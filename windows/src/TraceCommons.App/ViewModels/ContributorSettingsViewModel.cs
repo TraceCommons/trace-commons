@@ -1147,6 +1147,7 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
             Claude = settings?.ClaudeSourceMode ?? string.Empty,
             Codex = settings?.CodexSourceMode ?? string.Empty,
             Gemini = settings?.GeminiSourceMode ?? string.Empty,
+            Cline = settings?.ClineSourceMode ?? string.Empty,
         };
 
         bool declared = settings?.RoutingDeclared ?? false;

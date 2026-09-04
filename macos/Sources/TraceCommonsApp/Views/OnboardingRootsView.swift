@@ -83,14 +83,14 @@ struct OnboardingRootsView: View {
                 """)
                 .font(.body)
 
-            // Gemini is the one row where a blank genuinely reads as
-            // "nothing", so it is the one row where the warning above does
-            // not apply -- saying "answer for all three" would be false, and
+            // Gemini and Cline are the rows where a blank genuinely reads as
+            // "nothing", so they are the rows where the warning above does
+            // not apply -- saying "answer for all four" would be false, and
             // leaving the old "answer for both" in place would have made the
-            // sentence above silently wrong about a row now on the screen.
+            // sentence above silently wrong about rows now on the screen.
             Text("""
-                Gemini CLI is optional. Left blank it is not read at all — unlike the \
-                other two, there is no fallback to a standard location.
+                Gemini CLI and Cline are optional. Left blank they are not read at all — \
+                unlike the other two, there is no fallback to a standard location.
                 """)
                 .font(.body)
         }
@@ -114,7 +114,8 @@ struct OnboardingRootsView: View {
     /// Continue. Correct choices both, and together they meant the screen
     /// could stop asking about a whole source without anything noticing.
     ///
-    /// A fourth adapter now appears here by being added to `SourceKind`.
+    /// A new adapter now appears here by being added to `SourceKind`; Cline
+    /// arrived that way, with the same optional treatment as Gemini.
     static let offeredKinds: [SourceKind] = SourceKind.allCases
 
     private var rows: some View {
@@ -223,7 +224,7 @@ struct OnboardingRootsView: View {
             // Names the two rows that actually gate Continue. This merged
             // badly: this branch had reworded it to "each" while main gained
             // an optional Gemini row, and "each" would now promise that a
-            // blank Gemini row is what is blocking, which it never is --
+            // blank Gemini or Cline row is what is blocking, which it never is --
             // `isComplete` is claude && codex by design.
             failure = "Answer for Claude Code and Codex before continuing."
             return

@@ -137,6 +137,13 @@ pub struct DaemonSettings {
     /// [`roots_declared`].
     #[serde(default)]
     pub gemini_source: Option<SourceDeclaration>,
+    /// Added after every desktop client had shipped; absent means "no cline
+    /// adapter", never the conventional `~/.cline` -- see [`gemini_source`]
+    /// for the reasoning, which is identical.
+    ///
+    /// [`gemini_source`]: DaemonSettings::gemini_source
+    #[serde(default)]
+    pub cline_source: Option<SourceDeclaration>,
 
     /// A local inference proxy, when the contributor declared one. Absent
     /// means off: see [`IronWireDeclaration`].
@@ -445,6 +452,7 @@ impl Default for DaemonSettings {
             claude_source: None,
             codex_source: None,
             gemini_source: None,
+            cline_source: None,
             ironwire: None,
             legacy_claude_root: None,
             legacy_codex_root: None,
@@ -532,6 +540,7 @@ impl DaemonSettings {
             )
             .declare(crate::source::SOURCE_CODEX, self.codex_source.clone())
             .declare(crate::source::SOURCE_GEMINI_CLI, self.gemini_source.clone())
+            .declare(crate::source::SOURCE_CLINE, self.cline_source.clone())
             .with_trajectory(crate::source::TrajectorySelection::Auto {
                 working_dir: None,
                 staging_dir: Some(store.dir().join(crate::source::TRAJECTORY_STAGING_SUBDIR)),
@@ -574,6 +583,7 @@ pub fn source_settings_key(source: &str) -> Option<&'static str> {
         crate::source::SOURCE_CLAUDE_CODE => Some("claude_source"),
         crate::source::SOURCE_CODEX => Some("codex_source"),
         crate::source::SOURCE_GEMINI_CLI => Some("gemini_source"),
+        crate::source::SOURCE_CLINE => Some("cline_source"),
         _ => None,
     }
 }
@@ -721,6 +731,9 @@ pub fn apply_settings_object(
             }
             "gemini_source" => {
                 settings.gemini_source = parse_source_declaration(value)?;
+            }
+            "cline_source" => {
+                settings.cline_source = parse_source_declaration(value)?;
             }
             // Unlike the source roots above, `null` here means **off**, not
             // "never asked" -- see `IronWireDeclaration`'s doc comment for
@@ -1394,6 +1407,64 @@ mod tests {
             Err(ERR_SETTINGS_INVALID_VALUE),
             "a bare string is the legacy *_root spelling, which this key \
              never had"
+        );
+    }
+
+    #[test]
+    fn the_cline_declaration_is_settable_and_type_checked() {
+        let mut s = DaemonSettings::default();
+        assert_eq!(
+            s.cline_source, None,
+            "never asked, and undeclared constructs nothing"
+        );
+        assert_eq!(
+            apply_settings_object(
+                &mut s,
+                &serde_json::json!({"cline_source": {"mode": "off"}})
+            ),
+            Ok(true)
+        );
+        assert_eq!(s.cline_source, Some(SourceDeclaration::Off));
+        assert_eq!(
+            apply_settings_object(
+                &mut s,
+                &serde_json::json!({"cline_source": {"mode": "watch", "path": "/declared/cline"}}),
+            ),
+            Ok(true)
+        );
+        assert_eq!(
+            s.cline_source,
+            Some(SourceDeclaration::Watch {
+                path: PathBuf::from("/declared/cline")
+            })
+        );
+        assert_eq!(
+            apply_settings_object(&mut s, &serde_json::json!({"cline_source": "/a/path"})),
+            Err(ERR_SETTINGS_INVALID_VALUE),
+            "a bare path is not a declaration"
+        );
+        assert_eq!(
+            source_settings_key(crate::source::SOURCE_CLINE),
+            Some("cline_source")
+        );
+    }
+
+    /// A settings file written before this source existed must load, and
+    /// must construct no cline adapter.
+    #[test]
+    fn a_settings_file_written_before_cline_existed_loads_with_it_absent() {
+        let (_d, store) = temp_store();
+        let mut v = serde_json::to_value(DaemonSettings::default()).unwrap();
+        v.as_object_mut().unwrap().remove("cline_source");
+        store
+            .write_daemon_file(DAEMON_SETTINGS_FILE, v.to_string().as_bytes())
+            .unwrap();
+        let loaded = DaemonSettings::load(&store).unwrap();
+        assert_eq!(loaded.cline_source, None);
+        assert!(
+            !crate::source::all_sources(&loaded.source_roots(&store))
+                .iter()
+                .any(|s| s.name() == crate::source::SOURCE_CLINE)
         );
     }
 

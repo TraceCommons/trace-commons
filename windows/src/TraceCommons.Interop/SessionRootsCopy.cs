@@ -61,6 +61,7 @@ public static class SessionRootsCopy
         SourceDiscovery.ClaudeCode => "Claude Code",
         SourceDiscovery.Codex => "Codex",
         SourceDiscovery.GeminiCli => "Gemini CLI",
+        SourceDiscovery.Cline => "Cline",
         // The raw slug, never another agent's name. A row's label is the only
         // thing naming the store being consented to, so an unknown source
         // shows what it actually is rather than borrowing a name it is not.

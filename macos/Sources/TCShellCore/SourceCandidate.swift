@@ -10,12 +10,14 @@ public enum SourceKind: String, CaseIterable, Equatable, Sendable {
     case claudeCode = "claude-code"
     case codex
     case geminiCli = "gemini-cli"
+    case cline
 
     public var displayName: String {
         switch self {
         case .claudeCode: return "Claude Code"
         case .codex: return "Codex"
         case .geminiCli: return "Gemini CLI"
+        case .cline: return "Cline"
         }
     }
 }

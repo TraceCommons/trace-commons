@@ -372,11 +372,14 @@ fn build_choice(
 /// it -- but showing the raw slug beside its real path is honest, where
 /// showing the wrong product name is not.
 fn source_title(source: &str) -> &'static str {
-    use trace_commons_contributor::source::{SOURCE_CLAUDE_CODE, SOURCE_CODEX, SOURCE_GEMINI_CLI};
+    use trace_commons_contributor::source::{
+        SOURCE_CLAUDE_CODE, SOURCE_CLINE, SOURCE_CODEX, SOURCE_GEMINI_CLI,
+    };
     match source {
         SOURCE_CLAUDE_CODE => copy::ROOTS_CLAUDE,
         SOURCE_CODEX => copy::ROOTS_CODEX,
         SOURCE_GEMINI_CLI => copy::ROOTS_GEMINI,
+        SOURCE_CLINE => copy::ROOTS_CLINE,
         _ => copy::ROOTS_UNKNOWN_SOURCE,
     }
 }
@@ -459,6 +462,7 @@ mod tests {
         assert_eq!(source_title("codex"), copy::ROOTS_CODEX);
         assert_eq!(source_title("claude-code"), copy::ROOTS_CLAUDE);
         assert_eq!(source_title("gemini-cli"), copy::ROOTS_GEMINI);
+        assert_eq!(source_title("cline"), copy::ROOTS_CLINE);
     }
 
     /// Titles must be distinct, because this label is the only thing naming
@@ -472,6 +476,7 @@ mod tests {
             source_title("claude-code"),
             source_title("codex"),
             source_title("gemini-cli"),
+            source_title("cline"),
         ];
         for (i, a) in titles.iter().enumerate() {
             for b in titles.iter().skip(i + 1) {

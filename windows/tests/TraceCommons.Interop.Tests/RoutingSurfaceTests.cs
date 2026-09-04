@@ -34,7 +34,7 @@ public class RoutingSurfaceTests
 
     /// <summary>Every tool in use, nothing declared about any of them.</summary>
     private static RoutingModes AllWatched() =>
-        new() { Claude = "watch", Codex = "watch", Gemini = "watch" };
+        new() { Claude = "watch", Codex = "watch", Gemini = "watch", Cline = "watch" };
 
     // --- One tool, one word ---------------------------------------------
 
@@ -78,10 +78,11 @@ public class RoutingSurfaceTests
     /// IronWire has no <c>gemini</c> row upstream at all -- neither built in
     /// nor in its catalogue -- so Gemini CLI reads "Not known" on a machine
     /// where it is installed and in daily use, while the two tools IronWire
-    /// does list get real verdicts from the same answer.
+    /// does list get real verdicts from the same answer. Cline is in the
+    /// same position and gets the same word.
     /// </summary>
     [Fact]
-    public void GeminiIsUnknownEvenOnAMachineWhereItIsInstalledAndInUse()
+    public void GeminiAndClineAreUnknownEvenOnAMachineWhereTheyAreInstalledAndInUse()
     {
         RoutingCopy copy = Copy();
         RoutingEvidence evidence = Reachable(
@@ -94,13 +95,15 @@ public class RoutingSurfaceTests
 
         IReadOnlyList<RoutingToolRow> rows = RoutingTools.Rows(copy, AllWatched(), evidence);
 
-        Assert.Equal(3, rows.Count);
+        Assert.Equal(4, rows.Count);
         Assert.Equal(copy.ToolClaude, rows[0].Name);
         Assert.Equal(copy.WordPrivate, rows[0].Word);
         Assert.Equal(copy.ToolCodex, rows[1].Name);
         Assert.Equal(copy.WordDirect, rows[1].Word);
         Assert.Equal(copy.ToolGemini, rows[2].Name);
         Assert.Equal(copy.WordUnknown, rows[2].Word);
+        Assert.Equal(copy.ToolCline, rows[3].Name);
+        Assert.Equal(copy.WordUnknown, rows[3].Word);
     }
 
     /// <summary>
@@ -205,7 +208,7 @@ public class RoutingSurfaceTests
     {
         RoutingEvidence evidence = Reachable("""{"outcome":"reachable","tools":[]}""");
         Assert.Equal(RoutingProbeKind.Reachable, evidence.Outcome.Kind);
-        foreach (string id in new[] { RoutingTools.ClaudeId, RoutingTools.CodexId, RoutingTools.GeminiId })
+        foreach (string id in new[] { RoutingTools.ClaudeId, RoutingTools.CodexId, RoutingTools.GeminiId, RoutingTools.ClineId })
         {
             Assert.Equal(ToolWiring.Unknown, evidence.WiringFor(id));
         }
@@ -536,12 +539,14 @@ public class RoutingSurfaceTests
         DaemonSettingsSnapshot? settings = JsonSerializer.Deserialize<DaemonSettingsSnapshot>(
             """
             {"claude_source_mode":"watch","codex_source_mode":"off","gemini_source_mode":"unset",
+             "cline_source_mode":"off",
              "ironwire":{"mode":"watch","port":9001,"token_dir":"C:\\ironwire"}}
             """);
         Assert.NotNull(settings);
         Assert.Equal("watch", settings!.ClaudeSourceMode);
         Assert.Equal("off", settings.CodexSourceMode);
         Assert.Equal("unset", settings.GeminiSourceMode);
+        Assert.Equal("off", settings.ClineSourceMode);
         Assert.True(settings.RoutingDeclared);
         Assert.Equal((ushort)9001, settings.Routing!.Port);
         Assert.Equal(@"C:\ironwire", settings.Routing.TokenDir);
@@ -943,11 +948,12 @@ public class RoutingSurfaceTests
         Assert.Equal(RoutingTone.Clear, rows[0].Tone);
         Assert.Equal(RoutingTone.Neutral, rows[1].Tone);
         Assert.Equal(RoutingTone.Neutral, rows[2].Tone);
+        Assert.Equal(RoutingTone.Neutral, rows[3].Tone);
 
         // "Not used" is a preference, not an achievement.
         RoutingToolRow unused = RoutingTools.Rows(
             copy,
-            new RoutingModes { Claude = "off", Codex = "off", Gemini = "off" },
+            new RoutingModes { Claude = "off", Codex = "off", Gemini = "off", Cline = "off" },
             evidence)[0];
         Assert.Equal(copy.WordNotUsed, unused.Word);
         Assert.Equal(RoutingTone.Neutral, unused.Tone);
@@ -1219,7 +1225,7 @@ public class RoutingSurfaceTests
             "not_declared", "awaiting_rows", "rows_seen",
             "state", "last_refresh_at",
             // IronWire's own stable tool ids.
-            "claude", "codex", "gemini",
+            "claude", "codex", "gemini", "cline",
             // Punctuation, not wording.
             ": ",
         };

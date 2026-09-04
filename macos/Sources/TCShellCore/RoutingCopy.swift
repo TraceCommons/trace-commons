@@ -23,6 +23,7 @@ public struct RoutingCopy: Decodable, Equatable, Sendable {
     public let toolClaude: String
     public let toolCodex: String
     public let toolGemini: String
+    public let toolCline: String
     public let intro: String
     public let toggle: String
     public let appliesAtOnce: String
@@ -55,6 +56,7 @@ public struct RoutingCopy: Decodable, Equatable, Sendable {
         case toolClaude = "tool_claude"
         case toolCodex = "tool_codex"
         case toolGemini = "tool_gemini"
+        case toolCline = "tool_cline"
         case intro
         case toggle
         case appliesAtOnce = "applies_at_once"

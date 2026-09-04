@@ -12,6 +12,7 @@ use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
 
 pub mod claude_code;
+pub mod cline;
 pub mod codex;
 pub mod discovery;
 pub mod gemini_cli;
@@ -50,6 +51,7 @@ pub const SOURCE_CLAUDE_CODE: &str = "claude-code";
 pub const SOURCE_CODEX: &str = "codex";
 pub const SOURCE_TRAJECTORY: &str = "trajectory";
 pub const SOURCE_GEMINI_CLI: &str = "gemini-cli";
+pub const SOURCE_CLINE: &str = "cline";
 
 #[derive(Debug, Clone)]
 pub struct SessionRef {
@@ -459,6 +461,16 @@ static NATIVE_SOURCES: &[SourceSpec] = &[
         // to the contributor's real `~/.gemini`.
         undeclared: Undeclared::Nothing,
     },
+    SourceSpec {
+        name: SOURCE_CLINE,
+        conventional_root: cline::conventional_root_this_machine,
+        build: |path| Box::new(cline::ClineSource::new(path)),
+        // Same reasoning as Gemini: every shipped shell declares claude and
+        // codex and carries no cline field, so an absent declaration must
+        // construct nothing rather than watch the contributor's real
+        // `~/.cline`.
+        undeclared: Undeclared::Nothing,
+    },
 ];
 
 /// The subdirectory of the contributor state directory that trajectory
@@ -621,6 +633,22 @@ pub fn cli_source_roots(trajectory: Option<&Path>) -> SourceRoots {
         },
     };
     SourceRoots::conventional().with_trajectory(selection)
+}
+
+/// Whether an *undeclared* source scans the contributor's conventional
+/// location, by adapter name.
+///
+/// The settings screen has to say what an absent declaration actually does,
+/// and that answer is per-adapter ([`Undeclared`]) rather than one rule for
+/// everybody. Read off [`NATIVE_SOURCES`] rather than restated in
+/// [`crate::source_copy`], so the sentence cannot come to disagree with the
+/// table that decides it. An unknown name reads as `false`: this build
+/// constructs no adapter for it, so nothing is scanned.
+#[must_use]
+pub fn undeclared_scans_conventional(name: &str) -> bool {
+    NATIVE_SOURCES
+        .iter()
+        .any(|spec| spec.name == name && matches!(spec.undeclared, Undeclared::Conventional))
 }
 
 /// Construct the set of available `TraceSource` adapters from what the
@@ -954,10 +982,27 @@ mod tests {
             .collect();
         assert_eq!(
             names,
-            vec![SOURCE_CLAUDE_CODE, SOURCE_CODEX, SOURCE_GEMINI_CLI],
+            vec![
+                SOURCE_CLAUDE_CODE,
+                SOURCE_CODEX,
+                SOURCE_GEMINI_CLI,
+                SOURCE_CLINE
+            ],
             "adding an adapter to the table must reach the CLI without a \
              call-site change"
         );
+    }
+
+    /// Cline shipped after Gemini did and on the same terms: no shell
+    /// carries a cline field, so an absent declaration constructs nothing.
+    #[test]
+    fn an_undeclared_cline_source_constructs_nothing() {
+        let roots = SourceRoots::new();
+        let names: Vec<&str> = all_sources(&roots).iter().map(|s| s.name()).collect();
+        assert!(!names.contains(&SOURCE_CLINE), "{names:?}");
+        let roots = roots.declare(SOURCE_CLINE, watch("/declared/cline"));
+        let names: Vec<&str> = all_sources(&roots).iter().map(|s| s.name()).collect();
+        assert!(names.contains(&SOURCE_CLINE), "{names:?}");
     }
 
     /// Trajectory is asked for, never inferred: the daemon's working

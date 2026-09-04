@@ -279,10 +279,10 @@ char*       tc_discover_sources(void);
  *
  * Returns an owned JSON object; free it with tc_string_free. Its keys are
  * tools_heading, word_private, word_direct, word_unknown, word_not_used,
- * tool_claude, tool_codex, tool_gemini, intro, toggle, applies_at_once,
- * port_title, port_note, folder_title, folder_note, apply, checking,
- * check_unavailable, probe_reachable, state_off, state_waiting and
- * state_reading. Every value is a non-empty string.
+ * tool_claude, tool_codex, tool_gemini, tool_cline, intro, toggle,
+ * applies_at_once, port_title, port_note, folder_title, folder_note, apply,
+ * checking, check_unavailable, probe_reachable, state_off, state_waiting
+ * and state_reading. Every value is a non-empty string.
  *
  * All but one are fixed wording. folder_note names the folder this machine
  * reads when the folder field is left empty, because every failure sentence
@@ -479,7 +479,7 @@ char*       tc_routing_last_checked(const char* when);
 
 /* The settings screen's session-source row for one tool, assembled.
  *
- * tool is "claude", "codex" or "gemini". source_mode is get_settings's
+ * tool is "claude", "codex", "gemini" or "cline". source_mode is get_settings's
  * *_source_mode -- "watch", "off" or "unset".
  *
  * THREE MODES, THREE SENTENCES. *_root_configured is (mode == "watch") and is
@@ -492,6 +492,12 @@ char*       tc_routing_last_checked(const char* when);
  * front -- no word on this surface may deny a claim another word makes.
  *
  * Assembled on the Rust side, for the reason on tc_routing_token_line.
+ *
+ * "unset" is answered per tool, not once for everybody: an undeclared
+ * "claude" or "codex" is scanned at its conventional location and its row says
+ * sessions are read, while an undeclared "gemini" or "cline" constructs no
+ * adapter and its row says nothing is opened. Render what comes back for the
+ * tool you asked about; never carry one tool's "unset" sentence to another.
  *
  * A source_mode this build does not know renders as "unset", deliberately:
  * an older daemon sends no mode at all, and claiming nothing is read from a

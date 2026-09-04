@@ -82,6 +82,13 @@ public sealed class DaemonSettingsSnapshot
     public string GeminiSourceMode { get; set; } = string.Empty;
 
     /// <summary>
+    /// The Cline source. Optional exactly as Gemini CLI is, and likewise
+    /// without a <c>*_root_configured</c> twin.
+    /// </summary>
+    [JsonPropertyName("cline_source_mode")]
+    public string ClineSourceMode { get; set; } = string.Empty;
+
+    /// <summary>
     /// The local proxy declaration as the daemon holds it. Absent means off:
     /// there is no conventional fallback for a local service, so unlike a
     /// source root there is no third state.

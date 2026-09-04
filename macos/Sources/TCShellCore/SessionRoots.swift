@@ -57,15 +57,18 @@ public struct SessionRoots: Equatable, Sendable {
     public var claude: SourceChoice
     public var codex: SourceChoice
     public var gemini: SourceChoice
+    public var cline: SourceChoice
 
     public init(
         claude: SourceChoice = .undecided,
         codex: SourceChoice = .undecided,
-        gemini: SourceChoice = .undecided
+        gemini: SourceChoice = .undecided,
+        cline: SourceChoice = .undecided
     ) {
         self.claude = claude
         self.codex = codex
         self.gemini = gemini
+        self.cline = cline
     }
 
     /// Exhaustive on purpose. The binary form this replaced -- `kind ==
@@ -79,6 +82,7 @@ public struct SessionRoots: Equatable, Sendable {
             case .claudeCode: return claude
             case .codex: return codex
             case .geminiCli: return gemini
+            case .cline: return cline
             }
         }
         set {
@@ -86,6 +90,7 @@ public struct SessionRoots: Equatable, Sendable {
             case .claudeCode: claude = newValue
             case .codex: codex = newValue
             case .geminiCli: gemini = newValue
+            case .cline: cline = newValue
             }
         }
     }
@@ -101,13 +106,14 @@ public struct SessionRoots: Equatable, Sendable {
     ///
     /// This mirrors `daemon::settings::roots_declared`, which is the rule that
     /// actually gates the daemon starting, and which stays two-conjunct: an
-    /// absent Gemini declaration constructs no adapter, so nothing is read
-    /// unasked. Requiring a Gemini answer here would refuse to start for every
-    /// contributor upgrading from a build that never asked them -- a
-    /// re-onboarding for a store the daemon will not touch either way.
+    /// absent Gemini or Cline declaration constructs no adapter, so nothing
+    /// is read unasked. Requiring a Gemini or Cline answer here would refuse
+    /// to start for every contributor upgrading from a build that never asked
+    /// them -- a re-onboarding for a store the daemon will not touch either
+    /// way.
     ///
-    /// Gemini is still offered on the screen and still recorded when answered;
-    /// it just cannot block.
+    /// Gemini and Cline are still offered on the screen and still recorded
+    /// when answered; they just cannot block.
     public var isComplete: Bool {
         claude.isAnswered && codex.isAnswered
     }
@@ -138,6 +144,9 @@ public struct SessionRoots: Equatable, Sendable {
         // made.
         if let geminiDeclaration = gemini.declaration {
             object["gemini_source"] = geminiDeclaration
+        }
+        if let clineDeclaration = cline.declaration {
+            object["cline_source"] = clineDeclaration
         }
         guard let data = try? JSONSerialization.data(withJSONObject: object),
             let json = String(data: data, encoding: .utf8)

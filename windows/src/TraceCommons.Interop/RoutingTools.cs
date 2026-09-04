@@ -259,7 +259,7 @@ public sealed class RoutingEvidence
 }
 
 /// <summary>
-/// What the contributor said about each of the three tools this surface
+/// What the contributor said about each of the four tools this surface
 /// names: <c>get_settings</c>'s per-source mode, never the declaration switch.
 /// </summary>
 public sealed class RoutingModes
@@ -269,6 +269,8 @@ public sealed class RoutingModes
     public string Codex { get; init; } = string.Empty;
 
     public string Gemini { get; init; } = string.Empty;
+
+    public string Cline { get; init; } = string.Empty;
 }
 
 /// <summary>
@@ -403,13 +405,14 @@ public static class RoutingTools
     public const string SettingsKey = "ironwire";
 
     // IronWire's own stable tool ids. `ironwire connect <id>` takes these and
-    // its settings response is keyed by them. Gemini CLI has no row upstream
-    // at all today -- neither built in nor in the catalogue -- which is why
-    // it is named here and expected to be missing rather than left out and
-    // quietly defaulted.
+    // its settings response is keyed by them. Gemini CLI and Cline have no
+    // row upstream at all today -- neither built in nor in the catalogue --
+    // which is why they are named here and expected to be missing rather
+    // than left out and quietly defaulted.
     public const string ClaudeId = "claude";
     public const string CodexId = "codex";
     public const string GeminiId = "gemini";
+    public const string ClineId = "cline";
 
     // The daemon's three routing states, from `status.routing.state`. Wire
     // values, and no longer a branch table: which sentence each reaches is
@@ -472,6 +475,7 @@ public static class RoutingTools
             Row(copy, copy.ToolClaude, modes.Claude, ClaudeId, evidence),
             Row(copy, copy.ToolCodex, modes.Codex, CodexId, evidence),
             Row(copy, copy.ToolGemini, modes.Gemini, GeminiId, evidence),
+            Row(copy, copy.ToolCline, modes.Cline, ClineId, evidence),
         };
     }
 

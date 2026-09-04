@@ -35,6 +35,7 @@ public sealed record RoutingCopy
     [JsonPropertyName("tool_claude")] public string ToolClaude { get; init; } = "";
     [JsonPropertyName("tool_codex")] public string ToolCodex { get; init; } = "";
     [JsonPropertyName("tool_gemini")] public string ToolGemini { get; init; } = "";
+    [JsonPropertyName("tool_cline")] public string ToolCline { get; init; } = "";
     [JsonPropertyName("intro")] public string Intro { get; init; } = "";
     [JsonPropertyName("toggle")] public string Toggle { get; init; } = "";
     [JsonPropertyName("applies_at_once")] public string AppliesAtOnce { get; init; } = "";

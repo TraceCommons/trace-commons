@@ -349,7 +349,8 @@ internal static class NativeMethods
 
     /// <summary>
     /// The settings screen's session-source row for one tool, already
-    /// assembled. <paramref name="tool"/> is "claude", "codex" or "gemini";
+    /// assembled. <paramref name="tool"/> is "claude", "codex", "gemini" or
+    /// "cline";
     /// <paramref name="sourceMode"/> is get_settings's *_source_mode --
     /// "watch", "off" or "unset".
     ///

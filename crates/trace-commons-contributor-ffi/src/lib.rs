@@ -2130,7 +2130,7 @@ pub unsafe extern "C" fn tc_routing_last_checked(when: *const c_char) -> *mut c_
 
 /// The settings screen's session-source row for one tool, assembled.
 ///
-/// `tool` is `claude`, `codex` or `gemini`. `source_mode` is
+/// `tool` is `claude`, `codex`, `gemini` or `cline`. `source_mode` is
 /// `get_settings`'s `*_source_mode` -- `watch`, `off` or `unset`.
 ///
 /// THREE MODES, THREE SENTENCES. `*_root_configured` is `mode == "watch"`
@@ -2145,6 +2145,13 @@ pub unsafe extern "C" fn tc_routing_last_checked(when: *const c_char) -> *mut c_
 /// reassemble it from parts, and do not build the `off` line as the `unset`
 /// line with a "not" in front: no word on this surface may deny a privacy
 /// claim another word makes.
+///
+/// `unset` is answered per tool, not once for everybody: an undeclared
+/// `claude` or `codex` is scanned at its conventional location and its row
+/// says sessions are read, while an undeclared `gemini` or `cline`
+/// constructs no adapter and its row says nothing is opened. Render what
+/// comes back for the tool you asked about; do not carry one tool's `unset`
+/// sentence to another.
 ///
 /// A mode this build does not know reads as `unset`, deliberately -- see
 /// `source_copy::source_check_line`. A `tool` this build does not know is an

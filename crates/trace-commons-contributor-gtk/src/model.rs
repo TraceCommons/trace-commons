@@ -190,6 +190,7 @@ impl QueueEntry {
             "claude-code" => "Claude Code",
             "codex" => "Codex",
             "gemini-cli" => "Gemini CLI",
+            "cline" => "Cline",
             "antigravity" => "Antigravity",
             "trajectory" => "Trajectory",
             _ => self.source.as_str(),
@@ -604,6 +605,8 @@ pub struct Settings {
     pub codex_source_mode: String,
     #[serde(default)]
     pub gemini_source_mode: String,
+    #[serde(default)]
+    pub cline_source_mode: String,
     /// The local proxy declaration as the daemon holds it. Absent means
     /// off -- there is no conventional fallback for a local service, so
     /// unlike a source root there is no third state.

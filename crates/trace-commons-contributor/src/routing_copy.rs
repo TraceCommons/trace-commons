@@ -89,9 +89,9 @@ pub const TOOL_PRIVATE: &str = "Private";
 pub const TOOL_DIRECT: &str = "Sends direct";
 /// Nothing usable answered, or the answer did not mention this tool.
 ///
-/// Not a fault and not a verdict. Gemini CLI reaches this state on every
-/// machine today, because IronWire's tool list does not carry a row for it
-/// at all -- which is exactly the case the old single-switch word got
+/// Not a fault and not a verdict. Gemini CLI and Cline reach this state on
+/// every machine today, because IronWire's tool list does not carry a row
+/// for either at all -- which is exactly the case the old single-switch word got
 /// confidently wrong.
 pub const TOOL_UNKNOWN: &str = "Not known";
 /// The contributor said they do not use this tool. Nothing is read from
@@ -103,6 +103,7 @@ pub const TOOL_NOT_USED: &str = "Not used";
 pub const TOOL_CLAUDE: &str = "Claude Code";
 pub const TOOL_CODEX: &str = "Codex";
 pub const TOOL_GEMINI: &str = "Gemini CLI";
+pub const TOOL_CLINE: &str = "Cline";
 
 /// The one paragraph that has to be true.
 ///
@@ -505,6 +506,7 @@ pub struct RoutingCopy {
     pub tool_claude: &'static str,
     pub tool_codex: &'static str,
     pub tool_gemini: &'static str,
+    pub tool_cline: &'static str,
     pub intro: &'static str,
     pub toggle: &'static str,
     pub applies_at_once: &'static str,
@@ -543,6 +545,7 @@ pub fn routing_copy() -> RoutingCopy {
         tool_claude: TOOL_CLAUDE,
         tool_codex: TOOL_CODEX,
         tool_gemini: TOOL_GEMINI,
+        tool_cline: TOOL_CLINE,
         intro: IRONWIRE_INTRO,
         toggle: IRONWIRE_TOGGLE,
         applies_at_once: IRONWIRE_APPLIES_AT_ONCE,
@@ -1133,6 +1136,7 @@ mod tests {
         assert_eq!(copy.tool_claude, TOOL_CLAUDE);
         assert_eq!(copy.tool_codex, TOOL_CODEX);
         assert_eq!(copy.tool_gemini, TOOL_GEMINI);
+        assert_eq!(copy.tool_cline, TOOL_CLINE);
         assert_eq!(copy.intro, IRONWIRE_INTRO);
         assert_eq!(copy.toggle, IRONWIRE_TOGGLE);
         assert_eq!(copy.applies_at_once, IRONWIRE_APPLIES_AT_ONCE);

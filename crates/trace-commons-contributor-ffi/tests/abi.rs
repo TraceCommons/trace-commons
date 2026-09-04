@@ -1877,7 +1877,7 @@ fn discovery_answers_without_a_handle_and_describes_every_source() {
 
     let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
     let items = parsed.as_array().expect("an array");
-    assert_eq!(items.len(), 3, "one candidate per known agent: {json}");
+    assert_eq!(items.len(), 4, "one candidate per known agent: {json}");
 
     let sources: Vec<&str> = items
         .iter()
@@ -1888,7 +1888,7 @@ fn discovery_answers_without_a_handle_and_describes_every_source() {
     // an absent Gemini answer is not disqualifying, so the shells prompt for
     // it without refusing to start. Adding a source belongs here; adding one
     // to that gate would stop the daemon on every installed client.
-    assert_eq!(sources, vec!["claude-code", "codex", "gemini-cli"]);
+    assert_eq!(sources, vec!["claude-code", "codex", "gemini-cli", "cline"]);
 
     for item in items {
         // The fields a consent prompt needs to be specific rather than
@@ -2021,6 +2021,20 @@ fn each_source_mode_crosses_the_abi_as_its_own_sentence() {
         let line =
             take_owned(unsafe { tc_source_check_line(tool.as_ptr(), cstr_str(mode).as_ptr()) });
         assert_eq!(line, unset, "mode {mode:?} did not read as unset");
+    }
+}
+
+#[test]
+fn a_cline_source_check_crosses_the_abi_as_the_rust_sentence() {
+    // Cline has a settings row the way Gemini CLI does, and its key crosses
+    // this boundary the same way. Against the shared function, not against
+    // words written here, for the reason the Claude case gives.
+    use trace_commons_contributor::source_copy::{SourceTool, source_check_line};
+    let tool = cstr_str("cline");
+    for mode in ["watch", "unset", "off"] {
+        let line =
+            take_owned(unsafe { tc_source_check_line(tool.as_ptr(), cstr_str(mode).as_ptr()) });
+        assert_eq!(line, source_check_line(SourceTool::Cline, mode));
     }
 }
 

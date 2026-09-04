@@ -139,6 +139,9 @@ public static class SourceDiscovery
     /// <summary>The <c>source</c> value for the Gemini CLI's store.</summary>
     public const string GeminiCli = "gemini-cli";
 
+    /// <summary>The <c>source</c> value for Cline's store.</summary>
+    public const string Cline = "cline";
+
     private static readonly JsonSerializerOptions Options = new()
     {
         PropertyNameCaseInsensitive = false,
@@ -222,18 +225,21 @@ public sealed class SessionRootsDeclaration
     /// <summary>What the contributor said about the Gemini CLI's sessions.</summary>
     public SourceDecision Gemini { get; set; } = SourceDecision.Undecided;
 
+    /// <summary>What the contributor said about Cline's sessions.</summary>
+    public SourceDecision Cline { get; set; } = SourceDecision.Undecided;
+
     /// <summary>
     /// Whether Claude Code and Codex have been answered. Continue stays
     /// disabled until this is true -- an unanswered source is not "no".
     ///
-    /// Gemini is deliberately excluded. This mirrors
+    /// Gemini and Cline are deliberately excluded. This mirrors
     /// <c>daemon::settings::roots_declared</c>, the rule that actually gates
-    /// the daemon starting, which stays two-conjunct: an absent Gemini
-    /// declaration constructs no adapter, so nothing is read unasked.
-    /// Requiring it here would refuse to start for every contributor upgrading
-    /// from a build that never asked them, over a store the daemon will not
-    /// touch either way. Gemini is still offered and still recorded when
-    /// answered; it just cannot block.
+    /// the daemon starting, which stays two-conjunct: an absent Gemini or
+    /// Cline declaration constructs no adapter, so nothing is read unasked.
+    /// Requiring them here would refuse to start for every contributor
+    /// upgrading from a build that never asked them, over a store the daemon
+    /// will not touch either way. Both are still offered and still recorded
+    /// when answered; they just cannot block.
     /// </summary>
     public bool IsComplete => Claude.IsDecided && Codex.IsDecided;
 
@@ -270,6 +276,11 @@ public sealed class SessionRootsDeclaration
         if (Gemini.IsDecided)
         {
             payload["gemini_source"] = Describe(Gemini);
+        }
+
+        if (Cline.IsDecided)
+        {
+            payload["cline_source"] = Describe(Cline);
         }
 
         return JsonSerializer.Serialize(payload);
