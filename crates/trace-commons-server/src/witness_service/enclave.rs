@@ -191,8 +191,16 @@ pub enum EnclaveError {
     #[error("the guest agent could not be reached")]
     Transport,
     /// The guest agent answered, and refused.
-    #[error("the guest agent refused the request")]
-    AgentRefused,
+    #[error("the guest agent refused the request with HTTP {status}")]
+    AgentRefused {
+        /// The status line's code, carried because "refused" alone is not
+        /// diagnosable: a 404 means the method or its surface is wrong, a 400
+        /// means the arguments are, and a 403 means the caller is. Those need
+        /// different fixes and the operator cannot tell them apart from the
+        /// message otherwise. A status code is not contributor data and does
+        /// not fall under the hash-only rule.
+        status: u16,
+    },
     /// The guest agent's answer did not have the shape this client expects.
     #[error("the guest agent's response could not be read")]
     MalformedResponse,
@@ -556,8 +564,15 @@ fn http_body(response: &[u8]) -> Result<&[u8], EnclaveError> {
         .ok_or(EnclaveError::MalformedResponse)?;
     if status != "200" {
         // The agent answered and said no. Distinct from a socket that was not
-        // there, because the two mean different things to an operator.
-        return Err(EnclaveError::AgentRefused);
+        // there, because the two mean different things to an operator -- and
+        // carrying the code, because "refused" alone does not say whether the
+        // method, the arguments or the caller is what it objected to.
+        return Err(EnclaveError::AgentRefused {
+            // A status line this side of the check is ASCII digits or the
+            // response was malformed; 0 records "unparseable" rather than
+            // inventing a code.
+            status: status.parse::<u16>().unwrap_or(0),
+        });
     }
     let body = &response[split + 4..];
     if head
@@ -1078,7 +1093,7 @@ mod tests {
             EnclaveError::ReportDataTooLong,
             EnclaveError::SigningAddressMalformed,
             EnclaveError::Transport,
-            EnclaveError::AgentRefused,
+            EnclaveError::AgentRefused { status: 500 },
             EnclaveError::MalformedResponse,
             EnclaveError::SigningKeyUnusable,
             EnclaveError::QuoteUnparsable,
@@ -1090,13 +1105,32 @@ mod tests {
         // Pinned so a new variant has to be added here rather than skipping
         // the check silently.
         assert_eq!(variants.len(), 12);
+        // The property is that no refusal echoes the nonce or the signing
+        // address. This used to be enforced as "no ASCII digit anywhere",
+        // which is a proxy rather than the property -- and it is the reason
+        // AgentRefused could not carry the status code that says whether the
+        // agent objected to the method, the arguments or the caller. A
+        // deployment spent a long time undiagnosable behind that.
+        //
+        // Checked against the real shapes instead: a nonce is 32 bytes and an
+        // address 20, so both render as long hex runs. Anything that long is
+        // refused; a three-digit status is not, and cannot be either of them.
+        const LONGEST_SAFE_RUN: usize = 8;
         for variant in variants {
             let rendered = format!("{variant} {variant:?}");
             assert!(!rendered.contains("0x"), "{rendered}");
-            assert!(
-                !rendered.chars().any(|character| character.is_ascii_digit()),
-                "{rendered}"
-            );
+            let mut run = 0usize;
+            for character in rendered.chars() {
+                run = if character.is_ascii_hexdigit() {
+                    run + 1
+                } else {
+                    0
+                };
+                assert!(
+                    run <= LONGEST_SAFE_RUN,
+                    "a hex run this long can carry a nonce or an address: {rendered}"
+                );
+            }
         }
     }
 
@@ -1206,7 +1240,7 @@ mod tests {
                 DstackSocketAgent::at(&path)
                     .quote(&[0u8; REPORT_DATA_LEN])
                     .await,
-                Err(EnclaveError::AgentRefused)
+                Err(EnclaveError::AgentRefused { status: 500 })
             );
             assert_eq!(
                 DstackSocketAgent::at("/nonexistent/dstack.sock")
