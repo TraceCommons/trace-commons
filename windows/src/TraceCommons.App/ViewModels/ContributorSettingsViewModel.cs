@@ -111,6 +111,7 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
     private string _witnessUrl = string.Empty;
     private string _witnessSigningAddress = string.Empty;
     private string _witnessMeasurements = string.Empty;
+    private string _witnessMeasurementLine = string.Empty;
     private bool? _witnessEditorOpen;
 
     public ContributorSettingsViewModel(DaemonHost host)
@@ -448,18 +449,46 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
     /// The pinned measurements, one per line.
     /// </summary>
     /// <remarks>
-    /// Write-only against the daemon: the status payload reports how many are
-    /// pinned and not what they are, so this box holds what is being typed and
-    /// is not refilled from a read. Emptying it and pressing the configure
-    /// action does not clear the pin -- the ABI refuses an empty list, because
-    /// writing one would make this client refuse every submission from that
-    /// moment. Stopping is the other action.
+    /// Pre-filled from the status payload's read-back, verbatim, and handed
+    /// straight back on save -- including an entry this build cannot parse,
+    /// which is shown rather than dropped so the typo is visible instead of
+    /// being deleted on the next save.
+    ///
+    /// Emptying it and pressing the configure action does not clear the pin:
+    /// the ABI refuses an empty list, because writing one would make this
+    /// client refuse every submission from that moment. Stopping is the other
+    /// action. That refusal is right now that the box can be pre-filled -- an
+    /// empty box means the contributor cleared it, not that nobody looked.
     /// </remarks>
     public string WitnessMeasurements
     {
         get => _witnessMeasurements;
         set => Set(ref _witnessMeasurements, value ?? string.Empty);
     }
+
+    /// <summary>
+    /// The sentence for how many measurements are pinned, or empty where the
+    /// ABI had none.
+    /// </summary>
+    /// <remarks>
+    /// The Rust's sentence, not a numeral this shell wrapped in words. It is
+    /// null on the readings with no witness to count for -- absent, not
+    /// enrolled, unreadable -- and the row is hidden there rather than shown
+    /// with a placeholder or a zero.
+    /// </remarks>
+    public string WitnessMeasurementLine
+    {
+        get => _witnessMeasurementLine;
+        private set
+        {
+            if (Set(ref _witnessMeasurementLine, value))
+            {
+                Raise(nameof(HasWitnessMeasurementLine));
+            }
+        }
+    }
+
+    public bool HasWitnessMeasurementLine => _witnessMeasurementLine.Length > 0;
 
     /// <summary>
     /// Whether the address-and-pin editor is open.
@@ -1357,7 +1386,20 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
         {
             WitnessUrl = status.Url ?? string.Empty;
             WitnessSigningAddress = status.SigningAddress ?? string.Empty;
+
+            // Verbatim, through the helper that touches nothing. Filling this
+            // box from anything the entries were parsed into would let this
+            // screen rewrite a pin nobody edited, and leaving it empty would
+            // make an untouched configuration indistinguishable from a
+            // cleared one -- so changing only the URL would be refused.
+            WitnessMeasurements = WitnessTools.JoinMeasurements(status.PinnedMeasurements);
         }
+
+        // Null wherever there is no witness to count for. Nothing is rendered
+        // then: a bare numeral would be this shell inventing wording by
+        // omission, and a count of the pins on a witness that does not exist
+        // is not a shorter sentence but a wrong one.
+        WitnessMeasurementLine = status?.PinnedMeasurementLine ?? string.Empty;
 
         // The editor follows the state until the contributor says otherwise,
         // so a refusal that arrives while this screen is open opens the way

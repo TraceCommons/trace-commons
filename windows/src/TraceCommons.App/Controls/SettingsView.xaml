@@ -575,6 +575,18 @@
                                 <TextBlock Text="{x:Bind Settings.WitnessMeasurementsNote, Mode=OneWay}"
                                            Style="{StaticResource TcCaptionTextStyle}"
                                            TextWrapping="Wrap" />
+                                <!--
+                                    How many are pinned, in the Rust's own
+                                    sentence. Shown only where there was one:
+                                    it is absent on the readings with no
+                                    witness to count for, and a bare numeral
+                                    in its place would be this shell inventing
+                                    wording by omission.
+                                -->
+                                <TextBlock Text="{x:Bind Settings.WitnessMeasurementLine, Mode=OneWay}"
+                                           Visibility="{x:Bind Settings.HasWitnessMeasurementLine, Mode=OneWay}"
+                                           Style="{StaticResource TcCaptionTextStyle}"
+                                           TextWrapping="Wrap" />
                                 <Button Content="{x:Bind Settings.WitnessConfigureText, Mode=OneWay}"
                                         IsEnabled="{x:Bind Settings.WitnessControlsEnabled, Mode=OneWay}"
                                         Click="OnWitnessConfigure"
