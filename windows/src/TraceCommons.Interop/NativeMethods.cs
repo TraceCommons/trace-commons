@@ -170,6 +170,23 @@ internal static class NativeMethods
         out IntPtr matchesJson);
 
     /// <summary>
+    /// Counts occurrences of <paramref name="needle"/> in an entry's
+    /// PRE-redaction session text. Returns the count, or -1 on error.
+    /// </summary>
+    /// <remarks>
+    /// A COUNT, never content -- that is the whole bound of this call, and the
+    /// reason it is allowed to read unredacted bytes at all. It takes a handle
+    /// and an entry id rather than a preview because a preview lives as long
+    /// as its sheet, and an unredacted transcript must not: the daemon reads
+    /// the file, counts, and drops it.
+    /// </remarks>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int tc_search_original(
+        IntPtr handle,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string entryId,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string needle);
+
+    /// <summary>
     /// Frees a preview. Invalidates every borrowed pointer previously handed
     /// out for it. Safe with NULL.
     /// </summary>

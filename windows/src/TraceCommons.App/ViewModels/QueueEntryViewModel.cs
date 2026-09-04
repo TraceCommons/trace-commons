@@ -61,6 +61,7 @@ public sealed class QueueEntryViewModel : INotifyPropertyChanged
             Raise(nameof(TooLargeText));
             Raise(nameof(HasScrubbingReceipt));
             Raise(nameof(ScrubbingReceiptText));
+            Raise(nameof(MatchedNothing));
         }
     }
 
@@ -103,6 +104,31 @@ public sealed class QueueEntryViewModel : INotifyPropertyChanged
 
     public string ScrubbingReceiptText => _preview?.Summary?.RedactionReceipt ?? string.Empty;
 
+    /// <summary>
+    /// Whether this session's preview reports that no pattern fired.
+    /// </summary>
+    /// <remarks>
+    /// False until a preview lands, which is the honest reading: not knowing
+    /// is not the same as knowing nothing matched, and a rail that raised an
+    /// alarm about every card still loading would be raising it about
+    /// nothing. Counts REMOVALS, so a session whose only count is a surviving
+    /// secret reads as nothing matched here too, which is true and is the
+    /// state the gold chip exists to say.
+    /// </remarks>
+    public bool MatchedNothing =>
+        _preview is { IsReady: true, Summary: not null }
+        && RedactionLabels.Total(_preview.Summary.Redactions) == 0;
+
+    /// <summary>
+    /// Whether part of this conversation was left out to fit its byte budget.
+    /// </summary>
+    /// <remarks>
+    /// A load-time fact on the entry, not a property of the preview, so it is
+    /// as true while the card still reads "Loading preview…" as after one
+    /// lands. See <see cref="SubagentText"/>.
+    /// </remarks>
+    public bool WasTrimmed => _entry.SubagentsDropped > 0;
+
     private void Raise(string name) => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
 
     /// <summary>The daemon's identifier for this entry; used to open a preview.</summary>
@@ -127,6 +153,26 @@ public sealed class QueueEntryViewModel : INotifyPropertyChanged
         !string.IsNullOrWhiteSpace(_entry.ProjectLabel) ? _entry.ProjectLabel!
         : !string.IsNullOrWhiteSpace(_entry.ProjectId) ? _entry.ProjectId!
         : "Unknown project";
+
+    /// <summary>
+    /// Where this session actually ran, when that is not the project root.
+    /// </summary>
+    /// <remarks>
+    /// Key normalization walks up to the enclosing repository, so two sibling
+    /// subdirectories of one repo become one folder. That is the merge the
+    /// folder-first queue wanted, and this line is what pays for it: the
+    /// sessions are grouped by repo and still say individually where they
+    /// ran.
+    ///
+    /// Empty both when the daemon predates the field and when the session ran
+    /// at the root -- the daemon sends null in the second case rather than
+    /// repeating the project's own path, so the row draws this only when it
+    /// says something. Display only, like every path on this surface.
+    /// </remarks>
+    public string SessionPath => _entry.SessionPath ?? string.Empty;
+
+    /// <summary>Whether there is a session path worth a line of its own.</summary>
+    public bool HasSessionPath => SessionPath.Length > 0;
 
     /// <summary>
     /// The agent that produced the session, in the words a contributor uses

@@ -212,6 +212,29 @@ impl Backend {
             .ok_or_else(|| anyhow!("daemon answered with neither a result nor an error"))
     }
 
+    /// How many times `needle` appears in an entry's PRE-redaction session
+    /// text. `None` on any failure.
+    ///
+    /// A COUNT, never content -- that is the whole bound of the daemon call
+    /// behind this, and the reason it is allowed to read unredacted bytes at
+    /// all. `None` rather than a `Result` because the one thing the caller
+    /// must not do is round a failure off to a clean answer; see
+    /// [`crate::original_search::Outcome::Unknown`].
+    pub fn search_original(&self, entry_id: &str, needle: &str) -> Option<u32> {
+        // One arm for both modes: `handle_local` runs the same async
+        // dispatcher the socket does, so a hosting build routes this method
+        // without a second implementation to keep in step.
+        let value = self
+            .call(
+                "search_original",
+                serde_json::json!({ "entry_id": entry_id, "needle": needle }),
+            )
+            .ok()?;
+        value["matches"]
+            .as_u64()
+            .and_then(|n| u32::try_from(n).ok())
+    }
+
     /// The redacted body and the summary together, for the preview sheet.
     ///
     /// `Ok(None)` for the body means "this deployment cannot serve it" --

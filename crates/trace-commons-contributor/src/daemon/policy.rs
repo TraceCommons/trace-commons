@@ -24,7 +24,17 @@ use sha2::{Digest, Sha256};
 
 use crate::config::{ConfigStore, DAEMON_PROJECTS_FILE};
 
-pub const DAEMON_PROJECTS_SCHEMA: &str = "trace_commons.daemon_projects.v1";
+/// The current policy file schema.
+///
+/// Bumped to v2 when project keys became normalized
+/// (`project_key::normalize_project_key`). A v1 file's keys are raw
+/// recorded working directories, which no longer match anything
+/// `project_key_for` produces, so `load` re-keys it. The version is what
+/// makes that happen exactly once.
+pub const DAEMON_PROJECTS_SCHEMA: &str = "trace_commons.daemon_projects.v2";
+
+/// The pre-normalization schema. Recognized only so `load` can migrate it.
+pub const DAEMON_PROJECTS_SCHEMA_V1: &str = "trace_commons.daemon_projects.v1";
 
 /// The bucket for sessions with no resolvable working directory. Permanently
 /// notify-only.
@@ -41,6 +51,26 @@ pub enum ProjectMode {
     Ignore,
 }
 
+impl ProjectMode {
+    /// The more restrictive of two modes.
+    ///
+    /// `Ignore` beats everything, then `NotifyOnly`, then `AutoUpload`.
+    /// This is the merge rule when normalization collapses two policy
+    /// entries into one key, and the direction is not arbitrary: merging
+    /// toward the permissive mode would take a project the contributor had
+    /// silenced and start offering it again, or take one they had left
+    /// ask-first and upload from it unattended. A merge may only ever ask
+    /// more permission than before, never less.
+    pub fn more_restrictive(self, other: ProjectMode) -> ProjectMode {
+        use ProjectMode::*;
+        match (self, other) {
+            (Ignore, _) | (_, Ignore) => Ignore,
+            (NotifyOnly, _) | (_, NotifyOnly) => NotifyOnly,
+            (AutoUpload, AutoUpload) => AutoUpload,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectEntry {
     pub mode: ProjectMode,
@@ -48,6 +78,23 @@ pub struct ProjectEntry {
     /// Display name for consumers. Shells render this; they never render the
     /// key, which is a full local path.
     pub label: String,
+    /// The same directory as the map key, spelled the way the filesystem
+    /// spells it.
+    ///
+    /// The key is case-folded on macOS and Windows so one project cannot
+    /// mint two keys (see `project_key::NormalizedProject`). That fold is
+    /// right for a lookup and wrong for a person: it renders `~/Code/Api`
+    /// as `~/code/api`, a path that appears nowhere on their machine. This
+    /// is the unfolded half, carried so rendering never has to guess.
+    ///
+    /// No new class of secret: this map is already keyed by the full local
+    /// path, so the file this serializes into holds the same directory
+    /// either way. `None` on a policy file written before the field
+    /// existed, and on a key that no longer resolves -- both fall back to
+    /// the folded key, which is honest about the directory even when it is
+    /// not spelled the way the disk spells it.
+    #[serde(default)]
+    pub display_path: Option<String>,
 }
 
 /// How many times a project must have contributed before the app offers to
@@ -167,11 +214,89 @@ impl ProjectPolicy {
             })
     }
 
+    /// Re-key every map through `normalize_project_key`, merging entries
+    /// that collapse onto one key.
+    ///
+    /// Idempotent: a key that is already normalized normalizes to itself,
+    /// so running this on a v2 file changes nothing. The unknown bucket is
+    /// not a path and is carried across untouched.
+    ///
+    /// A key that no longer normalizes at all -- a relative path from a
+    /// hand-edited file, say -- is dropped rather than kept under its old
+    /// spelling, because nothing will ever look it up again.
+    pub fn rekey(&mut self) {
+        let renamed = |key: &str| -> Option<String> {
+            if key == UNKNOWN_PROJECT_KEY {
+                return Some(UNKNOWN_PROJECT_KEY.to_string());
+            }
+            crate::daemon::project_key::normalize_project_key(key)
+        };
+
+        let mut projects: BTreeMap<String, ProjectEntry> = BTreeMap::new();
+        for (key, entry) in std::mem::take(&mut self.projects) {
+            let Some(fresh) = renamed(&key) else { continue };
+            // Re-derived rather than carried across from `entry`: a v2 file
+            // has no display path at all, and one written on another host
+            // may name a directory this one spells differently.
+            let shown = display_path_for_key(&fresh);
+            let label = project_label_for(shown.as_deref().unwrap_or(&fresh));
+            projects
+                .entry(fresh)
+                .and_modify(|existing| {
+                    existing.mode = existing.mode.more_restrictive(entry.mode);
+                    // The earlier of the two: the contributor's decision
+                    // about this project is as old as its oldest half.
+                    existing.added_at = existing.added_at.min(entry.added_at);
+                    existing.label = label.clone();
+                    existing.display_path = shown.clone();
+                })
+                .or_insert(ProjectEntry {
+                    mode: entry.mode,
+                    added_at: entry.added_at,
+                    label,
+                    display_path: shown,
+                });
+        }
+        self.projects = projects;
+
+        let mut contributed: BTreeMap<String, u32> = BTreeMap::new();
+        for (key, count) in std::mem::take(&mut self.contributed) {
+            let Some(fresh) = renamed(&key) else { continue };
+            *contributed.entry(fresh).or_insert(0) += count;
+        }
+        self.contributed = contributed;
+
+        let mut declined: BTreeMap<String, DateTime<Utc>> = BTreeMap::new();
+        for (key, at) in std::mem::take(&mut self.arming_declined_at) {
+            let Some(fresh) = renamed(&key) else { continue };
+            // The most recent decline wins: a merged project was declined
+            // as recently as its most recent half, which is what the
+            // cooldown should measure from.
+            declined
+                .entry(fresh)
+                .and_modify(|existing| *existing = (*existing).max(at))
+                .or_insert(at);
+        }
+        self.arming_declined_at = declined;
+
+        self.schema_version = DAEMON_PROJECTS_SCHEMA.to_string();
+    }
+
     pub fn load(store: &ConfigStore) -> Result<Self> {
         let Some(body) = store.read_daemon_file(DAEMON_PROJECTS_FILE)? else {
             return Ok(Self::new());
         };
-        serde_json::from_slice(&body).context("parsing daemon project policy")
+        let mut policy: Self =
+            serde_json::from_slice(&body).context("parsing daemon project policy")?;
+        // Migrate in memory on every load rather than rewriting the file
+        // here: `load` has no business writing, and the next `save` -- which
+        // every mutation already performs -- persists the v2 form. A file
+        // that is never mutated again is migrated identically on every read,
+        // which costs one normalization pass and is always correct.
+        if policy.schema_version != DAEMON_PROJECTS_SCHEMA {
+            policy.rekey();
+        }
+        Ok(policy)
     }
 
     pub fn save(&self, store: &ConfigStore) -> Result<()> {
@@ -226,12 +351,14 @@ impl ProjectPolicy {
                  per-project opt-in can apply to them"
             );
         }
+        let shown = display_path_for_key(project_key);
         self.projects.insert(
             project_key.to_string(),
             ProjectEntry {
                 mode,
                 added_at: now,
-                label: project_label_for(project_key),
+                label: project_label_for(shown.as_deref().unwrap_or(project_key)),
+                display_path: shown,
             },
         );
         Ok(())
@@ -375,23 +502,48 @@ fn has_usable_basename(cwd: &str) -> bool {
         .is_some_and(|n| !n.is_empty())
 }
 
-/// The policy key for a session: its true working directory, or the locked
-/// unknown bucket. Never falls back to a basename heuristic.
+/// The policy key for a session: its normalized working directory, or the
+/// locked unknown bucket. Never falls back to a basename heuristic.
 ///
-/// A cwd with no usable final path segment goes to the unknown bucket
-/// rather than becoming a key of its own. Such a key has no label but
-/// itself, and `project_label` crosses the socket, lands in
+/// Normalization (`project_key::normalize_project_key`) is what makes one
+/// directory one project regardless of how the recording spelled it. A cwd
+/// with no usable final path segment -- `/`, anything ending in `..`, the
+/// empty string, a relative path -- yields no key and goes to the unknown
+/// bucket rather than becoming a key of its own. Such a key has no label
+/// but itself, and `project_label` crosses the socket, lands in
 /// `daemon-audit.jsonl`, in OS notification text, and in `HistoryRecord` --
 /// so the fallback turned a full local path into every one of those, in
 /// direct violation of the invariant `audit`'s own
-/// `an_audit_entry_never_carries_a_path` test asserts. It can also never be
-/// armed, which is the right answer for a directory the daemon cannot even
-/// name.
+/// `an_audit_entry_never_carries_a_path` test asserts.
 pub fn project_key_for(cwd: Option<&str>) -> String {
-    match cwd {
-        Some(cwd) if !cwd.trim().is_empty() && has_usable_basename(cwd) => cwd.to_string(),
-        _ => UNKNOWN_PROJECT_KEY.to_string(),
+    project_for(cwd).0
+}
+
+/// [`project_key_for`] and, beside it, the unfolded path a person is shown.
+///
+/// Both from one normalization, because they are two spellings of one
+/// directory and re-deriving the second would let them drift. `None` for
+/// the unknown bucket, which is not a directory and has nothing to show.
+pub fn project_for(cwd: Option<&str>) -> (String, Option<String>) {
+    match cwd.and_then(crate::daemon::project_key::normalize_project) {
+        Some(p) => (p.key, Some(p.display_path)),
+        None => (UNKNOWN_PROJECT_KEY.to_string(), None),
     }
+}
+
+/// Recover the unfolded spelling of a directory from its folded key.
+///
+/// The key is itself a real path, so re-normalizing it recovers the case
+/// the filesystem holds -- `std::fs::canonicalize` reports the on-disk
+/// spelling on both macOS and Windows. `None` for the unknown bucket and
+/// for a key that no longer resolves to anything; callers fall back to the
+/// folded key, which names the right directory in the wrong case rather
+/// than naming nothing.
+pub fn display_path_for_key(project_key: &str) -> Option<String> {
+    if project_key == UNKNOWN_PROJECT_KEY {
+        return None;
+    }
+    crate::daemon::project_key::normalize_project(project_key).map(|p| p.display_path)
 }
 
 /// A display label for a project key: the final path segment, or the bucket
@@ -464,15 +616,26 @@ pub fn known_keys(
 /// The suffix is derived from `sha256(project_key)`, never from any path
 /// segment: labels cross the IPC socket and must never leak which directory
 /// a colliding project lives in.
-pub fn disambiguated_label(project_key: &str, known_keys: &[String]) -> String {
-    let label = project_label_for(project_key);
+pub fn disambiguated_label(
+    project_key: &str,
+    project_path: Option<&str>,
+    known_keys: &[String],
+) -> String {
+    // Two labels, deliberately. The rendered one comes from the unfolded
+    // path so `IronWire` stays `IronWire`; the collision test runs on the
+    // folded key, so two projects whose basenames differ only in case are
+    // still treated as colliding and still both get a suffix. Testing on
+    // the rendered label instead would let `Api` and `api` sit side by side
+    // looking like two spellings of one project.
+    let label = project_label_for(project_path.unwrap_or(project_key));
     if project_key == UNKNOWN_PROJECT_KEY {
         return label;
     }
 
+    let folded = project_label_for(project_key);
     let collides = known_keys
         .iter()
-        .any(|other| other != project_key && project_label_for(other) == label);
+        .any(|other| other != project_key && project_label_for(other) == folded);
     if !collides {
         return label;
     }
@@ -495,6 +658,7 @@ fn hex_prefix(bytes: &[u8], chars: usize) -> String {
 mod tests {
     use super::*;
     use crate::config::tests_support::temp_store;
+    use crate::daemon::test_paths::{abs, abs_key};
 
     fn now() -> DateTime<Utc> {
         "2026-08-08T12:00:00Z".parse().unwrap()
@@ -504,7 +668,7 @@ mod tests {
     fn an_unknown_project_defaults_to_notify_only() {
         let p = ProjectPolicy::new();
         assert_eq!(
-            p.resolve("/Users/z/code/never-seen"),
+            p.resolve(&abs("Users/z/code/never-seen")),
             ProjectMode::NotifyOnly
         );
     }
@@ -513,9 +677,14 @@ mod tests {
     fn sessions_without_a_cwd_land_in_the_unknown_bucket() {
         assert_eq!(project_key_for(None), UNKNOWN_PROJECT_KEY);
         assert_eq!(project_key_for(Some("   ")), UNKNOWN_PROJECT_KEY);
+        // Spelled for the host platform: `/Users/z/code/proj` has a root
+        // but no prefix on Windows, so it is not absolute there and would
+        // fall into the unknown bucket for a reason that has nothing to do
+        // with what this test is about. `abs_key` applies the case-folding
+        // rule directly rather than by calling normalization again.
         assert_eq!(
-            project_key_for(Some("/Users/z/code/proj")),
-            "/Users/z/code/proj"
+            project_key_for(Some(&abs("Users/z/code/proj"))),
+            abs_key("Users/z/code/proj")
         );
     }
 
@@ -539,6 +708,7 @@ mod tests {
                 mode: ProjectMode::AutoUpload,
                 added_at: now(),
                 label: "unknown".into(),
+                display_path: None,
             },
         );
         assert_eq!(p.resolve(UNKNOWN_PROJECT_KEY), ProjectMode::NotifyOnly);
@@ -628,7 +798,7 @@ mod tests {
         // `project_label_for`, so a leak there would leak through here too.
         let keys = vec!["/".to_string(), "/Users/z/client/..".to_string()];
         for key in &keys {
-            let label = disambiguated_label(key, &keys);
+            let label = disambiguated_label(key, None, &keys);
             assert!(!label.contains('/'), "{key} leaked as {label}");
         }
     }
@@ -670,7 +840,10 @@ mod tests {
             "/Users/z/code/alpha".to_string(),
             "/Users/z/code/beta".to_string(),
         ];
-        assert_eq!(disambiguated_label("/Users/z/code/alpha", &keys), "alpha");
+        assert_eq!(
+            disambiguated_label("/Users/z/code/alpha", None, &keys),
+            "alpha"
+        );
     }
 
     #[test]
@@ -680,13 +853,13 @@ mod tests {
             "/Users/z/work/api".to_string(),
             "/Users/z/client/api".to_string(),
         ];
-        let a = disambiguated_label("/Users/z/work/api", &keys);
-        let b = disambiguated_label("/Users/z/client/api", &keys);
+        let a = disambiguated_label("/Users/z/work/api", None, &keys);
+        let b = disambiguated_label("/Users/z/client/api", None, &keys);
         assert_ne!(a, b, "colliding projects must be distinguishable");
         assert!(a.starts_with("api ("), "got {a}");
         assert_eq!(
             a,
-            disambiguated_label("/Users/z/work/api", &keys),
+            disambiguated_label("/Users/z/work/api", None, &keys),
             "must be stable"
         );
     }
@@ -698,7 +871,7 @@ mod tests {
             "/Users/z/work/api".to_string(),
             "/Users/z/client/api".to_string(),
         ];
-        let a = disambiguated_label("/Users/z/work/api", &keys);
+        let a = disambiguated_label("/Users/z/work/api", None, &keys);
         assert!(!a.contains("work") && !a.contains('/'), "got {a}");
     }
 
@@ -786,7 +959,7 @@ mod tests {
     fn the_unknown_bucket_is_never_suffixed() {
         let keys = vec![UNKNOWN_PROJECT_KEY.to_string()];
         assert_eq!(
-            disambiguated_label(UNKNOWN_PROJECT_KEY, &keys),
+            disambiguated_label(UNKNOWN_PROJECT_KEY, None, &keys),
             UNKNOWN_PROJECT_KEY
         );
     }
@@ -907,5 +1080,166 @@ mod tests {
         assert!(p.contributed.is_empty());
         assert!(p.arming_declined_at.is_empty());
         assert!(p.arming_suggestion(t("2026-08-31T12:00:00Z")).is_none());
+    }
+
+    #[test]
+    fn two_recordings_of_one_directory_share_a_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir(root.join(".git")).unwrap();
+        let sub = root.join("crates").join("inner");
+        std::fs::create_dir_all(&sub).unwrap();
+
+        // What Claude Code records, and what Codex records, for one repo.
+        let from_root = project_key_for(Some(root.to_str().unwrap()));
+        let from_sub = project_key_for(Some(sub.to_str().unwrap()));
+
+        assert_eq!(from_root, from_sub);
+        assert_eq!(project_id_for(&from_root), project_id_for(&from_sub));
+    }
+
+    #[test]
+    fn an_unusable_cwd_still_lands_in_the_unknown_bucket() {
+        assert_eq!(project_key_for(None), UNKNOWN_PROJECT_KEY);
+        assert_eq!(project_key_for(Some("")), UNKNOWN_PROJECT_KEY);
+        assert_eq!(project_key_for(Some("/")), UNKNOWN_PROJECT_KEY);
+        assert_eq!(project_key_for(Some("relative")), UNKNOWN_PROJECT_KEY);
+    }
+
+    #[test]
+    fn ignore_survives_a_rekey_that_merges_two_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir(root.join(".git")).unwrap();
+        let sub = root.join("crates").join("inner");
+        std::fs::create_dir_all(&sub).unwrap();
+
+        // A v1 file: two entries that Task 1 collapses into one key, with
+        // the more permissive mode listed second so a naive last-write-wins
+        // would lose the Ignore.
+        let mut p = ProjectPolicy::new();
+        p.schema_version = DAEMON_PROJECTS_SCHEMA_V1.to_string();
+        p.projects.insert(
+            root.to_string_lossy().to_string(),
+            ProjectEntry {
+                mode: ProjectMode::Ignore,
+                added_at: now(),
+                label: "repo".to_string(),
+                display_path: None,
+            },
+        );
+        p.projects.insert(
+            sub.to_string_lossy().to_string(),
+            ProjectEntry {
+                mode: ProjectMode::AutoUpload,
+                added_at: now(),
+                label: "inner".to_string(),
+                display_path: None,
+            },
+        );
+
+        p.rekey();
+
+        let key = project_key_for(Some(root.to_str().unwrap()));
+        assert_eq!(p.projects.len(), 1);
+        assert_eq!(p.resolve(&key), ProjectMode::Ignore);
+        assert_eq!(p.schema_version, DAEMON_PROJECTS_SCHEMA);
+    }
+
+    #[test]
+    fn a_rekey_carries_contribution_counts_and_declines_across() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir(root.join(".git")).unwrap();
+        let sub = root.join("sub");
+        std::fs::create_dir(&sub).unwrap();
+
+        let mut p = ProjectPolicy::new();
+        p.schema_version = DAEMON_PROJECTS_SCHEMA_V1.to_string();
+        p.contributed.insert(root.to_string_lossy().to_string(), 3);
+        p.contributed.insert(sub.to_string_lossy().to_string(), 4);
+        p.arming_declined_at
+            .insert(sub.to_string_lossy().to_string(), now());
+
+        p.rekey();
+
+        let key = project_key_for(Some(root.to_str().unwrap()));
+        // Counts for two spellings of one project are one project's count.
+        assert_eq!(p.contributed.get(&key), Some(&7));
+        assert!(p.arming_declined_at.contains_key(&key));
+    }
+
+    #[test]
+    fn a_rekey_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        std::fs::create_dir(&root).unwrap();
+
+        let mut p = ProjectPolicy::new();
+        p.schema_version = DAEMON_PROJECTS_SCHEMA_V1.to_string();
+        p.set_mode(root.to_str().unwrap(), ProjectMode::Ignore, now())
+            .unwrap();
+
+        p.rekey();
+        let once = p.clone();
+        p.rekey();
+        assert_eq!(p, once);
+    }
+
+    #[test]
+    fn loading_a_v1_file_rekeys_it() {
+        let (_d, store) = temp_store();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir(root.join(".git")).unwrap();
+        let sub = root.join("sub");
+        std::fs::create_dir(&sub).unwrap();
+
+        let mut p = ProjectPolicy::new();
+        p.schema_version = DAEMON_PROJECTS_SCHEMA_V1.to_string();
+        p.projects.insert(
+            sub.to_string_lossy().to_string(),
+            ProjectEntry {
+                mode: ProjectMode::Ignore,
+                added_at: now(),
+                label: "sub".to_string(),
+                display_path: None,
+            },
+        );
+        p.save(&store).unwrap();
+
+        let loaded = ProjectPolicy::load(&store).unwrap();
+        let key = project_key_for(Some(root.to_str().unwrap()));
+        assert_eq!(loaded.resolve(&key), ProjectMode::Ignore);
+    }
+
+    #[test]
+    fn the_unknown_bucket_is_never_rekeyed() {
+        let mut p = ProjectPolicy::new();
+        p.schema_version = DAEMON_PROJECTS_SCHEMA_V1.to_string();
+        p.projects.insert(
+            UNKNOWN_PROJECT_KEY.to_string(),
+            ProjectEntry {
+                mode: ProjectMode::Ignore,
+                added_at: now(),
+                label: UNKNOWN_PROJECT_KEY.to_string(),
+                display_path: None,
+            },
+        );
+        p.rekey();
+        assert_eq!(p.resolve(UNKNOWN_PROJECT_KEY), ProjectMode::Ignore);
+    }
+
+    #[test]
+    fn ignore_is_the_most_restrictive_mode() {
+        use ProjectMode::*;
+        assert_eq!(Ignore.more_restrictive(AutoUpload), Ignore);
+        assert_eq!(AutoUpload.more_restrictive(Ignore), Ignore);
+        assert_eq!(NotifyOnly.more_restrictive(AutoUpload), NotifyOnly);
+        assert_eq!(AutoUpload.more_restrictive(AutoUpload), AutoUpload);
     }
 }

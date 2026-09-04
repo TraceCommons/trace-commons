@@ -285,7 +285,7 @@ fn index_theme() -> String {
     format!(
         "[Icon Theme]\n\
          Name={name}\n\
-         Comment=The Trace Commons mark, written at runtime\n\
+         Comment=The {name} mark, written at runtime\n\
          Directories=scalable/apps,scalable/status\n\
          \n\
          [scalable/apps]\n\

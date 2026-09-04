@@ -216,10 +216,18 @@ async fn a_client_can_set_a_mode_using_only_what_this_socket_gave_it() {
         .as_str()
         .unwrap_or_else(|| panic!("list_projects must carry an id a client can name: {listed}"))
         .to_string();
-    let serialized = serde_json::to_string(&listed).unwrap();
+    // `project_path` is the one path this row may carry, for display; the
+    // point of the test is that a client can act on the row WITHOUT it, so
+    // it asserts the id is what the rest of the exchange uses rather than
+    // that no path exists. See `ipc::display_path` for the bound.
+    assert_eq!(
+        row["project_path"].as_str(),
+        Some(key.as_ref()),
+        "the row must render the project directory: {listed}"
+    );
     assert!(
-        !serialized.contains(key.as_ref()),
-        "a path crossed the socket: {serialized}"
+        !project_id.contains('/'),
+        "the handle a client names must not be a path: {project_id}"
     );
 
     c.send(&format!(
@@ -451,6 +459,8 @@ async fn preview_reports_the_redacted_envelope_not_the_raw_file() {
                 source: "claude-code".into(),
                 declared_source: None,
                 project_key: "/Users/testuser/code/myproj".into(),
+                project_path: None,
+                session_cwd: None,
                 project_label: "myproj".into(),
                 path: session_ref.path.clone(),
                 size_bytes: session_ref.size_bytes,
@@ -850,6 +860,8 @@ async fn daemon_with_a_multi_event_entry() -> (tempfile::TempDir, std::path::Pat
                 source: "claude-code".into(),
                 declared_source: None,
                 project_key: "/Users/testuser/code/myproj".into(),
+                project_path: None,
+                session_cwd: None,
                 project_label: "myproj".into(),
                 path: session_ref.path.clone(),
                 size_bytes: session_ref.size_bytes,
@@ -963,6 +975,8 @@ async fn daemon_with_a_redactable_entry() -> (tempfile::TempDir, std::path::Path
                 source: "claude-code".into(),
                 declared_source: None,
                 project_key: "/Users/testuser/code/myproj".into(),
+                project_path: None,
+                session_cwd: None,
                 project_label: "myproj".into(),
                 path: session_ref.path.clone(),
                 size_bytes: session_ref.size_bytes,
@@ -1450,6 +1464,8 @@ async fn enrolled_daemon_with_sessions_in_two_projects() -> (EnrolledDaemon, Con
                         source: "claude-code".into(),
                         declared_source: None,
                         project_key: project_key.into(),
+                        project_path: None,
+                        session_cwd: None,
                         project_label: project_label.into(),
                         path: session_ref.path.clone(),
                         size_bytes: session_ref.size_bytes,
@@ -1726,6 +1742,8 @@ async fn enrolled_daemon_with_one_good_and_one_oversized_session() -> (EnrolledD
                         source: "claude-code".into(),
                         declared_source: None,
                         project_key: "/Users/testuser/code/proj-a".into(),
+                        project_path: None,
+                        session_cwd: None,
                         project_label: "proj-a".into(),
                         path: session_ref.path.clone(),
                         size_bytes: session_ref.size_bytes,

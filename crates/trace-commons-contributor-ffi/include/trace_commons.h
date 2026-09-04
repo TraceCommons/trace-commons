@@ -54,6 +54,10 @@
  * or a receipt. Preview content fails outright, rather than being silently
  * edited, if it cannot be represented as a NUL-terminated C string.
  *
+ * One narrow addition: tc_search_original answers a yes/no-with-a-number
+ * question about PRE-redaction content. It returns a count and never a
+ * byte, for a needle the caller supplied, on an entry they already hold.
+ *
  * Opening a preview also stores the redacted envelope it built in the
  * contributor's own private state directory (0600, one file per previewed
  * entry, deleted when the entry resolves and on logout), so the upload can
@@ -279,6 +283,13 @@ char*       tc_discover_sources(void);
  * applies_at_once, port_title, port_note, folder_title, folder_note, apply,
  * checking, check_unavailable, probe_reachable, state_off, state_waiting
  * and state_reading. Every value is a non-empty string.
+ *
+ * All but one are fixed wording. folder_note names the folder this machine
+ * reads when the folder field is left empty, because every failure sentence
+ * on that surface ends by sending a contributor to that field, and a field
+ * that will not say which folder it means is an instruction with no answer.
+ * It is therefore the one value here that differs between machines, and the
+ * one that can carry a filesystem path.
  *
  * ONE CALL, NOT ONE PER STRING. tc_scrub_detector_names answers a single
  * question and returns a single list; this is a whole screen's wording and
@@ -662,6 +673,22 @@ const char* tc_preview_summary_json(const tc_preview*);  /* counts, sizes, openi
  * (if non-NULL) is set to NULL -- there is nothing to free.
  */
 int32_t     tc_preview_search(const tc_preview*, const char* needle, char** matches_json);
+
+/* Count occurrences of needle in an entry's PRE-redaction session text.
+ * Returns the match count, or -1 on error. Reports a COUNT ONLY: no
+ * offsets, no context, no bytes.
+ *
+ * This is the one call here that reads unredacted session bytes on behalf
+ * of a caller, and the count is the bound. It exists because
+ * tc_preview_search scans the REDACTED body, so a value redaction removed
+ * returns zero there, which is indistinguishable from a value that was
+ * never present.
+ *
+ * Takes a handle and an entry id, not a tc_preview*: a preview must not
+ * hold pre-redaction bytes for as long as a sheet is open. The daemon
+ * reads the file, counts, and drops it.
+ */
+int32_t     tc_search_original(tc_handle*, const char* entry_id, const char* needle);
 
 /* The turn index over a redacted preview body:
  *   {entry_id, body_digest, envelope_digest, turn_count,

@@ -7,6 +7,8 @@ using Microsoft.UI;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
+using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using TraceCommons.App.Controls;
 using TraceCommons.App.ViewModels;
@@ -769,9 +771,61 @@ public sealed partial class MainWindow : Window
     /// unpreviewed, so a row submit no longer sends bytes nobody was shown.
     /// See docs/superpowers/specs/2026-08-20-one-click-submit-design.md.
     /// </remarks>
-    private void OnLookInside(object sender, RoutedEventArgs e)
+    private void OnLookInside(object sender, RoutedEventArgs e) => OpenPreview(EntryOf(sender));
+
+    /// <summary>
+    /// A tap anywhere on the card body: the same thing "Look inside" does.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A second route to "Look inside", never a replacement for it. The button
+    /// keeps its emphasis: one-click submit added AVAILABILITY, and accent
+    /// styling is a RECOMMENDATION. What this adds is that the obvious gesture
+    /// on a card does the obvious thing.
+    /// </para>
+    /// <para>
+    /// The three footer buttons handle their own pointer input, so a WinUI
+    /// Button does not raise Tapped on an ancestor. That is checked rather
+    /// than assumed: routed events bubble, and being wrong about which ones
+    /// stop here would silently turn "Not this one" into "Look inside" on the
+    /// one screen where what a click means must never be ambiguous.
+    /// </para>
+    /// </remarks>
+    private void OnCardTapped(object sender, TappedRoutedEventArgs e)
     {
-        if (EntryOf(sender) is not QueueEntryViewModel entry)
+        if (e.OriginalSource is DependencyObject source && IsInsideButton(source))
+        {
+            return;
+        }
+
+        OpenPreview(EntryOf(sender));
+        e.Handled = true;
+    }
+
+    /// <summary>
+    /// Whether <paramref name="source"/> is a button, or sits inside one.
+    /// </summary>
+    /// <remarks>
+    /// Walks the visual tree rather than testing the element itself, because
+    /// what raises the event is whichever piece of a button's template was
+    /// under the pointer, never the button.
+    /// </remarks>
+    private static bool IsInsideButton(DependencyObject source)
+    {
+        for (DependencyObject? node = source; node is not null; node = VisualTreeHelper.GetParent(node))
+        {
+            if (node is ButtonBase)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private void OpenPreview(QueueEntryViewModel? entry)
+    {
+        if (entry is null)
         {
             return;
         }
@@ -951,6 +1005,42 @@ public sealed partial class MainWindow : Window
         sender is FrameworkElement element
             ? element.Tag as QueueGroupViewModel ?? element.DataContext as QueueGroupViewModel
             : null;
+
+    /// <summary>
+    /// A folder row: shows that project's sessions.
+    /// </summary>
+    /// <remarks>
+    /// The location itself lives on the view model and is re-resolved through
+    /// <see cref="QueueNavigation.Resolve"/> on every queue snapshot, so a
+    /// folder that empties underneath the contributor returns them to the
+    /// list rather than leaving them on an empty pane. This handler only
+    /// routes the click to the folder it came from, the same Tag-first
+    /// pattern every other queue handler follows.
+    /// </remarks>
+    private void OnOpenFolder(object sender, RoutedEventArgs e)
+    {
+        if (GroupOf(sender) is QueueGroupViewModel group)
+        {
+            ViewModel.OpenFolder(group.ProjectId);
+        }
+    }
+
+    /// <summary>Back to the folder list.</summary>
+    private void OnCloseFolder(object sender, RoutedEventArgs e) => ViewModel.CloseFolder();
+
+    /// <summary>
+    /// The detail pane's scroll, watched for the same settle the folder
+    /// list's is.
+    /// </summary>
+    /// <remarks>
+    /// Declared in the markup rather than found by walking a template, which
+    /// is what <see cref="OnQueueListViewLoaded"/> has to do for a ListView:
+    /// this ScrollViewer is an element of the page, so it can say who handles
+    /// its own event. It matters because the session rows live here now, so
+    /// this is the scroller whose settling changes what is on screen.
+    /// </remarks>
+    private void OnQueueDetailScrolled(object sender, ScrollViewerViewChangedEventArgs e) =>
+        OnQueueScrollViewChanged(sender, e);
 
     /// <summary>
     /// Finds the ScrollViewer once <see cref="QueueListView"/>'s template is

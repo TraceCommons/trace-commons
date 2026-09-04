@@ -44,8 +44,11 @@
 //!
 //! No path, token, invite code, claim, device key, or trace content
 //! appears in any response, error string, or pushed event. `error.message`
-//! is a fixed label. Queue entries carry `project_label`, never
-//! `project_key` or `path`. Project labels are derived by the daemon from
+//! is a fixed label. Queue entries carry `project_label` and, for display
+//! only, `project_path` -- never `project_key` or `path`. The path is on
+//! this socket and nowhere else: see `display_path` for the bound, and
+//! `no_sink_carries_a_project_path` for what enforces it. Project labels
+//! are derived by the daemon from
 //! the key and are never a string a caller supplied.
 //!
 //! **The preview exemption.** `"preview"`'s `opening_prompt`,
@@ -262,6 +265,7 @@ pub const METHODS: &[&str] = &[
     "quiesce",
     "refresh_history",
     "resume",
+    "search_original",
     "set_consent_scopes",
     "set_project_mode",
     "set_public_profile",
@@ -770,7 +774,7 @@ pub fn relabel_queue_entries(policy: &ProjectPolicy, queue: &mut Queue) -> bool 
         .all()
         .iter()
         .filter_map(|e| {
-            let fresh = disambiguated_label(&e.project_key, &known);
+            let fresh = disambiguated_label(&e.project_key, e.project_path.as_deref(), &known);
             (fresh != e.project_label).then_some((e.entry_id, fresh))
         })
         .collect();
@@ -828,6 +832,71 @@ fn regroup_subagent_entries(queue: &mut Queue) -> bool {
     true
 }
 
+/// A local path rendered for display: `~`-abbreviated, never modified
+/// otherwise.
+///
+/// Takes a PATH, not a key. Callers pass `QueueEntry::project_path` (or
+/// `ProjectEntry::display_path`) where they have one and the folded key
+/// only as a fallback, because the key is lowercased on macOS and Windows
+/// and a contributor should not be shown a spelling of their own directory
+/// that exists nowhere on their disk.
+///
+/// This is the ONE place in this crate that deliberately puts a local
+/// filesystem path on the socket, and the bound is stated where the
+/// function is rather than in a comment somewhere else:
+///
+/// > A path may be rendered. It may not be logged, audited, notified, or
+/// > persisted to history.
+///
+/// `project_label` remains the basename and remains the only project string
+/// that reaches `daemon-audit.jsonl`, notification text, or a
+/// `HistoryRecord` -- see `an_audit_entry_never_carries_a_path` and
+/// `no_sink_carries_a_project_path`. The relaxation exists because
+/// `disambiguated_label` can keep two projects DISTINCT (`api` and
+/// `api (3f9c)`) but can never make them IDENTIFIABLE, and a contributor
+/// deciding what to upload from which repository needs the second.
+pub fn display_path(project_key: &str) -> String {
+    if project_key == UNKNOWN_PROJECT_KEY {
+        return UNKNOWN_PROJECT_KEY.to_string();
+    }
+    let Some(home) = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(|h| h.to_string_lossy().to_string())
+        .filter(|h| !h.is_empty())
+    else {
+        return project_key.to_string();
+    };
+    // The COMPARISON is case-insensitive on macOS and Windows, and stays
+    // that way now that the input is unfolded. It is not a workaround for
+    // the key's folding -- it is the filesystem's own rule. `$HOME` and
+    // `%USERPROFILE%` are whatever the environment was handed; a shell
+    // exporting `HOME=/Users/Zaki` against a disk that spells it
+    // `/Users/zaki` names one directory, and on a case-insensitive volume
+    // the two are the same prefix. Comparing raw there meant the prefix
+    // never matched and every path rendered absolute.
+    //
+    // Only the comparison folds. The rendered string is cut from the
+    // ORIGINAL below, so the tail keeps its case -- which is what was
+    // missing while the input was itself a folded key: both halves were
+    // lowercase, so there was no case left to preserve.
+    match crate::daemon::project_key::fold_case(project_key)
+        .strip_prefix(&crate::daemon::project_key::fold_case(&home))
+    {
+        Some("") => "~".to_string(),
+        Some(rest) if rest.starts_with('/') || rest.starts_with('\\') => {
+            // Rendered from the ORIGINAL tail so the path keeps the case
+            // the filesystem holds. Folding can in principle change a
+            // string's length, in which case the boundary is not a
+            // character boundary and the folded tail is used instead.
+            let tail = project_key
+                .get(project_key.len().saturating_sub(rest.len())..)
+                .unwrap_or(rest);
+            format!("~{tail}")
+        }
+        _ => project_key.to_string(),
+    }
+}
+
 pub fn entry_value(e: &super::queue::QueueEntry) -> serde_json::Value {
     serde_json::json!({
         "entry_id": e.entry_id,
@@ -839,6 +908,22 @@ pub fn entry_value(e: &super::queue::QueueEntry) -> serde_json::Value {
         "declared_source": e.declared_source,
         "project_id": project_id_for(&e.project_key),
         "project_label": e.project_label,
+        // Rendered, never logged -- see `display_path`. The unfolded half
+        // when the entry has one, and the folded key when it does not: an
+        // entry written before `project_path` existed still names the right
+        // directory, just in the case the key was folded to.
+        "project_path": display_path(e.project_path.as_deref().unwrap_or(&e.project_key)),
+        // Only when the session ran somewhere other than the project root,
+        // which is the fact normalization discards and the folder detail
+        // view puts back. Null rather than a repeat of `project_path`, so a
+        // shell can render the line only when it says something.
+        "session_path": e
+            .session_cwd
+            .as_deref()
+            .map(display_path)
+            .filter(|p| p != &display_path(e.project_path.as_deref().unwrap_or(&e.project_key)))
+            .map(serde_json::Value::from)
+            .unwrap_or(serde_json::Value::Null),
         "size_bytes": e.size_bytes,
         "discovered_at": e.discovered_at,
         "state": e.state,
@@ -916,29 +1001,32 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
             let policy = shared.policy.lock().expect("policy lock");
             let queue = shared.queue.lock().expect("queue lock");
             let known = known_keys(&policy, queue.all().iter().map(|e| e.project_key.clone()));
-            let discovered: std::collections::BTreeSet<String> = queue
+            let discovered: std::collections::BTreeMap<String, Option<String>> = queue
                 .all()
                 .iter()
-                .map(|e| e.project_key.clone())
-                .filter(|key| !policy.projects.contains_key(key))
+                .map(|e| (e.project_key.clone(), e.project_path.clone()))
+                .filter(|(key, _)| !policy.projects.contains_key(key))
                 .collect();
             let projects: Vec<serde_json::Value> = policy
                 .projects
                 .iter()
                 .map(|(key, entry)| {
+                    let shown = entry.display_path.as_deref().unwrap_or(key);
                     serde_json::json!({
                         "project_id": project_id_for(key),
-                        "project_label": disambiguated_label(key, &known),
+                        "project_label": disambiguated_label(key, entry.display_path.as_deref(), &known),
+                        "project_path": display_path(shown),
                         "mode": policy.resolve(key),
                         "added_at": entry.added_at,
                         "configured": true,
                         "is_unresolved_bucket": key == UNKNOWN_PROJECT_KEY,
                     })
                 })
-                .chain(discovered.iter().map(|key| {
+                .chain(discovered.iter().map(|(key, shown)| {
                     serde_json::json!({
                         "project_id": project_id_for(key),
-                        "project_label": disambiguated_label(key, &known),
+                        "project_label": disambiguated_label(key, shown.as_deref(), &known),
+                        "project_path": display_path(shown.as_deref().unwrap_or(key)),
                         "mode": policy.resolve(key),
                         "added_at": serde_json::Value::Null,
                         "configured": false,
@@ -1077,7 +1165,8 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
                         key.to_string()
                     }
                 };
-                let label = disambiguated_label(&key, &known);
+                let shown = crate::daemon::policy::display_path_for_key(&key);
+                let label = disambiguated_label(&key, shown.as_deref(), &known);
                 (key, label)
             };
 
@@ -1343,7 +1432,11 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
                     .filter(|e| e.project_key == key && e.state == QueueState::Approved)
                     .map(|e| e.entry_id)
                     .collect();
-                let project_audit_label = disambiguated_label(&key, &known);
+                let project_audit_label = disambiguated_label(
+                    &key,
+                    crate::daemon::policy::display_path_for_key(&key).as_deref(),
+                    &known,
+                );
                 // Same ordering as `approve`'s `bulk-approved` row: written
                 // before anything is canceled, so a rollback never has to
                 // write to the disk that just refused a write. Undoing a
@@ -1588,6 +1681,7 @@ pub async fn handle_request_async(shared: &DaemonShared, req: &Request) -> Respo
         "preview_body" => handle_preview_body(shared, req).await,
         "quiesce" => handle_quiesce(shared, req).await,
         "preview_turns" => handle_preview_turns(shared, req).await,
+        "search_original" => handle_search_original(shared, req).await,
         "probe_routing" => handle_probe_routing(req).await,
         "probe_routed_tools" => handle_probe_routed_tools(req).await,
         "enroll" => enroll::handle_enroll(shared, req).await,
@@ -1802,7 +1896,14 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
         // Approving what is already in that bucket is an ordinary consent
         // decision about entries the contributor can see; it is *arming*
         // the bucket that `set_mode` refuses, which is a standing grant.
-        (ids, Some(disambiguated_label(&key, &known)))
+        (
+            ids,
+            Some(disambiguated_label(
+                &key,
+                crate::daemon::policy::display_path_for_key(&key).as_deref(),
+                &known,
+            )),
+        )
     } else {
         let queue = shared.queue.lock().expect("queue lock");
         (
@@ -2415,6 +2516,56 @@ async fn build_and_pin_preview(
 /// systemd-hosted daemon with the window as a socket client, is never the
 /// window. Errors are fixed labels, matching every other surface at this
 /// boundary -- no path, no entry content.
+/// Count occurrences of `needle` in an entry's PRE-redaction session text.
+///
+/// This is the only call in this crate that reads unredacted session bytes on
+/// behalf of a socket client, and the bound is what makes it acceptable: it
+/// returns a COUNT. No offsets, no context, no bytes, nothing that can be
+/// reassembled into content. A caller learns only the answer to a question
+/// they already knew how to ask, about a needle they typed themselves.
+///
+/// It exists because `preview_search` scans the REDACTED body, so a value that
+/// redaction removed returns zero matches -- which is indistinguishable from a
+/// value that was never in the session at all. Those are precisely the two
+/// answers a contributor checking for a client name needs to tell apart, and
+/// without this the search tab cannot tell them apart either.
+///
+/// The file is read, counted, and dropped inside this function. Nothing
+/// retains it. That is why this takes an entry id rather than hanging off an
+/// open preview: a preview lives as long as a sheet is on screen, and an
+/// unredacted transcript must not.
+///
+/// Errors are fixed labels, never a path or a fragment of content.
+pub async fn search_original(
+    shared: &DaemonShared,
+    entry_id: Uuid,
+    needle: &str,
+) -> Result<u32, &'static str> {
+    if needle.is_empty() {
+        return Ok(0);
+    }
+    let path = {
+        let queue = shared.queue.lock().expect("queue lock");
+        queue
+            .get(entry_id)
+            .map(|e| e.path.clone())
+            .ok_or(ERR_UNKNOWN_ENTRY_ID)?
+    };
+    let body = tokio::fs::read_to_string(&path)
+        .await
+        .map_err(|_| "session-unreadable")?;
+    let mut count: u32 = 0;
+    let mut start = 0usize;
+    while let Some(pos) = body[start..].find(needle) {
+        count = count.saturating_add(1);
+        start = start + pos + needle.len();
+        if start > body.len() {
+            break;
+        }
+    }
+    Ok(count)
+}
+
 pub async fn open_preview(
     shared: &DaemonShared,
     entry_id: Uuid,
@@ -2492,6 +2643,26 @@ pub async fn open_preview(
 ///
 /// Trace content, under the preview exemption in this module's doc: only for
 /// an entry the caller already holds, post-redaction only, and never onward.
+async fn handle_search_original(shared: &DaemonShared, req: &Request) -> Response {
+    let id = match parse_entry_id(&req.params) {
+        Ok(id) => id,
+        Err(m) => return Response::err(req.id, ERR_BAD_PARAMS, m),
+    };
+    let needle = match req.params.get("needle") {
+        Some(v) => match v.as_str() {
+            Some(n) => n,
+            None => return Response::err(req.id, ERR_BAD_PARAMS, "needle-invalid"),
+        },
+        None => return Response::err(req.id, ERR_BAD_PARAMS, "needle-required"),
+    };
+    match search_original(shared, id, needle).await {
+        // A count and nothing else. See `search_original` for why that is the
+        // whole bound of this method.
+        Ok(matches) => Response::ok(req.id, serde_json::json!({ "matches": matches })),
+        Err(label) => Response::err(req.id, ERR_BAD_PARAMS, label),
+    }
+}
+
 async fn handle_preview_body(shared: &DaemonShared, req: &Request) -> Response {
     let id = match parse_entry_id(&req.params) {
         Ok(id) => id,
@@ -3483,6 +3654,128 @@ mod tests {
         DaemonShared::load(store).unwrap()
     }
 
+    /// A queue entry whose session file holds `body`, so
+    /// `search_original` has something real to read.
+    fn shared_with_session(body: &str) -> (DaemonShared, Uuid, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        std::fs::write(&path, body).unwrap();
+
+        let s = shared();
+        let entry_id = Uuid::new_v4();
+        let entry = crate::daemon::queue::QueueEntry {
+            entry_id,
+            session_hash: "sha256:test".into(),
+            source: "claude-code".into(),
+            declared_source: None,
+            project_key: "/tmp/search-original".into(),
+            project_path: None,
+            session_cwd: None,
+            project_label: "search-original".into(),
+            path,
+            size_bytes: body.len() as u64,
+            discovered_at: chrono::Utc::now(),
+            state: crate::daemon::queue::QueueState::Pending,
+            reason_label: None,
+            attempts: 0,
+            retry_after: None,
+            submission_id: None,
+            approved_scopes: None,
+            approved_verdict: None,
+            approved_correction: None,
+            approved_inputs: None,
+            previewed_envelope_digest: None,
+            approved_at: None,
+            subagent_count: 0,
+            subagents_dropped: 0,
+            observed_modified_at: None,
+        };
+        s.queue
+            .lock()
+            .expect("queue lock")
+            .upsert(entry, 500)
+            .unwrap();
+        (s, entry_id, dir)
+    }
+
+    /// The reason this call exists. `preview_search` scans the REDACTED
+    /// body, so a value redaction removed returns zero there -- which is
+    /// indistinguishable from a value that was never in the session. This
+    /// reads the original, so it can tell those apart.
+    #[tokio::test]
+    async fn search_original_counts_a_value_that_redaction_would_remove() {
+        let (s, id, _dir) = shared_with_session(
+            "{\"secret\":\"planted-secret-value\"}\n{\"note\":\"planted-secret-value again\"}\n",
+        );
+        assert_eq!(
+            search_original(&s, id, "planted-secret-value")
+                .await
+                .unwrap(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn search_original_reports_zero_for_a_value_that_was_never_there() {
+        let (s, id, _dir) = shared_with_session("{\"note\":\"nothing to see\"}\n");
+        assert_eq!(
+            search_original(&s, id, "never-appeared-anywhere")
+                .await
+                .unwrap(),
+            0
+        );
+    }
+
+    /// An empty needle matches nothing rather than every position.
+    #[tokio::test]
+    async fn search_original_treats_an_empty_needle_as_no_matches() {
+        let (s, id, _dir) = shared_with_session("anything at all");
+        assert_eq!(search_original(&s, id, "").await.unwrap(), 0);
+    }
+
+    /// Overlapping occurrences are counted the way a person reading the
+    /// transcript would count them: left to right, non-overlapping.
+    #[tokio::test]
+    async fn search_original_counts_non_overlapping_matches() {
+        let (s, id, _dir) = shared_with_session("aaaa");
+        assert_eq!(search_original(&s, id, "aa").await.unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn search_original_refuses_an_unknown_entry() {
+        let (s, _id, _dir) = shared_with_session("body");
+        assert_eq!(
+            search_original(&s, Uuid::new_v4(), "anything").await,
+            Err(ERR_UNKNOWN_ENTRY_ID)
+        );
+    }
+
+    /// The whole bound of this call: it answers with a COUNT and never with
+    /// bytes. Asserted on the wire shape, because the wire is what a shell
+    /// can actually reach.
+    #[tokio::test]
+    async fn search_original_puts_no_content_on_the_wire() {
+        let (s, id, _dir) = shared_with_session("{\"secret\":\"planted-secret-value\"}");
+        let req = Request {
+            id: 1,
+            method: "search_original".to_string(),
+            params: serde_json::json!({
+                "entry_id": id.to_string(),
+                "needle": "planted-secret-value",
+            }),
+        };
+        let response = handle_search_original(&s, &req).await;
+        let body = serde_json::to_string(&response).unwrap();
+        assert!(
+            body.contains("\"matches\":1"),
+            "expected a count, got {body}"
+        );
+        assert!(
+            !body.contains("planted-secret-value"),
+            "the needle must never be echoed back: {body}"
+        );
+    }
+
     /// A daemon whose settings never declared a proxy builds no ledger and
     /// attempts no connection.
     #[test]
@@ -3886,6 +4179,8 @@ mod tests {
                         source: "claude-code".to_string(),
                         declared_source: None,
                         project_key: work_api.clone(),
+                        project_path: None,
+                        session_cwd: None,
                         project_label: "api".to_string(),
                         path: std::path::PathBuf::from("/tmp/seed.jsonl"),
                         size_bytes: 1,
@@ -3990,6 +4285,8 @@ mod tests {
                         source: "claude-code".to_string(),
                         declared_source: None,
                         project_key: "/tmp/p".to_string(),
+                        project_path: None,
+                        session_cwd: None,
                         project_label: "p".to_string(),
                         path: std::path::PathBuf::from("/tmp/seed.jsonl"),
                         size_bytes: 1,
@@ -4039,6 +4336,8 @@ mod tests {
                         source: "claude-code".to_string(),
                         declared_source: None,
                         project_key: "/tmp/p".to_string(),
+                        project_path: None,
+                        session_cwd: None,
                         project_label: "p".to_string(),
                         path: std::path::PathBuf::from("/tmp/seed.jsonl"),
                         size_bytes: 1,
@@ -4100,6 +4399,8 @@ mod tests {
                             source: "claude-code".to_string(),
                             declared_source: None,
                             project_key: "/tmp/p".to_string(),
+                            project_path: None,
+                            session_cwd: None,
                             project_label: "p".to_string(),
                             path: std::path::PathBuf::from(format!("/tmp/seed{n}.jsonl")),
                             size_bytes: 1,
@@ -4159,6 +4460,8 @@ mod tests {
                         source: "claude-code".to_string(),
                         declared_source: None,
                         project_key: "/tmp/p".to_string(),
+                        project_path: None,
+                        session_cwd: None,
                         project_label: "p".to_string(),
                         path: std::path::PathBuf::from("/tmp/seed.jsonl"),
                         size_bytes: 1,
@@ -4215,6 +4518,8 @@ mod tests {
                     source: "claude-code".to_string(),
                     declared_source: None,
                     project_key: "/tmp/p".to_string(),
+                    project_path: None,
+                    session_cwd: None,
                     project_label: "p".to_string(),
                     path: std::path::PathBuf::from("/tmp/seed.jsonl"),
                     size_bytes: 1,
@@ -4417,6 +4722,8 @@ mod tests {
                     source: "claude-code".to_string(),
                     declared_source: None,
                     project_key: project_key.to_string(),
+                    project_path: None,
+                    session_cwd: None,
                     project_label: super::super::policy::project_label_for(project_key),
                     path: std::path::PathBuf::from("/tmp/seed.jsonl"),
                     size_bytes: 1,
@@ -4886,6 +5193,8 @@ mod tests {
                         source: "claude-code".to_string(),
                         declared_source: None,
                         project_key: "/tmp/p".to_string(),
+                        project_path: None,
+                        session_cwd: None,
                         project_label: "p".to_string(),
                         path: std::path::PathBuf::from("/tmp/seed.jsonl"),
                         size_bytes: 1,
@@ -4967,6 +5276,8 @@ mod tests {
                         source: "claude-code".to_string(),
                         declared_source: None,
                         project_key: gone.to_string(),
+                        project_path: None,
+                        session_cwd: None,
                         project_label: "oldproj".to_string(),
                         path: std::path::PathBuf::from("/tmp/seed.jsonl"),
                         size_bytes: 1,
@@ -5090,6 +5401,8 @@ mod tests {
             source: "claude-code".to_string(),
             declared_source: None,
             project_key: "/tmp/p".to_string(),
+            project_path: None,
+            session_cwd: None,
             project_label: "p".to_string(),
             path: std::path::PathBuf::from("/tmp/s.jsonl"),
             size_bytes,
@@ -5284,8 +5597,16 @@ mod tests {
         assert_eq!(result["codex_root_configured"], true);
     }
 
+    /// The session file's path never crosses the socket, and the only path
+    /// that does is the rendered project directory.
+    ///
+    /// This asserted "no path at all" until `project_path` was added.
+    /// Relaxing it to "no path but that one" is the whole of the
+    /// relaxation, and it is stated as an equality rather than a substring
+    /// check so that a second path appearing on this shape fails here --
+    /// `display_path`'s doc comment carries the reasoning.
     #[test]
-    fn a_queue_entry_on_the_wire_carries_no_local_path() {
+    fn a_queue_entry_on_the_wire_carries_no_session_file_path() {
         use crate::daemon::queue::{QueueEntry, entry_id_for};
         let e = QueueEntry {
             entry_id: entry_id_for("sha256:aa"),
@@ -5293,6 +5614,8 @@ mod tests {
             source: "claude-code".into(),
             declared_source: None,
             project_key: "/Users/z/code/secret-client-project".into(),
+            project_path: None,
+            session_cwd: None,
             project_label: "secret-client-project".into(),
             path: "/Users/z/.claude/projects/x/s.jsonl".into(),
             size_bytes: 10,
@@ -5312,10 +5635,19 @@ mod tests {
             subagents_dropped: 0,
             observed_modified_at: None,
         };
-        let body = serde_json::to_string(&entry_value(&e)).unwrap();
+        let v = entry_value(&e);
+        let body = serde_json::to_string(&v).unwrap();
         assert!(
-            !body.contains("/Users/z"),
-            "path leaked to the wire: {body}"
+            !body.contains(".claude"),
+            "the session file's path leaked to the wire: {body}"
+        );
+        assert_eq!(
+            v["project_path"], "/Users/z/code/secret-client-project",
+            "the project directory is the one path this shape may carry"
+        );
+        assert!(
+            body.matches("/Users/z").count() == 1,
+            "exactly one path, and it is project_path: {body}"
         );
         assert!(body.contains("secret-client-project"));
     }
@@ -5339,6 +5671,8 @@ mod tests {
                 source: "claude-code".to_string(),
                 declared_source: None,
                 project_key: "/tmp/p".to_string(),
+                project_path: None,
+                session_cwd: None,
                 project_label: "p".to_string(),
                 path: std::path::PathBuf::from(path),
                 size_bytes: 1,
@@ -5426,6 +5760,8 @@ mod tests {
             source: "claude-code".to_string(),
             declared_source: None,
             project_key: "/tmp/p".to_string(),
+            project_path: None,
+            session_cwd: None,
             project_label: "p".to_string(),
             path: std::path::PathBuf::from("/tmp/s.jsonl"),
             size_bytes: 1,
@@ -5465,6 +5801,172 @@ mod tests {
             "the adapter that loads it must stay reportable"
         );
         assert_eq!(v["declared_source"], "antigravity");
+    }
+
+    #[test]
+    fn a_queue_entry_carries_a_displayable_project_path() {
+        let mut e = card_entry();
+        e.project_key = "/tmp/somewhere/repo".to_string();
+        e.session_cwd = Some("/tmp/somewhere/repo/crates/inner".to_string());
+
+        let v = entry_value(&e);
+        assert_eq!(v["project_path"], "/tmp/somewhere/repo");
+        assert_eq!(v["session_path"], "/tmp/somewhere/repo/crates/inner");
+    }
+
+    #[test]
+    fn a_home_relative_project_path_is_abbreviated() {
+        // `home_dir` rather than `$HOME`: Windows sets `%USERPROFILE%` and
+        // no `HOME`, which is exactly the fallback `display_path` itself
+        // uses. Reading only `HOME` here made this test unrunnable there.
+        let home = crate::daemon::project_key::home_dir()
+            .expect("a home directory must be discoverable in the test environment");
+        let sep = std::path::MAIN_SEPARATOR;
+        assert_eq!(
+            display_path(&format!("{}{sep}code{sep}api", home.display())),
+            format!("~{sep}code{sep}api")
+        );
+        let elsewhere = crate::daemon::test_paths::abs("opt/elsewhere");
+        assert_eq!(display_path(&elsewhere), elsewhere);
+    }
+
+    /// The bug the `HOME`-only test above could not see.
+    ///
+    /// A real project key has been through `normalize_project_key`, which
+    /// case-folds on macOS and Windows. `$HOME` and `%USERPROFILE%` have
+    /// not: they are `/Users/z` and `C:\Users\z`, capital letter and all.
+    /// Comparing the folded key against the unfolded home meant the prefix
+    /// never matched and every path rendered absolute.
+    #[test]
+    fn a_normalized_key_under_home_is_still_abbreviated() {
+        let home = crate::daemon::project_key::home_dir()
+            .expect("a home directory must be discoverable in the test environment");
+        let key = crate::daemon::policy::project_key_for(Some(
+            &home.join("code").join("api").to_string_lossy(),
+        ));
+        let sep = std::path::MAIN_SEPARATOR;
+        assert_eq!(display_path(&key), format!("~{sep}code{sep}api"));
+    }
+
+    /// What the contributor reads keeps its capitals; what the daemon
+    /// decides on does not.
+    ///
+    /// Both halves in one test deliberately. Unfolding the key to fix the
+    /// display would let one project mint two keys and an `Ignore` lapse
+    /// under the other spelling; re-folding the display to keep the key
+    /// tidy puts `~/code/ironwire` back in front of someone whose disk has
+    /// no such directory. Only doing both is passing.
+    ///
+    /// Every expected string is derived by running the real
+    /// `policy::project_for` over a real on-disk directory, from a
+    /// SUBDIRECTORY of it, rather than assembled here -- a test that
+    /// concatenates `$HOME` itself is how the broken `~` abbreviation went
+    /// unnoticed on this branch once already.
+    #[test]
+    fn a_mixed_case_project_keeps_its_capitals_while_its_key_stays_folded() {
+        let home = crate::daemon::project_key::home_dir()
+            .expect("a home directory must be discoverable in the test environment");
+        // Inside the real home, because the `~` abbreviation is half of
+        // what is being asserted and `display_path` reads the environment.
+        let dir = tempfile::Builder::new()
+            .prefix("tc-case-")
+            .tempdir_in(&home)
+            .expect("a temporary directory under home");
+        let root = dir.path().join("IronWire");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir(root.join(".git")).unwrap();
+        let sub = root.join("Crates").join("Inner");
+        std::fs::create_dir_all(&sub).unwrap();
+
+        let (key, shown) = crate::daemon::policy::project_for(Some(&sub.to_string_lossy()));
+        let shown = shown.expect("a directory that resolves has a display path");
+
+        let mut e = card_entry();
+        e.project_key = key.clone();
+        e.project_path = Some(shown.clone());
+        e.project_label = crate::daemon::policy::disambiguated_label(
+            &key,
+            Some(&shown),
+            std::slice::from_ref(&key),
+        );
+
+        let v = entry_value(&e);
+        let rendered = v["project_path"].as_str().expect("a rendered path");
+        assert!(
+            rendered.ends_with("IronWire"),
+            "the displayed path was lowercased: {rendered}"
+        );
+        assert!(
+            rendered.starts_with('~'),
+            "a project under home must still abbreviate: {rendered}"
+        );
+        assert_eq!(
+            v["project_label"], "IronWire",
+            "the label was lowercased: {v}"
+        );
+
+        assert_eq!(
+            key,
+            crate::daemon::project_key::fold_case(&shown),
+            "the key must remain the folded spelling of the same directory"
+        );
+        // Where folding is a no-op the two are equal by construction, so
+        // the inequality is asserted only where it is a real claim.
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        assert_ne!(
+            key, shown,
+            "on a case-insensitive filesystem the key must still be folded"
+        );
+    }
+
+    #[test]
+    fn the_unknown_bucket_has_no_path_to_show() {
+        assert_eq!(display_path(UNKNOWN_PROJECT_KEY), UNKNOWN_PROJECT_KEY);
+    }
+
+    #[test]
+    fn session_path_is_absent_when_it_matches_the_project() {
+        let mut e = card_entry();
+        e.project_key = "/tmp/somewhere/repo".to_string();
+        e.session_cwd = Some("/tmp/somewhere/repo".to_string());
+        assert!(entry_value(&e)["session_path"].is_null());
+    }
+
+    /// The path is on the socket and nowhere else.
+    ///
+    /// Deliberately asserts over the SINKS rather than over `display_path`:
+    /// the risk is not that this function is wrong, it is that some later
+    /// change pipes its output into an audit row or a notification. The
+    /// audit sink has its own long-standing guard
+    /// (`an_audit_entry_never_carries_a_path`); this covers the history
+    /// record, which gained a project field in the same change.
+    #[test]
+    fn no_sink_carries_a_project_path() {
+        let key = "/tmp/somewhere/secret-client-name";
+        let record = crate::daemon::history::HistoryRecord {
+            submission_id: uuid::Uuid::new_v4(),
+            submitted_at: chrono::Utc::now(),
+            project_id: crate::daemon::policy::project_id_for(key),
+            project_label: crate::daemon::policy::project_label_for(key),
+            source: "claude_code".to_string(),
+            session_hash: "sha256:abc".to_string(),
+            status: "accepted".to_string(),
+            consent_scopes: vec![],
+            credit_points_pending: 0.0,
+            credit_points_final: None,
+            explanations: vec![],
+            last_refreshed_at: None,
+            withdrawn_at: None,
+        };
+        let json = serde_json::to_string(&record).unwrap();
+        assert!(
+            !json.contains("/tmp/somewhere"),
+            "a history record must never carry a path: {json}"
+        );
+        assert!(
+            !json.contains(&crate::daemon::ipc::display_path(key)),
+            "not even an abbreviated one: {json}"
+        );
     }
 
     /// A native session declares nothing and must not grow an empty label.
@@ -5637,6 +6139,8 @@ mod tests {
                     source: "claude-code".to_string(),
                     declared_source: None,
                     project_key: "/tmp/p".to_string(),
+                    project_path: None,
+                    session_cwd: None,
                     project_label: "p".to_string(),
                     path: std::path::PathBuf::from("/tmp/seed.jsonl"),
                     size_bytes: 1,
@@ -5985,6 +6489,8 @@ mod tests {
                         source: "claude-code".to_string(),
                         declared_source: None,
                         project_key: "/tmp/p".to_string(),
+                        project_path: None,
+                        session_cwd: None,
                         project_label: "p".to_string(),
                         path: std::path::PathBuf::from("/tmp/seed.jsonl"),
                         size_bytes: 1,
@@ -6032,6 +6538,8 @@ mod tests {
                         source: "claude-code".to_string(),
                         declared_source: None,
                         project_key: "/tmp/p".to_string(),
+                        project_path: None,
+                        session_cwd: None,
                         project_label: "p".to_string(),
                         path: std::path::PathBuf::from("/tmp/seed.jsonl"),
                         size_bytes: 1,

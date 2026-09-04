@@ -1,0 +1,559 @@
+# Folder-first queue, and what the scrubber will admit to
+
+An alpha contributor ran the 0.7.0 contributor app against a real machine --
+149 sessions waiting -- and reported ten things. This design answers all
+ten across the three shells (macOS, GTK, Windows).
+
+The report is worth reading as one complaint rather than ten, because
+that is what it is: **at 149 sessions the queue stops being a list and
+becomes a haystack, and the app still renders it as a list.** Every
+navigation item below follows from that. The scrubber items are a second,
+separate complaint -- the app tells a contributor how much it removed and
+refuses to say what -- and that one is about trust, not scale.
+
+Related: `2026-08-20-one-click-submit-design.md` (whose single-entry-group
+rule this design retires, with reasons), and
+`crates/trace-commons-contributor/src/daemon/policy.rs`, whose path-privacy
+invariant this design relaxes in exactly one place and nowhere else.
+
+## What is not changing
+
+Stating these first, because three of the ten items look like they ask
+for one of them and do not:
+
+- **A local filesystem path still never reaches `daemon-audit.jsonl`, OS
+  notification text, or a `HistoryRecord`.** `an_audit_entry_never_carries_a_path`
+  keeps passing, unmodified. The relaxation below is to the IPC response
+  only.
+- **`Look inside` keeps its emphasis as the row's primary action.** Item 9
+  asks for the card to be clickable, not for the button to go away, and the
+  reasoning recorded in `QueueView.swift`'s `actions` -- that promoting
+  `Submit` would change what the app advises on the screen where its advice
+  matters most -- is untouched by making the card a second route to the same
+  place.
+- **The removed values themselves are never rendered.** Item 3 asks to see
+  "what doesn't go". It is answered below without ever drawing a secret on
+  screen, and the reason that distinction is worth the extra work is that a
+  window listing every credential a session touched is a worse artifact than
+  the session was.
+
+---
+
+## 1. The daemon changes, which land once for three shells
+
+### 1.1 A project's path, on the socket only
+
+Queue entries and `list_projects` rows gain `project_path: String`,
+`~`-abbreviated for display. Both it and `project_label` are rendered from
+the *unfolded* spelling of the project directory, which 1.2 carries beside
+the case-folded key -- not from the key itself. `project_label` is otherwise
+unchanged: still the bare basename from `project_label_for`, still the only
+project string that crosses into any audit, notification, or history sink.
+
+This is a deliberate widening of the rule stated in `policy.rs`'s
+`project_id_for` doc comment -- "the privacy rule is that a project key, a
+local filesystem path, never crosses the socket". The rule was written
+because a label lands in three sinks a path must not reach -- the audit
+log, notification text, and history. That reasoning is
+sound and survives intact for `project_label`; it was never an argument
+about the socket itself, which carries the contributor's own transcript
+bodies under the preview exemption already. A path is strictly less
+sensitive than the transcript recorded inside it.
+
+So the field is added, and the invariant is re-pointed rather than removed:
+
+> `project_path` may be rendered. It may not be logged, audited, notified,
+> or persisted to history.
+
+A new test asserts the second half by walking every audit and history sink
+for the new field's absence, mirroring the existing path test rather than
+replacing it.
+
+**Why this is necessary and not merely nice.** The reporter did not ask for
+paths out of curiosity. Three of their ten items -- "it doesn't unify the
+same folder", "I have the same path 2-3 times", "folder name should be more
+prominent" -- are the same observation: `disambiguated_label` renders two
+different projects as `api` and `api (3f9c)`, and a contributor holding
+those two labels cannot tell which is which. The hash suffix was built to
+keep them *distinct*; it was never able to make them *identifiable*. A path
+is the only thing that can.
+
+### 1.2 Normalizing the project key
+
+`project_key_for` keys on the raw `cwd` string an agent recorded. Two
+sessions in the same directory therefore land in different groups whenever
+the recorded strings differ, which they routinely do. Add a normalization
+pass ahead of the key:
+
+1. Resolve symlinks (`/var` vs `/private/var` on macOS is the common one).
+2. Strip trailing separators.
+3. Case-fold on case-insensitive volumes.
+4. Walk up to the nearest enclosing VCS root (`.git`, `.hg`, `.jj`), if one
+   exists within a bounded number of levels.
+
+Step 4 is the one that unifies Codex with Claude Code, because the two do
+not agree on whether the cwd is the repo root or the subdirectory the
+session happened to start in. It is also the one with a cost: two sibling
+subdirectories of one repo become one project, and a contributor who wanted
+them separate cannot get that back.
+
+The cost is paid down by keeping the raw recorded cwd on the entry (as
+`session_path`, same rendering rules as `project_path`) and showing it in
+the folder detail view, so nothing is lost -- the sessions are grouped by
+repo and still say individually where they ran.
+
+Steps 1-3 are unconditional. Step 4 is worth stating as reversible: it is a
+single function, and if the merge turns out to be wrong for real users it
+comes out without touching anything else.
+
+**The key is folded; what a person reads is not.** One normalization
+returns both spellings. `normalize_project_within` yields a
+`NormalizedProject` whose `key` is `fold_case(display_path)` and whose
+`display_path` is the canonicalized directory with the case the filesystem
+holds. Everything that *decides* something keys on the folded half -- policy
+lookup, grouping, `project_id_for`, and `disambiguated_label`'s collision
+test. Everything a person *reads* is rendered from the unfolded half.
+
+Both halves are load-bearing and neither may be dropped. Dropping the fold
+would be a fail-open: on a case-insensitive volume `~/Code/Api` and
+`~/code/api` are one directory, so one project would mint two keys, and a
+project the contributor set to `Ignore` under one spelling would silently
+lapse under the other. Dropping the unfolded half puts `~/code/ironwire` and
+`ironwire` in front of a contributor whose disk holds `~/Code/IronWire` -- a
+spelling of their own directory that exists nowhere on their machine, which
+weakens exactly the "identifiable" 1.1 exists to provide.
+
+The unfolded half is carried rather than re-derived at each render:
+`QueueEntry::project_path: Option<String>` beside `project_key`, and
+`ProjectEntry::display_path: Option<String>` beside the map key, both
+`#[serde(default)]` so a queue or policy file written before the fields
+existed still loads. `None` -- an older file, or a key that no longer
+resolves -- falls back to the folded key, which names the right directory in
+the wrong case rather than naming nothing, so a row is never empty and
+never a panic. `project_id_for` still takes the folded key, so a change of
+case cannot move a project's id. `NormalizedProject` derives nothing --
+no `Debug`, no `Serialize` -- because a derived `Debug` is how a local path
+reaches a log line by accident; the display half is local-only exactly as
+`project_key` and `session_cwd` are, rendered over the socket and never
+logged, audited, notified, or written to a history record.
+
+`session_path` is unaffected. It renders `QueueEntry.session_cwd`, which is
+the raw cwd the watcher recorded and is never folded. `display_path` still
+folds both sides only to *compare* against `$HOME`, and renders the tail
+from the string it was handed. That comparison is not a workaround for the
+key's folding: `$HOME` is whatever the environment supplied, and a shell
+exporting `HOME=/Users/Zaki` against a disk that spells it `/Users/zaki`
+names one directory on a case-insensitive volume, so folding the comparison
+is the filesystem's own rule. What had been wrong was that the *input* was
+folded too, leaving no case for the "cut the tail from the original" branch
+to preserve.
+
+Normalization changes `project_id_for`'s input, and ids are derived rather
+than stored, so **every existing project id changes on upgrade.** What that
+actually breaks is `daemon-projects.json`: modes keyed by the old key are
+orphaned, and a project a contributor had set to `ignore` would silently
+re-arm. That is not acceptable. Migration: on first load after upgrade,
+re-key the policy file through the normalizer, merging any two entries that
+collapse to one key by taking the **more restrictive** mode. The merge rule
+is the safety property here and gets its own test.
+
+---
+
+## 2. Queue: folders first (items 1, 2, 8)
+
+### 2.1 Root
+
+The queue root lists folders, not sessions:
+
+```
+149 sessions waiting for your decision
+
+  ironwire                                   12 sessions   6.1 MB   >
+  ~/code/ironwire
+  [ Submit all (12) ]  [ Submit all as v ]  [ Ignore ]
+
+  trace-commons-server                        8 sessions   3.4 MB   >
+  ~/code/trace-commons-server
+  [ Submit all (8) ]   [ Submit all as v ]  [ Ignore ]
+```
+
+The folder name is the row's largest text. Today it is the *smallest* text
+on the line -- `TC.Font_.meta` in `inkSecondary`, beside a primary-styled
+`Submit all` -- which is the direct subject of the reporter's first item.
+The line currently reads as a button with a caption; it should read as a
+place with actions.
+
+`QueueGrouping` already computes id, label, bytes, and entries in one pass,
+so the root needs no new grouping work -- only the count and byte totals it
+already carries.
+
+### 2.2 Detail
+
+Selecting a folder pushes a view listing that folder's sessions: today's
+cards, unchanged, scoped to one project, with a back affordance and the
+folder's name and path as the heading. Each card gains the `session_path`
+line from 1.2 when it differs from the folder's own path.
+
+### 2.3 A one-session folder gets `Submit all` too
+
+`ProjectQueueGroup` hides `Submit all` when `count == 1`, on the recorded
+reasoning that a single-entry group "offers no second way to do what its one
+row's own `Submit` already does". That was true of a flat list, where the
+row and the group header were on screen together. Under drill-in the row is
+one level down, so a contributor with a one-session folder would have to
+open the folder to do the thing the folder is offering -- which is exactly
+the reporter's item 8.
+
+The rule expires with the layout it was written for. Every folder row
+carries `Submit all (n)`, including `n = 1`. The comment in
+`ProjectQueueGroup` is updated to say so rather than deleted, so the next
+reader finds the history instead of rediscovering the argument.
+
+### 2.4 The card is clickable (item 9)
+
+The whole card becomes the hit target for `Look inside`. The button stays,
+with its current emphasis, for the reasons in "What is not changing".
+`Submit`, `Not this one`, and the button itself stop propagation.
+
+---
+
+## 3. The scrubber says what it removed (items 3, 5, 7)
+
+### 3.1 Redactions are already marked, and this section used to say otherwise
+
+**Correcting an error that survived this spec, four plans, and a review
+pass.** An earlier draft of this section claimed the redactor's placeholder
+tokens were "already in the bytes `tc_preview_body` returns" while "the
+shells render them as ordinary transcript text and the contributor scrolls
+past them," and asked each shell to build a scan that marked them.
+
+The second half was never true. All three shells already mark them, and have
+for some time:
+
+| Shell | Where |
+|---|---|
+| macOS | `TCShellCore.TranscriptMarkerScan` (`TranscriptPaging.swift`), drawn as chips by `TranscriptMarkers.chipped` |
+| GTK | `transcript_paging.rs`, around the `MARKER` pattern |
+| Windows | `TraceCommons.Interop.TranscriptMarkers` |
+
+All three carry the identical pattern
+`<PRIVATE_[A-Za-z0-9_]+>|\[REDACTED[^\]\n]*\]`, which covers the numbered
+`<PRIVATE_LABEL_N>` form and the square-bracketed `[REDACTED]` /
+`[REDACTED:label]` forms.
+
+**It does not cover `<REDACTED_PRIVATE_KEY>`, and that is a live defect.**
+That token is angle-bracketed like the first family but begins `<REDACTED_`,
+so it matches neither alternative -- not the `<PRIVATE_` arm, and not the
+`\[REDACTED` arm, which requires a square bracket. A PEM private key is
+therefore removed from the payload and its removal is **invisible in the
+transcript** in all three shells: the highest-stakes redaction there is, and
+the one a contributor cannot see happened.
+
+There is a second consequence. The pattern is shared with the chunker
+precisely so a marker is never cut in half; a token the pattern does not
+match is not protected, so `<REDACTED_PRIVATE_KEY>` can also be split across
+a chunk boundary and render as two fragments.
+
+Fixing it means widening one alternation in three separately-maintained
+copies of the constant, each with chunk-boundary tests behind it. That is
+its own change, not a rider on this one. The scan
+is deliberately shared with the chunker so a marker is never cut in half,
+and the chip styling is a considered choice recorded in its own doc comment:
+markers read as objects placed in the text, not as damage done to it.
+
+So item 3's "show me where" is **already shipped**, and a shell must not
+add a second marker pass, restyle the existing chips, or bypass the
+chunk-boundary contract.
+
+**What is actually missing is the naming.** Today every marker draws as the
+same anonymous chip. The tokens carry more than that: the numbered form
+carries a label and an ordinal, and `[REDACTED:label]` carries a category.
+A chip that says "local path removed", and that can tell a reader two chips
+stand for the same original value, is new information and restyles nothing.
+That -- plus the summary panel in §3.1b and the search in §3.2 -- is the
+whole of the scrubber work.
+
+Where a marker carries no ordinal, none is invented; where it carries no
+label, the chip says only that something was removed.
+
+**Which kinds carry what**, since the naming depends on it. Only
+`apply_placeholder_regex` mints the numbered form, for exactly two labels:
+`local_path` and `private_email`. Everything else is a fixed token:
+
+| Token | Covers |
+|---|---|
+| `[REDACTED]` | `secret`, `secret:{pattern}`, `secret:contextual_entropy`, `secret:split_literal`, `sensitive_field` |
+| `<REDACTED_PRIVATE_KEY>` | `secret:pem_private_key` -- angle-bracketed but carrying no index |
+| `[REDACTED:{label}]` | `tool_sensitive_field{:action}`, and every `privacy_filter:{label}` |
+
+Only the third names its own category. The first two can say that something
+left and not what, which is exactly the limit on how well a chip can be
+labelled.
+
+Distinct counts come from the placeholder map, so they exist for exactly the
+two labels that mint placeholders. `3 secret` will never carry a distinct
+suffix. That is correct rather than a gap -- there is no second number to
+report -- but no test may assert a distinct count for a secret fixture, and
+the rendering must omit the suffix rather than print `(0 distinct)`, which
+beside a non-zero occurrence count reads as "nothing was removed".
+
+The two layers differ on the wire and a shell must not confuse them.
+`PrivacyMetadata::redaction_distinct_counts` is
+`skip_serializing_if = "BTreeMap::is_empty"`, so on a secrets-only envelope
+the key is absent from the JSON entirely. `PreviewSummary` carries no such
+attribute, so a shell reading a preview always sees the key, as `{}`. Either
+way the renderer's rule is the same: no entry means no distinct count is
+available for that label, not that the count is zero.
+
+**The caveat this section must keep.** Markers appear where redaction
+*rewrote* a typed field. The detector scans every leaf; the rewriter does
+not reach all of them. A region with no marker is not a region with nothing
+sensitive in it, and `ScrubbingCaveat`'s sentence is what says so. Naming
+the chips makes the app look more thorough, which is precisely when that
+sentence earns its place.
+
+
+### 3.1b The removed-summary panel
+
+Marking placeholders in place answers *where*. It does not answer the thing
+the reporter actually asked for -- "so I can right away see what doesn't go"
+-- because collecting the marks means scrolling the whole transcript, which
+is the opposite of right away. The card's one-line figure is the only
+at-a-glance part, and it is a count, not a list.
+
+So the preview's scrubbing tab gains a summary panel: one row per category,
+with what that category is, how many times it fired, and how many distinct
+values that covered. No matched text, ever -- the value is gone by
+construction and the row says what KIND of thing left, not what it was.
+
+**Labels are an open, namespaced vocabulary, and the panel must be built for
+that.** The redactor emits `local_path` and `secret`, but also
+`secret:{pattern_name}`, `privacy_filter:{label}`,
+`tool_sensitive_field:{action}`, and `residual_secret_at:{schema_path}` --
+the last three generated, so the set is not closed and a shell cannot hold a
+complete table of it. Three rules follow:
+
+1. **Group by family**, the part before the first `:`. A session that
+   tripped nine different secret patterns is one `secret` row summing them,
+   with the sub-labels on a detail line, not nine rows.
+2. **An unrecognized family gets a neutral description**, never a guessed
+   one, and is **never dropped**. Hiding a category because this build has no
+   words for it would understate what happened, which is the one direction
+   this panel must not fail in.
+3. Sub-labels are safe to render. They are schema-shaped identifiers by
+   construction -- `log_residual_secret_locations` depends on that same
+   property -- never contributor strings.
+
+The descriptions, which are the panel's actual value to a reader who has
+never seen these words:
+
+| Family | What it is |
+|---|---|
+| `local_path` | File paths from this machine. |
+| `secret` | API keys, tokens, private keys, and high-entropy strings found next to credential words. |
+| `privacy_filter` | Names, emails, and other personal details the privacy model found in prose. |
+| `sensitive_field` | Fields whose name marks them sensitive, like `password` or `authorization`. |
+| `tool_sensitive_field` | Tool-call arguments whose name marks them sensitive. |
+| anything else | Removed by a pattern this version has no description for. |
+
+#### `residual_secret_at` is not a removal, and the card currently says it is
+
+`DeterministicTraceRedactor` sets `redaction_counts: report.counts` -- the
+whole report. That report includes `residual_secret_at:{path}`, which
+`note_residual_secret_location` increments when a secret was **detected and
+NOT removed**: a credential inside a human correction, which is preserved by
+design, or a field the typed traversal never visits, which is a real gap.
+
+Both reach the shells in the same map as every genuine removal, and all three
+render that map under the heading **"Removed by pattern"**. A session with a
+surviving secret therefore reports it today as a thing that was taken out.
+That is a pre-existing defect, it is exactly backwards, and it lands on the
+one screen where a contributor is deciding whether to send something.
+
+The panel is where it gets fixed, because the panel is the first surface with
+room to say two different things:
+
+- **Removed** -- every family except `residual_secret_at`.
+- **Found, and still in what would be sent** -- `residual_secret_at`, in the
+  attention tone, with its schema paths listed so the contributor can go and
+  look.
+
+The card's one-line figure gets the narrower half of the same fix: it excludes
+`residual_secret_at` from the "removed by pattern" total rather than trying to
+explain it in a strip that has no room. A session whose only count is a
+residual therefore reads `nothing matched` on the card and carries the
+attention state -- which is true, and is what the gold chip already exists to
+say.
+
+### 3.2 Search answers "was it removed?" (item 3, second half)
+
+`tc_preview_search` scans the redacted body, by an absolute stated rule.
+Searching it for a value that was removed correctly returns zero matches,
+which is indistinguishable from the value never having been there -- and
+those are the two answers a worried contributor most needs to tell apart.
+
+Add one FFI entry point:
+
+```c
+/* Count occurrences of needle in the PRE-redaction session text of an
+ * entry. Returns the match count, or -1 on error. Reports a COUNT ONLY:
+ * no offsets, no context, no bytes. */
+int32_t tc_search_original(tc_handle*, const char* entry_id, const char* needle);
+```
+
+It takes the handle and an entry id rather than a `tc_preview*`, which is
+not a detail. `tc_preview` holds exactly `body` and `summary_json`, both
+post-redaction; it has no pre-redaction bytes and must not acquire any.
+Hanging the raw session off the preview would keep an unredacted transcript
+resident in the shell's address space for as long as the sheet stays open,
+which is a worse property than the one this call exists to provide. Taking
+the handle instead lets the daemon re-read the session file, count, and drop
+it -- so the raw bytes live for the duration of one call, on the side of the
+boundary that already reads them.
+
+The result renders as:
+
+```
+Search: "acme-corp"
+  3 matches -- all 3 were removed
+```
+
+with the three honest cases: present and removed, present and still there
+(the alarming one, already the existing amber path), and absent entirely.
+
+This does widen the preview exemption, and the widening should be named
+rather than slipped in. Today the exemption is bounded to post-redaction
+content. This adds a **count-only oracle over pre-redaction content**, on a
+live preview the contributor already opened, for a needle the contributor
+themselves just typed. It returns a number and never a byte. It is not
+logged. The bound is that a caller learns only the answer to a question they
+already knew how to ask -- which is the entire point of the search tab, and
+is why the count is safe where a context snippet would not be.
+
+### 3.3 Recent searches stop recording prefixes (item 5)
+
+`PreviewSheet.swift:825` runs the search on `onChange(of: needle)`, and
+`run()` calls `RecentSearches.remember` on every non-empty result. Typing
+`xyz` therefore records `x`, `xy`, and `xyz`, and the recents strip -- six
+slots -- fills with prefixes of one word.
+
+Live search stays; it is the good part. `remember` moves out of `run()` and
+onto the explicit commit paths only (`onSubmit`, the `Search` button).
+
+**Windows has the same defect and takes the same fix.**
+`PreviewSheetViewModel.RunSearch` calls `Remember(Needle)` on any non-empty
+result, and `PreviewSheet.xaml.cs` calls `RunSearch` from the search box's
+text-changed handler as well as from the button. `Remember` moves onto the
+button and the recents strip only.
+
+**GTK already does this and needs no work.** `connect_search_changed` calls
+`run_search(.., false)`; `remember_search` is called only from
+`connect_activate` and the search button's click, beside the same
+`run_search(.., true)`. The separation is deliberate and carries a comment
+inside `run_search` saying so. Do not "fix" it.
+
+### 3.4 "nothing matched" gets something to do (item 7)
+
+The gold chip is correct and stays gold: a session where no pattern fired is
+the one worth slowing down on, and `ScrubbingCaveat` records why. What it
+lacks is a next step -- the reporter's "it's a bit unclear what to do with
+it" is a complaint about an affordance, not about a tone.
+
+The chip becomes a control. Activating it opens the preview on the search
+tab, which is the thing to do about it. The caveat line gains a clause
+saying so.
+
+---
+
+## 4. Top-of-window state (item 10), partially
+
+The nav item shows a shield glyph in three states -- clear, waiting,
+attention (any waiting entry that matched nothing, or was trimmed to fit) --
+**and keeps the numeric badge.**
+
+The request was to replace the count with an icon. Not adopting that half:
+at 149 the count is the reporter's own most-used signal, and an icon that
+means "some" is a downgrade exactly at the scale that produced this
+feedback. The shield adds the state the count could never carry; it does not
+substitute for it.
+
+---
+
+## 5. History, grouped the same way (item 11)
+
+`HistoryView` renders one flat list under a section header.
+It takes the same folder-first drill-in as the queue, over the same
+`QueueGrouping`, so the two screens navigate identically.
+
+`HistoryRecord` today carries `project_label` and nothing else about the
+project -- no id. Grouping on the label is not an option: a label is a
+display name, is not unique across two projects, and grouping on it would
+merge them, which is the same mistake `QueueGroup`'s own doc comment exists
+to forbid.
+
+So `HistoryRecord` gains `project_id`, and **not** `project_path` -- history
+is one of the three sinks §1.1 protects. The id is admissible in that sink by
+construction rather than by policy: `project_id_for` is a one-way SHA-256
+prefix that "leaks no path component", which is the property it was built
+for. Adding it therefore does not weaken the invariant the sink is protected
+by; a path would.
+
+The folder path shown in history is then resolved client-side, by matching
+the record's `project_id` against the live `list_projects` response. A
+record whose project the daemon no longer knows renders with its label
+alone -- the honest outcome, and no fallback path is needed.
+
+One consequence to state: §1.2 re-keys projects, so ids minted before the
+upgrade do not match ids minted after it. Historic records will not resolve
+to a path and will group under their labels. Backfilling is not possible --
+the daemon does not retain the old key -- and is not worth faking. History
+gets folder grouping for everything submitted after the upgrade, and older
+records group by label, which is what they already do today.
+
+---
+
+## 6. Testing
+
+- **Daemon.** Normalization table test (symlink, trailing slash, case,
+  VCS-root walk, bounded depth, no-repo fallback). Policy re-key migration,
+  with the more-restrictive-wins merge asserted directly. `project_path`
+  present in the IPC response and absent from every audit and history sink.
+- **Protocol.** Placeholder numbering is per distinct value (an existing
+  property, currently untested, that §3.1's distinct-count now depends on).
+- **FFI.** `tc_preview_search_original` returns counts for a value that was
+  redacted away; returns 0 for an absent needle; refuses a stale pointer the
+  same way its siblings do; and a test asserting it returns no bytes.
+- **Shells.** Recents record one entry for one committed search, not three.
+  Placeholder chips render for each label. macOS via `swift test` (the
+  `macOS app tests` CI job), GTK and Windows via their existing suites.
+
+## 7. Sequencing
+
+Each is a PR:
+
+1. Daemon: key normalization + policy re-key migration.
+2. Daemon: `project_path` / `session_path` on the socket and `project_id`
+   on `HistoryRecord`, with the sink test.
+3. Protocol/FFI: `tc_preview_search_original` + distinct-count exposure.
+4. macOS: queue drill-in, card click, shield, single-folder submit.
+5. macOS: preview -- placeholder chips, original-search, recents fix,
+   nothing-matched affordance.
+6. macOS: history drill-in.
+7. GTK: 4-6 combined.
+8. Windows: 4-6 combined.
+
+1-3 are prerequisites for 4-8 and are worth landing and living with first.
+The three shells are independent of each other and can go in any order; the
+reporter is on macOS, so 4-6 first.
+
+The C ABI header exists in two copies that CI enforces byte-identical --
+step 3 edits both.
+
+## Not in this design
+
+- Anything about *which* sessions are worth submitting. The queue is being
+  made navigable, not filtered or ranked.
+- Bulk selection across folders. `Submit all` remains per-project, which is
+  the unit `submitProject` actually acts on.
+- Persisting recent searches. They stay in memory, for the reason
+  `RecentSearches` already records.

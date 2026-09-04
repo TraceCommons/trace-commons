@@ -236,8 +236,14 @@ struct PreviewSheet: View {
     /// counts, in the daemon's own words, largest first. The contract
     /// guarantees this map never carries matched text.
     private static func scrubbingFound(_ summary: PreviewSummary) -> String {
-        guard !summary.redactions.isEmpty else { return "nothing matched" }
-        return summary.redactions
+        // Removals only. `redactions` also carries `residual_secret_at:*`,
+        // which counts a secret that was DETECTED AND LEFT IN, and this line
+        // sits under a heading that says the opposite. See
+        // `RedactionLabels`; the survivor is stated separately, in the
+        // attention tone, rather than dropped.
+        let removals = RedactionLabels.removals(summary.redactions)
+        guard !removals.isEmpty else { return "nothing matched" }
+        return removals
             .sorted { $0.value == $1.value ? $0.key < $1.key : $0.value > $1.value }
             .map { "\($0.value) \($0.key.replacingOccurrences(of: "_", with: " "))" }
             .joined(separator: " · ")
@@ -276,6 +282,9 @@ struct PreviewSheet: View {
                     SearchTab(
                         document: document,
                         preview: preview,
+                        searchOriginal: { needle in
+                            model.searchOriginal(entryID: entry.entryID, needle: needle)
+                        },
                         initialNeedle: preloaded?.needle ?? "",
                         initialOffsets: preloaded?.offsets
                     )
@@ -731,9 +740,15 @@ struct SearchTab: View {
     /// snippets are cut from those bytes at the offsets the ABI reports.
     let document: TranscriptDocument?
     let preview: TCPreview?
+    /// How many times a term appears in the PRE-redaction session, or nil
+    /// when that could not be checked. A closure rather than a daemon
+    /// reference because `AppModel` is the only thing in this app that talks
+    /// to the daemon.
+    let searchOriginal: (String) -> Int?
 
     @State private var needle: String
     @State private var offsets: [Int]?
+    @State private var outcome: OriginalSearchOutcome?
     @State private var searched: Bool
     @State private var recents: [String] = RecentSearches.load()
     @FocusState private var focused: Bool
@@ -741,11 +756,13 @@ struct SearchTab: View {
     init(
         document: TranscriptDocument?,
         preview: TCPreview?,
+        searchOriginal: @escaping (String) -> Int? = { _ in nil },
         initialNeedle: String = "",
         initialOffsets: [Int]? = nil
     ) {
         self.document = document
         self.preview = preview
+        self.searchOriginal = searchOriginal
         _needle = State(initialValue: initialNeedle)
         _offsets = State(initialValue: initialOffsets)
         _searched = State(initialValue: initialOffsets != nil)
@@ -759,7 +776,7 @@ struct SearchTab: View {
 
             HStack(spacing: TC.Space.s) {
                 searchField
-                Button("Search", action: run)
+                Button("Search", action: commit)
                     .buttonStyle(SheetSecondaryButtonStyle())
             }
 
@@ -821,7 +838,7 @@ struct SearchTab: View {
                     .font(TC.Font_.body)
                     .foregroundStyle(TC.inkPrimary)
                     .focused($focused)
-                    .onSubmit(run)
+                    .onSubmit(commit)
                     .onChange(of: needle) { _, _ in run() }
             }
         }
@@ -844,10 +861,26 @@ struct SearchTab: View {
             Text("The search couldn't run on this trace.")
                 .font(TC.Font_.body)
                 .foregroundStyle(TC.inkSecondary)
-        } else if offsets!.isEmpty {
+        } else if let outcome {
             // The answer to the only question this tab exists for, in
             // the app's two loudest tones -- each with a glyph, because a
             // green word and an amber word are the same word in greyscale.
+            //
+            // Which tone is the outcome's to decide: a term that is still in
+            // what would be sent is the one to slow down on, and a term that
+            // was removed reads as clear even though the redacted body and
+            // the original disagree about it.
+            //
+            // Three tones, not two. `.unknown` is a missing answer, and it
+            // used to draw in the clear tone -- the app's all-clear glyph
+            // beside the sentence that says the check did not run. See
+            // `OriginalSearchOutcome.Emphasis`.
+            Label(outcome.sentence, systemImage: tone(for: outcome).symbol)
+                .font(TC.Font_.headingAlert)
+                .foregroundStyle(tone(for: outcome).textColor)
+        } else if offsets!.isEmpty {
+            // No outcome: the preloaded screenshot path, which sets offsets
+            // without running a search.
             Label("0 matches", systemImage: TC.Tone.clear.symbol)
                 .font(TC.Font_.headingAlert)
                 .foregroundStyle(TC.Tone.clear.textColor)
@@ -858,17 +891,59 @@ struct SearchTab: View {
         }
     }
 
+    /// The tone for an outcome. Three of them, because "could not check"
+    /// is neither a clean answer nor an alarming one.
+    private func tone(for outcome: OriginalSearchOutcome) -> TC.Tone {
+        switch outcome.emphasis {
+        case .attention: return .attention
+        case .clear: return .clear
+        case .unchecked: return .neutral
+        }
+    }
+
+    /// The keystroke path. A local in-memory pass over the already-open
+    /// redacted preview and nothing else.
+    ///
     /// Runs on the main actor deliberately: the scan is a local in-memory
     /// pass, and keeping every touch of the `tc_preview*` on one thread is
     /// what the header's ownership rules ask for -- its pointer check narrows
     /// accidental misuse to an error, it does not make concurrent use safe.
+    ///
+    /// It deliberately does NOT ask about the original. `searchOriginal`
+    /// bottoms out in `tc_search_original`, which spawns a thread, builds a
+    /// runtime, and reads the whole raw unredacted session file off disk;
+    /// on `.onChange(of: needle)` that ran once per character typed, on this
+    /// actor. The outcome is cleared rather than left standing, so a verdict
+    /// from the previous term is never shown against the new one.
     private func run() {
         searched = true
+        outcome = nil
         guard !needle.isEmpty, let preview else {
             offsets = []
             return
         }
         offsets = preview.search(needle)
+    }
+
+    /// Runs the search, asks about the original, AND records the term.
+    ///
+    /// Separate from `run` for two reasons, and both are about the
+    /// difference between passing through a prefix and asking a question.
+    ///
+    /// Remembering here because doing it in `run` filled the six-slot strip
+    /// with the prefixes of one word: typing "xyz" recorded "x", "xy", and
+    /// "xyz". Checking the original here because that check is the expensive
+    /// one -- see `run` -- and a contributor asks it by pressing Return or
+    /// the button.
+    private func commit() {
+        run()
+        guard !needle.isEmpty, offsets != nil else { return }
+        // The redacted-body count alone cannot tell "we took it out" from
+        // "it was never here". See `OriginalSearchOutcome`.
+        outcome = OriginalSearchOutcome.classify(
+            remaining: offsets?.count ?? 0,
+            original: searchOriginal(needle)
+        )
         if let offsets, !offsets.isEmpty {
             recents = RecentSearches.remember(needle)
         }
@@ -920,39 +995,8 @@ struct WhatsInItTab: View {
                 .font(TC.Font_.caption)
                 .foregroundStyle(TC.inkSecondary)
 
-                TCSectionHeader(title: "What scrubbing removed")
+                removedPanel
                     .padding(.top, TC.Space.xs)
-                if summary.redactions.isEmpty {
-                    // The one card in this tab that is drawn to be found: a
-                    // session where no pattern fired is the session most
-                    // worth a second look, and it is the case a count of
-                    // removals cannot state.
-                    HStack(alignment: .top, spacing: TC.Space.m) {
-                        Image(systemName: TC.Tone.attention.symbol)
-                            .font(.system(size: 14))
-                            .foregroundStyle(TC.Tone.attention.color)
-                            .accessibilityHidden(true)
-                        Text("""
-                        Nothing matched. On a session that touched credentials, that is \
-                        itself worth a second look.
-                        """)
-                        .font(TC.Font_.body)
-                        .foregroundStyle(TC.inkPrimary)
-                        .fixedSize(horizontal: false, vertical: true)
-                        Spacer(minLength: 0)
-                    }
-                    .padding(.horizontal, TC.Space.md)
-                    .padding(.vertical, TC.Space.m)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .tcCard(emphasised: true)
-                    .accessibilityElement(children: .combine)
-                } else {
-                    ForEach(summary.redactions.sorted(by: { $0.key < $1.key }), id: \.key) { kind, count in
-                        Text("\(count) × \(kind.replacingOccurrences(of: "_", with: " "))")
-                            .font(TC.Font_.body)
-                            .foregroundStyle(TC.inkPrimary)
-                    }
-                }
 
                 if !summary.piiLabelsPresent.isEmpty {
                     TCSectionHeader(title: "Personal-information categories seen")
@@ -979,6 +1023,115 @@ struct WhatsInItTab: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
+    }
+
+    /// Grouped by family, described in words, and split into what left and
+    /// what did not.
+    ///
+    /// This section used to print the daemon's count map one raw label per
+    /// line -- which put `residual_secret_at:events.3.correction` under the
+    /// heading "What scrubbing removed", stating the exact opposite of what
+    /// happened about a secret that is still in the payload. See
+    /// `RedactionSummary` and `RedactionLabels`.
+    private var rows: (removed: [RedactionSummaryRow], stillPresent: [RedactionSummaryRow]) {
+        RedactionSummary.rows(
+            occurrences: summary.redactions,
+            distinct: summary.redactionsDistinct
+        )
+    }
+
+    @ViewBuilder
+    private var removedPanel: some View {
+        let rows = self.rows
+        TCSectionHeader(title: "What scrubbing removed")
+        if rows.removed.isEmpty {
+            nothingMatchedCard
+        } else {
+            ForEach(rows.removed, id: \.family) { row in
+                summaryRow(row)
+            }
+        }
+
+        if !rows.stillPresent.isEmpty {
+            TCSectionHeader(title: "Found, and still in what would be sent")
+                .padding(.top, TC.Space.xs)
+            ForEach(rows.stillPresent, id: \.family) { row in
+                HStack(alignment: .top, spacing: TC.Space.s) {
+                    Image(systemName: TC.Tone.attention.symbol)
+                        .font(.system(size: 14))
+                        .foregroundStyle(TC.Tone.attention.color)
+                        .accessibilityHidden(true)
+                    VStack(alignment: .leading, spacing: TC.Space.micro) {
+                        Text(row.description)
+                            .font(TC.Font_.body)
+                            .foregroundStyle(TC.goldText)
+                            .fixedSize(horizontal: false, vertical: true)
+                        // Schema paths, never transcript text: the redactor
+                        // guarantees the shape of these labels where it
+                        // mints them.
+                        if !row.detail.isEmpty {
+                            Text(row.detail.joined(separator: ", "))
+                                .font(TC.Font_.caption)
+                                .foregroundStyle(TC.inkSecondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                    Spacer(minLength: 0)
+                }
+                .accessibilityElement(children: .combine)
+            }
+        }
+
+        // A panel that enumerates categories makes the app look more
+        // thorough than it is, which is exactly when this sentence earns its
+        // place.
+        ScrubbingCaveatNote()
+            .padding(.top, TC.Space.xs)
+    }
+
+    private func summaryRow(_ row: RedactionSummaryRow) -> some View {
+        VStack(alignment: .leading, spacing: TC.Space.micro) {
+            Text(row.countLine)
+                .font(TC.Font_.body)
+                .foregroundStyle(TC.inkPrimary)
+            Text(row.description)
+                .font(TC.Font_.caption)
+                .foregroundStyle(TC.inkSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if !row.detail.isEmpty {
+                Text(row.detail.joined(separator: ", "))
+                    .font(TC.Font_.caption)
+                    .foregroundStyle(TC.inkTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .combine)
+    }
+
+    /// The one card in this tab that is drawn to be found: a session where
+    /// no pattern fired is the session most worth a second look, and it is
+    /// the case a count of removals cannot state.
+    private var nothingMatchedCard: some View {
+        HStack(alignment: .top, spacing: TC.Space.m) {
+            Image(systemName: TC.Tone.attention.symbol)
+                .font(.system(size: 14))
+                .foregroundStyle(TC.Tone.attention.color)
+                .accessibilityHidden(true)
+            Text("""
+            Nothing matched. On a session that touched credentials, that is \
+            itself worth a second look.
+            """)
+            .font(TC.Font_.body)
+            .foregroundStyle(TC.inkPrimary)
+            .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, TC.Space.md)
+        .padding(.vertical, TC.Space.m)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .tcCard(emphasised: true)
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -1009,7 +1162,7 @@ struct TranscriptTab: View {
     /// The chunks that are typeset right now, and the eviction that keeps
     /// that set under the ceiling. The policy lives in `TCShellCore` so it
     /// can be asserted against real byte counts without a running app.
-    @State private var resident = TranscriptResidentChunks<AttributedString>()
+    @State private var resident = TranscriptResidentChunks<ChippedChunk>()
     /// Where each chunk sits vertically, so a chunk that is not typeset
     /// still holds its place in the scroll.
     @State private var rows: TranscriptRowIndex?
@@ -1075,14 +1228,20 @@ struct TranscriptTab: View {
     @ViewBuilder
     private func chunkRow(_ index: Int) -> some View {
         Group {
-            if let text = resident.rendered[index] {
-                Text(text)
+            if let chunk = resident.rendered[index] {
+                Text(chunk.text)
                     .font(TC.Font_.monoTranscript)
                     .lineSpacing(
                         TC.Font_.LineHeight.spacing(for: 11, TC.Font_.LineHeight.transcript)
                     )
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
+                    // The chips are named here and nowhere else: SwiftUI has
+                    // no per-run accessibility label inside a `Text`, and a
+                    // marker left unnamed is spelled out as punctuation and
+                    // capitals in the middle of a sentence. See
+                    // `RedactionMarks`.
+                    .accessibilityLabel(chunk.spoken)
             } else {
                 // Holds the chunk's place so the scroll extent is the whole
                 // body's, not the resident window's.
@@ -1106,7 +1265,11 @@ struct TranscriptTab: View {
     private func refresh() {
         let index = anchor
         resident.update(document: document, visible: index..<(index + 1)) { chunk in
-            TranscriptMarkers.chipped(document.text(of: chunk), font: TC.Font_.monoTranscript)
+            let text = document.text(of: chunk)
+            return ChippedChunk(
+                text: TranscriptMarkers.chipped(text, font: TC.Font_.monoTranscript),
+                spoken: RedactionMarks.spoken(text)
+            )
         }
     }
 
@@ -1153,6 +1316,18 @@ struct TranscriptTab: View {
         """
 }
 
+/// One resident chunk: what it draws as, and what it reads as aloud.
+///
+/// The spoken form is built in the same pass as the chips, off the same
+/// text, so naming costs one scan per chunk that was going to be scanned
+/// anyway -- and a chunk that is evicted drops both together rather than
+/// leaving a name behind for text nobody is holding.
+private struct ChippedChunk {
+    let text: AttributedString
+    /// The chunk with each marker replaced by its name. See `RedactionMarks`.
+    let spoken: String
+}
+
 /// Turns the redaction pipeline's `<PRIVATE_*>` and `[REDACTED*]` markers
 /// into chips: bold, on the measured chip pair rather than the gold ramp,
 /// so they read as objects placed in the text instead of damage done to it.
@@ -1162,6 +1337,14 @@ struct TranscriptTab: View {
 /// avoid cutting through a marker -- half a marker rendered as body text in
 /// one block and the other half in the next would read as content that was
 /// never scrubbed.
+///
+/// The chip's colours are deliberate and are not the gold ramp; that is the
+/// paragraph above and it stands. What the chip does NOT carry is a name:
+/// every one of them draws the same whether it stands for a path, a
+/// credential, or a name found in prose. `RedactionMarks` supplies that,
+/// over this same scan, and `chunkRow` puts it on the chunk's accessibility
+/// label -- SwiftUI has no per-run label inside a `Text`, so the chunk is
+/// the finest grain available.
 private enum TranscriptMarkers {
     static func chipped(_ text: String, font: Font) -> AttributedString {
         var out = AttributedString()
@@ -1234,50 +1417,4 @@ enum ScopeCopy {
     }
 }
 
-/// Recent searches, kept for the life of the process and never written to
-/// disk.
-///
-/// They used to persist in `UserDefaults`, on the reasoning that the second
-/// trace should be one keystroke. That reasoning is sound; the storage was
-/// not. A recent-search list is the contributor's list of the things they
-/// were afraid of leaking -- a client name, an employer, an unreleased
-/// product, the name of a person. It is assembled precisely because those
-/// strings are sensitive, which makes it a worse thing to leave on disk
-/// than most of what the search was checking for.
-///
-/// Nothing else in this product writes that class of string down. The Linux
-/// and Windows shells both hold theirs in memory for the same reason, so
-/// this is also what makes the three agree.
-///
-/// In memory it still does its job: a contributor checking six traces in one
-/// sitting types each term once. It only stops helping across a restart,
-/// which is the trade being made deliberately.
-enum RecentSearches {
-    private static let legacyKey = "trace-commons.recent-searches"
 
-    private static var terms: [String] = []
-
-    static func load() -> [String] {
-        // Earlier builds wrote this list to disk. Stopping the writes does
-        // not unwrite what they already stored, and an install that has been
-        // upgraded would otherwise keep those terms indefinitely with no
-        // surface left in the app to clear them. So the key is removed the
-        // first time this is read, rather than merely ignored.
-        purgeLegacyStore()
-        return terms
-    }
-
-    static func remember(_ term: String) -> [String] {
-        terms = [term] + terms.filter { $0 != term }
-        terms = Array(terms.prefix(6))
-        return terms
-    }
-
-    /// Removes the old on-disk list. Idempotent, and safe when absent.
-    static func purgeLegacyStore() {
-        guard UserDefaults.standard.object(forKey: legacyKey) != nil else {
-            return
-        }
-        UserDefaults.standard.removeObject(forKey: legacyKey)
-    }
-}

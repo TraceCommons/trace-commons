@@ -107,6 +107,7 @@ fn envelope_with_events(events: Vec<TraceContributionEvent>) -> TraceContributio
         privacy: PrivacyMetadata {
             redaction_pipeline_version: DETERMINISTIC_REDACTION_PIPELINE_VERSION.to_string(),
             redaction_counts: BTreeMap::new(),
+            redaction_distinct_counts: BTreeMap::new(),
             privacy_filter_summary: None,
             pii_labels_present: Vec::new(),
             residual_pii_risk: ResidualPiiRisk::Low,

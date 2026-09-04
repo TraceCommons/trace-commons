@@ -12,16 +12,29 @@ namespace TraceCommons.Interop;
 /// <remarks>
 /// Deliberately holds counts, not entries. The queue row list already owns
 /// the entries themselves; a group is a view over the same data, not a
-/// second copy of it, so this carries only what a header renders and what a
-/// project-group submit needs to send.
+/// second copy of it, so this carries only what a folder row renders and what
+/// a project-group submit needs to send.
+///
+/// Under the folder-first layout a row renders two more scalars -- the
+/// project's display path and the total bytes waiting in it -- and they are
+/// here for exactly the same reason the count is: they are facts about the
+/// group, computed once in the grouping pass, not a second copy of the
+/// entries.
 /// </remarks>
 public sealed class ProjectQueueGroup
 {
-    internal ProjectQueueGroup(string projectId, string projectLabel, int count)
+    internal ProjectQueueGroup(
+        string projectId,
+        string projectLabel,
+        string projectPath,
+        int count,
+        long sizeBytes)
     {
         ProjectId = projectId;
         ProjectLabel = projectLabel;
+        ProjectPath = projectPath;
         Count = count;
+        SizeBytes = sizeBytes;
     }
 
     /// <summary>
@@ -35,22 +48,52 @@ public sealed class ProjectQueueGroup
     /// </summary>
     public string ProjectId { get; }
 
-    /// <summary>The display label shown on the group's header.</summary>
+    /// <summary>The display label shown on the folder row.</summary>
     public string ProjectLabel { get; }
+
+    /// <summary>
+    /// The project's folder, <c>~</c>-abbreviated, taken from the first entry
+    /// in the group. Empty against a daemon predating the field, in which
+    /// case the row renders its label alone.
+    /// </summary>
+    /// <remarks>
+    /// Every entry sharing a <see cref="ProjectId"/> shares a project key, so
+    /// the first member's path is the group's path -- there is no
+    /// disagreement to reconcile. It is display-only: renderable, never
+    /// logged, audited, notified, or persisted to history. See
+    /// <see cref="QueueEntry.ProjectPath"/>.
+    /// </remarks>
+    public string ProjectPath { get; }
 
     /// <summary>How many pending entries this project has.</summary>
     public int Count { get; }
 
     /// <summary>
-    /// Whether the header offers a "Submit all" action.
-    ///
-    /// Only when there is more than one entry, matching the macOS shell's
-    /// <c>ProjectQueueGroup</c>: a single-entry group's own row already has a
-    /// <c>Submit</c> button that does exactly what a group action would, so a
-    /// second control offering the identical decision would be noise, not a
-    /// second choice.
+    /// The session bytes on disk this folder is holding, summed over its
+    /// entries.
     /// </summary>
-    public bool ShowSubmitAll => Count > 1;
+    /// <remarks>
+    /// Sessions on disk, never a would-send figure. That number only a
+    /// preview computes, and stating one as the other on a consent surface
+    /// is the app's first false statement about what leaves the machine --
+    /// the same rule the card's own size line follows.
+    /// </remarks>
+    public long SizeBytes { get; }
+
+    /// <summary>
+    /// Whether the folder row offers a "Submit all" action. Always -- see the
+    /// remark.
+    /// </summary>
+    /// <remarks>
+    /// This used to be <c>Count &gt; 1</c>, on the reasoning that a
+    /// single-entry group's own row already had a Submit doing exactly the
+    /// same thing. That was true of a flat list where the row and the header
+    /// were on screen together. Under the folder-first layout the row is a
+    /// level down, so hiding this would mean opening a folder to do the thing
+    /// the folder is offering. The rule expired with the layout it was
+    /// written for; the property stays so callers do not have to know that.
+    /// </remarks>
+    public bool ShowSubmitAll => true;
 }
 
 /// <summary>
@@ -87,6 +130,8 @@ public static class QueueGrouping
         var order = new List<string>();
         var counts = new Dictionary<string, int>(StringComparer.Ordinal);
         var labels = new Dictionary<string, string>(StringComparer.Ordinal);
+        var paths = new Dictionary<string, string>(StringComparer.Ordinal);
+        var bytes = new Dictionary<string, long>(StringComparer.Ordinal);
 
         foreach (QueueEntry entry in entries)
         {
@@ -98,13 +143,21 @@ public static class QueueGrouping
                 order.Add(key);
                 counts[key] = 0;
                 labels[key] = LabelOf(entry);
+                paths[key] = entry.ProjectPath;
+                bytes[key] = 0;
             }
 
             counts[key]++;
+            bytes[key] += entry.SizeBytes;
         }
 
         return order
-            .Select(key => new ProjectQueueGroup(key, labels[key], counts[key]))
+            .Select(key => new ProjectQueueGroup(
+                key,
+                labels[key],
+                paths[key],
+                counts[key],
+                bytes[key]))
             .ToList();
     }
 

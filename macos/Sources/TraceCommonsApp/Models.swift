@@ -2,9 +2,12 @@ import Foundation
 import TCShellCore
 
 // Typed shapes for `trace_commons.daemon.v1_1`, as specified in
-// docs/contributor-daemon-ipc-v1_1.md. Nothing here carries a filesystem
-// path: the contract keeps `project_key` and `path` off the wire on purpose,
-// and this layer has no field to put one in.
+// docs/contributor-daemon-ipc-v1_1.md. The contract keeps `project_key` and
+// raw paths off the wire on purpose. The one relaxation is
+// `QueueEntry.projectPath` / `.sessionPath`: `~`-abbreviated display paths
+// the daemon emits through `ipc::display_path` so a queue row can say which
+// folder it is. They are for the screen only -- never logged, never in a
+// notification, never in a history record.
 
 // MARK: - Queue
 
@@ -41,6 +44,24 @@ struct QueueEntry: Decodable, Identifiable, Hashable {
     /// not guaranteed unique across two projects in the first place.
     let projectID: String
     let projectLabel: String
+    /// The project's folder, `~`-abbreviated, for display only.
+    ///
+    /// The daemon relaxed its path rule in exactly one place to send this
+    /// (see `ipc::display_path`), because `projectLabel` can keep two
+    /// projects distinct but can never make them identifiable, and the
+    /// queue's folder rows are where that difference is decided. Never
+    /// logged, never in a notification, never in a history record.
+    ///
+    /// Empty against a daemon predating the field. A folder row with no
+    /// path renders its label alone rather than an empty line.
+    let projectPath: String
+    /// Where this session actually ran, when that is not the project root.
+    ///
+    /// `nil` both when the daemon predates the field and when the session
+    /// ran at the root -- the daemon sends null in the second case rather
+    /// than repeating `projectPath`, so a row renders this line only when
+    /// it says something.
+    let sessionPath: String?
     let sizeBytes: Int
     let discoveredAt: Date
     let state: QueueState
@@ -78,6 +99,8 @@ struct QueueEntry: Decodable, Identifiable, Hashable {
         case declaredSource = "declared_source"
         case projectID = "project_id"
         case projectLabel = "project_label"
+        case projectPath = "project_path"
+        case sessionPath = "session_path"
         case sizeBytes = "size_bytes"
         case discoveredAt = "discovered_at"
         case state
@@ -260,6 +283,14 @@ struct PreviewSummary: Decodable, Equatable, Sendable {
     let eventCount: Int
     let openingPrompt: String
     let redactions: [String: Int]
+    /// Distinct values removed per label, beside `redactions`' occurrence
+    /// counts. `185 local path` is occurrences; `(12 distinct)` is how much
+    /// of the session's surface was really touched, which is the figure a
+    /// person estimating risk is reaching for.
+    ///
+    /// Empty against a daemon predating the field; `RedactionLabels` renders
+    /// occurrences alone in that case.
+    let redactionsDistinct: [String: Int]
     let piiLabelsPresent: [String]
     let consentScopes: [String]
     let residualRisk: String
@@ -270,6 +301,7 @@ struct PreviewSummary: Decodable, Equatable, Sendable {
         case eventCount = "event_count"
         case openingPrompt = "opening_prompt"
         case redactions
+        case redactionsDistinct = "redactions_distinct"
         case piiLabelsPresent = "pii_labels_present"
         case consentScopes = "consent_scopes"
         case residualRisk = "residual_risk"
@@ -278,11 +310,14 @@ struct PreviewSummary: Decodable, Equatable, Sendable {
     /// "12 secrets, 4 tokens, 31 paths" -- category labels and counts only;
     /// the contract guarantees neither map ever carries matched text.
     var redactionReceipt: String {
-        if redactions.isEmpty { return "scrubbed: nothing matched" }
-        let parts = redactions
-            .sorted { $0.value == $1.value ? $0.key < $1.key : $0.value > $1.value }
-            .map { "\($0.value) \($0.key.replacingOccurrences(of: "_", with: " "))" }
-        return "scrubbed: " + parts.joined(separator: ", ")
+        // Delegated rather than a second copy of the wording: `redactions`
+        // also carries `residual_secret_at:*`, which counts a secret that was
+        // FOUND AND LEFT IN, and one place decides how that is worded. See
+        // `RedactionLabels`.
+        "scrubbed: " + RedactionLabels.line(
+            occurrences: redactions,
+            distinct: redactionsDistinct
+        ).replacingOccurrences(of: "  ·  ", with: ", ")
     }
 }
 
@@ -338,6 +373,15 @@ struct AuditEntry: Decodable, Equatable {
 struct HistoryRecord: Decodable, Identifiable, Equatable {
     let submissionID: String
     let submittedAt: Date
+    /// The opaque project handle, so History can group by folder the way
+    /// the queue does. Grouping on `projectLabel` instead would merge two
+    /// different repositories that share a basename.
+    ///
+    /// Empty on records cached before the daemon carried it, and on records
+    /// submitted before project keys were normalized -- those cannot be
+    /// resolved to a folder and group under their label alone. Nothing
+    /// retained the key they were minted from, so this is not backfillable.
+    let projectID: String
     let projectLabel: String
     let source: String
     let status: String
@@ -352,6 +396,7 @@ struct HistoryRecord: Decodable, Identifiable, Equatable {
     enum CodingKeys: String, CodingKey {
         case submissionID = "submission_id"
         case submittedAt = "submitted_at"
+        case projectID = "project_id"
         case projectLabel = "project_label"
         case source
         case status
@@ -608,5 +653,83 @@ enum DaemonDecoding {
 
     static func pendingEntries(from data: Data) throws -> [QueueEntry] {
         try decoder().decode(PendingList.self, from: data).pending
+    }
+}
+
+/// The decoder is an extension rather than a member so that `QueueEntry`
+/// keeps its memberwise initializer, which the debug capture screens build
+/// fixtures with.
+///
+/// Written out rather than synthesized because `projectPath` is
+/// non-optional and must still tolerate absence: this app ships separately
+/// from the daemon and routinely runs against an older one, where a required
+/// key would fail the whole queue rather than one field.
+extension QueueEntry {
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            entryID: try c.decode(String.self, forKey: .entryID),
+            sessionHash: try c.decode(String.self, forKey: .sessionHash),
+            source: try c.decode(String.self, forKey: .source),
+            declaredSource: try c.decodeIfPresent(String.self, forKey: .declaredSource),
+            projectID: try c.decode(String.self, forKey: .projectID),
+            projectLabel: try c.decode(String.self, forKey: .projectLabel),
+            projectPath: try c.decodeIfPresent(String.self, forKey: .projectPath) ?? "",
+            sessionPath: try c.decodeIfPresent(String.self, forKey: .sessionPath),
+            sizeBytes: try c.decode(Int.self, forKey: .sizeBytes),
+            discoveredAt: try c.decode(Date.self, forKey: .discoveredAt),
+            state: try c.decode(QueueState.self, forKey: .state),
+            reasonLabel: try c.decodeIfPresent(String.self, forKey: .reasonLabel),
+            attempts: try c.decode(Int.self, forKey: .attempts),
+            subagentCount: try c.decodeIfPresent(Int.self, forKey: .subagentCount),
+            subagentsDropped: try c.decodeIfPresent(Int.self, forKey: .subagentsDropped)
+        )
+    }
+}
+
+/// An extension rather than a member so that `PreviewSummary` keeps its
+/// memberwise initializer, which the debug capture screens build fixtures
+/// with. Written out so `redactionsDistinct` can be absent without failing
+/// the whole preview: a daemon predating the field sends no such key.
+extension PreviewSummary {
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            wouldSendBytes: try c.decode(Int.self, forKey: .wouldSendBytes),
+            rawSessionBytes: try c.decode(Int.self, forKey: .rawSessionBytes),
+            eventCount: try c.decode(Int.self, forKey: .eventCount),
+            openingPrompt: try c.decode(String.self, forKey: .openingPrompt),
+            redactions: try c.decode([String: Int].self, forKey: .redactions),
+            redactionsDistinct:
+                try c.decodeIfPresent([String: Int].self, forKey: .redactionsDistinct) ?? [:],
+            piiLabelsPresent: try c.decode([String].self, forKey: .piiLabelsPresent),
+            consentScopes: try c.decode([String].self, forKey: .consentScopes),
+            residualRisk: try c.decode(String.self, forKey: .residualRisk)
+        )
+    }
+}
+
+/// An extension rather than a member so that `HistoryRecord` keeps its
+/// memberwise initializer, which the debug capture screens and the
+/// quarantine tests build fixtures with. Written out so `projectID` can be
+/// absent -- records cached before the daemon carried it are still real
+/// submissions, and failing them would empty the History screen rather than
+/// degrade one row.
+extension HistoryRecord {
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            submissionID: try c.decode(String.self, forKey: .submissionID),
+            submittedAt: try c.decode(Date.self, forKey: .submittedAt),
+            projectID: try c.decodeIfPresent(String.self, forKey: .projectID) ?? "",
+            projectLabel: try c.decode(String.self, forKey: .projectLabel),
+            source: try c.decode(String.self, forKey: .source),
+            status: try c.decode(String.self, forKey: .status),
+            consentScopes: try c.decode([String].self, forKey: .consentScopes),
+            creditPointsPending: try c.decode(Double.self, forKey: .creditPointsPending),
+            creditPointsFinal: try c.decodeIfPresent(Double.self, forKey: .creditPointsFinal),
+            explanations: try c.decode([String].self, forKey: .explanations),
+            lastRefreshedAt: try c.decodeIfPresent(Date.self, forKey: .lastRefreshedAt)
+        )
     }
 }
