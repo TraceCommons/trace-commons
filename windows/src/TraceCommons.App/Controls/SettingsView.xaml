@@ -425,6 +425,193 @@
                     </StackPanel>
                 </Border>
 
+                <!--
+                    The redaction witness.
+
+                    Every word on this card arrives from the Rust through
+                    tc_witness_copy, tc_witness_state_line and
+                    tc_witness_last_result_line. There is not one string
+                    literal in it, and there must never be: the sentences here
+                    say what happens to a raw session, and a copy of one kept
+                    on this shell would stop matching the other two the day it
+                    changed.
+
+                    The whole card is collapsed where those words did not
+                    arrive, rather than rendered with blanks under a heading
+                    about privacy.
+                -->
+                <TextBlock Text="{x:Bind Settings.WitnessHeading, Mode=OneWay}"
+                           Visibility="{x:Bind Settings.WitnessAvailable, Mode=OneWay}"
+                           Style="{StaticResource TcEyebrowTextStyle}" />
+                <Border Background="{ThemeResource TcSurfaceCardBrush}"
+                        BorderBrush="{ThemeResource TcHairlineBrush}"
+                        BorderThickness="1"
+                        CornerRadius="{StaticResource TcCardCornerRadius}"
+                        Padding="14,12"
+                        Visibility="{x:Bind Settings.WitnessAvailable, Mode=OneWay}">
+                    <StackPanel Spacing="10">
+                        <TextBlock Text="{x:Bind Settings.WitnessIntro, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   TextWrapping="Wrap" />
+                        <!--
+                            What a certificate establishes, and what it does
+                            not. Carried whole from the Rust and never
+                            summarised: a shorter version of this is a claim
+                            that a session is clean, which no certificate
+                            makes.
+                        -->
+                        <TextBlock Text="{x:Bind Settings.WitnessCertificateMeans, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   TextWrapping="Wrap" />
+
+                        <!--
+                            The state sentence, painted from the state code and
+                            never from its own text.
+
+                            FIVE BRANCHES, NOT FOUR. The refused branch is its
+                            own, and is not the attention one: attention says
+                            something needs fixing while sessions still go out,
+                            and on a refusal nothing goes out at all. It is the
+                            only reading on this screen painted coral.
+
+                            The neutral branch is where "no witness" lands, and
+                            that is not a warning. Redaction happens on this machine,
+                            which is the ordinary arrangement.
+                        -->
+                        <TextBlock Text="{x:Bind Settings.WitnessStateText, Mode=OneWay}"
+                                   Visibility="{x:Bind Settings.WitnessStateIsNeutral, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   TextWrapping="Wrap" />
+                        <TextBlock Text="{x:Bind Settings.WitnessStateText, Mode=OneWay}"
+                                   Visibility="{x:Bind Settings.WitnessStateIsHeld, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   Foreground="{ThemeResource TcBlueBrandBrush}"
+                                   TextWrapping="Wrap" />
+                        <TextBlock Text="{x:Bind Settings.WitnessStateText, Mode=OneWay}"
+                                   Visibility="{x:Bind Settings.WitnessStateIsClear, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   Foreground="{ThemeResource TcGreenTextBrush}"
+                                   TextWrapping="Wrap" />
+                        <TextBlock Text="{x:Bind Settings.WitnessStateText, Mode=OneWay}"
+                                   Visibility="{x:Bind Settings.WitnessStateIsAttention, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   Foreground="{ThemeResource TcGoldTextBrush}"
+                                   TextWrapping="Wrap" />
+                        <TextBlock Text="{x:Bind Settings.WitnessStateText, Mode=OneWay}"
+                                   Visibility="{x:Bind Settings.WitnessStateIsRefused, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   Foreground="{ThemeResource TcCoralTextBrush}"
+                                   TextWrapping="Wrap" />
+
+                        <!--
+                            What the last session sent did about the witness.
+                            Per process: a freshly started app has seen none,
+                            and says so rather than guessing. The same five
+                            branches, for the same reason.
+                        -->
+                        <TextBlock Text="{x:Bind Settings.WitnessLastResultText, Mode=OneWay}"
+                                   Visibility="{x:Bind Settings.WitnessLastResultIsNeutral, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   TextWrapping="Wrap" />
+                        <TextBlock Text="{x:Bind Settings.WitnessLastResultText, Mode=OneWay}"
+                                   Visibility="{x:Bind Settings.WitnessLastResultIsHeld, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   Foreground="{ThemeResource TcBlueBrandBrush}"
+                                   TextWrapping="Wrap" />
+                        <TextBlock Text="{x:Bind Settings.WitnessLastResultText, Mode=OneWay}"
+                                   Visibility="{x:Bind Settings.WitnessLastResultIsClear, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   Foreground="{ThemeResource TcGreenTextBrush}"
+                                   TextWrapping="Wrap" />
+                        <TextBlock Text="{x:Bind Settings.WitnessLastResultText, Mode=OneWay}"
+                                   Visibility="{x:Bind Settings.WitnessLastResultIsAttention, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   Foreground="{ThemeResource TcGoldTextBrush}"
+                                   TextWrapping="Wrap" />
+                        <TextBlock Text="{x:Bind Settings.WitnessLastResultText, Mode=OneWay}"
+                                   Visibility="{x:Bind Settings.WitnessLastResultIsRefused, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   Foreground="{ThemeResource TcCoralTextBrush}"
+                                   TextWrapping="Wrap" />
+
+                        <!--
+                            The way out of a refusal, and the way in.
+
+                            Open by default on every refusing state, because a
+                            refusal a contributor cannot act on is a dead end
+                            and these three fields are what resolves all of
+                            them. Collapsed on the two readings that are not
+                            refusals, where opening it would present the
+                            ordinary arrangement as something needing repair.
+                        -->
+                        <Expander Header="{x:Bind Settings.WitnessConfigureText, Mode=OneWay}"
+                                  IsExpanded="{x:Bind Settings.WitnessEditorOpen, Mode=TwoWay}"
+                                  HorizontalAlignment="Stretch">
+                            <StackPanel Spacing="10">
+                                <!--
+                                    Shown verbatim, deliberately. A screen that
+                                    will not name what it is asking somebody to
+                                    trust with their raw session is not a
+                                    settings screen.
+                                -->
+                                <TextBox Header="{x:Bind Settings.WitnessUrlTitle, Mode=OneWay}"
+                                         Text="{x:Bind Settings.WitnessUrl, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                         IsEnabled="{x:Bind Settings.WitnessControlsEnabled, Mode=OneWay}" />
+                                <TextBox Header="{x:Bind Settings.WitnessSigningAddressTitle, Mode=OneWay}"
+                                         Text="{x:Bind Settings.WitnessSigningAddress, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                         IsEnabled="{x:Bind Settings.WitnessControlsEnabled, Mode=OneWay}" />
+                                <!--
+                                    One measurement set per line. A list, not a
+                                    value: an upgrade moves the measurement and
+                                    leaves the signing address alone, so the
+                                    new one goes in before the fleet rolls.
+                                -->
+                                <TextBox Header="{x:Bind Settings.WitnessMeasurementsTitle, Mode=OneWay}"
+                                         Text="{x:Bind Settings.WitnessMeasurements, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                         AcceptsReturn="True"
+                                         TextWrapping="Wrap"
+                                         MinHeight="72"
+                                         IsEnabled="{x:Bind Settings.WitnessControlsEnabled, Mode=OneWay}" />
+                                <TextBlock Text="{x:Bind Settings.WitnessMeasurementsNote, Mode=OneWay}"
+                                           Style="{StaticResource TcCaptionTextStyle}"
+                                           TextWrapping="Wrap" />
+                                <!--
+                                    How many are pinned, in the Rust's own
+                                    sentence. Shown only where there was one:
+                                    it is absent on the readings with no
+                                    witness to count for, and a bare numeral
+                                    in its place would be this shell inventing
+                                    wording by omission.
+                                -->
+                                <TextBlock Text="{x:Bind Settings.WitnessMeasurementLine, Mode=OneWay}"
+                                           Visibility="{x:Bind Settings.HasWitnessMeasurementLine, Mode=OneWay}"
+                                           Style="{StaticResource TcCaptionTextStyle}"
+                                           TextWrapping="Wrap" />
+                                <Button Content="{x:Bind Settings.WitnessConfigureText, Mode=OneWay}"
+                                        IsEnabled="{x:Bind Settings.WitnessControlsEnabled, Mode=OneWay}"
+                                        Click="OnWitnessConfigure"
+                                        Style="{StaticResource TcSecondaryButtonStyle}" />
+                            </StackPanel>
+                        </Expander>
+
+                        <!--
+                            Stopping, with the sentence that says what stopping
+                            actually does beside it. Not "off": the redaction
+                            still happens, on this machine.
+                        -->
+                        <Button Content="{x:Bind Settings.WitnessClearText, Mode=OneWay}"
+                                IsEnabled="{x:Bind Settings.WitnessControlsEnabled, Mode=OneWay}"
+                                Click="OnWitnessClear"
+                                Style="{StaticResource TcSecondaryButtonStyle}" />
+                        <TextBlock Text="{x:Bind Settings.WitnessClearNote, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   TextWrapping="Wrap" />
+                        <TextBlock Text="{x:Bind Settings.WitnessAppliesAtOnceText, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   TextWrapping="Wrap" />
+                    </StackPanel>
+                </Border>
+
                 <TextBlock Text="{x:Bind Settings.Notice, Mode=OneWay}"
                            Visibility="{x:Bind Settings.HasNotice, Mode=OneWay}"
                            Style="{StaticResource TcBodyDenseTextStyle}"
