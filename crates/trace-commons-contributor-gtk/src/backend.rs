@@ -11,15 +11,8 @@
 //! of the logic below: try to take it, and if somebody else has it, connect
 //! to them instead. There is no other coordination and no second lock.
 //!
-//! ## The one capability that differs between the two modes
-//!
-//! `preview` over the socket is a **summary** -- counts, sizes, and the
-//! redacted opening prompt -- by deliberate design of the contract. The full
-//! redacted body is available only in-process, through
-//! `daemon::ipc::open_preview`. So the shell can show "Exactly what would be
-//! sent" and search the transcript **only when it hosts the loop**. Attached
-//! to a daemon it did not start, it cannot, and it says so rather than
-//! pretending. See `docs/superpowers/plans/linux-shell-report.md`.
+//! Attached previews use the same digest-anchored `preview_body` pages as
+//! other socket clients. A summary alone cannot enable contribution review.
 
 use std::sync::Arc;
 
@@ -247,7 +240,11 @@ impl Backend {
         match self {
             Backend::Attached { .. } => {
                 let value = self.call("preview", serde_json::json!({ "entry_id": entry_id }))?;
-                Ok((serde_json::from_value(value)?, None))
+                let summary: crate::model::PreviewSummary = serde_json::from_value(value)?;
+                let body = read_preview_body(entry_id, &summary, |params| {
+                    self.call("preview_body", params)
+                })?;
+                Ok((summary, Some(body)))
             }
             Backend::Hosting(h) => {
                 let id: uuid::Uuid = entry_id.parse().map_err(|_| anyhow!("entry-id-invalid"))?;
@@ -765,5 +762,118 @@ mod roots_tests {
             backend.hosts_the_loop(),
             "nothing else held the lock, so this shell should be hosting"
         );
+    }
+}
+
+/// Join bounded UTF-8 pages only while both the body and envelope anchors hold.
+fn read_preview_body(
+    entry_id: &str,
+    summary: &crate::model::PreviewSummary,
+    mut fetch: impl FnMut(serde_json::Value) -> Result<serde_json::Value>,
+) -> Result<String> {
+    let mut body = String::new();
+    let mut digest: Option<String> = None;
+    let mut total: Option<usize> = None;
+    loop {
+        let mut params = serde_json::json!({"entry_id": entry_id, "offset": body.len()});
+        if let Some(digest) = &digest {
+            params["body_digest"] = digest.clone().into();
+        }
+        let page = fetch(params)?;
+        let chunk = page
+            .get("chunk")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| anyhow!("preview-body-invalid"))?;
+        let page_digest = page
+            .get("body_digest")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| anyhow!("preview-body-invalid"))?;
+        let page_total = page
+            .get("total_bytes")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| usize::try_from(value).ok())
+            .ok_or_else(|| anyhow!("preview-body-invalid"))?;
+        if page_total > trace_commons_contributor::envelope::MAX_ENVELOPE_BYTES
+            || total.is_some_and(|expected| expected != page_total)
+            || digest
+                .as_deref()
+                .is_some_and(|expected| expected != page_digest)
+            || page
+                .get("envelope_digest")
+                .and_then(serde_json::Value::as_str)
+                != Some(summary.envelope_digest.as_str())
+            || page.get("enrolled").and_then(serde_json::Value::as_bool) != Some(summary.enrolled)
+            || body.len().saturating_add(chunk.len()) > page_total
+        {
+            bail!("preview-body-changed");
+        }
+        total = Some(page_total);
+        digest = Some(page_digest.to_string());
+        body.push_str(chunk);
+        match page.get("next_offset") {
+            Some(serde_json::Value::Null) if body.len() == page_total => return Ok(body),
+            Some(next)
+                if !chunk.is_empty()
+                    && body.len() < page_total
+                    && next.as_u64() == Some(body.len() as u64) => {}
+            _ => bail!("preview-body-incomplete"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod native_witness_body_tests {
+    use super::*;
+
+    fn summary() -> crate::model::PreviewSummary {
+        serde_json::from_value(
+            serde_json::json!({"envelope_digest":"witness-sha256:artifact", "enrolled":true}),
+        )
+        .unwrap()
+    }
+
+    fn page(chunk: &str, next: serde_json::Value, digest: &str) -> serde_json::Value {
+        serde_json::json!({"chunk":chunk, "next_offset":next, "total_bytes":4,
+            "body_digest":digest, "envelope_digest":"witness-sha256:artifact", "enrolled":true})
+    }
+
+    #[test]
+    fn witness_body_reassembles_exact_bytes_and_passes_continuation_anchor() {
+        let mut requests = Vec::new();
+        let body = read_preview_body("entry", &summary(), |params| {
+            requests.push(params);
+            Ok(if requests.len() == 1 {
+                page("ab", 2.into(), "same")
+            } else {
+                page("cd", serde_json::Value::Null, "same")
+            })
+        })
+        .unwrap();
+        assert_eq!(body, "abcd");
+        assert!(requests[0].get("body_digest").is_none());
+        assert_eq!(requests[1]["body_digest"], "same");
+        assert_eq!(requests[1]["offset"], 2);
+    }
+
+    #[test]
+    fn witness_body_rejects_changed_anchor_partial_or_stalled_page() {
+        for second in [
+            page("cd", serde_json::Value::Null, "changed"),
+            page("c", serde_json::Value::Null, "same"),
+            page("", 2.into(), "same"),
+        ] {
+            let mut first = true;
+            assert!(
+                read_preview_body("entry", &summary(), |_| {
+                    Ok(if std::mem::take(&mut first) {
+                        page("ab", 2.into(), "same")
+                    } else {
+                        second.clone()
+                    })
+                })
+                .is_err()
+            );
+        }
     }
 }

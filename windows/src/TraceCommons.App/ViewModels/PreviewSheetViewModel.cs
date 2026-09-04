@@ -100,6 +100,50 @@ public sealed class PreviewSheetViewModel : INotifyPropertyChanged, IDisposable
         _summary is null ? 0 : RedactionLabels.Total(_summary.Redactions));
 
     private readonly DaemonHost _host;
+    private readonly WitnessReviewCopy? _witnessCopy = WitnessSurface.Copy()?.Review;
+    private bool _witnessSupported;
+    private bool _witnessRequested;
+    private bool _witnessWorking;
+    private bool _witnessConfigured;
+    public string WitnessHeading => _witnessCopy?.Heading ?? string.Empty;
+    public string WitnessDisclosure => _witnessCopy?.Disclosure ?? string.Empty;
+    public string WitnessAction => _witnessCopy?.Action ?? string.Empty;
+    public string WitnessConfirm => _witnessCopy?.Confirm ?? string.Empty;
+    public string WitnessCancel => _witnessCopy?.Cancel ?? string.Empty;
+    public string PreviewFailureDetail => _witnessRequested ? _witnessCopy?.Failed ?? FailureDetail : FailureDetail;
+    public string LoadingTitle => _witnessWorking ? _witnessCopy?.Heading ?? string.Empty : "Scrubbing it locally…";
+    public string LoadingDetail => _witnessWorking ? _witnessCopy?.Working ?? string.Empty : "Reading the session and running the redaction pass.";
+    public bool CanRequestWitness => _witnessSupported && _witnessConfigured && !_witnessWorking && _witnessCopy?.IsComplete == true;
+    public bool CanEditOutcome => !_witnessConfigured && !_witnessRequested && !_witnessWorking;
+
+    public async Task RequestWitnessAsync()
+    {
+        if (!CanRequestWitness) return;
+        _witnessRequested = true;
+        _witnessWorking = true;
+        Gate.SetPinnedPreview(false);
+        IsLoading = true;
+        HasFailed = false;
+        Raise(nameof(CanRequestWitness));
+        Raise(nameof(CanEditOutcome));
+        Raise(nameof(LoadingTitle));
+        Raise(nameof(LoadingDetail));
+        Raise(nameof(PreviewFailureDetail));
+        try
+        {
+            var response = await _host.CallAsync(NativeWitnessReview.Method, NativeWitnessReview.ConfirmedRequest(Entry.EntryId)).ConfigureAwait(true);
+            _witnessWorking = false;
+            if (!NativeWitnessReview.IsReady(response)) { Fail(); return; }
+            await LoadAsync().ConfigureAwait(true);
+        }
+        catch { _witnessWorking = false; Fail(); }
+        finally {
+            Raise(nameof(CanRequestWitness));
+            Raise(nameof(LoadingTitle));
+            Raise(nameof(LoadingDetail));
+        }
+    }
+
 
     private TcPreview? _preview;
     private PreviewSummary? _summary;
@@ -434,6 +478,7 @@ public sealed class PreviewSheetViewModel : INotifyPropertyChanged, IDisposable
         get => _correction;
         set
         {
+            if (!CanEditOutcome) return;
             string clipped = value ?? string.Empty;
             if (clipped.Length > CorrectionCopy.MaxCharacters)
             {
@@ -505,6 +550,7 @@ public sealed class PreviewSheetViewModel : INotifyPropertyChanged, IDisposable
     /// </remarks>
     public void ToggleVerdict(string outcome)
     {
+        if (!CanEditOutcome) return;
         _verdict = _verdict == Verdict.Require(outcome) ? null : outcome;
 
         // A contributor who wrote a correction under "Failed" and then
@@ -544,6 +590,11 @@ public sealed class PreviewSheetViewModel : INotifyPropertyChanged, IDisposable
     {
         IsLoading = true;
         HasFailed = false;
+        _witnessConfigured = WitnessSurface.TrustState(_host.ConfigDir) == WitnessTools.StatePinned;
+        var hello = await _host.CallAsync("hello").ConfigureAwait(true);
+        _witnessSupported = NativeWitnessReview.Supports(hello);
+        Raise(nameof(CanRequestWitness));
+        Raise(nameof(CanEditOutcome));
 
         TcPreview preview;
         try
@@ -571,6 +622,8 @@ public sealed class PreviewSheetViewModel : INotifyPropertyChanged, IDisposable
         }
 
         _summary = summary;
+        _witnessRequested = summary.EnvelopeDigest?.StartsWith("witness-sha256:", StringComparison.Ordinal) == true;
+        Raise(nameof(CanEditOutcome));
         FillManifest(summary);
 
         // An unenrolled preview is an illustration: it was built from a

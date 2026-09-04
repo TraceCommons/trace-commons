@@ -343,3 +343,26 @@ final class DaemonClientMethodInventoryTests: XCTestCase {
         XCTAssertTrue(Set(Self.expected).isSubset(of: advertised))
     }
 }
+
+final class NativeWitnessReviewTests: XCTestCase {
+    func testCapabilityIsExplicitAndDoesNotRequestAReview() throws {
+        let daemon = RecordingDaemon()
+        let client = DaemonClient(daemon: daemon)
+        XCTAssertFalse(try client.supportsWitnessReview())
+        daemon.response = #"{"result":{"methods":["preview_request","witness_preview_request"]}}"#
+        XCTAssertTrue(try client.supportsWitnessReview())
+        XCTAssertEqual(daemon.calls.map(\.method), ["hello", "hello"])
+    }
+
+    func testConfirmedRequestHasNoApprovalOrOutcomeAndRequiresReady() throws {
+        let daemon = RecordingDaemon()
+        let client = DaemonClient(daemon: daemon)
+        XCTAssertThrowsError(try client.requestWitnessReview(entryID: "entry"))
+        daemon.response = #"{"result":{"status":"ready","summary":{}}}"#
+        try client.requestWitnessReview(entryID: "entry")
+        XCTAssertEqual(daemon.calls.last?.method, "witness_preview_request")
+        XCTAssertEqual(daemon.lastParams?["entry_id"] as? String, "entry")
+        XCTAssertEqual(daemon.lastParams?["raw_session_confirmed"] as? Bool, true)
+        XCTAssertEqual(daemon.lastParams?.count, 2)
+    }
+}

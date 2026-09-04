@@ -294,6 +294,7 @@ struct PreviewSummary: Decodable, Equatable, Sendable {
     let piiLabelsPresent: [String]
     let consentScopes: [String]
     let residualRisk: String
+    var envelopeDigest: String? = nil
 
     enum CodingKeys: String, CodingKey {
         case wouldSendBytes = "would_send_bytes"
@@ -305,6 +306,7 @@ struct PreviewSummary: Decodable, Equatable, Sendable {
         case piiLabelsPresent = "pii_labels_present"
         case consentScopes = "consent_scopes"
         case residualRisk = "residual_risk"
+        case envelopeDigest = "envelope_digest"
     }
 
     /// "12 secrets, 4 tokens, 31 paths" -- category labels and counts only;
@@ -708,7 +710,8 @@ extension PreviewSummary {
                 try c.decodeIfPresent([String: Int].self, forKey: .redactionsDistinct) ?? [:],
             piiLabelsPresent: try c.decode([String].self, forKey: .piiLabelsPresent),
             consentScopes: try c.decode([String].self, forKey: .consentScopes),
-            residualRisk: try c.decode(String.self, forKey: .residualRisk)
+            residualRisk: try c.decode(String.self, forKey: .residualRisk),
+            envelopeDigest: try c.decodeIfPresent(String.self, forKey: .envelopeDigest)
         )
     }
 }

@@ -75,6 +75,20 @@ final class DaemonClient {
     /// event will follow; `ready` and `too_large` are answered here with no
     /// event to come. See `docs/contributor-daemon-ipc-v1_1.md`, "Scheduled
     /// previews".
+    func supportsWitnessReview() throws -> Bool {
+        let hello = try resultObject("hello")
+        return (hello["methods"] as? [String])?.contains("witness_preview_request") == true
+    }
+
+    func requestWitnessReview(entryID: String) throws {
+        let result = try resultObject("witness_preview_request", params: [
+            "entry_id": entryID, "raw_session_confirmed": true
+        ])
+        guard result["status"] as? String == "ready" else {
+            throw Failure(code: "unavailable", message: "witness-review-incomplete")
+        }
+    }
+
     func requestPreview(entryID: String) throws -> PreviewRequestResult {
         let raw = try rawResult("preview_request", params: ["entry_id": entryID])
         return try DaemonDecoding.decoder().decode(PreviewRequestResult.self, from: raw)

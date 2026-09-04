@@ -120,6 +120,13 @@ enum DebugScreenshot {
                     size: CGSize(width: 660, height: 260)
                 )
             }
+            if let copy = model.witnessCopy?.review {
+                render(
+                    WitnessReviewConsent(copy: copy, onConfirm: {}),
+                    to: directory + "/macos-shell-witness-review-consent.png",
+                    size: CGSize(width: 560, height: 390)
+                )
+            }
             if let (entry, preloaded) = await model.loadCaptureSample(needle: "Northwind") {
                 // 760 x 620 is the sheet's own frame, not a chosen canvas:
                 // `PreviewSheet` sets that width from the design spec's

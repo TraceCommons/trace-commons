@@ -88,6 +88,23 @@ public sealed partial class PreviewSheet : UserControl, IDisposable
         SearchBox.Focus(FocusState.Programmatic);
     }
 
+    private async void OnWitnessReview(object sender, RoutedEventArgs e)
+    {
+        if (!ViewModel.CanRequestWitness) return;
+        var dialog = new ContentDialog {
+            XamlRoot = XamlRoot,
+            Title = ViewModel.WitnessHeading,
+            Content = new ScrollViewer { Content = new TextBlock {
+                Text = ViewModel.WitnessDisclosure, TextWrapping = TextWrapping.Wrap
+            }},
+            PrimaryButtonText = ViewModel.WitnessConfirm,
+            CloseButtonText = ViewModel.WitnessCancel,
+            DefaultButton = ContentDialogButton.Close
+        };
+        if (await dialog.ShowAsync() == ContentDialogResult.Primary)
+            await ViewModel.RequestWitnessAsync();
+    }
+
     private void OnSearchTab(object sender, RoutedEventArgs e) =>
         ViewModel.SelectTab(PreviewTab.Search);
 

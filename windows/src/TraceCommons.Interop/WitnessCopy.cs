@@ -19,6 +19,8 @@ namespace TraceCommons.Interop;
 /// </summary>
 public sealed record WitnessCopy
 {
+    [JsonPropertyName("review")] public WitnessReviewCopy? Review { get; init; }
+    [JsonPropertyName("onboarding")] public FirstContributionCopy? Onboarding { get; init; }
     [JsonPropertyName("heading")] public string Heading { get; init; } = "";
     [JsonPropertyName("intro")] public string Intro { get; init; } = "";
 
@@ -203,3 +205,28 @@ public sealed record WitnessReadResult(WitnessStatus? Status, string? Error);
 /// back twice; it is never rendered.
 /// </remarks>
 public sealed record WitnessWriteResult(int Code, string? Error);
+
+public sealed record WitnessReviewCopy
+{
+    [JsonPropertyName("heading")] public string Heading { get; init; } = "";
+    [JsonPropertyName("disclosure")] public string Disclosure { get; init; } = "";
+    [JsonPropertyName("action")] public string Action { get; init; } = "";
+    [JsonPropertyName("confirm")] public string Confirm { get; init; } = "";
+    [JsonPropertyName("cancel")] public string Cancel { get; init; } = "";
+    [JsonPropertyName("working")] public string Working { get; init; } = "";
+    [JsonPropertyName("failed")] public string Failed { get; init; } = "";
+    [JsonPropertyName("immutable")] public string Immutable { get; init; } = "";
+    public bool IsComplete => !string.IsNullOrWhiteSpace(Heading) && !string.IsNullOrWhiteSpace(Disclosure)
+        && !string.IsNullOrWhiteSpace(Action) && !string.IsNullOrWhiteSpace(Confirm)
+        && !string.IsNullOrWhiteSpace(Cancel) && !string.IsNullOrWhiteSpace(Working)
+        && !string.IsNullOrWhiteSpace(Failed) && !string.IsNullOrWhiteSpace(Immutable);
+}
+
+public sealed record FirstContributionCopy
+{
+    [JsonPropertyName("heading")] public string Heading { get; init; } = "";
+    [JsonPropertyName("start")] public string Start { get; init; } = "";
+    [JsonPropertyName("review")] public string Review { get; init; } = "";
+    [JsonPropertyName("follow_up")] public string FollowUp { get; init; } = "";
+    [JsonPropertyName("agent_setup")] public string AgentSetup { get; init; } = "";
+}

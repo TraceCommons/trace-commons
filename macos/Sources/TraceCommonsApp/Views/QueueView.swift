@@ -61,6 +61,19 @@ struct QueueContent: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: TC.Space.md) {
+            if model.history.isEmpty, let copy = model.witnessCopy?.onboarding {
+                VStack(alignment: .leading, spacing: TC.Space.s) {
+                    Text(copy.heading).font(TC.Font_.cardTitle)
+                    Text(model.awaitingDecision.isEmpty ? copy.start : copy.review)
+                    Text(copy.followUp)
+                    DisclosureGroup("Agent setup") { Text(copy.agentSetup) }
+                }
+                .font(TC.Font_.caption)
+                .padding(TC.Space.md)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(TC.surface)
+            }
+
             if let health = model.health {
                 HealthBanner(health: health)
             }

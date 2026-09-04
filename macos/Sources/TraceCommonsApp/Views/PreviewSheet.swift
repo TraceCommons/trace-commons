@@ -44,6 +44,10 @@ struct PreviewSheet: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.dismiss) private var dismiss
 
+    @State private var witnessSupported = false
+    @State private var confirmingWitness = false
+    @State private var witnessRequested = false
+    @State private var witnessWorking = false
     @State private var preview: TCPreview?
     @State private var summary: PreviewSummary?
     @State private var transcriptText: String
@@ -141,9 +145,15 @@ struct PreviewSheet: View {
         .tcScreen()
         .task(id: entry.entryID) {
             guard preloaded == nil else { return }
+            witnessSupported = await model.supportsWitnessReview()
             await load()
         }
         .onDisappear { closePreview() }
+        .sheet(isPresented: $confirmingWitness) {
+            if let copy = model.witnessCopy?.review {
+                WitnessReviewConsent(copy: copy) { Task { await prepareWitness() } }
+            }
+        }
         // The credential refusal, as its own alert rather than a line in
         // the submit toast: it is the one submit failure the contributor
         // caused and the only one they can fix, and it asks them to do two
@@ -251,19 +261,21 @@ struct PreviewSheet: View {
 
     @ViewBuilder
     private var content: some View {
-        if loading {
+        if witnessWorking, let copy = model.witnessCopy?.review {
+            CenteredNotice(title: copy.heading, detail: copy.working)
+        } else if loading {
             CenteredNotice(
                 title: "Scrubbing it locally…",
                 detail: "Reading the session and running the redaction pass."
             )
         } else if let failure {
-            CenteredNotice(
-                title: "This one can't be shown.",
-                detail: """
-                \(failure). Nothing has been sent, and nothing will be until it can \
-                be shown to you.
-                """
-            )
+            VStack(spacing: TC.Space.md) {
+                CenteredNotice(title: "This one can't be shown.", detail: witnessRequested ? (model.witnessCopy?.review?.failed ?? failure) : failure)
+                if witnessSupported, model.witnessStateCode == 1, let copy = model.witnessCopy?.review {
+                    Text(copy.disclosure).font(TC.Font_.caption)
+                    Button(copy.action) { confirmingWitness = true }
+                }
+            }.padding(TC.Space.l)
         } else if let summary {
             // A segmented control rather than a TabView: inside a sheet this
             // is the standard macOS treatment, and Search has to be able to
@@ -385,9 +397,9 @@ struct PreviewSheet: View {
             // saying it.
             ScrubbingCaveatAtCommit()
             gateStatement
-            verdictQuestion
+            verdictQuestion.disabled(model.witnessStateCode == 1 || witnessRequested || witnessWorking)
             if correctionIsOffered {
-                correctionField
+                correctionField.disabled(model.witnessStateCode == 1 || witnessRequested || witnessWorking)
             }
             HStack(spacing: TC.Space.s) {
                 // Outlined like "Close", never filled: it must not read as a
@@ -601,8 +613,21 @@ struct PreviewSheet: View {
             .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    private func prepareWitness() async {
+        guard witnessSupported, !witnessWorking else { return }
+        witnessRequested = true
+        witnessWorking = true
+        summary = nil
+        closePreview()
+        let succeeded = await model.requestWitnessReview(entryID: entry.entryID)
+        witnessWorking = false
+        if succeeded { await load() }
+        else { failure = model.witnessCopy?.review?.failed; loading = false }
+    }
+
     private func load() async {
         loading = true
+        failure = nil
         let outcome = await model.openPreview(entryID: entry.entryID)
         switch outcome {
         case .opened(let opened):
@@ -613,6 +638,7 @@ struct PreviewSheet: View {
                let decoded = try? DaemonDecoding.decoder().decode(PreviewSummary.self, from: data)
             {
                 summary = decoded
+                witnessRequested = decoded.envelopeDigest?.hasPrefix("witness-sha256:") == true
             } else {
                 failure = "the summary could not be read"
             }
@@ -1418,3 +1444,36 @@ enum ScopeCopy {
 }
 
 
+
+/// The disclosure is scrollable and shared with the screenshot renderer.
+struct WitnessReviewConsent: View {
+    let copy: WitnessReviewCopy
+    let onConfirm: () -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: TC.Space.l) {
+            Text(copy.heading).font(TC.Font_.cardTitle)
+            ViewThatFits(in: .vertical) {
+                disclosure
+                ScrollView { disclosure }
+            }
+            HStack {
+                Spacer()
+                Button(copy.cancel, role: .cancel) { dismiss() }
+                Button(copy.confirm) { dismiss(); onConfirm() }
+            }
+        }
+        .padding(TC.Space.xl)
+        .frame(width: 560, height: 390)
+        .tcScreen()
+    }
+
+    private var disclosure: some View {
+        VStack(alignment: .leading, spacing: TC.Space.l) {
+            Text(copy.disclosure).fixedSize(horizontal: false, vertical: true)
+            Text(copy.immutable).foregroundStyle(TC.inkSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }.frame(maxWidth: .infinity, alignment: .leading)
+    }
+}

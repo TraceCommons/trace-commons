@@ -409,7 +409,7 @@ pub fn witness_copy() -> WitnessCopy {
             cancel: "Not now",
             working: "Preparing your witness review. The session may already have left this device.",
             failed: "The witness review could not be confirmed. The session may already have reached the witness. No contribution has been approved here. Try again only if you want to send another review request.",
-            immutable: "This certified review is fixed. To change an outcome or correction, close it and request a new witness review before approving.",
+            immutable: "This certified review is fixed. Outcome and correction edits are unavailable for this review.",
         },
         onboarding: FirstContributionCopy {
             heading: "Your first contribution",

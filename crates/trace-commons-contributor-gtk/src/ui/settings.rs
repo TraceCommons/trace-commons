@@ -2813,7 +2813,7 @@ fn brand_link(text: &str, url: &str) -> gtk::Button {
 /// second enum for "there is no config" would hand the view two
 /// vocabularies and let it decide for itself that one of them looks like
 /// `Absent`.
-fn witness_read(dir: &std::path::Path) -> WitnessStatus {
+pub(super) fn witness_read(dir: &std::path::Path) -> WitnessStatus {
     // Empty because the count is NOT KNOWN in this state, which is why
     // `pinned_measurement_line` returns nothing for it: an unreadable
     // configuration has no pins to report, and reporting zero would be a
@@ -3010,7 +3010,8 @@ fn witness_write(
     if measurements.is_empty() {
         return Err(WITNESS_PIN_REQUIRED);
     }
-    let settings = WitnessSettings {
+    let mut settings = WitnessSettings {
+        admission_evidence: false,
         url,
         signing_address: signing_address.to_string(),
         expected_measurements: measurements,
@@ -3026,6 +3027,10 @@ fn witness_write(
         Ok(None) => return Err(WITNESS_NOT_ENROLLED),
         Err(_) => return Err(WITNESS_CONFIG_UNREADABLE),
     };
+    settings.admission_evidence = cfg
+        .witness
+        .as_ref()
+        .is_some_and(|previous| previous.admission_evidence);
     cfg.witness = Some(settings);
     store
         .save_config(&cfg)
@@ -3580,6 +3585,7 @@ mod witness_tests {
         enrol(
             dir.path(),
             Some(WitnessSettings {
+                admission_evidence: false,
                 url: "https://witness.example".into(),
                 signing_address: "0xabc".into(),
                 expected_measurements: vec![],
@@ -3692,6 +3698,7 @@ mod witness_tests {
         enrol(
             dir.path(),
             Some(WitnessSettings {
+                admission_evidence: true,
                 url: "https://witness.example".into(),
                 signing_address: "0xabc".into(),
                 expected_measurements: stored.clone(),
@@ -3714,6 +3721,16 @@ mod witness_tests {
         let after = witness_read(dir.path());
         assert_eq!(after.pinned_measurements, stored);
         assert_eq!(after.url.as_deref(), Some("https://elsewhere.example"));
+        assert!(
+            ConfigStore::open(dir.path().to_path_buf())
+                .unwrap()
+                .load_config()
+                .unwrap()
+                .unwrap()
+                .witness
+                .unwrap()
+                .admission_evidence
+        );
     }
 
     /// A pin this build cannot parse comes back as it is stored, typo and
@@ -3726,6 +3743,7 @@ mod witness_tests {
         enrol(
             dir.path(),
             Some(WitnessSettings {
+                admission_evidence: false,
                 url: "https://witness.example".into(),
                 signing_address: "0xabc".into(),
                 expected_measurements: stored.clone(),
@@ -3756,6 +3774,7 @@ mod witness_tests {
         enrol(
             dir.path(),
             Some(WitnessSettings {
+                admission_evidence: false,
                 url: "https://witness.example".into(),
                 signing_address: "0xabc".into(),
                 expected_measurements: stored.clone(),

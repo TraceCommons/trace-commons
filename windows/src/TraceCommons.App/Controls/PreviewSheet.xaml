@@ -149,10 +149,10 @@
                         VerticalAlignment="Center"
                         HorizontalAlignment="Center"
                         Visibility="{x:Bind ViewModel.IsLoading, Mode=OneWay}">
-                <TextBlock Text="Scrubbing it locally…"
+                <TextBlock Text="{x:Bind ViewModel.LoadingTitle, Mode=OneWay}"
                            Style="{StaticResource TcTitleCardTextStyle}"
                            HorizontalAlignment="Center" />
-                <TextBlock Text="Reading the session and running the redaction pass."
+                <TextBlock Text="{x:Bind ViewModel.LoadingDetail, Mode=OneWay}"
                            Style="{StaticResource TcCaptionTextStyle}"
                            HorizontalAlignment="Center" />
             </StackPanel>
@@ -169,10 +169,12 @@
                            Style="{StaticResource TcHeadingAlertTextStyle}"
                            TextWrapping="Wrap"
                            HorizontalAlignment="Center" />
-                <TextBlock Text="Nothing has been sent, and nothing will be until it can be shown to you."
+                <TextBlock Text="{x:Bind ViewModel.PreviewFailureDetail, Mode=OneWay}"
                            Style="{StaticResource TcCaptionTextStyle}"
                            TextWrapping="Wrap"
                            TextAlignment="Center" />
+                <Button Content="{x:Bind ViewModel.WitnessAction}" Click="OnWitnessReview"
+                        Visibility="{x:Bind ViewModel.CanRequestWitness, Mode=OneWay}" />
             </StackPanel>
 
             <!--
@@ -616,7 +618,7 @@
                        Style="{StaticResource TcCaptionTextStyle}"
                        TextWrapping="Wrap" />
 
-            <StackPanel Orientation="Horizontal" Spacing="8">
+            <StackPanel Orientation="Horizontal" Spacing="8" IsEnabled="{x:Bind ViewModel.CanEditOutcome, Mode=OneWay}">
                 <ToggleButton Content="{x:Bind ViewModel.VerdictWorkedLabel}"
                               IsChecked="{x:Bind ViewModel.IsWorkedSelected, Mode=OneWay}"
                               Click="OnVerdictWorked" />
@@ -657,7 +659,7 @@
                 <TextBlock Text="{x:Bind ViewModel.CorrectionQuestion}"
                            Style="{StaticResource TcCaptionTextStyle}"
                            TextWrapping="Wrap" />
-                <TextBox PlaceholderText="{x:Bind ViewModel.CorrectionPlaceholder}"
+                <TextBox IsEnabled="{x:Bind ViewModel.CanEditOutcome, Mode=OneWay}" PlaceholderText="{x:Bind ViewModel.CorrectionPlaceholder}"
                          Text="{x:Bind ViewModel.Correction, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                          AcceptsReturn="True"
                          TextWrapping="Wrap"

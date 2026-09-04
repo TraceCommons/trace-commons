@@ -172,9 +172,12 @@ public struct WitnessCopy: Decodable, Equatable, Sendable {
     public let inferenceEnabled: String
     public let inferenceDisabled: String
     public let inferenceSaveFailed: String
+    public let review: WitnessReviewCopy?
+    public let onboarding: FirstContributionCopy?
 
 
     enum CodingKeys: String, CodingKey {
+        case review, onboarding
         case heading
         case intro
         case certificateMeans = "certificate_means"
@@ -491,5 +494,18 @@ public enum WitnessSurface {
     /// degraded-but-working state.
     public static func lastResultTone(calls: WitnessCalls) -> WitnessTone {
         WitnessTone.fromABI(calls.lastResultTone())
+    }
+}
+
+public struct WitnessReviewCopy: Decodable, Equatable, Sendable {
+    public let heading, disclosure, action, confirm, cancel, working, failed, immutable: String
+}
+
+public struct FirstContributionCopy: Decodable, Equatable, Sendable {
+    public let heading, start, review: String
+    public let followUp, agentSetup: String
+    enum CodingKeys: String, CodingKey {
+        case heading, start, review
+        case followUp = "follow_up", agentSetup = "agent_setup"
     }
 }

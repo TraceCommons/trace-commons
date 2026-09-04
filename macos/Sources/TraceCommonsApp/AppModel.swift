@@ -1500,6 +1500,21 @@ final class AppModel: ObservableObject {
 
     /// Opens the in-process preview off the main actor -- the redaction pass
     /// blocks -- and hands the open handle back on the main actor.
+    func supportsWitnessReview() async -> Bool {
+        guard let client else { return false }
+        return await Task.detached { (try? client.supportsWitnessReview()) == true }.value
+    }
+
+    func requestWitnessReview(entryID: String) async -> Bool {
+        guard let client else { return false }
+        return await Task.detached(priority: .userInitiated) {
+            do {
+                try client.requestWitnessReview(entryID: entryID)
+                return true
+            } catch { return false }
+        }.value
+    }
+
     func openPreview(entryID: String) async -> PreviewOutcome {
         guard let client else { return .failed("the watcher isn't running") }
         return await Task.detached(priority: .userInitiated) { () -> PreviewOutcome in
