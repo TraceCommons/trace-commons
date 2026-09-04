@@ -1412,9 +1412,29 @@ fn ask_routed_tools(app: &Rc<App>, settings: &Settings) {
             // cache is left empty so the next render asks again, and every
             // word stays "not known" meanwhile.
             if let Ok(value) = result {
-                app.settings
-                    .routing_evidence
-                    .replace(Some(parse_routed_tools(&value)));
+                let evidence = parse_routed_tools(&value);
+                // The same answer the button's probe reads, so the card can
+                // say why the four words are blank without waiting for
+                // somebody to press anything. Reopening this page with a
+                // declared proxy that is not running used to paint four
+                // "not known" rows and no sentence at all -- a dead end,
+                // with the reason already in hand and thrown away.
+                //
+                // Only where the line is saying nothing yet. This callback
+                // also runs on the background re-ask, and rewriting a line
+                // that answered a press would answer a question nobody
+                // asked. That is the rule the Windows shell already keeps.
+                //
+                // No extra call is made for this: it reads the outcome of
+                // the tool-list answer this function was already asking
+                // for.
+                if !app.settings.routing_probe.is_visible() {
+                    app.settings
+                        .routing_probe
+                        .set_text(&probe_line(&evidence.outcome));
+                    app.settings.routing_probe.set_visible(true);
+                }
+                app.settings.routing_evidence.replace(Some(evidence));
             }
             render_tool_rows(app);
         },
@@ -3478,6 +3498,55 @@ mod tests {
         assert!(
             !body.contains("routing_evidence.replace(None)"),
             "re-asking must not clear the answer that is on screen"
+        );
+    }
+
+    /// Opening this card against a declared proxy that is not running says
+    /// why, without a press.
+    ///
+    /// `check_routing` is the only other writer of the probe line and it
+    /// runs from a button. So the card could be opened, paint four "not
+    /// known" rows, and offer no sentence at all -- while the answer that
+    /// explains them was in the tool-list result this function had already
+    /// received. Windows has filled this line on load since it was written;
+    /// this is that parity, and it costs no extra call.
+    ///
+    /// Read from the source, because "this callback also writes that label,
+    /// and only when it is saying nothing" is a fact about one function's
+    /// body that no value-level assertion in this crate can reach.
+    #[test]
+    fn opening_the_card_says_why_the_words_are_blank_without_a_press() {
+        let source = include_str!("settings.rs");
+        let start = source
+            .find("fn ask_routed_tools(")
+            .expect("the asker exists");
+        let end = source[start..].find("\n}\n").expect("its body ends") + start;
+        let body = &source[start..end];
+
+        assert!(
+            body.contains("probe_line(&evidence.outcome)"),
+            "the open-time refresh throws the outcome away: {body}"
+        );
+        assert!(
+            body.contains("routing_probe.set_visible(true)"),
+            "the sentence is written and never shown: {body}"
+        );
+        // And it does not overwrite an answer to a press. A background
+        // re-ask rewriting that line would answer a question nobody asked.
+        assert!(
+            body.contains("if !app.settings.routing_probe.is_visible()"),
+            "the re-ask rewrites a line somebody asked for: {body}"
+        );
+        // One call, not two: the outcome comes from the tool-list answer
+        // this function already asks for.
+        assert!(
+            !body.contains("probe_routing"),
+            "opening the card must not add a second probe call: {body}"
+        );
+        assert_eq!(
+            body.matches("app.call(").count(),
+            1,
+            "opening the card must make exactly one call: {body}"
         );
     }
 

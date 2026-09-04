@@ -67,12 +67,28 @@ private enum RoutingCard {
     static func declaration(
         _ signature: String, file: StaticString = #filePath, line: UInt = #line
     ) -> String? {
-        guard let text = try? String(contentsOf: viewPath, encoding: .utf8) else {
-            XCTFail("could not read \(viewPath.path)", file: file, line: line)
+        declaration(signature, in: viewPath, file: file, line: line)
+    }
+
+    /// `.../macos/Sources/TraceCommonsApp/AppModel.swift`. The card's own
+    /// bindings are in the view; what it asks the daemon for when it appears
+    /// is in the model, and that is a different file to read.
+    static let modelPath = viewPath
+        .deletingLastPathComponent()  // Views
+        .appendingPathComponent("../AppModel.swift")
+        .standardizedFileURL
+
+    /// As above, over any of this app's sources.
+    static func declaration(
+        _ signature: String, in path: URL,
+        file: StaticString = #filePath, line: UInt = #line
+    ) -> String? {
+        guard let text = try? String(contentsOf: path, encoding: .utf8) else {
+            XCTFail("could not read \(path.path)", file: file, line: line)
             return nil
         }
         guard let start = text.range(of: signature) else {
-            XCTFail("\(viewPath.lastPathComponent) no longer declares `\(signature)`", file: file, line: line)
+            XCTFail("\(path.lastPathComponent) no longer declares `\(signature)`", file: file, line: line)
             return nil
         }
         var depth = 1
@@ -664,6 +680,55 @@ final class RoutingBindingTests: XCTestCase {
             XCTAssertFalse(card.contains(chosen), "the routing card names \(chosen)")
             XCTAssertFalse(state.contains(chosen), "the routing status line names \(chosen)")
         }
+    }
+
+    /// Opening this card against a declared proxy that is not running says
+    /// why, without a press.
+    ///
+    /// `checkRouting` is the only other writer of `routingProbeLine` and it
+    /// runs from `applyIronWire` -- a switch or a button. So the card could
+    /// appear, repaint four "not known" rows, and offer no sentence at all,
+    /// while the answer that explains them was in the tool-list result
+    /// `refreshRoutedTools` had already received and dropped. The Windows
+    /// shell has filled this line on load since it was written; this is
+    /// that parity.
+    ///
+    /// Asserted against the model's source for the reason the rest of this
+    /// file is: the call is a detached task on a live client, and what is
+    /// being pinned is that its answer reaches the sentence.
+    func testAppearingWithADeadProxyWritesTheSentenceAndNotOnlyTheWords() throws {
+        let body = try XCTUnwrap(
+            RoutingCard.declaration("func refreshRoutedTools() {", in: RoutingCard.modelPath)
+        )
+        XCTAssertTrue(
+            body.contains("self.routingProbeLine = RoutingSurface.probeLine("),
+            "the open-time refresh throws the outcome away: \(body)"
+        )
+        XCTAssertTrue(
+            body.contains("evidence.outcome"),
+            "the sentence is not built from the answer that came back: \(body)"
+        )
+        // One call, not two: the outcome rides on the tool-list answer this
+        // already asks for, so appearing costs exactly what it did.
+        XCTAssertEqual(
+            RoutingCard.occurrences(of: "client.", in: body), 1,
+            "appearing must make exactly one call: \(body)"
+        )
+        XCTAssertFalse(
+            body.contains("probeRouting("),
+            "appearing must not add a second probe: \(body)"
+        )
+        // And nothing is written when the call did not run: a sentence
+        // about a call that did not happen is not a fact about the proxy.
+        XCTAssertTrue(
+            body.contains("guard let evidence else { return }"),
+            "a refused call still writes a sentence: \(body)"
+        )
+        // Still off the main actor until the answer is in hand.
+        XCTAssertTrue(
+            body.contains("Task.detached"),
+            "appearing now blocks the main actor: \(body)"
+        )
     }
 
     // MARK: - The probe result
