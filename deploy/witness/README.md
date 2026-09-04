@@ -94,8 +94,8 @@ deployment.
 
 ## The two routes are unauthenticated. That is deliberate, and it has a cost.
 
-The witness serves exactly two routes, both unauthenticated, unrated and
-without TLS of its own:
+The witness serves exactly two routes, both unauthenticated, neither
+rate-limited by source, and without TLS of their own:
 
 - `POST /v1/witness` — raw transcript in, redacted artifact plus certificate out.
 - `GET /v1/attestation?nonce=<64 hex chars>` — a nonce-bound quote and the
@@ -112,19 +112,51 @@ the design is trying not to hand it.
   compute is a redaction pass over the whole of it. Anyone who can reach the
   route can spend the CVM's cores. In `full-pipeline` mode they can also spend
   your classifier's capacity, and if that classifier is a metered external
-  service, your money.
+  service, your money. What that spend is *bounded* by is below — a
+  concurrency limit and a request deadline, both measured — and what it is
+  still not bounded by is below too.
 - `/v1/attestation` is **a quote oracle**. Anyone who can reach it obtains a
   fresh TDX quote over a report body of their choosing in the nonce half. The
   quote proves what it says, and nothing about a caller.
 
 A deployment is expected to put something in front of it. `gateway_enabled` is
 on, so dstack-gateway terminates TLS — that is the TLS answer and not the abuse
-answer. **The abuse answer is not in this directory:** rate limiting per source,
-a body-size limit at the edge below the witness's own, and a reachability
-decision (public, or only from your contributor shells' egress) are the
-deploying operator's, and none of them are configured here. If you deploy this
-on a public hostname with no edge in front of it, you have deployed an open
-redaction service and an open quote oracle.
+answer.
+
+**Part of the abuse answer is now in this directory, and part of it still is
+not.** Be precise about which is which.
+
+*What is configured here.* `POST /v1/witness` is bounded in two ways, both set
+in the measured compose and therefore part of the enclave's identity — a
+contributor who pins the measurement can verify that a bound exists and what it
+is:
+
+| Variable | Ships as | What it bounds |
+|---|---|---|
+| `TRACE_COMMONS_WITNESS_MAX_CONCURRENT_REQUESTS` | `4` | How many witness requests run at once. Over it, the witness answers `503` with `witness_saturated` and a `Retry-After`, immediately. It does not queue. |
+| `TRACE_COMMONS_WITNESS_REQUEST_TIMEOUT_SECS` | `300` | How long one request may take. Over it, `504` with `witness_request_timed_out`, and the slot is released. |
+
+Neither refusal certifies anything. Together they bound what an anonymous
+caller can spend: cores, and — because `full-pipeline` sends prose to a metered
+external classifier — money. A concurrency bound was chosen over a rate limit
+deliberately: behind dstack-gateway the peer address is the gateway's, so a
+per-source limit here would have to trust a forwarded header, and keying a
+limiter on identity is the correlation this witness is built not to have. A
+concurrency bound needs no identity.
+
+`GET /v1/attestation` is **not** bounded with it, on purpose. It reads no body
+and does one enclave round trip, and it is what a contributor uses to pin this
+witness before trusting it; making it unavailable under load on the other route
+would make the enclave unpinnable exactly when someone is attacking it.
+
+*What is still the deploying operator's, and is not configured here.* A
+**per-source rate limit at an edge** — the thing that stops a single caller
+re-arriving four at a time forever, which a concurrency bound does not; a
+body-size limit at the edge below the witness's own; and the **reachability
+decision** (public, or only from your contributor shells' egress). The bounds
+above make an open witness survivable, not unattended. If you deploy this on a
+public hostname with no edge in front of it, you have deployed a bounded but
+open redaction service, and an open quote oracle.
 
 ---
 

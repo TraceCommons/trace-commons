@@ -19,6 +19,16 @@
 //! is an operator who can correlate it. If a load balancer needs a liveness
 //! probe, `GET /v1/attestation` with a fresh nonce is one, and it proves more.
 //!
+//! # What bounds the work
+//!
+//! Both routes are unauthenticated -- deliberately, because authenticating
+//! would give the witness an identity to correlate against content -- so
+//! anything reachable here is reachable by anyone. [`WitnessLoadBound`] is
+//! what keeps `POST /v1/witness` from being unbounded compute and unbounded
+//! classifier spend: a fixed number of requests in flight, each under a
+//! deadline, and an immediate honest refusal past either. See its
+//! documentation for why a concurrency bound and not a rate limit.
+//!
 //! # Why this module cannot serve an unbound quote
 //!
 //! [`Enclave::attestation_quote`] takes arbitrary report data. A handler that
@@ -42,13 +52,16 @@
 //! [`Enclave::nonce_bound_quote`]: super::Enclave::nonce_bound_quote
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::Router;
 use axum::extract::{DefaultBodyLimit, Query, Request, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use serde::Deserialize;
+use tokio::sync::Semaphore;
 use trace_commons_protocol::trace_contribution::{
     ConsentMetadata, ConsentScope, RawTraceContribution, ResidualPiiRisk, TraceAllowedUse,
 };
@@ -73,7 +86,7 @@ pub const WITNESS_SIGNATURE_HEADER: &str = "x-trace-witness-signature";
 /// Built here rather than in the binary so that route wiring is covered by the
 /// library test suite. A handler can be correct and unreachable; the tests
 /// below drive this exact `Router`.
-pub fn witness_router(service: Arc<WitnessService>) -> Router {
+pub fn witness_router(service: Arc<WitnessService>, load: WitnessLoadBound) -> Router {
     Router::new()
         .route("/v1/witness", post(witness_handler))
         // Axum's default 2 MiB body cap would refuse an oversized transcript
@@ -87,8 +100,102 @@ pub fn witness_router(service: Arc<WitnessService>) -> Router {
         // `/v1/witness` and still guards `/v1/attestation`, which has no body
         // to read and should not be able to be sent one.
         .layer(DefaultBodyLimit::disable())
+        // Applied to `/v1/witness` and not to `/v1/attestation`, for the same
+        // reason as the line above: `Router::layer` applies to the routes
+        // added before it. The expensive route is the one that redacts a body
+        // and, in `full-pipeline`, spends a metered classifier; the
+        // attestation route reads no body and does one enclave round trip, and
+        // it is what a contributor uses to pin this witness *before* trusting
+        // it. Bounding that one too would let a load spike on the expensive
+        // route make the enclave unpinnable.
+        //
+        // Outside the body limit rather than inside it, so a permit covers the
+        // body read as well as the redaction. A caller who dribbles out 64 MiB
+        // is spending the same slot as one who sends it at once, and the
+        // timeout is what bounds both.
+        .layer(middleware::from_fn_with_state(load, bound_witness_load))
         .route("/v1/attestation", get(attestation_handler))
         .with_state(service)
+}
+
+/// How many `POST /v1/witness` requests may run at once, and how long one may
+/// take before it is abandoned.
+///
+/// Both halves are needed and neither is sufficient. A concurrency bound with
+/// no timeout is not a bound: one request whose classifier call never returns
+/// holds its permit for as long as the process lives, and enough of those
+/// wedge the witness at full occupancy with nothing running. A timeout with no
+/// concurrency bound leaves the arrival rate unbounded, which is the thing an
+/// unauthenticated route makes free.
+///
+/// # Why a concurrency bound rather than a rate limit
+///
+/// The witness sits behind dstack-gateway, so the peer address it sees is the
+/// gateway's. A per-source limit would have to key on a forwarded header --
+/// and a header trusted for limiting is a header an attacker sets. Worse, the
+/// witness is deliberately denied any identity to correlate against content
+/// (see `deploy/witness/README.md`); keying a limiter on *who* is asking
+/// reintroduces exactly what the two routes are unauthenticated to avoid.
+///
+/// A concurrency bound needs no identity at all. It bounds what is in flight
+/// rather than who sent it, and what is in flight is what costs cores and
+/// classifier spend.
+#[derive(Clone)]
+pub struct WitnessLoadBound {
+    /// Shared, so every clone of the layered service counts against the same
+    /// budget. A per-clone semaphore would be a per-connection bound, which
+    /// bounds nothing an attacker cannot multiply by opening connections.
+    permits: Arc<Semaphore>,
+    request_timeout: Duration,
+}
+
+impl WitnessLoadBound {
+    /// `max_concurrent_requests` slots, each held for at most
+    /// `request_timeout`.
+    pub fn new(max_concurrent_requests: usize, request_timeout: Duration) -> Self {
+        Self {
+            permits: Arc::new(Semaphore::new(max_concurrent_requests)),
+            request_timeout,
+        }
+    }
+}
+
+/// What a saturated witness tells a caller to wait, in seconds.
+///
+/// A constant rather than a value derived from the timeout: `Retry-After` is a
+/// hint to a client, and deriving it from the request timeout would publish
+/// the deployment's occupancy ceiling to anyone who reads a 503.
+const SATURATED_RETRY_AFTER_SECS: u32 = 30;
+
+/// The bound itself: acquire or refuse, then run under a deadline.
+async fn bound_witness_load(
+    State(load): State<WitnessLoadBound>,
+    request: Request,
+    next: Next,
+) -> Response {
+    // `try_acquire_owned`, not `acquire_owned`. Waiting for a permit is a
+    // queue, an unbounded queue in front of a bounded worker turns a load
+    // problem into a memory problem, and it does it while telling the caller
+    // nothing -- a contributor cannot distinguish "queued behind four hundred
+    // others" from "working". Refusing immediately is the honest answer and
+    // the cheap one.
+    let Ok(_permit) = Arc::clone(&load.permits).try_acquire_owned() else {
+        return Refusal::new(StatusCode::SERVICE_UNAVAILABLE, "witness_saturated")
+            .retry_after(SATURATED_RETRY_AFTER_SECS)
+            .into_response();
+    };
+
+    match tokio::time::timeout(load.request_timeout, next.run(request)).await {
+        Ok(response) => response,
+        // Dropping the timed-out future is what makes this a bound rather than
+        // a message: the handler, its redaction pass and any classifier call
+        // under it are cancelled here, and `_permit` is released on the way
+        // out of this function. Without that, a hung backend would retire a
+        // slot permanently.
+        Err(_elapsed) => {
+            Refusal::new(StatusCode::GATEWAY_TIMEOUT, "witness_request_timed_out").into_response()
+        }
+    }
 }
 
 /// The wire form of a witness request: two shapes in one struct.
@@ -213,21 +320,43 @@ struct AttestationQuery {
 struct Refusal {
     status: StatusCode,
     code: &'static str,
+    /// Seconds for a `Retry-After` header, on the refusals where waiting is
+    /// the right answer. `None` everywhere else: telling a caller to retry a
+    /// malformed body would be advice to send it again.
+    retry_after_secs: Option<u32>,
 }
 
 impl Refusal {
     const fn new(status: StatusCode, code: &'static str) -> Self {
-        Self { status, code }
+        Self {
+            status,
+            code,
+            retry_after_secs: None,
+        }
+    }
+
+    const fn retry_after(mut self, seconds: u32) -> Self {
+        self.retry_after_secs = Some(seconds);
+        self
     }
 }
 
 impl IntoResponse for Refusal {
     fn into_response(self) -> Response {
-        (
+        let mut response = (
             self.status,
             axum::Json(serde_json::json!({ "error": self.code })),
         )
-            .into_response()
+            .into_response();
+        if let Some(seconds) = self.retry_after_secs {
+            // An integer renders as a valid header value; a hypothetical
+            // failure here loses the hint and keeps the refusal, which is the
+            // right way round.
+            if let Ok(value) = HeaderValue::from_str(&seconds.to_string()) {
+                response.headers_mut().insert(header::RETRY_AFTER, value);
+            }
+        }
+        response
     }
 }
 
@@ -458,6 +587,13 @@ mod tests {
     /// A generous default for tests that are not about the bound.
     const TEST_LIMIT: usize = 64 * 1024;
 
+    /// A load bound wide enough that tests which are not about it never meet
+    /// it: more slots than any test sends at once, and a timeout far longer
+    /// than a deterministic redaction of a few kilobytes.
+    fn unconstrained_load() -> WitnessLoadBound {
+        WitnessLoadBound::new(64, Duration::from_secs(30))
+    }
+
     struct TestSigner(SigningKey);
 
     impl TestSigner {
@@ -609,15 +745,35 @@ mod tests {
         service: Arc<WitnessService>,
         request: HttpRequest<Body>,
     ) -> (StatusCode, String) {
-        let response = witness_router(service)
+        send_bounded(service, unconstrained_load(), request).await
+    }
+
+    /// `send`, with the load bound under test.
+    async fn send_bounded(
+        service: Arc<WitnessService>,
+        load: WitnessLoadBound,
+        request: HttpRequest<Body>,
+    ) -> (StatusCode, String) {
+        let (status, _, body) = send_bounded_full(service, load, request).await;
+        (status, String::from_utf8_lossy(&body).into_owned())
+    }
+
+    /// `send_bounded`, keeping the headers as well.
+    async fn send_bounded_full(
+        service: Arc<WitnessService>,
+        load: WitnessLoadBound,
+        request: HttpRequest<Body>,
+    ) -> (StatusCode, axum::http::HeaderMap, Vec<u8>) {
+        let response = witness_router(service, load)
             .oneshot(request)
             .await
             .expect("the router is infallible");
         let status = response.status();
+        let headers = response.headers().clone();
         let body = axum::body::to_bytes(response.into_body(), 8 * 1024 * 1024)
             .await
             .expect("the test bodies are small");
-        (status, String::from_utf8_lossy(&body).into_owned())
+        (status, headers, body.to_vec())
     }
 
     fn post_witness(body: String) -> HttpRequest<Body> {
@@ -1085,7 +1241,7 @@ mod tests {
         service: Arc<WitnessService>,
         request: HttpRequest<Body>,
     ) -> (StatusCode, axum::http::HeaderMap, Vec<u8>) {
-        let response = witness_router(service)
+        let response = witness_router(service, unconstrained_load())
             .oneshot(request)
             .await
             .expect("the router is infallible");
@@ -1234,6 +1390,205 @@ mod tests {
         );
         for (_, value) in headers.iter() {
             assert!(!value.to_str().unwrap_or_default().contains(SECRET));
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // The load bound.
+    // ---------------------------------------------------------------
+
+    /// A redactor that parks in `redact` until it is released, so a test can
+    /// hold a slot open for as long as it needs one.
+    ///
+    /// Parks rather than sleeping: a sleep long enough to be reliable makes
+    /// the test slow, and one short enough to be fast makes it flaky.
+    struct ParkingRedactor {
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait]
+    impl TranscriptRedactor for ParkingRedactor {
+        async fn redact(&self, raw: &str) -> Result<RedactedTranscript, SeamUnavailable> {
+            self.entered.notify_one();
+            self.release.notified().await;
+            DeterministicRedaction::new(Vec::new()).redact(raw).await
+        }
+    }
+
+    /// A redactor that hangs forever on its first call and behaves normally
+    /// afterwards -- a classifier that never answers, which is the failure the
+    /// timeout exists for.
+    struct HangsOnceRedactor {
+        hung: Mutex<bool>,
+    }
+
+    #[async_trait]
+    impl TranscriptRedactor for HangsOnceRedactor {
+        async fn redact(&self, raw: &str) -> Result<RedactedTranscript, SeamUnavailable> {
+            let first = {
+                let mut hung = self.hung.lock().expect("no test panics holding it");
+                let first = !*hung;
+                *hung = true;
+                first
+            };
+            if first {
+                // Never resolves. Only cancellation ends this.
+                std::future::pending::<()>().await;
+            }
+            DeterministicRedaction::new(Vec::new()).redact(raw).await
+        }
+    }
+
+    fn service_with_redactor(redactor: Arc<dyn TranscriptRedactor>) -> Arc<WitnessService> {
+        service_with(
+            redactor,
+            Arc::new(TestSigner::new("http-surface")),
+            Arc::new(RecordingEnclave::default()),
+            TEST_LIMIT,
+        )
+    }
+
+    /// A witness at its concurrency bound REFUSES the next request. It does
+    /// not queue it, and it certifies nothing.
+    ///
+    /// The refusal is the assertion that matters: a queueing limiter would
+    /// pass a test that only checked "the second request did not run
+    /// concurrently", because it would eventually return 200.
+    #[tokio::test]
+    async fn a_second_request_at_the_bound_is_refused_rather_than_queued() {
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let service = service_with_redactor(Arc::new(ParkingRedactor {
+            entered: entered.clone(),
+            release: release.clone(),
+        }));
+        // One slot, and a timeout long enough that it cannot be what refuses.
+        let load = WitnessLoadBound::new(1, Duration::from_secs(30));
+
+        let held = tokio::spawn({
+            let (service, load) = (service.clone(), load.clone());
+            async move { send_bounded(service, load, post_witness(witness_body("first"))).await }
+        });
+        // The slot is occupied only once the handler is inside the redactor.
+        entered.notified().await;
+
+        let (status, headers, body) = send_bounded_full(
+            service.clone(),
+            load.clone(),
+            post_witness(witness_body("second")),
+        )
+        .await;
+        let rendered = String::from_utf8_lossy(&body).into_owned();
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "body: {rendered}");
+        assert_eq!(error_code(&rendered), "witness_saturated");
+        assert_eq!(
+            headers
+                .get(header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok()),
+            Some(SATURATED_RETRY_AFTER_SECS.to_string().as_str()),
+        );
+        // Nothing was certified: no certificate in the body and none in the
+        // headers the structured path uses.
+        assert!(!rendered.contains("certificate"), "body: {rendered}");
+        assert!(headers.get(WITNESS_CERTIFICATE_HEADER).is_none());
+        assert!(headers.get(WITNESS_SIGNATURE_HEADER).is_none());
+
+        // The held request still completes, so the bound refused the second
+        // caller rather than breaking the first.
+        release.notify_one();
+        let (held_status, _) = held.await.expect("the held request did not panic");
+        assert_eq!(held_status, StatusCode::OK);
+    }
+
+    /// The attestation route is NOT bounded with the witness route. A
+    /// contributor can still pin the enclave while every witness slot is
+    /// occupied.
+    #[tokio::test]
+    async fn attestation_still_answers_while_the_witness_route_is_saturated() {
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let service = service_with_redactor(Arc::new(ParkingRedactor {
+            entered: entered.clone(),
+            release: release.clone(),
+        }));
+        let load = WitnessLoadBound::new(1, Duration::from_secs(30));
+
+        let held = tokio::spawn({
+            let (service, load) = (service.clone(), load.clone());
+            async move { send_bounded(service, load, post_witness(witness_body("first"))).await }
+        });
+        entered.notified().await;
+
+        let nonce = hex::encode([0x11u8; WITNESS_NONCE_LEN]);
+        let (status, body) = send_bounded(
+            service.clone(),
+            load.clone(),
+            get_attestation(&format!("?nonce={nonce}")),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "body: {body}");
+
+        release.notify_one();
+        held.await.expect("the held request did not panic");
+    }
+
+    /// A request that exceeds the timeout is refused with 504, certifies
+    /// nothing, and -- the part that makes this a bound rather than a
+    /// message -- RELEASES ITS SLOT, so the witness serves the next caller.
+    ///
+    /// Without the release, one hung backend call would retire a slot for the
+    /// life of the process and enough of them would wedge the service at full
+    /// occupancy with nothing running.
+    #[tokio::test]
+    async fn a_timed_out_request_releases_its_slot_and_the_witness_recovers() {
+        let service = service_with_redactor(Arc::new(HangsOnceRedactor {
+            hung: Mutex::new(false),
+        }));
+        // One slot, so a leaked permit means the second request can never run.
+        let load = WitnessLoadBound::new(1, Duration::from_millis(50));
+
+        let (status, headers, body) = send_bounded_full(
+            service.clone(),
+            load.clone(),
+            post_witness(witness_body("hangs")),
+        )
+        .await;
+        let rendered = String::from_utf8_lossy(&body).into_owned();
+        assert_eq!(status, StatusCode::GATEWAY_TIMEOUT, "body: {rendered}");
+        assert_eq!(error_code(&rendered), "witness_request_timed_out");
+        assert!(!rendered.contains("certificate"), "body: {rendered}");
+        assert!(headers.get(WITNESS_CERTIFICATE_HEADER).is_none());
+        assert!(headers.get(WITNESS_SIGNATURE_HEADER).is_none());
+
+        // The next request finds a free slot and is certified normally.
+        let (status, body) = send_bounded(
+            service,
+            load,
+            post_witness(witness_body(&format!("deploy {SURVIVOR}"))),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "the witness wedged: {body}");
+        let value: serde_json::Value = serde_json::from_str(&body).expect("a JSON response");
+        assert!(value["certificate"]["redacted_sha256"].is_string());
+    }
+
+    /// A slot is returned when its request finishes, so a witness serves an
+    /// unbounded number of requests over time -- the bound is on concurrency,
+    /// not on lifetime volume.
+    #[tokio::test]
+    async fn slots_are_returned_so_sequential_requests_all_succeed() {
+        let (service, _) = healthy_service(TEST_LIMIT);
+        let load = WitnessLoadBound::new(1, Duration::from_secs(30));
+        for attempt in 0..5 {
+            let (status, body) = send_bounded(
+                service.clone(),
+                load.clone(),
+                post_witness(witness_body("sequential")),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "attempt {attempt}: {body}");
         }
     }
 }
