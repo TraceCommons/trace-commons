@@ -113,7 +113,8 @@ public enum RedactionLabels {
             .sorted { $0.site < $1.site }
     }
 
-    /// How many secrets were found and left in what would be sent.
+    /// How many places a secret was found and left in what would be sent.
+    /// Sites, not secrets: one site can hold more than one value.
     public static func survivorTotal(_ counts: [String: Int]) -> Int {
         counts.filter { !isRemoval($0.key) }.values.reduce(0, +)
     }
@@ -121,15 +122,15 @@ public enum RedactionLabels {
     /// The line shown when a session carries survivors, in the attention
     /// tone. Nil when there are none.
     ///
-    /// Deliberately says "still in what would be sent" rather than naming a
-    /// number of secrets: the count is of detection SITES, and one site can
-    /// hold more than one value. Overstating precision here would be its own
-    /// small lie.
+    /// Never names a number of secrets. The count is of detection SITES, and
+    /// one site can hold more than one value, so "2 secrets" would understate
+    /// what survived. The plural says "found in N places" instead, which is
+    /// what the number actually counts; the singular drops it entirely.
     public static func survivorLine(_ counts: [String: Int]) -> String? {
         let total = survivorTotal(counts)
         guard total > 0 else { return nil }
         return total == 1
-            ? "1 secret found here is still in what would be sent"
-            : "\(total) secrets found here are still in what would be sent"
+            ? "A secret found here is still in what would be sent"
+            : "Secrets found in \(total) places are still in what would be sent"
     }
 }

@@ -73,14 +73,14 @@ final class RedactionLabelsTests: XCTestCase {
     func testTheSurvivorLineInflects() {
         XCTAssertEqual(
             RedactionLabels.survivorLine(["residual_secret_at:events.x": 1]),
-            "1 secret found here is still in what would be sent"
+            "A secret found here is still in what would be sent"
         )
         XCTAssertEqual(
             RedactionLabels.survivorLine([
                 "residual_secret_at:events.x": 1,
                 "residual_secret_at:events.y": 1,
             ]),
-            "2 secrets found here are still in what would be sent"
+            "Secrets found in 2 places are still in what would be sent"
         )
     }
 

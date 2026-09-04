@@ -293,14 +293,15 @@ pub const NOTHING_MATCHED: &str = "nothing matched";
 /// The sites are schema-shaped identifiers (`events.3.correction`), never a
 /// filesystem path and never transcript text.
 ///
-/// Says "found here" rather than naming a number of secrets: the count is of
-/// detection SITES, and one site can hold more than one value. Overstating
-/// the precision would be its own small lie.
+/// Never names a number of secrets. The count is of detection SITES, and
+/// one site can hold more than one value, so "3 secrets" would understate
+/// what survived. The plural says "found in N places" instead, which is
+/// what the number actually counts; the singular drops it entirely.
 pub fn residual_secret_line(count: u32, sites: &[String]) -> String {
     let head = if count == 1 {
-        "1 secret found here is still in what would be sent".to_string()
+        "A secret found here is still in what would be sent".to_string()
     } else {
-        format!("{count} secrets found here are still in what would be sent")
+        format!("Secrets found in {count} places are still in what would be sent")
     };
     if sites.is_empty() {
         return head;
@@ -2909,13 +2910,13 @@ mod residual_copy_tests {
     fn one_survivor_reads_as_one() {
         assert_eq!(
             residual_secret_line(1, &[]),
-            "1 secret found here is still in what would be sent"
+            "A secret found here is still in what would be sent"
         );
     }
 
     #[test]
     fn several_survivors_inflect() {
-        assert!(residual_secret_line(3, &[]).starts_with("3 secrets found here are"));
+        assert!(residual_secret_line(3, &[]).starts_with("Secrets found in 3 places are"));
     }
 
     /// The line must say STILL IN, never anything that reads as removal --
