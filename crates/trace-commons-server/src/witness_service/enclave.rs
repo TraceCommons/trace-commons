@@ -152,6 +152,27 @@ pub const GET_KEY_PATH: &str = "/v0/GetKey";
 /// -- the quote in that attestation response came through this path.
 pub const GET_QUOTE_PATH: &str = "/v0/GetQuote";
 
+/// The same `GetKey` method at its unversioned spelling.
+///
+/// dstack documents the legacy methods as reachable at `/v0/<Method>` **and**
+/// at an unversioned `/<Method>`, and every example in its API reference uses
+/// the unversioned form. Which one a given agent actually serves has now been
+/// wrong in both directions on live hardware: a deployment crash-looped on
+/// `/v0/GetKey` with HTTP 404, the constant was moved to the unversioned form,
+/// that was reverted when a running image appeared to prove the versioned path
+/// worked, and the next image built from that revert crash-looped on 404 again.
+///
+/// The evidence does not settle it, so this stops guessing. Both spellings name
+/// the same v0 surface and derive the SAME key material, so trying one and
+/// falling back to the other on a 404 costs nothing and cannot change a signing
+/// address. Only the v1 surface derives differently, and moving there would
+/// change the signing address of every deployment at once -- which is why these
+/// are constants rather than something a caller passes.
+pub const GET_KEY_PATH_UNVERSIONED: &str = "/GetKey";
+
+/// The unversioned `GetQuote`. See [`GET_KEY_PATH_UNVERSIONED`].
+pub const GET_QUOTE_PATH_UNVERSIONED: &str = "/GetQuote";
+
 /// `GetKey`'s HKDF info string. `Sign` uses this same value internally, which
 /// is what makes the in-process signature and an agent signature the same key.
 pub const SIGNING_KEY_PATH: &str = "vms";
@@ -570,6 +591,27 @@ impl DstackSocketAgent {
         let body = http_body(&response)?;
         serde_json::from_slice(body).map_err(|_| EnclaveError::MalformedResponse)
     }
+
+    /// Try `primary`, and on a 404 try `fallback`.
+    ///
+    /// Only a 404 falls through. A transport failure, a malformed body, or any
+    /// other refusal is returned as-is: those say something is wrong with the
+    /// agent or the request, and retrying the same call at a different spelling
+    /// would turn a real fault into a second, more confusing one.
+    ///
+    /// The two spellings name the same v0 surface and derive the same key
+    /// material, so this cannot change a signing address -- see
+    /// [`GET_KEY_PATH_UNVERSIONED`] for why the ambiguity exists at all.
+    async fn get_either(
+        &self,
+        primary: &str,
+        fallback: &str,
+    ) -> Result<serde_json::Value, EnclaveError> {
+        match self.get(primary).await {
+            Err(EnclaveError::AgentRefused { status: 404 }) => self.get(fallback).await,
+            other => other,
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -657,9 +699,14 @@ fn hex_field(value: &serde_json::Value, field: &str) -> Result<Vec<u8>, EnclaveE
 impl GuestAgent for DstackSocketAgent {
     async fn signing_key(&self) -> Result<DerivedSigningKey, EnclaveError> {
         let response = self
-            .get(&format!(
-                "{GET_KEY_PATH}?path={SIGNING_KEY_PATH}&purpose={SIGNING_KEY_PURPOSE}&algorithm={SIGNING_KEY_ALGORITHM}"
-            ))
+            .get_either(
+                &format!(
+                    "{GET_KEY_PATH}?path={SIGNING_KEY_PATH}&purpose={SIGNING_KEY_PURPOSE}&algorithm={SIGNING_KEY_ALGORITHM}"
+                ),
+                &format!(
+                    "{GET_KEY_PATH_UNVERSIONED}?path={SIGNING_KEY_PATH}&purpose={SIGNING_KEY_PURPOSE}&algorithm={SIGNING_KEY_ALGORITHM}"
+                ),
+            )
             .await?;
         let key = hex_field(&response, "key")?;
         let scalar: [u8; 32] = key
@@ -685,10 +732,16 @@ impl GuestAgent for DstackSocketAgent {
 
     async fn quote(&self, report_data: &[u8; REPORT_DATA_LEN]) -> Result<Vec<u8>, EnclaveError> {
         let response = self
-            .get(&format!(
-                "{GET_QUOTE_PATH}?report_data=0x{}",
-                hex::encode(report_data)
-            ))
+            .get_either(
+                &format!(
+                    "{GET_QUOTE_PATH}?report_data=0x{}",
+                    hex::encode(report_data)
+                ),
+                &format!(
+                    "{GET_QUOTE_PATH_UNVERSIONED}?report_data=0x{}",
+                    hex::encode(report_data)
+                ),
+            )
             .await?;
         hex_field(&response, "quote")
     }
@@ -1193,10 +1246,103 @@ mod tests {
         (dir, path, handle)
     }
 
+    /// A fake agent that 404s the first request and serves `response` to the
+    /// second, recording both request lines.
+    ///
+    /// Two connections, because the real client opens one per call with
+    /// `Connection: close`.
+    #[cfg(unix)]
+    async fn serve_404_then(
+        response: String,
+    ) -> (
+        tempfile::TempDir,
+        std::path::PathBuf,
+        tokio::task::JoinHandle<Vec<String>>,
+    ) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let path = dir.path().join("dstack.sock");
+        let listener = tokio::net::UnixListener::bind(&path).expect("bind");
+        let handle = tokio::spawn(async move {
+            let mut seen = Vec::new();
+            for turn in 0..2 {
+                let (mut stream, _) = listener.accept().await.expect("accept");
+                let mut buffer = [0u8; 2048];
+                let read = stream.read(&mut buffer).await.expect("read");
+                seen.push(String::from_utf8_lossy(&buffer[..read]).into_owned());
+                let body = if turn == 0 {
+                    "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".to_string()
+                } else {
+                    response.clone()
+                };
+                stream.write_all(body.as_bytes()).await.expect("write");
+                stream.shutdown().await.expect("shutdown");
+            }
+            seen
+        });
+        (dir, path, handle)
+    }
+
     #[cfg(unix)]
     mod socket {
         use super::super::*;
-        use super::{SCALAR_ONE, serve_response};
+        use super::{SCALAR_ONE, serve_404_then, serve_response};
+
+        /// A 404 on the versioned path falls through to the unversioned one.
+        ///
+        /// This exists because the versioned spelling has now failed on live
+        /// hardware twice and appeared to work in between, and nothing in the
+        /// evidence settles which an agent serves. Both derive the same key, so
+        /// trying both is free; guessing is not.
+        #[tokio::test]
+        async fn a_404_on_the_versioned_key_path_falls_back_to_the_unversioned_one() {
+            let (_dir, path, handle) = serve_404_then(format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{{\"key\":\"0x{}\"}}",
+                hex::encode(SCALAR_ONE)
+            ))
+            .await;
+            let agent = DstackSocketAgent::at(path);
+
+            let key = agent.signing_key().await.expect("the fallback answers");
+            assert_eq!(key.scalar.as_slice(), SCALAR_ONE);
+
+            let seen = handle.await.expect("the server task");
+            assert!(
+                seen[0].contains(GET_KEY_PATH),
+                "the first attempt must name the versioned path: {}",
+                seen[0]
+            );
+            assert!(
+                seen[1].contains(GET_KEY_PATH_UNVERSIONED) && !seen[1].contains(GET_KEY_PATH),
+                "the retry must name the unversioned path: {}",
+                seen[1]
+            );
+        }
+
+        /// A refusal that is not a 404 is returned rather than retried.
+        ///
+        /// Retrying a real fault at a second spelling turns one clear error
+        /// into a second, more confusing one.
+        #[tokio::test]
+        async fn a_non_404_refusal_is_not_retried_at_the_other_spelling() {
+            let (_dir, path, handle) = serve_response(
+                "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n".to_string(),
+            )
+            .await;
+            let agent = DstackSocketAgent::at(path);
+
+            // `DerivedSigningKey` has no `Debug` on purpose -- it holds
+            // zeroizing key material -- so this matches rather than
+            // `expect_err`, which would require one.
+            match agent.signing_key().await {
+                Err(EnclaveError::AgentRefused { status: 500 }) => {}
+                Err(other) => panic!("a 500 must surface as itself, got {other:?}"),
+                Ok(_) => panic!("a 500 must not yield a key"),
+            }
+            let seen = handle.await.expect("the server task");
+            assert!(seen.contains(GET_KEY_PATH), "{seen}");
+        }
 
         #[tokio::test]
         async fn the_quote_request_names_the_pinned_surface_and_hex_report_data() {
