@@ -413,7 +413,7 @@ history record, audit entry, notification text, or IPC response.
 | `discover_routing` | — | `found`, plus `port` and optionally `token_path` when found | reads the pointer a running IronWire published, so the declaring flow can pre-fill instead of asking; no network I/O and **never returns the token**; see "`discover_routing`" below |
 | `quiesce` | `timeout_secs` (optional, default 60, max 300) | `quiesced: true`, `waited_ms` | parks uploads for an update swap; `busy` / `quiesce-timeout` if in-flight work does not finish in time |
 | `get_settings` | — | settings; credential and local paths reported as booleans only | |
-| `set_settings` | any of `quiescence_secs`, `digest_interval_secs`, `approval_hold_secs`, `local_notifications`, `claude_root`, `codex_root`, `claude_source`, `codex_source`, `gemini_source`, `cline_source`, `ironwire`, `max_uploads_per_day`, `max_bytes_per_day` | updated settings | see "`set_settings`" below |
+| `set_settings` | any of `quiescence_secs`, `digest_interval_secs`, `approval_hold_secs`, `local_notifications`, `claude_root`, `codex_root`, `claude_source`, `codex_source`, `gemini_source`, `cline_source`, `ironwire`, `ironwire_attested_bodies`, `max_uploads_per_day`, `max_bytes_per_day` | updated settings | see "`set_settings`" below |
 | `consent_options` | — | `scopes[]` of `{name, description, always_on, grants_data_use}` | |
 | `set_consent_scopes` | `scopes[]` (wire-name strings; omitted means floor scope only) | `consent_scopes[]` | requires an existing enrollment |
 | `enroll` | `grant` xor `invite`, `scopes[]` (optional) | `enrolled: bool`, and on success `tenant_id`, `device_key_id`, `consent_scopes[]` | performs real network I/O |
@@ -1397,7 +1397,8 @@ Takes a JSON object of settings to change. Every top-level key must be one
 of `quiescence_secs`, `digest_interval_secs`, `approval_hold_secs`,
 `local_notifications`, `claude_root`, `codex_root`, `claude_source`,
 `codex_source`, `gemini_source`, `cline_source`, `ironwire`,
-`max_uploads_per_day`, `max_bytes_per_day` -- a key this method does
+`ironwire_attested_bodies`, `max_uploads_per_day`, `max_bytes_per_day` --
+a key this method does
 not recognize is
 refused outright (`bad_params` / `settings-unknown-field`), not silently
 ignored, so a caller that mistypes a key gets a definite signal rather than
@@ -1428,6 +1429,27 @@ daemon and the first tick fires immediately on start. That is what the C
 ABI's `tc_daemon_start_with_settings` is for: it applies the same object
 this method validates, but before starting the daemon, so the first tick
 already observes the override. See `include/trace_commons.h`.
+
+`ironwire_attested_bodies` takes a boolean, and it is a **second, separate
+answer from `ironwire`** rather than a detail of it. `ironwire` declares a
+local inference proxy whose ledger the daemon may read: metadata about model
+calls -- how many, what they cost, which backend served them. This key says
+that the final call's verbatim request and response bodies -- the
+contributor's own prompt, in the clear -- may additionally be carried to a
+configured redaction witness, which verifies an inference receipt against
+them inside its enclave, strips them, and certifies what is left. Declaring
+the proxy therefore never switches this on: cost attribution is not consent
+to send a prompt, and a client that sets `ironwire` alone gets routing
+telemetry and no bodies.
+
+Default `false`, and a settings file written before this key existed loads
+with it off. Turning it on moves the approval fingerprint, so approvals
+already given are re-asked rather than honoured under the new terms. The
+directory read is not configurable and is not this key: it is
+`bodies/` inside whichever proxy home the control token resolved in, so the
+body store and the ledger always belong to the same proxy. With no proxy
+declared, with the proxy declared off, or with no witness configured,
+setting this changes nothing that leaves the machine.
 
 `max_uploads_per_day` and `max_bytes_per_day` each take a positive integer,
 validated against a fixed ceiling (1,000 uploads; 5 GiB) rather than

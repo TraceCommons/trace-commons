@@ -286,7 +286,17 @@ fn envelope_determining_config_bytes(cfg: &ContributorConfig) -> Vec<u8> {
 ///
 /// One envelope-determining input is still outside this: `SubmitOptions`.
 /// See the note at the daemon's construction site in `daemon::drain_approved`.
-pub fn input_fingerprint(cfg: &ContributorConfig, near_ai: Option<&NearAiSettings>) -> String {
+///
+/// `attested_bodies` is the one term here that is NOT envelope-determining,
+/// and it is hashed in for the reason the guard exists rather than for the
+/// name it goes by: with it on, a submission carries the final inference
+/// call's verbatim prompt to a witness, which is a change in what leaves the
+/// machine that an earlier approval never covered.
+pub fn input_fingerprint(
+    cfg: &ContributorConfig,
+    near_ai: Option<&NearAiSettings>,
+    attested_bodies: bool,
+) -> String {
     let mut h = Sha256::new();
     h.update(envelope_determining_config_bytes(cfg).as_slice());
     h.update(b"\x00redactor\x00");
@@ -303,6 +313,21 @@ pub fn input_fingerprint(cfg: &ContributorConfig, near_ai: Option<&NearAiSetting
             h.update(s.model.as_deref().unwrap_or("").as_bytes());
         }
     }
+    // The attested-bodies switch. It does not change the envelope, and it is
+    // hashed in anyway: what it changes is what leaves the machine. With it
+    // on, a submission carries the final inference call's verbatim request
+    // and response to the witness -- the contributor's own prompt, in the
+    // clear, to a remote process. An entry approved while it was off must
+    // not be uploaded under it, which is exactly the "sends something the
+    // contributor did not approve" failure this fingerprint exists to
+    // prevent; the cost of being wrong the other way is one re-ask.
+    //
+    // The *directory* is deliberately not hashed in. It is derived from the
+    // IronWire declaration rather than configured separately, it is a local
+    // path, and a path in a value written to disk is what the hash-only rule
+    // is about. The switch is the consent-relevant fact.
+    h.update(b"\x00attested_bodies\x00");
+    h.update(if attested_bodies { "on" } else { "off" }.as_bytes());
     format!("sha256:{:x}", h.finalize())
 }
 
@@ -481,7 +506,13 @@ pub async fn build_preview(
     source: &dyn TraceSource,
     session_ref: &SessionRef,
 ) -> Result<(PreviewSummary, String, TraceContributionEnvelope)> {
-    build_preview_with_correction(_store, cfg, near_ai, source, session_ref, None).await
+    // `false` for the attested-bodies term of the fingerprint: this
+    // convenience entry point has no settings to read one from. The daemon's
+    // own preview surfaces call `build_preview_with_correction` and
+    // `build_preview_card` and pass the contributor's real answer -- a
+    // summary built here reports the terms of a machine that carries no
+    // bodies, which is what a caller with no daemon settings is.
+    build_preview_with_correction(_store, cfg, near_ai, source, session_ref, None, false).await
 }
 
 /// [`build_preview`], with the contributor's written correction folded into
@@ -503,9 +534,17 @@ pub async fn build_preview_with_correction(
     source: &dyn TraceSource,
     session_ref: &SessionRef,
     correction: Option<&str>,
+    attested_bodies: bool,
 ) -> Result<(PreviewSummary, String, TraceContributionEnvelope)> {
-    let (core, envelope) =
-        build_preview_core(cfg, near_ai, source, session_ref, correction).await?;
+    let (core, envelope) = build_preview_core(
+        cfg,
+        near_ai,
+        source,
+        session_ref,
+        correction,
+        attested_bodies,
+    )
+    .await?;
     // Digested here, at exactly the point `submit_loaded` takes over the
     // envelope it is about to send: after redaction, before the granted
     // scopes the issuer echoes back are stamped on. This identifies the
@@ -555,10 +594,12 @@ pub async fn build_preview_with_correction(
 pub async fn build_preview_card(
     cfg: Option<&ContributorConfig>,
     near_ai: Option<NearAiSettings>,
+    attested_bodies: bool,
     source: &dyn TraceSource,
     session_ref: &SessionRef,
 ) -> Result<PreviewCardSummary> {
-    let (core, _envelope) = build_preview_core(cfg, near_ai, source, session_ref, None).await?;
+    let (core, _envelope) =
+        build_preview_core(cfg, near_ai, source, session_ref, None, attested_bodies).await?;
     Ok(core)
 }
 
@@ -572,6 +613,12 @@ async fn build_preview_core(
     source: &dyn TraceSource,
     session_ref: &SessionRef,
     correction: Option<&str>,
+    // `attested_bodies`: whether this machine carries the final call's
+    // verbatim bodies to a witness. Reported, not applied -- the switch
+    // changes nothing about the envelope built here, because an attested
+    // body never enters a local envelope at all -- so it reaches this
+    // function only to be fingerprinted.
+    attested_bodies: bool,
 ) -> Result<(PreviewCardSummary, TraceContributionEnvelope)> {
     let transcript = source.load(session_ref)?;
     let raw_session_bytes = session_ref.size_bytes;
@@ -588,7 +635,8 @@ async fn build_preview_core(
     // The fingerprint of an unenrolled build describes the placeholder, and
     // is reported only so the summary is self-describing. Nothing binds an
     // approval to it -- see `PreviewSummary::enrolled`.
-    let fingerprint = input_fingerprint(cfg, near_ai.as_ref().filter(|_| enrolled));
+    let fingerprint =
+        input_fingerprint(cfg, near_ai.as_ref().filter(|_| enrolled), attested_bodies);
     let (redactor, raw) = if enrolled {
         (
             build_redactor_with(cfg, transcript.cwd.as_deref(), near_ai)
@@ -1035,7 +1083,7 @@ mod tests {
         }
 
         // The queue card reads the same map through the same shared build.
-        let card = build_preview_card(Some(&cfg), None, &src, &r)
+        let card = build_preview_card(Some(&cfg), None, false, &src, &r)
             .await
             .unwrap();
         assert_eq!(
@@ -1589,8 +1637,12 @@ mod tests {
     fn the_input_fingerprint_moves_with_every_envelope_determining_input() {
         let (_sd, store) = crate::config::tests_support::temp_store();
         let base = sample_cfg(&store);
-        let baseline = input_fingerprint(&base, None);
-        assert_eq!(baseline, input_fingerprint(&base, None), "must be stable");
+        let baseline = input_fingerprint(&base, None, false);
+        assert_eq!(
+            baseline,
+            input_fingerprint(&base, None, false),
+            "must be stable"
+        );
 
         for mutate in [
             (|c: &mut ContributorConfig| c.tenant_id = "other-tenant".into())
@@ -1605,7 +1657,7 @@ mod tests {
             mutate(&mut cfg);
             assert_ne!(
                 baseline,
-                input_fingerprint(&cfg, None),
+                input_fingerprint(&cfg, None, false),
                 "an envelope-determining config change must move the fingerprint"
             );
         }
@@ -1617,14 +1669,14 @@ mod tests {
             base_url: Some("https://filter.invalid".into()),
             model: Some("m1".into()),
         };
-        assert_ne!(baseline, input_fingerprint(&base, Some(&near)));
+        assert_ne!(baseline, input_fingerprint(&base, Some(&near), false));
         let other_model = NearAiSettings {
             model: Some("m2".into()),
             ..near.clone()
         };
         assert_ne!(
-            input_fingerprint(&base, Some(&near)),
-            input_fingerprint(&base, Some(&other_model))
+            input_fingerprint(&base, Some(&near), false),
+            input_fingerprint(&base, Some(&other_model), false)
         );
         // But rotating the credential does not: it changes nothing about
         // what the filter does, and a secret is not hashed into a value
@@ -1634,8 +1686,24 @@ mod tests {
             ..near.clone()
         };
         assert_eq!(
-            input_fingerprint(&base, Some(&near)),
-            input_fingerprint(&base, Some(&rotated))
+            input_fingerprint(&base, Some(&near), false),
+            input_fingerprint(&base, Some(&rotated), false)
+        );
+    }
+
+    /// Turning the attested-bodies switch on starts sending the final
+    /// call's verbatim prompt to a witness. Every approval taken before that
+    /// was taken without it, so the fingerprint must move and the uploader
+    /// must re-ask.
+    #[test]
+    fn switching_on_attested_bodies_re_asks_the_approved_backlog() {
+        let (_sd, store) = crate::config::tests_support::temp_store();
+        let base = sample_cfg(&store);
+        assert_ne!(
+            input_fingerprint(&base, None, false),
+            input_fingerprint(&base, None, true),
+            "an approval given before prompt bodies were carried must not \
+             be honoured after"
         );
     }
 
@@ -1648,7 +1716,7 @@ mod tests {
         // under `approval-inputs-changed`.
         let (_sd, store) = crate::config::tests_support::temp_store();
         let base = sample_cfg(&store);
-        let baseline = input_fingerprint(&base, None);
+        let baseline = input_fingerprint(&base, None, false);
 
         let mut claimed = base.clone();
         claimed.display_handle = Some("quiet-otter".into());
@@ -1656,7 +1724,7 @@ mod tests {
         claimed.public_since = Some(chrono::Utc::now());
         assert_eq!(
             baseline,
-            input_fingerprint(&claimed, None),
+            input_fingerprint(&claimed, None, false),
             "claiming a handle must not move the fingerprint"
         );
 
@@ -1665,7 +1733,7 @@ mod tests {
         renamed.public_bio = None;
         assert_eq!(
             baseline,
-            input_fingerprint(&renamed, None),
+            input_fingerprint(&renamed, None, false),
             "editing a published profile must not move the fingerprint"
         );
     }

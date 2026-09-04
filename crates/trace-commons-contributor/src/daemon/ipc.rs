@@ -531,14 +531,31 @@ impl DaemonShared {
     /// snapshot, which is the defect this helper exists to prevent -- see
     /// `DaemonSettings::source_roots`, which stays bare on purpose.
     pub(crate) fn source_roots_with_routing(&self) -> crate::source::SourceRoots {
-        let roots = {
+        let (roots, bodies) = {
             let s = self.settings.lock().expect("settings lock");
-            s.source_roots(&self.store)
+            (
+                s.source_roots(&self.store),
+                // The second, separate switch. Read from the same settings
+                // snapshot as the declaration it derives its path from, so
+                // a `set_settings` landing mid-call cannot produce a
+                // directory from one declaration and a decision from
+                // another.
+                super::settings::attested_bodies_dir_for(
+                    s.ironwire.as_ref(),
+                    s.ironwire_attested_bodies,
+                ),
+            )
         };
         let ledger = self
             .routing_ledger()
             .map(|l| l as Arc<dyn crate::routing::RoutingLedger>);
-        roots.with_routing(ledger)
+        // Never without a ledger. `all_sources` already builds no overlay in
+        // that case, so this is belt and braces -- and it is the belt worth
+        // having: it states, at the one place the daemon decides, that a
+        // body store is only ever read for a proxy this daemon is actually
+        // reading rows from.
+        let bodies = bodies.filter(|_| ledger.is_some());
+        roots.with_routing(ledger).with_attested_bodies(bodies)
     }
 
     /// The routing ledger the daemon currently holds, if any.
@@ -1888,13 +1905,11 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
     // every call site expresses "unknown" the same way, and the
     // uploader treats it as "re-ask" -- fail-closed.
     let inputs = cfg.as_ref().map(|c| {
-        let near_ai = shared
-            .settings
-            .lock()
-            .expect("settings lock")
-            .near_ai
-            .clone();
-        super::preview::input_fingerprint(c, near_ai.as_ref())
+        let (near_ai, attested_bodies) = {
+            let s = shared.settings.lock().expect("settings lock");
+            (s.near_ai.clone(), s.ironwire_attested_bodies)
+        };
+        super::preview::input_fingerprint(c, near_ai.as_ref(), attested_bodies)
     });
     let project_id = req.params.get("project_id").and_then(|v| v.as_str());
     // Three mutually exclusive selectors; `all` wins over `project_id` wins
@@ -2320,7 +2335,19 @@ async fn handle_preview(shared: &DaemonShared, req: &Request) -> Response {
         return Response::err(req.id, ERR_BAD_PARAMS, "session-file-vanished");
     };
 
-    match super::preview::build_preview_card(cfg.as_ref(), near_ai, source, &session_ref).await {
+    let attested_bodies = {
+        let s = shared.settings.lock().expect("settings lock");
+        s.ironwire_attested_bodies
+    };
+    match super::preview::build_preview_card(
+        cfg.as_ref(),
+        near_ai,
+        attested_bodies,
+        source,
+        &session_ref,
+    )
+    .await
+    {
         Ok(summary) => {
             // The card shape lives in `preview_card_value`, shared with the
             // scheduler's ready event so the two cannot drift. `entry` is
@@ -2390,12 +2417,12 @@ pub(crate) fn preview_card_value(
 /// unenrolled preview -- holds either way.
 pub(crate) fn preview_config_fingerprint(shared: &DaemonShared) -> String {
     let cfg = shared.store.load_config().ok().flatten();
-    let near_ai = {
+    let (near_ai, attested_bodies) = {
         let s = shared.settings.lock().expect("settings lock");
-        s.near_ai.clone()
+        (s.near_ai.clone(), s.ironwire_attested_bodies)
     };
     match cfg {
-        Some(c) => super::preview::input_fingerprint(&c, near_ai.as_ref()),
+        Some(c) => super::preview::input_fingerprint(&c, near_ai.as_ref(), attested_bodies),
         None => "unenrolled".to_string(),
     }
 }
@@ -2516,9 +2543,9 @@ async fn build_and_pin_preview(
     ),
     (&'static str, &'static str),
 > {
-    let near_ai = {
+    let (near_ai, attested_bodies) = {
         let s = shared.settings.lock().expect("settings lock");
-        s.near_ai.clone()
+        (s.near_ai.clone(), s.ironwire_attested_bodies)
     };
     let source_roots = shared.source_roots_with_routing();
     let sources = crate::source::all_sources(&source_roots);
@@ -2531,6 +2558,7 @@ async fn build_and_pin_preview(
         source,
         &session_ref,
         correction,
+        attested_bodies,
     )
     .await
     .map_err(|e| {
