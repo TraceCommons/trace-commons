@@ -3,27 +3,44 @@
 
 //! Server-side verification of a witness certificate.
 //!
-//! Three facts have to hold before a certificate says anything useful about
+//! Four facts have to hold before a certificate says anything useful about
 //! an artifact the server holds:
 //!
 //! 1. the signature recovers to the witness signing address the operator
 //!    pinned;
-//! 2. `witness_measurement` is one the operator pinned;
-//! 3. `redacted_sha256` is the digest of the bytes actually on hand.
+//! 2. `timestamp` is inside the pin's freshness window;
+//! 3. `witness_measurement` is one the operator pinned;
+//! 4. `redacted_sha256` is the digest of the bytes actually on hand.
 //!
 //! They run in that order, and a test pins it.
 //!
+//! # What the freshness window is, and is not
+//!
+//! A certificate names no submitter and carries no nonce. Nothing in it says
+//! who may present it, so the pair (envelope bytes, certificate) is a bearer
+//! token: whoever holds it can submit those bytes under any account and get
+//! the bypass. Before [`WitnessFreshness`] existed that was true forever --
+//! `timestamp` was signed into the preimage and then read only to render a
+//! header, so a single captured pair replayed indefinitely.
+//!
+//! The window does not fix that. It bounds it. A certificate is still
+//! replayable by anyone holding it, for as long as the window lasts. Making
+//! one single-use, or binding it to a submission or a tenant, requires a
+//! nonce or a submission identifier inside the signed preimage -- a protocol
+//! change, on both sides, that this module cannot make alone.
+//!
 //! [`WitnessCertificate::verify`] checks only the first. A caller who ran it
 //! and stopped there would have established that *some* enclave signed
-//! *something* -- not that this certificate covers this artifact, and not
-//! that the enclave running the witness is one anybody vouched for.
+//! *something* -- not that this certificate covers this artifact, not that
+//! the enclave running the witness is one anybody vouched for, and not that
+//! it was issued at any time in particular.
 //!
-//! So this module does not offer three checks. It offers one entry point,
+//! So this module does not offer four checks. It offers one entry point,
 //! [`verify_witness_certificate`], which takes every input the three checks
 //! need in a single call, consumes the certificate, and returns a
 //! [`VerifiedWitnessCertificate`] that has no other constructor. A partial
 //! verification is not discouraged here, it is unspeakable: there is no way
-//! to obtain the verified type without having passed all three, and the
+//! to obtain the verified type without having passed all four, and the
 //! field a policy would want to act on -- the residual-risk verdict --
 //! is reachable only through it.
 //!
@@ -59,6 +76,135 @@ use trace_commons_protocol::trace_contribution::ResidualPiiRisk;
 
 /// Missing-control name reported when the operator has pinned no witness.
 pub const EXPECTED_MEASUREMENT_CONTROL: &str = "witness_expected_measurement";
+
+/// How old a certificate may be, by default, and still be accepted.
+///
+/// Twenty-four hours. The honest path takes seconds -- a contributor witnesses
+/// a session and submits the envelope it got back -- so this is not a bound on
+/// normal use but on how long a captured pair stays replayable. It is generous
+/// deliberately: a contributor who witnessed a session and then lost
+/// connectivity should not have to send the raw session a second time, and by
+/// then it has already left their machine once.
+pub const DEFAULT_CERTIFICATE_MAX_AGE_SECONDS: i64 = 24 * 60 * 60;
+
+/// How far ahead of the server's clock a certificate may be stamped.
+///
+/// Five minutes. The witness stamps from its own clock, and two machines that
+/// are both behaving still disagree by seconds; refusing at zero skew would
+/// turn ordinary NTP drift into a refusal an operator cannot diagnose from the
+/// message. It is small because a wide forward tolerance is a wide replay
+/// window in disguise -- a certificate stamped `now + tolerance` is accepted
+/// for `max_age + tolerance`.
+pub const DEFAULT_CERTIFICATE_FORWARD_TOLERANCE_SECONDS: i64 = 5 * 60;
+
+/// Why a freshness window could not be built.
+#[derive(Clone, PartialEq, Eq, thiserror::Error)]
+pub enum WitnessFreshnessError {
+    /// The window is zero or negative, which would refuse every certificate
+    /// including an honest one issued this instant.
+    #[error("the witness certificate max age must be a positive number of seconds")]
+    MaxAgeNotPositive,
+    /// The forward tolerance is negative, which would refuse a certificate for
+    /// being stamped at exactly the server's own clock.
+    #[error("the witness certificate forward tolerance must not be negative")]
+    ForwardToleranceNegative,
+}
+
+impl std::fmt::Debug for WitnessFreshnessError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, formatter)
+    }
+}
+
+/// How long a certificate stays acceptable.
+///
+/// A certificate carries no nonce and names no submitter, so the pair
+/// (envelope bytes, certificate) is a bearer token: anyone who observes one
+/// can present it again, under any account, for as long as it verifies. Until
+/// the signed preimage binds a submission there is no way to make that
+/// single-use, and this window is the only thing that bounds it at all.
+///
+/// It is part of [`WitnessPin`] rather than a separate argument to
+/// [`verify_witness_certificate`] so that there is no way to verify a
+/// certificate without one. An `Option` here, or a second parameter a caller
+/// could pass `None` to, would make "no freshness check" expressible -- and
+/// the state this fixes is precisely that it was not expressible any other
+/// way.
+///
+/// Values are operator configuration. `Debug` is derived for the same reason
+/// [`WitnessPin`]'s is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WitnessFreshness {
+    max_age_seconds: i64,
+    forward_tolerance_seconds: i64,
+}
+
+impl Default for WitnessFreshness {
+    fn default() -> Self {
+        Self {
+            max_age_seconds: DEFAULT_CERTIFICATE_MAX_AGE_SECONDS,
+            forward_tolerance_seconds: DEFAULT_CERTIFICATE_FORWARD_TOLERANCE_SECONDS,
+        }
+    }
+}
+
+impl WitnessFreshness {
+    /// Build a window. The forward tolerance keeps its default.
+    pub fn new(max_age_seconds: i64) -> Result<Self, WitnessFreshnessError> {
+        Self::with_forward_tolerance(
+            max_age_seconds,
+            DEFAULT_CERTIFICATE_FORWARD_TOLERANCE_SECONDS,
+        )
+    }
+
+    /// Build a window, naming both halves.
+    pub fn with_forward_tolerance(
+        max_age_seconds: i64,
+        forward_tolerance_seconds: i64,
+    ) -> Result<Self, WitnessFreshnessError> {
+        if max_age_seconds <= 0 {
+            return Err(WitnessFreshnessError::MaxAgeNotPositive);
+        }
+        if forward_tolerance_seconds < 0 {
+            return Err(WitnessFreshnessError::ForwardToleranceNegative);
+        }
+        Ok(Self {
+            max_age_seconds,
+            forward_tolerance_seconds,
+        })
+    }
+
+    /// The configured maximum age, in seconds.
+    pub fn max_age_seconds(&self) -> i64 {
+        self.max_age_seconds
+    }
+
+    /// The configured forward tolerance, in seconds.
+    pub fn forward_tolerance_seconds(&self) -> i64 {
+        self.forward_tolerance_seconds
+    }
+
+    /// Judge a claimed timestamp against `now`, both as Unix seconds.
+    ///
+    /// `checked_sub` rather than `-`: a certificate may claim `i64::MIN`, and
+    /// an overflow in a security check is not a diagnostic, it is a panic on
+    /// attacker-chosen input inside a request handler. An age that does not
+    /// compute is refused as expired, which is the fail-closed direction.
+    fn check(&self, claimed: i64, now: i64) -> Result<(), WitnessVerificationError> {
+        let Some(age) = now.checked_sub(claimed) else {
+            return Err(WitnessVerificationError::CertificateExpired {
+                age_seconds: self.max_age_seconds,
+            });
+        };
+        if age > self.max_age_seconds {
+            return Err(WitnessVerificationError::CertificateExpired { age_seconds: age });
+        }
+        if age < -self.forward_tolerance_seconds {
+            return Err(WitnessVerificationError::CertificateFutureDated { skew_seconds: -age });
+        }
+        Ok(())
+    }
+}
 
 /// Why a witness pin could not be loaded.
 ///
@@ -115,6 +261,7 @@ impl std::fmt::Debug for WitnessPinError {
 pub struct WitnessPin {
     signing_address: String,
     measurements: BTreeSet<String>,
+    freshness: WitnessFreshness,
 }
 
 impl WitnessPin {
@@ -150,7 +297,23 @@ impl WitnessPin {
         Ok(WitnessPin {
             signing_address: signing_address.to_string(),
             measurements: pinned,
+            freshness: WitnessFreshness::default(),
         })
+    }
+
+    /// Replace the default freshness window.
+    ///
+    /// Additive rather than a third parameter on [`Self::new`], so that a pin
+    /// always HAS a window and an operator who configures nothing gets the
+    /// default rather than no check.
+    pub fn with_freshness(mut self, freshness: WitnessFreshness) -> Self {
+        self.freshness = freshness;
+        self
+    }
+
+    /// The freshness window this pin applies.
+    pub fn freshness(&self) -> WitnessFreshness {
+        self.freshness
     }
 
     /// How many distinct measurements this pin admits. A caller reporting the
@@ -206,6 +369,24 @@ pub enum WitnessVerificationError {
     /// reaches this variant.
     #[error("the witness reported measurement {reported}, which is not pinned")]
     MeasurementNotPinned { reported: String },
+    /// The certificate is genuine and older than the configured window.
+    ///
+    /// Carries the age in seconds, not the timestamp. The age is what an
+    /// operator acts on -- widen the window, or investigate a replay -- and it
+    /// is safe to render for the same reason the reported measurement is: the
+    /// signature is checked first, so this value derives from one the PINNED
+    /// witness stamped, not one a sender chose.
+    #[error("the witness certificate is {age_seconds}s old, past the configured window")]
+    CertificateExpired { age_seconds: i64 },
+    /// The certificate is genuine and stamped further into the future than the
+    /// forward tolerance allows.
+    ///
+    /// Almost always a clock, not an attack -- which is why it is its own
+    /// variant. Told a certificate is expired, an operator inspects the
+    /// contributor; told it is future-dated by a large skew, they inspect the
+    /// witness's clock, which is the actual fix.
+    #[error("the witness certificate is stamped {skew_seconds}s in the future")]
+    CertificateFutureDated { skew_seconds: i64 },
 }
 
 impl std::fmt::Debug for WitnessVerificationError {
@@ -327,18 +508,22 @@ impl VerifiedWitnessCertificate {
 // `witness_service::mod`'s doc states it on the issuing side. It is repeated
 // here because this is the file the bypass gets written in.
 //
-// `timestamp` in particular is bound by the signature and *not* checked for
-// freshness: a certificate has no nonce and is replayable against the same
-// artifact by anyone holding it, so any freshness window is a policy decision
-// above this module.
+// `timestamp` is bound by the signature and now bounded by a freshness window
+// as well -- see `WitnessFreshness`. That window is what stops the same
+// (bytes, certificate) pair from being replayed forever; it is NOT a binding
+// to a submission, a tenant, or an account, and a certificate remains
+// replayable by anyone holding it FOR AS LONG AS THE WINDOW LASTS. Binding one
+// to a submitter needs a nonce or a submission identifier inside the signed
+// preimage, which is a protocol change this module cannot make on its own.
 
 /// Verify a witness certificate against the artifact the server holds.
 ///
-/// All three checks or none: the signature against the pinned address, the
-/// reported measurement against the pinned set, and the certificate's digest
-/// against `redacted_bytes` -- in that order, which a test pins. There is no
-/// way to run a subset, and the successful return value cannot be produced
-/// any other way.
+/// All four checks or none: the signature against the pinned address, the
+/// claimed timestamp against the pin's freshness window, the reported
+/// measurement against the pinned set, and the certificate's digest against
+/// `redacted_bytes` -- in that order, which a test pins. There is no way to
+/// run a subset, and the successful return value cannot be produced any other
+/// way.
 ///
 /// The order is fail-closed first. `pin: None` refuses before anything is
 /// examined, and the signature is checked before any certificate field is
@@ -355,6 +540,29 @@ pub fn verify_witness_certificate(
     pin: Option<&WitnessPin>,
     redacted_bytes: &[u8],
 ) -> Result<VerifiedWitnessCertificate, WitnessVerificationError> {
+    verify_witness_certificate_at(
+        certificate,
+        signature_hex,
+        pin,
+        redacted_bytes,
+        chrono::Utc::now().timestamp(),
+    )
+}
+
+/// [`verify_witness_certificate`] with the current time supplied.
+///
+/// `pub(crate)` and not the entry point: a caller that could choose `now`
+/// could choose the certificate's own timestamp and turn the freshness check
+/// into a tautology. Reading the clock is part of the check, so the public
+/// function reads it, and this exists only so a test can drive a certificate
+/// across the window boundary without sleeping through it.
+pub(crate) fn verify_witness_certificate_at(
+    certificate: WitnessCertificate,
+    signature_hex: &str,
+    pin: Option<&WitnessPin>,
+    redacted_bytes: &[u8],
+    now: i64,
+) -> Result<VerifiedWitnessCertificate, WitnessVerificationError> {
     let Some(pin) = pin else {
         return Err(WitnessVerificationError::Unpinned {
             control: EXPECTED_MEASUREMENT_CONTROL,
@@ -364,6 +572,12 @@ pub fn verify_witness_certificate(
     certificate
         .verify(signature_hex, &pin.signing_address)
         .map_err(WitnessVerificationError::Signature)?;
+
+    // Second, and only now: the signature has been checked, so the timestamp
+    // is one the pinned witness stamped rather than one a sender chose. A
+    // freshness check ahead of the signature would be judging an unsigned
+    // integer, and would put an attacker-chosen value on an operator surface.
+    pin.freshness.check(certificate.claimed_timestamp(), now)?;
 
     if !pin
         .measurements
@@ -415,7 +629,11 @@ mod tests {
             residual_risk_verdict: ResidualPiiRisk::Medium,
             redaction_policy_version: "policy-v3".to_string(),
             witness_measurement: PINNED_MEASUREMENT.to_string(),
-            timestamp: 1_788_000_000,
+            // Stamped now, because every test below except the freshness ones
+            // is about something else and a fixed past instant would make all
+            // of them fail on the window instead. The freshness tests choose
+            // their own `now` through `verify_witness_certificate_at`.
+            timestamp: chrono::Utc::now().timestamp(),
         }
     }
 
@@ -471,6 +689,272 @@ mod tests {
         let pin = WitnessPin::new(&address_of_key(&k), [PINNED_MEASUREMENT.to_string()])
             .expect("pin is well formed");
         (k, pin)
+    }
+
+    /// A certificate stamped at `at`, covering [`ARTIFACT`].
+    fn certificate_stamped(at: i64) -> WitnessCertificate {
+        WitnessCertificate::from_parts(
+            digest_of(ARTIFACT),
+            CertificateDetails {
+                timestamp: at,
+                ..details()
+            },
+        )
+    }
+
+    /// The signed timestamp was never read. Nothing checked it, so the same
+    /// (bytes, certificate) pair verified forever -- a bearer token with no
+    /// expiry, presentable by anyone who observed one.
+    #[test]
+    fn a_certificate_older_than_the_window_is_refused() {
+        let (k, pin) = witness();
+        let now = 1_800_000_000;
+        let cert = certificate_stamped(now - DEFAULT_CERTIFICATE_MAX_AGE_SECONDS - 1);
+        let signature = sign(&k, &cert);
+
+        let err = verify_witness_certificate_at(cert, &signature, Some(&pin), ARTIFACT, now)
+            .expect_err("a certificate past the window must refuse");
+        assert_eq!(
+            err,
+            WitnessVerificationError::CertificateExpired {
+                age_seconds: DEFAULT_CERTIFICATE_MAX_AGE_SECONDS + 1
+            },
+            "{err}"
+        );
+    }
+
+    /// The PUBLIC entry point refuses a certificate stamped long ago.
+    ///
+    /// Every other freshness test drives `verify_witness_certificate_at`,
+    /// which proves the predicate but not that production applies it. The
+    /// entry point reads the clock itself, and that read is the part a
+    /// regression removes: replacing `Utc::now()` with the certificate's own
+    /// timestamp makes every age zero and disables the window completely.
+    /// Nothing caught that, because the rest of this suite stamps `now` and
+    /// passes either way. This test does not -- 2020 is more than 24 hours
+    /// before any clock this will ever run on.
+    #[test]
+    fn the_public_entry_point_refuses_an_ancient_certificate() {
+        let (k, pin) = witness();
+        let cert = certificate_stamped(1_600_000_000);
+        let signature = sign(&k, &cert);
+
+        let err = verify_witness_certificate(cert, &signature, Some(&pin), ARTIFACT)
+            .expect_err("a certificate from 2020 must refuse against the real clock");
+        assert!(
+            matches!(err, WitnessVerificationError::CertificateExpired { .. }),
+            "the entry point is not applying the freshness window: {err}"
+        );
+    }
+
+    /// And the same entry point refuses one stamped past the tolerance ahead.
+    ///
+    /// Relative to the real clock rather than an absolute future instant, so
+    /// it cannot quietly stop being in the future.
+    #[test]
+    fn the_public_entry_point_refuses_a_future_dated_certificate() {
+        let (k, pin) = witness();
+        let cert = certificate_stamped(chrono::Utc::now().timestamp() + 86_400);
+        let signature = sign(&k, &cert);
+
+        let err = verify_witness_certificate(cert, &signature, Some(&pin), ARTIFACT)
+            .expect_err("a certificate stamped tomorrow must refuse against the real clock");
+        assert!(
+            matches!(err, WitnessVerificationError::CertificateFutureDated { .. }),
+            "the entry point is not applying the forward tolerance: {err}"
+        );
+    }
+
+    /// The boundary itself passes. A window that refused at exactly its own
+    /// width would be one second narrower than it is documented to be.
+    #[test]
+    fn a_certificate_at_exactly_the_window_still_verifies() {
+        let (k, pin) = witness();
+        let now = 1_800_000_000;
+        let cert = certificate_stamped(now - DEFAULT_CERTIFICATE_MAX_AGE_SECONDS);
+        let signature = sign(&k, &cert);
+
+        verify_witness_certificate_at(cert, &signature, Some(&pin), ARTIFACT, now)
+            .expect("the last second of the window is inside it");
+    }
+
+    /// Ordinary clock skew is tolerated; a certificate from next week is not.
+    #[test]
+    fn a_certificate_inside_the_forward_tolerance_verifies_and_one_beyond_it_does_not() {
+        let (k, pin) = witness();
+        let now = 1_800_000_000;
+
+        let near = certificate_stamped(now + DEFAULT_CERTIFICATE_FORWARD_TOLERANCE_SECONDS);
+        let signature = sign(&k, &near);
+        verify_witness_certificate_at(near, &signature, Some(&pin), ARTIFACT, now)
+            .expect("skew inside the tolerance is not a refusal");
+
+        let far = certificate_stamped(now + DEFAULT_CERTIFICATE_FORWARD_TOLERANCE_SECONDS + 1);
+        let signature = sign(&k, &far);
+        let err = verify_witness_certificate_at(far, &signature, Some(&pin), ARTIFACT, now)
+            .expect_err("a future-dated certificate must refuse");
+        assert_eq!(
+            err,
+            WitnessVerificationError::CertificateFutureDated {
+                skew_seconds: DEFAULT_CERTIFICATE_FORWARD_TOLERANCE_SECONDS + 1
+            },
+            "{err}"
+        );
+    }
+
+    /// Future-dating is its own refusal, not "expired".
+    ///
+    /// The two send an operator to different places: expired means look at
+    /// the submission, future-dated means look at the witness's clock.
+    #[test]
+    fn a_future_dated_certificate_is_not_reported_as_expired() {
+        let (k, pin) = witness();
+        let now = 1_800_000_000;
+        let cert = certificate_stamped(now + 86_400);
+        let signature = sign(&k, &cert);
+
+        let err = verify_witness_certificate_at(cert, &signature, Some(&pin), ARTIFACT, now)
+            .expect_err("a certificate from tomorrow must refuse");
+        assert!(
+            matches!(err, WitnessVerificationError::CertificateFutureDated { .. }),
+            "{err}"
+        );
+    }
+
+    /// `i64::MIN` is a timestamp a sender can type. Subtracting it overflows,
+    /// and an overflow inside a request handler is a panic, not a refusal.
+    #[test]
+    fn a_timestamp_that_overflows_the_age_computation_refuses_rather_than_panicking() {
+        let (k, pin) = witness();
+        let cert = certificate_stamped(i64::MIN);
+        let signature = sign(&k, &cert);
+
+        let err = verify_witness_certificate_at(cert, &signature, Some(&pin), ARTIFACT, 1)
+            .expect_err("an unrepresentable age must refuse");
+        assert!(
+            matches!(err, WitnessVerificationError::CertificateExpired { .. }),
+            "{err}"
+        );
+    }
+
+    /// The window is checked AFTER the signature.
+    ///
+    /// Order matters for what reaches an operator surface: the age rendered
+    /// in `CertificateExpired` is only trustworthy because it comes from a
+    /// certificate the pinned witness signed. A stale certificate signed by
+    /// somebody else must report the signature, not the age.
+    #[test]
+    fn a_stale_certificate_signed_by_a_stranger_reports_the_signature() {
+        let (_, pin) = witness();
+        let stranger = key("not the witness");
+        let now = 1_800_000_000;
+        let cert = certificate_stamped(now - DEFAULT_CERTIFICATE_MAX_AGE_SECONDS - 1000);
+        let signature = sign(&stranger, &cert);
+
+        let err = verify_witness_certificate_at(cert, &signature, Some(&pin), ARTIFACT, now)
+            .expect_err("a stranger's signature must refuse");
+        assert!(
+            matches!(err, WitnessVerificationError::Signature(_)),
+            "the freshness check ran before the signature: {err}"
+        );
+    }
+
+    /// And before the measurement, so an operator widening a pin is not sent
+    /// chasing an enclave over a certificate that was stale anyway.
+    #[test]
+    fn a_stale_certificate_from_an_unpinned_enclave_reports_the_age() {
+        let (k, pin) = witness();
+        let now = 1_800_000_000;
+        let cert = WitnessCertificate::from_parts(
+            digest_of(ARTIFACT),
+            CertificateDetails {
+                witness_measurement: "d2d2d2d2".to_string(),
+                timestamp: now - DEFAULT_CERTIFICATE_MAX_AGE_SECONDS - 1,
+                ..details()
+            },
+        );
+        let signature = sign(&k, &cert);
+
+        let err = verify_witness_certificate_at(cert, &signature, Some(&pin), ARTIFACT, now)
+            .expect_err("a stale certificate must refuse");
+        assert!(
+            matches!(err, WitnessVerificationError::CertificateExpired { .. }),
+            "{err}"
+        );
+    }
+
+    /// An operator can narrow the window, and the narrowed one is what
+    /// applies.
+    #[test]
+    fn a_configured_window_replaces_the_default() {
+        let (k, _) = witness();
+        let pin = WitnessPin::new(&address_of_key(&k), [PINNED_MEASUREMENT.to_string()])
+            .expect("pin is well formed")
+            .with_freshness(WitnessFreshness::new(60).expect("a minute is a window"));
+        let now = 1_800_000_000;
+
+        let inside = certificate_stamped(now - 59);
+        let signature = sign(&k, &inside);
+        verify_witness_certificate_at(inside, &signature, Some(&pin), ARTIFACT, now)
+            .expect("inside the narrowed window");
+
+        // And a certificate the DEFAULT window would have admitted does not
+        // get in through the narrowed one.
+        let outside = certificate_stamped(now - 3_600);
+        let signature = sign(&k, &outside);
+        let err = verify_witness_certificate_at(outside, &signature, Some(&pin), ARTIFACT, now)
+            .expect_err("outside the narrowed window");
+        assert_eq!(
+            err,
+            WitnessVerificationError::CertificateExpired { age_seconds: 3_600 },
+            "{err}"
+        );
+    }
+
+    /// A pin that names no window still has one.
+    #[test]
+    fn a_pin_built_without_a_window_carries_the_default() {
+        let (_, pin) = witness();
+        assert_eq!(
+            pin.freshness().max_age_seconds(),
+            DEFAULT_CERTIFICATE_MAX_AGE_SECONDS
+        );
+        assert_eq!(
+            pin.freshness().forward_tolerance_seconds(),
+            DEFAULT_CERTIFICATE_FORWARD_TOLERANCE_SECONDS
+        );
+    }
+
+    /// A window that admits nothing is a configuration error, not a very
+    /// strict policy.
+    #[test]
+    fn a_window_that_is_not_positive_refuses_to_build() {
+        for seconds in [0, -1, i64::MIN] {
+            let err = WitnessFreshness::new(seconds).expect_err("must refuse");
+            assert_eq!(err, WitnessFreshnessError::MaxAgeNotPositive, "{err}");
+        }
+        let err = WitnessFreshness::with_forward_tolerance(60, -1).expect_err("must refuse");
+        assert_eq!(
+            err,
+            WitnessFreshnessError::ForwardToleranceNegative,
+            "{err}"
+        );
+    }
+
+    /// The refusals render an age and a skew, and nothing else.
+    #[test]
+    fn the_freshness_refusals_carry_no_content() {
+        for err in [
+            WitnessVerificationError::CertificateExpired { age_seconds: 99 },
+            WitnessVerificationError::CertificateFutureDated { skew_seconds: 99 },
+        ] {
+            let rendered = format!("{err} {err:?}");
+            assert!(rendered.contains("99"), "{rendered}");
+            assert!(
+                !rendered.contains(&digest_of(ARTIFACT)) && !rendered.contains(PINNED_MEASUREMENT),
+                "a freshness refusal rendered certificate content: {rendered}"
+            );
+        }
     }
 
     #[test]
