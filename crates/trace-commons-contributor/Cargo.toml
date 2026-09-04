@@ -14,12 +14,6 @@ trace-commons-build-info = { path = "../trace-commons-build-info" }
 # witness: this client verifies an enclave's measurement BEFORE handing it a
 # raw session, and verifies the certificate it gets back before forwarding it.
 #
-# Default features, deliberately: `receipt` stays off because this client
-# makes no inference calls and holds no receipts. It saves nothing -- `k256`
-# and `sha3` are unconditional in that crate because certificate verification
-# needs them -- and the flag is off because it is accurate, not because it is
-# cheap.
-#
 # Measured cost, `cargo tree -p trace-commons-contributor -e normal`:
 # 162 packages before, 227 after. Approved at that figure.
 # `receipt` is on because this crate now fetches and carries NEAR AI

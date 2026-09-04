@@ -113,6 +113,23 @@ pub struct ContributorConfig {
     /// has no `witness` key.
     #[serde(default)]
     pub witness: Option<WitnessSettings>,
+    /// Base URL of the inference provider's receipt endpoint, e.g.
+    /// `https://qwen3-6-27b.completions.near.ai/v1`.
+    ///
+    /// Absent -- the default, and every deployment today -- means no receipt
+    /// is ever fetched and every submission is honestly unattested. It is a
+    /// separate switch from the witness and from the body store, because
+    /// fetching a receipt tells the provider that this exchange is being
+    /// contributed (see `crate::routing::receipt`), and that is a disclosure
+    /// a contributor opts into rather than inherits.
+    ///
+    /// A base URL rather than something derived from a routing row: the proxy
+    /// records no upstream URL, so a derived base would be invented.
+    ///
+    /// `#[serde(default)]` is required rather than decorative: this struct is
+    /// read from files written by releases that had no such key.
+    #[serde(default)]
+    pub inference_receipt_endpoint: Option<String>,
 }
 
 /// Where the redaction witness is, and what this client will accept from it.
@@ -193,6 +210,23 @@ pub fn witness_settings_from_env() -> Option<WitnessSettings> {
             .map(str::to_string)
             .collect(),
     })
+}
+
+/// `TRACE_COMMONS_INFERENCE_RECEIPT_ENDPOINT`.
+pub const TRACE_COMMONS_INFERENCE_RECEIPT_ENDPOINT: &str =
+    "TRACE_COMMONS_INFERENCE_RECEIPT_ENDPOINT";
+
+/// Read the receipt endpoint from the environment.
+///
+/// Absent, or set to nothing but whitespace, is "no endpoint" -- not an
+/// endpoint that fails later. An empty string reaching `receipt_url` would be
+/// refused there too, but as a malformed URL rather than as the "not
+/// configured" it actually is.
+pub fn inference_receipt_endpoint_from_env() -> Option<String> {
+    std::env::var(TRACE_COMMONS_INFERENCE_RECEIPT_ENDPOINT)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 /// Build the allowlist to enforce for issuer/ingest requests: the `allowed_hosts`
@@ -705,6 +739,7 @@ mod tests {
 
     fn sample_config() -> ContributorConfig {
         ContributorConfig {
+            inference_receipt_endpoint: None,
             schema_version: CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),
             issuer_url: "https://issuer.example".into(),
             ingest_url: "https://ingest.example".into(),

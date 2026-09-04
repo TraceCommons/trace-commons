@@ -1959,6 +1959,7 @@ mod tests {
     fn enrol(f: &WatcherFixture) {
         let device = crate::identity::DeviceIdentity::load_or_generate(&f.shared.store).unwrap();
         let cfg = crate::config::ContributorConfig {
+            inference_receipt_endpoint: None,
             schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
             issuer_url: "http://issuer.invalid".into(),
             ingest_url: "http://ingest.invalid".into(),

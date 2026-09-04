@@ -1345,6 +1345,7 @@ mod tests {
         let store = crate::config::ConfigStore::open(dir.path().join("state")).unwrap();
         store
             .save_config(&crate::config::ContributorConfig {
+                inference_receipt_endpoint: None,
                 schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),
                 issuer_url: "http://127.0.0.1:9".to_string(),
                 // Port 9 (discard) refuses immediately on loopback, so this

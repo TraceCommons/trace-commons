@@ -894,6 +894,7 @@ mod tests {
     fn sample_cfg(store: &ConfigStore) -> ContributorConfig {
         let device = crate::identity::DeviceIdentity::load_or_generate(store).unwrap();
         ContributorConfig {
+            inference_receipt_endpoint: None,
             schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
             issuer_url: "http://issuer.invalid".into(),
             ingest_url: "http://ingest.invalid".into(),
@@ -1696,6 +1697,15 @@ mod tests {
                 "consent_scopes",
                 "device_key_id",
                 "display_handle",
+                // Fingerprinted, deliberately. It does not change a byte of
+                // the envelope -- the receipt goes to the witness, which
+                // strips the bodies before certifying -- but turning it on
+                // starts disclosing to the inference provider that a given
+                // exchange is being contributed. That is a consent-bearing
+                // change, and an entry approved before it was set should be
+                // re-asked rather than uploaded under a rule the contributor
+                // never saw.
+                "inference_receipt_endpoint",
                 "ingest_url",
                 "instance_id",
                 "issuer_url",

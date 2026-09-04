@@ -49,6 +49,7 @@ use sha3::Keccak256;
 use tower::ServiceExt as _;
 
 use trace_commons_protocol::trace_contribution::ResidualPiiRisk;
+use trace_commons_server::near_attestation::receipt::ReceiptPayload;
 use trace_commons_server::redaction_witness::certificate::{
     CertificateDetails, WitnessCertificate,
 };
@@ -63,12 +64,15 @@ use trace_commons_server::witness_service::http::{
     WITNESS_CERTIFICATE_HEADER, WITNESS_SIGNATURE_HEADER, WitnessLoadBound, certificate_json,
     verdict_label, witness_router,
 };
+use trace_commons_server::witness_service::inference::InferenceAttestationPolicy;
 use trace_commons_server::witness_service::surface::WitnessService;
 use trace_commons_server::witness_service::{
     DeterministicRedaction, Enclave, PipelineContributionRedaction, SeamUnavailable, Signer,
 };
 
-use trace_commons_contributor::witness::transport::{WitnessedEnvelope, verify_certificate};
+use trace_commons_contributor::witness::transport::{
+    GrantedConsent, WitnessedEnvelope, verify_certificate, witness_request_body,
+};
 
 /// The measurement the test enclave reports and the pin admits.
 const MEASUREMENT: &str = "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1";
@@ -386,4 +390,246 @@ async fn the_certificate_binds_the_envelope_bytes_as_served() {
         hex::encode(Sha256::digest(&wire.envelope_bytes)),
         "the certificate names a digest that is not the body's"
     );
+}
+
+// ---------------------------------------------------------------------------
+// The offered inference receipt: a fourth implementation of one wire format.
+// ---------------------------------------------------------------------------
+//
+// `WitnessRequestBody` is `#[serde(deny_unknown_fields)]`. So the contributor's
+// spelling of `inference_receipt` is not a field that degrades to "no receipt"
+// when it is wrong -- a misspelling makes EVERY witnessed submission a 400,
+// which the client reports as an unreachable witness. Nothing but a test that
+// hands the client's own bytes to the server's own deserialiser can observe
+// that, and the client cannot host such a test: this crate is AGPL and
+// unreachable from the permissive one.
+//
+// The client-side unit tests assert the shape of the document it builds. They
+// would pass unchanged against a field the server has never heard of.
+
+/// A receipt over these two bodies, signed the way the inference enclave signs.
+///
+/// The **two**-part text -- `<requestHash>:<responseHash>` -- because that is
+/// what NEAR AI signs today. It binds no model, and nothing here or downstream
+/// may read one out of it.
+fn receipt_over(signer: &TestSigner, request_body: &str, response_body: &str) -> ReceiptPayload {
+    let text = format!(
+        "{}:{}",
+        hex::encode(Sha256::digest(request_body.as_bytes())),
+        hex::encode(Sha256::digest(response_body.as_bytes()))
+    );
+    let signature = signer
+        .sign_eip191(text.as_bytes())
+        .expect("the test signer is available");
+    ReceiptPayload {
+        text,
+        signature,
+        signing_address: signer.address(),
+    }
+}
+
+/// One attestable call, built through the client's own reader.
+///
+/// `attested_final_call` rather than a hand-built `AttestedCall`: the digests
+/// it checks are the ones the receipt above is taken over, so a fixture that
+/// is not actually attestable fails here instead of proving nothing.
+fn attestable_call() -> (
+    trace_commons_contributor::routing::attested::AttestedCall,
+    tempfile::TempDir,
+) {
+    const REQUEST: &str = "{\"model\":\"Qwen/Qwen3.6-27B-FP8\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}";
+    const RESPONSE: &str =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n";
+
+    let dir = tempfile::tempdir().expect("a temporary body store");
+    let reference = "00000000000000000007-000000";
+    std::fs::write(dir.path().join(format!("{reference}.req")), REQUEST).expect("the request body");
+    std::fs::write(dir.path().join(format!("{reference}.res")), RESPONSE)
+        .expect("the response body");
+
+    let row = trace_commons_contributor::routing::RoutedExchange {
+        id: Some(7),
+        started_at: chrono::Utc::now(),
+        client_session_id: Some("session".to_string()),
+        total_ms: Some(10),
+        facade: "openai".to_string(),
+        backend: "nearai".to_string(),
+        requested_model: Some("Qwen/Qwen3.6-27B-FP8".to_string()),
+        served_model: Some("Qwen/Qwen3.6-27B-FP8".to_string()),
+        upstream_id: Some("chatcmpl-abc123".to_string()),
+        request_sha256: Some(hex::encode(Sha256::digest(REQUEST.as_bytes()))),
+        response_sha256: Some(hex::encode(Sha256::digest(RESPONSE.as_bytes()))),
+        body_ref: Some(reference.to_string()),
+        rung: "full".to_string(),
+        attempts: 1,
+        input_tokens: Some(1),
+        cache_read_tokens: None,
+        cache_write_tokens: None,
+        output_tokens: Some(1),
+        cost_usd: Some(0.0),
+        status: 200,
+    };
+    let call =
+        trace_commons_contributor::routing::attested::attested_final_call(&[row], dir.path())
+            .expect("the fixture must be attestable, or these tests prove nothing");
+    (call, dir)
+}
+
+/// The client's `POST /v1/witness` document, with the attested exchange
+/// appended exactly as `witness_contribution` appends it, and the receipt
+/// passed through the client's own builder.
+fn client_request_body(
+    call: &trace_commons_contributor::routing::attested::AttestedCall,
+    receipt: Option<ReceiptPayload>,
+) -> Vec<u8> {
+    use trace_commons_protocol::trace_contribution::{
+        RawTraceCaptureTurn, RawTraceContribution, RecordedTraceContributionOptions,
+    };
+    let started = chrono::Utc::now();
+    let mut raw = RawTraceContribution::from_capture_turns(
+        &[RawTraceCaptureTurn {
+            user_input: "ran the build and read the log".to_string(),
+            response: None,
+            tool_calls: Vec::new(),
+            started_at: started,
+            completed_at: Some(started + chrono::Duration::milliseconds(10)),
+            state: Some("Completed".to_string()),
+        }],
+        RecordedTraceContributionOptions {
+            include_message_text: true,
+            ..RecordedTraceContributionOptions::default()
+        },
+    );
+    raw.events
+        .push(trace_commons_contributor::routing::attested::attested_exchange_event(call));
+
+    // The receipt is handed over as a value, never as JSON this file spelled:
+    // the whole point is that the CLIENT chooses the field names on the wire.
+    // `ReceiptPayload` is the same type on both sides -- the server re-exports
+    // the attestation crate's -- so nothing is transcribed.
+    witness_request_body(
+        &raw,
+        &GrantedConsent {
+            scopes: vec![
+                trace_commons_protocol::trace_contribution::ConsentScope::DebuggingEvaluation,
+            ],
+            uses: vec![trace_commons_protocol::trace_contribution::TraceAllowedUse::Debugging],
+        },
+        receipt.as_ref(),
+    )
+    .expect("the client builds its own request document")
+}
+
+/// A witness that refuses anything unattested, and the address it signs under.
+fn requiring_service() -> (Arc<WitnessService>, TestSigner) {
+    let signer = TestSigner::new("cross-implementation");
+    let address = signer.address();
+    let service = WitnessService::new(
+        Arc::new(DeterministicRedaction::new(Vec::new())),
+        Arc::new(TestSigner::new("cross-implementation")),
+        Arc::new(TestEnclave(address)),
+        TEST_LIMIT,
+    )
+    .with_contribution_redactor(Arc::new(PipelineContributionRedaction::deterministic_only(
+        Vec::new(),
+    )))
+    .requiring_attested_inference(
+        InferenceAttestationPolicy::required(TEST_LIMIT).expect("the policy requires something"),
+    );
+    (Arc::new(service), signer)
+}
+
+/// Drive the real router with a raw body and keep the status and the label.
+async fn post_witness(service: Arc<WitnessService>, body: Vec<u8>) -> (StatusCode, String) {
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri("/v1/witness")
+        .header("content-type", "application/json")
+        .body(Body::from(body))
+        .expect("a well formed request");
+    let response = witness_router(
+        service,
+        WitnessLoadBound::new(8, std::time::Duration::from_secs(30)),
+    )
+    .oneshot(request)
+    .await
+    .expect("the router is infallible");
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), TEST_LIMIT)
+        .await
+        .expect("the response body is small");
+    let label = serde_json::from_slice::<serde_json::Value>(&bytes)
+        .ok()
+        .and_then(|document| {
+            document
+                .get("error")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_default();
+    (status, label)
+}
+
+/// The headline: a receipt the client offers is one the witness reads.
+///
+/// The witness here **requires** attested inference, so the only way to reach
+/// `200` is for the offered receipt to have been found, parsed, and verified
+/// against the bodies the client put in the same document. A field named
+/// anything other than `inference_receipt` is a `400
+/// witness_request_malformed` (`deny_unknown_fields`); a field found but
+/// shaped wrong is the same; a receipt read but not matched to the bodies is
+/// `403 witness_inference_receipt_unverified`. Each failure is distinct from
+/// the success, and none of them is reachable from the client's own tests.
+#[tokio::test]
+async fn a_receipt_this_client_offers_is_one_the_witness_verifies() {
+    let (service, signer) = requiring_service();
+    let (call, _dir) = attestable_call();
+    let receipt = receipt_over(&signer, call.request_body(), call.response_body());
+
+    let (status, label) = post_witness(service, client_request_body(&call, Some(receipt))).await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a witness requiring attestation refused a receipt this client offered: {label}"
+    );
+}
+
+/// And the same submission with no receipt is refused, by name.
+///
+/// This is what makes the test above non-vacuous: without it, a witness that
+/// silently ignored the receipt field entirely would also return `200`. The
+/// two together say the field is read and that reading it is what decided the
+/// outcome.
+#[tokio::test]
+async fn the_same_submission_without_a_receipt_is_refused_by_name() {
+    let (service, _) = requiring_service();
+    let (call, _dir) = attestable_call();
+
+    let (status, label) = post_witness(service, client_request_body(&call, None)).await;
+
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        label, "witness_inference_attestation_missing",
+        "an absent receipt must be refused as an absent receipt"
+    );
+}
+
+/// A receipt over other bytes does not pass, even though it is a real
+/// signature by the right key.
+///
+/// The client forwards what the provider gave it and checks nothing. So the
+/// binding between a receipt and this trace is entirely the witness's, and
+/// this pins that the bodies the client carried are the bodies the witness
+/// hashed -- not merely that a well-formed receipt was present.
+#[tokio::test]
+async fn a_receipt_over_other_bytes_is_refused() {
+    let (service, signer) = requiring_service();
+    let (call, _dir) = attestable_call();
+    let elsewhere = receipt_over(&signer, "some other request", "some other response");
+
+    let (status, label) = post_witness(service, client_request_body(&call, Some(elsewhere))).await;
+
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(label, "witness_inference_receipt_unverified");
 }

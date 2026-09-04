@@ -251,6 +251,7 @@ mod tests {
 
     fn enrolled_config() -> ContributorConfig {
         ContributorConfig {
+            inference_receipt_endpoint: None,
             schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
             issuer_url: "http://issuer.invalid".into(),
             ingest_url: "http://ingest.invalid".into(),

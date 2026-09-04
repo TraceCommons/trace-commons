@@ -67,6 +67,7 @@ fn seed_config_dir_with(enrolled: bool) -> (tempfile::TempDir, uuid::Uuid) {
     let session_ref = TraceSource::discover(&src).unwrap().remove(0);
 
     let cfg = ContributorConfig {
+        inference_receipt_endpoint: None,
         schema_version: trace_commons_contributor::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
         issuer_url: "http://issuer.invalid".into(),
         ingest_url: "http://ingest.invalid".into(),
