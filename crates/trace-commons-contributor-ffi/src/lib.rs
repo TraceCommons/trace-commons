@@ -2367,8 +2367,26 @@ pub unsafe extern "C" fn tc_witness_trust_state(config_dir: *const c_char) -> i3
 /// ```json
 /// {"state":"refusing_unpinned","state_code":2,"refusal":"witness_expected_measurement",
 ///  "url":"https://witness.example","signing_address":"0x...",
-///  "pinned_measurement_count":0}
+///  "pinned_measurement_count":0,
+///  "pinned_measurement_line":"No measurement is pinned.",
+///  "pinned_measurements":[]}
 /// ```
+///
+/// `pinned_measurements` is the pinned sets **verbatim**, in stored order,
+/// and is exactly what [`tc_witness_configure`] takes as
+/// `measurements_json` -- pre-fill an editor from it and hand it straight
+/// back. Do not re-serialise it from a parsed measurement: a shell that
+/// reformats a pin is a shell that can reformat it wrongly. Its length is
+/// always `pinned_measurement_count`.
+///
+/// A stored entry this build cannot parse is returned AS IT IS STORED, not
+/// omitted: the state is already `refusing_pin_malformed`, and the entry is
+/// there so a contributor can see the typo. Omitting it would delete their
+/// work the next time they saved.
+///
+/// `pinned_measurement_line` is the sentence for that count, or null when
+/// there is no witness to count for. A shell must print this rather than a
+/// bare numeral, and must not write its own.
 ///
 /// `state` and `state_code` are the same answer [`tc_witness_trust_state`]
 /// gives, carried here so a shell that already has the JSON does not make a
@@ -2411,6 +2429,8 @@ pub unsafe extern "C" fn tc_witness_status_json(
             "url": status.url,
             "signing_address": status.signing_address,
             "pinned_measurement_count": status.pinned_measurement_count,
+            "pinned_measurement_line": status.pinned_measurement_line(),
+            "pinned_measurements": status.pinned_measurements,
         });
         Ok(to_owned_cstring(&json.to_string()))
     })

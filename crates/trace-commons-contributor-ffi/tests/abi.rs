@@ -3105,3 +3105,152 @@ fn the_last_result_line_is_prose_and_never_says_attested() {
     assert_eq!(tc_witness_last_result_tone(), TC_WITNESS_TONE_HELD);
     assert_ne!(tc_witness_last_result_tone(), TC_WITNESS_TONE_CLEAR);
 }
+
+/// The pinned entries must go back through `tc_witness_configure` unchanged.
+///
+/// This is the whole point of returning them: a shell pre-fills its editor
+/// from `pinned_measurements` and hands that array straight back. If the
+/// round trip were not exact, a contributor who opened the settings screen
+/// and pressed save without touching the box would have silently rewritten
+/// their own pins.
+#[test]
+fn the_pinned_measurements_round_trip_through_configure_unchanged() {
+    let dir = tempfile::tempdir().unwrap();
+    write_enrolled_config(dir.path(), None);
+    let path = cstr(dir.path());
+    let url = cstr_str("https://witness.example");
+    let address = cstr_str("0xfeed");
+
+    let original = vec![
+        format!("mrtd={},mrconfigid={}", "ab".repeat(48), "cd".repeat(48)),
+        format!("mrtd={}", "ef".repeat(48)),
+    ];
+    let pins = cstr_str(&serde_json::to_string(&original).unwrap());
+    let mut err: *mut c_char = std::ptr::null_mut();
+    assert_eq!(
+        unsafe {
+            tc_witness_configure(
+                path.as_ptr(),
+                url.as_ptr(),
+                address.as_ptr(),
+                pins.as_ptr(),
+                &mut err,
+            )
+        },
+        0,
+        "configure failed: {:?}",
+        last_error()
+    );
+
+    let first = witness_status_json(dir.path());
+    let read_back: Vec<String> =
+        serde_json::from_value(first["pinned_measurements"].clone()).unwrap();
+    assert_eq!(
+        read_back, original,
+        "what came back is not what was stored, so an editor pre-filled from it \
+         would save something else"
+    );
+
+    // Hand exactly what was read straight back, the way a shell will.
+    let again = cstr_str(&serde_json::to_string(&read_back).unwrap());
+    let mut err: *mut c_char = std::ptr::null_mut();
+    assert_eq!(
+        unsafe {
+            tc_witness_configure(
+                path.as_ptr(),
+                url.as_ptr(),
+                address.as_ptr(),
+                again.as_ptr(),
+                &mut err,
+            )
+        },
+        0,
+        "the entries this ABI returned were rejected by the call that takes them"
+    );
+    let second = witness_status_json(dir.path());
+    assert_eq!(
+        first, second,
+        "a save that changed nothing changed the stored configuration"
+    );
+}
+
+/// The count and the list are one answer, and the list is what the editor
+/// shows.
+#[test]
+fn the_status_payload_carries_the_entries_and_a_sentence_for_the_count() {
+    let dir = tempfile::tempdir().unwrap();
+    let pin = format!("mrtd={}", "ab".repeat(48));
+    write_enrolled_config(
+        dir.path(),
+        Some(witness_settings(vec![pin.clone(), pin.clone()])),
+    );
+    let json = witness_status_json(dir.path());
+    assert_eq!(
+        json["pinned_measurements"],
+        serde_json::json!([pin, pin]),
+        "the editor has nothing to pre-fill from"
+    );
+    assert_eq!(
+        json["pinned_measurements"].as_array().unwrap().len(),
+        json["pinned_measurement_count"].as_u64().unwrap() as usize,
+        "the count and the list are two different answers"
+    );
+    assert_eq!(
+        json["pinned_measurement_line"],
+        serde_json::json!("2 measurements are pinned."),
+        "a bare numeral makes a shell write the words itself"
+    );
+
+    // No witness: an empty list, and no sentence to print about a count of
+    // pins on something that does not exist.
+    let absent = tempfile::tempdir().unwrap();
+    write_enrolled_config(absent.path(), None);
+    let json = witness_status_json(absent.path());
+    assert_eq!(json["pinned_measurements"], serde_json::json!([]));
+    assert_eq!(json["pinned_measurement_line"], serde_json::Value::Null);
+}
+
+/// A stored entry this build cannot parse is still shown, so it can be fixed.
+#[test]
+fn a_malformed_pin_is_readable_so_a_contributor_can_repair_it() {
+    let dir = tempfile::tempdir().unwrap();
+    write_enrolled_config(
+        dir.path(),
+        Some(witness_settings(vec!["mrtd=not-hex".into()])),
+    );
+    let json = witness_status_json(dir.path());
+    assert_eq!(json["state"], serde_json::json!("refusing_pin_malformed"));
+    assert_eq!(
+        json["pinned_measurements"],
+        serde_json::json!(["mrtd=not-hex"]),
+        "the unreadable entry is the one a contributor most needs to see; hiding it \
+         deletes their work on the next save"
+    );
+    assert_eq!(
+        json["pinned_measurement_line"],
+        serde_json::json!("One measurement is pinned.")
+    );
+
+    // And handing that entry back is still refused: the read is permissive,
+    // the write is not.
+    let path = cstr(dir.path());
+    let url = cstr_str("https://witness.example");
+    let address = cstr_str("0xfeed");
+    let pins = cstr_str(r#"["mrtd=not-hex"]"#);
+    let mut err: *mut c_char = std::ptr::null_mut();
+    assert_eq!(
+        unsafe {
+            tc_witness_configure(
+                path.as_ptr(),
+                url.as_ptr(),
+                address.as_ptr(),
+                pins.as_ptr(),
+                &mut err,
+            )
+        },
+        -1
+    );
+    let label = unsafe { CStr::from_ptr(err) }.to_str().unwrap().to_string();
+    unsafe { tc_string_free(err) };
+    assert_eq!(label, "witness-pin-malformed");
+}

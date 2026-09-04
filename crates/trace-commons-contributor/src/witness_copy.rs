@@ -194,6 +194,26 @@ pub fn witness_state_tone(state: WitnessTrustState) -> WitnessTone {
     }
 }
 
+/// How many measurement sets are pinned, as a sentence.
+///
+/// Two shells rendered this as a bare numeral and both declined to write a
+/// sentence for it, which is the right instinct and the reason this function
+/// exists: a number with no words around it on a privacy surface is a shell
+/// authoring wording by omission.
+///
+/// The zero case says only that nothing is pinned. It does NOT repeat the
+/// outage -- [`witness_state_line`] already leads with "Nothing is being
+/// sent." for that state, and a card that says it twice reads as two
+/// separate faults.
+#[must_use]
+pub fn witness_pinned_count_line(count: usize) -> String {
+    match count {
+        0 => "No measurement is pinned.".to_string(),
+        1 => "One measurement is pinned.".to_string(),
+        n => format!("{n} measurements are pinned."),
+    }
+}
+
 /// How many of a session's model calls carried a receipt, as a sentence.
 ///
 /// ALWAYS THE PAIR. There is no sentence here that says "attested", and none
@@ -415,6 +435,9 @@ mod tests {
         lines.push(WITNESS_CERTIFICATE_MEANS.to_string());
         lines.push(WITNESS_CLEAR_NOTE.to_string());
         lines.push(witness_n_of_m_line(InferenceReceiptCount { n: 3, m: 7 }));
+        for count in [0usize, 1, 2] {
+            lines.push(witness_pinned_count_line(count));
+        }
         for result in [
             WitnessLastResult::NotObserved,
             WitnessLastResult::LocalRedaction,
@@ -444,6 +467,28 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn the_pinned_count_is_a_sentence_and_never_a_bare_numeral() {
+        assert_eq!(witness_pinned_count_line(0), "No measurement is pinned.");
+        assert_eq!(witness_pinned_count_line(1), "One measurement is pinned.");
+        assert_eq!(witness_pinned_count_line(2), "2 measurements are pinned.");
+        assert_eq!(witness_pinned_count_line(11), "11 measurements are pinned.");
+        for count in [0usize, 1, 2, 11] {
+            let line = witness_pinned_count_line(count);
+            assert!(line.ends_with('.'), "{line} is not a sentence");
+            assert!(
+                line.split_whitespace().count() > 1,
+                "{line} is a bare numeral, which is a shell writing wording by omission"
+            );
+        }
+        // The zero case must not repeat the outage: the state line already
+        // leads with it, and a card saying it twice reads as two faults.
+        assert!(
+            !witness_pinned_count_line(0).contains("Nothing is being sent"),
+            "the state line already says this"
+        );
     }
 
     #[test]

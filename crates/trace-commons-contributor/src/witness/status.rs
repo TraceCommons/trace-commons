@@ -189,7 +189,68 @@ pub struct WitnessStatus {
     pub signing_address: Option<String>,
     /// How many measurement sets are pinned. Zero with a `url` present is
     /// [`WitnessTrustState::RefusingUnpinned`], never a pass.
+    ///
+    /// Exactly `pinned_measurements.len()`, always. It exists as its own
+    /// field because it shipped first and three shells read it; the two can
+    /// never disagree, and `the_count_is_the_length_of_the_list` says so.
     pub pinned_measurement_count: usize,
+    /// The pinned measurement sets themselves, **verbatim**, in the order
+    /// they are stored.
+    ///
+    /// # Why the entries and not just the count
+    ///
+    /// Without them the editor on every shell is write-only: reconfiguring
+    /// a pinned witness means retyping every pin from memory, and an empty
+    /// box is indistinguishable from a deliberately cleared one -- so a
+    /// shell either refuses a contributor who only wanted to change the URL,
+    /// or grows a "keep what is there" mode that silently saves something
+    /// nobody looked at. Read-back removes the need for both.
+    ///
+    /// # Verbatim, and why that matters
+    ///
+    /// These are the strings `WitnessSettings::expected_measurements` holds,
+    /// unparsed and unreformatted, which is exactly what
+    /// `measurements_json` takes. A shell pre-fills its editor from this
+    /// list and hands it straight back; it never re-serialises an
+    /// `ExpectedMeasurements`, because a shell that reformats a pin is a
+    /// shell that can reformat it wrongly.
+    ///
+    /// # A malformed entry is returned as it is stored
+    ///
+    /// Not omitted, and not a refusal to read. The state is already
+    /// [`WitnessTrustState::RefusingPinMalformed`], which says the pin
+    /// cannot be parsed; the entry is returned so the contributor can SEE
+    /// the typo and fix it. Omitting it would silently delete their work the
+    /// next time they saved, and refusing the read would leave them with a
+    /// witness that refuses every submission and no way to look at why.
+    pub pinned_measurements: Vec<String>,
+}
+
+impl WitnessStatus {
+    /// The sentence for how many measurements are pinned, or `None` when
+    /// there is no witness to count for.
+    ///
+    /// Lives here rather than on a shell because two shells asked for it and
+    /// both declined to write one, and a bare numeral on a privacy surface
+    /// is a shell inventing wording by omission. `None` for
+    /// [`WitnessTrustState::Absent`] and [`WitnessTrustState::NotEnrolled`]:
+    /// a count of the pins on a witness that does not exist is not a shorter
+    /// sentence, it is a wrong one. `None` too for
+    /// [`WitnessTrustState::SettingsUnreadable`], where the count is not
+    /// known at all.
+    pub fn pinned_measurement_line(&self) -> Option<String> {
+        match self.state {
+            WitnessTrustState::Absent
+            | WitnessTrustState::NotEnrolled
+            | WitnessTrustState::SettingsUnreadable => None,
+            WitnessTrustState::Pinned
+            | WitnessTrustState::RefusingUnpinned
+            | WitnessTrustState::RefusingPinMalformed
+            | WitnessTrustState::RefusingInferenceReceiptsMissing => Some(
+                crate::witness_copy::witness_pinned_count_line(self.pinned_measurement_count),
+            ),
+        }
+    }
 }
 
 /// Read the witness configuration out of a contributor config.
@@ -204,6 +265,7 @@ pub fn witness_status(cfg: &ContributorConfig) -> WitnessStatus {
             url: None,
             signing_address: None,
             pinned_measurement_count: 0,
+            pinned_measurements: Vec::new(),
         };
     };
     let state = match settings.trust() {
@@ -220,6 +282,10 @@ pub fn witness_status(cfg: &ContributorConfig) -> WitnessStatus {
         // screen can say "three pins, one of them unreadable" rather than
         // "no pins", which would read as the unpinned refusal instead.
         pinned_measurement_count: settings.expected_measurements.len(),
+        // Cloned verbatim. Not parsed and re-emitted: the value that goes
+        // back through `measurements_json` must be the value that is stored,
+        // or a round trip through a settings screen quietly rewrites a pin.
+        pinned_measurements: settings.expected_measurements.clone(),
     }
 }
 
@@ -455,6 +521,110 @@ mod tests {
             status.pinned_measurement_count, 1,
             "the contributor wrote one pin; reporting zero would read as the unpinned refusal"
         );
+    }
+
+    #[test]
+    fn the_count_is_the_length_of_the_list_in_every_state() {
+        for measurements in [
+            vec![],
+            vec![a_pin()],
+            vec![a_pin(), a_pin(), a_pin()],
+            vec!["mrtd=not-hex".to_string()],
+            vec![a_pin(), "mrtd=not-hex".to_string()],
+        ] {
+            let status = witness_status(&cfg_with(Some(WitnessSettings {
+                url: "https://witness.example".into(),
+                signing_address: "0xabc".into(),
+                expected_measurements: measurements.clone(),
+            })));
+            assert_eq!(
+                status.pinned_measurement_count,
+                status.pinned_measurements.len(),
+                "the count and the list disagree for {measurements:?}, so a shell shown \
+                 both is shown two different answers"
+            );
+        }
+    }
+
+    #[test]
+    fn the_pinned_entries_come_back_exactly_as_stored() {
+        // Verbatim is the whole contract: these strings go straight back
+        // into `measurements_json`, so anything this function normalises is
+        // something a settings screen would silently rewrite.
+        let stored = vec![
+            format!("{},mrconfigid={}", a_pin(), "cd".repeat(48)),
+            a_pin(),
+        ];
+        let status = witness_status(&cfg_with(Some(WitnessSettings {
+            url: "https://witness.example".into(),
+            signing_address: "0xabc".into(),
+            expected_measurements: stored.clone(),
+        })));
+        assert_eq!(status.pinned_measurements, stored);
+    }
+
+    #[test]
+    fn a_malformed_entry_is_returned_rather_than_hidden() {
+        // The state already says the pin cannot be parsed. Returning the
+        // entry is what lets a contributor SEE the typo; omitting it would
+        // delete their work on the next save, and refusing the read would
+        // leave them refusing every submission with nothing to look at.
+        let status = witness_status(&cfg_with(Some(WitnessSettings {
+            url: "https://witness.example".into(),
+            signing_address: "0xabc".into(),
+            expected_measurements: vec![a_pin(), "mrtd=not-hex".into()],
+        })));
+        assert_eq!(status.state, WitnessTrustState::RefusingPinMalformed);
+        assert_eq!(
+            status.pinned_measurements,
+            vec![a_pin(), "mrtd=not-hex".to_string()],
+            "the unreadable entry is the one the contributor most needs to see"
+        );
+    }
+
+    #[test]
+    fn a_count_sentence_exists_only_where_there_is_something_to_count() {
+        let absent = witness_status(&cfg_with(None));
+        assert_eq!(
+            absent.pinned_measurement_line(),
+            None,
+            "a count of the pins on a witness that does not exist is a wrong sentence, \
+             not a short one"
+        );
+
+        let pinned = witness_status(&cfg_with(Some(WitnessSettings {
+            url: "https://witness.example".into(),
+            signing_address: "0xabc".into(),
+            expected_measurements: vec![a_pin(), a_pin()],
+        })));
+        assert_eq!(
+            pinned.pinned_measurement_line().as_deref(),
+            Some("2 measurements are pinned.")
+        );
+
+        let unpinned = witness_status(&cfg_with(Some(WitnessSettings {
+            url: "https://witness.example".into(),
+            signing_address: "0xabc".into(),
+            expected_measurements: vec![],
+        })));
+        assert_eq!(
+            unpinned.pinned_measurement_line().as_deref(),
+            Some("No measurement is pinned.")
+        );
+
+        for state in [
+            WitnessTrustState::NotEnrolled,
+            WitnessTrustState::SettingsUnreadable,
+        ] {
+            let status = WitnessStatus {
+                state,
+                url: None,
+                signing_address: None,
+                pinned_measurement_count: 0,
+                pinned_measurements: Vec::new(),
+            };
+            assert_eq!(status.pinned_measurement_line(), None, "{state:?}");
+        }
     }
 
     #[test]
