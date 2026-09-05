@@ -50,11 +50,10 @@ pub struct SessionTooLarge {
 /// This machine's home directory, or an empty path when the platform will
 /// not name one.
 ///
-/// Every caller here wants the same thing from a missing home: a root that
-/// exists nowhere, so discovery finds no sessions. An empty path gives that
-/// -- `.join(".codex/sessions")` off it is a relative path no walk resolves
-/// -- which is why the six call sites this replaces all wrote
-/// `unwrap_or_default()` rather than propagating an error.
+/// Preserve the adapters' existing empty-path fallback when the platform
+/// cannot resolve a home. Joining a conventional suffix to that fallback
+/// produces a relative path; this helper does not claim that such a path is
+/// absent or replace the source-declaration and consent checks.
 pub(crate) fn home_dir() -> PathBuf {
     dirs::home_dir().unwrap_or_default()
 }
@@ -64,8 +63,8 @@ pub(crate) fn home_dir() -> PathBuf {
 ///
 /// Each adapter keeps its own layout rule and takes `(home, env)` so a test
 /// can hand it a temporary directory and a fake environment. This is the
-/// one place that supplies the real pair, so an adapter cannot accidentally
-/// read the process environment on a path a test believed was sandboxed.
+/// shared bridge used by the adapter wrappers to supply the real pair; tests
+/// can continue calling the adapter resolvers without reading process state.
 pub(crate) fn conventional_root_on_this_machine(
     conventional_root: fn(&Path, fn(&str) -> Option<String>) -> PathBuf,
 ) -> PathBuf {
