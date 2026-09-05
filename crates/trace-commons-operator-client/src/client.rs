@@ -286,6 +286,8 @@ impl ClientBuilder {
         };
 
         let inner = reqwest::Client::builder()
+            // Service endpoints never delegate credentials or trust through redirects.
+            .redirect(reqwest::redirect::Policy::none())
             .timeout(self.timeout)
             .build()
             .map_err(|source| Error::Transport {
@@ -707,5 +709,41 @@ mod tests {
             .build()
             .expect_err("a host outside the allowlist is refused at construction");
         assert_eq!(err.kind(), "host-not-allowed");
+    }
+    #[tokio::test]
+    async fn redirects_cannot_delegate_capability_trust_or_bearer_requests() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let target = MockServer::start().await;
+        Mock::given(path("/redirected"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"ready":true})),
+            )
+            .expect(0)
+            .mount(&target)
+            .await;
+        let origin = MockServer::start().await;
+        for verb in ["GET", "POST"] {
+            Mock::given(method(verb))
+                .and(path("/origin"))
+                .respond_with(
+                    ResponseTemplate::new(307)
+                        .insert_header("Location", format!("{}/redirected", target.uri())),
+                )
+                .mount(&origin)
+                .await;
+        }
+        let client = Client::builder(origin.uri(), "unused")
+            .bearer_token("secret")
+            .build()
+            .unwrap();
+        for verb in [Method::GET, Method::POST] {
+            assert!(
+                client
+                    .call_json::<serde_json::Value, serde_json::Value>(verb, "/origin", &[], None)
+                    .await
+                    .is_err()
+            );
+        }
     }
 }
