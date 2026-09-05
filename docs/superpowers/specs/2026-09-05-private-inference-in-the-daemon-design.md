@@ -104,7 +104,7 @@ nothing in PR CI validates it.
 
 ## Sub-projects
 
-- **A — upstream:** an embeddable seam in nearai/ironwire.
+- **A — upstream:** an embeddable seam in nearai/ironwire. **Landed** as ironwire#26 (`b1ecde4f`) on 2026-09-05, larger than this spec anticipated — see the plan for the six things it got wrong.
 - **B — the daemon hosts it**, behind `private_inference`, default off,
   settable over IPC. Ships working and headless.
 - **C — the first-start offer** in three shells. Its own spec and plan, once
