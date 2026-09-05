@@ -10,7 +10,7 @@ use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
     process::Stdio,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::process::{Child, Command};
 
@@ -112,6 +112,190 @@ struct Endpoint {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    fn sleeping_worker_for(seconds: &str) -> (tempfile::TempDir, WorkerProcess) {
+        let root = tempfile::tempdir().unwrap();
+        let mut worker = WorkerProcess::new(
+            root.path(),
+            LocalWorkerConfig {
+                binary: PathBuf::from("/usr/bin/true"),
+                expected_sha256: "00".repeat(32),
+                coordinator: "ws://127.0.0.1:9999".into(),
+                startup_timeout_secs: 1,
+            },
+        )
+        .unwrap();
+        crate::config::ConfigStore::open(worker.home.join("node")).unwrap();
+        let lock = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(worker.home.join("node/controller.lock"))
+            .unwrap();
+        lock.try_lock().unwrap();
+        worker.controller_lock = Some(lock);
+        worker.child = Some(
+            Command::new("/bin/sleep")
+                .arg(seconds)
+                .kill_on_drop(true)
+                .spawn()
+                .unwrap(),
+        );
+        (root, worker)
+    }
+
+    fn sleeping_worker() -> (tempfile::TempDir, WorkerProcess) {
+        sleeping_worker_for("30")
+    }
+
+    #[tokio::test]
+    async fn guarded_spawn_refusal_never_owns_child_and_releases_lock() {
+        let (_root, mut worker) = sleeping_worker();
+        worker
+            .stop_with_urgency(
+                tokio::sync::watch::channel(Some(Instant::now() - Duration::from_secs(2))).1,
+            )
+            .await;
+        worker.config.expected_sha256 = hex::encode(Sha256::digest(
+            std::fs::read(&worker.config.binary).unwrap(),
+        ));
+        let mut called = false;
+        let result = worker
+            .start_guarded(1, |_| {
+                called = true;
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "resource-policy-refused",
+                ))
+            })
+            .await;
+        assert!(called);
+        assert!(result.is_err());
+        assert!(worker.child.is_none());
+        assert!(worker.controller_lock.is_none());
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(worker.home.join("node/controller.lock"))
+            .unwrap();
+        lock.try_lock().unwrap();
+    }
+
+    #[tokio::test]
+    async fn urgent_observation_before_stop_kills_and_releases_ownership() {
+        let (_root, mut worker) = sleeping_worker();
+        let (sender, receiver) =
+            tokio::sync::watch::channel(Some(Instant::now() - Duration::from_secs(2)));
+        drop(sender);
+        let report =
+            tokio::time::timeout(Duration::from_secs(2), worker.stop_with_urgency(receiver))
+                .await
+                .unwrap();
+        assert_eq!(report.process, StopOutcome::Forced);
+        assert!(report.stopped);
+        assert!(report.drain.is_none());
+        assert!(worker.child.is_none());
+        assert!(worker.controller_lock.is_none());
+    }
+
+    #[tokio::test]
+    async fn urgent_escalation_interrupts_an_unresponsive_drain() {
+        let (_root, mut worker) = sleeping_worker();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        worker.address = Some(listener.local_addr().unwrap());
+        worker.credential = Some(wire::Credential::from_seed(&[7; 32]).unwrap());
+        let (sender, receiver) = tokio::sync::watch::channel(None);
+        let stop = worker.stop_with_urgency(receiver);
+        let escalation = async {
+            let (_socket, _) = listener.accept().await.unwrap();
+            sender.send(Some(Instant::now())).unwrap();
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        };
+        let started = Instant::now();
+        let report = tokio::time::timeout(Duration::from_millis(1900), async {
+            tokio::pin!(escalation);
+            tokio::select! {
+                report = stop => report,
+                _ = &mut escalation => panic!("drain did not escalate"),
+            }
+        })
+        .await
+        .unwrap();
+        assert!(started.elapsed() >= Duration::from_millis(900));
+        assert_eq!(report.process, StopOutcome::Forced);
+        assert!(report.stopped);
+        assert!(report.drain.is_none());
+    }
+
+    #[tokio::test]
+    async fn canceled_stop_retains_child_and_lock_then_escalates_during_exit_wait() {
+        let (_root, mut worker) = sleeping_worker();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), worker.stop())
+                .await
+                .is_err()
+        );
+        assert!(worker.child.is_some());
+        assert!(worker.controller_lock.is_some());
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(worker.home.join("node/controller.lock"))
+            .unwrap();
+        assert!(lock.try_lock().is_err());
+        let (sender, receiver) = tokio::sync::watch::channel(None);
+        let escalation = async {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            sender
+                .send(Some(Instant::now() - Duration::from_secs(2)))
+                .unwrap();
+        };
+        let (report, ()) = tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::join!(worker.stop_with_urgency(receiver), escalation)
+        })
+        .await
+        .unwrap();
+        assert_eq!(report.process, StopOutcome::Forced);
+        assert!(report.stopped);
+        lock.try_lock().unwrap();
+    }
+
+    #[tokio::test]
+    async fn normal_stop_allows_cooperative_child_exit() {
+        let (_root, mut worker) = sleeping_worker_for("0.1");
+        let report = worker.stop().await;
+        assert_eq!(report.process, StopOutcome::Exited);
+        assert!(report.stopped);
+    }
+
+    #[tokio::test]
+    async fn urgency_deadline_survives_sender_close_and_later_reset() {
+        let (_sender, receiver) =
+            tokio::sync::watch::channel(Some(Instant::now() - Duration::from_secs(2)));
+        assert!(
+            cooperative_until_urgent(std::future::pending::<()>(), receiver)
+                .await
+                .is_none()
+        );
+        let (sender, receiver) =
+            tokio::sync::watch::channel(Some(Instant::now() - Duration::from_millis(900)));
+        let reset = async {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            sender.send(None).unwrap();
+            drop(sender);
+        };
+        let (result, ()) = tokio::time::timeout(Duration::from_secs(1), async {
+            tokio::join!(
+                cooperative_until_urgent(std::future::pending::<()>(), receiver),
+                reset
+            )
+        })
+        .await
+        .unwrap();
+        assert!(result.is_none());
+    }
+
     #[tokio::test]
     async fn wrong_artifact_and_existing_worker_fail_before_launch_and_release_parent_lock() {
         let root = tempfile::tempdir().unwrap();
@@ -160,7 +344,18 @@ impl WorkerProcess {
         })
     }
 
+    #[cfg(test)]
     pub async fn start(&mut self, allowance: u64) -> anyhow::Result<wire::Status> {
+        self.start_guarded(allowance, Command::spawn).await
+    }
+
+    /// The caller can serialize its final policy check with the actual spawn.
+    /// No await or worker preparation occurs between this callback and ownership.
+    pub async fn start_guarded(
+        &mut self,
+        allowance: u64,
+        spawn: impl FnOnce(&mut Command) -> std::io::Result<Child>,
+    ) -> anyhow::Result<wire::Status> {
         anyhow::ensure!(self.child.is_none(), "worker-already-owned");
         self.config.verify_binary()?;
         for name in ["", "node", "host-home", "cache", "tmp"] {
@@ -218,8 +413,9 @@ impl WorkerProcess {
         if let Some(root) = std::env::var_os("SystemRoot") {
             command.env("SystemRoot", root);
         }
-        let child = command.spawn()?;
+        let spawned = spawn(&mut command);
         seed.fill(0);
+        let child = spawned?;
         self.child = Some(child);
         self.controller_lock = Some(parent_lock);
         self.credential = Some(credential);
@@ -280,7 +476,19 @@ impl WorkerProcess {
             .await
     }
 
+    #[cfg(test)]
     pub async fn stop(&mut self) -> StopReport {
+        let (_sender, receiver) = tokio::sync::watch::channel(None);
+        self.stop_with_urgency(receiver).await
+    }
+
+    /// Escalation may arrive during drain or exit waiting. The first urgent
+    /// observation caps all remaining cooperative work at observation + 1s.
+    /// The child and ownership lock remain in self across cancellation/failure.
+    pub async fn stop_with_urgency(
+        &mut self,
+        urgency: tokio::sync::watch::Receiver<Option<Instant>>,
+    ) -> StopReport {
         let Some(child) = self.child.as_mut() else {
             return StopReport {
                 drain: None,
@@ -289,28 +497,34 @@ impl WorkerProcess {
             };
         };
         let mut drain = None;
-        if matches!(child.try_wait(), Ok(None)) {
-            if let (Some(credential), Some(address)) = (&self.credential, self.address) {
-                drain = credential
-                    .exchange(address, wire::Command::Drain)
-                    .await
-                    .ok()
-                    .map(|s| s.drain);
-            }
-        }
-        let mut process = StopOutcome::Exited;
-        let stopped = match tokio::time::timeout(Duration::from_secs(3), child.wait()).await {
-            Ok(Ok(_)) => true,
-            _ => {
-                process = StopOutcome::Forced;
-                if child.start_kill().is_err() {
-                    false
-                } else {
-                    matches!(
-                        tokio::time::timeout(Duration::from_secs(2), child.wait()).await,
-                        Ok(Ok(_))
-                    )
+        let cooperative = async {
+            if matches!(child.try_wait(), Ok(None)) {
+                if let (Some(credential), Some(address)) = (&self.credential, self.address) {
+                    drain = credential
+                        .exchange(address, wire::Command::Drain)
+                        .await
+                        .ok()
+                        .map(|s| s.drain);
                 }
+            }
+            matches!(
+                tokio::time::timeout(Duration::from_secs(3), child.wait()).await,
+                Ok(Ok(_))
+            )
+        };
+        let exited = cooperative_until_urgent(cooperative, urgency).await == Some(true);
+        let mut process = StopOutcome::Exited;
+        let stopped = if exited {
+            true
+        } else {
+            process = StopOutcome::Forced;
+            if child.start_kill().is_err() {
+                false
+            } else {
+                matches!(
+                    tokio::time::timeout(Duration::from_secs(2), child.wait()).await,
+                    Ok(Ok(_))
+                )
             }
         };
         if stopped {
@@ -325,6 +539,35 @@ impl WorkerProcess {
             drain,
             process,
             stopped,
+        }
+    }
+}
+
+async fn cooperative_until_urgent<T>(
+    work: impl std::future::Future<Output = T>,
+    mut urgency: tokio::sync::watch::Receiver<Option<Instant>>,
+) -> Option<T> {
+    tokio::pin!(work);
+    let mut first_urgent = *urgency.borrow_and_update();
+    let mut channel_open = true;
+    loop {
+        let deadline = async {
+            if let Some(at) = first_urgent {
+                tokio::time::sleep_until((at + Duration::from_secs(1)).into()).await;
+            } else {
+                std::future::pending::<()>().await;
+            }
+        };
+        tokio::select! {
+            biased;
+            _ = deadline => return None,
+            changed = urgency.changed(), if channel_open => {
+                channel_open = changed.is_ok();
+                if let Some(at) = *urgency.borrow_and_update() {
+                    first_urgent = Some(first_urgent.map_or(at, |earlier| earlier.min(at)));
+                }
+            }
+            result = &mut work => return Some(result),
         }
     }
 }
