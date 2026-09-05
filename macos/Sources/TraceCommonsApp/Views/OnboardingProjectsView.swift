@@ -77,25 +77,37 @@ struct OnboardingProjectsContent: View {
     private var header: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("What to watch").font(TC.Font_.sectionTitle)
-            Text("""
-            Every project starts at ask-first: you see each session before \
-            anything is sent. Ignore a project to leave it out entirely.
-            """)
+            // "Ignore a project" is not offered when there is no project to
+            // ignore, so the sentence stops before it.
+            Text(
+                model.projects.isEmpty
+                    ? "Every project starts at ask-first: you see each session before anything is sent."
+                    : """
+                    Every project starts at ask-first: you see each session before \
+                    anything is sent. Ignore a project to leave it out entirely.
+                    """
+            )
             .font(.callout)
             .foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)
         }
     }
 
+    /// On a fresh install this is almost always the empty branch: a session
+    /// is queued only after 30 minutes of quiet, and `list_projects` is
+    /// built from the queue, so nothing has had time to appear. The step
+    /// collapses to its one line and Continue rather than a field label
+    /// over an empty list; nothing is invented to fill the space.
+    @ViewBuilder
     private var projectList: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            TCFieldLabel("Projects")
-            if model.projects.isEmpty {
-                Text("No projects yet. Sessions you run later will appear here, and in Settings.")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            } else {
+        if model.projects.isEmpty {
+            Text("No projects yet. Sessions you run later will appear here, and in Settings.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        } else {
+            VStack(alignment: .leading, spacing: 10) {
+                TCFieldLabel("Projects")
                 ForEach(model.projects) { project in
                     projectRow(project)
                 }
