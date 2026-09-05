@@ -28,10 +28,13 @@ use reqwest::Method;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use trace_commons_operator_client::privacy_filter;
-use trace_commons_operator_client::{Client, format as oc_format, host_allowlist::HostAllowlist};
+use trace_commons_operator_client::{Client, format as oc_format};
 use uuid::Uuid;
 
-use operator_common::{render_items, render_kv_fields, sanitized_url};
+use operator_common::{
+    CorpusStatus, ExportQuery, PrivacyRisk, borrow_query, build_client, emit_json, render_items,
+    render_kv_fields,
+};
 
 const DEFAULT_BEARER_ENV: &str = "TRACE_COMMONS_TENANT_BEARER";
 
@@ -255,46 +258,6 @@ pub(crate) struct PrivacyFilterCanaryArgs {
 // --- value enums ---
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub(crate) enum PrivacyRisk {
-    Low,
-    Medium,
-    High,
-}
-
-impl PrivacyRisk {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Low => "low",
-            Self::Medium => "medium",
-            Self::High => "high",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub(crate) enum CorpusStatus {
-    Accepted,
-    Quarantined,
-    Rejected,
-    Revoked,
-    Expired,
-    Purged,
-}
-
-impl CorpusStatus {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Accepted => "accepted",
-            Self::Quarantined => "quarantined",
-            Self::Rejected => "rejected",
-            Self::Revoked => "revoked",
-            Self::Expired => "expired",
-            Self::Purged => "purged",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub(crate) enum ConsentScope {
     DebuggingEvaluation,
     BenchmarkOnly,
@@ -393,18 +356,6 @@ async fn main() -> Result<()> {
     dispatch(cli).await
 }
 
-fn build_client(cli: &Cli) -> Result<Client> {
-    let endpoint = cli
-        .endpoint
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("--endpoint (or TRACE_COMMONS_ENDPOINT) is required"))?;
-    let mut builder = Client::builder(endpoint, &cli.bearer_token_env);
-    if let Some(csv) = cli.allowed_hosts.as_deref() {
-        builder = builder.host_allowlist(HostAllowlist::from_csv(csv));
-    }
-    Ok(builder.build()?)
-}
-
 async fn dispatch(cli: Cli) -> Result<()> {
     // Subcommands that don't hit the server: handle first so we don't require
     // an endpoint to be configured.
@@ -417,8 +368,17 @@ async fn dispatch(cli: Cli) -> Result<()> {
         }
         _ => {}
     }
-    let client = build_client(&cli)?;
-    let endpoint = cli.endpoint.clone().unwrap();
+    // `--endpoint` is optional on the parser so the two local-only subcommands
+    // above can run without it; every server-backed path requires it.
+    let endpoint = cli
+        .endpoint
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("--endpoint (or TRACE_COMMONS_ENDPOINT) is required"))?;
+    let client = build_client(
+        &endpoint,
+        &cli.bearer_token_env,
+        cli.allowed_hosts.as_deref(),
+    )?;
     let json = cli.json;
     match cli.command {
         TenantSubcommand::TenantPolicyGet => tenant_policy_get(&client, &endpoint, json).await,
@@ -803,89 +763,23 @@ async fn ranker_training_export(
     item_field: &str,
     json: bool,
 ) -> Result<()> {
-    let mut owned: Vec<(&str, String)> = Vec::new();
-    if let Some(limit) = args.limit {
-        owned.push(("limit", limit.to_string()));
-    }
-    if let Some(purpose) = args.purpose {
-        let trimmed = purpose.trim();
-        if trimmed.is_empty() {
-            anyhow::bail!("--purpose must be non-empty");
-        }
-        owned.push(("purpose", trimmed.to_string()));
-    }
-    if let Some(scope) = args.consent_scope {
-        owned.push(("consent_scope", scope.query_value().to_string()));
-    }
-    if let Some(status) = args.status {
-        owned.push(("status", status.as_str().to_string()));
-    }
-    if let Some(risk) = args.privacy_risk {
-        owned.push(("privacy_risk", risk.as_str().to_string()));
-    }
-    let query = borrow_query(&owned);
-    let raw = client
-        .call_raw::<()>(Method::GET, path, &query, None)
-        .await?;
-    let value: Value = serde_json::from_str(&raw).unwrap_or(Value::Null);
-
-    if let Some(output) = args.output.as_ref() {
-        let pretty = if value.is_null() {
-            raw.clone()
-        } else {
-            serde_json::to_string_pretty(&value)?
-        };
-        std::fs::write(output, pretty).map_err(|e| {
-            anyhow::anyhow!(
-                "failed to write ranker training export {}: {}",
-                output.display(),
-                e
-            )
-        })?;
-        if json {
-            emit_json(endpoint, "GET", path, &value)?;
-        } else {
-            let mut out = stdout();
-            writeln!(
-                out,
-                "Wrote central {} export to {}",
-                output_label,
-                output.display()
-            )?;
-            render_kv_fields(
-                &mut out,
-                &value,
-                &[
-                    ("  export id", "export_id"),
-                    ("  audit event id", "audit_event_id"),
-                    ("  purpose", "purpose"),
-                    ("  item count", "item_count"),
-                ],
-            )?;
-        }
-        return Ok(());
-    }
-
-    if json {
-        emit_json(endpoint, "GET", path, &value)
-    } else {
-        let items = value.get(item_field).cloned().unwrap_or(Value::Null);
-        let envelope = serde_json::json!({ "items": items });
-        render_items(
-            &mut stdout(),
-            &format!("Central {output_label}"),
-            &envelope,
-            &[
-                "submission_id",
-                "trace_id",
-                "ranker_score",
-                "preferred_submission_id",
-                "rejected_submission_id",
-                "reason",
-            ],
-        )?;
-        Ok(())
-    }
+    operator_common::ranker_training_export(
+        client,
+        endpoint,
+        path,
+        output_label,
+        item_field,
+        ExportQuery {
+            purpose: args.purpose,
+            consent_scope: args.consent_scope.map(|s| s.query_value().to_string()),
+            status: args.status.map(|s| s.as_str().to_string()),
+            privacy_risk: args.privacy_risk.map(|r| r.as_str().to_string()),
+            limit: args.limit,
+            output: args.output,
+        },
+        json,
+    )
+    .await
 }
 
 async fn audit_events(
@@ -1186,10 +1080,6 @@ async fn privacy_filter_canary(args: &PrivacyFilterCanaryArgs, json: bool) -> Re
 
 // --- helpers ---
 
-fn borrow_query<'a>(owned: &'a [(&'a str, String)]) -> Vec<(&'a str, &'a str)> {
-    owned.iter().map(|(k, v)| (*k, v.as_str())).collect()
-}
-
 fn trimmed(value: Option<&str>) -> Option<String> {
     value
         .map(str::trim)
@@ -1220,12 +1110,6 @@ fn parse_metadata(values: &[String]) -> Result<std::collections::BTreeMap<String
         metadata.insert(key.to_string(), raw.trim().to_string());
     }
     Ok(metadata)
-}
-
-fn emit_json(endpoint: &str, method: &str, path: &str, value: &Value) -> Result<()> {
-    let url = sanitized_url(endpoint, path);
-    oc_format::emit_json(&mut stdout(), method, &url, value)?;
-    Ok(())
 }
 
 // --- tests ---

@@ -17,10 +17,12 @@ use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
 use reqwest::Method;
 use serde_json::Value;
-use trace_commons_operator_client::{Client, format as oc_format, host_allowlist::HostAllowlist};
+use trace_commons_operator_client::Client;
 use uuid::Uuid;
 
-use operator_common::{render_items, render_kv_fields, sanitized_url};
+use operator_common::{
+    PrivacyRisk, borrow_query, build_client, emit_json, render_items, render_kv_fields,
+};
 
 const DEFAULT_BEARER_ENV: &str = "TRACE_COMMONS_REVIEWER_BEARER";
 
@@ -175,23 +177,6 @@ impl ReviewLeaseFilter {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub(crate) enum PrivacyRisk {
-    Low,
-    Medium,
-    High,
-}
-
-impl PrivacyRisk {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Low => "low",
-            Self::Medium => "medium",
-            Self::High => "high",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub(crate) enum ReviewDecision {
     Approve,
     Reject,
@@ -232,16 +217,12 @@ impl CreditEventType {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    let client = build_client(&cli)?;
+    let client = build_client(
+        &cli.endpoint,
+        &cli.bearer_token_env,
+        cli.allowed_hosts.as_deref(),
+    )?;
     dispatch(&client, &cli.endpoint, cli.command, cli.json).await
-}
-
-fn build_client(cli: &Cli) -> Result<Client> {
-    let mut builder = Client::builder(&cli.endpoint, &cli.bearer_token_env);
-    if let Some(csv) = cli.allowed_hosts.as_deref() {
-        builder = builder.host_allowlist(HostAllowlist::from_csv(csv));
-    }
-    Ok(builder.build()?)
 }
 
 async fn dispatch(
@@ -564,10 +545,6 @@ async fn append_credit_event(
 
 // --- helpers ---
 
-fn borrow_query<'a>(owned: &'a [(&'a str, String)]) -> Vec<(&'a str, &'a str)> {
-    owned.iter().map(|(k, v)| (*k, v.as_str())).collect()
-}
-
 fn lease_body(
     lease_ttl_seconds: Option<i64>,
     review_due_at: Option<&str>,
@@ -614,18 +591,13 @@ fn render_lease_fields<W: Write>(out: &mut W, value: &Value) -> std::io::Result<
     )
 }
 
-fn emit_json(endpoint: &str, method: &str, path: &str, value: &Value) -> Result<()> {
-    let url = sanitized_url(endpoint, path);
-    oc_format::emit_json(&mut stdout(), method, &url, value)?;
-    Ok(())
-}
-
 // --- tests ---
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use trace_commons_operator_client::host_allowlist::HostAllowlist;
     use wiremock::matchers::{body_json, header, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
