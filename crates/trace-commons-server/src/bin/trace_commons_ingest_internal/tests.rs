@@ -5073,6 +5073,9 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
     configure_unbounded_submit_limits_for_test(&tokens);
     Arc::new(AppState {
         root,
+        near_provisioning_enabled: false,
+        near_provisioning_public_origin: None,
+        near_provisioning_admission_ready: false,
         near_attestation_client: None,
         near_attestation_verification_clock: None,
         driver_liveness: Arc::new(
@@ -26015,6 +26018,9 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
     );
     let state = Arc::new(AppState {
         root: temp.path().to_path_buf(),
+        near_provisioning_enabled: false,
+        near_provisioning_public_origin: None,
+        near_provisioning_admission_ready: false,
         near_attestation_client: None,
         near_attestation_verification_clock: None,
         driver_liveness: Arc::new(
@@ -80217,7 +80223,7 @@ async fn mint_login_link_account_for_subject(
             device_key_id: device_key_id.to_string(),
             tenant_id: tenant_id.to_string(),
             public_key: pk_b64.to_string(),
-            invite_subject_hash: "sha256:stub".to_string(),
+            invite_subject_hash: Some("sha256:stub".to_string()),
             client_info: serde_json::json!({}),
             created_at: Utc::now(),
             revoked_at: None,
@@ -81194,7 +81200,7 @@ async fn device_key_claims_honor_grant_scope_ceiling() {
             device_key_id: granted_device_key_id.clone(),
             tenant_id: tenant_id.to_string(),
             public_key: granted_pk_b64.clone(),
-            invite_subject_hash: "sha256:stub".to_string(),
+            invite_subject_hash: Some("sha256:stub".to_string()),
             client_info: serde_json::json!({}),
             created_at: Utc::now(),
             revoked_at: None,
@@ -81207,7 +81213,7 @@ async fn device_key_claims_honor_grant_scope_ceiling() {
             device_key_id: ungranted_device_key_id.clone(),
             tenant_id: tenant_id.to_string(),
             public_key: ungranted_pk_b64.clone(),
-            invite_subject_hash: "sha256:stub".to_string(),
+            invite_subject_hash: Some("sha256:stub".to_string()),
             client_info: serde_json::json!({}),
             created_at: Utc::now(),
             revoked_at: None,
@@ -90433,4 +90439,38 @@ mod witness_receipt_wording {
             "a witness admission is not a risk condition",
         );
     }
+}
+
+#[tokio::test]
+async fn near_provisioning_default_disabled_returns_uniform_denial() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = test_state(temp.path().to_path_buf());
+    let request: near_provisioning::StartRequest = serde_json::from_value(serde_json::json!({
+        "account_id":"unknown.near","device_public_key":"bad",
+        "code_challenge":"bad","code_challenge_method":"S256"
+    }))
+    .unwrap();
+    let denied =
+        near_provision_start_handler(State(state.clone()), HeaderMap::new(), Ok(Json(request)))
+            .await;
+    let expected = native_generic_deny();
+    assert_eq!(denied.status(), expected.status());
+    assert_eq!(
+        axum::body::to_bytes(denied.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+        axum::body::to_bytes(expected.into_body(), usize::MAX)
+            .await
+            .unwrap()
+    );
+    let capability = near_provisioning::capabilities(State(state)).await;
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(capability.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body["ready"], false);
+    assert_eq!(body["funding_available"], false);
+    assert!(body.get("witness").is_none());
 }

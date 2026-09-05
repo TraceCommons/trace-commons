@@ -20,6 +20,7 @@
 //! - A configured privacy filter that is unavailable stops the pipeline. It
 //!   never degrades to sending unfiltered text.
 
+pub mod account_onboarding;
 pub mod approved_envelope;
 pub mod audit;
 pub mod client;

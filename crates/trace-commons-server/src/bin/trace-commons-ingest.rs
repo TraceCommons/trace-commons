@@ -1494,6 +1494,9 @@ fn flush_vector_indexes_on_shutdown(state: &AppState) {
 
 #[derive(Clone)]
 struct AppState {
+    near_provisioning_enabled: bool,
+    near_provisioning_admission_ready: bool,
+    near_provisioning_public_origin: Option<String>,
     root: PathBuf,
     /// #438: per-driver liveness, so a background loop that has been failing
     /// for days is visible as such instead of only as a repeating WARN.
@@ -4134,6 +4137,14 @@ impl AppState {
             ),
             account_webauthn,
             account_ceremony_store,
+            // Integration: set from validated admission.is_some(), never an independent env flag.
+            near_provisioning_admission_ready: false,
+            near_provisioning_public_origin: std::env::var(
+                "TRACE_COMMONS_NEAR_PROVISIONING_PUBLIC_ORIGIN",
+            )
+            .ok(),
+            near_provisioning_enabled: std::env::var("TRACE_COMMONS_NEAR_PROVISIONING_ENABLED")
+                .is_ok_and(|v| v == "true"),
             account_native_requests,
             account_native_codes,
             account_near_config,
@@ -7491,6 +7502,22 @@ fn app(state: Arc<AppState>) -> Router {
             post(native_authorize_start_handler),
         )
         .route("/v1/account/native/token", post(native_token_handler))
+        .route(
+            "/v1/account/near/provision/capabilities",
+            get(near_provisioning::capabilities),
+        )
+        .route(
+            "/v1/account/near/provision/start",
+            post(near_provision_start_handler),
+        )
+        .route(
+            "/account/near/provision/wallet",
+            get(near_provisioning::wallet_page),
+        )
+        .route(
+            "/v1/account/near/provision/finish",
+            post(near_provision_finish_handler),
+        )
         // Browser-facing redeem flow. Intentionally NOT under /v1 and
         // un-authenticated: the single-use code IS the credential. The mint URL
         // (`/account/login?code=...`) points here.
@@ -11445,7 +11472,7 @@ struct DeviceKeyResponse {
     tenant_id: String,
     tenant_storage_ref: String,
     device_key_id: String,
-    invite_subject_hash: String,
+    invite_subject_hash: Option<String>,
     client_info: serde_json::Value,
     created_at: DateTime<Utc>,
     revoked_at: Option<DateTime<Utc>>,
@@ -16576,6 +16603,10 @@ async fn native_authorize_start_handler(
     );
     response
 }
+
+#[path = "trace_commons_ingest_internal/near_provisioning.rs"]
+mod near_provisioning;
+use near_provisioning::{near_provision_finish_handler, near_provision_start_handler};
 
 /// Complete the native half of a browser redeem: mint the one-time code and
 /// return the absolute loopback `Location` the browser should be sent to.
