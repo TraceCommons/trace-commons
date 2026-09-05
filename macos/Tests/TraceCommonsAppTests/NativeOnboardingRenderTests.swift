@@ -34,12 +34,24 @@ final class NativeOnboardingRenderTests: XCTestCase {
 
     @MainActor
     private func render<V: View>(_ view: V, size: CGSize, to url: URL) throws {
-        let renderer = ImageRenderer(content: view.frame(width: size.width, height: size.height)
-            .background(Color(nsColor: .windowBackgroundColor)))
-        renderer.scale = 2
-        let image = try XCTUnwrap(renderer.nsImage)
-        let tiff = try XCTUnwrap(image.tiffRepresentation)
-        let representation = try XCTUnwrap(NSBitmapImageRep(data: tiff))
+        // ImageRenderer cannot draw AppKit-backed TextFields: it emits a
+        // yellow placeholder instead. Host the real native hierarchy so this
+        // test exercises the same controls the app displays.
+        _ = NSApplication.shared
+        let content = view.frame(width: size.width, height: size.height)
+            .background(Color(nsColor: .windowBackgroundColor))
+        let hosting = NSHostingView(rootView: content)
+        let bounds = NSRect(origin: .zero, size: size)
+        hosting.frame = bounds
+        let window = NSWindow(contentRect: bounds, styleMask: [.borderless],
+                              backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = hosting
+        defer { window.close() }
+        hosting.layoutSubtreeIfNeeded()
+        window.displayIfNeeded()
+        let representation = try XCTUnwrap(hosting.bitmapImageRepForCachingDisplay(in: bounds))
+        hosting.cacheDisplay(in: bounds, to: representation)
         let png = try XCTUnwrap(representation.representation(using: .png, properties: [:]))
         XCTAssertGreaterThan(png.count, 1000)
         try png.write(to: url)
