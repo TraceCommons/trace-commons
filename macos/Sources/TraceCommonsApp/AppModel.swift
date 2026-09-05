@@ -410,6 +410,11 @@ final class AppModel: ObservableObject {
     /// it.
     private(set) var configDirectory: String = ""
 
+    var traceNavigationReady: Bool {
+        guard case .running = startup else { return false }
+        return status.loggedIn && isOnboardingComplete
+    }
+
     func start() {
         guard case .starting = startup else { return }
         let resolved: DaemonHost.Resolution
@@ -419,8 +424,15 @@ final class AppModel: ObservableObject {
             startup = .refused("\(error)")
             return
         }
-        configDirectory = resolved.path
-        startDaemon(at: resolved.path, settingsJSON: nil)
+        start(configDirectory: resolved.path)
+    }
+
+    /// Explicit directory seam also exercises first-install startup without
+    /// touching the developer's state or altering process-global environment.
+    func start(configDirectory path: String) {
+        guard case .starting = startup else { return }
+        configDirectory = path
+        startDaemon(at: path, settingsJSON: nil)
     }
 
     /// Start (or restart) the in-process daemon against an already-resolved

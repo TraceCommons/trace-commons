@@ -1,8 +1,40 @@
 import Foundation
 import TCBridge
+import TCShellCore
 import XCTest
 
 final class ComputeExportTests: XCTestCase {
+    func testCopyExportDoesNotRequireSettingsOrEnrollment() throws {
+        let copy = try XCTUnwrap(ComputeCopy.decode(XCTUnwrap(TCCompute.copyJSON())))
+        XCTAssertFalse(copy.destination.isEmpty)
+        XCTAssertFalse(try XCTUnwrap(copy.quitDetail).isEmpty)
+        XCTAssertFalse(try XCTUnwrap(copy.quitRefused).isEmpty)
+    }
+
+    func testUnsupportedAndIncompleteSnapshotsAreNotActionable() throws {
+        let compute = try TCCompute(configDirectory: directory().path)
+        defer { compute.close() }
+        let json = try compute.statusJSON()
+        XCTAssertNotNil(ComputeSnapshot.decode(json))
+        var payload = try snapshot(json)
+        payload["schema"] = "unknown"
+        let unknownSchema = try JSONSerialization.data(withJSONObject: payload)
+        XCTAssertNil(ComputeSnapshot.decode(String(decoding: unknownSchema, as: UTF8.self)))
+        payload["schema"] = "trace_commons.compute_status.v1"
+        payload.removeValue(forKey: "can_enable")
+        let incomplete = try JSONSerialization.data(withJSONObject: payload)
+        XCTAssertNil(ComputeSnapshot.decode(String(decoding: incomplete, as: UTF8.self)))
+    }
+
+    func testShutdownReportsProcessStopSeparatelyFromDrainAcknowledgement() throws {
+        let compute = try TCCompute(configDirectory: directory().path)
+        defer { compute.close() }
+        let stopped = try snapshot(compute.shutdownJSON(timeoutMilliseconds: 100))
+        XCTAssertEqual(stopped["worker_stopped"] as? Bool, true)
+        XCTAssertNotEqual(stopped["drain_outcome"] as? String, "acknowledged")
+        XCTAssertFalse(try compute.statusJSON().isEmpty)
+    }
+
     private func directory() throws -> URL {
         let path = FileManager.default.temporaryDirectory
             .appendingPathComponent("tc-compute-test-\(UUID().uuidString)", isDirectory: true)

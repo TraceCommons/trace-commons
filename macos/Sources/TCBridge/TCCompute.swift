@@ -52,6 +52,18 @@ public final class TCCompute: @unchecked Sendable {
 
     deinit { close() }
 
+    /// Handle-free fixed vocabulary remains available when settings cannot open.
+    public static func copyJSON() -> String? { take(tc_compute_copy_json()) }
+
+    /// Bounded controller stop. The caller must inspect worker_stopped before
+    /// freeing this handle; drain_outcome separately describes acknowledgement.
+    public func shutdownJSON(timeoutMilliseconds: UInt64) throws -> String {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let handle else { throw Failure.closed }
+        return try Self.result(tc_compute_shutdown(handle, timeoutMilliseconds))
+    }
+
     /// Return Rust's snapshot unchanged, including shared wording and capability
     /// gates. Neither a successful call nor an open handle implies availability.
     public func statusJSON() throws -> String {
@@ -72,14 +84,29 @@ public final class TCCompute: @unchecked Sendable {
         return try Self.result(result)
     }
 
-    /// Idempotent. Prevents new calls and waits for current pointer use before
-    /// freeing; never frees a handle concurrently with a call through this object.
-    public func close() {
+    /// Idempotent. Retains the handle when the controller cannot prove all work
+    /// stopped, so callers can retry shutdown. Never races another pointer call.
+    @discardableResult
+    public func close() -> Bool {
         lock.lock()
         defer { lock.unlock() }
-        guard let owned = handle else { return }
+        guard let owned = handle else { return true }
+        guard let raw = tc_compute_status_json(owned),
+              let json = Self.take(raw),
+              let evidence = try? JSONDecoder().decode(CloseEvidence.self, from: Data(json.utf8)),
+              evidence.workerStopped && !evidence.commandPending else { return false }
         handle = nil
         tc_compute_free(owned)
+        return true
+    }
+
+    private struct CloseEvidence: Decodable {
+        let workerStopped: Bool
+        let commandPending: Bool
+        enum CodingKeys: String, CodingKey {
+            case workerStopped = "worker_stopped"
+            case commandPending = "command_pending"
+        }
     }
 
     private static func result(

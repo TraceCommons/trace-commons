@@ -25,6 +25,9 @@ import SwiftUI
 ///   state contributors are actually in.
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    var compute: ComputeModel?
+    var navigation: MainWindowNavigation?
+    private let quitCoordinator = QuitCoordinator()
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Explicit rather than inherited. Removing LSUIElement already makes
         // this the default, but the default is invisible in the source: a
@@ -63,13 +66,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// installed it for, which is not what "close the window" means anywhere
     /// else on this platform.
     ///
-    /// `runModal` is synchronous, so this answers immediately rather than
-    /// going through `.terminateLater`. That matters for cleanup:
-    /// `TraceCommonsAppMain` runs `model.shutdown()` off
-    /// `willTerminateNotification`, and a `.terminateLater` design that never
-    /// gets its reply leaves the daemon un-stopped.
+    /// Confirmation is synchronous; compute stop runs on its background queue.
+    /// Every pending request gets a reply, including the outer deadline, which
+    /// keeps the app running if worker shutdown has not returned safe evidence.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        QuitConfirmation.granted() ? .terminateNow : .terminateCancel
+        let confirmed = quitCoordinator.isStopping || QuitConfirmation.granted(computeDetail: compute?.copy?.quitDetail)
+        let decision = quitCoordinator.request(confirmed: confirmed, deadlineSeconds: 17, stop: { [weak self] in
+            guard let compute = self?.compute else { return true }
+            return await compute.shutdown(timeoutMilliseconds: 15_000)
+        }, reply: { [weak self] stopped in
+            if !stopped {
+                self?.compute?.noteQuitRefused()
+                self?.navigation?.section = .compute
+                OpenMainWindow.request()
+            }
+            sender.reply(toApplicationShouldTerminate: stopped)
+        })
+        return decision == .later ? .terminateLater : .terminateCancel
     }
 
     /// Clicking the Dock icon with no window open. Without this the click is
@@ -141,7 +154,7 @@ enum QuitConfirmation {
     /// written specifically because the watcher stops with the app, and
     /// nothing about gaining a Dock icon makes that less true.
     @MainActor
-    static func granted() -> Bool {
+    static func granted(computeDetail: String? = nil) -> Bool {
         NSApp.activate(ignoringOtherApps: true)
         let alert = NSAlert()
         alert.messageText = "Quit Trace Commons?"
@@ -152,6 +165,7 @@ enum QuitConfirmation {
         Sessions already waiting stay on this machine and will be here when you \
         come back. Nothing is sent while nobody's approving.
         """
+        if let computeDetail { alert.informativeText += "\n\n" + computeDetail }
         alert.addButton(withTitle: "Quit")
         alert.addButton(withTitle: "Keep running")
         return alert.runModal() == .alertFirstButtonReturn
