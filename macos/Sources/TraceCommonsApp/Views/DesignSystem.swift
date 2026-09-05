@@ -196,6 +196,33 @@ enum TC {
         static let checkbox: CGFloat = 13
     }
 
+    /// The status item. The menu bar is 22pt tall and the system's own
+    /// glyphs sit at 15-16pt inside it, so there is no room to set a digit
+    /// row under the mark; the count is a capsule over the mark's top
+    /// right corner instead, and these are its measures.
+    enum MenuBar {
+        /// Spec §1.3: the mark at 15pt, template variant.
+        static let mark: CGFloat = 15
+        /// The badge's height, and the smallest a digit can be and still be
+        /// read against the menu bar at 1x.
+        static let badgeHeight: CGFloat = 10
+        /// Side padding inside the capsule, beyond the digits' own width.
+        static let badgeInset: CGFloat = 2.5
+        /// The clear ring between the badge and the bracket it overlaps,
+        /// so the capsule reads as a thing on the mark rather than a growth
+        /// of it.
+        static let badgeHalo: CGFloat = 1
+        /// How far the badge rises above the mark's top edge. The label is
+        /// padded by this on both edges so the mark stays centred, and
+        /// 15 + 3 + 3 is the most that fits the 22pt bar.
+        static let badgeOverhang: CGFloat = 3
+        /// How far back over the mark the badge's leading edge sits. The
+        /// user's bracket ends at 28/64 of the mark (6.5pt at 15) and the
+        /// agent's begins at 36/64 (8.4pt) but only below the badge, so a
+        /// leading edge at 15 - 6 = 9pt touches neither.
+        static let badgeOverlap: CGFloat = 6
+    }
+
     // MARK: - Type
 
     /// A fixed scale, all of it relative to system text styles.
@@ -257,6 +284,10 @@ enum TC {
         /// anything else countable. Was `footnote`-sized mono (10pt).
         static let ledger = Font.system(.callout, design: .monospaced)
             .weight(.medium)
+        /// The status item's count, drawn against an opaque 10pt capsule. Rounded
+        /// and bold because at this size a hairline digit disappears when
+        /// it is drawn in reverse.
+        static let menuBarBadge = Font.system(size: 8, weight: .bold, design: .rounded)
         /// Spec `mono.chip`, 11/500 mono. Status-pill text.
         static let monoChip = Font.system(.subheadline, design: .monospaced)
             .weight(.medium)

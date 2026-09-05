@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import TCShellCore
 
 /// The menu-bar item.
 ///
@@ -17,44 +18,120 @@ import SwiftUI
 /// thicken from 7/64 to 8/64 to carry the mark without it.
 ///
 /// State precedence is unchanged from the shared design: decisions owed
-/// (numeric badge) -> unhealthy -> paused -> idle. The badge counts
-/// DECISIONS OWED; if it shows 3, there are exactly three things to say yes
-/// or no to. Every state that is not "idle" carries a second glyph as well
-/// as a count, because a dimmed mark on its own is not a state anybody can
-/// read.
+/// (numeric badge) -> unhealthy -> paused -> idle, decided in
+/// `MenuBarStatus` where it can be tested. The badge counts DECISIONS OWED;
+/// if it shows 3, there are exactly three things to say yes or no to. Every
+/// state that is not "idle" carries a second glyph as well as a count,
+/// because a dimmed mark on its own is not a state anybody can read.
+///
+/// The count is ON the mark, not beside it. A bare number in the menu bar
+/// belongs to nothing -- twenty status items along, a "3" is not findable
+/// as this product's "3" -- so it is a capsule over the mark's top right
+/// corner, the way an app badge sits on a Dock icon. It was tried under the
+/// mark first: 15pt of mark plus a digit row anyone can read is more than
+/// the 22pt the menu bar has, and shrinking the mark to make room defeats
+/// the reason it is there. See `TC.MenuBar` and `MenuBarGlyph`.
 struct MenuBarLabel: View {
     @ObservedObject var model: AppModel
 
     var body: some View {
-        HStack(spacing: TC.Space.xxs) {
-            BrandMark(size: 15, variant: .template)
-                .opacity(model.status.paused ? 0.5 : 1)
-            if model.decisionsOwed > 0 {
-                // The one countable figure in the chrome, so it is set in the
-                // same mono the manifest strips use rather than in the menu
-                // bar's default face.
-                Text("\(model.decisionsOwed)")
-                    .font(TC.Font_.ledger)
-                    .monospacedDigit()
-            } else if model.health != nil {
-                Image(systemName: "exclamationmark.triangle")
-                    .imageScale(.small)
-            } else if model.status.paused {
-                Image(systemName: "pause.fill")
-                    .imageScale(.small)
-            }
-        }
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(accessibilityLabel)
+        MenuBarGlyph(state: state)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(accessibilityLabel)
+    }
+
+    private var state: MenuBarState {
+        MenuBarStatus.state(
+            decisionsOwed: model.decisionsOwed,
+            unhealthy: model.health != nil,
+            paused: model.status.paused,
+            available: model.startup == .running
+        )
     }
 
     private var accessibilityLabel: String {
-        if model.decisionsOwed > 0 {
-            return "Trace Commons. ^[\(model.decisionsOwed) session](inflect: true) waiting for your decision."
+        MenuBarStatus.accessibilityLabel(
+            decisionsOwed: model.decisionsOwed, unhealthy: model.health != nil,
+            paused: model.status.paused, available: model.startup == .running)
+    }
+}
+
+/// The status item's drawing, as a pure function of `MenuBarState` so it
+/// can be rendered off a fixture -- the screenshot hook and the label test
+/// both do -- without an `AppModel`.
+///
+/// The badge uses an opaque black/white pair rather than transparent digits.
+/// Its contrast is independent of the wallpaper behind the translucent menu bar.
+struct MenuBarGlyph: View {
+    let state: MenuBarState
+    @Environment(\.colorScheme) private var colorScheme
+
+    var body: some View {
+        HStack(spacing: TC.Space.xxs) {
+            // Top right, where a Dock badge sits, and not the lower right:
+            // the agent's bracket IS the lower right of this mark, and a
+            // two-digit capsule there covered it whole, leaving a single
+            // bracket and a number. The top right quadrant is the one
+            // corner neither bracket draws in.
+            //
+            // The badge is laid out beside the mark and pulled back over
+            // it by a fixed amount, rather than pinned to the corner: its
+            // LEADING edge is what stays put, so a wider count grows out
+            // into the empty bar instead of back across the user's
+            // bracket, which a trailing-pinned "12" was found to do.
+            HStack(alignment: .top, spacing: -TC.MenuBar.badgeOverlap) {
+                BrandMark(size: TC.MenuBar.mark, variant: .template)
+                    .opacity(state.isPaused ? 0.5 : 1)
+                if case .count(let text, _) = state {
+                    // The halo punches a clear ring out of whatever the
+                    // capsule touches so it sits on the mark instead of
+                    // merging with a stroke. Digits have an opaque backdrop.
+                    badge(text)
+                        .offset(y: -TC.MenuBar.badgeOverhang)
+                }
+            }
+            // `compositingGroup` is what makes the destination-out blend
+            // modes in `badge` cut into the mark rather than into the menu
+            // bar.
+            .compositingGroup()
+            // Room for the overhang, so the status item's frame -- which is
+            // sized from this view -- does not clip the capsule. Padded on
+            // both edges, and in every state, so the mark sits at the same
+            // height whether or not there is a count.
+            .padding(.vertical, TC.MenuBar.badgeOverhang)
+
+            // The two non-numeric states keep their glyph beside the mark:
+            // a triangle or a pause bar is not a thing to knock out of a
+            // 10pt capsule.
+            switch state {
+            case .attention:
+                Image(systemName: "exclamationmark.triangle")
+                    .imageScale(.small)
+            case .paused:
+                Image(systemName: "pause.fill")
+                    .imageScale(.small)
+            case .count, .idle:
+                EmptyView()
+            }
         }
-        if model.health != nil { return "Trace Commons. Needs attention." }
-        if model.status.paused { return "Trace Commons. Paused." }
-        return "Trace Commons. Nothing waiting."
+        .foregroundStyle(.primary)
+    }
+
+    private func badge(_ text: String) -> some View {
+        Text(text)
+            .font(TC.Font_.menuBarBadge)
+            .monospacedDigit()
+            .padding(.horizontal, TC.MenuBar.badgeInset)
+            .frame(minWidth: TC.MenuBar.badgeHeight)
+            .frame(height: TC.MenuBar.badgeHeight)
+            .foregroundStyle(colorScheme == .dark ? Color.black : Color.white)
+            .background(Capsule().fill(colorScheme == .dark ? Color.white : Color.black))
+            .background(
+                Capsule()
+                    .fill(.primary)
+                    .padding(-TC.MenuBar.badgeHalo)
+                    .blendMode(.destinationOut)
+            )
     }
 }
 
