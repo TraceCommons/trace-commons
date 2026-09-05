@@ -53,7 +53,7 @@ public sealed class HealthCopy : IEquatable<HealthCopy>
     public string Detail { get; }
 
     /// <summary>
-    /// The banner's action, for the two labels the design gives one.
+    /// The banner's action, for conditions with a contributor recovery step.
     /// </summary>
     /// <remarks>
     /// Null for everything else, and deliberately so. The other conditions
@@ -106,7 +106,7 @@ public sealed class HealthCopy : IEquatable<HealthCopy>
             "queue-full" => new HealthCopy(
                 "Trace Commons has stopped queuing new sessions",
                 "-- 500 are already waiting. Review or clear some to start again.",
-                null),
+                "Review"),
             // The fallback for a daemon that reported the label but no
             // daily_budget object. ForBudget is what normally renders this
             // condition, because it can say how many are waiting and when

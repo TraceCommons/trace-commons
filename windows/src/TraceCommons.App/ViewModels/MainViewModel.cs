@@ -78,6 +78,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private IReadOnlyList<ProjectQueueGroup> _groups = Array.Empty<ProjectQueueGroup>();
     private QueueGroupViewModel? _openFolder;
     private HealthCopy? _health;
+    private HealthNavigationTarget _healthNavigation;
     private ArmingOffer? _armingOffer;
     private HealthCopy? _budget;
     private HistoryRollup _rollup = new();
@@ -429,6 +430,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public bool HasHealthAction => _health?.ActionLabel is not null;
 
     public string HealthActionLabel => _health?.ActionLabel ?? string.Empty;
+
+    public HealthNavigationTarget HealthDestination => _healthNavigation;
 
     // --- The week band -----------------------------------------------------
     //
@@ -1247,6 +1250,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         HealthCopy? next = _budget is not null && label == "daily-cap-reached"
             ? null
             : HealthCopy.ForLabel(label);
+        _healthNavigation = next is null ? HealthNavigationTarget.None : HealthNavigation.ForLabel(label);
         if (Equals(_health, next))
         {
             return;
