@@ -778,10 +778,11 @@ public sealed partial class MainWindow : Window
     /// </summary>
     /// <remarks>
     /// <para>
-    /// A second route to "Look inside", never a replacement for it. The button
-    /// keeps its emphasis: one-click submit added AVAILABILITY, and accent
-    /// styling is a RECOMMENDATION. What this adds is that the obvious gesture
-    /// on a card does the obvious thing.
+    /// A second route to "Look inside", never a replacement for it. That
+    /// button is the card's one accented control and "Submit" is secondary:
+    /// one-click submit added AVAILABILITY, and accent styling is a
+    /// RECOMMENDATION, which is to read first. What this adds is that the
+    /// obvious gesture on a card does the obvious thing.
     /// </para>
     /// <para>
     /// The three footer buttons handle their own pointer input, so a WinUI
