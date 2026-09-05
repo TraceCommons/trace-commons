@@ -2,6 +2,7 @@ import Foundation
 import AppKit
 import SwiftUI
 import XCTest
+import TCShellCore
 @testable import TraceCommonsApp
 
 final class ComputeNavigationTests: XCTestCase {
@@ -103,4 +104,39 @@ final class ComputeNavigationTests: XCTestCase {
         XCTAssertEqual(compute.snapshot?.workerStopped, true)
         await compute.close()
     }
+    @MainActor
+    func testFailedOpenCanRetryAfterSettingsAreRepaired() async throws {
+        let root = try directory()
+        let file = root.appendingPathComponent("compute/settings.json")
+        try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("invalid".utf8).write(to: file)
+        let compute = ComputeModel()
+        await compute.start(configDirectory: root.path)
+        XCTAssertNil(compute.snapshot)
+        XCTAssertNotNil(compute.failureLabel)
+        try FileManager.default.removeItem(at: file)
+        await compute.retryOpen()
+        XCTAssertNotNil(compute.snapshot)
+        XCTAssertNil(compute.failureLabel)
+        XCTAssertEqual(compute.snapshot?.consentGranted, false)
+        await compute.close()
+    }
+
+    func testComputeDirectoryDoesNotInheritDaemonSocketLengthRestriction() throws {
+        let path = "/private/tmp/" + String(repeating: "a", count: 120)
+        XCTAssertThrowsError(try StateDirectory.resolve(explicit: path, probe: .init { _ in .absent }))
+        XCTAssertEqual(try StateDirectory.resolveCompute(explicit: path, probe: .init { _ in .absent }).path, path)
+        XCTAssertThrowsError(try StateDirectory.resolveCompute(explicit: path, probe: .init { _ in .file }))
+    }
+
+    @MainActor
+    func testFailureRecoveryAndSubtitleUseHandleFreeRustCopy() throws {
+        let model = ComputeModel()
+        let copy = try XCTUnwrap(model.copy)
+        XCTAssertFalse(try XCTUnwrap(copy.unavailable).isEmpty)
+        XCTAssertFalse(try XCTUnwrap(copy.retry).isEmpty)
+        XCTAssertFalse(try XCTUnwrap(copy.subtitle).isEmpty)
+        XCTAssertFalse(try XCTUnwrap(copy.quitRefused).isEmpty)
+    }
+
 }

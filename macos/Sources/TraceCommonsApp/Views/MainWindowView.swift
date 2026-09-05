@@ -144,7 +144,7 @@ struct MainWindowView: View {
     }
 
     private func title(_ item: Section) -> String {
-        item == .compute ? (compute.copy?.destination ?? "compute-copy-unavailable") : item.rawValue
+        item == .compute ? (compute.copy?.destination ?? "") : item.rawValue
     }
 
     // MARK: - Sidebar
@@ -256,7 +256,7 @@ struct MainWindowView: View {
                 Text(title(section))
                     .font(TC.Font_.screenTitle)
                     .foregroundStyle(TC.inkPrimary)
-                Text(section.subtitle)
+                Text(section == .compute ? (compute.copy?.subtitle ?? "") : section.subtitle)
                     .font(TC.Font_.caption)
                     .foregroundStyle(TC.inkSecondary)
             }

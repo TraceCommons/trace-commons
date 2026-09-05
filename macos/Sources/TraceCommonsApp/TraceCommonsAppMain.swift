@@ -84,7 +84,7 @@ private struct Launcher: View {
         appDelegate.navigation = navigation
         model.start()
         Task {
-            await compute.start(configDirectory: model.configDirectory)
+            await compute.start()
             compute.startMonitoring()
         }
         // Update checks begin here and nowhere else. UpdateController itself

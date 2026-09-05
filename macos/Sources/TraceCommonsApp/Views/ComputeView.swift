@@ -24,7 +24,7 @@ struct ComputeContent: View {
     var body: some View {
         VStack(alignment: .leading, spacing: TC.Space.l) {
             if model.quitWasRefused, let line = model.copy?.quitRefused {
-                Text(line).foregroundStyle(TC.goldText)
+                refusal(line)
             }
             if let snapshot = model.snapshot {
                 Text(snapshot.copy.introduction)
@@ -66,14 +66,26 @@ struct ComputeContent: View {
                     }
                 }
                 if model.controlsBusy { ProgressView() }
-            } else if let label = model.failureLabel {
-                Text(label).foregroundStyle(TC.inkSecondary)
+            } else if model.failureLabel != nil {
+                if let copy = model.copy, let line = copy.unavailable {
+                    refusal(line)
+                    if let retry = copy.retry {
+                        Button(retry) { Task { await model.retryOpen() } }
+                            .disabled(model.controlsBusy)
+                    }
+                }
             } else {
                 ProgressView()
             }
         }
         .padding(TC.Space.lg)
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func refusal(_ line: String) -> some View {
+        Label(line, systemImage: TC.Tone.refused.symbol)
+            .foregroundStyle(TC.coralText)
+            .fixedSize(horizontal: false, vertical: true)
     }
 
     private var parsedAllowance: UInt64? {

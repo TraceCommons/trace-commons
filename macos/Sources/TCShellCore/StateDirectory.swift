@@ -107,6 +107,19 @@ public enum StateDirectory {
         return Resolution(path: dir)
     }
 
+    /// Compute uses no daemon socket, so a long directory must not inherit
+    /// the watcher's Unix socket-path refusal. Folder validity still applies.
+    public static func resolveCompute(
+        explicit: String? = nil,
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        homeDirectory: String = NSHomeDirectory(),
+        probe: Probe = .filesystem
+    ) throws -> Resolution {
+        let dir = chooseDirectory(explicit: explicit, environment: environment, homeDirectory: homeDirectory)
+        if case .file = probe.verdict(dir) { throw Refusal.notADirectory }
+        return Resolution(path: dir)
+    }
+
     private static func chooseDirectory(
         explicit: String?,
         environment: [String: String],

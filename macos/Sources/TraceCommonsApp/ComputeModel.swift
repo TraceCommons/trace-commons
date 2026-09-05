@@ -14,6 +14,7 @@ final class ComputeModel {
     private(set) var quitWasRefused = false
     let copy = ComputeCopy.decode(TCCompute.copyJSON() ?? "")
     private var started = false
+    private var requestedDirectory: String?
     private var stopping = false
     private var closed = false
     @ObservationIgnored private var monitor: Task<Void, Never>?
@@ -26,8 +27,22 @@ final class ComputeModel {
 
     func noteQuitRefused() { quitWasRefused = true }
 
+    func start() async {
+        do { await start(configDirectory: try StateDirectory.resolveCompute().path) }
+        catch { fail(error) }
+    }
+
+    func retryOpen() async {
+        guard !controlsBusy, !closed else { return }
+        started = false
+        if let requestedDirectory { await start(configDirectory: requestedDirectory) }
+        else { await start() }
+        startMonitoring()
+    }
+
     func start(configDirectory: String) async {
         guard !started, !closed else { return }
+        requestedDirectory = configDirectory
         started = true
         busy = true
         defer { busy = false }

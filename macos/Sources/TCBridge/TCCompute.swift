@@ -4,13 +4,13 @@ import Foundation
 /// App-owned compute controller. It requires neither a trace daemon nor enrollment.
 /// Calls perform synchronous settings I/O: invoke them on a background queue.
 ///
-/// Short pointer calls serialize with close. A blocking shutdown pins the handle
-/// but releases the lock so resource pressure can escalate its stop deadline.
+/// Pointer calls pin the handle and release the ownership lock before Rust I/O.
+/// Resource pressure remains independent of settings writes and shutdown.
 /// Production construction cannot launch; close is not evidence of a drain.
 public final class TCCompute: @unchecked Sendable {
     private let lock = NSLock()
     private var handle: OpaquePointer?
-    private var activeShutdowns = 0
+    private var activeCalls = 0
 
     public enum Failure: Error, Equatable, Sendable {
         case refused(String)
@@ -73,10 +73,7 @@ public final class TCCompute: @unchecked Sendable {
 
     /// Ticket is issued before native reads, not at submission time.
     public func resourceBeginJSON() -> String? {
-        lock.lock()
-        defer { lock.unlock() }
-        guard let handle else { return nil }
-        return Self.take(tc_compute_resource_begin_json(handle))
+        try? withHandle { Self.take(tc_compute_resource_begin_json($0)) }
     }
 
     @discardableResult
@@ -94,10 +91,9 @@ public final class TCCompute: @unchecked Sendable {
     private func resourceEvent(_ event: [String: Any]) throws -> String {
         let bytes = try JSONSerialization.data(withJSONObject: event)
         guard bytes.count <= 4096, let json = String(data: bytes, encoding: .utf8) else { throw Failure.invalidInput }
-        lock.lock()
-        defer { lock.unlock() }
-        guard let handle else { throw Failure.closed }
-        return try json.withCString { try Self.result(tc_compute_resource_event_json(handle, $0)) }
+        return try withHandle { handle in
+            try json.withCString { try Self.result(tc_compute_resource_event_json(handle, $0)) }
+        }
     }
 
     /// Handle-free fixed vocabulary remains available when settings cannot open.
@@ -106,37 +102,46 @@ public final class TCCompute: @unchecked Sendable {
     /// Bounded controller stop. The caller must inspect worker_stopped before
     /// freeing this handle; drain_outcome separately describes acknowledgement.
     public func shutdownJSON(timeoutMilliseconds: UInt64) throws -> String {
-        lock.lock()
-        guard let handle else { lock.unlock(); throw Failure.closed }
-        activeShutdowns += 1
-        lock.unlock()
-        defer {
-            lock.lock()
-            activeShutdowns -= 1
-            lock.unlock()
-        }
-        return try Self.result(tc_compute_shutdown(handle, timeoutMilliseconds))
+        try withHandle { try Self.result(tc_compute_shutdown($0, timeoutMilliseconds)) }
     }
 
     /// Return Rust's snapshot unchanged, including shared wording and capability
     /// gates. Neither a successful call nor an open handle implies availability.
     public func statusJSON() throws -> String {
-        lock.lock()
-        defer { lock.unlock() }
-        guard let handle else { throw Failure.closed }
-        return try Self.result(tc_compute_status_json(handle))
+        try withHandle { try Self.result(tc_compute_status_json($0)) }
     }
 
     /// Returns the observed post-command snapshot; callers must not publish an
     /// optimistic enabled/running state while this command is in progress.
     public func commandJSON(_ command: Command) throws -> String {
         let json = try command.json()
-        lock.lock()
-        defer { lock.unlock() }
-        guard let handle else { throw Failure.closed }
-        let result = json.withCString { tc_compute_command_json(handle, $0) }
-        return try Self.result(result)
+        return try withHandle { handle in
+            #if DEBUG
+            commandWillExecuteForTesting?()
+            #endif
+            let result = json.withCString { tc_compute_command_json(handle, $0) }
+            return try Self.result(result)
+        }
     }
+
+    /// Pins lifetime without holding the ownership lock during Rust I/O.
+    /// Resource ingress can proceed while commands write settings or stop.
+    private func withHandle<T>(_ operation: (OpaquePointer) throws -> T) throws -> T {
+        lock.lock()
+        guard let handle else { lock.unlock(); throw Failure.closed }
+        activeCalls += 1
+        lock.unlock()
+        defer {
+            lock.lock()
+            activeCalls -= 1
+            lock.unlock()
+        }
+        return try operation(handle)
+    }
+
+    #if DEBUG
+    var commandWillExecuteForTesting: (@Sendable () -> Void)?
+    #endif
 
     /// Idempotent. Retains the handle when the controller cannot prove all work
     /// stopped, so callers can retry shutdown. Never races another pointer call.
@@ -145,7 +150,7 @@ public final class TCCompute: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         guard let owned = handle else { return true }
-        guard activeShutdowns == 0 else { return false }
+        guard activeCalls == 0 else { return false }
         guard let raw = tc_compute_status_json(owned),
               let json = Self.take(raw),
               let evidence = try? JSONDecoder().decode(CloseEvidence.self, from: Data(json.utf8)),

@@ -93,5 +93,30 @@ final class ComputeResourceBridgeTests: XCTestCase {
         XCTAssertTrue(compute.close())
         XCTAssertNil(compute.resourceBeginJSON())
     }
+    func testResourceIngressDoesNotWaitForPinnedCommand() async throws {
+        let compute = try local()
+        let entered = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        compute.commandWillExecuteForTesting = {
+            entered.signal()
+            _ = release.wait(timeout: .now() + 5)
+        }
+        let command = Task.detached { try compute.commandJSON(.pause) }
+        let ready = await withCheckedContinuation { continuation in
+            DispatchQueue.global().async {
+                continuation.resume(returning: entered.wait(timeout: .now() + 2) == .success)
+            }
+        }
+        XCTAssertTrue(ready)
+        let start = ProcessInfo.processInfo.systemUptime
+        XCTAssertFalse(compute.close(), "the command must retain its handle")
+        let ticket = try XCTUnwrap(compute.resourceBeginJSON())
+        try compute.resourceSampleJSON(ticket: ticket, reading: healthy)
+        XCTAssertLessThan(ProcessInfo.processInfo.systemUptime - start, 0.5)
+        release.signal()
+        _ = try await command.value
+        XCTAssertTrue(compute.close())
+    }
+
 }
 #endif

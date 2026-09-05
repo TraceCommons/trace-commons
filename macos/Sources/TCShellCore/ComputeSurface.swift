@@ -3,6 +3,9 @@ import Foundation
 /// Shared Rust wording; no shell-owned sentences or status interpretations.
 public struct ComputeCopy: Decodable, Equatable, Sendable {
     public let destination: String
+    public let subtitle: String?
+    public let retry: String?
+    public let unavailable: String?
     public let introduction: String
     public let allowanceLabel: String
     public let allowanceDetail: String
