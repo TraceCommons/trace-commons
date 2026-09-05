@@ -20,6 +20,13 @@ not MLX/device validation, training progress, spare migration, or a penalty-free
 shutdown guarantee. No production pool, private traces, wallet keys, or funds
 were used. The regular app constructor still refuses worker launch.
 
+The macOS shell now exposes Compute before trace enrollment, with app-owned
+observable state, shared Rust wording, background controller calls, and bounded
+Quit that retains unconfirmed worker ownership. Twenty-five Swift tests passed
+and the app target built; the unavailable content was visually inspected. These
+are model/navigation and bridge tests, not native mouse-click or installed-app
+worker evidence. See `macos/COMPUTE.md` for the lifecycle and platform gaps.
+
 Earlier slices below are historical progress notes, not the current capability
 summary. The phase exit gates remain open where their full criteria are unmet.
 
