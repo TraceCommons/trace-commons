@@ -1479,6 +1479,11 @@ fn force_rls_migration_covers_every_trace_rls_table() {
         )
         .expect("read community withdrawal eviction production hardening migration"),
     );
+    // Tables introduced after the original hardening migration install their
+    // policies in their creation migration; earlier migrations cannot alter them.
+    sql.push_str(include_str!(
+        "../../../migrations/V58__near_account_provisioning.sql"
+    ));
     // `trace_pii_backstop` carries the same tenant-isolation policy but is not
     // in `TRACE_COMMONS_RLS_TABLES`, so assert it here rather than lose the
     // coverage the hand-maintained table list used to provide.
@@ -1548,6 +1553,11 @@ fn central_rls_tenant_predicate_migration_covers_every_trace_rls_table() {
         .expect("read community withdrawal eviction central RLS policy migration"),
     );
 
+    // Tables introduced after the original hardening migration install their
+    // policies in their creation migration; earlier migrations cannot alter them.
+    sql.push_str(include_str!(
+        "../../../migrations/V58__near_account_provisioning.sql"
+    ));
     assert!(sql.contains("CREATE OR REPLACE FUNCTION trace_current_tenant_id()"));
     assert!(sql.contains("RETURNS TEXT"));
     assert!(sql.contains("current_setting('trace_commons.trace_tenant_id', true)"));
@@ -1566,6 +1576,78 @@ fn central_rls_tenant_predicate_migration_covers_every_trace_rls_table() {
                 "CREATE POLICY trace_corpus_tenant_isolation ON {table}"
             )),
             "central tenant predicate migration must recreate policy on {table}"
+        );
+    }
+}
+
+#[test]
+fn onboarding_creation_migrations_enforce_their_rls_boundaries() {
+    let provisioning = include_str!("../../../migrations/V58__near_account_provisioning.sql");
+    let admission = include_str!("../../../migrations/V59__trace_admission_ledger.sql");
+    // V59 uses dedicated policy names checked by admission_runtime_ready;
+    // validate those separately from the corpus policy-name registry.
+    for (sql, table, policy) in [
+        (
+            provisioning,
+            "trace_near_account_anchors",
+            "trace_corpus_tenant_isolation",
+        ),
+        (
+            provisioning,
+            "trace_near_provisioned_devices",
+            "trace_corpus_tenant_isolation",
+        ),
+        (
+            admission,
+            "trace_admission_challenges",
+            "admission_challenge_tenant",
+        ),
+        (
+            admission,
+            "trace_admission_accounts",
+            "admission_account_tenant",
+        ),
+        (
+            admission,
+            "trace_admission_submissions",
+            "admission_submission_tenant",
+        ),
+    ] {
+        assert!(sql.contains(&format!("ALTER TABLE {table} ENABLE ROW LEVEL SECURITY;")));
+        assert!(sql.contains(&format!("ALTER TABLE {table} FORCE ROW LEVEL SECURITY;")));
+        let normalized: String = sql.split_whitespace().collect();
+        assert!(normalized.contains(&format!(
+            "CREATEPOLICY{policy}ON{table}USING(tenant_id=trace_current_tenant_id())WITHCHECK(tenant_id=trace_current_tenant_id());"
+        )), "{table} must constrain both reads and writes with the canonical tenant predicate");
+    }
+    // The pre-account ceremony and global ledger state have distinct scopes;
+    // neither may lose FORCE RLS or acquire a public unrestricted policy.
+    for (sql, table, policy, expression) in [
+        (
+            provisioning,
+            "trace_near_provisioning_ceremonies",
+            "trace_near_ceremony_isolation",
+            "USING(ceremony_hash=current_setting('trace_commons.near_ceremony_hash',true))WITHCHECK(ceremony_hash=current_setting('trace_commons.near_ceremony_hash',true));",
+        ),
+        (
+            admission,
+            "trace_admission_receipts",
+            "admission_receipt_guard",
+            "TOtrace_admission_guardUSING(TRUE)WITHCHECK(TRUE);",
+        ),
+        (
+            admission,
+            "trace_admission_global_budget",
+            "admission_global_guard",
+            "TOtrace_admission_guardUSING(TRUE)WITHCHECK(TRUE);",
+        ),
+    ] {
+        assert!(sql.contains(&format!("ALTER TABLE {table} ENABLE ROW LEVEL SECURITY;")));
+        assert!(sql.contains(&format!("ALTER TABLE {table} FORCE ROW LEVEL SECURITY;")));
+        let normalized: String = sql.split_whitespace().collect();
+        assert!(
+            normalized.contains(&format!("CREATEPOLICY{policy}ON{table}{expression}")),
+            "{table} must retain its scoped policy"
         );
     }
 }
