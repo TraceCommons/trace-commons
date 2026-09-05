@@ -78,9 +78,12 @@ Checks on 2026-09-04:
   the repository allow-list passes under `RUSTFLAGS='-D warnings'`.
 - Updated Windows XAML parses as XML. Full WinUI compilation remains a Windows
   runner check: this macOS host cannot execute `XamlCompiler.exe` (exit 126).
-- GTK includes an ignored `wallet_widget_render` test for a real display/Xvfb.
-  It renders the same widget constructor with synthetic strings and constructs
-  no daemon or wallet request. Set `TC_WALLET_RENDER_PATH` to save its PNG.
+- GTK `wallet_widget_render` passed under Linux/Xvfb in the existing `tc-gtk`
+  image. The final 520 × 550 PNG was inspected: disclosure, both inputs, and
+  actions fit. This renders the same widget constructor with synthetic strings
+  and constructs no daemon or wallet request. It does not validate a live wallet
+  ceremony or the entire onboarding window. Set `TC_WALLET_RENDER_PATH` to save
+  its PNG; the exported window includes its opaque background.
 
 ```sh
 DOTNET_ROLL_FORWARD=Major NUGET_HTTP_CACHE_PATH=/tmp/native-flow-nuget-cache \

@@ -277,13 +277,9 @@ mod tests {
         assert!(wallet.start.is_mapped());
         assert!(wallet.start.allocation().y() + wallet.start.height() <= wallet.root.height());
         if let Ok(path) = std::env::var("TC_WALLET_RENDER_PATH") {
-            let paintable = gtk::WidgetPaintable::new(Some(&wallet.root));
+            let paintable = gtk::WidgetPaintable::new(Some(&window));
             let snapshot = gtk::Snapshot::new();
-            paintable.snapshot(
-                &snapshot,
-                wallet.root.width() as f64,
-                wallet.root.height() as f64,
-            );
+            paintable.snapshot(&snapshot, window.width() as f64, window.height() as f64);
             let node = snapshot.to_node().expect("render node");
             let renderer = gtk::gsk::Renderer::for_surface(&window.surface()).expect("renderer");
             renderer
