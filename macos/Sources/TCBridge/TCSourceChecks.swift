@@ -18,6 +18,12 @@ public enum TCSourceChecks {
     /// The wire key for Codex's session source.
     public static let codex = "codex"
 
+    /// The wire key for Gemini CLI's session source.
+    public static let gemini = "gemini"
+
+    /// The wire key for Cline's session source.
+    public static let cline = "cline"
+
     /// One tool's row, from `get_settings`'s `*_source_mode` -- `watch`,
     /// `off` or `unset`.
     ///

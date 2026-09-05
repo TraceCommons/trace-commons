@@ -3,6 +3,7 @@ import SwiftUI
 import TCBridge
 import TCShellCore
 import TCUpdates
+import UserNotifications
 
 /// What this machine is doing, and what permissions traces carry.
 ///
@@ -46,6 +47,10 @@ struct SettingsContent: View {
     // then claim a state that is no longer true. See `LoginItemManager`.
     @State private var loginItemState: LoginItemManager.State = LoginItemManager.currentState
     @State private var loginItemActionError: String?
+    /// Nil until the system has answered, and nil for good where there is
+    /// no notification centre to ask; the section renders nothing then.
+    @State private var notificationStatus: UNAuthorizationStatus?
+    @State private var notificationRequestPending = false
     @State private var showingGoPublic = false
     @State private var showingInferenceDisclosure = false
     /// The panel's two editable fields. Seeded from the daemon's answer --
@@ -102,6 +107,7 @@ struct SettingsContent: View {
         VStack(alignment: .leading, spacing: TC.Space.lg) {
             connection
             loginItem
+            notifications
             updatesSection
             consent
             publicProfile
@@ -121,6 +127,10 @@ struct SettingsContent: View {
             // can have grown since launch (the CLI writes to it too), and
             // the daemon publishes no event when it does.
             model.refreshAudit()
+        }
+        .task { notificationStatus = await Notifier.shared.authorizationStatus() }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            Task { notificationStatus = await Notifier.shared.authorizationStatus() }
         }
         .sheet(isPresented: $showingGoPublic) {
             // Handed the model explicitly rather than relying on the sheet
@@ -153,8 +163,14 @@ struct SettingsContent: View {
                 // sent it. The two session rows are driven by the MODE --
                 // `*_root_configured` is `mode == "watch"` and cannot tell
                 // "not declared" from "declared off".
+                // All four sources the roots screen offers, not the two
+                // the app started with: a Gemini CLI or Cline folder a
+                // contributor declared was watched with no row here saying
+                // so.
                 sourceCheckRow(TCSourceChecks.claude, settings.routingSourceModes.claude)
                 sourceCheckRow(TCSourceChecks.codex, settings.routingSourceModes.codex)
+                sourceCheckRow(TCSourceChecks.gemini, settings.routingSourceModes.gemini)
+                sourceCheckRow(TCSourceChecks.cline, settings.routingSourceModes.cline)
                 checkRow("Extra privacy scan configured", settings.nearAIConfigured)
             }
         }
@@ -227,6 +243,50 @@ struct SettingsContent: View {
             }
         }
         loginItemState = LoginItemManager.currentState
+    }
+
+    // MARK: - Notifications
+
+    /// Where the system stands on this app's notifications, read fresh on
+    /// appear for the same reason the login-item state is. Nothing is
+    /// rendered where there is no notification centre (a bare `swift run`
+    /// binary has no bundle identifier), and a denial is not an error: it
+    /// says where to change the answer, because this app cannot re-ask
+    /// once the system has been told no.
+    @ViewBuilder
+    private var notifications: some View {
+        if let status = notificationStatus {
+            VStack(alignment: .leading, spacing: TC.Space.sm) {
+                TCSectionHeader(title: "Notifications")
+                Text(Notifier.purpose)
+                    .font(TC.Font_.meta)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                switch status {
+                case .authorized, .provisional, .ephemeral:
+                    checkRow("Notifications allowed", true)
+                case .denied:
+                    checkRow("Notifications turned off in System Settings", false)
+                    Link("Open System Settings", destination: Notifier.systemSettingsURL)
+                        .font(TC.Font_.body)
+                case .notDetermined:
+                    checkRow("Not asked yet", false)
+                    Button("Allow notifications") {
+                        guard !notificationRequestPending else { return }
+                        notificationRequestPending = true
+                        Task {
+                            defer { notificationRequestPending = false }
+                            _ = await Notifier.shared.requestAuthorization()
+                            notificationStatus = await Notifier.shared.authorizationStatus()
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(notificationRequestPending)
+                @unknown default:
+                    checkRow("Notifications allowed", false)
+                }
+            }
+        }
     }
 
     // MARK: - Updates

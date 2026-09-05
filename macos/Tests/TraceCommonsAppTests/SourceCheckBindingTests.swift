@@ -60,6 +60,10 @@ final class SourceCheckBindingTests: XCTestCase {
             section.contains(
                 "sourceCheckRow(TCSourceChecks.codex, settings.routingSourceModes.codex)"),
             "the Codex row is not bound to its source mode: \(section)")
+        for tool in ["gemini", "cline"] {
+            XCTAssertTrue(section.contains(
+                "sourceCheckRow(TCSourceChecks.\(tool), settings.routingSourceModes.\(tool))"))
+        }
         for forbidden in [
             "claudeRootConfigured", "codexRootConfigured", "sessions folder set", "usual place",
         ] {
