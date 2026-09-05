@@ -47,12 +47,15 @@ struct MainWindowView: View {
             // resolves.
             CenteredNotice(title: "The watcher isn't running.", detail: reason)
                 .onAppear { model.refreshAll() }
-        case .needsRoots:
-            // The one refusal with somewhere to go. Rendering it as a notice
-            // is what made a fresh install a dead end: every screen that
-            // could clear it was behind the daemon it was blocking.
-            OnboardingRootsView(configDirectory: model.configDirectory)
-        case .running:
+        case .needsRoots, .running:
+            // One branch for BOTH states, deliberately: `.needsRoots` is the
+            // start of a fresh install's onboarding, not a notice, and the
+            // roots screen it leads to flips `startup` to `.running` when
+            // the daemon starts. Two `case` arms would be two view
+            // identities, and the coordinator's `@State step` would be
+            // thrown away at exactly that flip -- the same reason the two
+            // enrolment states below share one `if` branch.
+            //
             // First-run detection: `status.logged_in` from the daemon's own
             // `status`, never a local file probe -- see `AppModel.start()`
             // for why the app treats the daemon as the source of truth.
@@ -78,7 +81,7 @@ struct MainWindowView: View {
             // `startAt: .consent`, throwing away whatever step the
             // contributor had just reached. One branch keeps one identity
             // (and therefore one `@State step`) for the entire flow.
-            if !model.status.loggedIn || !model.isOnboardingComplete {
+            if model.requiresOnboarding {
                 OnboardingCoordinatorView(
                     startAt: model.status.loggedIn ? .consent : .welcome,
                     onComplete: { model.markOnboardingComplete() }

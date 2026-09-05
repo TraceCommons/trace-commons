@@ -974,6 +974,10 @@ final class AppModel: ObservableObject {
     /// onboarding, not straight to the main window with whatever scopes
     /// `enroll`'s floor-only default happened to leave in place -- see the
     /// coordinator's atomicity note.
+    var requiresOnboarding: Bool {
+        startup == .needsRoots || !status.loggedIn || !isOnboardingComplete
+    }
+
     var isOnboardingComplete: Bool {
         guard let tenantID = status.tenantID else { return false }
         return UserDefaults.standard.bool(forKey: Self.onboardingCompleteKey(tenantID))
@@ -1004,6 +1008,8 @@ final class AppModel: ObservableObject {
     /// tenant-keyed onboarding marker without a running daemon and a real
     /// enrolment. Debug-only, and deliberately routed through
     /// `publishIfChanged` so a test observes exactly what the app does.
+    func setStartupForTesting(_ startup: Startup) { self.startup = startup }
+
     func setStatusForTesting(_ status: DaemonStatus) {
         publishIfChanged(\.status, status)
     }
