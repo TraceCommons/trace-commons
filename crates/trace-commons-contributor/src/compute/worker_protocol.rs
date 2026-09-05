@@ -86,86 +86,6 @@ pub struct Credential {
     key: signature::Ed25519KeyPair,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn pinned_holonear_vectors_match_both_directions_and_reject_tampering() {
-        let fixture: serde_json::Value =
-            serde_json::from_str(include_str!("../../tests/fixtures/worker_ipc_v0.json")).unwrap();
-        for case in fixture["cases"].as_array().unwrap() {
-            let seed: [u8; 32] = hex::decode(case["seed_hex"].as_str().unwrap())
-                .unwrap()
-                .try_into()
-                .unwrap();
-            let credential = Credential::from_seed(&seed).unwrap();
-            let request: SignedRequest = serde_json::from_value(case["request"].clone()).unwrap();
-            let response: SignedResponse =
-                serde_json::from_value(case["response"].clone()).unwrap();
-            let actual = credential
-                .request_with_nonce(request.body.command, request.body.nonce)
-                .unwrap();
-            assert_eq!(actual.signature, request.signature);
-            assert_eq!(
-                serde_json::to_string(&actual.body).unwrap(),
-                case["request_body_json"].as_str().unwrap()
-            );
-            assert_eq!(
-                serde_json::to_string(&response.body).unwrap(),
-                case["response_body_json"].as_str().unwrap()
-            );
-            assert!(credential.verify_response(&actual, &response));
-            let mut wrong = response.clone();
-            wrong.body.version += 1;
-            assert!(!credential.verify_response(&actual, &wrong));
-            let mut wrong = response.clone();
-            wrong.body.nonce[0] ^= 1;
-            assert!(!credential.verify_response(&actual, &wrong));
-            let mut wrong = response.clone();
-            wrong.body.instance[0] ^= 1;
-            assert!(!credential.verify_response(&actual, &wrong));
-            let mut wrong = response.clone();
-            wrong.body.status.free_mem_bytes += 1;
-            assert!(!credential.verify_response(&actual, &wrong));
-            let mut wrong = response.clone();
-            wrong.signature = request.signature;
-            assert!(!credential.verify_response(&actual, &wrong));
-        }
-    }
-
-    #[tokio::test]
-    async fn refuses_oversized_empty_malformed_and_disconnected_frames() {
-        for frame in [0, MAX_FRAME_BYTES as u32 + 1, 2] {
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let address = listener.local_addr().unwrap();
-            let peer = tokio::spawn(async move {
-                let (mut stream, _) = listener.accept().await.unwrap();
-                let len = stream.read_u32().await.unwrap();
-                let mut bytes = vec![0; len as usize];
-                stream.read_exact(&mut bytes).await.unwrap();
-                stream.write_u32(frame).await.unwrap();
-                if frame == 2 {
-                    stream.write_all(b"{}").await.unwrap();
-                }
-            });
-            assert!(
-                Credential::from_seed(&[3; 32])
-                    .unwrap()
-                    .exchange(address, Command::Status)
-                    .await
-                    .is_err()
-            );
-            peer.await.unwrap();
-        }
-        assert!(
-            Credential::from_seed(&[3; 32])
-                .unwrap()
-                .exchange("192.0.2.1:8".parse().unwrap(), Command::Status)
-                .await
-                .is_err()
-        );
-    }
-}
 impl Credential {
     pub fn from_seed(seed: &[u8; 32]) -> anyhow::Result<Self> {
         Ok(Self {
@@ -250,5 +170,86 @@ impl Credential {
         })
         .await
         .map_err(|_| anyhow::anyhow!("worker-request-timeout"))?
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn pinned_holonear_vectors_match_both_directions_and_reject_tampering() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../tests/fixtures/worker_ipc_v0.json")).unwrap();
+        for case in fixture["cases"].as_array().unwrap() {
+            let seed: [u8; 32] = hex::decode(case["seed_hex"].as_str().unwrap())
+                .unwrap()
+                .try_into()
+                .unwrap();
+            let credential = Credential::from_seed(&seed).unwrap();
+            let request: SignedRequest = serde_json::from_value(case["request"].clone()).unwrap();
+            let response: SignedResponse =
+                serde_json::from_value(case["response"].clone()).unwrap();
+            let actual = credential
+                .request_with_nonce(request.body.command, request.body.nonce)
+                .unwrap();
+            assert_eq!(actual.signature, request.signature);
+            assert_eq!(
+                serde_json::to_string(&actual.body).unwrap(),
+                case["request_body_json"].as_str().unwrap()
+            );
+            assert_eq!(
+                serde_json::to_string(&response.body).unwrap(),
+                case["response_body_json"].as_str().unwrap()
+            );
+            assert!(credential.verify_response(&actual, &response));
+            let mut wrong = response.clone();
+            wrong.body.version += 1;
+            assert!(!credential.verify_response(&actual, &wrong));
+            let mut wrong = response.clone();
+            wrong.body.nonce[0] ^= 1;
+            assert!(!credential.verify_response(&actual, &wrong));
+            let mut wrong = response.clone();
+            wrong.body.instance[0] ^= 1;
+            assert!(!credential.verify_response(&actual, &wrong));
+            let mut wrong = response.clone();
+            wrong.body.status.free_mem_bytes += 1;
+            assert!(!credential.verify_response(&actual, &wrong));
+            let mut wrong = response.clone();
+            wrong.signature = request.signature;
+            assert!(!credential.verify_response(&actual, &wrong));
+        }
+    }
+
+    #[tokio::test]
+    async fn refuses_oversized_empty_malformed_and_disconnected_frames() {
+        for frame in [0, MAX_FRAME_BYTES as u32 + 1, 2] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let peer = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let len = stream.read_u32().await.unwrap();
+                let mut bytes = vec![0; len as usize];
+                stream.read_exact(&mut bytes).await.unwrap();
+                stream.write_u32(frame).await.unwrap();
+                if frame == 2 {
+                    stream.write_all(b"{}").await.unwrap();
+                }
+            });
+            assert!(
+                Credential::from_seed(&[3; 32])
+                    .unwrap()
+                    .exchange(address, Command::Status)
+                    .await
+                    .is_err()
+            );
+            peer.await.unwrap();
+        }
+        assert!(
+            Credential::from_seed(&[3; 32])
+                .unwrap()
+                .exchange("192.0.2.1:8".parse().unwrap(), Command::Status)
+                .await
+                .is_err()
+        );
     }
 }

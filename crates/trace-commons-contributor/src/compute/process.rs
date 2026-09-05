@@ -353,7 +353,7 @@ impl WorkerProcess {
         })
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub async fn start(&mut self, allowance: u64) -> anyhow::Result<wire::Status> {
         self.start_guarded(allowance, Command::spawn).await
     }
@@ -485,7 +485,7 @@ impl WorkerProcess {
             .await
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub async fn stop(&mut self) -> StopReport {
         let (_sender, receiver) = tokio::sync::watch::channel(None);
         self.stop_with_urgency(receiver).await
