@@ -35,6 +35,18 @@ final class NearAccountConnectTests: XCTestCase {
             XCTAssertNil(progress.browserURLFor(commons: "https://commons.example"))
         }
     }
+    func testPreparationRequiresExplicitSessionBackendAndConfirmation() throws {
+        let daemon = NearRecordingDaemon()
+        daemon.response = #"{"id":1,"result":{"status":"ready_for_next_inference","expires_at":123}}"#
+        let result = try DaemonClient(daemon: daemon).prepareAdmissionSession(entryID: "selected", backend: "near-funded")
+        XCTAssertEqual(result.status, "ready_for_next_inference")
+        XCTAssertEqual(daemon.calls.map(\.0), ["prepare_admission_session"])
+        let params = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(daemon.calls[0].1.utf8)) as? [String: Any])
+        XCTAssertEqual(Set(params.keys), ["entry_id", "backend", "confirmed"])
+        XCTAssertEqual(params["entry_id"] as? String, "selected")
+        XCTAssertEqual(params["backend"] as? String, "near-funded")
+        XCTAssertEqual(params["confirmed"] as? Bool, true)
+    }
     func testStatusAndCancellationReferOnlyToTheLocalAttempt() throws {
         let daemon = NearRecordingDaemon()
         daemon.response = #"{"id":1,"result":{"status":"complete","attempt_id":"local"}}"#

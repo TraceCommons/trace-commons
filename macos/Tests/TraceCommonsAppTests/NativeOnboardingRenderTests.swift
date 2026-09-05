@@ -25,6 +25,10 @@ final class NativeOnboardingRenderTests: XCTestCase {
         let model = AppModel()
         try render(QueueContent(previewing: .constant(nil)).environmentObject(model),
                    size: CGSize(width: 860, height: 640), to: directory.appendingPathComponent("native-first-contribution.png"))
+        try render(NearAccountConnectView(onEnrolled: {}).environmentObject(model),
+                   size: CGSize(width: 680, height: 300), to: directory.appendingPathComponent("native-wallet-connect.png"))
+        try render(AdmissionPreparationView(entryID: "synthetic").environmentObject(model),
+                   size: CGSize(width: 680, height: 320), to: directory.appendingPathComponent("native-admission-preparation.png"))
         XCTAssertFalse(confirmed)
     }
 

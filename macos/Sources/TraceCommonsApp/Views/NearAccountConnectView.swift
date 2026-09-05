@@ -70,6 +70,7 @@ struct NearAccountConnectView: View {
             }
             guard let progress, let id = progress.attemptID,
                   let url = progress.browserURLFor(commons: commons) else {
+                if let id = progress?.attemptID { await model.nearAccountCancel(attemptID: id) }
                 message = "The connection could not start. Check availability and try again."
                 onBusyChanged(false)
                 return

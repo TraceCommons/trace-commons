@@ -244,6 +244,7 @@ pub const METHODS: &[&str] = &[
     "arming_suggestion",
     "decline_arming",
     "enroll",
+    "prepare_admission_session",
     "near_account_capabilities",
     "near_account_start",
     "near_account_status",
@@ -1397,6 +1398,9 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         // async. Same treatment as `"enroll"`: an honest refusal here rather
         // than a partial answer. No real caller reaches it -- see the module
         // doc's "Sync vs. async dispatch" section.
+        "prepare_admission_session" => {
+            Response::err(req.id, ERR_UNAVAILABLE, "admission-setup-requires-async")
+        }
         "near_account_status" => super::account_onboarding::handle_status(shared, req),
         "near_account_cancel" => super::account_onboarding::handle_cancel(shared, req),
         "near_account_start" | "near_account_capabilities" => {
@@ -1681,13 +1685,7 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
                 let settings = shared.settings.lock().expect("settings lock");
                 redacted_settings(&settings)
             };
-            value["admission_evidence_required"] = match shared.store.load_config() {
-                Ok(cfg) => serde_json::json!(
-                    cfg.and_then(|c| c.witness)
-                        .is_some_and(|w| w.admission_evidence)
-                ),
-                Err(_) => serde_json::Value::Null,
-            };
+            add_admission_setting(shared, &mut value);
             Response::ok(req.id, value)
         }
         "set_settings" => {
@@ -1717,7 +1715,10 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
                     if settings.ironwire != declared_before {
                         shared.rebuild_routing(settings.ironwire.as_ref());
                     }
-                    Response::ok(req.id, redacted_settings(&settings))
+                    let mut value = redacted_settings(&settings);
+                    drop(settings);
+                    add_admission_setting(shared, &mut value);
+                    Response::ok(req.id, value)
                 }
                 Err(label) => Response::err(req.id, ERR_BAD_PARAMS, label),
             }
@@ -1750,6 +1751,16 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
     }
 }
 
+fn add_admission_setting(shared: &DaemonShared, value: &mut serde_json::Value) {
+    value["admission_evidence_required"] = match shared.store.load_config() {
+        Ok(cfg) => serde_json::json!(
+            cfg.and_then(|c| c.witness)
+                .is_some_and(|w| w.admission_evidence)
+        ),
+        Err(_) => serde_json::Value::Null,
+    };
+}
+
 /// The complete dispatcher: answers the async methods (`"approve"`,
 /// `"preview"`, `"preview_body"`, `"preview_turns"`, `"probe_routing"`,
 /// `"probe_routed_tools"`,
@@ -1763,6 +1774,9 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
 /// `handle_request` directly.
 pub async fn handle_request_async(shared: &DaemonShared, req: &Request) -> Response {
     match req.method.as_str() {
+        "prepare_admission_session" => {
+            super::admission_setup::handle_prepare_admission_session(shared, req).await
+        }
         "near_account_start" => super::account_onboarding::handle_start(shared, req).await,
         "near_account_capabilities" => {
             super::account_onboarding::handle_capabilities(shared, req).await
@@ -6582,6 +6596,29 @@ mod tests {
             &req("dismiss", serde_json::json!({"entry_id": "not-a-uuid"})),
         );
         assert_eq!(r.error.unwrap().code, ERR_BAD_PARAMS);
+    }
+
+    #[test]
+    fn admission_requirement_survives_settings_write() {
+        let s = shared();
+        let mut cfg = crate::commands::unenrolled_preview_config();
+        cfg.witness = Some(crate::config::WitnessSettings {
+            url: "https://witness.example".into(),
+            signing_address: "0x0000000000000000000000000000000000000000".into(),
+            expected_measurements: vec!["measurement".into()],
+            admission_evidence: true,
+        });
+        s.store.save_config(&cfg).unwrap();
+        for method in ["get_settings", "set_settings"] {
+            let response = handle_request(
+                &s,
+                &req(method, serde_json::json!({"max_uploads_per_day": 200})),
+            );
+            assert_eq!(
+                response.result.unwrap()["admission_evidence_required"],
+                true
+            );
+        }
     }
 
     #[test]
