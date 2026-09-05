@@ -4,6 +4,7 @@
 //! `issuer_client`. They never print raw `user_subject` (only its hash) and
 //! never echo issuer response bodies on error.
 
+use std::io::IsTerminal;
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -424,6 +425,9 @@ pub async fn account_logout(store: &ConfigStore) -> Result<()> {
 /// nothing here names a path, a submission or a key.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct LogoutInventory {
+    pub pending: Option<usize>,
+    pub approved_not_uploaded: Option<usize>,
+    pub approved_envelopes: Option<usize>,
     pub receipts: usize,
     pub history_rows: usize,
     pub device_key: bool,
@@ -434,7 +438,57 @@ pub(crate) struct LogoutInventory {
 /// empty: this is a summary for a prompt, and refusing to log out because
 /// a receipts file is corrupt would be the wrong failure.
 pub(crate) fn logout_inventory(store: &ConfigStore) -> LogoutInventory {
+    // Unlike normal recovery loading, a deletion summary must not silently
+    // skip corrupt rows and call the remaining count complete.
+    let queue = store
+        .read_daemon_file(crate::config::DAEMON_QUEUE_FILE)
+        .ok()
+        .and_then(|body| {
+            let Some(body) = body else {
+                return Some(Vec::new());
+            };
+            let text = std::str::from_utf8(&body).ok()?;
+            text.lines()
+                .filter(|line| !line.trim().is_empty())
+                .map(serde_json::from_str::<crate::daemon::queue::QueueEntry>)
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .ok()
+        });
+    let approved_envelopes = std::fs::read_dir(store.dir()).ok().and_then(|entries| {
+        let entries = entries.collect::<std::io::Result<Vec<_>>>().ok()?;
+        Some(
+            entries
+                .iter()
+                .filter(|entry| {
+                    let name = entry.file_name();
+                    let name = name.to_string_lossy();
+                    name.starts_with(crate::config::DAEMON_APPROVED_ENVELOPE_PREFIX)
+                        || name.starts_with(&format!(
+                            ".{}",
+                            crate::config::DAEMON_APPROVED_ENVELOPE_PREFIX
+                        ))
+                })
+                .count(),
+        )
+    });
     LogoutInventory {
+        pending: queue.as_ref().map(|q| {
+            q.iter()
+                .filter(|e| e.state == crate::daemon::queue::QueueState::Pending)
+                .count()
+        }),
+        approved_not_uploaded: queue.as_ref().map(|q| {
+            q.iter()
+                .filter(|e| {
+                    matches!(
+                        e.state,
+                        crate::daemon::queue::QueueState::Approved
+                            | crate::daemon::queue::QueueState::Uploading
+                    )
+                })
+                .count()
+        }),
+        approved_envelopes,
         receipts: store.load_receipts().map(|r| r.len()).unwrap_or(0),
         history_rows: crate::daemon::history::HistoryCache::load(store)
             .map(|h| h.len())
@@ -458,6 +512,11 @@ pub(crate) fn logout_summary_lines(inv: &LogoutInventory) -> Vec<String> {
     } else {
         "no account session is stored"
     };
+    let count = |value: Option<usize>| {
+        value
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "unknown (unreadable state)".to_string())
+    };
     vec![
         "about to log out and delete this device's local Trace Commons state:".to_string(),
         format!(
@@ -468,6 +527,12 @@ pub(crate) fn logout_summary_lines(inv: &LogoutInventory) -> Vec<String> {
             "  history    : {} history row(s), plus the local audit log",
             inv.history_rows
         ),
+        format!("  pending    : {} queued session(s) discarded", count(inv.pending)),
+        format!("  approved   : {} approved but not confirmed uploaded session(s) discarded", count(inv.approved_not_uploaded)),
+        format!("  envelopes  : {} stored approved envelope file(s), including temporary files, deleted", count(inv.approved_envelopes)),
+        "  settings   : watched folders, project choices and auto-upload opt-ins deleted".to_string(),
+        "queued sessions can be rediscovered only if their source session files still exist; approval must be given again.".to_string(),
+        "counts are a snapshot; any additional local queue state present when logout stops the daemon is also discarded.".to_string(),
         format!("  device key : {device_key}"),
         format!("  account    : {account}"),
         "submitted traces stay on the server. `daemon withdraw` is what removes them, \
@@ -477,8 +542,11 @@ pub(crate) fn logout_summary_lines(inv: &LogoutInventory) -> Vec<String> {
 }
 
 /// Delete all local contributor state (config, device key, receipts,
-/// history, audit log). Asks first unless `yes`; a closed stdin is a no.
+/// history, audit log). Requires a terminal confirmation or explicit `yes`.
 pub fn logout(store: &ConfigStore, yes: bool) -> Result<()> {
+    if !yes && !std::io::stdin().is_terminal() {
+        anyhow::bail!("logout requires confirmation; use --yes in non-interactive mode");
+    }
     logout_with(store, yes, &mut std::io::stdin(), &mut std::io::stdout())
 }
 
@@ -496,7 +564,7 @@ pub(crate) fn logout_with(
         if !read_yes_no("log out and delete this? [y/N] ", reader, writer)? {
             writeln!(writer, "logout cancelled; nothing removed")
                 .context("writing logout outcome")?;
-            return Ok(());
+            anyhow::bail!("logout cancelled; nothing removed");
         }
     }
     // Stop a running daemon first. It holds a minted claim that stays valid
@@ -1302,14 +1370,16 @@ pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()
     let indices: Vec<usize> = if mode == SubmitSelectionMode::All {
         (0..refs.len()).collect()
     } else if mode == SubmitSelectionMode::Summary {
+        if !std::io::stdin().is_terminal() {
+            anyhow::bail!("submit requires confirmation; use --yes in non-interactive mode");
+        }
         for line in submit_summary_lines(&refs, scope.as_deref(), &cfg.consent_scopes) {
             println!("{line}");
         }
         let confirmed = read_confirmation(&mut std::io::stdin(), &mut std::io::stdout())?;
         println!();
         if !confirmed {
-            println!("nothing submitted");
-            return Ok(());
+            anyhow::bail!("submission cancelled; nothing submitted");
         }
         (0..refs.len()).collect()
     } else {
@@ -3117,8 +3187,8 @@ fn daemon_call(store: &ConfigStore, method: &str, params: serde_json::Value) -> 
 pub(crate) enum DaemonLiveness {
     /// A running daemon answered over its socket.
     Running,
-    /// Nothing is listening; the answer came from the state files, which
-    /// are what the next daemon start will load.
+    /// No daemon answered; the answer came from saved state. Connection
+    /// errors can also take this path, so this does not prove absence.
     NotRunning,
 }
 
@@ -3146,17 +3216,18 @@ fn daemon_call_probed(
 pub(crate) fn daemon_liveness_line(liveness: DaemonLiveness) -> &'static str {
     match liveness {
         DaemonLiveness::Running => "daemon:      running",
-        DaemonLiveness::NotRunning => {
-            "daemon:      not running (showing the state the next start will load)"
-        }
+        DaemonLiveness::NotRunning => "daemon:      not reachable (showing saved local state)",
     }
 }
 
-/// Add `daemon_running` to a status result. Additive: every existing field
-/// is untouched, so a `--json` caller parsing the old shape keeps working.
+/// Add the CLI-only `daemon_running` annotation. Offline health is unknown
+/// and is replaced with null rather than presenting a fabricated healthy state.
 /// An error response has no result to annotate and passes through.
 pub(crate) fn annotate_daemon_running(mut resp: Response, liveness: DaemonLiveness) -> Response {
     if let Some(serde_json::Value::Object(map)) = resp.result.as_mut() {
+        if liveness == DaemonLiveness::NotRunning && map.contains_key("health") {
+            map.insert("health".to_string(), serde_json::Value::Null);
+        }
         map.insert(
             "daemon_running".to_string(),
             serde_json::Value::Bool(liveness == DaemonLiveness::Running),
@@ -3174,10 +3245,10 @@ pub(crate) fn daemon_pause_line(paused: bool, liveness: DaemonLiveness) -> Strin
         (true, DaemonLiveness::Running) => "paused".to_string(),
         (false, DaemonLiveness::Running) => "running".to_string(),
         (true, DaemonLiveness::NotRunning) => {
-            "paused (no daemon is running; recorded for the next daemon start)".to_string()
+            "paused (daemon not reachable; recorded in local state)".to_string()
         }
         (false, DaemonLiveness::NotRunning) => {
-            "not paused (no daemon is running; recorded for the next daemon start)".to_string()
+            "not paused (daemon not reachable; recorded in local state)".to_string()
         }
     }
 }
@@ -3229,6 +3300,10 @@ pub fn daemon_status(store: &ConfigStore, json: bool) -> Result<()> {
             if v["paused"] == true { "yes" } else { "no" }
         );
         println!("pending:     {}", v["queue_depth"]);
+        if liveness == DaemonLiveness::NotRunning {
+            println!("health:      unknown (daemon not reachable)");
+            return;
+        }
         match health["last_error_label"].as_str() {
             Some(label) => println!(
                 "health:      {label} (since {})",
@@ -4540,6 +4615,9 @@ mod logout_tests {
         assert_eq!(
             logout_inventory(&store),
             LogoutInventory {
+                pending: Some(0),
+                approved_not_uploaded: Some(0),
+                approved_envelopes: Some(0),
                 receipts: 3,
                 history_rows: 2,
                 device_key: true,
@@ -4550,6 +4628,9 @@ mod logout_tests {
         assert_eq!(
             logout_inventory(&empty),
             LogoutInventory {
+                pending: Some(0),
+                approved_not_uploaded: Some(0),
+                approved_envelopes: Some(0),
                 receipts: 0,
                 history_rows: 0,
                 device_key: false,
@@ -4559,14 +4640,67 @@ mod logout_tests {
     }
 
     #[test]
+    fn inventory_counts_pending_and_approved_work_before_deletion() {
+        let (_d, store) = temp_store();
+        let mut rows = Vec::new();
+        for state in ["pending", "approved", "uploading", "uploaded", "expired"] {
+            let row = serde_json::json!({
+                "entry_id": uuid::Uuid::new_v4(), "session_hash": "sha256:test",
+                "source": "trajectory", "project_key": "private-project",
+                "project_label": "private-label", "path": "private-source",
+                "size_bytes": 1, "discovered_at": "2026-09-05T00:00:00Z",
+                "state": state, "attempts": 0
+            });
+            let _: crate::daemon::queue::QueueEntry = serde_json::from_value(row.clone()).unwrap();
+            rows.push(row.to_string());
+        }
+        store
+            .write_daemon_file(crate::config::DAEMON_QUEUE_FILE, rows.join("\n").as_bytes())
+            .unwrap();
+        let inv = logout_inventory(&store);
+        assert_eq!(inv.pending, Some(1));
+        assert_eq!(inv.approved_not_uploaded, Some(2));
+        let summary = logout_summary_lines(&inv).join("\n");
+        assert!(!summary.contains("private-"));
+    }
+
+    #[test]
+    fn unreadable_queue_is_unknown_and_orphaned_envelopes_are_counted() {
+        let (_d, store) = temp_store();
+        store
+            .write_daemon_file(crate::config::DAEMON_QUEUE_FILE, b"broken\n")
+            .unwrap();
+        store
+            .write_daemon_file("daemon-approved-envelope-orphan.json", b"{}")
+            .unwrap();
+        let inv = logout_inventory(&store);
+        assert_eq!(inv.pending, None);
+        assert_eq!(inv.approved_not_uploaded, None);
+        assert_eq!(inv.approved_envelopes, Some(1));
+        assert!(
+            logout_summary_lines(&inv)
+                .join("\n")
+                .contains("unknown (unreadable state)")
+        );
+    }
+
+    #[test]
     fn the_summary_names_the_counts_the_key_and_what_stays() {
         let text = logout_summary_lines(&LogoutInventory {
+            pending: Some(4),
+            approved_not_uploaded: Some(2),
+            approved_envelopes: Some(3),
             receipts: 3,
             history_rows: 2,
             device_key: true,
             account_session: true,
         })
         .join("\n");
+        assert!(text.contains("4 queued session"));
+        assert!(text.contains("2 approved but not confirmed uploaded"));
+        assert!(text.contains("3 stored approved envelope"));
+        assert!(text.contains("auto-upload opt-ins"));
+        assert!(text.contains("source session files still exist"));
         assert!(text.contains("3 receipt"), "got: {text}");
         assert!(text.contains("2 history"), "got: {text}");
         assert!(text.contains("device key"), "got: {text}");
@@ -4581,7 +4715,7 @@ mod logout_tests {
         for answer in ["", "\n", "n\n", "no\n"] {
             let (_d, store) = a_populated_store();
             let mut out = Vec::new();
-            logout_with(&store, false, &mut answer.as_bytes(), &mut out).unwrap();
+            assert!(logout_with(&store, false, &mut answer.as_bytes(), &mut out).is_err());
             let text = String::from_utf8(out).unwrap();
             assert!(text.contains("[y/N]"), "answer {answer:?}: {text}");
             assert!(
@@ -4633,7 +4767,7 @@ mod daemon_liveness_tests {
         );
         assert_eq!(
             daemon_liveness_line(DaemonLiveness::NotRunning),
-            "daemon:      not running (showing the state the next start will load)"
+            "daemon:      not reachable (showing saved local state)"
         );
     }
 
@@ -4656,6 +4790,23 @@ mod daemon_liveness_tests {
     }
 
     #[test]
+    fn offline_health_is_unknown_but_live_health_is_preserved() {
+        let health = serde_json::json!({"last_error_label": null});
+        for liveness in [DaemonLiveness::Running, DaemonLiveness::NotRunning] {
+            let response = Response::ok(1, serde_json::json!({"health": health}));
+            let value = annotate_daemon_running(response, liveness).result.unwrap();
+            assert_eq!(
+                value["health"],
+                if liveness == DaemonLiveness::Running {
+                    health.clone()
+                } else {
+                    serde_json::Value::Null
+                }
+            );
+        }
+    }
+
+    #[test]
     fn an_error_response_is_left_alone() {
         let resp = Response::err(1, "nope", "no");
         let out = annotate_daemon_running(resp, DaemonLiveness::Running);
@@ -4669,11 +4820,11 @@ mod daemon_liveness_tests {
         assert_eq!(daemon_pause_line(false, DaemonLiveness::Running), "running");
         assert_eq!(
             daemon_pause_line(true, DaemonLiveness::NotRunning),
-            "paused (no daemon is running; recorded for the next daemon start)"
+            "paused (daemon not reachable; recorded in local state)"
         );
         assert_eq!(
             daemon_pause_line(false, DaemonLiveness::NotRunning),
-            "not paused (no daemon is running; recorded for the next daemon start)"
+            "not paused (daemon not reachable; recorded in local state)"
         );
     }
 }

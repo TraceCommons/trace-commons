@@ -723,3 +723,68 @@ fn refusal_reports_session_and_size_and_only_fails_real_submit() {
         "stdout={real_stdout}\nstderr={real_stderr}"
     );
 }
+
+#[test]
+fn noninteractive_bulk_submit_requires_yes_and_uploads_nothing() {
+    let config = tempfile::tempdir().unwrap();
+    write_enrolled_config(config.path());
+    let source = tempfile::tempdir().unwrap();
+    let trajectory = write_trajectory(source.path(), "list the files");
+    let output = Command::new(env!("CARGO_BIN_EXE_trace-commons-contributor"))
+        .arg("--config-dir")
+        .arg(config.path())
+        .args(["submit", "--all", "--source", "trajectory", "--trajectory"])
+        .arg(trajectory)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("use --yes"));
+    let store =
+        trace_commons_contributor::config::ConfigStore::open(config.path().to_path_buf()).unwrap();
+    assert!(store.load_receipts().unwrap().is_empty());
+}
+
+#[test]
+fn noninteractive_logout_requires_yes_and_preserves_state() {
+    let config = tempfile::tempdir().unwrap();
+    write_enrolled_config(config.path());
+    let output = Command::new(env!("CARGO_BIN_EXE_trace-commons-contributor"))
+        .arg("--config-dir")
+        .arg(config.path())
+        .arg("logout")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("use --yes"));
+    assert!(config.path().join("contributor.json").exists());
+}
+
+#[test]
+fn offline_status_never_claims_healthy() {
+    let config = tempfile::tempdir().unwrap();
+    for json in [false, true] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_trace-commons-contributor"));
+        command.arg("--config-dir").arg(config.path());
+        if json {
+            command.arg("--json");
+        }
+        let output = command.args(["daemon", "status"]).output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if json {
+            let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(value["daemon_running"], false);
+            assert!(value["health"].is_null());
+        } else {
+            let text = String::from_utf8(output.stdout).unwrap();
+            assert!(text.contains("not reachable"));
+            assert!(text.contains("health:      unknown"));
+            assert!(!text.contains("health:      ok"));
+        }
+    }
+}
