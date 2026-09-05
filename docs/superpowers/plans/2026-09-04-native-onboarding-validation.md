@@ -204,11 +204,12 @@ ENABLE/FORCE and canonical policies without changing historical migrations or
 removing runtime registry entries. All 31 default RLS tests and the dedicated
 real-PostgreSQL provisioning/admission tests passed.
 
-An extra, optional full PostgreSQL RLS suite ran 30/31: the unchanged export
-fixture `store_facade_preserves_export_grant_job_scope_and_updates` inserts a
-random nonexistent grant and fails its foreign key. That fixture is outside this
-onboarding change and remains unresolved; this record does not claim the entire
-optional database suite passed.
+The pre-review optional PostgreSQL RLS suite ran 30/31: the export fixture
+`store_facade_preserves_export_grant_job_scope_and_updates` inserted a random
+nonexistent grant and failed its foreign key. The review revision reproduced
+that failure on main and repaired the missing prerequisite row without changing
+assertions. The full revised suite now passes 32/32 against real PostgreSQL; see
+[baseline evidence and repair](2026-09-05-export-fixture-validation.md).
 
 
 ## Review revision, 2026-09-05
@@ -255,6 +256,9 @@ Local verification during this revision:
   affected by an existing default-port daemon and fixed startup timing; it is not
   cited as a passing run.
 
-Current-head CI and the optional PostgreSQL main-baseline comparison are recorded
-in PR #602. Earlier results above describe their stated revisions, not subsequent
+The final PostgreSQL checks passed 32 RLS tests, the restricted-role retention
+test (including refusal of runtime membership in either guard), and the atomic
+admission-ledger test. The main-baseline failure and minimal fixture repair are
+recorded in [the reproduction note](2026-09-05-export-fixture-validation.md).
+Current-head CI is recorded in PR #602. Earlier results above describe their stated revisions, not subsequent
 heads. No live pilot, deployment or provider spending occurred in this revision.
