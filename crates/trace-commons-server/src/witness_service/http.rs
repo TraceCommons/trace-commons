@@ -258,7 +258,8 @@ struct WitnessRequestBody {
 struct InferenceReceiptBody {
     /// The receipt's signed text: two or three `:`-separated parts.
     text: String,
-    /// The 65-byte secp256k1 signature, hex.
+    /// The signature, hex. 65 bytes for ecdsa, 64 for ed25519; which is
+    /// decided by `signing_algo`.
     signature: String,
     /// The address the provider claims signed it.
     signing_address: String,
@@ -1771,7 +1772,8 @@ mod tests {
     /// because every receipt failure is deliberately one label on the wire
     /// (see `inference.rs`) and a route-level test therefore cannot tell an
     /// ed25519 reading from an ECDSA one. Hardcoding `Ecdsa` in `try_from`
-    /// fails this test and nothing else -- which is the point.
+    /// while keeping the `from_wire` validation fails this test and nothing
+    /// else -- which is the point.
     #[test]
     fn the_wire_signing_algo_becomes_the_payload_discriminator() {
         let absent: InferenceReceiptBody = serde_json::from_value(serde_json::json!({
@@ -1802,9 +1804,12 @@ mod tests {
             "text": "a:b", "signature": "cc", "signing_address": "0xdd", "signing_algo": "rsa"
         }))
         .unwrap();
-        assert!(
-            ReceiptPayload::try_from(unknown).is_err(),
-            "an unknown scheme is a refusal, never a default"
-        );
+        match ReceiptPayload::try_from(unknown) {
+            Err(refusal) => {
+                assert_eq!(refusal.status, StatusCode::BAD_REQUEST);
+                assert_eq!(refusal.code, "witness_request_malformed");
+            }
+            Ok(_) => panic!("an unknown scheme is a refusal, never a default"),
+        }
     }
 }
