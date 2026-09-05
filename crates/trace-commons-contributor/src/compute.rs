@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::ConfigStore;
 
+pub mod artifact;
 mod controller;
 mod live;
 mod process;

@@ -1,6 +1,8 @@
 # Compute pilot packaging and resource-policy implementation
 
-Status: design complete; implementation tasks below are not yet executed.
+Status: artifact inventory and inert validator implemented; later tasks remain open.
+Evidence and the MLX runtime asset-location gap are recorded in
+[artifact inventory](../../compute-artifact-inventory.md). No shipping gate changed.
 Design: [contract and policy](../specs/2026-09-04-compute-pilot-packaging-policy.md).
 Build on Trace Commons `bd523c22` and Holonear `cef95b36` in isolated worktrees.
 
