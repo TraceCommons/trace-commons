@@ -3,6 +3,60 @@
 use super::*;
 use trace_commons_contributor::compute::{ComputeCommand, ComputeController};
 
+/// Obtain a single-use capture ticket BEFORE reading native resource APIs.
+/// Returns NULL for unavailable controllers. Never launches work.
+/// # Safety
+/// The handle must remain alive for the call; free the result with tc_string_free.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_compute_resource_begin_json(
+    handle: *mut tc_compute_handle,
+) -> *mut c_char {
+    guard(|| {
+        anyhow::ensure!(
+            registry_is(handle as usize, AllocKind::Compute),
+            "invalid-handle"
+        );
+        let ticket = unsafe { &*handle }
+            .controller
+            .resource_begin()
+            .ok_or_else(|| anyhow::anyhow!("resource-unavailable"))?;
+        Ok(to_owned_cstring(&serde_json::to_string(&ticket)?))
+    })
+    .unwrap_or_else(|_| {
+        set_last_error("compute-resource-unavailable");
+        std::ptr::null_mut()
+    })
+}
+
+/// Submit a complete fresh reading with its ticket, or a sleep/wake event.
+/// Short safety ingress; independent of the bounded command queue and safe to
+/// call during shutdown. Stale/consumed tickets return NULL. This trusted native
+/// adapter seam does not attest platform state and cannot enable production.
+/// # Safety
+/// Handle must remain alive. JSON must be NUL terminated, at most 4096 bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_compute_resource_event_json(
+    handle: *mut tc_compute_handle,
+    json: *const c_char,
+) -> *mut c_char {
+    guard(|| {
+        anyhow::ensure!(
+            registry_is(handle as usize, AllocKind::Compute),
+            "invalid-handle"
+        );
+        let event = serde_json::from_slice(unsafe { bounded_json_bytes(json) }?)?;
+        let controller = &unsafe { &*handle }.controller;
+        anyhow::ensure!(controller.resource_event(event), "resource-event-refused");
+        Ok(to_owned_cstring(&serde_json::to_string(
+            &controller.snapshot(),
+        )?))
+    })
+    .unwrap_or_else(|_| {
+        set_last_error("compute-resource-event-refused");
+        std::ptr::null_mut()
+    })
+}
+
 /// Shared navigation and loading/error copy, available without a handle.
 #[unsafe(no_mangle)]
 pub extern "C" fn tc_compute_copy_json() -> *mut c_char {
@@ -227,6 +281,18 @@ mod tests {
             },
         )
         .unwrap();
+        let ticket = controller.resource_begin().unwrap();
+        assert!(controller.resource_event(
+            trace_commons_contributor::compute::ResourceEvent::Sample {
+                ticket,
+                reading: trace_commons_contributor::compute::ResourceReading {
+                    power: trace_commons_contributor::compute::policy::PowerSource::Ac,
+                    low_power_mode: Some(false),
+                    thermal: trace_commons_contributor::compute::policy::ThermalState::Nominal,
+                    memory: trace_commons_contributor::compute::policy::MemoryPressure::Normal,
+                }
+            }
+        ));
         controller.command(ComputeCommand::Enable {
             ram_allowance_gib: 1,
         });

@@ -139,6 +139,14 @@ typedef struct tc_handle tc_handle;
 typedef struct tc_compute_handle tc_compute_handle;
 tc_compute_handle *tc_compute_open(const char *config_dir, char **err);
 char *tc_compute_status_json(tc_compute_handle *handle);
+/* Native resource ingress: obtain a single-use {epoch,sequence} ticket BEFORE
+ * reading every field. Submit {event:"sample",ticket:{epoch,sequence},reading:
+ * {power,low_power_mode,thermal,memory}}, or {event:"sleep"}/{event:"wake"}.
+ * Snake-case enum strings; low_power_mode is bool/null. JSON <=4096 bytes.
+ * NULL for unavailable/refused; owned strings use tc_string_free. Short calls
+ * may run concurrently with shutdown, but NEVER with free. No launch authority. */
+char *tc_compute_resource_begin_json(tc_compute_handle *handle);
+char *tc_compute_resource_event_json(tc_compute_handle *handle, const char *json);
 char *tc_compute_command_json(tc_compute_handle *handle, const char *command_json);
 void tc_compute_free(tc_compute_handle *handle);
 /* Shared copy independent of handle; returned JSON is caller-owned. */

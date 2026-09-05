@@ -16,6 +16,8 @@ mod controller;
 mod live;
 pub mod policy;
 mod process;
+mod resource;
+pub use resource::{ResourceEvent, ResourceReading, ResourceTicket};
 pub mod worker_protocol;
 pub use controller::{
     ComputeCommand, ComputeController, ComputeCopy, ComputeSnapshot, ComputeState,

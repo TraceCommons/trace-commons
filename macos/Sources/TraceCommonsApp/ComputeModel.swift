@@ -18,6 +18,9 @@ final class ComputeModel {
     private var closed = false
     @ObservationIgnored private var monitor: Task<Void, Never>?
     @ObservationIgnored private let service = ComputeService()
+    @ObservationIgnored private var resources: TCComputeResourceObserver?
+    @ObservationIgnored private var currentObservationHandle: TCCompute?
+    @ObservationIgnored private var resourceBindingGeneration: UInt64 = 0
 
     var controlsBusy: Bool { busy || stopping || snapshot?.commandPending == true }
 
@@ -28,7 +31,10 @@ final class ComputeModel {
         started = true
         busy = true
         defer { busy = false }
-        do { publish(try await service.open(configDirectory: configDirectory)) }
+        do {
+            publish(try await service.open(configDirectory: configDirectory))
+            await startResourceObservation()
+        }
         catch { fail(error) }
     }
 
@@ -51,6 +57,10 @@ final class ComputeModel {
         monitor?.cancel()
         monitor = nil
         if await service.close() {
+            resources?.stop()
+            resources = nil
+            currentObservationHandle = nil
+            resourceBindingGeneration &+= 1
             closed = true
             snapshot = nil
             return true
@@ -99,6 +109,7 @@ final class ComputeModel {
                     // A deadline-refused Quit needs a new paused controller, but
                     // only after the old controller proves its worker stopped.
                     publish(try await service.reopenAfterStop())
+                    await startResourceObservation()
                 }
             }
             // Otherwise retain the sealed idle handle until actual termination.
@@ -119,6 +130,28 @@ final class ComputeModel {
         failureLabel = nil
     }
 
+    private func startResourceObservation() async {
+        guard !closed else { return }
+        if resources == nil {
+            // Continuous app-owned registration also covers handle replacement.
+            // The safe bridge remains reachable during blocking shutdown calls.
+            let observer = TCComputeResourceObserver(
+                begin: { [weak self] in self?.currentObservationHandle?.resourceBeginJSON() },
+                submit: { [weak self] ticket, reading in _ = try? self?.currentObservationHandle?.resourceSampleJSON(ticket: ticket, reading: reading) },
+                sleep: { [weak self] in _ = try? self?.currentObservationHandle?.resourceSleepJSON() },
+                wake: { [weak self] in _ = try? self?.currentObservationHandle?.resourceWakeJSON() }
+            )
+            resources = observer
+            observer.start()
+        }
+        resourceBindingGeneration &+= 1
+        let generation = resourceBindingGeneration
+        let handle = await service.observationHandle()
+        guard !closed, generation == resourceBindingGeneration else { return }
+        currentObservationHandle = handle
+        resources?.hostDidChange()
+    }
+
     private func fail(_ error: Error) {
         snapshot = nil
         if case TCCompute.Failure.refused(let label) = error {
@@ -136,6 +169,12 @@ private final class ComputeService: @unchecked Sendable {
     private var handle: TCCompute?
     private var configDirectory: String?
     private var closed = false
+
+    func observationHandle() async -> TCCompute? {
+        await withCheckedContinuation { continuation in
+            queue.async { continuation.resume(returning: self.closed ? nil : self.handle) }
+        }
+    }
 
     func open(configDirectory: String) async throws -> String {
         try await withCheckedThrowingContinuation { continuation in

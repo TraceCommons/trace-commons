@@ -107,6 +107,19 @@ pub struct ComputeController {
 }
 
 impl ComputeController {
+    /// Begin a single-use platform read before consulting native APIs. Production
+    /// unavailable handles have no resource adapter and return None.
+    pub fn resource_begin(&self) -> Option<super::ResourceTicket> {
+        self.live.as_ref()?.resource_begin()
+    }
+
+    /// Short safety ingress, independent of the actor's bounded command queue.
+    pub fn resource_event(&self, event: super::ResourceEvent) -> bool {
+        self.live
+            .as_ref()
+            .is_some_and(|live| live.resource_event(event))
+    }
+
     pub fn open(root: &std::path::Path) -> Result<Self, ComputeSettingsError> {
         let store = ComputeSettingsStore::open(root)?;
         let settings = store.load()?;
@@ -320,6 +333,7 @@ mod tests {
             },
         )
         .unwrap();
+        crate::compute::resource::tests::healthy(&controller);
         controller.command(ComputeCommand::Enable {
             ram_allowance_gib: 1,
         });
@@ -355,6 +369,7 @@ mod tests {
             }
             assert_eq!(controller.snapshot().state, stopped_state);
             assert!(!controller.snapshot().command_pending);
+            crate::compute::resource::tests::healthy(&controller);
             controller.command(start);
             let deadline = Instant::now() + Duration::from_secs(3);
             while controller.snapshot().state != ComputeState::Starting && Instant::now() < deadline

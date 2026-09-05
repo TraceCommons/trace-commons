@@ -231,6 +231,14 @@ mod tests {
     #[tokio::test]
     async fn canceled_stop_retains_child_and_lock_then_escalates_during_exit_wait() {
         let (_root, mut worker) = sleeping_worker();
+        // A concurrent fork/dup can retain the same open-file description.
+        // Closing our descriptor alone must not leave its flock held after reap.
+        let inherited = worker
+            .controller_lock
+            .as_ref()
+            .unwrap()
+            .try_clone()
+            .unwrap();
         assert!(
             tokio::time::timeout(Duration::from_millis(20), worker.stop())
                 .await
@@ -259,6 +267,7 @@ mod tests {
         assert_eq!(report.process, StopOutcome::Forced);
         assert!(report.stopped);
         lock.try_lock().unwrap();
+        drop(inherited);
     }
 
     #[tokio::test]
@@ -514,7 +523,7 @@ impl WorkerProcess {
         };
         let exited = cooperative_until_urgent(cooperative, urgency).await == Some(true);
         let mut process = StopOutcome::Exited;
-        let stopped = if exited {
+        let mut stopped = if exited {
             true
         } else {
             process = StopOutcome::Forced;
@@ -527,6 +536,16 @@ impl WorkerProcess {
                 )
             }
         };
+        if stopped
+            && self
+                .controller_lock
+                .as_ref()
+                .is_some_and(|lock| lock.unlock().is_err())
+        {
+            // Reaping preceded this attempt. Retain ownership evidence and retry
+            // rather than claiming successful release after an unlock failure.
+            stopped = false;
+        }
         if stopped {
             self.child = None;
             self.controller_lock = None;

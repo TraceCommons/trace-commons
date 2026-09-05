@@ -1,4 +1,6 @@
 //! Explicit local development harness; release builds refuse local configuration.
+//! This legacy CLI has no native observer. It now refuses launch until driven by
+//! a host that supplies fresh resource tickets; it must not synthesize AC/normal.
 use std::{
     path::PathBuf,
     time::{Duration, Instant},
@@ -28,6 +30,10 @@ fn run() -> anyhow::Result<()> {
     let observe: u64 = args.get(5).map(|s| s.parse()).transpose()?.unwrap_or(45);
     anyhow::ensure!((1..=300).contains(&observe), "observe-duration-invalid");
     let controller = ComputeController::open_local(std::path::Path::new(&args[0]), config)?;
+    anyhow::ensure!(
+        controller.snapshot().can_enable,
+        "native-resource-adapter-required"
+    );
     println!(
         "{}",
         serde_json::to_string(&controller.command(ComputeCommand::Enable {

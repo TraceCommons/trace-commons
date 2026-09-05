@@ -4,12 +4,13 @@ import Foundation
 /// App-owned compute controller. It requires neither a trace daemon nor enrollment.
 /// Calls perform synchronous settings I/O: invoke them on a background queue.
 ///
-/// The lock serializes all pointer use with close, including concurrent callers
-/// that retained this object before close began. The current controller cannot
-/// launch a worker. Closing this handle is not evidence of a worker drain.
+/// Short pointer calls serialize with close. A blocking shutdown pins the handle
+/// but releases the lock so resource pressure can escalate its stop deadline.
+/// Production construction cannot launch; close is not evidence of a drain.
 public final class TCCompute: @unchecked Sendable {
     private let lock = NSLock()
     private var handle: OpaquePointer?
+    private var activeShutdowns = 0
 
     public enum Failure: Error, Equatable, Sendable {
         case refused(String)
@@ -52,6 +53,53 @@ public final class TCCompute: @unchecked Sendable {
 
     deinit { close() }
 
+    #if DEBUG
+    /// Test-only native bridge seam; the Rust constructor also enforces its
+    /// debug/Unix gate and strict loopback/hash configuration.
+    init(localConfigDirectory: String, localConfigurationJSON: String) throws {
+        guard !localConfigDirectory.utf8.contains(0),
+              !localConfigurationJSON.utf8.contains(0), localConfigurationJSON.utf8.count <= 4096 else {
+            throw Failure.invalidInput
+        }
+        var error: UnsafeMutablePointer<CChar>?
+        let opened = localConfigDirectory.withCString { directory in
+            localConfigurationJSON.withCString { tc_compute_open_local(directory, $0, &error) }
+        }
+        guard let opened else { throw Failure.refused(Self.take(error) ?? "panic") }
+        if let error { tc_string_free(error) }
+        handle = opened
+    }
+    #endif
+
+    /// Ticket is issued before native reads, not at submission time.
+    public func resourceBeginJSON() -> String? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let handle else { return nil }
+        return Self.take(tc_compute_resource_begin_json(handle))
+    }
+
+    @discardableResult
+    public func resourceSampleJSON(ticket: String, reading: TCComputeResourceReading) throws -> String {
+        let token = try JSONSerialization.jsonObject(with: Data(ticket.utf8))
+        let fields = try JSONSerialization.jsonObject(with: JSONEncoder().encode(reading))
+        return try resourceEvent(["event": "sample", "ticket": token, "reading": fields])
+    }
+
+    @discardableResult
+    public func resourceSleepJSON() throws -> String { try resourceEvent(["event": "sleep"]) }
+    @discardableResult
+    public func resourceWakeJSON() throws -> String { try resourceEvent(["event": "wake"]) }
+
+    private func resourceEvent(_ event: [String: Any]) throws -> String {
+        let bytes = try JSONSerialization.data(withJSONObject: event)
+        guard bytes.count <= 4096, let json = String(data: bytes, encoding: .utf8) else { throw Failure.invalidInput }
+        lock.lock()
+        defer { lock.unlock() }
+        guard let handle else { throw Failure.closed }
+        return try json.withCString { try Self.result(tc_compute_resource_event_json(handle, $0)) }
+    }
+
     /// Handle-free fixed vocabulary remains available when settings cannot open.
     public static func copyJSON() -> String? { take(tc_compute_copy_json()) }
 
@@ -59,8 +107,14 @@ public final class TCCompute: @unchecked Sendable {
     /// freeing this handle; drain_outcome separately describes acknowledgement.
     public func shutdownJSON(timeoutMilliseconds: UInt64) throws -> String {
         lock.lock()
-        defer { lock.unlock() }
-        guard let handle else { throw Failure.closed }
+        guard let handle else { lock.unlock(); throw Failure.closed }
+        activeShutdowns += 1
+        lock.unlock()
+        defer {
+            lock.lock()
+            activeShutdowns -= 1
+            lock.unlock()
+        }
         return try Self.result(tc_compute_shutdown(handle, timeoutMilliseconds))
     }
 
@@ -91,6 +145,7 @@ public final class TCCompute: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         guard let owned = handle else { return true }
+        guard activeShutdowns == 0 else { return false }
         guard let raw = tc_compute_status_json(owned),
               let json = Self.take(raw),
               let evidence = try? JSONDecoder().decode(CloseEvidence.self, from: Data(json.utf8)),

@@ -1,22 +1,25 @@
-//! Pure resource gate; not yet connected to the worker actor or native observers.
+//! Pure resource gate used by the worker actor and native observation ingress.
 //!
 //! This is an additional launch condition, never consent, artifact verification,
 //! or proof of process termination. The owning actor must serialize commands,
 //! samples and timer ticks, poll even without samples, and recheck before spawn.
 //! A stop stays latched until the actor confirms its owned child has been reaped.
 
+use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 
 pub const OBSERVATION_TTL: Duration = Duration::from_secs(6);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum PowerSource {
     Ac,
     Battery,
     Ups,
     Unknown,
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ThermalState {
     Nominal,
     Fair,
@@ -24,7 +27,8 @@ pub enum ThermalState {
     Critical,
     Unknown,
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum MemoryPressure {
     Normal,
     Warning,
@@ -70,6 +74,24 @@ pub enum PolicyReason {
 }
 
 impl PolicyReason {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::MissingObservation => "resource-observation-missing",
+            Self::StaleObservation => "resource-observation-stale",
+            Self::InvalidClock => "resource-clock-invalid",
+            Self::Sleeping => "resource-sleeping",
+            Self::Power => "resource-ac-required",
+            Self::LowPowerMode => "resource-low-power-mode",
+            Self::UnknownObservation => "resource-observation-unknown",
+            Self::Thermal => "resource-thermal",
+            Self::CriticalThermal => "resource-thermal-critical",
+            Self::Memory => "resource-memory",
+            Self::CriticalMemory => "resource-memory-critical",
+            Self::Paused => "resource-resume-required",
+            Self::Disabled => "resource-disabled",
+            Self::Shutdown => "resource-shutdown",
+        }
+    }
     pub fn detail(self) -> &'static str {
         match self {
             Self::MissingObservation => "Waiting for fresh resource observations.",
@@ -146,6 +168,13 @@ impl Default for ResourcePolicy {
 }
 
 impl ResourcePolicy {
+    /// Resource readiness only, not consent or permission to start.
+    pub fn ready(&mut self, now: Instant) -> bool {
+        self.evaluate(now);
+        self.stop.is_none()
+            && self.resource_reason(now).is_none()
+            && self.intent != Intent::Shutdown
+    }
     pub fn epoch(&self) -> u64 {
         self.epoch
     }

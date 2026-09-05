@@ -1,7 +1,8 @@
 # Compute pilot packaging and resource-policy implementation
 
-Status: artifact inventory, inert validator, and standalone resource-policy reducer
-implemented. Actor enforcement, ABI projection, and native observers remain open.
+Status: artifact validator, resource-policy actor enforcement, ABI ingress and
+native observers implemented. Signed package assembly and installed qualification
+remain open. Production construction remains unavailable.
 Evidence and the MLX runtime asset-location gap are recorded in
 [artifact inventory](../../compute-artifact-inventory.md). No shipping gate changed.
 Design: [contract and policy](../specs/2026-09-04-compute-pilot-packaging-policy.md).
@@ -26,9 +27,19 @@ a six-second monotonic lease, epoch/sequence rejection, latched normal/urgent st
 requests, manual command precedence and explicit Resume after confirmed stop.
 Tests cover the 240 resource combinations, exact expiry, recovery, event reorder,
 critical escalation, clock errors, disabled/shutdown intent and wake invalidation.
-This module is **not wired to the actor** and does not change runtime enforcement.
+The local-development actor now enforces this gate. Rust-issued single-use
+capture tickets precede native reads, and a 250ms watchdog expires observations
+independently of readiness/drain/UI callbacks. Safety updates bypass the bounded
+start queue. The last eligibility check and actual spawn share the resource lock.
+Urgent observations cap cooperative stopping at observation + 1 second, then
+force-kill/reap with a 2-second budget; these are not OS real-time guarantees.
+Failed reap retains child/lock, including when the host drops the controller.
+Readiness/status futures are interruptible, and telemetry is resource-epoch bound.
+The Swift bridge pins handles during blocking shutdown without blocking resource
+ingress. One app-owned observer persists across controller replacement and replays
+sleep state. Native evidence and remaining gates: [observer notes](../../compute-native-observers.md).
 
-Local verification (2026-09-05): all 31 contributor compute tests passed with
+Previous reducer-only verification (2026-09-05): all 31 contributor compute tests passed with
 warnings denied; all nine standalone policy tests also passed on Rust 1.92.
 Contributor library Clippy passed with the repository allowances and warnings
 denied; workspace formatting passed. Tests use injected monotonic times, not
@@ -38,7 +49,7 @@ All four unchanged license-boundary tests passed when compiled directly with
 manifest directory. The Cargo test invocation was interrupted during its large
 server rebuild; it is not recorded as a passing Cargo test run.
 
-Integration requirements:
+Enforcement invariants (preserve during future package integration):
 
 - Serialize policy updates with actor lifecycle actions; do not queue safety
   updates behind the bounded start-command queue. Evaluate on timer ticks and
@@ -52,8 +63,8 @@ Integration requirements:
   and reconcile ownership. Epochs and intent are session-local, not persisted.
 - Consent persistence, signed package authorization and worker ownership stay
   with their existing owners. The resource gate grants none of those permissions.
-- Wire urgent stop deadlines, ABI/shared copy and macOS observers before claiming
-  any of the live lifecycle matrix below passes.
+- Real hardware transitions and installed-package qualification remain separate
+  from synthetic lifecycle fixtures; do not claim the entire pilot matrix passes.
 
 - Add pure typed observations, monotonic freshness, policy reasons and stop
   urgency to the contributor core. Project copy/state through both ABI headers.
