@@ -47,6 +47,30 @@ pub struct SessionTooLarge {
     pub budget_bytes: u64,
 }
 
+/// This machine's home directory, or an empty path when the platform will
+/// not name one.
+///
+/// Preserve the adapters' existing empty-path fallback when the platform
+/// cannot resolve a home. Joining a conventional suffix to that fallback
+/// produces a relative path; this helper does not claim that such a path is
+/// absent or replace the source-declaration and consent checks.
+pub(crate) fn home_dir() -> PathBuf {
+    dirs::home_dir().unwrap_or_default()
+}
+
+/// Resolves a source's `conventional_root` against this machine's real home
+/// and environment.
+///
+/// Each adapter keeps its own layout rule and takes `(home, env)` so a test
+/// can hand it a temporary directory and a fake environment. This is the
+/// shared bridge used by the adapter wrappers to supply the real pair; tests
+/// can continue calling the adapter resolvers without reading process state.
+pub(crate) fn conventional_root_on_this_machine(
+    conventional_root: fn(&Path, fn(&str) -> Option<String>) -> PathBuf,
+) -> PathBuf {
+    conventional_root(&home_dir(), |key| std::env::var(key).ok())
+}
+
 pub const SOURCE_CLAUDE_CODE: &str = "claude-code";
 pub const SOURCE_CODEX: &str = "codex";
 pub const SOURCE_TRAJECTORY: &str = "trajectory";
@@ -451,17 +475,13 @@ struct SourceSpec {
 static NATIVE_SOURCES: &[SourceSpec] = &[
     SourceSpec {
         name: SOURCE_CLAUDE_CODE,
-        conventional_root: || {
-            dirs::home_dir()
-                .unwrap_or_default()
-                .join(".claude/projects")
-        },
+        conventional_root: || home_dir().join(".claude/projects"),
         build: |path| Box::new(claude_code::ClaudeCodeSource::new(path)),
         undeclared: Undeclared::Conventional,
     },
     SourceSpec {
         name: SOURCE_CODEX,
-        conventional_root: || dirs::home_dir().unwrap_or_default().join(".codex/sessions"),
+        conventional_root: || home_dir().join(".codex/sessions"),
         build: |path| Box::new(codex::CodexSource::new(path)),
         undeclared: Undeclared::Conventional,
     },
@@ -934,7 +954,7 @@ mod tests {
         // Pinned separately from the count above: the failure mode that
         // matters is not "an extra adapter appeared", it is "an adapter
         // appeared pointing at the contributor's real home directory".
-        let home = dirs::home_dir().unwrap_or_default();
+        let home = super::home_dir();
         for sources in [
             all_sources(
                 &SourceRoots::new()

@@ -60,9 +60,7 @@ pub fn conventional_root(home: &Path, env: impl Fn(&str) -> Option<String>) -> P
 /// The conventional store, resolved against this machine's real home and
 /// environment.
 pub fn conventional_root_this_machine() -> PathBuf {
-    conventional_root(&dirs::home_dir().unwrap_or_default(), |key| {
-        std::env::var(key).ok()
-    })
+    super::conventional_root_on_this_machine(conventional_root)
 }
 
 pub struct GeminiCliSource {

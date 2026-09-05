@@ -144,7 +144,7 @@ where
 
 /// Probe using this machine's real home and environment.
 pub fn probe_this_machine() -> Vec<SourceCandidate> {
-    let home = dirs::home_dir().unwrap_or_default();
+    let home = super::home_dir();
     probe(&home, |key| std::env::var(key).ok())
 }
 
