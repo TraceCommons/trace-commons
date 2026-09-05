@@ -341,6 +341,41 @@ pub struct FirstContributionCopy {
     pub agent_setup: &'static str,
 }
 
+/// Fixed wallet words used by the core state machine and all native adapters.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct WalletCopy {
+    pub heading: &'static str,
+    pub disclosure: &'static str,
+    pub commons: &'static str,
+    pub account: &'static str,
+    pub check: &'static str,
+    pub start: &'static str,
+    pub cancel: &'static str,
+    pub available: &'static str,
+    pub unavailable: &'static str,
+    pub opening: &'static str,
+    pub waiting: &'static str,
+    pub failed: &'static str,
+    pub cancelled: &'static str,
+    pub refused_glyph: &'static str,
+    pub refused_tone: &'static str,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct AdmissionCopy {
+    pub heading: &'static str,
+    pub disclosure: &'static str,
+    pub prerequisite: &'static str,
+    pub backend: &'static str,
+    pub confirm: &'static str,
+    pub cancel: &'static str,
+    pub permission: &'static str,
+    pub working: &'static str,
+    pub ready: &'static str,
+    pub failed: &'static str,
+    pub refused_glyph: &'static str,
+    pub refused_tone: &'static str,
+}
+
 /// Every fixed word on the witness surface, in one value.
 ///
 /// ONE CALL, NOT ONE PER STRING, for the reason [`crate::routing_copy`]
@@ -373,6 +408,8 @@ pub struct WitnessCopy {
     pub inference_save_failed: &'static str,
     pub review: WitnessReviewCopy,
     pub onboarding: FirstContributionCopy,
+    pub wallet: WalletCopy,
+    pub admission: AdmissionCopy,
 }
 
 /// The witness surface's fixed words.
@@ -410,6 +447,37 @@ pub fn witness_copy() -> WitnessCopy {
             working: "Preparing your witness review. The session may already have left this device.",
             failed: "The witness review could not be confirmed. The session may already have reached the witness. No contribution has been approved here. Try again only if you want to send another review request.",
             immutable: "This certified review is fixed. Outcome and correction edits are unavailable for this review.",
+        },
+        wallet: WalletCopy {
+            heading: "Join with a NEAR account",
+            disclosure: "Check whether your commons accepts new accounts. Connecting proves control of your account and this device; it does not fund inference or enable capture.",
+            commons: "Commons HTTPS address",
+            account: "Your NEAR account",
+            check: "Check availability",
+            start: "Continue in wallet",
+            cancel: "Cancel connection",
+            available: "This commons supports wallet signup.",
+            unavailable: "Wallet signup is unavailable for this commons. You can still use an invite.",
+            opening: "Opening a wallet connection…",
+            waiting: "Finish signing in your wallet. Keep this window open.",
+            failed: "The wallet connection could not be confirmed. Cancel and try again.",
+            cancelled: "Connection cancelled.",
+            refused_glyph: "⊘",
+            refused_tone: "refused",
+        },
+        admission: AdmissionCopy {
+            heading: "Prepare next NEAR inference",
+            disclosure: "For new inference evidence, this adds an account-bound challenge to the next request in this session. Use your own funded NEAR AI backend, then continue the agent task and return here to review. You can separately choose witness review of eligible existing history, subject to server limits.",
+            prerequisite: "IronWire must already route this agent to that backend and capture request bodies. Inference-body evidence also needs your separate permission in Settings.",
+            backend: "NEAR AI backend name",
+            confirm: "Prepare session",
+            cancel: "Cancel",
+            permission: "Review inference-body permission",
+            working: "Preparing this session…",
+            ready: "Ready. Continue this session in your agent, then review the updated session.",
+            failed: "This session could not be prepared. Check your supported agent, backend, and capture settings, then try again.",
+            refused_glyph: "⊘",
+            refused_tone: "refused",
         },
         onboarding: FirstContributionCopy {
             heading: "Your first contribution",
@@ -675,7 +743,7 @@ mod tests {
         let object = json.as_object().unwrap();
         assert_eq!(
             object.len(),
-            24,
+            26,
             "a field added to WitnessCopy must be counted here, or a shell can be handed \
              a word this test has never seen"
         );
