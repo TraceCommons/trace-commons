@@ -1229,7 +1229,7 @@ impl PgBackend {
         Ok(())
     }
 
-    pub(super) async fn begin_trace_tenant_transaction<'a>(
+    pub(crate) async fn begin_trace_tenant_transaction<'a>(
         client: &'a mut deadpool_postgres::Client,
         tenant_id: &str,
     ) -> Result<deadpool_postgres::Transaction<'a>, DatabaseError> {

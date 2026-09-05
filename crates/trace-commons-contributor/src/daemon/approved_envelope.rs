@@ -41,10 +41,10 @@
 //!   -rename path as every other daemon file, and are removed by
 //!   `ConfigStore::wipe` on logout.
 //! * **Bounded in bytes, not just in count.** One file per pinned entry,
-//!   each at most `MAX_ENVELOPE_BYTES`, and live entries are capped by
-//!   `max_queue_entries` -- but that pair only bounds the directory at
-//!   500 x 16 MB, which is 7.8 GB of redacted trace content and is not a
-//!   bound anyone would choose on purpose. `MAX_STORE_BYTES` is the real
+//!   local envelopes at most `MAX_ENVELOPE_BYTES`, certified records at
+//!   most twice that for base64 and certificate overhead. Live entries are
+//!   capped by `max_queue_entries`, but their product is too large to be
+//!   the practical disk bound. `MAX_STORE_BYTES` is the real
 //!   ceiling, and `release_stale_pins` holds the store under it by
 //!   releasing the oldest pending previews.
 //! * **Kept only while somebody is waiting on it.** The at-rest exemption
@@ -62,7 +62,10 @@
 use std::collections::HashSet;
 use std::time::{Duration, SystemTime};
 
+use crate::witness::transport::{WitnessedEnvelope, parse_witnessed_envelope, verify_certificate};
 use anyhow::{Context, Result, bail};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::config::{ConfigStore, DAEMON_APPROVED_ENVELOPE_PREFIX};
@@ -83,8 +86,8 @@ pub const PIN_MAX_AGE: Duration = Duration::from_secs(3 * 24 * 60 * 60);
 
 /// The ceiling on the whole store, over every entry at once.
 ///
-/// `MAX_ENVELOPE_BYTES` bounds one file and `max_queue_entries` bounds how
-/// many can be live, but their product is 7.8 GB. This is the number that
+/// Per-file bounds and `max_queue_entries` bound how much can be live,
+/// but their product is much larger than this aggregate ceiling. This is the number that
 /// actually decides how much redacted trace content a contributor's disk
 /// can be holding, so it is stated rather than inferred.
 pub const MAX_STORE_BYTES: u64 = 256 * 1024 * 1024;
@@ -109,6 +112,173 @@ pub fn entry_id_of(name: &str) -> Option<Uuid> {
         .strip_suffix(FILE_SUFFIX)?
         .parse()
         .ok()
+}
+
+/// Versioned, single-write record for an explicitly requested witnessed review.
+/// No token, raw session, attached inference body, or correction text is stored.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WitnessReviewArtifact {
+    review_schema: String,
+    source_hash: String,
+    input_fingerprint: String,
+    verdict: Option<String>,
+    correction_hash: Option<String>,
+    response: WitnessedEnvelope,
+}
+
+const WITNESS_REVIEW_SCHEMA: &str = "trace_commons.witness_review.v1";
+const MAX_STORED_ARTIFACT_BYTES: usize = MAX_ENVELOPE_BYTES * 2;
+
+impl WitnessReviewArtifact {
+    pub(crate) fn new(
+        response: WitnessedEnvelope,
+        source_hash: String,
+        input_fingerprint: String,
+        verdict: Option<&str>,
+        correction: Option<&str>,
+    ) -> Self {
+        Self {
+            review_schema: WITNESS_REVIEW_SCHEMA.to_string(),
+            source_hash,
+            input_fingerprint,
+            verdict: verdict.map(str::to_string),
+            correction_hash: correction.map(correction_hash),
+            response,
+        }
+    }
+
+    pub fn envelope(&self) -> Result<TraceContributionEnvelope> {
+        parse_witnessed_envelope(&self.response)
+            .map_err(|_| anyhow::anyhow!("witness-artifact-malformed"))
+    }
+
+    /// The queue pin covers every response byte AND every review binding.
+    pub fn digest(&self) -> Result<String> {
+        let bytes =
+            serde_json::to_vec(self).map_err(|_| anyhow::anyhow!("witness-artifact-malformed"))?;
+        Ok(format!("witness-sha256:{:x}", Sha256::digest(bytes)))
+    }
+
+    pub(crate) fn response(&self) -> &WitnessedEnvelope {
+        &self.response
+    }
+
+    pub fn validate(
+        &self,
+        cfg: &crate::config::ContributorConfig,
+        source_hash: &str,
+        input_fingerprint: &str,
+        verdict: Option<&str>,
+        correction: Option<&str>,
+    ) -> Result<TraceContributionEnvelope> {
+        if self.verdict.as_deref() != verdict
+            || self.correction_hash != correction.map(correction_hash)
+        {
+            bail!("witness-review-stale");
+        }
+        self.validate_stored(cfg, source_hash, input_fingerprint)
+    }
+
+    /// Validate a saved review for display without recovering correction text.
+    /// Callers must separately compare the complete artifact digest to its pin.
+    pub fn validate_stored(
+        &self,
+        cfg: &crate::config::ContributorConfig,
+        source_hash: &str,
+        input_fingerprint: &str,
+    ) -> Result<TraceContributionEnvelope> {
+        if self.review_schema != WITNESS_REVIEW_SCHEMA
+            || self.source_hash != source_hash
+            || self.input_fingerprint != input_fingerprint
+            || self.response.envelope_bytes.len() > MAX_ENVELOPE_BYTES
+        {
+            bail!("witness-review-stale");
+        }
+        let settings = cfg
+            .witness
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("witness-review-stale"))?;
+        // Ordinary signed reviews of pre-inference history are valid for new
+        // accounts too. Absence of admission evidence never grants entitlement:
+        // the authenticated server must reserve its bounded window at upload.
+
+        if !settings
+            .trust()
+            .map_err(|_| anyhow::anyhow!("witness-review-stale"))?
+            .is_pinned()
+        {
+            bail!("witness-review-stale");
+        }
+        verify_certificate(&self.response, &settings.signing_address)
+            .map_err(|_| anyhow::anyhow!("witness-certificate-invalid"))?;
+        if let Some(headers) = &self.response.admission {
+            let evidence: trace_commons_protocol::admission::AdmissionEvidence =
+                serde_json::from_str(&headers.evidence_json)
+                    .map_err(|_| anyhow::anyhow!("witness-certificate-invalid"))?;
+            if cfg.tenant_id.strip_prefix("near-") != Some(evidence.account_anchor_sha256.as_str())
+            {
+                bail!("witness-certificate-invalid");
+            }
+        }
+        let envelope = self.envelope()?;
+        if envelope.submission_id != crate::source::submission_id_for(source_hash)
+            || envelope.contributor.tenant_scope_ref.as_deref() != Some(cfg.tenant_id.as_str())
+            || envelope.contributor.pseudonymous_contributor_id.as_deref()
+                != Some(
+                    trace_commons_protocol::onboarding::user_subject_hash(&cfg.user_subject)
+                        .as_str(),
+                )
+        {
+            bail!("witness-review-stale");
+        }
+        Ok(envelope)
+    }
+}
+
+fn correction_hash(text: &str) -> String {
+    format!("sha256:{:x}", Sha256::digest(text.as_bytes()))
+}
+
+pub fn save_witnessed(
+    store: &ConfigStore,
+    entry_id: Uuid,
+    artifact: &WitnessReviewArtifact,
+) -> Result<()> {
+    let bytes =
+        serde_json::to_vec(artifact).map_err(|_| anyhow::anyhow!("witness-artifact-malformed"))?;
+    if bytes.len() > MAX_STORED_ARTIFACT_BYTES {
+        bail!("approved-envelope-too-large");
+    }
+    store.write_daemon_file(&file_name(entry_id), &bytes)
+}
+
+/// Absence/legacy local envelope is None; malformed versioned state is an error.
+/// Callers with a witness pin MUST refuse None, never rebuild or fall back.
+pub fn load_witnessed(
+    store: &ConfigStore,
+    entry_id: Uuid,
+) -> Result<Option<WitnessReviewArtifact>> {
+    let Some(bytes) = store.read_daemon_file(&file_name(entry_id))? else {
+        return Ok(None);
+    };
+    if bytes.len() > MAX_STORED_ARTIFACT_BYTES {
+        bail!("approved-envelope-too-large");
+    }
+    let value: serde_json::Value = serde_json::from_slice(&bytes)
+        .map_err(|_| anyhow::anyhow!("witness-artifact-malformed"))?;
+    if value.get("review_schema").is_none() {
+        // Validate a legacy envelope before classifying it as local.
+        serde_json::from_value::<TraceContributionEnvelope>(value)
+            .map_err(|_| anyhow::anyhow!("witness-artifact-malformed"))?;
+        return Ok(None);
+    }
+    let artifact: WitnessReviewArtifact =
+        serde_json::from_value(value).map_err(|_| anyhow::anyhow!("witness-artifact-malformed"))?;
+    if artifact.review_schema != WITNESS_REVIEW_SCHEMA {
+        bail!("witness-artifact-version");
+    }
+    Ok(Some(artifact))
 }
 
 /// Persist the redacted envelope a preview just built for `entry_id`.
@@ -270,6 +440,203 @@ pub fn sweep(store: &ConfigStore, keep: &HashSet<Uuid>) -> Result<()> {
 mod tests {
     use super::*;
     use crate::config::tests_support::temp_store;
+
+    #[tokio::test]
+    async fn new_account_receiptless_history_keeps_signed_window_review_through_approval() {
+        use crate::witness::transport::{
+            GrantedConsent, HttpWitnessTransport, witness_contribution,
+        };
+        use axum::response::IntoResponse as _;
+        use trace_commons_protocol::trace_contribution::{
+            ConsentScope, RawTraceCaptureTurn, RawTraceContribution,
+            RecordedTraceContributionOptions, TraceAllowedUse,
+        };
+        let (_dir, store) = temp_store();
+        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
+        let source_hash = "pre-inference-history";
+        let tenant = format!("near-{}", "ab".repeat(32));
+        let mut envelope = envelope().await;
+        envelope.submission_id = crate::source::submission_id_for(source_hash);
+        envelope.contributor.tenant_scope_ref = Some(tenant.clone());
+        envelope.contributor.pseudonymous_contributor_id = Some(
+            trace_commons_protocol::onboarding::user_subject_hash(&device.device_key_id),
+        );
+        let bytes = serde_json::to_vec(&envelope).unwrap();
+        let (response, address) = crate::witness::transport::signed_fixture(bytes.clone());
+        let answer = response.clone();
+        let router = axum::Router::new().route(
+            "/v1/witness",
+            axum::routing::post(move |axum::Json(body): axum::Json<serde_json::Value>| {
+                let answer = answer.clone();
+                async move {
+                    assert!(body.get("inference_receipt").is_none());
+                    let mut response = answer.envelope_bytes.into_response();
+                    response.headers_mut().insert(
+                        crate::witness::transport::WITNESS_CERTIFICATE_HEADER,
+                        answer.certificate_json.parse().unwrap(),
+                    );
+                    response.headers_mut().insert(
+                        crate::witness::transport::WITNESS_SIGNATURE_HEADER,
+                        answer.signature_hex.parse().unwrap(),
+                    );
+                    response
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        let cfg:crate::config::ContributorConfig=serde_json::from_value(serde_json::json!({
+            "schema_version":crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION,"issuer_url":"http://issuer.invalid","ingest_url":"http://ingest.invalid","audience":"upload","tenant_id":tenant,"instance_id":"","user_subject":device.device_key_id,"device_key_id":device.device_key_id,"consent_scopes":["debugging_evaluation"],
+            "witness":{"url":url,"signing_address":address,"expected_measurements":[format!("mrtd={}","aa".repeat(48))],"admission_evidence":true}
+        })).unwrap();
+        let settings = cfg.witness.as_ref().unwrap();
+        let profile =
+            crate::submit::admission_profile_for_request(settings.admission_evidence, None)
+                .unwrap();
+        assert!(!profile);
+        let transport = HttpWitnessTransport::new(
+            url.clone(),
+            cfg.ingest_url.clone(),
+            std::sync::Arc::new(
+                trace_commons_operator_client::host_allowlist::HostAllowlist::permissive(),
+            ),
+            Duration::from_secs(5),
+        )
+        .unwrap()
+        .with_admission_evidence(profile);
+        // Enclave attestation is injected only at the existing test seam;
+        // HTTP, returned artifact signature and approval validation are real.
+        let verified = crate::witness::verify::verified_witness_for_test(&url, &address);
+        let raw = RawTraceContribution::from_capture_turns(
+            &[RawTraceCaptureTurn {
+                user_input: "previous useful work".into(),
+                response: None,
+                tool_calls: Vec::new(),
+                started_at: chrono::Utc::now(),
+                completed_at: Some(chrono::Utc::now()),
+                state: Some("Completed".into()),
+            }],
+            RecordedTraceContributionOptions::default(),
+        );
+        let received = witness_contribution(
+            &transport,
+            &verified,
+            raw,
+            None,
+            &GrantedConsent {
+                scopes: vec![ConsentScope::DebuggingEvaluation],
+                uses: vec![TraceAllowedUse::Debugging],
+            },
+        )
+        .await
+        .unwrap();
+        assert!(received.admission.is_none());
+        let artifact = WitnessReviewArtifact::new(
+            received,
+            source_hash.into(),
+            "fingerprint".into(),
+            None,
+            None,
+        );
+        let id = Uuid::new_v4();
+        save_witnessed(&store, id, &artifact).unwrap();
+        let loaded = load_witnessed(&store, id).unwrap().unwrap();
+        loaded
+            .validate_stored(&cfg, source_hash, "fingerprint")
+            .unwrap();
+        assert_eq!(loaded.response.envelope_bytes, bytes);
+        let opts = crate::submit::SubmitOptions {
+            dry_run: false,
+            pii_filter: None,
+            no_reasoning: false,
+            machine_readable: true,
+            unenrolled_preview: false,
+            remediate_quarantined: false,
+            verdict: None,
+        };
+        let mut context = crate::submit::SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        context.use_approved_witness(loaded.response).unwrap();
+        // Server authority is separately exercised by the real-PG
+        // actual_postgres_challenge_witness_ingest_and_terminal_retry test:
+        // no evidence consumes one window slot; exhaustion refuses upload.
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn witness_review_persists_exact_bytes_and_refuses_partial_records() {
+        let (_dir, store) = temp_store();
+        let bytes = serde_json::to_vec_pretty(&envelope().await).unwrap();
+        let (response, _) = crate::witness::transport::signed_fixture(bytes.clone());
+        let artifact = WitnessReviewArtifact::new(
+            response,
+            "source-hash".into(),
+            "fingerprint".into(),
+            Some("worked"),
+            Some("correction"),
+        );
+        let id = Uuid::new_v4();
+        save_witnessed(&store, id, &artifact).unwrap();
+        let loaded = load_witnessed(&store, id).unwrap().unwrap();
+        assert_eq!(loaded.response.envelope_bytes, bytes);
+        assert_eq!(loaded.digest().unwrap(), artifact.digest().unwrap());
+        let persisted = std::fs::read_to_string(store.dir().join(file_name(id))).unwrap();
+        assert!(!persisted.contains("access_token"));
+        assert!(!persisted.contains("\"correction\""));
+        assert!(
+            load(&store, id).is_err(),
+            "old local-only reader must not silently accept a certified record"
+        );
+        let mut value: serde_json::Value = serde_json::from_str(&persisted).unwrap();
+        value["response"]
+            .as_object_mut()
+            .unwrap()
+            .remove("signature_hex");
+        store
+            .write_daemon_file(&file_name(id), &serde_json::to_vec(&value).unwrap())
+            .unwrap();
+        assert!(load_witnessed(&store, id).is_err());
+    }
+
+    #[tokio::test]
+    async fn witness_review_pin_covers_certificate_context_and_all_wire_bytes() {
+        let (response, _) = crate::witness::transport::signed_fixture(
+            serde_json::to_vec(&envelope().await).unwrap(),
+        );
+        let artifact = WitnessReviewArtifact::new(
+            response,
+            "source-hash".into(),
+            "fingerprint".into(),
+            None,
+            None,
+        );
+        let pin = artifact.digest().unwrap();
+        let mut changed = artifact.clone();
+        changed.source_hash.push('x');
+        assert_ne!(pin, changed.digest().unwrap());
+        changed = artifact.clone();
+        changed.input_fingerprint.push('x');
+        assert_ne!(pin, changed.digest().unwrap());
+        changed = artifact.clone();
+        changed.response.signature_hex.push('0');
+        assert_ne!(pin, changed.digest().unwrap());
+        changed = artifact.clone();
+        changed.response.envelope_bytes.push(b' ');
+        assert_ne!(pin, changed.digest().unwrap());
+        changed = artifact.clone();
+        changed.verdict = Some("failed".into());
+        assert_ne!(pin, changed.digest().unwrap());
+    }
+
+    #[tokio::test]
+    async fn legacy_local_envelope_does_not_acquire_a_witness_certificate() {
+        let (_dir, store) = temp_store();
+        let id = Uuid::new_v4();
+        save(&store, id, &envelope().await).unwrap();
+        assert!(load_witnessed(&store, id).unwrap().is_none());
+    }
 
     /// A real redacted envelope, built by the same pipeline preview uses.
     async fn envelope() -> TraceContributionEnvelope {

@@ -90,6 +90,7 @@ pub const WITNESS_SIGNATURE_HEADER: &str = "x-trace-witness-signature";
 pub fn witness_router(service: Arc<WitnessService>, load: WitnessLoadBound) -> Router {
     Router::new()
         .route("/v1/witness", post(witness_handler))
+        .route("/v1/witness/admission", post(admission_witness_handler))
         // Axum's default 2 MiB body cap would refuse an oversized transcript
         // before the handler could name the refusal, and would accept nothing
         // larger even when the operator configured a larger bound. The bound
@@ -549,6 +550,53 @@ async fn witness_handler(
             Ok(contribution_response(response))
         }
     }
+}
+
+/// Separate route: legacy callers never accidentally request admission evidence.
+async fn admission_witness_handler(
+    State(service): State<Arc<WitnessService>>,
+    request: Request,
+) -> Result<Response, Refusal> {
+    let body = axum::body::to_bytes(request.into_body(), service.max_request_bytes())
+        .await
+        .map_err(|_| Refusal::new(StatusCode::PAYLOAD_TOO_LARGE, "witness_request_too_large"))?;
+    let parsed: WitnessRequestBody = serde_json::from_slice(&body)
+        .map_err(|_| Refusal::new(StatusCode::BAD_REQUEST, "witness_request_malformed"))?;
+    let RequestShape::Contribution(request) = shape_of(parsed)? else {
+        return Err(Refusal::new(
+            StatusCode::FORBIDDEN,
+            "admission_evidence_refused",
+        ));
+    };
+    let (response, evidence, signature) = service
+        .witness_admission_contribution(*request)
+        .await
+        .map_err(|_| Refusal::new(StatusCode::FORBIDDEN, "admission_evidence_refused"))?;
+    let encoded = serde_json::to_string(&evidence).map_err(|_| {
+        Refusal::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "admission_evidence_refused",
+        )
+    })?;
+    let mut response = contribution_response(response);
+    for (name, value) in [
+        (trace_commons_protocol::admission::EVIDENCE_HEADER, encoded),
+        (
+            trace_commons_protocol::admission::SIGNATURE_HEADER,
+            signature,
+        ),
+    ] {
+        response.headers_mut().insert(
+            name,
+            HeaderValue::from_str(&value).map_err(|_| {
+                Refusal::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "admission_evidence_refused",
+                )
+            })?,
+        );
+    }
+    Ok(response)
 }
 
 /// The structured response: the envelope **as the body**, the certificate in

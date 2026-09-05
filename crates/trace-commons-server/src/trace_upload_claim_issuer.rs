@@ -2542,6 +2542,21 @@ impl TraceUploadClaimIssuerState {
             .tenant_access_grant_db
             .as_ref()
             .ok_or_else(IssuerError::internal)?;
+        // Explicit NEAR device identity can obtain narrowly scoped claims before
+        // submission admission. This does not grant an invite or window budget;
+        // ingest's separately configured admission ledger must authorize each upload.
+        if std::env::var("TRACE_COMMONS_NEAR_PROVISIONING_ENABLED").is_ok_and(|v| v == "true")
+            && db
+                .get_near_provisioned_anchor(tenant_id, principal_ref)
+                .await
+                .map_err(|_| IssuerError::internal())?
+                .is_some()
+        {
+            if consent_scopes.is_empty() || allowed_uses.is_empty() {
+                return Err(IssuerError::forbidden("native claim scopes required"));
+            }
+            return Ok(());
+        }
         // Dual-read canonical method-bound refs and pre-#209 signed hashes so
         // grants provisioned under either shape still authorize.
         let mut principal_refs = vec![principal_ref.to_string()];
@@ -6145,7 +6160,7 @@ mod tests {
                 device_key_id: device_key_id.clone(),
                 tenant_id: tenant_id.to_string(),
                 public_key: pk_b64,
-                invite_subject_hash: "sha256:stub".to_string(),
+                invite_subject_hash: Some("sha256:stub".to_string()),
                 client_info: serde_json::json!({}),
                 created_at: Utc::now(),
                 revoked_at: None,
@@ -6232,6 +6247,11 @@ mod tests {
             post_signed_device_claim_for_tenant(tenant_id, body).await;
         assert_eq!(status, StatusCode::OK, "claim must succeed: {:?}", response);
         let claims = decode_issued_claims(&response);
+        assert_eq!(
+            claims["allowed_consent_scopes"],
+            json!(["debugging_evaluation", "public_attribution"]),
+            "a grant-free device upload claim must retain a nonempty scope ceiling"
+        );
         assert_eq!(
             claims["allowed_uses"],
             json!(["debugging", "evaluation", "aggregate_analytics"]),

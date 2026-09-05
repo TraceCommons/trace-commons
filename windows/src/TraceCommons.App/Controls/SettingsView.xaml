@@ -460,6 +460,21 @@
                             that a session is clean, which no certificate
                             makes.
                         -->
+                        <TextBlock Text="{x:Bind Settings.InferenceEvidenceHeading}" Style="{StaticResource TcEyebrowTextStyle}" />
+                        <TextBlock Text="{x:Bind Settings.InferenceEvidenceDisclosure}" TextWrapping="Wrap" />
+                        <TextBlock Text="{x:Bind Settings.InferenceEvidenceCaptureNote}" TextWrapping="Wrap" />
+                        <TextBlock Text="{x:Bind Settings.InferenceEvidenceScopeNote}" TextWrapping="Wrap" />
+                        <TextBlock Text="{x:Bind Settings.InferenceEvidenceState, Mode=OneWay}" TextWrapping="Wrap" />
+                        <Button Content="{x:Bind Settings.InferenceEvidenceEnable, Mode=OneWay}"
+                                IsEnabled="{x:Bind Settings.InferenceEvidenceControlsEnabled, Mode=OneWay}"
+                                Click="OnInferenceEvidence" />
+                        <Button Content="{x:Bind Settings.InferenceEvidenceDisable}"
+                                IsEnabled="{x:Bind Settings.WitnessControlsEnabled, Mode=OneWay}"
+                                Click="OnDisableInferenceEvidence" />
+                        <Grid ColumnDefinitions="Auto,*" ColumnSpacing="6">
+                            <TextBlock Grid.Column="0" Text="{x:Bind Settings.InferenceEvidenceNoticeGlyph, Mode=OneWay}" Style="{StaticResource TcHeadingAlertTextStyle}" />
+                            <TextBlock Grid.Column="1" Text="{x:Bind Settings.InferenceEvidenceNotice, Mode=OneWay}" Style="{StaticResource TcHeadingAlertTextStyle}" TextWrapping="Wrap" />
+                        </Grid>
                         <TextBlock Text="{x:Bind Settings.WitnessCertificateMeans, Mode=OneWay}"
                                    Style="{StaticResource TcCaptionTextStyle}"
                                    TextWrapping="Wrap" />

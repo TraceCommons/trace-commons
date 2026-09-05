@@ -47,6 +47,7 @@ struct SettingsContent: View {
     @State private var loginItemState: LoginItemManager.State = LoginItemManager.currentState
     @State private var loginItemActionError: String?
     @State private var showingGoPublic = false
+    @State private var showingInferenceDisclosure = false
     /// The panel's two editable fields. Seeded from the daemon's answer --
     /// see `seedProfileDraft` -- rather than bound straight to it, so a
     /// background refresh cannot rewrite what is being typed.
@@ -985,9 +986,9 @@ struct SettingsContent: View {
     /// these sentences are privacy claims. The card renders nothing at all
     /// if the payload did not arrive.
     ///
-    /// # There is no switch on this card
+    /// # Witness trust is not a switch
     ///
-    /// A toggle would have to answer "is a witness configured?", and that
+    /// A witness toggle would have to answer "is a witness configured?", and that
     /// question has two yes-answers that are opposites: a pinned witness
     /// certifies every submission, a configured-but-unpinned one refuses
     /// every submission before any network call. `WitnessTrustState` has one
@@ -1049,6 +1050,8 @@ struct SettingsContent: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
 
+                inferenceEvidence(copy: copy)
+
                 Text(copy.appliesAtOnce)
                     .font(TC.Font_.meta)
                     .foregroundStyle(.secondary)
@@ -1058,6 +1061,38 @@ struct SettingsContent: View {
                 // and the CLI writes to it too.
                 model.refreshWitness()
             }
+        }
+    }
+
+    private func inferenceEvidence(copy: WitnessCopy) -> some View {
+        VStack(alignment: .leading, spacing: TC.Space.sm) {
+            Text(copy.inferenceHeading).font(TC.Font_.body.weight(.semibold))
+            Text(copy.inferenceDisclosure).fixedSize(horizontal: false, vertical: true)
+            Text(copy.inferenceCaptureNote).fixedSize(horizontal: false, vertical: true)
+            Text(copy.inferenceScopeNote).fixedSize(horizontal: false, vertical: true)
+            if let enabled = model.daemonSettings?.ironwireAttestedBodies {
+                Text(enabled ? copy.inferenceEnabled : copy.inferenceDisabled)
+            }
+            HStack {
+                Button(copy.inferenceEnable) { showingInferenceDisclosure = true }
+                    .disabled(model.inferenceEvidenceBusy || model.daemonSettings?.ironwireAttestedBodies == nil)
+                Button(copy.inferenceDisable) {
+                    Task { await model.setInferenceEvidence(false) }
+                }
+                .disabled(model.inferenceEvidenceBusy)
+            }
+            if model.inferenceEvidenceSaveFailed {
+                NativeFlowNotice(message: copy.inferenceSaveFailed, glyph: copy.wallet?.refusedGlyph ?? "", tone: copy.wallet?.refusedTone ?? "refused")
+            }
+        }
+        .font(TC.Font_.meta)
+        .confirmationDialog(copy.inferenceHeading, isPresented: $showingInferenceDisclosure, titleVisibility: .visible) {
+            Button(copy.inferenceConfirm) {
+                Task { await model.setInferenceEvidence(true, disclosureConfirmed: true) }
+            }
+            Button(copy.inferenceCancel, role: .cancel) { }
+        } message: {
+            Text([copy.inferenceDisclosure, copy.inferenceCaptureNote, copy.inferenceScopeNote].joined(separator: "\n\n"))
         }
     }
 

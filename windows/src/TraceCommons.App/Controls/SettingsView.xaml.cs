@@ -21,6 +21,8 @@ namespace TraceCommons.App.Controls;
 /// </summary>
 public sealed partial class SettingsView : UserControl
 {
+    private bool _inferenceEvidenceDialogOpen;
+
     public SettingsView(DaemonHost host)
     {
         InitializeComponent();
@@ -44,6 +46,50 @@ public sealed partial class SettingsView : UserControl
     {
         Loaded -= OnFirstLoaded;
         await Task.WhenAll(ViewModel.LoadAsync(), Settings.LoadAsync());
+    }
+
+    private async void OnDisableInferenceEvidence(object sender, RoutedEventArgs e)
+    {
+        await Settings.SetInferenceEvidenceAsync(false);
+    }
+
+    private async void OnInferenceEvidence(object sender, RoutedEventArgs e)
+    {
+        if (_inferenceEvidenceDialogOpen || !Settings.InferenceEvidenceControlsEnabled)
+        {
+            return;
+        }
+
+        var dialog = new ContentDialog
+        {
+            XamlRoot = XamlRoot,
+            Title = Settings.InferenceEvidenceHeading,
+            Content = new ScrollViewer
+            {
+                Content = new TextBlock
+                {
+                    Text = string.Join("\n\n", Settings.InferenceEvidenceDisclosure,
+                        Settings.InferenceEvidenceCaptureNote, Settings.InferenceEvidenceScopeNote),
+                    TextWrapping = TextWrapping.Wrap,
+                },
+            },
+            PrimaryButtonText = Settings.InferenceEvidenceConfirm,
+            CloseButtonText = Settings.InferenceEvidenceCancel,
+            DefaultButton = ContentDialogButton.Close,
+        };
+
+        _inferenceEvidenceDialogOpen = true;
+        try
+        {
+            if (await DialogGuard.ShowOnceAsync(dialog) == ContentDialogResult.Primary)
+            {
+                await Settings.SetInferenceEvidenceAsync(true, disclosureConfirmed: true);
+            }
+        }
+        finally
+        {
+            _inferenceEvidenceDialogOpen = false;
+        }
     }
 
     private async void OnStartAtLoginToggled(object sender, RoutedEventArgs e)

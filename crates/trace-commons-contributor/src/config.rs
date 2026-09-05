@@ -153,6 +153,11 @@ pub struct ContributorConfig {
 /// an uncertified submission from someone enrolled as certified.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WitnessSettings {
+    /// Enable account-bound admission for final calls carrying its request marker.
+    /// Existing unbound history still uses signed ordinary review and the server's
+    /// bounded window. Legacy invited devices stay false.
+    #[serde(default)]
+    pub admission_evidence: bool,
     /// Base URL of the witness, e.g. `https://witness.example`.
     pub url: String,
     /// The address whose signature this client accepts on a certificate, and
@@ -213,6 +218,7 @@ pub fn witness_settings_from_env() -> Option<WitnessSettings> {
     let signing_address = std::env::var(TRACE_COMMONS_WITNESS_SIGNING_ADDRESS).ok()?;
     let expected = std::env::var(TRACE_COMMONS_WITNESS_EXPECTED_MEASUREMENTS).ok()?;
     Some(WitnessSettings {
+        admission_evidence: false,
         url,
         signing_address,
         expected_measurements: expected
@@ -239,6 +245,27 @@ pub fn inference_receipt_endpoint_from_env() -> Option<String> {
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+/// Validate an explicitly configured receipt service before trust-bootstrap
+/// persistence or admission preparation. No backend-derived URL is accepted.
+pub(crate) fn validate_inference_receipt_endpoint(
+    endpoint: &str,
+    allowlist: &HostAllowlist,
+) -> Result<()> {
+    let denied = || anyhow::anyhow!("inference_receipt_endpoint_invalid");
+    let url = reqwest::Url::parse(endpoint).map_err(|_| denied())?;
+    if !allowlist.is_enforcing()
+        || url.scheme() != "https"
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(denied());
+    }
+    allowlist.check(&url).map_err(|_| denied())
 }
 
 /// `TRACE_COMMONS_INFERENCE_RECEIPT_CHECK_ATTESTATION`.
@@ -928,6 +955,31 @@ mod tests {
     // Test helper: expose the file path for assertions.
     fn store_path(store: &ConfigStore, name: &str) -> std::path::PathBuf {
         store.dir().join(name)
+    }
+    #[test]
+    fn native_receipt_endpoint_requires_explicit_https_allowed_host_without_credentials() {
+        let allowed = HostAllowlist::from_csv("receipts.example");
+        assert!(
+            validate_inference_receipt_endpoint("https://receipts.example/v1", &allowed).is_ok()
+        );
+        for value in [
+            "http://receipts.example/v1",
+            "https://other.example/v1",
+            "https://user:secret@receipts.example/v1",
+            "https://receipts.example/v1?token=secret",
+            "https://receipts.example/v1#fragment",
+            "not a URL",
+            "",
+        ] {
+            assert!(validate_inference_receipt_endpoint(value, &allowed).is_err());
+        }
+        assert!(
+            validate_inference_receipt_endpoint(
+                "https://receipts.example/v1",
+                &HostAllowlist::permissive()
+            )
+            .is_err()
+        );
     }
 
     // `inference_receipt_check_attestation_from_env` reads process-wide env;

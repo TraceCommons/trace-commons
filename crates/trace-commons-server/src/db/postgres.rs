@@ -5,6 +5,9 @@
 
 use std::collections::HashSet;
 
+#[path = "postgres_account_onboarding.rs"]
+mod account_onboarding;
+
 use async_trait::async_trait;
 use deadpool_postgres::Pool;
 use sha2::{Digest, Sha256};
@@ -146,7 +149,8 @@ pub struct PgBackend {
 ///
 /// Deliberate exclusions, so an absence is never mistaken for an oversight
 /// again: `trace_instance_enrollments` and `onboarding_invite_grants` are
-/// isolated by subject hash rather than by tenant, and
+/// isolated by subject hash rather than by tenant;
+/// `trace_near_provisioning_ceremonies` uses an unpredictable ceremony hash, and
 /// `trace_community_snapshot_invalidations` and `trace_leaderboard_snapshots`
 /// are deployment-wide aggregate bookkeeping with no tenant column to
 /// predicate on -- inexpressible rather than merely unnecessary. The
@@ -198,6 +202,8 @@ pub const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "trace_account_audit",
     "trace_webauthn_credentials",
     "trace_near_identities",
+    "trace_near_account_anchors",
+    "trace_near_provisioned_devices",
     "trace_account_merge_proposals",
     "trace_community_withdrawal_evictions",
 ];
@@ -813,6 +819,77 @@ const INVITE_GRANT_COLUMNS: &str = "invite_subject_hash, policy_label, tenant_mo
 
 #[async_trait]
 impl Database for PgBackend {
+    async fn admission_runtime_ready(&self) -> Result<bool, DatabaseError> {
+        self.check_admission_runtime().await
+    }
+    async fn lookup_completed_submission_admission(
+        &self,
+        tenant: &str,
+        anchor: &str,
+        submission: uuid::Uuid,
+        body_hash: &str,
+    ) -> Result<bool, DatabaseError> {
+        self.completed_admission(tenant, anchor, submission, body_hash)
+            .await
+    }
+    async fn acquire_admission_processing_lock(
+        &self,
+        tenant: &str,
+        submission: uuid::Uuid,
+    ) -> Result<Option<crate::admission_ledger::AdmissionProcessingGuard>, DatabaseError> {
+        self.lock_admission(tenant, submission).await
+    }
+    async fn prune_onboarding_expiry(
+        &self,
+        tenant: &str,
+        limit: i32,
+        dry_run: bool,
+    ) -> Result<u64, DatabaseError> {
+        let mut client = self.trace_pool().get().await?;
+        let tx = client.transaction().await?;
+        tx.execute(
+            "SELECT set_config('trace_commons.trace_tenant_id',$1,true)",
+            &[&tenant],
+        )
+        .await?;
+        let count: i64 = tx
+            .query_one(
+                "SELECT trace_prune_onboarding_expiry($1,$2,$3)",
+                &[&tenant, &limit, &dry_run],
+            )
+            .await?
+            .get(0);
+        tx.commit().await?;
+        u64::try_from(count)
+            .map_err(|_| DatabaseError::Pool("onboarding_retention_unavailable".into()))
+    }
+    async fn issue_admission_challenge(
+        &self,
+        tenant: &str,
+        anchor: &str,
+        challenge: &str,
+        expires: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), DatabaseError> {
+        self.insert_admission_challenge(tenant, anchor, challenge, expires)
+            .await
+    }
+    async fn reserve_submission_admission(
+        &self,
+        request: &crate::admission_ledger::AdmissionReservation,
+    ) -> Result<crate::admission_ledger::AdmissionDecision, DatabaseError> {
+        self.reserve_admission(request).await
+    }
+    async fn transition_submission_admission(
+        &self,
+        tenant: &str,
+        submission: uuid::Uuid,
+        lease: uuid::Uuid,
+        next: &str,
+    ) -> Result<bool, DatabaseError> {
+        self.transition_admission(tenant, submission, lease, next)
+            .await
+    }
+
     async fn try_acquire_near_credit_submit_lock(
         &self,
         tenant_id: &str,
@@ -2090,6 +2167,68 @@ impl Database for PgBackend {
                 )
                 .await?;
         }
+
+        let already_applied = client
+            .query_opt(
+                "SELECT 1 FROM _trace_commons_migrations WHERE version = $1",
+                &[&58_i32],
+            )
+            .await?
+            .is_some();
+        if !already_applied {
+            client
+                .batch_execute(include_str!(
+                    "../../../../migrations/V58__near_account_provisioning.sql"
+                ))
+                .await?;
+            client
+                .execute(
+                    "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
+                    &[&58_i32, &"near_account_provisioning"],
+                )
+                .await?;
+        }
+
+        let already_applied = client
+            .query_opt(
+                "SELECT 1 FROM _trace_commons_migrations WHERE version = $1",
+                &[&59_i32],
+            )
+            .await?
+            .is_some();
+        if !already_applied {
+            client
+                .batch_execute(include_str!(
+                    "../../../../migrations/V59__trace_admission_ledger.sql"
+                ))
+                .await?;
+            client
+                .execute(
+                    "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
+                    &[&59_i32, &"trace_admission_ledger"],
+                )
+                .await?;
+        }
+        let already_applied = client
+            .query_opt(
+                "SELECT 1 FROM _trace_commons_migrations WHERE version = $1",
+                &[&60_i32],
+            )
+            .await?
+            .is_some();
+        if !already_applied {
+            client
+                .batch_execute(include_str!(
+                    "../../../../migrations/V60__onboarding_retention.sql"
+                ))
+                .await?;
+            client
+                .execute(
+                    "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
+                    &[&60_i32, &"onboarding_retention"],
+                )
+                .await?;
+        }
         Ok(())
     }
 
@@ -3047,7 +3186,8 @@ impl Database for PgBackend {
         {
             let record = device_key_record_from_row(existing);
             if record.public_key == device_key.public_key
-                && record.invite_subject_hash == device_key.invite_subject_hash
+                && record.invite_subject_hash.as_deref()
+                    == Some(device_key.invite_subject_hash.as_str())
                 && record.revoked_at.is_none()
             {
                 upsert_onboarding_device_tenant_access_grant(
@@ -3122,7 +3262,8 @@ impl Database for PgBackend {
             if let Some(existing) = existing {
                 let record = device_key_record_from_row(existing);
                 if record.public_key == device_key.public_key
-                    && record.invite_subject_hash == device_key.invite_subject_hash
+                    && record.invite_subject_hash.as_deref()
+                        == Some(device_key.invite_subject_hash.as_str())
                     && record.revoked_at.is_none()
                 {
                     upsert_onboarding_device_tenant_access_grant(
@@ -3648,6 +3789,35 @@ impl Database for PgBackend {
         PgBackend::resolve_credential_tenant(self, credential_id)
             .await
             .map_err(|error| DatabaseError::Pool(error.to_string()))
+    }
+
+    async fn store_near_provisioning_ceremony(
+        &self,
+        hash: &str,
+        pending: crate::account_onboarding::NativeProvisioningPending,
+        expires_at: i64,
+    ) -> Result<(), DatabaseError> {
+        self.near_store_ceremony(hash, pending, expires_at).await
+    }
+    async fn take_near_provisioning_ceremony(
+        &self,
+        hash: &str,
+    ) -> Result<Option<crate::account_onboarding::NativeProvisioningPending>, DatabaseError> {
+        self.near_take_ceremony(hash).await
+    }
+    async fn provision_verified_near_account(
+        &self,
+        proof: crate::account_onboarding::VerifiedNearProvisioning,
+        session: crate::db::NewSession<'_>,
+    ) -> Result<crate::account_onboarding::ProvisionedNearAccount, DatabaseError> {
+        self.near_provision(proof, session).await
+    }
+    async fn get_near_provisioned_anchor(
+        &self,
+        tenant: &str,
+        principal: &str,
+    ) -> Result<Option<String>, DatabaseError> {
+        self.near_anchor_for_principal(tenant, principal).await
     }
 
     async fn resolve_near_public_key_tenant(
@@ -6735,6 +6905,7 @@ mod tests {
             include_str!("../../../../migrations/V34__account_consolidation.sql"),
             include_str!("../../../../migrations/V43__trace_withdrawal.sql"),
             include_str!("../../../../migrations/V56__community_withdrawal_eviction_rls.sql"),
+            include_str!("../../../../migrations/V58__near_account_provisioning.sql"),
         ];
         let force_rls_migrations = [
             include_str!("../../../../migrations/V6__trace_force_rls.sql"),
@@ -6752,6 +6923,7 @@ mod tests {
             include_str!("../../../../migrations/V34__account_consolidation.sql"),
             include_str!("../../../../migrations/V43__trace_withdrawal.sql"),
             include_str!("../../../../migrations/V56__community_withdrawal_eviction_rls.sql"),
+            include_str!("../../../../migrations/V58__near_account_provisioning.sql"),
         ];
 
         for table in TRACE_COMMONS_RLS_TABLES {

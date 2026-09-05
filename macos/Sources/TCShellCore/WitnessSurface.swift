@@ -161,8 +161,25 @@ public struct WitnessCopy: Decodable, Equatable, Sendable {
     /// this machine.
     public let clearNote: String
     public let appliesAtOnce: String
+    public let inferenceHeading: String
+    public let inferenceDisclosure: String
+    public let inferenceCaptureNote: String
+    public let inferenceScopeNote: String
+    public let inferenceEnable: String
+    public let inferenceDisable: String
+    public let inferenceConfirm: String
+    public let inferenceCancel: String
+    public let inferenceEnabled: String
+    public let inferenceDisabled: String
+    public let inferenceSaveFailed: String
+    public let review: WitnessReviewCopy?
+    public let onboarding: FirstContributionCopy?
+    public let wallet: WalletCopy?
+    public let admission: AdmissionCopy?
+
 
     enum CodingKeys: String, CodingKey {
+        case review, onboarding, wallet, admission
         case heading
         case intro
         case certificateMeans = "certificate_means"
@@ -174,6 +191,18 @@ public struct WitnessCopy: Decodable, Equatable, Sendable {
         case clear
         case clearNote = "clear_note"
         case appliesAtOnce = "applies_at_once"
+        case inferenceHeading = "inference_heading"
+        case inferenceDisclosure = "inference_disclosure"
+        case inferenceCaptureNote = "inference_capture_note"
+        case inferenceScopeNote = "inference_scope_note"
+        case inferenceEnable = "inference_enable"
+        case inferenceDisable = "inference_disable"
+        case inferenceConfirm = "inference_confirm"
+        case inferenceCancel = "inference_cancel"
+        case inferenceEnabled = "inference_enabled"
+        case inferenceDisabled = "inference_disabled"
+        case inferenceSaveFailed = "inference_save_failed"
+
     }
 
     /// Decode the payload, or nil if it will not parse.
@@ -467,5 +496,81 @@ public enum WitnessSurface {
     /// degraded-but-working state.
     public static func lastResultTone(calls: WitnessCalls) -> WitnessTone {
         WitnessTone.fromABI(calls.lastResultTone())
+    }
+}
+
+public struct WitnessReviewCopy: Decodable, Equatable, Sendable {
+    public let heading, disclosure, action, confirm, cancel, working, failed, immutable: String
+}
+
+public struct FirstContributionCopy: Decodable, Equatable, Sendable {
+    public let heading, start, review: String
+    public let followUp, agentSetup: String
+    enum CodingKeys: String, CodingKey {
+        case heading, start, review
+        case followUp = "follow_up", agentSetup = "agent_setup"
+    }
+}
+
+public struct WalletCopy: Decodable, Equatable, Sendable {
+    public let heading: String
+    public let disclosure: String
+    public let commons: String
+    public let account: String
+    public let check: String
+    public let start: String
+    public let cancel: String
+    public let available: String
+    public let unavailable: String
+    public let opening: String
+    public let waiting: String
+    public let failed: String
+    public let cancelled: String
+    public let refusedGlyph: String
+    public let refusedTone: String
+    enum CodingKeys: String, CodingKey {
+        case heading = "heading"
+        case disclosure = "disclosure"
+        case commons = "commons"
+        case account = "account"
+        case check = "check"
+        case start = "start"
+        case cancel = "cancel"
+        case available = "available"
+        case unavailable = "unavailable"
+        case opening = "opening"
+        case waiting = "waiting"
+        case failed = "failed"
+        case cancelled = "cancelled"
+        case refusedGlyph = "refused_glyph"
+        case refusedTone = "refused_tone"
+    }
+}
+public struct AdmissionCopy: Decodable, Equatable, Sendable {
+    public let heading: String
+    public let disclosure: String
+    public let prerequisite: String
+    public let backend: String
+    public let confirm: String
+    public let cancel: String
+    public let permission: String
+    public let working: String
+    public let ready: String
+    public let failed: String
+    public let refusedGlyph: String
+    public let refusedTone: String
+    enum CodingKeys: String, CodingKey {
+        case heading = "heading"
+        case disclosure = "disclosure"
+        case prerequisite = "prerequisite"
+        case backend = "backend"
+        case confirm = "confirm"
+        case cancel = "cancel"
+        case permission = "permission"
+        case working = "working"
+        case ready = "ready"
+        case failed = "failed"
+        case refusedGlyph = "refused_glyph"
+        case refusedTone = "refused_tone"
     }
 }

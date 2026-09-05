@@ -492,6 +492,7 @@ mod tests {
     #[test]
     fn a_configured_witness_with_no_pin_is_a_refusal_not_an_absence() {
         let status = witness_status(&cfg_with(Some(WitnessSettings {
+            admission_evidence: false,
             url: "https://witness.example".into(),
             signing_address: "0xabc".into(),
             expected_measurements: vec![],
@@ -513,6 +514,7 @@ mod tests {
     #[test]
     fn a_malformed_pin_is_its_own_state() {
         let status = witness_status(&cfg_with(Some(WitnessSettings {
+            admission_evidence: false,
             url: "https://witness.example".into(),
             signing_address: "0xabc".into(),
             expected_measurements: vec!["mrtd=not-hex".into()],
@@ -535,6 +537,7 @@ mod tests {
             vec![a_pin(), "mrtd=not-hex".to_string()],
         ] {
             let status = witness_status(&cfg_with(Some(WitnessSettings {
+                admission_evidence: false,
                 url: "https://witness.example".into(),
                 signing_address: "0xabc".into(),
                 expected_measurements: measurements.clone(),
@@ -558,6 +561,7 @@ mod tests {
             a_pin(),
         ];
         let status = witness_status(&cfg_with(Some(WitnessSettings {
+            admission_evidence: false,
             url: "https://witness.example".into(),
             signing_address: "0xabc".into(),
             expected_measurements: stored.clone(),
@@ -572,6 +576,7 @@ mod tests {
         // delete their work on the next save, and refusing the read would
         // leave them refusing every submission with nothing to look at.
         let status = witness_status(&cfg_with(Some(WitnessSettings {
+            admission_evidence: false,
             url: "https://witness.example".into(),
             signing_address: "0xabc".into(),
             expected_measurements: vec![a_pin(), "mrtd=not-hex".into()],
@@ -595,6 +600,7 @@ mod tests {
         );
 
         let pinned = witness_status(&cfg_with(Some(WitnessSettings {
+            admission_evidence: false,
             url: "https://witness.example".into(),
             signing_address: "0xabc".into(),
             expected_measurements: vec![a_pin(), a_pin()],
@@ -605,6 +611,7 @@ mod tests {
         );
 
         let unpinned = witness_status(&cfg_with(Some(WitnessSettings {
+            admission_evidence: false,
             url: "https://witness.example".into(),
             signing_address: "0xabc".into(),
             expected_measurements: vec![],
@@ -632,6 +639,7 @@ mod tests {
     #[test]
     fn a_pinned_witness_reports_its_url_and_count() {
         let status = witness_status(&cfg_with(Some(WitnessSettings {
+            admission_evidence: false,
             url: "https://witness.example".into(),
             signing_address: "0xabc".into(),
             expected_measurements: vec![a_pin(), a_pin()],

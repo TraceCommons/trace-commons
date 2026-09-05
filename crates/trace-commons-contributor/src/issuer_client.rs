@@ -62,6 +62,8 @@ impl IssuerClient {
     /// Construct a client with a 30-second request timeout.
     pub fn new(allowlist: HostAllowlist) -> Result<Self> {
         let http = reqwest::Client::builder()
+            // Service endpoints never delegate credentials or trust through redirects.
+            .redirect(reqwest::redirect::Policy::none())
             .timeout(std::time::Duration::from_secs(30))
             .build()
             .context("building issuer HTTP client")?;
@@ -304,5 +306,42 @@ mod tests {
         let err = client.enroll(&base, &req).await.unwrap_err();
         assert!(err.to_string().contains("EnrollNotAuthorized"));
         let _ = grant;
+    }
+    #[tokio::test]
+    async fn signed_claim_requests_never_follow_redirects() {
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = hits.clone();
+        let target = spawn(Router::new().route(
+            "/redirected",
+            post(move || {
+                let count = count.clone();
+                async move {
+                    count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Json(serde_json::json!({}))
+                }
+            }),
+        ))
+        .await;
+        let origin = spawn(Router::new().route(
+            "/v1/trace-upload-claim",
+            post(move || {
+                let target = target.clone();
+                async move {
+                    (
+                        axum::http::StatusCode::TEMPORARY_REDIRECT,
+                        [(axum::http::header::LOCATION, format!("{target}/redirected"))],
+                    )
+                }
+            }),
+        ))
+        .await;
+        let client = IssuerClient::new(HostAllowlist::permissive()).unwrap();
+        let signed = SignedClaimRequest {
+            body: "{}".into(),
+            device_key_id: "device".into(),
+            signature_b64: "signature".into(),
+        };
+        assert!(client.mint_claim(&origin, &signed).await.is_err());
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 }

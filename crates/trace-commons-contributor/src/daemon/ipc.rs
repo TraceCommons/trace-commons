@@ -244,6 +244,12 @@ pub const METHODS: &[&str] = &[
     "arming_suggestion",
     "decline_arming",
     "enroll",
+    "prepare_admission_session",
+    "near_account_capabilities",
+    "native_wallet_flow",
+    "near_account_start",
+    "near_account_status",
+    "near_account_cancel",
     "get_public_profile",
     "get_settings",
     "hello",
@@ -257,6 +263,7 @@ pub const METHODS: &[&str] = &[
     "preview_body",
     "preview_cancel",
     "preview_request",
+    "witness_preview_request",
     "preview_turns",
     "preview_visible",
     "probe_routed_tools",
@@ -1392,6 +1399,17 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         // async. Same treatment as `"enroll"`: an honest refusal here rather
         // than a partial answer. No real caller reaches it -- see the module
         // doc's "Sync vs. async dispatch" section.
+        "prepare_admission_session" => {
+            Response::err(req.id, ERR_UNAVAILABLE, "admission-setup-requires-async")
+        }
+        "near_account_status" => super::account_onboarding::handle_status(shared, req),
+        "near_account_cancel" => super::account_onboarding::handle_cancel(shared, req),
+        "near_account_start" | "near_account_capabilities" | "native_wallet_flow" => {
+            Response::err(req.id, ERR_UNAVAILABLE, "near-signup-requires-async")
+        }
+        "witness_preview_request" => {
+            Response::err(req.id, ERR_UNAVAILABLE, "witness-review-requires-async")
+        }
         "preview_body" => Response::err(req.id, ERR_UNAVAILABLE, "preview-body-requires-async"),
         // Waiting for a drain is async by nature; the synchronous dispatcher
         // cannot do it and says so rather than claiming a quiesce it did not
@@ -1664,8 +1682,12 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
             Response::ok(req.id, serde_json::json!({ "requested": true }))
         }
         "get_settings" => {
-            let settings = shared.settings.lock().expect("settings lock");
-            Response::ok(req.id, redacted_settings(&settings))
+            let mut value = {
+                let settings = shared.settings.lock().expect("settings lock");
+                redacted_settings(&settings)
+            };
+            add_admission_setting(shared, &mut value);
+            Response::ok(req.id, value)
         }
         "set_settings" => {
             let mut settings = shared.settings.lock().expect("settings lock");
@@ -1694,7 +1716,10 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
                     if settings.ironwire != declared_before {
                         shared.rebuild_routing(settings.ironwire.as_ref());
                     }
-                    Response::ok(req.id, redacted_settings(&settings))
+                    let mut value = redacted_settings(&settings);
+                    drop(settings);
+                    add_admission_setting(shared, &mut value);
+                    Response::ok(req.id, value)
                 }
                 Err(label) => Response::err(req.id, ERR_BAD_PARAMS, label),
             }
@@ -1727,6 +1752,16 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
     }
 }
 
+fn add_admission_setting(shared: &DaemonShared, value: &mut serde_json::Value) {
+    value["admission_evidence_required"] = match shared.store.load_config() {
+        Ok(cfg) => serde_json::json!(
+            cfg.and_then(|c| c.witness)
+                .is_some_and(|w| w.admission_evidence)
+        ),
+        Err(_) => serde_json::Value::Null,
+    };
+}
+
 /// The complete dispatcher: answers the async methods (`"approve"`,
 /// `"preview"`, `"preview_body"`, `"preview_turns"`, `"probe_routing"`,
 /// `"probe_routed_tools"`,
@@ -1740,6 +1775,16 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
 /// `handle_request` directly.
 pub async fn handle_request_async(shared: &DaemonShared, req: &Request) -> Response {
     match req.method.as_str() {
+        "native_wallet_flow" => super::native_flow::handle_wallet(shared, req).await,
+        "prepare_admission_session" => super::native_flow::admission_response(
+            super::admission_setup::handle_prepare_admission_session(shared, req).await,
+            chrono::Utc::now().timestamp(),
+        ),
+        "near_account_start" => super::account_onboarding::handle_start(shared, req).await,
+        "near_account_capabilities" => {
+            super::account_onboarding::handle_capabilities(shared, req).await
+        }
+        "witness_preview_request" => handle_witness_preview_request(shared, req).await,
         "approve" => handle_approve(shared, req).await,
         "preview" => handle_preview(shared, req).await,
         "preview_body" => handle_preview_body(shared, req).await,
@@ -2218,6 +2263,38 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
             skipped.push((id, label));
             continue;
         }
+        if let Some(entry) = queue.get(id).filter(|entry| {
+            entry
+                .previewed_envelope_digest
+                .as_deref()
+                .is_some_and(|pin| pin.starts_with("witness-sha256:"))
+        }) {
+            let valid = cfg
+                .as_ref()
+                .zip(inputs.as_deref())
+                .is_some_and(|(cfg, fingerprint)| {
+                    super::approved_envelope::load_witnessed(&shared.store, id)
+                        .ok()
+                        .flatten()
+                        .is_some_and(|artifact| {
+                            artifact.digest().ok().as_deref()
+                                == entry.previewed_envelope_digest.as_deref()
+                                && artifact
+                                    .validate(
+                                        cfg,
+                                        &entry.session_hash,
+                                        fingerprint,
+                                        verdict.as_deref(),
+                                        correction.as_deref(),
+                                    )
+                                    .is_ok()
+                        })
+                });
+            if !valid {
+                skipped.push((id, "witness-review-stale"));
+                continue;
+            }
+        }
         if queue.approve(
             id,
             &scopes,
@@ -2305,6 +2382,165 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
 /// rebuild inside `handle_approve` are the two paths that actually pin, and
 /// either one runs regardless of whether a card was ever loaded for the
 /// entry.
+/// One explicit, user-confirmed remote review. Ordinary preview paths never call it.
+async fn handle_witness_preview_request(shared: &DaemonShared, req: &Request) -> Response {
+    handle_witness_preview_request_inner(
+        shared,
+        req,
+        #[cfg(test)]
+        None,
+    )
+    .await
+}
+
+async fn handle_witness_preview_request_inner(
+    shared: &DaemonShared,
+    req: &Request,
+    // Recorded signed responses exercise persistence/approval without pretending
+    // that local fixtures are Intel-signed quotes. Absent from production builds.
+    #[cfg(test)] recorded: Option<super::preview::WitnessPreview>,
+) -> Response {
+    if req
+        .params
+        .get("raw_session_confirmed")
+        .and_then(|v| v.as_bool())
+        != Some(true)
+    {
+        return Response::err(req.id, ERR_BAD_PARAMS, "witness-review-consent-required");
+    }
+    let id = match parse_entry_id(&req.params) {
+        Ok(id) => id,
+        Err(label) => return Response::err(req.id, ERR_BAD_PARAMS, label),
+    };
+    let verdict = match req
+        .params
+        .get("outcome")
+        .or_else(|| req.params.get("verdict"))
+    {
+        None => None,
+        Some(value) => match value
+            .as_str()
+            .and_then(crate::envelope::ContributorVerdict::parse)
+        {
+            Some(verdict) => Some(verdict),
+            None => return Response::err(req.id, ERR_BAD_PARAMS, ERR_BAD_VERDICT),
+        },
+    };
+    let correction = match req.params.get("correction") {
+        None => None,
+        Some(value) => match value.as_str() {
+            Some(text) if text.trim().is_empty() => None,
+            Some(text) if text.trim().chars().count() <= crate::envelope::MAX_CORRECTION_CHARS => {
+                Some(text.trim())
+            }
+            _ => return Response::err(req.id, ERR_BAD_PARAMS, ERR_BAD_CORRECTION),
+        },
+    };
+    if correction.is_some()
+        && !matches!(
+            verdict,
+            Some(
+                crate::envelope::ContributorVerdict::Partly
+                    | crate::envelope::ContributorVerdict::Failed
+            )
+        )
+    {
+        return Response::err(req.id, ERR_BAD_PARAMS, ERR_CORRECTION_NEEDS_VERDICT);
+    }
+    let entry = {
+        let queue = shared.queue.lock().expect("queue lock");
+        match queue.get(id) {
+            Some(entry) if entry.state == QueueState::Pending => entry.clone(),
+            Some(_) => return Response::err(req.id, ERR_BAD_PARAMS, "not-pending"),
+            None => return Response::err(req.id, ERR_BAD_PARAMS, ERR_UNKNOWN_ENTRY_ID),
+        }
+    };
+    // Repeated requests must not replace an existing certified artifact.
+    if entry
+        .previewed_envelope_digest
+        .as_deref()
+        .is_some_and(|pin| pin.starts_with("witness-sha256:"))
+    {
+        return Response::err(req.id, ERR_BAD_PARAMS, "witness-review-already-pinned");
+    }
+    let cfg = match shared.store.load_config() {
+        Ok(Some(cfg)) => cfg,
+        _ => return Response::err(req.id, ERR_UNAVAILABLE, "witness-review-not-enrolled"),
+    };
+    let initial_settings = shared.settings.lock().expect("settings lock").clone();
+    let near_ai = initial_settings.near_ai.clone();
+    let bodies = initial_settings.ironwire_attested_bodies;
+    let roots = shared.source_roots_with_routing();
+    let sources = crate::source::all_sources(&roots);
+    let Some((source, session_ref)) = super::find_session(&sources, &entry) else {
+        return Response::err(req.id, ERR_BAD_PARAMS, "session-file-vanished");
+    };
+    let build = super::preview::build_witnessed_preview(
+        &shared.store,
+        &cfg,
+        near_ai,
+        source,
+        &session_ref,
+        super::preview::WitnessPreviewOptions {
+            raw_session_confirmed: true,
+            expected_session_hash: &entry.session_hash,
+            include_inference_bodies: bodies,
+            verdict,
+            correction,
+        },
+    );
+    #[cfg(test)]
+    let built = match recorded {
+        Some(review) => Ok(review),
+        None => build.await,
+    };
+    #[cfg(not(test))]
+    let built = build.await;
+    let review = match built {
+        Ok(review) => review,
+        Err(_) => return Response::err(req.id, ERR_UNAVAILABLE, "witness-review-failed"),
+    };
+    // The async network operation is over. Recheck identity, consent and source
+    // before either persistent write, and keep the queue locked through both.
+    let current_cfg = match shared.store.load_config() {
+        Ok(Some(cfg)) => cfg,
+        _ => return Response::err(req.id, ERR_UNAVAILABLE, "witness-review-stale"),
+    };
+    let settings = shared.settings.lock().expect("settings lock");
+    let fingerprint = super::preview::input_fingerprint(
+        &current_cfg,
+        settings.near_ai.as_ref(),
+        settings.ironwire_attested_bodies,
+    );
+    if *settings != initial_settings
+        || fingerprint != review.summary.input_fingerprint
+        || source
+            .load(&session_ref)
+            .map(|t| t.session_hash != entry.session_hash)
+            .unwrap_or(true)
+    {
+        return Response::err(req.id, ERR_UNAVAILABLE, "witness-review-stale");
+    }
+    let mut queue = shared.queue.lock().expect("queue lock");
+    if queue.get(id) != Some(&entry) {
+        return Response::err(req.id, ERR_UNAVAILABLE, "witness-review-stale");
+    }
+    if super::approved_envelope::save_witnessed(&shared.store, id, &review.artifact).is_err() {
+        return Response::err(req.id, ERR_UNAVAILABLE, "witness-review-save-failed");
+    }
+    let previous_queue = queue.clone();
+    if !queue.record_previewed_envelope(id, &review.summary.envelope_digest)
+        || queue.save(&shared.store).is_err()
+    {
+        *queue = previous_queue;
+        return Response::err(req.id, ERR_UNAVAILABLE, "witness-review-save-failed");
+    }
+    Response::ok(
+        req.id,
+        serde_json::json!({"status": "ready", "summary": review.summary}),
+    )
+}
+
 async fn handle_preview(shared: &DaemonShared, req: &Request) -> Response {
     let id = match parse_entry_id(&req.params) {
         Ok(id) => id,
@@ -2317,6 +2553,21 @@ async fn handle_preview(shared: &DaemonShared, req: &Request) -> Response {
             None => return Response::err(req.id, ERR_BAD_PARAMS, ERR_UNKNOWN_ENTRY_ID),
         }
     };
+    if entry
+        .previewed_envelope_digest
+        .as_deref()
+        .is_some_and(|pin| pin.starts_with("witness-sha256:"))
+    {
+        return match open_preview(shared, id).await {
+            Ok((summary, _)) => {
+                let mut value =
+                    serde_json::to_value(summary).expect("preview summary serialization");
+                value["entry"] = entry_value(&entry);
+                Response::ok(req.id, value)
+            }
+            Err(label) => Response::err(req.id, ERR_UNAVAILABLE, label),
+        };
+    }
     // No enrollment is not a refusal. Preview does no network I/O and needs
     // neither the daemon's lock nor its running loop, so requiring a config
     // here was incidental -- and it forced anyone who wanted to *see* what
@@ -2551,6 +2802,40 @@ async fn build_and_pin_preview(
     let sources = crate::source::all_sources(&source_roots);
     let (source, session_ref) =
         super::find_session(&sources, entry).ok_or((ERR_BAD_PARAMS, "session-file-vanished"))?;
+    if entry
+        .previewed_envelope_digest
+        .as_deref()
+        .is_some_and(|pin| pin.starts_with("witness-sha256:"))
+    {
+        let unavailable = (
+            ERR_UNAVAILABLE,
+            super::preview::REASON_APPROVED_ENVELOPE_UNAVAILABLE,
+        );
+        let artifact = super::approved_envelope::load_witnessed(&shared.store, entry_id)
+            .map_err(|_| unavailable)?
+            .ok_or(unavailable)?;
+        if artifact.digest().map_err(|_| unavailable)?.as_str()
+            != entry
+                .previewed_envelope_digest
+                .as_deref()
+                .ok_or(unavailable)?
+        {
+            return Err(unavailable);
+        }
+        let transcript = source.load(&session_ref).map_err(|_| unavailable)?;
+        if transcript.session_hash != entry.session_hash {
+            return Err((ERR_UNAVAILABLE, "witness-review-stale"));
+        }
+        return super::preview::summarize_witnessed_preview(
+            &artifact,
+            cfg.ok_or(unavailable)?,
+            near_ai,
+            &transcript,
+            session_ref.size_bytes,
+            attested_bodies,
+        )
+        .map_err(|_| (ERR_UNAVAILABLE, "witness-review-stale"));
+    }
     let (summary, body, envelope) = super::preview::build_preview_with_correction(
         &shared.store,
         cfg,
@@ -2989,6 +3274,16 @@ async fn resolve_preview_envelope(
             .cloned()
             .ok_or((ERR_BAD_PARAMS, ERR_UNKNOWN_ENTRY_ID))?
     };
+    if entry
+        .previewed_envelope_digest
+        .as_deref()
+        .is_some_and(|pin| pin.starts_with("witness-sha256:"))
+    {
+        let cfg = shared.store.load_config().ok().flatten();
+        let (summary, _, envelope) =
+            build_and_pin_preview(shared, entry_id, &entry, cfg.as_ref(), None).await?;
+        return Ok((envelope, summary.envelope_digest, true));
+    }
     match super::approved_envelope::load(&shared.store, entry_id) {
         Ok(Some(envelope)) => {
             let digest = super::preview::envelope_digest(&envelope)
@@ -3717,6 +4012,9 @@ fn routed_tools(body: &[u8]) -> Vec<serde_json::Value> {
 
 #[cfg(test)]
 mod tests {
+    mod witnessed_flow {
+        include!("ipc_witness_flow_test.rs");
+    }
     use super::*;
     use crate::config::tests_support::temp_store;
     use crate::daemon::policy::UNKNOWN_PROJECT_KEY;
@@ -3771,6 +4069,233 @@ mod tests {
             .upsert(entry, 500)
             .unwrap();
         (s, entry_id, dir)
+    }
+
+    async fn recorded_witness_review() -> (
+        DaemonShared,
+        Uuid,
+        tempfile::TempDir,
+        super::super::preview::WitnessPreview,
+    ) {
+        let body = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"synthetic onboarding task\"},\"cwd\":\"/synthetic/project\",\"timestamp\":\"2026-08-08T10:00:00Z\",\"sessionId\":\"sess-1\",\"uuid\":\"a1\"}\n";
+        let (s, id, dir) = shared_with_session(body);
+        let project = dir.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        let path = project.join("sess-1.jsonl");
+        std::fs::write(&path, body).unwrap();
+        {
+            let mut queue = s.queue.lock().unwrap();
+            let mut entry = queue.get(id).unwrap().clone();
+            entry.path = path;
+            entry.session_hash = crate::source::session_hash(body.as_bytes());
+            *queue = super::super::queue::Queue::default();
+            queue.upsert(entry, 500).unwrap();
+        }
+        s.settings.lock().unwrap().claude_source =
+            Some(super::super::settings::SourceDeclaration::Watch {
+                path: dir.path().to_path_buf(),
+            });
+        let device = crate::identity::DeviceIdentity::load_or_generate(&s.store).unwrap();
+        let mut cfg = crate::commands::unenrolled_preview_config();
+        cfg.device_key_id = device.device_key_id;
+        cfg.tenant_id = "synthetic-tenant".into();
+        cfg.user_subject = "synthetic-user".into();
+        cfg.consent_scopes = vec!["debugging_evaluation".into()];
+        let roots = s.source_roots_with_routing();
+        let sources = crate::source::all_sources(&roots);
+        let entry = s.queue.lock().unwrap().get(id).unwrap().clone();
+        let (source, reference) = super::super::find_session(&sources, &entry).unwrap();
+        let (_, _, envelope) = super::super::preview::build_preview_with_correction(
+            &s.store,
+            Some(&cfg),
+            None,
+            source,
+            &reference,
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+        let (response, address) = crate::witness::transport::signed_fixture(
+            serde_json::to_vec_pretty(&envelope).unwrap(),
+        );
+        cfg.witness = Some(crate::config::WitnessSettings {
+            url: "https://synthetic-witness.invalid".into(),
+            signing_address: address,
+            expected_measurements: vec![format!("mrtd={}", "aa".repeat(48))],
+            admission_evidence: false,
+        });
+        s.store.save_config(&cfg).unwrap();
+        let artifact = super::super::approved_envelope::WitnessReviewArtifact::new(
+            response,
+            entry.session_hash,
+            super::super::preview::input_fingerprint(&cfg, None, false),
+            None,
+            None,
+        );
+        let transcript = source.load(&reference).unwrap();
+        let (summary, body, _) = super::super::preview::summarize_witnessed_preview(
+            &artifact,
+            &cfg,
+            None,
+            &transcript,
+            reference.size_bytes,
+            false,
+        )
+        .unwrap();
+        (
+            s,
+            id,
+            dir,
+            super::super::preview::WitnessPreview {
+                summary,
+                body,
+                artifact,
+            },
+        )
+    }
+
+    #[tokio::test]
+    async fn recorded_witness_request_reopens_and_approves_the_same_persisted_artifact() {
+        let (s, id, _dir, review) = recorded_witness_review().await;
+        let expected_digest = review.summary.envelope_digest.clone();
+        let expected_body = review.body.clone();
+        let response = handle_witness_preview_request_inner(
+            &s,
+            &req(
+                "witness_preview_request",
+                serde_json::json!({"entry_id":id,"raw_session_confirmed":true}),
+            ),
+            Some(review),
+        )
+        .await;
+        assert!(response.error.is_none(), "{:?}", response.error);
+        assert_eq!(
+            s.queue.lock().unwrap().get(id).unwrap().state,
+            QueueState::Pending
+        );
+        let reloaded =
+            DaemonShared::load(ConfigStore::open(s.store.dir().to_path_buf()).unwrap()).unwrap();
+        // Source settings are persisted independently by the settings API.
+        *reloaded.settings.lock().unwrap() = s.settings.lock().unwrap().clone();
+        let (summary, body) = open_preview(&reloaded, id).await.unwrap();
+        assert_eq!(summary.envelope_digest, expected_digest);
+        assert_eq!(body, expected_body);
+        let refusal = handle_approve(
+            &reloaded,
+            &req(
+                "approve",
+                serde_json::json!({"entry_id":id,"outcome":"failed"}),
+            ),
+        )
+        .await;
+        assert_eq!(refusal.result.unwrap()["approved"], 0);
+        let approved = handle_approve(
+            &reloaded,
+            &req("approve", serde_json::json!({"entry_id":id})),
+        )
+        .await;
+        assert_eq!(approved.result.unwrap()["approved"], 1);
+        assert_eq!(
+            reloaded
+                .queue
+                .lock()
+                .unwrap()
+                .get(id)
+                .unwrap()
+                .previewed_envelope_digest
+                .as_deref(),
+            Some(expected_digest.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn recorded_witness_request_refuses_changed_consent_before_pinning() {
+        let (s, id, _dir, review) = recorded_witness_review().await;
+        s.settings.lock().unwrap().ironwire_attested_bodies = true;
+        let response = handle_witness_preview_request_inner(
+            &s,
+            &req(
+                "witness_preview_request",
+                serde_json::json!({"entry_id":id,"raw_session_confirmed":true}),
+            ),
+            Some(review),
+        )
+        .await;
+        assert_eq!(response.error.unwrap().message, "witness-review-stale");
+        assert!(
+            s.queue
+                .lock()
+                .unwrap()
+                .get(id)
+                .unwrap()
+                .previewed_envelope_digest
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn witness_request_requires_confirmation_before_lookup_or_io() {
+        let s = shared();
+        for params in [
+            serde_json::json!({}),
+            serde_json::json!({"raw_session_confirmed": false}),
+            serde_json::json!({"raw_session_confirmed": "true"}),
+        ] {
+            let response = handle_request_async(&s, &req("witness_preview_request", params)).await;
+            assert_eq!(
+                response.error.unwrap().message,
+                "witness-review-consent-required"
+            );
+        }
+        assert!(METHODS.contains(&"witness_preview_request"));
+    }
+
+    #[tokio::test]
+    async fn witness_request_refuses_without_enrollment_and_keeps_pending() {
+        let (s, id, _dir) = shared_with_session("{}");
+        let response = handle_request_async(
+            &s,
+            &req(
+                "witness_preview_request",
+                serde_json::json!({"entry_id": id,"raw_session_confirmed":true}),
+            ),
+        )
+        .await;
+        assert_eq!(
+            response.error.unwrap().message,
+            "witness-review-not-enrolled"
+        );
+        let queue = s.queue.lock().unwrap();
+        assert_eq!(queue.get(id).unwrap().state, QueueState::Pending);
+        assert!(queue.get(id).unwrap().previewed_envelope_digest.is_none());
+    }
+
+    #[tokio::test]
+    async fn missing_witness_artifact_never_falls_back_to_local_preview() {
+        let (s, id, _dir) = shared_with_session("{}");
+        s.queue
+            .lock()
+            .unwrap()
+            .record_previewed_envelope(id, "witness-sha256:missing");
+        assert!(open_preview(&s, id).await.is_err());
+        assert!(resolve_preview_envelope(&s, id).await.is_err());
+        let response = handle_request_async(
+            &s,
+            &req(
+                "witness_preview_request",
+                serde_json::json!({"entry_id":id,"raw_session_confirmed":true}),
+            ),
+        )
+        .await;
+        assert_eq!(
+            response.error.unwrap().message,
+            "witness-review-already-pinned"
+        );
+        assert_eq!(
+            s.queue.lock().unwrap().get(id).unwrap().state,
+            QueueState::Pending
+        );
     }
 
     /// The reason this call exists. `preview_search` scans the REDACTED
@@ -6077,6 +6602,29 @@ mod tests {
             &req("dismiss", serde_json::json!({"entry_id": "not-a-uuid"})),
         );
         assert_eq!(r.error.unwrap().code, ERR_BAD_PARAMS);
+    }
+
+    #[test]
+    fn admission_requirement_survives_settings_write() {
+        let s = shared();
+        let mut cfg = crate::commands::unenrolled_preview_config();
+        cfg.witness = Some(crate::config::WitnessSettings {
+            url: "https://witness.example".into(),
+            signing_address: "0x0000000000000000000000000000000000000000".into(),
+            expected_measurements: vec!["measurement".into()],
+            admission_evidence: true,
+        });
+        s.store.save_config(&cfg).unwrap();
+        for method in ["get_settings", "set_settings"] {
+            let response = handle_request(
+                &s,
+                &req(method, serde_json::json!({"max_uploads_per_day": 200})),
+            );
+            assert_eq!(
+                response.result.unwrap()["admission_evidence_required"],
+                true
+            );
+        }
     }
 
     #[test]

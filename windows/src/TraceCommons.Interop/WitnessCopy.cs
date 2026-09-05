@@ -19,6 +19,10 @@ namespace TraceCommons.Interop;
 /// </summary>
 public sealed record WitnessCopy
 {
+    [JsonPropertyName("wallet")] public WalletCopy? Wallet { get; init; }
+    [JsonPropertyName("admission")] public AdmissionCopy? Admission { get; init; }
+    [JsonPropertyName("review")] public WitnessReviewCopy? Review { get; init; }
+    [JsonPropertyName("onboarding")] public FirstContributionCopy? Onboarding { get; init; }
     [JsonPropertyName("heading")] public string Heading { get; init; } = "";
     [JsonPropertyName("intro")] public string Intro { get; init; } = "";
 
@@ -46,6 +50,18 @@ public sealed record WitnessCopy
 
     [JsonPropertyName("applies_at_once")] public string AppliesAtOnce { get; init; } = "";
 
+    [JsonPropertyName("inference_heading")] public string InferenceHeading { get; init; } = "";
+    [JsonPropertyName("inference_disclosure")] public string InferenceDisclosure { get; init; } = "";
+    [JsonPropertyName("inference_capture_note")] public string InferenceCaptureNote { get; init; } = "";
+    [JsonPropertyName("inference_scope_note")] public string InferenceScopeNote { get; init; } = "";
+    [JsonPropertyName("inference_enable")] public string InferenceEnable { get; init; } = "";
+    [JsonPropertyName("inference_disable")] public string InferenceDisable { get; init; } = "";
+    [JsonPropertyName("inference_confirm")] public string InferenceConfirm { get; init; } = "";
+    [JsonPropertyName("inference_cancel")] public string InferenceCancel { get; init; } = "";
+    [JsonPropertyName("inference_enabled")] public string InferenceEnabled { get; init; } = "";
+    [JsonPropertyName("inference_disabled")] public string InferenceDisabled { get; init; } = "";
+    [JsonPropertyName("inference_save_failed")] public string InferenceSaveFailed { get; init; } = "";
+
     /// <summary>
     /// Every word the payload carries, for the whole-or-nothing check.
     ///
@@ -66,6 +82,18 @@ public sealed record WitnessCopy
         Clear,
         ClearNote,
         AppliesAtOnce,
+        InferenceHeading,
+        InferenceDisclosure,
+        InferenceCaptureNote,
+        InferenceScopeNote,
+        InferenceEnable,
+        InferenceDisable,
+        InferenceConfirm,
+        InferenceCancel,
+        InferenceEnabled,
+        InferenceDisabled,
+        InferenceSaveFailed,
+
     };
 }
 
@@ -179,3 +207,62 @@ public sealed record WitnessReadResult(WitnessStatus? Status, string? Error);
 /// back twice; it is never rendered.
 /// </remarks>
 public sealed record WitnessWriteResult(int Code, string? Error);
+
+public sealed record WitnessReviewCopy
+{
+    [JsonPropertyName("heading")] public string Heading { get; init; } = "";
+    [JsonPropertyName("disclosure")] public string Disclosure { get; init; } = "";
+    [JsonPropertyName("action")] public string Action { get; init; } = "";
+    [JsonPropertyName("confirm")] public string Confirm { get; init; } = "";
+    [JsonPropertyName("cancel")] public string Cancel { get; init; } = "";
+    [JsonPropertyName("working")] public string Working { get; init; } = "";
+    [JsonPropertyName("failed")] public string Failed { get; init; } = "";
+    [JsonPropertyName("immutable")] public string Immutable { get; init; } = "";
+    public bool IsComplete => !string.IsNullOrWhiteSpace(Heading) && !string.IsNullOrWhiteSpace(Disclosure)
+        && !string.IsNullOrWhiteSpace(Action) && !string.IsNullOrWhiteSpace(Confirm)
+        && !string.IsNullOrWhiteSpace(Cancel) && !string.IsNullOrWhiteSpace(Working)
+        && !string.IsNullOrWhiteSpace(Failed) && !string.IsNullOrWhiteSpace(Immutable);
+}
+
+public sealed record FirstContributionCopy
+{
+    [JsonPropertyName("heading")] public string Heading { get; init; } = "";
+    [JsonPropertyName("start")] public string Start { get; init; } = "";
+    [JsonPropertyName("review")] public string Review { get; init; } = "";
+    [JsonPropertyName("follow_up")] public string FollowUp { get; init; } = "";
+    [JsonPropertyName("agent_setup")] public string AgentSetup { get; init; } = "";
+}
+
+public sealed record WalletCopy
+{
+    [JsonPropertyName("heading")] public string Heading { get; init; } = "";
+    [JsonPropertyName("disclosure")] public string Disclosure { get; init; } = "";
+    [JsonPropertyName("commons")] public string Commons { get; init; } = "";
+    [JsonPropertyName("account")] public string Account { get; init; } = "";
+    [JsonPropertyName("check")] public string Check { get; init; } = "";
+    [JsonPropertyName("start")] public string Start { get; init; } = "";
+    [JsonPropertyName("cancel")] public string Cancel { get; init; } = "";
+    [JsonPropertyName("available")] public string Available { get; init; } = "";
+    [JsonPropertyName("unavailable")] public string Unavailable { get; init; } = "";
+    [JsonPropertyName("opening")] public string Opening { get; init; } = "";
+    [JsonPropertyName("waiting")] public string Waiting { get; init; } = "";
+    [JsonPropertyName("failed")] public string Failed { get; init; } = "";
+    [JsonPropertyName("cancelled")] public string Cancelled { get; init; } = "";
+    [JsonPropertyName("refused_glyph")] public string RefusedGlyph { get; init; } = "";
+    [JsonPropertyName("refused_tone")] public string RefusedTone { get; init; } = "";
+}
+public sealed record AdmissionCopy
+{
+    [JsonPropertyName("heading")] public string Heading { get; init; } = "";
+    [JsonPropertyName("disclosure")] public string Disclosure { get; init; } = "";
+    [JsonPropertyName("prerequisite")] public string Prerequisite { get; init; } = "";
+    [JsonPropertyName("backend")] public string Backend { get; init; } = "";
+    [JsonPropertyName("confirm")] public string Confirm { get; init; } = "";
+    [JsonPropertyName("cancel")] public string Cancel { get; init; } = "";
+    [JsonPropertyName("permission")] public string Permission { get; init; } = "";
+    [JsonPropertyName("working")] public string Working { get; init; } = "";
+    [JsonPropertyName("ready")] public string Ready { get; init; } = "";
+    [JsonPropertyName("failed")] public string Failed { get; init; } = "";
+    [JsonPropertyName("refused_glyph")] public string RefusedGlyph { get; init; } = "";
+    [JsonPropertyName("refused_tone")] public string RefusedTone { get; init; } = "";
+}

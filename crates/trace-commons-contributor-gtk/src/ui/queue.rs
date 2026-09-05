@@ -48,6 +48,7 @@ const CONTENT_GAP: i32 = 14;
 
 pub struct QueueView {
     pub root: gtk::Box,
+    first_contribution: gtk::Expander,
     /// The arming offer, above the cards it is about. Persistent and
     /// emptied rather than rebuilt with the list, because it is not part of
     /// the list: rebuilding it on every queue render would make it flicker
@@ -206,15 +207,40 @@ impl QueueView {
             .sync_create()
             .build();
 
+        let guide = trace_commons_contributor::witness_copy::witness_copy().onboarding;
+        let first_contribution = gtk::Expander::builder()
+            .label(guide.heading)
+            .margin_start(space::XL)
+            .margin_end(space::XL)
+            .margin_top(space::M)
+            .build();
+        let steps = gtk::Box::new(gtk::Orientation::Vertical, space::S);
+        for text in [
+            guide.start,
+            guide.review,
+            guide.follow_up,
+            guide.agent_setup,
+        ] {
+            let label = gtk::Label::builder()
+                .label(text)
+                .wrap(true)
+                .xalign(0.0)
+                .build();
+            label.add_css_class("tc-meta");
+            steps.append(&label);
+        }
+        first_contribution.set_child(Some(&steps));
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
         root.add_css_class("tc-root");
         root.append(&arming_clamp);
         root.append(&undo_clamp);
+        root.append(&first_contribution);
         root.append(&empty);
         root.append(&scroller);
 
         Self {
             root,
+            first_contribution,
             arming_offer,
             undo_bar,
             undo_headline,
@@ -354,6 +380,8 @@ pub fn wire(app: &Rc<App>) {
 
 pub fn render(app: &Rc<App>) {
     let view = &app.queue;
+    view.first_contribution
+        .set_visible(app.rollup.borrow().all_time.total() == 0);
     clear(&view.list);
     clear(&view.disclosure);
     clear(&view.week);

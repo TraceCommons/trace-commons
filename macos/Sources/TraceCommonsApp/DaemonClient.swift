@@ -49,6 +49,14 @@ final class DaemonClient {
 
     // MARK: - Read
 
+    func nativeWalletFlow(action: String, flowID: String, commons: String, account: String) throws -> NativeWalletView {
+        try call("native_wallet_flow", params: ["action": action, "flow_id": flowID, "ingest_url": commons, "account_id": account], as: NativeWalletView.self)
+    }
+
+    func prepareAdmissionSession(entryID: String, backend: String) throws -> AdmissionPreparation {
+        try call("prepare_admission_session", params: ["entry_id": entryID, "backend": backend, "confirmed": true], as: AdmissionPreparation.self)
+    }
+
     func status() throws -> DaemonStatus {
         try call("status", as: DaemonStatus.self)
     }
@@ -75,6 +83,20 @@ final class DaemonClient {
     /// event will follow; `ready` and `too_large` are answered here with no
     /// event to come. See `docs/contributor-daemon-ipc-v1_1.md`, "Scheduled
     /// previews".
+    func supportsWitnessReview() throws -> Bool {
+        let hello = try resultObject("hello")
+        return (hello["methods"] as? [String])?.contains("witness_preview_request") == true
+    }
+
+    func requestWitnessReview(entryID: String) throws {
+        let result = try resultObject("witness_preview_request", params: [
+            "entry_id": entryID, "raw_session_confirmed": true
+        ])
+        guard result["status"] as? String == "ready" else {
+            throw Failure(code: "unavailable", message: "witness-review-incomplete")
+        }
+    }
+
     func requestPreview(entryID: String) throws -> PreviewRequestResult {
         let raw = try rawResult("preview_request", params: ["entry_id": entryID])
         return try DaemonDecoding.decoder().decode(PreviewRequestResult.self, from: raw)
@@ -209,6 +231,21 @@ final class DaemonClient {
     func setSettings(_ declarations: [String: Any]) throws -> DaemonSettingsView {
         let params = try Self.settingsParams(declarations)
         return try call("set_settings", params: params, as: DaemonSettingsView.self)
+    }
+
+    /// Enabling requires a separate disclosure decision; disabling always works.
+    func setInferenceEvidence(_ enabled: Bool, disclosureConfirmed: Bool) throws -> DaemonSettingsView {
+        guard !enabled || disclosureConfirmed else { throw InferenceEvidenceRefusal.disclosureRequired }
+        let settings = try setSettings(["ironwire_attested_bodies": enabled])
+        guard settings.ironwireAttestedBodies == enabled else {
+            throw InferenceEvidenceRefusal.unconfirmedWrite
+        }
+        return settings
+    }
+
+    enum InferenceEvidenceRefusal: Error {
+        case disclosureRequired
+        case unconfirmedWrite
     }
 
     /// Shape-checks a settings object, refusing rather than returning one

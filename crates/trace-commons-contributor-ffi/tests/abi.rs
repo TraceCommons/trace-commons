@@ -1507,6 +1507,35 @@ fn an_unknown_settings_field_is_rejected_not_silently_ignored() {
 }
 
 #[test]
+fn inference_consent_round_trips_without_changing_proxy_or_other_permissions() {
+    let dir = tempfile::tempdir().unwrap();
+    let handle = start(dir.path());
+    let read = |method: &str, params: &str| {
+        let frame: serde_json::Value = serde_json::from_str(&call(handle, method, params)).unwrap();
+        assert!(frame.get("error").is_none_or(serde_json::Value::is_null));
+        frame["result"].clone()
+    };
+    let baseline = read("get_settings", "{}");
+    assert_eq!(baseline["ironwire_attested_bodies"], false);
+
+    for enabled in [true, false] {
+        let mut expected = baseline.clone();
+        expected["ironwire_attested_bodies"] = enabled.into();
+        let patch = serde_json::json!({"ironwire_attested_bodies": enabled}).to_string();
+        assert_eq!(read("set_settings", &patch), expected);
+        assert_eq!(read("get_settings", "{}"), expected);
+        let store =
+            trace_commons_contributor::config::ConfigStore::open(dir.path().into()).unwrap();
+        let saved =
+            trace_commons_contributor::daemon::settings::DaemonSettings::load(&store).unwrap();
+        assert_eq!(saved.ironwire_attested_bodies, enabled);
+        assert!(saved.ironwire.is_none());
+        assert!(saved.near_ai.is_none());
+    }
+    stop(handle);
+}
+
+#[test]
 fn the_pre_start_and_ipc_paths_agree_on_the_daily_caps() {
     // `tc_daemon_start_with_settings` and `tc_call(handle, "set_settings",
     // ...)` share one validator (`apply_settings_object`); this proves that
@@ -2516,6 +2545,7 @@ fn witness_settings(
     measurements: Vec<String>,
 ) -> trace_commons_contributor::config::WitnessSettings {
     trace_commons_contributor::config::WitnessSettings {
+        admission_evidence: false,
         url: "https://witness.example".into(),
         signing_address: "0xfeed".into(),
         expected_measurements: measurements,
@@ -3071,6 +3101,17 @@ fn the_witness_copy_call_carries_the_whole_card() {
         "clear",
         "clear_note",
         "applies_at_once",
+        "inference_heading",
+        "inference_disclosure",
+        "inference_capture_note",
+        "inference_scope_note",
+        "inference_enable",
+        "inference_disable",
+        "inference_confirm",
+        "inference_cancel",
+        "inference_enabled",
+        "inference_disabled",
+        "inference_save_failed",
     ] {
         let value = object
             .get(key)

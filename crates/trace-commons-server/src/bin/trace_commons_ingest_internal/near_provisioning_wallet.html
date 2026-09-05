@@ -1,0 +1,44 @@
+<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Connect NEAR — Trace Commons</title>
+<style>body{font:18px system-ui;max-width:640px;margin:12vh auto;padding:24px;color:#202b24;background:#f8faf7}button{font:inherit;padding:12px 18px}p{line-height:1.6}pre{white-space:pre-wrap;overflow-wrap:anywhere}</style>
+<h1>Connect your NEAR account</h1><p>This signs an account request. It does not transfer funds, authorize contributions, or enable inference capture.</p><p id="account"></p><pre id="message"></pre><button id="connect" disabled>Continue with MyNearWallet</button><p id="status">Checking the request…</p>
+<script>
+// MyNearWallet's documented sign-message popup protocol, no third-party script.
+// Source: near/wallet-selector packages/my-near-wallet/src/lib/mnw-connect.ts.
+'use strict';
+const status=document.getElementById('status'),button=document.getElementById('connect');
+let request, popup, expectedOrigin, timer;
+try {
+ const encoded=location.hash.slice(1); if(encoded.length>16000) throw Error();
+ request=JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(encoded.replace(/-/g,'+').replace(/_/g,'/')),c=>c.charCodeAt(0))));
+ history.replaceState(null,'',location.pathname);
+ const callback=new URL(request.loopback);
+ if(callback.protocol!=='http:'||callback.hostname!=='127.0.0.1'||!callback.port||Number(callback.port)<1024||callback.pathname!=='/trace-commons/near-onboarding/callback'||callback.search||callback.hash||callback.username||callback.password)throw Error();
+ if(!/^[A-Za-z0-9_-]{43}$/.test(request.state)||!['mainnet','testnet'].includes(request.network)||request.expires_at*1000<=Date.now())throw Error();
+ if(typeof request.message!=='string'||typeof request.nonce!=='string'||typeof request.account_id!=='string'||typeof request.recipient!=='string')throw Error();
+ expectedOrigin=request.network==='mainnet'?'https://app.mynearwallet.com':'https://testnet.mynearwallet.com';
+ document.getElementById('account').textContent=request.account_id;
+ document.getElementById('message').textContent=request.message;
+ button.disabled=false; status.textContent='Review the account and request, then approve in your wallet.';
+} catch {status.textContent='This request is invalid or expired. Return to the app and try again.';}
+button.onclick=()=>{
+ if(!request||request.expires_at*1000<=Date.now()){status.textContent='This request expired. Return to the app.';return;}
+ const url=new URL('/sign-message',expectedOrigin);
+ for(const key of ['message','nonce','recipient'])url.searchParams.set(key,request[key]);
+ url.searchParams.set('callbackUrl',location.origin+location.pathname);
+ popup=window.open(url.toString(),'TraceCommonsNearWallet','width=620,height=740');
+ if(!popup){status.textContent='Allow this page to open the wallet window, then try again.';return;}
+ button.disabled=true;status.textContent='Waiting for your wallet. You can cancel by closing its window.';
+ timer=setInterval(()=>{if(popup.closed){clearInterval(timer);button.disabled=false;status.textContent='Wallet closed. Return to the app or try again.';}},500);
+};
+addEventListener('message',event=>{
+ if(!popup||event.source!==popup||event.origin!==expectedOrigin)return;
+ if(event.data?.status==='failure'){clearInterval(timer);popup.close();button.disabled=false;status.textContent='The wallet did not approve. You may retry.';return;}
+ const signed=event.data?.signedRequest;
+ if(event.data?.status!=='success'||signed?.accountId!==request.account_id||typeof signed?.publicKey!=='string'||typeof signed?.signature!=='string')return;
+ clearInterval(timer);popup.close();
+ const payload={state:request.state,account_id:signed.accountId,wallet_public_key:signed.publicKey,wallet_signature:signed.signature};
+ const encoded=btoa(String.fromCharCode(...new TextEncoder().encode(JSON.stringify(payload)))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+ const target=new URL(request.loopback);target.searchParams.set('result',encoded);
+ status.textContent='Returning the signed request to the app for verification…';location.assign(target.toString());
+});
+</script></html>

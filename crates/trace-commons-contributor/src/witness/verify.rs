@@ -84,8 +84,7 @@ pub fn verify_witness(
 ) -> Result<VerifiedWitness, WitnessTrustError> {
     let quote = hex::decode(evidence.quote_hex.trim())
         .map_err(|_| WitnessTrustError::WitnessQuoteUnverified)?;
-    let verified = verify_quote(&quote, collateral, now_unix)
-        .map_err(|_| WitnessTrustError::WitnessQuoteUnverified)?;
+    let verified = verify_witness_quote(&quote, collateral, now_unix)?;
 
     check_quote(&verified, nonce, pin)?;
 
@@ -170,6 +169,62 @@ pub fn check_quote(
         // unconfigured client from one whose pin did not match.
         reported: last_reported,
     })
+}
+
+// Kept below check_quote so the construction-site guard covers both public guards.
+#[cfg(not(test))]
+fn verify_witness_quote(
+    quote: &[u8],
+    collateral: &Collateral,
+    now: u64,
+) -> Result<VerifiedQuote, WitnessTrustError> {
+    verify_quote(quote, collateral, now).map_err(|_| WitnessTrustError::WitnessQuoteUnverified)
+}
+
+#[cfg(test)]
+fn quote_fixtures() -> &'static std::sync::Mutex<std::collections::HashMap<Vec<u8>, VerifiedQuote>>
+{
+    static FIXTURES: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<Vec<u8>, VerifiedQuote>>,
+    > = std::sync::OnceLock::new();
+    FIXTURES.get_or_init(Default::default)
+}
+
+/// One-shot DCAP-only fixture. Random quote bytes isolate concurrent exchanges;
+/// real nonce, address and measurement checks still run in verify_witness.
+#[cfg(test)]
+pub(crate) fn register_quote_fixture(quote: VerifiedQuote) -> QuoteFixture {
+    let key = uuid::Uuid::new_v4().as_bytes().to_vec();
+    assert!(
+        quote_fixtures()
+            .lock()
+            .unwrap()
+            .insert(key.clone(), quote)
+            .is_none()
+    );
+    QuoteFixture(key)
+}
+
+#[cfg(test)]
+pub(crate) struct QuoteFixture(pub(crate) Vec<u8>);
+
+#[cfg(test)]
+impl Drop for QuoteFixture {
+    fn drop(&mut self) {
+        quote_fixtures().lock().unwrap().remove(&self.0);
+    }
+}
+
+#[cfg(test)]
+fn verify_witness_quote(
+    quote: &[u8],
+    collateral: &Collateral,
+    now: u64,
+) -> Result<VerifiedQuote, WitnessTrustError> {
+    if let Some(verified) = quote_fixtures().lock().unwrap().remove(quote) {
+        return Ok(verified);
+    }
+    verify_quote(quote, collateral, now).map_err(|_| WitnessTrustError::WitnessQuoteUnverified)
 }
 
 /// A `VerifiedWitness` for tests in sibling modules.
@@ -271,6 +326,46 @@ mod tests {
             signing_address: ADDRESS.to_string(),
             measurements: Vec::new(),
         }
+    }
+
+    #[test]
+    fn dcap_fixture_is_one_shot_and_still_checks_the_exchange_nonce() {
+        let collateral = trace_commons_attestation::quote::parse_collateral(include_str!(
+            "../../../trace-commons-attestation/tests/fixtures/near_ai_attestation_collateral.json"
+        ))
+        .unwrap();
+        let fixture = register_quote_fixture(quote_for(ADDRESS, &our_nonce(), MRTD, MRCONFIGID));
+        let evidence = AttestationEvidence {
+            quote_hex: hex::encode(&fixture.0),
+            signing_address: ADDRESS.into(),
+        };
+        assert!(
+            verify_witness(
+                "https://fixture.invalid",
+                &evidence,
+                &collateral,
+                &other_nonce(),
+                1,
+                &trust()
+            )
+            .is_err()
+        );
+        assert!(!quote_fixtures().lock().unwrap().contains_key(&fixture.0));
+        assert!(
+            verify_witness(
+                "https://fixture.invalid",
+                &evidence,
+                &collateral,
+                &our_nonce(),
+                1,
+                &trust()
+            )
+            .is_err()
+        );
+        let abandoned = register_quote_fixture(quote_for(ADDRESS, &our_nonce(), MRTD, MRCONFIGID));
+        let key = abandoned.0.clone();
+        drop(abandoned);
+        assert!(!quote_fixtures().lock().unwrap().contains_key(&key));
     }
 
     #[test]

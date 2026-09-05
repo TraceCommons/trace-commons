@@ -524,7 +524,7 @@
             <Grid Grid.Row="2"
                   Grid.Column="1"
                   Visibility="{x:Bind ViewModel.ShowingQueue, Mode=OneWay}"
-                  RowDefinitions="Auto,*,Auto,Auto,Auto,Auto,Auto">
+                  RowDefinitions="Auto,*,Auto,Auto,Auto,Auto,Auto,Auto">
 
                 <!--
                     Content header.
@@ -1193,6 +1193,17 @@
                                MaxWidth="360"
                                TextAlignment="Center"
                                HorizontalAlignment="Center" />
+                </StackPanel>
+
+                <StackPanel Grid.Row="7" Visibility="{x:Bind ViewModel.ShowFirstContribution, Mode=OneWay}"
+                            Spacing="6" Padding="20,8">
+                    <TextBlock Text="{x:Bind ViewModel.FirstContributionHeading}" Style="{StaticResource TcTitleCardTextStyle}" />
+                    <TextBlock Text="{x:Bind ViewModel.FirstContributionStart}" TextWrapping="Wrap" Style="{StaticResource TcCaptionTextStyle}" />
+                    <TextBlock Text="{x:Bind ViewModel.FirstContributionReview}" TextWrapping="Wrap" Style="{StaticResource TcCaptionTextStyle}" />
+                    <TextBlock Text="{x:Bind ViewModel.FirstContributionFollowUp}" TextWrapping="Wrap" Style="{StaticResource TcCaptionTextStyle}" />
+                    <Expander Header="Agent setup" HorizontalAlignment="Stretch">
+                        <TextBlock Text="{x:Bind ViewModel.FirstContributionAgentSetup}" TextWrapping="Wrap" />
+                    </Expander>
                 </StackPanel>
 
                 <!--

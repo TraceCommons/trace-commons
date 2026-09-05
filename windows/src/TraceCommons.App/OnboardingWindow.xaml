@@ -67,11 +67,12 @@
         </StackPanel>
 
         <!-- 2. Connect -->
-        <StackPanel Spacing="16" Visibility="{x:Bind ViewModel.IsConnect, Mode=OneWay}">
+        <ScrollViewer Visibility="{x:Bind ViewModel.IsConnect, Mode=OneWay}">
+        <StackPanel Spacing="16">
             <TextBlock Style="{StaticResource TcTitleScreenTextStyle}" Text="Connect" />
             <TextBlock Style="{StaticResource TcBodyTextStyle}" TextWrapping="Wrap"
                        Text="Paste the invite link someone sent you, or click it from your email." />
-            <TextBox PlaceholderText="https://.../onboard#..."
+            <TextBox IsEnabled="{x:Bind ViewModel.CanUseInvite, Mode=OneWay}" PlaceholderText="https://.../onboard#..."
                      Text="{x:Bind ViewModel.Invite, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                      TextChanged="OnInviteChanged" />
             <!--
@@ -94,7 +95,28 @@
             <Button Content="Connect" HorizontalAlignment="Right"
                     IsEnabled="{x:Bind ViewModel.CanConnect, Mode=OneWay}"
                     Click="OnConnect" />
+            <ContentControl Visibility="{x:Bind ViewModel.NearAccount.Supported, Mode=OneWay}"
+                            IsEnabled="{x:Bind ViewModel.CanUseWallet, Mode=OneWay}"
+                            HorizontalContentAlignment="Stretch">
+            <StackPanel Spacing="12">
+                <TextBlock Text="{x:Bind ViewModel.NearAccount.Copy.Heading}" Style="{StaticResource TcTitleCardTextStyle}" />
+                <TextBlock Text="{x:Bind ViewModel.NearAccount.Copy.Disclosure}" TextWrapping="Wrap" />
+                <TextBox Header="{x:Bind ViewModel.NearAccount.Copy.Commons}" Text="{x:Bind ViewModel.NearAccount.Commons, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" IsEnabled="{x:Bind ViewModel.NearAccount.CanEdit, Mode=OneWay}" />
+                <Button Content="{x:Bind ViewModel.NearAccount.Copy.Check}" Click="OnCheckNearAccount" IsEnabled="{x:Bind ViewModel.NearAccount.CanCheck, Mode=OneWay}" />
+                <StackPanel Spacing="12" Visibility="{x:Bind ViewModel.NearAccount.Ready, Mode=OneWay}">
+                    <TextBox Header="{x:Bind ViewModel.NearAccount.Copy.Account}" Text="{x:Bind ViewModel.NearAccount.Account, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" IsEnabled="{x:Bind ViewModel.NearAccount.CanEdit, Mode=OneWay}" />
+                    <Button Content="{x:Bind ViewModel.NearAccount.Copy.Start}" Click="OnStartNearAccount" IsEnabled="{x:Bind ViewModel.NearAccount.CanStart, Mode=OneWay}" />
+                </StackPanel>
+                <Grid ColumnDefinitions="Auto,*" ColumnSpacing="6">
+                    <TextBlock Grid.Column="0" Text="{x:Bind ViewModel.NearAccount.Glyph, Mode=OneWay}" Style="{StaticResource TcHeadingAlertTextStyle}" />
+                    <TextBlock Grid.Column="1" Text="{x:Bind ViewModel.NearAccount.RefusalMessage, Mode=OneWay}" Style="{StaticResource TcHeadingAlertTextStyle}" TextWrapping="Wrap" />
+                    <TextBlock Grid.Column="1" Text="{x:Bind ViewModel.NearAccount.NeutralMessage, Mode=OneWay}" TextWrapping="Wrap" />
+                </Grid>
+                <Button Content="{x:Bind ViewModel.NearAccount.Copy.Cancel}" Click="OnCancelNearAccount" Visibility="{x:Bind ViewModel.NearAccount.CanCancel, Mode=OneWay}" />
+            </StackPanel>
+            </ContentControl>
         </StackPanel>
+        </ScrollViewer>
 
         <!-- 3. Consent scopes -->
         <Grid RowDefinitions="Auto,Auto,*,Auto" RowSpacing="16"

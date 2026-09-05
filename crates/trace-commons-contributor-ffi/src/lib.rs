@@ -2544,6 +2544,7 @@ pub unsafe extern "C" fn tc_witness_configure(
         }
 
         let settings = trace_commons_contributor::config::WitnessSettings {
+            admission_evidence: cfg.witness.as_ref().is_some_and(|w| w.admission_evidence),
             url,
             signing_address,
             expected_measurements: measurements,

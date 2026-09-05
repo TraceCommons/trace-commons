@@ -862,6 +862,15 @@ final class AppModel: ObservableObject {
     /// `failure.message`, and `enroll`'s failure message must never reach a
     /// screen -- `OnboardingConnectView` renders one fixed sentence for
     /// every failure of this call instead.
+    func prepareAdmissionSession(entryID: String, backend: String) async -> AdmissionPreparation? {
+        guard let client else { return nil }
+        return await Task.detached { try? client.prepareAdmissionSession(entryID: entryID, backend: backend) }.value
+    }
+
+    func nativeWalletFlow(action: String, flowID: String, commons: String, account: String) async -> NativeWalletView? {
+        guard let client else { return nil }
+        return await Task.detached { try? client.nativeWalletFlow(action: action, flowID: flowID, commons: commons, account: account) }.value
+    }
     func enroll(invite: String, scopes: [String] = []) async -> EnrollOutcome {
         guard let client else { return .failed }
         return await Task.detached(priority: .userInitiated) { () -> EnrollOutcome in
@@ -925,6 +934,32 @@ final class AppModel: ObservableObject {
             refreshAudit()
         }
         return outcome
+    }
+
+    @Published private(set) var inferenceEvidenceBusy = false
+    @Published private(set) var inferenceEvidenceSaveFailed = false
+
+    func setInferenceEvidence(_ enabled: Bool, disclosureConfirmed: Bool = false) async {
+        guard !inferenceEvidenceBusy else { return }
+        inferenceEvidenceSaveFailed = false
+        guard let client else {
+            daemonSettings?.ironwireAttestedBodies = nil
+            inferenceEvidenceSaveFailed = true
+            return
+        }
+        inferenceEvidenceBusy = true
+        defer { inferenceEvidenceBusy = false }
+        let result = await Task.detached(priority: .userInitiated) {
+            Result { try client.setInferenceEvidence(enabled, disclosureConfirmed: disclosureConfirmed) }
+        }.value
+        switch result {
+        case .success(let settings):
+            daemonSettings = settings
+            refreshAudit()
+        case .failure:
+            daemonSettings = await Task.detached { try? client.settings() }.value
+            inferenceEvidenceSaveFailed = true
+        }
     }
 
     // MARK: - Onboarding resume
@@ -1474,6 +1509,21 @@ final class AppModel: ObservableObject {
 
     /// Opens the in-process preview off the main actor -- the redaction pass
     /// blocks -- and hands the open handle back on the main actor.
+    func supportsWitnessReview() async -> Bool {
+        guard let client else { return false }
+        return await Task.detached { (try? client.supportsWitnessReview()) == true }.value
+    }
+
+    func requestWitnessReview(entryID: String) async -> Bool {
+        guard let client else { return false }
+        return await Task.detached(priority: .userInitiated) {
+            do {
+                try client.requestWitnessReview(entryID: entryID)
+                return true
+            } catch { return false }
+        }.value
+    }
+
     func openPreview(entryID: String) async -> PreviewOutcome {
         guard let client else { return .failed("the watcher isn't running") }
         return await Task.detached(priority: .userInitiated) { () -> PreviewOutcome in

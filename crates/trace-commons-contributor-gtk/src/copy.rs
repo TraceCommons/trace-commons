@@ -2098,10 +2098,13 @@ pub use trace_commons_contributor::routing_copy::{
 // to one bit would paint a total outage as "on".
 pub use trace_commons_contributor::witness_copy::{
     WITNESS_APPLIES_AT_ONCE, WITNESS_CERTIFICATE_MEANS, WITNESS_CLEAR, WITNESS_CLEAR_NOTE,
-    WITNESS_CONFIGURE, WITNESS_HEADING, WITNESS_INTRO, WITNESS_MEASUREMENTS_NOTE,
-    WITNESS_MEASUREMENTS_TITLE, WITNESS_SIGNING_ADDRESS_TITLE, WITNESS_URL_TITLE, WitnessTone,
-    witness_last_result_line, witness_last_result_tone, witness_pinned_count_line,
-    witness_state_line, witness_state_tone,
+    WITNESS_CONFIGURE, WITNESS_HEADING, WITNESS_INFERENCE_CANCEL, WITNESS_INFERENCE_CAPTURE_NOTE,
+    WITNESS_INFERENCE_CONFIRM, WITNESS_INFERENCE_DISABLE, WITNESS_INFERENCE_DISABLED,
+    WITNESS_INFERENCE_DISCLOSURE, WITNESS_INFERENCE_ENABLE, WITNESS_INFERENCE_ENABLED,
+    WITNESS_INFERENCE_HEADING, WITNESS_INFERENCE_SAVE_FAILED, WITNESS_INFERENCE_SCOPE_NOTE,
+    WITNESS_INTRO, WITNESS_MEASUREMENTS_NOTE, WITNESS_MEASUREMENTS_TITLE,
+    WITNESS_SIGNING_ADDRESS_TITLE, WITNESS_URL_TITLE, WitnessTone, witness_last_result_line,
+    witness_last_result_tone, witness_pinned_count_line, witness_state_line, witness_state_tone,
 };
 
 /// When the daemon last got an answer, or nothing.

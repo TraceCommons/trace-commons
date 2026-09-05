@@ -72,6 +72,36 @@ final class SetSettingsTests: XCTestCase {
         client = DaemonClient(daemon: daemon)
     }
 
+    func testInferenceEvidenceNeedsExplicitDisclosureBeforeAnyWrite() {
+        XCTAssertThrowsError(try client.setInferenceEvidence(true, disclosureConfirmed: false))
+        XCTAssertTrue(daemon.calls.isEmpty)
+    }
+
+    func testInferenceEvidenceDoesNotInferConsentFromPrivacyScanOrRouting() throws {
+        daemon.response = settingsFrame
+        let settings = try client.settings()
+        XCTAssertFalse(settings.inferenceEvidenceEnabled)
+        XCTAssertNil(settings.ironwireAttestedBodies)
+    }
+
+    func testInferenceEvidenceWritesOnlyConsentAndRequiresDaemonConfirmation() throws {
+        daemon.response = settingsFrame.replacingOccurrences(of: "\"near_ai_configured\":false", with: "\"ironwire_attested_bodies\":true,\"near_ai_configured\":false")
+        let settings = try client.setInferenceEvidence(true, disclosureConfirmed: true)
+        XCTAssertTrue(settings.inferenceEvidenceEnabled)
+        XCTAssertEqual(daemon.lastParams?.count, 1)
+        XCTAssertEqual(daemon.lastParams?["ironwire_attested_bodies"] as? Bool, true)
+
+        daemon.response = settingsFrame
+        XCTAssertThrowsError(try client.setInferenceEvidence(true, disclosureConfirmed: true))
+        XCTAssertThrowsError(try client.setInferenceEvidence(false, disclosureConfirmed: false))
+    }
+
+    func testInferenceEvidenceCanBeDisabledWithoutAnotherConsentDecision() throws {
+        daemon.response = settingsFrame.replacingOccurrences(of: "\"near_ai_configured\":false", with: "\"ironwire_attested_bodies\":false,\"near_ai_configured\":false")
+        XCTAssertFalse(try client.setInferenceEvidence(false, disclosureConfirmed: false).inferenceEvidenceEnabled)
+        XCTAssertEqual(daemon.lastParams?["ironwire_attested_bodies"] as? Bool, false)
+    }
+
     // MARK: - What goes out
 
     /// The method name is the contract's, and the object carries exactly
@@ -311,5 +341,49 @@ final class DaemonClientMethodInventoryTests: XCTestCase {
             "shutdown", "status", "subscribe", "withdraw", "withdraw_bulk",
         ]
         XCTAssertTrue(Set(Self.expected).isSubset(of: advertised))
+    }
+}
+
+final class NativeWitnessReviewTests: XCTestCase {
+    func testCapabilityIsExplicitAndDoesNotRequestAReview() throws {
+        let daemon = RecordingDaemon()
+        let client = DaemonClient(daemon: daemon)
+        XCTAssertFalse(try client.supportsWitnessReview())
+        daemon.response = #"{"result":{"methods":["preview_request","witness_preview_request"]}}"#
+        XCTAssertTrue(try client.supportsWitnessReview())
+        XCTAssertEqual(daemon.calls.map(\.method), ["hello", "hello"])
+    }
+
+    func testConfirmedRequestHasNoApprovalOrOutcomeAndRequiresReady() throws {
+        let daemon = RecordingDaemon()
+        let client = DaemonClient(daemon: daemon)
+        XCTAssertThrowsError(try client.requestWitnessReview(entryID: "entry"))
+        daemon.response = #"{"result":{"status":"ready","summary":{}}}"#
+        try client.requestWitnessReview(entryID: "entry")
+        XCTAssertEqual(daemon.calls.last?.method, "witness_preview_request")
+        XCTAssertEqual(daemon.lastParams?["entry_id"] as? String, "entry")
+        XCTAssertEqual(daemon.lastParams?["raw_session_confirmed"] as? Bool, true)
+        XCTAssertEqual(daemon.lastParams?.count, 2)
+    }
+}
+
+final class NativeFlowAdapterTests: XCTestCase {
+    func testWalletAdapterTransportsCoreViewWithoutLocalOriginOrCadenceLogic() throws {
+        let daemon = RecordingDaemon()
+        daemon.response = #"{"id":1,"result":{"flow_id":"fixture","state":"WaitingForWallet","busy":true,"can_check":false,"can_start":false,"can_edit":false,"can_cancel":true,"wait":true,"message":"fixture","tone":"neutral","glyph":"","browser_url":"https://commons.example/exact"}}"#
+        let result = try DaemonClient(daemon: daemon).nativeWalletFlow(action: "wait", flowID: "fixture", commons: "", account: "")
+        XCTAssertEqual(daemon.calls.last?.method, "native_wallet_flow")
+        XCTAssertEqual(daemon.lastParams?["action"] as? String, "wait")
+        XCTAssertTrue(result.wait)
+        XCTAssertTrue(result.canCancel)
+        XCTAssertFalse(result.canStart)
+        XCTAssertEqual(result.browserURL, "https://commons.example/exact")
+    }
+    func testAdmissionAdapterUsesCoreExpiryDecision() throws {
+        let daemon = RecordingDaemon()
+        daemon.response = #"{"id":1,"result":{"status":"ready_for_next_inference","expires_at":1,"view":{"ready":false,"message":"fixture refusal","tone":"refused","glyph":"⊘"}}}"#
+        let result = try DaemonClient(daemon: daemon).prepareAdmissionSession(entryID: "fixture", backend: "near")
+        XCTAssertFalse(try XCTUnwrap(result.view).ready)
+        XCTAssertEqual(result.view?.tone, "refused")
     }
 }

@@ -384,6 +384,34 @@ Everywhere else the rule remains absolute: no path, token, invite code,
 claim, device key, or trace content in any log line, error string, receipt,
 history record, audit entry, notification text, or IPC response.
 
+## Native onboarding state and bootstrap trust
+
+`get_settings.admission_evidence_required` is an additive boolean derived from
+configured witness admission policy. It is not proof of eligibility or a grant.
+The separate `ironwire_attested_bodies` consent remains authoritative. If that
+consent is off while admission is required, explicit witness review refuses with
+`admission_receipt_unavailable` before transmitting a session. Clients must reread
+`get_settings` after a failed settings write rather than display an assumed value.
+
+The native wallet view carries `flow_id`, `state` (`Unsupported`, `Idle`,
+`Checking`, `Ready`, `WaitingForWallet`, `Refused`, `Complete`), `busy`,
+`can_check`, `can_start`, `can_edit`, `can_cancel`, `wait`, `message`, `tone`,
+`glyph`, and optional `browser_url`. Shells render core copy and state, open the
+browser handoff once, and request `wait` while requested by the view. Core owns
+the two-second cadence and discards late replies after cancellation. Closing a
+sheet sends `cancel`, including while start is pending. `Refused` uses the
+returned refusal tone and glyph. Unsupported methods retain the invite flow.
+
+`prepare_admission_session.view` adds `{ready, state, message, tone, glyph}` to
+its existing result. Core requires both the expected status and a future expiry;
+shells use `view.ready` rather than repeat readiness or clock rules.
+
+Capability discovery bootstraps trust from allowlisted HTTPS at the ingest origin
+chosen by the user (trust on first use). The advertised witness/issuer pins are
+not independently authenticated merely because TLS succeeds. Operators must
+provide an authenticated service origin; subsequent exchanges enforce the stored
+pins. No account token, device key or PKCE verifier is returned to native views.
+
 ## Methods
 
 | Method | Params | Result | Notes |
@@ -394,6 +422,13 @@ history record, audit entry, notification text, or IPC response.
 | `preview` | `entry_id` | see below | summary only; the body is `preview_body` |
 | `preview_body` | `entry_id`, `offset` (optional), `limit` (optional), `body_digest` (required when `offset > 0`) | `chunk`, `next_offset`, `total_bytes`, `body_digest`, `envelope_digest`, `enrolled`, `max_chunk_bytes` | the redacted body, paged; see "`preview_body`" below |
 | `preview_turns` | `entry_id`, `body_digest` (**required**) | `entry_id`, `body_digest`, `envelope_digest`, `turn_count`, `turns[]` | an index of turn boundaries **into the body `preview_body` returns**; the body itself is unchanged. See "`preview_turns`" below |
+| `prepare_admission_session` | `entry_id`, `backend`, `confirmed: true` | `status: "ready_for_next_inference"`, `expires_at`, `view` | consent-gated challenge registration for the next inference; no funding or routing changes |
+| `native_wallet_flow` | `action: open/check/start/wait/cancel`; `flow_id` after open; `ingest_url` for check/start; `account_id` for start | shared wallet view (see below) | owns capability checks, origin validation, polling cadence and cancellation; no new C ABI |
+| `near_account_capabilities` | `ingest_url` | validated `ready`, issuer, audience and witness settings | checks allowlisted HTTPS service; no signup or funding |
+| `near_account_start` | `ingest_url`, `account_id` | `attempt_id`, `browser_url`, `status` | explicit wallet ceremony; keys and PKCE stay in daemon |
+| `near_account_status` | `attempt_id` | `attempt_id`, `status` | no account token or signing material |
+| `near_account_cancel` | `attempt_id` | cancellation state | cancels the matching local attempt |
+| `witness_preview_request` | `entry_id`, `raw_session_confirmed: true`; optional `outcome`, `correction` | `status: "ready"`, `summary` | awaits explicit remote review; saves and pins certified bytes without approval or upload |
 | `preview_request` | `entry_id` | `entry_id`, `state`, and the fields that state carries | enqueues and returns immediately; the result arrives as a `preview_ready` event. See "Scheduled previews" below |
 | `preview_visible` | `entry_ids[]` | `visible: <count>` | replaces the on-screen set wholesale; decides preview **order**, never membership |
 | `preview_cancel` | `entry_id` | `entry_id`, `dropped` | drops a queued preview, or discards a running one's result; `dropped: false` is a no-op, not an error |
@@ -653,6 +688,62 @@ preview a local file; that requirement was incidental and is gone.
 `would_send_bytes`, `redactions`, `pii_labels_present` and `opening_prompt`
 are real in both cases; an unenrolled preview understates nothing about
 redaction except what an external filter would additionally have removed.
+
+### Explicit witnessed review
+
+The daemon exposes `witness_preview_request` through authenticated local IPC.
+Clients must not offer it unless the daemon advertises that method. Existing `preview`, `preview_request`, card summaries, and background
+refresh never invoke this builder. A configured witness still refuses ordinary
+preview with `witness_claim_unavailable`, rather than building a local substitute.
+
+The handler enforces these conditions:
+
+1. Require an authenticated local IPC caller, an enrolled device, a pending entry
+   the caller already holds, and explicit confirmation to send this session to
+   the configured remote witness before redaction. Body-export consent remains
+   separate: read `ironwire_attested_bodies` from current daemon settings, never
+   from a caller's inferred proxy/scanner state. No confirmation means no work.
+2. Snapshot the selected entry's source hash and current configuration, including
+   consent and witness pins. Call `preview::build_witnessed_preview` with
+   `WitnessPreviewOptions { raw_session_confirmed, expected_session_hash,
+   include_inference_bodies, verdict, correction }`. A missing/stale device,
+   changed source, unpinned witness, failed claim, or unverified certificate
+   refuses. There is no local-redaction fallback.
+3. This is an ordinary authenticated upload-claim request, not an admission or
+   credit action. Its explicitly echoed grant must be fresh and no wider than
+   requested permissions. The granted scopes/uses are included in the bytes the
+   witness certifies. The helper never uploads a contribution or persists a token.
+4. On completion, take the queue lock and recheck that the entry is still pending
+   and its source/configuration/consent match the snapshot. Persist via
+   `approved_envelope::save_witnessed`, then pin `summary.envelope_digest` and save
+   the queue. A failed save must not allow approval without a persisted artifact.
+   Never route this result through the local-envelope `save` function.
+5. `witness-sha256:` pins identify the full versioned record: exact wire bytes,
+   certificate/signature, source hash, configuration fingerprint, and approval
+   answers. Read through `load_witnessed`; check its digest and `validate` against
+   current context, then use `envelope()` for existing body/turn/summary rendering.
+   Missing, corrupt, partial, unknown-version, or legacy local records are refused.
+6. The witnessed artifact is immutable. Corrections/verdicts must be supplied
+   before that explicit review, and approval must match those answers exactly.
+   A changed answer requires another explicit review; neither ordinary `approve`
+   nor background upload may re-witness on the contributor's behalf. Keep local
+   envelope approval semantics unchanged.
+7. Upload obtains fresh authorization. All certified scopes/uses must match; a
+   compatible 401/403 re-mint may resend the **same bytes and certificate**, while
+   a changed grant re-offers the entry for review. No restamping, second redaction,
+   or new raw witness request occurs. Existing source/fingerprint/residual-secret
+   checks remain enforced. Record cleanup uses the existing pin lifetime/sweep.
+
+The record stores only redacted artifact content and hash-only bindings; attached
+inference bodies, bearer claims, and plaintext correction inputs are excluded.
+Exact envelope bytes are base64-encoded only inside the atomic local record;
+ingest receives the original bytes. The envelope remains bounded by the existing
+size limit; the record including encoding/certificate overhead is limited to twice
+that size, under the existing aggregate approved-artifact storage ceiling.
+
+This enables a local implementation seam, not a deployed capability claim.
+Live acceptance still requires configured trusted witness deployment, usable
+provider receipt retrieval, and an invited end-to-end artifact check.
 
 ### Scheduled previews
 

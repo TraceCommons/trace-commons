@@ -366,10 +366,7 @@ pub async fn receipt_for_attested_call(
     let model = call
         .served_model()
         .ok_or(ReceiptFetchError::NotConfigured)?;
-    let client = reqwest::Client::builder()
-        .timeout(FETCH_TIMEOUT)
-        .build()
-        .map_err(|_| ReceiptFetchError::Unreachable)?;
+    let client = receipt_http_client()?;
     // One attempt, no retry. A retry loop on the submission path multiplies a
     // provider outage into a stalled uploader; the cost of not retrying is one
     // unattested submission.
@@ -382,6 +379,15 @@ pub async fn receipt_for_attested_call(
     }
 
     Ok(payload)
+}
+
+fn receipt_http_client() -> Result<reqwest::Client, ReceiptFetchError> {
+    reqwest::Client::builder()
+        // The configured provider cannot delegate this call's identifier.
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(FETCH_TIMEOUT)
+        .build()
+        .map_err(|_| ReceiptFetchError::Unreachable)
 }
 
 #[cfg(test)]
@@ -631,6 +637,60 @@ mod tests {
                 "{body} must not parse as a receipt"
             );
         }
+    }
+    #[tokio::test]
+    async fn receipt_transport_never_follows_provider_redirects() {
+        use axum::{Router, routing::get};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        let hits = Arc::new(AtomicUsize::new(0));
+        let counter = hits.clone();
+        let target = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_url = format!("http://{}/redirected", target.local_addr().unwrap());
+        let target_router = Router::new().route(
+            "/redirected",
+            get(move || {
+                let counter = counter.clone();
+                async move {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    "unexpected"
+                }
+            }),
+        );
+        let target_task = tokio::spawn(async move {
+            axum::serve(target, target_router).await.unwrap();
+        });
+        let origin = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin_url = format!("http://{}/signature/test", origin.local_addr().unwrap());
+        let origin_router = Router::new().route(
+            "/signature/test",
+            get(move || {
+                let target_url = target_url.clone();
+                async move {
+                    (
+                        axum::http::StatusCode::FOUND,
+                        [(axum::http::header::LOCATION, target_url)],
+                    )
+                }
+            }),
+        );
+        let origin_task = tokio::spawn(async move {
+            axum::serve(origin, origin_router).await.unwrap();
+        });
+        // Exercise the production client's redirect policy in isolation; the
+        // higher-level receipt URL gate continues requiring HTTPS in production.
+        let response = receipt_http_client()
+            .unwrap()
+            .get(origin_url)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::FOUND);
+        assert_eq!(hits.load(Ordering::SeqCst), 0);
+        origin_task.abort();
+        target_task.abort();
     }
 
     /// The nonce and key this module's attestation fixtures use throughout

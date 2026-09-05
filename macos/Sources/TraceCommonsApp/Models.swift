@@ -294,6 +294,7 @@ struct PreviewSummary: Decodable, Equatable, Sendable {
     let piiLabelsPresent: [String]
     let consentScopes: [String]
     let residualRisk: String
+    var envelopeDigest: String? = nil
 
     enum CodingKeys: String, CodingKey {
         case wouldSendBytes = "would_send_bytes"
@@ -305,6 +306,7 @@ struct PreviewSummary: Decodable, Equatable, Sendable {
         case piiLabelsPresent = "pii_labels_present"
         case consentScopes = "consent_scopes"
         case residualRisk = "residual_risk"
+        case envelopeDigest = "envelope_digest"
     }
 
     /// "12 secrets, 4 tokens, 31 paths" -- category labels and counts only;
@@ -533,6 +535,10 @@ struct DaemonSettingsView: Decodable, Equatable {
     /// because nobody said otherwise would probe a service the contributor
     /// never mentioned.
     let ironwire: IronWireDeclarationView?
+    /// Older daemons omit this independent, default-off consent.
+    var admissionEvidenceRequired: Bool? = nil
+    var ironwireAttestedBodies: Bool? = nil
+    var inferenceEvidenceEnabled: Bool { ironwireAttestedBodies == true }
 
     /// The four source modes as the routing surface takes them. Absent
     /// means `unset`, which watches the conventional location and is
@@ -561,6 +567,8 @@ struct DaemonSettingsView: Decodable, Equatable {
         case geminiSourceMode = "gemini_source_mode"
         case clineSourceMode = "cline_source_mode"
         case ironwire
+        case admissionEvidenceRequired = "admission_evidence_required"
+        case ironwireAttestedBodies = "ironwire_attested_bodies"
     }
 }
 
@@ -704,7 +712,8 @@ extension PreviewSummary {
                 try c.decodeIfPresent([String: Int].self, forKey: .redactionsDistinct) ?? [:],
             piiLabelsPresent: try c.decode([String].self, forKey: .piiLabelsPresent),
             consentScopes: try c.decode([String].self, forKey: .consentScopes),
-            residualRisk: try c.decode(String.self, forKey: .residualRisk)
+            residualRisk: try c.decode(String.self, forKey: .residualRisk),
+            envelopeDigest: try c.decodeIfPresent(String.self, forKey: .envelopeDigest)
         )
     }
 }

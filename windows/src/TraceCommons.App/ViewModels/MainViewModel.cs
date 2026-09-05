@@ -513,6 +513,14 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     /// <summary>True when there is nothing pending, for an empty-state view.</summary>
     public bool IsEmpty => Pending.Count == 0;
+    private readonly FirstContributionCopy? _firstContributionCopy = WitnessSurface.Copy()?.Onboarding;
+    public bool ShowFirstContribution => _rollup.TotalContributed == 0 && _firstContributionCopy is not null;
+    public string FirstContributionHeading => _firstContributionCopy?.Heading ?? string.Empty;
+    public string FirstContributionStart => _firstContributionCopy?.Start ?? string.Empty;
+    public string FirstContributionReview => _firstContributionCopy?.Review ?? string.Empty;
+    public string FirstContributionFollowUp => _firstContributionCopy?.FollowUp ?? string.Empty;
+    public string FirstContributionAgentSetup => _firstContributionCopy?.AgentSetup ?? string.Empty;
+
 
     /// <summary>
     /// Whether the update banner is on screen. Only ever true for a
@@ -1126,6 +1134,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
             if (rollup.ResultAs<HistoryRollup>() is { } parsed)
             {
                 _rollup = parsed;
+                Raise(nameof(ShowFirstContribution));
                 Raise(nameof(ContributedCountText));
                 Raise(nameof(HeldCountText));
                 Raise(nameof(InTheCommonsCountText));

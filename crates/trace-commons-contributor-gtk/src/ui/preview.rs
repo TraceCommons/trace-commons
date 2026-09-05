@@ -59,6 +59,16 @@ pub fn open_with_search(app: &Rc<App>, index: usize, term: Option<String>, tab: 
 
 struct Sheet {
     app: Rc<App>,
+    witness_button: gtk::Button,
+    immutable_note: gtk::Label,
+    admission_button: gtk::Button,
+    admission_message: gtk::Label,
+    admission_required: Cell<bool>,
+    admission_supported: Cell<bool>,
+    admission_busy: Cell<bool>,
+    witness_requested: Cell<bool>,
+    witness_busy: Cell<bool>,
+    witness_supported: Cell<bool>,
     window: adw::Window,
     title: adw::WindowTitle,
     pending: Vec<crate::model::QueueEntry>,
@@ -594,10 +604,37 @@ impl Sheet {
             .build();
         footer.append(&residual_risk);
         footer.append(&gate_statement);
+        let immutable_note = gtk::Label::builder()
+            .label(
+                trace_commons_contributor::witness_copy::witness_copy()
+                    .review
+                    .immutable,
+            )
+            .wrap(true)
+            .xalign(0.0)
+            .visible(false)
+            .build();
+        footer.append(&immutable_note);
         footer.append(&verdict_question);
         footer.append(&verdict_track);
         footer.append(&verdict_caption);
         footer.append(&correction_group);
+        let witness_button = gtk::Button::with_label(
+            trace_commons_contributor::witness_copy::witness_copy()
+                .review
+                .action,
+        );
+        witness_button.set_visible(false);
+        footer.append(&witness_button);
+        let admission_button = gtk::Button::with_label(
+            trace_commons_contributor::witness_copy::witness_copy()
+                .admission
+                .heading,
+        );
+        admission_button.set_visible(false);
+        let admission_message = gtk::Label::builder().wrap(true).xalign(0.0).build();
+        footer.append(&admission_button);
+        footer.append(&admission_message);
         footer.append(&actions);
 
         let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -612,6 +649,16 @@ impl Sheet {
 
         let sheet = Rc::new(Sheet {
             app: Rc::clone(app),
+            witness_button: witness_button.clone(),
+            immutable_note,
+            admission_button: admission_button.clone(),
+            admission_message,
+            admission_required: Cell::new(false),
+            admission_supported: Cell::new(false),
+            admission_busy: Cell::new(false),
+            witness_requested: Cell::new(false),
+            witness_busy: Cell::new(false),
+            witness_supported: Cell::new(false),
             window: window.clone(),
             title,
             pending,
@@ -638,6 +685,50 @@ impl Sheet {
             verdict: RefCell::new(None),
             correction_group: correction_group.clone(),
             correction_view: correction_view.clone(),
+        });
+
+        let admission_sheet = Rc::clone(&sheet);
+        admission_button.connect_clicked(move |_| admission_sheet.confirm_admission());
+        let admission_sheet = Rc::clone(&sheet);
+        app.call("get_settings", serde_json::json!({}), move |_, result| {
+            admission_sheet.admission_required.set(
+                result
+                    .ok()
+                    .and_then(|v| {
+                        v.get("admission_evidence_required")
+                            .and_then(|v| v.as_bool())
+                    })
+                    .unwrap_or(false),
+            );
+            admission_sheet.sync_witness();
+        });
+        let witness_sheet = Rc::clone(&sheet);
+        witness_button.connect_clicked(move |_| witness_sheet.confirm_witness());
+        let witness_sheet = Rc::clone(&sheet);
+        app.call("hello", serde_json::json!({}), move |_, result| {
+            witness_sheet.admission_supported.set(
+                result
+                    .as_ref()
+                    .ok()
+                    .and_then(|v| v.get("methods"))
+                    .and_then(|v| v.as_array())
+                    .is_some_and(|methods| {
+                        methods
+                            .iter()
+                            .any(|v| v.as_str() == Some("prepare_admission_session"))
+                    }),
+            );
+            let supported = result
+                .ok()
+                .and_then(|value| value.get("methods").cloned())
+                .and_then(|value| value.as_array().cloned())
+                .is_some_and(|methods| {
+                    methods
+                        .iter()
+                        .any(|method| method.as_str() == Some("witness_preview_request"))
+                });
+            witness_sheet.witness_supported.set(supported);
+            witness_sheet.sync_witness();
         });
 
         for (button, name) in verdict_buttons.iter().zip(["worked", "partly", "failed"]) {
@@ -731,7 +822,129 @@ impl Sheet {
     /// approval that may follow covers those bytes. Approving against a
     /// summary fetched minutes ago would be approving something the daemon
     /// is no longer holding.
+    fn sync_witness(&self) {
+        self.admission_button.set_visible(
+            self.admission_required.get() && self.admission_supported.get() && !self.pinned.get(),
+        );
+        self.admission_button
+            .set_sensitive(!self.admission_busy.get() && !self.witness_busy.get());
+        let configured = super::settings::witness_read(&self.app.worker.dir).state
+            == trace_commons_contributor::witness::status::WitnessTrustState::Pinned;
+        self.immutable_note
+            .set_visible(configured || self.witness_requested.get());
+        self.witness_button
+            .set_visible(configured && self.witness_supported.get() && !self.pinned.get());
+        self.witness_button
+            .set_sensitive(!self.witness_busy.get() && !self.admission_busy.get());
+        for button in &self.verdict_buttons {
+            button.set_sensitive(!configured && !self.witness_requested.get());
+        }
+        self.correction_view
+            .set_editable(!configured && !self.witness_requested.get());
+    }
+
+    fn confirm_admission(self: &Rc<Self>) {
+        if !self.admission_required.get()
+            || !self.admission_supported.get()
+            || self.admission_busy.get()
+            || self.witness_busy.get()
+        {
+            return;
+        }
+        let copy = trace_commons_contributor::witness_copy::witness_copy().admission;
+        let backend = gtk::Entry::builder().placeholder_text(copy.backend).build();
+        let dialog = adw::MessageDialog::builder()
+            .transient_for(&self.window)
+            .modal(true)
+            .heading(copy.heading)
+            .body(copy.disclosure)
+            .extra_child(&backend)
+            .build();
+        dialog.add_responses(&[("cancel", copy.cancel), ("prepare", copy.confirm)]);
+        dialog.set_default_response(Some("cancel"));
+        dialog.set_close_response("cancel");
+        dialog.set_response_enabled("prepare", false);
+        backend.connect_changed({
+            let dialog = dialog.clone();
+            move |entry| dialog.set_response_enabled("prepare", !entry.text().trim().is_empty())
+        });
+        let sheet = self.clone();
+        dialog.connect_response(None, move |_, response| {
+            if response != "prepare" || sheet.admission_busy.replace(true) { return; }
+            let Some(entry) = sheet.pending.get(*sheet.index.borrow()) else { sheet.admission_busy.set(false); return; };
+            sheet.admission_message.set_label(trace_commons_contributor::witness_copy::witness_copy().admission.working); sheet.sync_witness();
+            let result_sheet = sheet.clone();
+            let prepared_entry = entry.entry_id.clone();
+            sheet.app.call("prepare_admission_session", serde_json::json!({"entry_id":entry.entry_id,"backend":backend.text().trim(),"confirmed":true}), move |_, result| {
+                let ready = result.ok().is_some_and(|v| admission_ready(&v));
+                result_sheet.admission_busy.set(false);
+                if result_sheet.current().is_none_or(|entry| entry.entry_id != prepared_entry) { result_sheet.sync_witness(); return; }
+                let copy = trace_commons_contributor::witness_copy::witness_copy().admission;
+                if ready { result_sheet.admission_message.remove_css_class("tc-refused"); result_sheet.admission_message.set_label(copy.ready); }
+                else { result_sheet.admission_message.add_css_class("tc-refused"); result_sheet.admission_message.set_label(&format!("{} {}",copy.refused_glyph,copy.failed)); }
+                result_sheet.sync_witness();
+            });
+        });
+        dialog.present();
+    }
+
+    fn confirm_witness(self: &Rc<Self>) {
+        if !self.witness_supported.get() || self.witness_busy.get() {
+            return;
+        }
+        let copy = trace_commons_contributor::witness_copy::witness_copy().review;
+        let dialog = adw::MessageDialog::new(
+            Some(&self.window),
+            Some(copy.heading),
+            Some(copy.disclosure),
+        );
+        dialog.add_responses(&[("cancel", copy.cancel), ("review", copy.confirm)]);
+        dialog.set_default_response(Some("cancel"));
+        dialog.set_close_response("cancel");
+        let sheet = Rc::clone(self);
+        dialog.connect_response(None, move |dialog, response| {
+            dialog.close();
+            if response != "review" || sheet.witness_busy.replace(true) {
+                return;
+            }
+            let Some(entry) = sheet.current() else {
+                sheet.witness_busy.set(false);
+                return;
+            };
+            sheet.witness_requested.set(true);
+            sheet.pinned.set(false);
+            sheet.sync_contribute();
+            sheet.sync_witness();
+            let copy = trace_commons_contributor::witness_copy::witness_copy().review;
+            sheet.search_summary.set_text(copy.working);
+            sheet.transcript.show_sentence(copy.working);
+            let result_sheet = Rc::clone(&sheet);
+            sheet.app.call(
+                "witness_preview_request",
+                serde_json::json!({
+                    "entry_id": entry.entry_id, "raw_session_confirmed": true
+                }),
+                move |_, result| {
+                    result_sheet.witness_busy.set(false);
+                    match result {
+                        Ok(value)
+                            if value.get("status").and_then(serde_json::Value::as_str)
+                                == Some("ready") =>
+                        {
+                            result_sheet.load()
+                        }
+                        Ok(_) => result_sheet.fill_failure("witness-review-incomplete"),
+                        Err(label) => result_sheet.fill_failure(&label),
+                    }
+                    result_sheet.sync_witness();
+                },
+            );
+        });
+        dialog.present();
+    }
+
     fn load(self: &Rc<Self>) {
+        self.admission_message.set_label("");
         let Some(entry) = self.current() else {
             self.window.close();
             return;
@@ -758,6 +971,7 @@ impl Sheet {
         // last entry must never attach to this one.
         self.pinned.set(false);
         self.sync_contribute();
+        self.sync_witness();
         for button in &self.verdict_buttons {
             button.set_active(false);
         }
@@ -866,6 +1080,9 @@ impl Sheet {
     }
 
     fn fill(self: &Rc<Self>, summary: &PreviewSummary, body: Option<String>) {
+        self.witness_requested
+            .set(summary.envelope_digest.starts_with("witness-sha256:"));
+        self.witness_button.set_visible(false);
         self.set_manifest(Some(summary));
         // Approving is only allowed against a real, pinned preview. An
         // unenrolled build carries a placeholder identity and is not
@@ -995,18 +1212,25 @@ impl Sheet {
     fn fill_failure(self: &Rc<Self>, label: &str) {
         self.pinned.set(false);
         self.sync_contribute();
-        let sentence = match label {
-            "preview-failed" | "unavailable" => {
-                concat!(
-                    copy::app_name!(),
-                    " can't work out what would be sent right now, so there is nothing to \
+        self.sync_witness();
+        let sentence = if self.witness_requested.get() {
+            trace_commons_contributor::witness_copy::witness_copy()
+                .review
+                .failed
+        } else {
+            match label {
+                "preview-failed" | "unavailable" => {
+                    concat!(
+                        copy::app_name!(),
+                        " can't work out what would be sent right now, so there is nothing to \
                      decide on yet. Nothing has been sent."
-                )
+                    )
+                }
+                "unknown-entry-id" | "session-file-vanished" => {
+                    "This session is no longer waiting. Nothing was sent."
+                }
+                _ => "Something went wrong working out what would be sent. Nothing has been sent.",
             }
-            "unknown-entry-id" | "session-file-vanished" => {
-                "This session is no longer waiting. Nothing was sent."
-            }
-            _ => "Something went wrong working out what would be sent. Nothing has been sent.",
         };
         self.copy_all.set_sensitive(false);
         self.transcript.show_sentence(sentence);
@@ -1972,8 +2196,30 @@ fn context_around(body: &str, byte_start: usize, byte_end: usize) -> Excerpt {
     }
 }
 
+fn admission_ready(value: &serde_json::Value) -> bool {
+    value
+        .get("view")
+        .and_then(|view| view.get("ready"))
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn admission_preparation_requires_fresh_explicit_success() {
+        let future = chrono::Utc::now().timestamp() + 600;
+        assert!(super::admission_ready(
+            &serde_json::json!({"status":"ready_for_next_inference","expires_at":future,"view":{"ready":true}})
+        ));
+        for value in [
+            serde_json::json!({}),
+            serde_json::json!({"status":"ready"}),
+            serde_json::json!({"status":"ready_for_next_inference","expires_at":1}),
+        ] {
+            assert!(!super::admission_ready(&value));
+        }
+    }
     use super::context_around;
 
     #[test]

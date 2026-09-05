@@ -46,7 +46,7 @@ use adw::prelude::*;
 /// `Scan` is skipped unless the operator offers the second scanner, which
 /// the shell learns from `get_settings` rather than assuming.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Step {
+pub(super) enum Step {
     Welcome,
     Connect,
     Consent,
@@ -82,14 +82,15 @@ struct ScopeOption {
 
 /// The live onboarding window.
 pub struct Onboarding {
-    window: adw::Window,
+    pub(super) window: adw::Window,
     stack: gtk::Stack,
     /// The invite field. Read once, on Connect, and never re-read into any
     /// label -- the raw text is a credential.
-    invite: gtk::Entry,
+    pub(super) invite: gtk::Entry,
     invite_error: gtk::Label,
     invite_instance: gtk::Label,
-    connect_button: gtk::Button,
+    pub(super) connect_button: gtk::Button,
+    pub(super) connection_busy: std::cell::Cell<bool>,
     /// Checkboxes for the optional scopes, in wire-name order. The floor
     /// scope is not in here: it is drawn but never toggleable.
     scope_checks: RefCell<Vec<(String, gtk::CheckButton)>>,
@@ -290,6 +291,7 @@ fn present_at(app: &Rc<App>, start: Option<Step>) {
         invite_error: invite_error.clone(),
         invite_instance: invite_instance.clone(),
         connect_button: connect_button.clone(),
+        connection_busy: std::cell::Cell::new(false),
         scope_checks: RefCell::new(Vec::new()),
         consent_body: consent_body.clone(),
         scan_local_only: scan_local_only.clone(),
@@ -405,7 +407,7 @@ fn health_step(label: &str) -> Option<Step> {
 }
 
 impl Onboarding {
-    fn go(self: &Rc<Self>, step: Step) {
+    pub(super) fn go(self: &Rc<Self>, step: Step) {
         self.stack.set_visible_child_name(step.page_name());
     }
 
@@ -449,7 +451,7 @@ fn page(title: &str) -> (gtk::Box, gtk::Box) {
     (outer, body)
 }
 
-fn body_label(text: &str) -> gtk::Label {
+pub(super) fn body_label(text: &str) -> gtk::Label {
     let label = gtk::Label::builder()
         .label(text)
         .xalign(0.0)
@@ -627,7 +629,9 @@ fn connect_page(app: &Rc<App>, onboarding: &Rc<Onboarding>) -> gtk::Box {
                         .invite_instance
                         .set_label(&format!("This invite is for {host}."));
                     onboarding.invite_instance.set_visible(true);
-                    onboarding.connect_button.set_sensitive(true);
+                    onboarding
+                        .connect_button
+                        .set_sensitive(!onboarding.connection_busy.get());
                 }
                 None => {
                     onboarding.invite_instance.set_visible(false);
@@ -640,10 +644,19 @@ fn connect_page(app: &Rc<App>, onboarding: &Rc<Onboarding>) -> gtk::Box {
         }
     });
 
+    let wallet = super::onboarding_wallet::build(app, onboarding);
+    body.append(&wallet);
+
     onboarding.connect_button.connect_clicked({
         let app = app.clone();
         let onboarding = onboarding.clone();
+        let wallet = wallet.clone();
         move |button| {
+            if onboarding.connection_busy.replace(true) {
+                return;
+            }
+            wallet.set_sensitive(false);
+            onboarding.invite.set_sensitive(false);
             button.set_sensitive(false);
             onboarding.invite_error.set_visible(false);
             let invite = onboarding.invite.text().to_string();
@@ -652,32 +665,45 @@ fn connect_page(app: &Rc<App>, onboarding: &Rc<Onboarding>) -> gtk::Box {
             // grant something the contributor has not been asked about.
             app.call("enroll", serde_json::json!({ "invite": invite }), {
                 let onboarding = onboarding.clone();
-                move |app, result| match result {
-                    Ok(_) => {
-                        // The field held a credential and its work is
-                        // done. Clearing it keeps the invite out of the
-                        // window for the rest of the session.
-                        onboarding.invite.set_text("");
-                        load_consent_options(app, &onboarding);
-                        onboarding.go(Step::Consent);
-                    }
-                    Err(_) => {
-                        // Deliberately ignoring which error this was.
-                        onboarding.invite_error.set_visible(true);
-                        onboarding.connect_button.set_sensitive(true);
+                let wallet = wallet.clone();
+                move |app, result| {
+                    onboarding.connection_busy.set(false);
+                    wallet.set_sensitive(true);
+                    onboarding.invite.set_sensitive(true);
+                    match result {
+                        Ok(_) => {
+                            // The field held a credential and its work is
+                            // done. Clearing it keeps the invite out of the
+                            // window for the rest of the session.
+                            onboarding.invite.set_text("");
+                            load_consent_options(app, &onboarding);
+                            onboarding.go(Step::Consent);
+                        }
+                        Err(_) => {
+                            // Deliberately ignoring which error this was.
+                            onboarding.invite_error.set_visible(true);
+                            onboarding.connect_button.set_sensitive(true);
+                        }
                     }
                 }
             });
         }
     });
 
+    // The connect choices scroll at narrow window sizes and large text settings.
+    outer.remove(&body);
+    let scroll = gtk::ScrolledWindow::builder()
+        .vexpand(true)
+        .child(&body)
+        .build();
+    outer.append(&scroll);
     outer.append(&button_row(&onboarding.connect_button));
     outer
 }
 
 /// Fill the consent screen from `consent_options`, and decide on the way
 /// past whether screen 4 has anything to offer.
-fn load_consent_options(app: &Rc<App>, onboarding: &Rc<Onboarding>) {
+pub(super) fn load_consent_options(app: &Rc<App>, onboarding: &Rc<Onboarding>) {
     app.call("consent_options", serde_json::json!({}), {
         let onboarding = onboarding.clone();
         move |_app, result| {

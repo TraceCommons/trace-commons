@@ -263,6 +263,7 @@ async fn a_certificate_this_client_accepts_is_one_the_server_issued() {
     let wire = witness_over_the_wire(service, "ran the build and read the log").await;
 
     let envelope = WitnessedEnvelope {
+        admission: None,
         envelope_bytes: wire.envelope_bytes,
         certificate_json: wire.certificate_header,
         signature_hex: wire.signature_header,
@@ -351,6 +352,7 @@ async fn every_verdict_survives_both_consumers() {
 
         // The client.
         let envelope = WitnessedEnvelope {
+            admission: None,
             envelope_bytes: ARTIFACT.as_bytes().to_vec(),
             certificate_json: json.clone(),
             signature_hex: signature.clone(),

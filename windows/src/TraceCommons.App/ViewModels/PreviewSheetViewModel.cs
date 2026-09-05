@@ -61,9 +61,9 @@ public sealed class PreviewSheetViewModel : INotifyPropertyChanged, IDisposable
     /// <summary>
     /// Shown where the sheet body would be while the redaction pass runs.
     /// </summary>
-    public const string LoadingTitle = "Scrubbing it locally…";
+    private const string LocalLoadingTitle = "Scrubbing it locally…";
 
-    public const string LoadingDetail = "Reading the session and running the redaction pass.";
+    private const string LocalLoadingDetail = "Reading the session and running the redaction pass.";
 
     /// <summary>
     /// A preview that could not be opened or could not be understood. The
@@ -100,6 +100,74 @@ public sealed class PreviewSheetViewModel : INotifyPropertyChanged, IDisposable
         _summary is null ? 0 : RedactionLabels.Total(_summary.Redactions));
 
     private readonly DaemonHost _host;
+    private readonly WitnessReviewCopy? _witnessCopy = WitnessSurface.Copy()?.Review;
+    private bool _witnessSupported;
+    private bool _witnessRequested;
+    private bool _witnessWorking;
+    private bool _witnessConfigured;
+    private bool _admissionSupported;
+    private bool _admissionBusy;
+    private string _admissionMessage = string.Empty;
+    public bool CanPrepareAdmission => _admissionSupported && !_admissionBusy && !_witnessWorking;
+    private bool _admissionRefused;
+    public string AdmissionMessage => _admissionMessage;
+    public string AdmissionRefusalMessage => _admissionRefused ? _admissionMessage : string.Empty;
+    public string AdmissionNeutralMessage => _admissionRefused ? string.Empty : _admissionMessage;
+    public string AdmissionGlyph => _admissionRefused ? AdmissionPreparation.Copy?.RefusedGlyph ?? string.Empty : string.Empty;
+    public string AdmissionHeading => AdmissionPreparation.Heading;
+    public string ImmutableNote => CanEditOutcome ? string.Empty : _witnessCopy?.Immutable ?? string.Empty;
+    public async Task PrepareAdmissionAsync(string backend)
+    {
+        if (!CanPrepareAdmission || string.IsNullOrWhiteSpace(backend)) return;
+        _admissionBusy = true; _admissionRefused = false; _admissionMessage = AdmissionPreparation.Copy?.Working ?? "";
+        Raise(nameof(CanPrepareAdmission)); Raise(nameof(AdmissionMessage)); Raise(nameof(AdmissionRefusalMessage)); Raise(nameof(AdmissionNeutralMessage)); Raise(nameof(AdmissionGlyph)); Raise(nameof(CanRequestWitness));
+        try {
+            var response = await _host.CallAsync(AdmissionPreparation.Method, AdmissionPreparation.Request(Entry.EntryId, backend)).ConfigureAwait(true);
+            _admissionRefused = !AdmissionPreparation.IsReady(response);
+            _admissionMessage = _admissionRefused ? AdmissionPreparation.Failed : AdmissionPreparation.Success;
+        } catch { _admissionRefused = true; _admissionMessage = AdmissionPreparation.Failed; }
+        finally { _admissionBusy = false; Raise(nameof(CanPrepareAdmission)); Raise(nameof(AdmissionMessage)); Raise(nameof(AdmissionRefusalMessage)); Raise(nameof(AdmissionNeutralMessage)); Raise(nameof(AdmissionGlyph)); Raise(nameof(CanRequestWitness)); }
+    }
+
+    public string WitnessHeading => _witnessCopy?.Heading ?? string.Empty;
+    public string WitnessDisclosure => _witnessCopy?.Disclosure ?? string.Empty;
+    public string WitnessAction => _witnessCopy?.Action ?? string.Empty;
+    public string WitnessConfirm => _witnessCopy?.Confirm ?? string.Empty;
+    public string WitnessCancel => _witnessCopy?.Cancel ?? string.Empty;
+    public string PreviewFailureDetail => _witnessRequested ? _witnessCopy?.Failed ?? FailureDetail : FailureDetail;
+    public string LoadingTitle => _witnessWorking ? _witnessCopy?.Heading ?? string.Empty : LocalLoadingTitle;
+    public string LoadingDetail => _witnessWorking ? _witnessCopy?.Working ?? string.Empty : LocalLoadingDetail;
+    public bool CanRequestWitness => _witnessSupported && _witnessConfigured && !_witnessWorking && !_admissionBusy && _witnessCopy?.IsComplete == true;
+    public bool CanEditOutcome => !_witnessConfigured && !_witnessRequested && !_witnessWorking;
+
+    public async Task RequestWitnessAsync()
+    {
+        if (!CanRequestWitness) return;
+        _witnessRequested = true;
+        _witnessWorking = true;
+        Gate.SetPinnedPreview(false);
+        IsLoading = true;
+        HasFailed = false;
+        Raise(nameof(CanRequestWitness));
+        Raise(nameof(CanEditOutcome)); Raise(nameof(ImmutableNote));
+        Raise(nameof(LoadingTitle));
+        Raise(nameof(LoadingDetail));
+        Raise(nameof(PreviewFailureDetail));
+        try
+        {
+            var response = await _host.CallAsync(NativeWitnessReview.Method, NativeWitnessReview.ConfirmedRequest(Entry.EntryId)).ConfigureAwait(true);
+            _witnessWorking = false;
+            if (!NativeWitnessReview.IsReady(response)) { Fail(); return; }
+            await LoadAsync().ConfigureAwait(true);
+        }
+        catch { _witnessWorking = false; Fail(); }
+        finally {
+            Raise(nameof(CanRequestWitness));
+            Raise(nameof(LoadingTitle));
+            Raise(nameof(LoadingDetail));
+        }
+    }
+
 
     private TcPreview? _preview;
     private PreviewSummary? _summary;
@@ -434,6 +502,7 @@ public sealed class PreviewSheetViewModel : INotifyPropertyChanged, IDisposable
         get => _correction;
         set
         {
+            if (!CanEditOutcome) return;
             string clipped = value ?? string.Empty;
             if (clipped.Length > CorrectionCopy.MaxCharacters)
             {
@@ -505,6 +574,7 @@ public sealed class PreviewSheetViewModel : INotifyPropertyChanged, IDisposable
     /// </remarks>
     public void ToggleVerdict(string outcome)
     {
+        if (!CanEditOutcome) return;
         _verdict = _verdict == Verdict.Require(outcome) ? null : outcome;
 
         // A contributor who wrote a correction under "Failed" and then
@@ -544,6 +614,14 @@ public sealed class PreviewSheetViewModel : INotifyPropertyChanged, IDisposable
     {
         IsLoading = true;
         HasFailed = false;
+        _witnessConfigured = WitnessSurface.TrustState(_host.ConfigDir) == WitnessTools.StatePinned;
+        var hello = await _host.CallAsync("hello").ConfigureAwait(true);
+        _witnessSupported = NativeWitnessReview.Supports(hello);
+        var settings = await _host.CallAsync("get_settings").ConfigureAwait(true);
+        _admissionSupported = AdmissionPreparation.Available(hello, settings.ResultAs<DaemonSettingsSnapshot>());
+        Raise(nameof(CanPrepareAdmission));
+        Raise(nameof(CanRequestWitness));
+        Raise(nameof(CanEditOutcome)); Raise(nameof(ImmutableNote));
 
         TcPreview preview;
         try
@@ -571,6 +649,8 @@ public sealed class PreviewSheetViewModel : INotifyPropertyChanged, IDisposable
         }
 
         _summary = summary;
+        _witnessRequested = summary.EnvelopeDigest?.StartsWith("witness-sha256:", StringComparison.Ordinal) == true;
+        Raise(nameof(CanEditOutcome)); Raise(nameof(ImmutableNote));
         FillManifest(summary);
 
         // An unenrolled preview is an illustration: it was built from a

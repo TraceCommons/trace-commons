@@ -5,8 +5,11 @@
 
 pub mod account_native_auth;
 pub mod account_near;
+pub mod account_onboarding;
 pub mod account_passkey;
 pub mod account_session;
+pub mod admission_evidence;
+pub mod admission_ledger;
 pub mod audit_chain;
 pub mod celestine_sloth_claim;
 pub mod config;
@@ -19,6 +22,7 @@ pub mod dedup_assign;
 pub mod dedup_simhash;
 pub mod driver_liveness;
 pub mod error;
+pub mod inference_funding;
 pub mod instance_enroll_guard;
 pub mod near_attestation;
 pub mod near_credit;

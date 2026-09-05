@@ -72,6 +72,37 @@ pub const WITNESS_CLEAR_NOTE: &str = concat!(
 /// Changes take effect on the next upload, with no restart.
 pub const WITNESS_APPLIES_AT_ONCE: &str = "Changes here apply to the next session sent.";
 
+/// Consent to carry inference content is independent of observing a proxy's
+/// ledger, configuring a witness, and acknowledging the extra privacy scan.
+pub const WITNESS_INFERENCE_HEADING: &str = "Include captured inference evidence";
+pub const WITNESS_INFERENCE_DISCLOSURE: &str = concat!(
+    "When a contribution uses a witness, this allows the final model call's exact request ",
+    "and response to be sent to that remote witness before redaction. These may include ",
+    "prompts, conversation history, tool results, and secrets. The witness checks the ",
+    "evidence and removes these attached bodies from the contribution it returns. ",
+    "Looking up a receipt with NEAR AI can also reveal which call you are contributing."
+);
+pub const WITNESS_INFERENCE_CAPTURE_NOTE: &str = concat!(
+    "IronWire capture must be configured separately. When capture is enabled, request ",
+    "and response bodies are stored on this machine. Turning this permission off stops ",
+    "including bodies in future contributions; it does not turn off IronWire capture ",
+    "or delete bodies already stored. Work already in progress may still finish."
+);
+pub const WITNESS_INFERENCE_SCOPE_NOTE: &str = concat!(
+    "This permission does not connect an agent to NEAR AI, fund inference, or prove a ",
+    "receipt was verified. A supported desktop app asks separately before sending a ",
+    "session for witness review. This permission alone does not make it ready to send."
+);
+pub const WITNESS_INFERENCE_ENABLE: &str = "Review permission";
+pub const WITNESS_INFERENCE_DISABLE: &str = "Stop including inference bodies";
+pub const WITNESS_INFERENCE_CONFIRM: &str = "Allow sending captured bodies";
+pub const WITNESS_INFERENCE_CANCEL: &str = "Not now";
+pub const WITNESS_INFERENCE_ENABLED: &str =
+    "Permission saved. Captured bodies may be included when a contribution uses a witness.";
+pub const WITNESS_INFERENCE_DISABLED: &str = "Captured inference bodies are not included.";
+pub const WITNESS_INFERENCE_SAVE_FAILED: &str =
+    "Couldn't confirm this permission was saved. Reload settings to check before continuing.";
+
 /// How a witness sentence is painted.
 ///
 /// Five values, and the fifth is the reason this is not
@@ -287,6 +318,64 @@ pub fn witness_last_result_tone(result: &WitnessLastResult) -> WitnessTone {
     }
 }
 
+/// Explicit remote review disclosure, shared by every native shell.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct WitnessReviewCopy {
+    pub heading: &'static str,
+    pub disclosure: &'static str,
+    pub action: &'static str,
+    pub confirm: &'static str,
+    pub cancel: &'static str,
+    pub working: &'static str,
+    pub failed: &'static str,
+    pub immutable: &'static str,
+}
+
+/// Persistent next steps, without inferring acceptance or funding from local setup.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct FirstContributionCopy {
+    pub heading: &'static str,
+    pub start: &'static str,
+    pub review: &'static str,
+    pub follow_up: &'static str,
+    pub agent_setup: &'static str,
+}
+
+/// Fixed wallet words used by the core state machine and all native adapters.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct WalletCopy {
+    pub heading: &'static str,
+    pub disclosure: &'static str,
+    pub commons: &'static str,
+    pub account: &'static str,
+    pub check: &'static str,
+    pub start: &'static str,
+    pub cancel: &'static str,
+    pub available: &'static str,
+    pub unavailable: &'static str,
+    pub opening: &'static str,
+    pub waiting: &'static str,
+    pub failed: &'static str,
+    pub cancelled: &'static str,
+    pub refused_glyph: &'static str,
+    pub refused_tone: &'static str,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct AdmissionCopy {
+    pub heading: &'static str,
+    pub disclosure: &'static str,
+    pub prerequisite: &'static str,
+    pub backend: &'static str,
+    pub confirm: &'static str,
+    pub cancel: &'static str,
+    pub permission: &'static str,
+    pub working: &'static str,
+    pub ready: &'static str,
+    pub failed: &'static str,
+    pub refused_glyph: &'static str,
+    pub refused_tone: &'static str,
+}
+
 /// Every fixed word on the witness surface, in one value.
 ///
 /// ONE CALL, NOT ONE PER STRING, for the reason [`crate::routing_copy`]
@@ -306,6 +395,21 @@ pub struct WitnessCopy {
     pub clear: &'static str,
     pub clear_note: &'static str,
     pub applies_at_once: &'static str,
+    pub inference_heading: &'static str,
+    pub inference_disclosure: &'static str,
+    pub inference_capture_note: &'static str,
+    pub inference_scope_note: &'static str,
+    pub inference_enable: &'static str,
+    pub inference_disable: &'static str,
+    pub inference_confirm: &'static str,
+    pub inference_cancel: &'static str,
+    pub inference_enabled: &'static str,
+    pub inference_disabled: &'static str,
+    pub inference_save_failed: &'static str,
+    pub review: WitnessReviewCopy,
+    pub onboarding: FirstContributionCopy,
+    pub wallet: WalletCopy,
+    pub admission: AdmissionCopy,
 }
 
 /// The witness surface's fixed words.
@@ -323,6 +427,65 @@ pub fn witness_copy() -> WitnessCopy {
         clear: WITNESS_CLEAR,
         clear_note: WITNESS_CLEAR_NOTE,
         applies_at_once: WITNESS_APPLIES_AT_ONCE,
+        inference_heading: WITNESS_INFERENCE_HEADING,
+        inference_disclosure: WITNESS_INFERENCE_DISCLOSURE,
+        inference_capture_note: WITNESS_INFERENCE_CAPTURE_NOTE,
+        inference_scope_note: WITNESS_INFERENCE_SCOPE_NOTE,
+        inference_enable: WITNESS_INFERENCE_ENABLE,
+        inference_disable: WITNESS_INFERENCE_DISABLE,
+        inference_confirm: WITNESS_INFERENCE_CONFIRM,
+        inference_cancel: WITNESS_INFERENCE_CANCEL,
+        inference_enabled: WITNESS_INFERENCE_ENABLED,
+        inference_disabled: WITNESS_INFERENCE_DISABLED,
+        inference_save_failed: WITNESS_INFERENCE_SAVE_FAILED,
+        review: WitnessReviewCopy {
+            heading: "Review with your configured witness",
+            disclosure: "This sends this session, including its unredacted conversation and any correction you include, to your configured remote witness before you approve a contribution. It may contain prompts, tool results, personal data, or secrets. Captured inference bodies are included only with the separate saved permission. You can inspect the returned redacted contribution before deciding whether to send it. Cancelling afterwards cannot recall a session already sent to the witness.",
+            action: "Prepare witness review",
+            confirm: "Send this session for review",
+            cancel: "Not now",
+            working: "Preparing your witness review. The session may already have left this device.",
+            failed: "The witness review could not be confirmed. The session may already have reached the witness. No contribution has been approved here. Try again only if you want to send another review request.",
+            immutable: "Witness review uses fixed contribution content. Outcome and correction edits are unavailable here.",
+        },
+        wallet: WalletCopy {
+            heading: "Join with a NEAR account",
+            disclosure: "Check whether your commons accepts new accounts. Connecting proves control of your account and this device; it does not fund inference or enable capture.",
+            commons: "Commons HTTPS address",
+            account: "Your NEAR account",
+            check: "Check availability",
+            start: "Continue in wallet",
+            cancel: "Cancel connection",
+            available: "This commons supports wallet signup.",
+            unavailable: "Wallet signup is unavailable for this commons. You can still use an invite.",
+            opening: "Opening a wallet connection…",
+            waiting: "Finish signing in your wallet. Keep this window open.",
+            failed: "The wallet connection could not be confirmed. Cancel and try again.",
+            cancelled: "Connection cancelled.",
+            refused_glyph: "⊘",
+            refused_tone: "refused",
+        },
+        admission: AdmissionCopy {
+            heading: "Prepare next NEAR inference",
+            disclosure: "For new inference evidence, this adds an account-bound challenge to the next request in this session. Use your own funded NEAR AI backend, then continue the agent task and return here to review. You can separately choose witness review of eligible existing history, subject to server limits.",
+            prerequisite: "IronWire must already route this agent to that backend and capture request bodies. Inference-body evidence also needs your separate permission in Settings.",
+            backend: "NEAR AI backend name",
+            confirm: "Prepare session",
+            cancel: "Cancel",
+            permission: "Review inference-body permission",
+            working: "Preparing this session…",
+            ready: "Ready. Continue this session in your agent, then review the updated session.",
+            failed: "This session could not be prepared. Check your supported agent, backend, and capture settings, then try again.",
+            refused_glyph: "⊘",
+            refused_tone: "refused",
+        },
+        onboarding: FirstContributionCopy {
+            heading: "Your first contribution",
+            start: "Start with an existing session you can share, or complete a new task in a supported agent. Choose its session folder in Settings, then return here to review. Setup alone does not mean a contribution was accepted.",
+            review: "Open a waiting session with Look inside. A configured witness asks separately before the session leaves this device for review. Check the returned contribution before sending it. The server may allow limited initial submissions from eligible existing history; this screen does not show a remaining allowance.",
+            follow_up: "Open History to follow the server's recorded result. Upload, acceptance, and credit are separate steps. Points are not a spendable NEAR AI balance.",
+            agent_setup: "To generate new NEAR AI inference evidence, configure your selected agent using your own funded provider account and model settings. IronWire capture and sending captured bodies each require separate setup. Existing-history review is a separate choice; this app does not create a funded provider account.",
+        },
     }
 }
 
@@ -580,13 +743,16 @@ mod tests {
         let object = json.as_object().unwrap();
         assert_eq!(
             object.len(),
-            11,
+            26,
             "a field added to WitnessCopy must be counted here, or a shell can be handed \
              a word this test has never seen"
         );
         for (key, value) in object {
             assert!(
-                !value.as_str().unwrap().is_empty(),
+                value.as_str().is_some_and(|text| !text.is_empty())
+                    || value.as_object().is_some_and(|fields| fields
+                        .values()
+                        .all(|text| text.as_str().is_some_and(|text| !text.is_empty()))),
                 "{key} is empty, so a shell renders a blank and writes its own"
             );
         }

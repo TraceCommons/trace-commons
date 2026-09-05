@@ -265,6 +265,13 @@ pub struct WitnessPin {
 }
 
 impl WitnessPin {
+    pub(crate) fn verifies_detached(&self, message: &[u8], signature: &str) -> bool {
+        crate::near_attestation::receipt::recover_eip191_signer(message, signature)
+            .ok()
+            .zip(decode_address(&self.signing_address))
+            .is_some_and(|(actual, expected)| actual == expected)
+    }
+
     /// Validate and build a pin.
     ///
     /// Measurements are compared exactly, byte for byte. They are opaque

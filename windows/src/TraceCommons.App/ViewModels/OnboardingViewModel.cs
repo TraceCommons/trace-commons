@@ -61,6 +61,11 @@ public sealed class OnboardingViewModel : INotifyPropertyChanged
     {
         _host = host ?? throw new ArgumentNullException(nameof(host));
         _state = state ?? throw new ArgumentNullException(nameof(state));
+        NearAccount = new NearAccountConnection((method, payload) => _host.CallAsync(method, payload),
+            async uri => await Windows.System.Launcher.LaunchUriAsync(uri), () => !IsBusy);
+        NearAccount.PropertyChanged += (_, _) => { Raise(nameof(CanConnect)); Raise(nameof(CanUseInvite)); };
+        NearAccount.Completed += OnNearAccountCompleted;
+
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;
@@ -148,7 +153,17 @@ public sealed class OnboardingViewModel : INotifyPropertyChanged
         private set => Set(ref _inviteFailed, value);
     }
 
-    public bool CanConnect => !string.IsNullOrWhiteSpace(_invite) && !_isBusy;
+    public NearAccountConnection NearAccount { get; }
+    public bool CanUseWallet => !IsBusy;
+    public bool CanUseInvite => !IsBusy && !NearAccount.Busy;
+    public bool CanConnect => !string.IsNullOrWhiteSpace(_invite) && CanUseInvite;
+    private async void OnNearAccountCompleted()
+    {
+        Invite = string.Empty;
+        await LoadConsentOptionsAsync().ConfigureAwait(true);
+        Step = OnboardingStep.Consent;
+    }
+
 
     public bool IsBusy
     {
@@ -161,6 +176,8 @@ public sealed class OnboardingViewModel : INotifyPropertyChanged
             }
 
             Raise(nameof(CanConnect));
+            Raise(nameof(CanUseInvite));
+            Raise(nameof(CanUseWallet));
         }
     }
 
