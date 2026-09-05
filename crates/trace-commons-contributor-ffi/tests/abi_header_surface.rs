@@ -82,6 +82,7 @@ fn rust_base_type_to_c(ty: &str) -> String {
         "c_void" => "void",
         "tc_handle" => "tc_handle",
         "tc_preview" => "tc_preview",
+        "tc_compute_handle" => "tc_compute_handle",
         "u64" => "uint64_t",
         "u32" => "uint32_t",
         "i64" => "int64_t",
@@ -174,8 +175,11 @@ fn split_top_level_commas(s: &str) -> Vec<String> {
 }
 
 fn rust_surface() -> BTreeMap<String, Signature> {
-    let src = std::fs::read_to_string(ffi_crate_dir().join("src/lib.rs"))
-        .expect("failed to read the FFI crate's src/lib.rs");
+    let src = ["src/lib.rs", "src/compute.rs"]
+        .map(|path| {
+            std::fs::read_to_string(ffi_crate_dir().join(path)).expect("failed to read FFI source")
+        })
+        .join("\n");
 
     let mut out: BTreeMap<String, Signature> = BTreeMap::new();
     let bytes: Vec<&str> = src.lines().collect();
@@ -304,7 +308,8 @@ fn canonical_c_type(decl: &str) -> String {
             "*" => stars += 1,
             "struct" => {}
             "char" | "void" | "int" | "int8_t" | "int16_t" | "int32_t" | "int64_t" | "uint8_t"
-            | "uint16_t" | "uint32_t" | "uint64_t" | "size_t" | "tc_handle" | "tc_preview" => {
+            | "uint16_t" | "uint32_t" | "uint64_t" | "size_t" | "tc_handle" | "tc_preview"
+            | "tc_compute_handle" => {
                 if let Some(existing) = &base {
                     panic!("two base types (`{existing}`, `{token}`) in C type `{decl}`");
                 }
