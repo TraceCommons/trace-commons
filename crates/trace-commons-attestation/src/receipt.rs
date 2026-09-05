@@ -115,9 +115,12 @@ pub struct ReceiptPayload {
 /// What a verified receipt establishes.
 ///
 /// The hashes are re-rendered from the verified receipt in lowercase hex. The
-/// address is the *recovered* signer, not the claimed one -- they are equal by
-/// the time this exists. It is here so a caller can bind a receipt to a known
-/// enclave key; it must not reach a log line or an audit row.
+/// address's provenance depends on `signing_algo`: on `Ecdsa` it is the
+/// *recovered* signer, not the claimed one -- they are equal by the time this
+/// exists. On `Ed25519` there is no recovery; it is the *claimed* key, whose
+/// signature verified against it. Same trust value -- a caller can bind a
+/// receipt to a known enclave key either way -- reached by a different
+/// mechanism. It must not reach a log line or an audit row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReceiptVerdict {
     pub request_sha256: String,
@@ -267,6 +270,11 @@ pub fn verify_receipt(
 /// receipt: the raw text verifies, the prefixed form does not. Public
 /// because a caller holding an attestation-report key may want the
 /// signature check alone, without bodies.
+///
+/// The `0x` handling is asymmetric on purpose: `signature` accepts an
+/// optional `0x` prefix, `signing_address` does not. NEAR AI renders
+/// ed25519 keys without one, so a `0x`-prefixed key is not a spelling this
+/// verifier tolerates -- it fails closed as [`ReceiptError::Ed25519KeyMalformed`].
 ///
 /// # Errors
 ///
@@ -812,9 +820,11 @@ mod tests {
         verify_ed25519_signature(&payload).expect("NEAR AI's real signature verifies");
     }
 
-    /// A validly signed ed25519 receipt over different bytes is refused by
-    /// the digest check, not the signature check -- the same ordering the
-    /// ECDSA path already pins.
+    /// A validly signed ed25519 receipt over different bytes is refused for
+    /// its digest, not its signature -- the signature verifies fine here, so
+    /// this pins the digest check alone, not any ordering between the two.
+    /// `a_bad_ed25519_signature_is_refused_before_the_digests_are_checked`,
+    /// below, is what pins the ordering.
     #[test]
     fn an_ed25519_receipt_over_other_bytes_is_refused() {
         let payload = live_ed25519();
@@ -888,5 +898,110 @@ mod tests {
             verify_ed25519_signature(&wrong),
             Err(ReceiptError::Ed25519KeyMalformed)
         );
+    }
+
+    // ---- The ed25519 success path through `verify_receipt` -------------
+    //
+    // Every test above either calls `verify_ed25519_signature` directly or
+    // takes the `RequestHashMismatch` early return in `verify_receipt`, so
+    // neither `verify_receipt`'s `to_ascii_lowercase()` on the ed25519
+    // verdict nor its `signing_algo: payload.signing_algo` line is ever
+    // executed. A mutation dropping the lowercasing, or hardcoding `Ecdsa`
+    // into the verdict, would pass every test above. The fixture below
+    // drives `verify_receipt` all the way to `Ok` to close that gap.
+    //
+    // The key is generated once, offline, and pinned as a constant --
+    // never generated at test time -- for the same reason every other fixed
+    // key in this module is a constant: a random key makes a failure
+    // unreproducible. Generated with a throwaway
+    // `Ed25519KeyPair::generate_pkcs8(&SystemRandom::new())` in a scratch
+    // test that printed the hex and was deleted; `generate_pkcs8` produces
+    // a PKCS#8 v2 document, which is what `ring::signature::Ed25519KeyPair
+    // ::from_pkcs8` here requires.
+
+    /// A PKCS#8 v2 Ed25519 private key, generated once and pinned. This
+    /// project never held the real NEAR AI signing key; this is a key of our
+    /// own, used only to reach the success path with a receipt this test can
+    /// construct end to end.
+    const TEST_ED25519_PKCS8_HEX: &str = "3051020101300506032b6570042204202764e45a50c3d8868fc19eb9399ed8e502345ee694068543a055e4043c80061681210080b7c045fef35b623c5fad76f4b0aa2cd4c29f10a7863cdbf67d802e821b783d";
+
+    /// A self-signed ed25519 receipt: real signature, over real bodies,
+    /// reaching `Ok` through `verify_receipt`.
+    ///
+    /// The public key is embedded in `signing_address` UPPERCASE. `hex::encode`
+    /// already emits lowercase, so a lowercase key would make
+    /// `to_ascii_lowercase()` in `verify_receipt` a silent no-op and a
+    /// mutation that dropped it would still pass. Uppercase forces the
+    /// lowercasing to do visible work.
+    fn self_signed_ed25519_receipt(request_body: &[u8], response_body: &[u8]) -> ReceiptPayload {
+        use ring::signature::{Ed25519KeyPair, KeyPair};
+        let key_pair =
+            Ed25519KeyPair::from_pkcs8(&hex::decode(TEST_ED25519_PKCS8_HEX).unwrap()).unwrap();
+        let text = format!(
+            "{}:{}",
+            hex::encode(Sha256::digest(request_body)),
+            hex::encode(Sha256::digest(response_body))
+        );
+        // Load-bearing: signed over the raw text, never the EIP-191-prefixed
+        // form. Prefixing here would be exactly how the deleted
+        // `the_ed25519_path_does_not_apply_the_eip191_prefix` test became
+        // vacuous -- a future maintainer "fixing" a red test by signing the
+        // prefixed form instead of fixing the verifier. This fixture and the
+        // live-receipt test above are the two guards against that.
+        let signature = key_pair.sign(text.as_bytes());
+        ReceiptPayload {
+            text,
+            signature: hex::encode(signature.as_ref()),
+            signing_address: hex::encode(key_pair.public_key().as_ref()).to_ascii_uppercase(),
+            signing_algo: ReceiptAlgo::Ed25519,
+        }
+    }
+
+    /// The ed25519 success path through `verify_receipt`, not just
+    /// `verify_ed25519_signature`: the verdict's address is lowercased and
+    /// its `signing_algo` is the one the payload carried, not a hardcoded
+    /// `Ecdsa`. Bodies are chosen so a re-serialiser would change them --
+    /// non-alphabetical keys, odd whitespace, a non-ASCII character -- the
+    /// same fixture discipline the rest of this module uses.
+    #[test]
+    fn a_self_signed_ed25519_receipt_verifies_to_a_lowercase_verdict() {
+        let request = r#"{"messages":[{"content":"café  ","role":"user"}],"model":"m"}"#.as_bytes();
+        let response =
+            r#"{"id":"c1","choices":[{"message":{"role":"assistant",  "content":"oké"}}]}"#
+                .as_bytes();
+        let payload = self_signed_ed25519_receipt(request, response);
+        // Measured, not assumed: the fixture really does carry an uppercase
+        // key, so the assertion below is exercising the lowercasing rather
+        // than comparing a lowercase value against itself.
+        assert!(payload.signing_address.contains(char::is_uppercase));
+
+        let verdict = verify_receipt(&payload, request, response, "unused")
+            .expect("a validly self-signed receipt over its own bodies verifies");
+        assert_eq!(
+            verdict.signing_address,
+            payload.signing_address.to_lowercase()
+        );
+        assert_eq!(verdict.signing_algo, ReceiptAlgo::Ed25519);
+    }
+
+    /// A corrupted signature is refused as an invalid signature, not as a
+    /// digest mismatch, even when the bodies handed in *also* don't match --
+    /// the only way that specific error comes out is if the signature check
+    /// runs before the digest checks. This is the ordering guard that
+    /// `an_ed25519_receipt_over_other_bytes_is_refused` does not provide,
+    /// because that test's signature is valid and both orderings would
+    /// report the same digest mismatch.
+    #[test]
+    fn a_bad_ed25519_signature_is_refused_before_the_digests_are_checked() {
+        let request = b"the real request";
+        let response = b"the real response";
+        let mut payload = self_signed_ed25519_receipt(request, response);
+        let mut sig = hex::decode(&payload.signature).unwrap();
+        sig[0] ^= 0x01;
+        payload.signature = hex::encode(sig);
+
+        let err = verify_receipt(&payload, b"not the request", b"not the response", "unused")
+            .expect_err("neither the signature nor the bodies are right");
+        assert_eq!(err, ReceiptError::Ed25519SignatureInvalid);
     }
 }
