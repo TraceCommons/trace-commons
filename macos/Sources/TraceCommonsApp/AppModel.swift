@@ -777,6 +777,22 @@ final class AppModel: ObservableObject {
     ///
     /// The probes run only from here -- a contributor pressing the switch or
     /// the button. Nothing on the submission path calls them.
+    /// Changes one source's declaration on the running daemon -- Settings'
+    /// "Watched folders", the after-first-run counterpart of the roots
+    /// screen's start-with-settings.
+    ///
+    /// Nothing is applied optimistically: the rows read the daemon's
+    /// answer, which `set_settings` returns in full, and an undecided
+    /// choice is never sent. A refusal lands in `lastActionError` like
+    /// every other settings write.
+    func setSourceRoot(_ kind: SourceKind, _ choice: SourceChoice) {
+        guard let params = choice.settingsParams(for: kind) else { return }
+        lastActionError = nil
+        perform("set_settings", work: { try $0.setSettings(params) }) { view in
+            self.publishIfChanged(\.daemonSettings, view)
+        }
+    }
+
     func applyIronWire(_ form: RoutingForm) {
         routingEvidence = nil
         routingProbeLine = nil

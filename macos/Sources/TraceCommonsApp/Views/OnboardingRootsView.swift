@@ -127,67 +127,14 @@ struct OnboardingRootsView: View {
     }
 
     private func row(for kind: SourceKind) -> some View {
-        let candidate = candidates.first { $0.source == kind }
-        return VStack(alignment: .leading, spacing: TC.Space.xs) {
-            Text(kind.displayName).font(TC.Font_.body.weight(.semibold))
-            VStack(alignment: .leading, spacing: TC.Space.s) {
-                answerLine(for: kind, candidate: candidate)
-                choiceButtons(for: kind, candidate: candidate)
-            }
-            .padding(TC.Space.m)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .tcCard()
-        }
-    }
-
-    /// What this row currently says: the discovered store and its evidence
-    /// while undecided, or the answer once one has been given.
-    @ViewBuilder
-    private func answerLine(for kind: SourceKind, candidate: SourceCandidate?) -> some View {
-        switch roots[kind] {
-        case .off:
-            Text("Not used on this machine — nothing will be watched")
-                .font(TC.Font_.body)
-        case .watch(let path):
-            VStack(alignment: .leading, spacing: TC.Space.xxs) {
-                Text("Watching").font(TC.Font_.body)
-                Text(path)
-                    .font(TC.Font_.ledger)
-                    .lineLimit(1)
-                    .truncationMode(.head)
-            }
-        case .undecided:
-            if let candidate {
-                VStack(alignment: .leading, spacing: TC.Space.xxs) {
-                    Text(candidate.path)
-                        .font(TC.Font_.ledger)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.head)
-                    Text(candidate.evidence(now: Date()))
-                        .font(TC.Font_.body)
-                        .foregroundStyle(.secondary)
-                }
-            } else {
-                Text("No standard location found — choose a folder, or decline")
-                    .font(TC.Font_.body)
-                    .foregroundStyle(.secondary)
-            }
-        }
-    }
-
-    @ViewBuilder
-    private func choiceButtons(for kind: SourceKind, candidate: SourceCandidate?) -> some View {
-        HStack(spacing: TC.Space.m) {
-            if let candidate, candidate.exists {
-                Button("Watch this folder") { roots.watch(candidate) }
-                    .disabled(roots[kind] == .watch(path: candidate.path))
-            }
-            Button("Choose a different folder…") { choose(for: kind) }
-            Button("I don't use \(kind.displayName)") { roots[kind] = .off }
-                .disabled(roots[kind] == .off)
-            Spacer(minLength: 0)
-        }
+        SourceRootRow(
+            kind: kind,
+            candidate: candidates.first { $0.source == kind },
+            choice: roots[kind],
+            onWatchCandidate: { roots.watch($0) },
+            onChoose: { path in roots[kind] = .watch(path: path) },
+            onDecline: { roots[kind] = .off }
+        )
     }
 
     private var actions: some View {
@@ -207,16 +154,6 @@ struct OnboardingRootsView: View {
     private func discover() {
         guard candidates.isEmpty, let json = TCDiscovery.sourcesJSON() else { return }
         candidates = (try? SourceCandidate.decodeList(from: json)) ?? []
-    }
-
-    private func choose(for kind: SourceKind) {
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.allowsMultipleSelection = false
-        panel.canCreateDirectories = false
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        roots[kind] = .watch(path: url.path)
     }
 
     private func start() {

@@ -96,6 +96,13 @@ struct SettingsContent: View {
     @State private var consentSaveError: String?
     @State private var consentBusy = false
 
+    /// What discovery found for the "Watched folders" rows, and the paths
+    /// this process has declared from them. `get_settings` reports modes,
+    /// not paths, so the path a row shows is remembered here from the
+    /// write that sent it and is otherwise not known.
+    @State private var sourceCandidates: [SourceCandidate] = []
+    @State private var chosenPaths: [SourceKind: String] = [:]
+
     /// Spec §5.4: the Settings content column is `max-width:520px` ("prose
     /// column, kept narrow on purpose"), narrower than the 660 that
     /// `TC.Measure.prose` carries for onboarding. There is no token for it,
@@ -112,6 +119,7 @@ struct SettingsContent: View {
             consent
             publicProfile
             watching
+            watchedFolders
             routing
             witness
             projects
@@ -738,6 +746,84 @@ struct SettingsContent: View {
                 Text("Paused. Nothing is being queued or sent.").font(TC.Font_.body)
             }
         }
+    }
+
+    // MARK: - Watched folders
+
+    /// The roots screen's rows, after first run.
+    ///
+    /// Each answer writes straight through `set_settings` -- there is no
+    /// Save, because each row is one declaration and the daemon applies it
+    /// in the same call. What a row shows is the MODE the daemon reports
+    /// (`*_source_mode`), which is all `get_settings` says: it never
+    /// reports the path, so a folder declared before this window opened
+    /// shows as "Watching" with no path, and one chosen here shows the path
+    /// this process just sent. The same explanation the roots screen gives
+    /// applies, and is given, because a blank Claude Code or Codex row still
+    /// means the standard location.
+    private var watchedFolders: some View {
+        VStack(alignment: .leading, spacing: TC.Space.sm) {
+            TCSectionHeader(title: "Watched folders")
+            Text("""
+            Which session folders this app reads. Declining is an answer; for \
+            Claude Code and Codex a row left blank means the standard location.
+            """)
+            .font(TC.Font_.meta)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+            if let error = model.lastActionError, error.hasPrefix("set_settings") {
+                Text("Couldn't change that folder -- the watcher refused it. Nothing was changed.")
+                    .font(TC.Font_.caption)
+                    .foregroundStyle(TC.coralText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            ForEach(OnboardingRootsView.offeredKinds, id: \.self) { kind in
+                SourceRootRow(
+                    kind: kind,
+                    candidate: sourceCandidates.first { $0.source == kind },
+                    choice: sourceChoice(for: kind),
+                    onWatchCandidate: { candidate in
+                        chosenPaths[kind] = candidate.path
+                        model.setSourceRoot(kind, .watch(path: candidate.path))
+                    },
+                    onChoose: { path in
+                        chosenPaths[kind] = path
+                        model.setSourceRoot(kind, .watch(path: path))
+                    },
+                    onDecline: {
+                        chosenPaths[kind] = nil
+                        model.setSourceRoot(kind, .off)
+                    }
+                )
+            }
+        }
+        .onAppear(perform: discoverSources)
+    }
+
+    /// The daemon's answer for one source, as the row shows it. The path
+    /// is the one this process sent, if it sent one; otherwise the daemon
+    /// only says that a folder is watched.
+    private func sourceChoice(for kind: SourceKind) -> SourceChoice {
+        guard let modes = model.daemonSettings?.routingSourceModes else { return .undecided }
+        let mode: String
+        switch kind {
+        case .claudeCode: mode = modes.claude
+        case .codex: mode = modes.codex
+        case .geminiCli: mode = modes.gemini
+        case .cline: mode = modes.cline
+        }
+        switch mode {
+        case "watch": return .watch(path: chosenPaths[kind] ?? "")
+        case "off": return .off
+        default: return .undecided
+        }
+    }
+
+    /// Best-effort, exactly as on the roots screen: a row can always be
+    /// answered by hand.
+    private func discoverSources() {
+        guard sourceCandidates.isEmpty, let json = TCDiscovery.sourcesJSON() else { return }
+        sourceCandidates = (try? SourceCandidate.decodeList(from: json)) ?? []
     }
 
     // MARK: - Tools: the local proxy

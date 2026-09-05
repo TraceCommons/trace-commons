@@ -43,6 +43,29 @@ public enum SourceChoice: Equatable, Sendable {
             return path.isEmpty ? nil : ["mode": "watch", "path": path]
         }
     }
+
+    /// This one answer as a `set_settings` object -- the form Settings
+    /// writes when a contributor changes a folder after first run, one
+    /// row at a time against a daemon that is already running. Nil while
+    /// the row is unfinished, for the same reason `declaration` is.
+    public func settingsParams(for kind: SourceKind) -> [String: Any]? {
+        guard let declaration else { return nil }
+        return [kind.settingsKey: declaration]
+    }
+}
+
+extension SourceKind {
+    /// The `set_settings` / `daemon-settings.json` key that declares this
+    /// source. Exhaustive so a fifth adapter cannot be watched under a
+    /// key nobody spelled.
+    public var settingsKey: String {
+        switch self {
+        case .claudeCode: return "claude_source"
+        case .codex: return "codex_source"
+        case .geminiCli: return "gemini_source"
+        case .cline: return "cline_source"
+        }
+    }
 }
 
 /// The two answers the roots screen collects, and the settings object that
@@ -135,18 +158,18 @@ public struct SessionRoots: Equatable, Sendable {
         else { return nil }
 
         var object: [String: Any] = [
-            "claude_source": claudeDeclaration,
-            "codex_source": codexDeclaration,
+            SourceKind.claudeCode.settingsKey: claudeDeclaration,
+            SourceKind.codex.settingsKey: codexDeclaration,
         ]
         // Emitted only when answered. Absent is the tri-state's "never asked",
         // which the contributor library treats as "construct no adapter";
         // sending `off` for an unanswered row would record a refusal nobody
         // made.
         if let geminiDeclaration = gemini.declaration {
-            object["gemini_source"] = geminiDeclaration
+            object[SourceKind.geminiCli.settingsKey] = geminiDeclaration
         }
         if let clineDeclaration = cline.declaration {
-            object["cline_source"] = clineDeclaration
+            object[SourceKind.cline.settingsKey] = clineDeclaration
         }
         guard let data = try? JSONSerialization.data(withJSONObject: object),
             let json = String(data: data, encoding: .utf8)
