@@ -131,3 +131,47 @@ measurement verification and a funded provider inference have not been exercised
 as one production flow. Provider credit redemption remains unavailable; no
 production configuration, funds, or services were changed. Full WinUI compiler
 and render checks require a Windows runner.
+
+### Final integration gates
+
+- Contributor library: 1,293 passed, one ignored (before the existing-history
+  profile and receipt-endpoint followups); invited enroll/claim/submit regression
+  passed. Both contributor and FFI all-target Clippy passed with warnings denied.
+- Native FFI rebuilt; real-daemon body consent round-trip passed.
+- macOS: all 501 tests passed against the rebuilt FFI. AppKit snapshots show real
+  controls for wallet signup and preparation; all four snapshots were inspected.
+- Windows: 39 integrated witness/onboarding/wallet/preparation interop tests passed.
+  This does not substitute for WinUI compilation on Windows.
+- GTK: 11 wallet/preparation tests, all-target Clippy, and actual Linux/Xvfb
+  wallet render passed. Shared disclosure strings remain identical across shells.
+- Server: warnings-denied binary check, all test targets compiled, NEAR scorer
+  feature binary check, license-boundary 4/4, and all-target Clippy passed.
+- Integrated actual PostgreSQL challenge/witness/ingest/retry test passed.
+
+The test harnesses require local socket access. Sandbox-denied binds were rerun
+with that access and passed; they were not counted as product failures or passes.
+
+### Live pilot handoff
+
+Required inputs are an HTTPS test Commons deployment, its validated witness and
+issuer configuration, explicit admission limits/runtime database grants, a
+matching IronWire build, and an existing funded NEAR AI test configuration.
+Use configuration paths or names; never paste credentials into the test record.
+
+1. Verify public capability readiness and perform a real wallet/device ceremony.
+   Confirm ordinary unknown-account login still refuses implicit provisioning.
+2. Select a contribution purpose. Review existing synthetic history through the
+   witness and submit it within the configured allowance; repeat beyond the
+   allowance and verify refusal without a new qualifying attestation.
+3. Explicitly configure the funded route, local capture, receipt endpoint, and
+   separate body-export consent. Prepare one selected session, continue its task,
+   then review and approve the exact witnessed artifact.
+4. Confirm durable accepted/processing state from the service, account/global
+   budget accounting, and retry idempotency. Verify stored redacted artifacts
+   contain neither raw request nor raw response bodies. Record hashes and status
+   evidence only, alongside the tested build versions and witness measurement.
+
+A live provider charge is confined to the authorized funded test configuration.
+This record contains no such live execution yet; successful local fixtures are
+not a substitute for it. Credit redemption needs its own verified provider
+contract before any earned-credit-to-inference loop can be offered.
