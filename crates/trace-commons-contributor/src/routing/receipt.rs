@@ -321,6 +321,27 @@ fn fresh_nonce_hex() -> Result<String, ReceiptFetchError> {
 /// unattestable, which is a limit of the ledger's shape rather than a choice
 /// made here.
 ///
+/// The parse-and-compare half of the attestation check, with no network in
+/// it, so it can be tested without a stub. [`receipt_for_attested_call`]
+/// does the fetch and hands the body here.
+///
+/// # Errors
+///
+/// [`ReceiptFetchError::SignerNotAttested`] when the report cannot be
+/// parsed, is for a different nonce, or names a different signer.
+pub fn signer_matches_report(
+    signer: &str,
+    report_json: &str,
+    nonce: &str,
+) -> Result<(), ReceiptFetchError> {
+    let attested = super::attestation_report::gateway_ed25519_key(report_json, nonce)
+        .map_err(|_| ReceiptFetchError::SignerNotAttested)?;
+    if !super::attestation_report::signer_is_attested(signer, &attested) {
+        return Err(ReceiptFetchError::SignerNotAttested);
+    }
+    Ok(())
+}
+
 /// `check_attestation` additionally fetches a freshly-nonced attestation
 /// report and refuses the receipt if its signer is not the gateway key that
 /// report binds. Off by default at the config level -- see
@@ -357,11 +378,7 @@ pub async fn receipt_for_attested_call(
     if check_attestation {
         let nonce = fresh_nonce_hex()?;
         let report = fetch_attestation_report(&client, allowlist, endpoint, model, &nonce).await?;
-        let attested = super::attestation_report::gateway_ed25519_key(&report, &nonce)
-            .map_err(|_| ReceiptFetchError::SignerNotAttested)?;
-        if !super::attestation_report::signer_is_attested(&payload.signing_address, &attested) {
-            return Err(ReceiptFetchError::SignerNotAttested);
-        }
+        signer_matches_report(&payload.signing_address, &report, &nonce)?;
     }
 
     Ok(payload)
@@ -614,5 +631,62 @@ mod tests {
                 "{body} must not parse as a receipt"
             );
         }
+    }
+
+    /// The nonce and key this module's attestation fixtures use throughout
+    /// -- the live values captured in `attestation_report`'s own tests.
+    const ATTESTATION_NONCE: &str =
+        "482934fb749d13aa81b2e543a253cf4d8cc847dab55a8d49989effd5023ddb5d";
+    const ATTESTATION_KEY: &str =
+        "cb6fc58f6bd685919fa42fb54d3fcfe03222e324bdda91f0bac6d5c73dc4f1c6";
+
+    fn attestation_report(nonce: &str) -> String {
+        format!(
+            r#"{{"gateway_attestation":{{"signing_address":"{ATTESTATION_KEY}","signing_algo":"ed25519","request_nonce":"{nonce}","report_data":"{ATTESTATION_KEY}{nonce}"}}}}"#
+        )
+    }
+
+    /// The composed check `receipt_for_attested_call` runs when the
+    /// attestation gate is on, tested without a network: a signer that
+    /// matches the report's attested key over the nonce it was fetched for.
+    #[test]
+    fn a_matching_signer_over_a_good_report_is_accepted() {
+        assert!(
+            signer_matches_report(
+                ATTESTATION_KEY,
+                &attestation_report(ATTESTATION_NONCE),
+                ATTESTATION_NONCE,
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_different_signer_over_a_good_report_is_refused() {
+        assert_eq!(
+            signer_matches_report(
+                "0000000000000000000000000000000000000000000000000000000000000000",
+                &attestation_report(ATTESTATION_NONCE),
+                ATTESTATION_NONCE,
+            )
+            .unwrap_err(),
+            ReceiptFetchError::SignerNotAttested
+        );
+    }
+
+    /// A good signer over a report issued for a *different* nonce is still
+    /// refused -- the report was not attested for this fetch.
+    #[test]
+    fn a_good_signer_over_a_report_for_a_different_nonce_is_refused() {
+        let other_nonce = "0".repeat(64);
+        assert_eq!(
+            signer_matches_report(
+                ATTESTATION_KEY,
+                &attestation_report(&other_nonce),
+                ATTESTATION_NONCE,
+            )
+            .unwrap_err(),
+            ReceiptFetchError::SignerNotAttested
+        );
     }
 }

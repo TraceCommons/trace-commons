@@ -27,6 +27,8 @@ pub enum AttestationReportError {
     NonceMismatch,
     #[error("attestation report_data does not commit to the listed key and nonce")]
     ReportDataMismatch,
+    #[error("attestation report gateway key is not 32 bytes of hex")]
+    KeyMalformed,
     #[error("attestation report base URL is not a valid https URL")]
     UrlInvalid,
 }
@@ -86,6 +88,13 @@ pub fn gateway_ed25519_key(
         return Err(AttestationReportError::NotEd25519);
     }
     let key = field("signing_address")?.to_ascii_lowercase();
+    // A key this short (or empty) could `strip_prefix` trivially against any
+    // `report_data`, making the check below vacuous. Refused here so
+    // `gateway_ed25519_key` can never return a string that is not actually a
+    // 32-byte hex key -- callers should not have to re-check that.
+    if key.len() != 64 || !key.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(AttestationReportError::KeyMalformed);
+    }
     // `request_nonce` is the provider's own label for the value; required for
     // shape, but the binding this function trusts is `report_data` itself,
     // checked below against the key it names and the nonce we asked for.
@@ -126,6 +135,15 @@ mod tests {
     const NONCE: &str = "482934fb749d13aa81b2e543a253cf4d8cc847dab55a8d49989effd5023ddb5d";
     const KEY: &str = "cb6fc58f6bd685919fa42fb54d3fcfe03222e324bdda91f0bac6d5c73dc4f1c6";
 
+    /// The `gateway_attestation` subtree of a report NEAR AI actually
+    /// returned (2026-09-05), reduced to the fields this parser reads. Every
+    /// other fixture in this module is authored beside the code; this one
+    /// pins that the real response nests these fields the way the parser
+    /// expects and that `report_data` really is `signing_address ||
+    /// request_nonce`. `NONCE` and `KEY` above are the live values, so this
+    /// composes with them directly.
+    const LIVE_REPORT: &str = r#"{"gateway_attestation":{"signing_address":"cb6fc58f6bd685919fa42fb54d3fcfe03222e324bdda91f0bac6d5c73dc4f1c6","signing_algo":"ed25519","request_nonce":"482934fb749d13aa81b2e543a253cf4d8cc847dab55a8d49989effd5023ddb5d","report_data":"cb6fc58f6bd685919fa42fb54d3fcfe03222e324bdda91f0bac6d5c73dc4f1c6482934fb749d13aa81b2e543a253cf4d8cc847dab55a8d49989effd5023ddb5d"},"model_attestations":[],"ohttp_attestation":{}}"#;
+
     fn report(nonce_in_report_data: &str) -> String {
         format!(
             r#"{{"gateway_attestation":{{"signing_address":"{KEY}","signing_algo":"ed25519","request_nonce":"{NONCE}","report_data":"{KEY}{nonce_in_report_data}"}}}}"#
@@ -161,6 +179,27 @@ mod tests {
             gateway_ed25519_key(&body, NONCE).unwrap_err(),
             AttestationReportError::ReportDataMismatch
         );
+    }
+
+    /// `strip_prefix` on a too-short (or empty) key would trivially succeed
+    /// against any `report_data`, so this checks the key's shape before the
+    /// split ever happens. Each case's `report_data` is set to exactly the
+    /// key followed by the real nonce -- the shape that would otherwise
+    /// pass -- so the test would pass the pre-guard code and fails only on
+    /// this check.
+    #[test]
+    fn a_report_whose_key_is_not_32_bytes_is_refused() {
+        let cases = ["", "cb", &"g".repeat(64)];
+        for bad_key in cases {
+            let body = format!(
+                r#"{{"gateway_attestation":{{"signing_address":"{bad_key}","signing_algo":"ed25519","request_nonce":"{NONCE}","report_data":"{bad_key}{NONCE}"}}}}"#
+            );
+            assert_eq!(
+                gateway_ed25519_key(&body, NONCE).unwrap_err(),
+                AttestationReportError::KeyMalformed,
+                "key {bad_key:?} should be refused as malformed"
+            );
+        }
     }
 
     #[test]
@@ -212,5 +251,15 @@ mod tests {
             !signer_is_attested(KEY, ""),
             "an empty attested key matches nothing"
         );
+    }
+
+    /// The gateway_attestation subtree of a report NEAR AI actually returned,
+    /// reduced to the fields this parser reads. Every other fixture here is
+    /// authored beside the code; this one pins that the real response nests
+    /// these fields the way the parser expects and that report_data really is
+    /// signing_address || request_nonce. The nonce is the one that fetch sent.
+    #[test]
+    fn the_live_report_parses_to_the_attested_gateway_key() {
+        assert_eq!(gateway_ed25519_key(LIVE_REPORT, NONCE).unwrap(), KEY);
     }
 }
