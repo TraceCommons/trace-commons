@@ -747,20 +747,22 @@ async fn an_ed25519_receipt_is_accepted_on_the_wire_and_reaches_the_verifier() {
 }
 
 /// The client's own serialiser now emits `signing_algo` (this is the change
-/// that lands it), so this is the true cross-implementation check that the
-/// client's `"signing_algo"` key and the server's field agree byte-for-byte
-/// -- built with `witness_request_body` from the contributor crate, the same
-/// way `a_receipt_this_client_offers_is_one_the_witness_verifies` is, rather
-/// than spliced raw JSON as the tests above still are.
+/// that lands it), so this proves the client's `"signing_algo"` key and the
+/// server's field agree byte-for-byte, and that `"ed25519"` is an accepted
+/// value -- built with `witness_request_body` from the contributor crate,
+/// the same way `a_receipt_this_client_offers_is_one_the_witness_verifies`
+/// is, rather than spliced raw JSON as the tests above still are.
 ///
-/// The witness deliberately folds every receipt failure into one wire label
-/// (`witness_inference_receipt_unverified`), so this proves only that the
-/// FIELD crossed correctly, not which verification step failed: the receipt
-/// below is over bytes that are not this call's, so it is refused at the
-/// digest check (signature checked as ed25519) rather than being rejected as
-/// malformed input.
+/// It does NOT prove the receipt was verified *as* ed25519: the witness
+/// deliberately folds every receipt failure into one wire label
+/// (`witness_inference_receipt_unverified`), so a receipt misread as ECDSA
+/// and one correctly read as ed25519 would both fail with the same 403 here.
+/// That the value actually becomes `ReceiptAlgo::Ed25519` and is dispatched
+/// on as such is proven at the seam that can see it -- the server's own unit
+/// test, `http::tests::the_wire_signing_algo_becomes_the_payload_discriminator`
+/// -- not here.
 #[tokio::test]
-async fn an_ed25519_receipt_this_client_serialises_is_read_as_ed25519_by_the_witness() {
+async fn an_ed25519_receipt_this_client_serialises_crosses_the_wire_intact() {
     let (service, _signer) = requiring_service();
     let (call, _dir) = attestable_call();
     let receipt = ReceiptPayload {

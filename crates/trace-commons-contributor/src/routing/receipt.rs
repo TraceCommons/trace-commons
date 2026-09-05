@@ -136,12 +136,15 @@ pub fn parse_receipt_response(body: &str) -> Result<ReceiptPayload, ReceiptFetch
             .map(str::to_string)
             .ok_or(ReceiptFetchError::ResponseMalformed)
     };
-    let signing_algo = match receipt
-        .get("signing_algo")
-        .and_then(serde_json::Value::as_str)
-    {
+    let signing_algo = match receipt.get("signing_algo") {
         None => ReceiptAlgo::Ecdsa,
-        Some(s) => ReceiptAlgo::from_wire(s).ok_or(ReceiptFetchError::ResponseMalformed)?,
+        Some(serde_json::Value::String(s)) => {
+            ReceiptAlgo::from_wire(s).ok_or(ReceiptFetchError::ResponseMalformed)?
+        }
+        // Present but not a string: the provider said something this
+        // client cannot read. That is a malformed response, not an absent
+        // field, and it must not be read as the ECDSA default.
+        Some(_) => return Err(ReceiptFetchError::ResponseMalformed),
     };
     Ok(ReceiptPayload {
         text: field("text")?,
@@ -448,6 +451,25 @@ mod tests {
             parse_receipt_response(body).unwrap_err(),
             ReceiptFetchError::ResponseMalformed
         );
+    }
+
+    /// A present-but-unreadable `signing_algo` is malformed, not absent. The
+    /// absent arm is for the pre-field response shape only; a provider that
+    /// sends the field as a number, null, or a list has said something this
+    /// client cannot read, and reading it as ECDSA would be a guess.
+    #[test]
+    fn a_non_string_signing_algo_is_malformed_not_absent() {
+        for body in [
+            r#"{"text":"a:b","signature":"0xcc","signing_address":"0xdd","signing_algo":7}"#,
+            r#"{"text":"a:b","signature":"0xcc","signing_address":"0xdd","signing_algo":null}"#,
+            r#"{"text":"a:b","signature":"0xcc","signing_address":"0xdd","signing_algo":["ed25519"]}"#,
+        ] {
+            assert_eq!(
+                parse_receipt_response(body).unwrap_err(),
+                ReceiptFetchError::ResponseMalformed,
+                "{body}"
+            );
+        }
     }
 
     /// The identifier comes off another process's database. A `..` or a `?`
