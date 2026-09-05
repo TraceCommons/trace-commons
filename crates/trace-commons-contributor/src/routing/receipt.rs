@@ -1,8 +1,10 @@
 //! Fetching the provider's receipt for one inference call.
 //!
-//! `GET {base}/signature/{chat_id}?model={model}&signing_algo=ecdsa` returns
+//! `GET {base}/signature/{chat_id}?model={model}&signing_algo=ed25519` returns
 //! the enclave's EIP-191 signature over `<requestHash>:<responseHash>`. This
-//! module is the only thing in the tree that calls it.
+//! module is the only thing in the tree that calls it. Ed25519, because that
+//! signer is the one bound into the gateway's attestation quote; the ECDSA
+//! signer appears in no report.
 //!
 //! # Why the contributor fetches it
 //!
@@ -134,11 +136,18 @@ pub fn parse_receipt_response(body: &str) -> Result<ReceiptPayload, ReceiptFetch
             .map(str::to_string)
             .ok_or(ReceiptFetchError::ResponseMalformed)
     };
+    let signing_algo = match receipt
+        .get("signing_algo")
+        .and_then(serde_json::Value::as_str)
+    {
+        None => ReceiptAlgo::Ecdsa,
+        Some(s) => ReceiptAlgo::from_wire(s).ok_or(ReceiptFetchError::ResponseMalformed)?,
+    };
     Ok(ReceiptPayload {
         text: field("text")?,
         signature: field("signature")?,
         signing_address: field("signing_address")?,
-        signing_algo: ReceiptAlgo::Ecdsa,
+        signing_algo,
     })
 }
 
@@ -174,11 +183,12 @@ pub fn receipt_url(base: &str, chat_id: &str, model: &str) -> Result<url::Url, R
         .push(chat_id);
     url.query_pairs_mut()
         .append_pair("model", model)
-        // ECDSA over secp256k1, which is what `verify_receipt` recovers from.
-        // Pinned rather than configurable: a receipt in another algorithm is
-        // one this client cannot check, and asking for one would produce a
-        // signature that fails verification for a reason nobody could read.
-        .append_pair("signing_algo", "ecdsa");
+        // The signer bound into the gateway's TDX quote. Pinned rather than
+        // configurable: a receipt in another algorithm is one this client
+        // cannot check against the attestation, and asking for one would
+        // produce a signature that fails verification for a reason nobody
+        // could read.
+        .append_pair("signing_algo", ReceiptAlgo::Ed25519.as_wire());
     Ok(url)
 }
 
@@ -384,7 +394,59 @@ mod tests {
         assert_eq!(
             url.as_str(),
             "https://qwen3-6-27b.completions.near.ai/v1/signature/chatcmpl-abc123\
-             ?model=Qwen%2FQwen3.6-27B-FP8&signing_algo=ecdsa"
+             ?model=Qwen%2FQwen3.6-27B-FP8&signing_algo=ed25519"
+        );
+    }
+
+    /// The fetch asks for the scheme whose signer is bound into the gateway's
+    /// TDX quote. The ECDSA signer appears in no attestation report.
+    #[test]
+    fn the_receipt_url_asks_for_ed25519() {
+        let url = receipt_url(
+            "https://cloud-api.near.ai/v1",
+            "ee64b242d74f4c7eb59b05b046f33f7b",
+            "Qwen/Qwen3.6-35B-A3B-FP8",
+        )
+        .unwrap();
+        assert!(
+            url.query().unwrap().contains("signing_algo=ed25519"),
+            "{url}"
+        );
+        assert!(!url.query().unwrap().contains("ecdsa"), "{url}");
+    }
+
+    /// The response's own `signing_algo` is what the payload records, not
+    /// what was asked for. A provider answering a different scheme than
+    /// requested is a fact to carry, not to overwrite.
+    #[test]
+    fn the_parsed_receipt_carries_the_scheme_the_provider_answered() {
+        let body = r#"{"text":"81e9887990592366b55ef758cad3b3a097e890871bedc023a51b2828ed237cc3:6f7091a0fbe5917a631c70805833760fe63ceea3493466e3230bd830816a3f2e","signature":"838765bd299514ec80084d50b7cef9357172ce2923dd35aa837beed0c6af04e684673e61db6c0d3ae8d69476b680d94c8e1e36e05277a1b103c27a12f563eb0c","signing_address":"cb6fc58f6bd685919fa42fb54d3fcfe03222e324bdda91f0bac6d5c73dc4f1c6","signing_algo":"ed25519","signature_kind":"gateway"}"#;
+        let payload = parse_receipt_response(body).unwrap();
+        assert_eq!(payload.signing_algo, ReceiptAlgo::Ed25519);
+        assert_eq!(
+            payload.signing_address,
+            "cb6fc58f6bd685919fa42fb54d3fcfe03222e324bdda91f0bac6d5c73dc4f1c6"
+        );
+    }
+
+    /// A response with no `signing_algo` is ECDSA -- the pre-field form.
+    #[test]
+    fn a_response_without_signing_algo_is_ecdsa() {
+        let body = r#"{"text":"a:b","signature":"0xcc","signing_address":"0xdd"}"#;
+        assert_eq!(
+            parse_receipt_response(body).unwrap().signing_algo,
+            ReceiptAlgo::Ecdsa
+        );
+    }
+
+    /// An unrecognised `signing_algo` is a malformed response, not a guess.
+    #[test]
+    fn an_unknown_signing_algo_in_the_response_is_malformed() {
+        let body =
+            r#"{"text":"a:b","signature":"0xcc","signing_address":"0xdd","signing_algo":"rsa"}"#;
+        assert_eq!(
+            parse_receipt_response(body).unwrap_err(),
+            ReceiptFetchError::ResponseMalformed
         );
     }
 

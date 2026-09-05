@@ -353,6 +353,7 @@ pub fn witness_request_body(
                 "text": receipt.text,
                 "signature": receipt.signature,
                 "signing_address": receipt.signing_address,
+                "signing_algo": receipt.signing_algo.as_wire(),
             }),
         );
     }
@@ -1489,6 +1490,24 @@ mod tests {
             signing_address: "0xdddd444444444444444444444444444444444444".to_string(),
             signing_algo: ReceiptAlgo::Ecdsa,
         }
+    }
+
+    /// The scheme travels with the receipt. The witness reads
+    /// `signing_algo` and dispatches on it; a receipt sent without it is read
+    /// as ECDSA, so an ed25519 receipt sent bare would be refused as a
+    /// malformed 20-byte address.
+    #[test]
+    fn the_offered_receipt_carries_its_scheme_to_the_witness() {
+        let receipt = ReceiptPayload {
+            text: "aaaa1111:bbbb2222".to_string(),
+            signature: "cccc3333".to_string(),
+            signing_address: "dddd4444".to_string(),
+            signing_algo: ReceiptAlgo::Ed25519,
+        };
+        let body = witness_request_body(&raw_with_secret(), &granted(), Some(&receipt))
+            .expect("the fixture contribution serialises");
+        let document: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(document["inference_receipt"]["signing_algo"], "ed25519");
     }
 
     /// The receipt reaches the witness, in the field the witness reads, with

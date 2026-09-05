@@ -745,3 +745,38 @@ async fn an_ed25519_receipt_is_accepted_on_the_wire_and_reaches_the_verifier() {
     assert_eq!(status, StatusCode::FORBIDDEN);
     assert_eq!(label, "witness_inference_receipt_unverified");
 }
+
+/// The client's own serialiser now emits `signing_algo` (this is the change
+/// that lands it), so this is the true cross-implementation check that the
+/// client's `"signing_algo"` key and the server's field agree byte-for-byte
+/// -- built with `witness_request_body` from the contributor crate, the same
+/// way `a_receipt_this_client_offers_is_one_the_witness_verifies` is, rather
+/// than spliced raw JSON as the tests above still are.
+///
+/// The witness deliberately folds every receipt failure into one wire label
+/// (`witness_inference_receipt_unverified`), so this proves only that the
+/// FIELD crossed correctly, not which verification step failed: the receipt
+/// below is over bytes that are not this call's, so it is refused at the
+/// digest check (signature checked as ed25519) rather than being rejected as
+/// malformed input.
+#[tokio::test]
+async fn an_ed25519_receipt_this_client_serialises_is_read_as_ed25519_by_the_witness() {
+    let (service, _signer) = requiring_service();
+    let (call, _dir) = attestable_call();
+    let receipt = ReceiptPayload {
+        text: "81e9887990592366b55ef758cad3b3a097e890871bedc023a51b2828ed237cc3:\
+               6f7091a0fbe5917a631c70805833760fe63ceea3493466e3230bd830816a3f2e"
+            .to_string(),
+        signature: "838765bd299514ec80084d50b7cef9357172ce2923dd35aa837beed0c6af04e\
+                    684673e61db6c0d3ae8d69476b680d94c8e1e36e05277a1b103c27a12f563eb0c"
+            .to_string(),
+        signing_address: "cb6fc58f6bd685919fa42fb54d3fcfe03222e324bdda91f0bac6d5c73dc4f1c6"
+            .to_string(),
+        signing_algo: ReceiptAlgo::Ed25519,
+    };
+
+    let (status, label) = post_witness(service, client_request_body(&call, Some(receipt))).await;
+
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(label, "witness_inference_receipt_unverified");
+}
