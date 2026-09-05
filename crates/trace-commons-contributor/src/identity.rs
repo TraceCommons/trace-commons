@@ -324,6 +324,7 @@ mod tests {
         let device = DeviceIdentity::load_or_generate(&store).unwrap();
         let cfg = crate::config::ContributorConfig {
             inference_receipt_endpoint: None,
+            inference_receipt_check_attestation: false,
             schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
             issuer_url: "https://issuer.example".into(),
             ingest_url: "https://ingest.example".into(),

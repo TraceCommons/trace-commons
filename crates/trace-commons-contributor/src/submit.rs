@@ -537,12 +537,17 @@ impl<'a> SubmitContext<'a> {
     /// description of what happened, and the witness decides whether that is
     /// acceptable. Nothing here retries, and nothing here is logged -- the
     /// endpoint, the identifier, the model and the receipt are all caller
-    /// data.
+    /// data -- with one exception: an operator who turned on
+    /// `inference_receipt_check_attestation` needs to be able to tell "the
+    /// signer never matches" apart from an ordinary outage, since both look
+    /// identical as an unattested submission otherwise. That case gets a
+    /// fixed-label debug line and nothing else -- never the signer, the
+    /// nonce, or the report.
     async fn inference_receipt_for(
         &self,
         call: &crate::routing::attested::AttestedCall,
     ) -> Option<trace_commons_attestation::receipt::ReceiptPayload> {
-        crate::routing::receipt::receipt_for_attested_call(
+        let result = crate::routing::receipt::receipt_for_attested_call(
             // `effective_cfg`, which is `cfg` with the flag-level overrides
             // applied, so a future `--no-attest` lands in one place.
             self.effective_cfg.inference_receipt_endpoint.as_deref(),
@@ -550,9 +555,13 @@ impl<'a> SubmitContext<'a> {
             // every other outbound call in this file reads it from.
             &allowlist_for(self.cfg.allowed_hosts.as_deref()),
             call,
+            self.effective_cfg.inference_receipt_check_attestation,
         )
-        .await
-        .ok()
+        .await;
+        if let Err(crate::routing::receipt::ReceiptFetchError::SignerNotAttested) = result {
+            tracing::debug!("inference receipt omitted: receipt_signer_not_attested");
+        }
+        result.ok()
     }
 
     async fn witness_envelope(
@@ -1835,6 +1844,7 @@ mod tests {
     ) -> crate::config::ContributorConfig {
         crate::config::ContributorConfig {
             inference_receipt_endpoint: None,
+            inference_receipt_check_attestation: false,
             schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
             issuer_url: issuer.into(),
             ingest_url: ingest.into(),
@@ -1883,6 +1893,7 @@ mod tests {
         let preview_cfg = crate::commands::unenrolled_preview_config();
         let enrolled_cfg = crate::config::ContributorConfig {
             inference_receipt_endpoint: None,
+            inference_receipt_check_attestation: false,
             schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
             issuer_url: "https://issuer.example".into(),
             ingest_url: "https://ingest.example".into(),

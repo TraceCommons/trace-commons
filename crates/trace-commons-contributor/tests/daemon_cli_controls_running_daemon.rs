@@ -67,6 +67,7 @@ impl Running {
         let device = DeviceIdentity::load_or_generate(&store).unwrap();
         let cfg = trace_commons_contributor::config::ContributorConfig {
             inference_receipt_endpoint: None,
+            inference_receipt_check_attestation: false,
             schema_version: trace_commons_contributor::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION
                 .into(),
             issuer_url: "http://issuer.invalid".into(),

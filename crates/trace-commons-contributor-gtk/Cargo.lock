@@ -3448,6 +3448,7 @@ dependencies = [
  "dcap-qvl",
  "hex",
  "k256",
+ "ring",
  "serde_json",
  "sha2",
  "sha3",

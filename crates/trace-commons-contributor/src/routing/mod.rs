@@ -22,6 +22,7 @@
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
+pub mod attestation_report;
 pub mod attested;
 pub mod enriched;
 pub mod ironwire;

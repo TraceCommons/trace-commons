@@ -753,6 +753,7 @@ fn scan(hay: &str) -> Vec<(&'static str, usize)> {
 fn audit_cfg() -> ContributorConfig {
     ContributorConfig {
         inference_receipt_endpoint: None,
+        inference_receipt_check_attestation: false,
         schema_version: CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
         issuer_url: "https://issuer.tracecommons.ai".into(),
         ingest_url: "https://ingest.example".into(),

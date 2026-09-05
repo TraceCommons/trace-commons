@@ -49,7 +49,7 @@ use sha3::Keccak256;
 use tower::ServiceExt as _;
 
 use trace_commons_protocol::trace_contribution::ResidualPiiRisk;
-use trace_commons_server::near_attestation::receipt::ReceiptPayload;
+use trace_commons_server::near_attestation::receipt::{ReceiptAlgo, ReceiptPayload};
 use trace_commons_server::redaction_witness::certificate::{
     CertificateDetails, WitnessCertificate,
 };
@@ -425,6 +425,7 @@ fn receipt_over(signer: &TestSigner, request_body: &str, response_body: &str) ->
         text,
         signature,
         signing_address: signer.address(),
+        signing_algo: ReceiptAlgo::Ecdsa,
     }
 }
 
@@ -629,6 +630,154 @@ async fn a_receipt_over_other_bytes_is_refused() {
     let elsewhere = receipt_over(&signer, "some other request", "some other response");
 
     let (status, label) = post_witness(service, client_request_body(&call, Some(elsewhere))).await;
+
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(label, "witness_inference_receipt_unverified");
+}
+
+// ---------------------------------------------------------------------------
+// `signing_algo` on the wire.
+// ---------------------------------------------------------------------------
+//
+// The client's own serialiser does not emit this field yet (that lands with
+// the contributor change), so these tests craft the `inference_receipt`
+// object directly and splice it into a client-built document -- the same
+// document `client_request_body` produces for every other field, with only
+// `inference_receipt` replaced. That is what proves the *server's*
+// deserialiser, not a hand-written fixture that might only agree with itself.
+
+/// A client-built document with `inference_receipt` replaced by a raw JSON
+/// object this file controls, so a wire shape no serialiser here emits yet
+/// can still be sent to the real router.
+fn body_with_raw_receipt(
+    call: &trace_commons_contributor::routing::attested::AttestedCall,
+    receipt: serde_json::Value,
+) -> Vec<u8> {
+    let base = client_request_body(call, None);
+    let mut document: serde_json::Value =
+        serde_json::from_slice(&base).expect("the client's own document is valid JSON");
+    document["inference_receipt"] = receipt;
+    serde_json::to_vec(&document).expect("a JSON value serialises")
+}
+
+/// A client may omit `signing_algo`, and the field's absence is accepted by
+/// the deserialiser -- every receipt issued before this field existed is
+/// ECDSA, and a witness that refused an absent field would refuse every
+/// existing client. The receipt below is nonsense, so it fails verification;
+/// the point is that it fails as *unverified*, not as *malformed*, which is
+/// what proves the omission reached the verifier rather than being rejected
+/// as an unrecognised shape.
+#[tokio::test]
+async fn a_receipt_without_signing_algo_is_read_as_ecdsa() {
+    let (service, _signer) = requiring_service();
+    let (call, _dir) = attestable_call();
+    let body = body_with_raw_receipt(
+        &call,
+        serde_json::json!({
+            "text": "aaaa1111:bbbb2222",
+            "signature": "0xcccc3333",
+            "signing_address": "0xdddd444444444444444444444444444444444444"
+        }),
+    );
+
+    let (status, label) = post_witness(service, body).await;
+
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(label, "witness_inference_receipt_unverified");
+}
+
+/// An unrecognised `signing_algo` is a malformed request, never a guess.
+#[tokio::test]
+async fn an_unknown_signing_algo_is_refused_as_malformed() {
+    let (service, _signer) = requiring_service();
+    let (call, _dir) = attestable_call();
+    let body = body_with_raw_receipt(
+        &call,
+        serde_json::json!({
+            "text": "aaaa1111:bbbb2222",
+            "signature": "0xcccc3333",
+            "signing_address": "0xdddd444444444444444444444444444444444444",
+            "signing_algo": "rsa"
+        }),
+    );
+
+    let (status, label) = post_witness(service, body).await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(label, "witness_request_malformed");
+}
+
+/// A real, live-captured ed25519 receipt (from NEAR AI; Task 1 verifies its
+/// signature) is accepted on the wire and reaches the verifier, rather than
+/// being refused as an unrecognised `signing_algo` value.
+///
+/// This is a narrower claim than "the witness verified it as ed25519" --
+/// this route cannot prove that, and must not be made to: every way a
+/// receipt fails to verify is deliberately folded into one label
+/// (`witness_inference_receipt_unverified`, see `inference.rs`), on purpose,
+/// so an unauthenticated caller cannot learn which part of a forged receipt
+/// was closest. So a receipt misread as ECDSA (failing early as a malformed
+/// 20-byte address) and one correctly read as ed25519 (failing at the
+/// digest, because this fixture's bodies are not the ones this test's
+/// contribution carries) produce the exact same 403 here, by design. What
+/// this test proves is only that the field parses and the request reaches
+/// the verifier at all, rather than being rejected as malformed input.
+/// That the value actually becomes `ReceiptAlgo::Ed25519` is proven at the
+/// seam that dispatches on it: `http::tests::
+/// the_wire_signing_algo_becomes_the_payload_discriminator`, in-crate,
+/// where the wire is not the only thing that can be inspected.
+#[tokio::test]
+async fn an_ed25519_receipt_is_accepted_on_the_wire_and_reaches_the_verifier() {
+    let (service, _signer) = requiring_service();
+    let (call, _dir) = attestable_call();
+    let body = body_with_raw_receipt(
+        &call,
+        serde_json::json!({
+            "text": "81e9887990592366b55ef758cad3b3a097e890871bedc023a51b2828ed237cc3:6f7091a0fbe5917a631c70805833760fe63ceea3493466e3230bd830816a3f2e",
+            "signature": "838765bd299514ec80084d50b7cef9357172ce2923dd35aa837beed0c6af04e684673e61db6c0d3ae8d69476b680d94c8e1e36e05277a1b103c27a12f563eb0c",
+            "signing_address": "cb6fc58f6bd685919fa42fb54d3fcfe03222e324bdda91f0bac6d5c73dc4f1c6",
+            "signing_algo": "ed25519"
+        }),
+    );
+
+    let (status, label) = post_witness(service, body).await;
+
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(label, "witness_inference_receipt_unverified");
+}
+
+/// The client's own serialiser now emits `signing_algo` (this is the change
+/// that lands it), so this proves the client's `"signing_algo"` key and the
+/// server's field agree byte-for-byte, and that `"ed25519"` is an accepted
+/// value -- built with `witness_request_body` from the contributor crate,
+/// the same way `a_receipt_this_client_offers_is_one_the_witness_verifies`
+/// is, rather than spliced raw JSON as the tests above still are.
+///
+/// It does NOT prove the receipt was verified *as* ed25519: the witness
+/// deliberately folds every receipt failure into one wire label
+/// (`witness_inference_receipt_unverified`), so a receipt misread as ECDSA
+/// and one correctly read as ed25519 would both fail with the same 403 here.
+/// That the value actually becomes `ReceiptAlgo::Ed25519` and is dispatched
+/// on as such is proven at the seam that can see it -- the server's own unit
+/// test, `http::tests::the_wire_signing_algo_becomes_the_payload_discriminator`
+/// -- not here.
+#[tokio::test]
+async fn an_ed25519_receipt_this_client_serialises_crosses_the_wire_intact() {
+    let (service, _signer) = requiring_service();
+    let (call, _dir) = attestable_call();
+    let receipt = ReceiptPayload {
+        text: "81e9887990592366b55ef758cad3b3a097e890871bedc023a51b2828ed237cc3:\
+               6f7091a0fbe5917a631c70805833760fe63ceea3493466e3230bd830816a3f2e"
+            .to_string(),
+        signature: "838765bd299514ec80084d50b7cef9357172ce2923dd35aa837beed0c6af04e\
+                    684673e61db6c0d3ae8d69476b680d94c8e1e36e05277a1b103c27a12f563eb0c"
+            .to_string(),
+        signing_address: "cb6fc58f6bd685919fa42fb54d3fcfe03222e324bdda91f0bac6d5c73dc4f1c6"
+            .to_string(),
+        signing_algo: ReceiptAlgo::Ed25519,
+    };
+
+    let (status, label) = post_witness(service, client_request_body(&call, Some(receipt))).await;
 
     assert_eq!(status, StatusCode::FORBIDDEN);
     assert_eq!(label, "witness_inference_receipt_unverified");

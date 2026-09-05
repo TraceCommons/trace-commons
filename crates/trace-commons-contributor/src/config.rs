@@ -130,6 +130,18 @@ pub struct ContributorConfig {
     /// read from files written by releases that had no such key.
     #[serde(default)]
     pub inference_receipt_endpoint: Option<String>,
+    /// Also fetch a nonced attestation report and refuse a receipt whose
+    /// signer is not the gateway key bound in it. Off by default: it costs a
+    /// second network call per submission, and it reads the report's
+    /// self-description without verifying the quote -- so what it adds is
+    /// consistency with NEAR AI's claim, not proof of it. Named so an
+    /// operator turning it on reads that limit first.
+    ///
+    /// A receipt that fails this check is omitted, and the submission
+    /// proceeds unattested with a fixed-label debug line; it is not refused.
+    /// The witness's own `required` mode is where a refusal belongs.
+    #[serde(default)]
+    pub inference_receipt_check_attestation: bool,
 }
 
 /// Where the redaction witness is, and what this client will accept from it.
@@ -227,6 +239,21 @@ pub fn inference_receipt_endpoint_from_env() -> Option<String> {
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+/// `TRACE_COMMONS_INFERENCE_RECEIPT_CHECK_ATTESTATION`.
+pub const TRACE_COMMONS_INFERENCE_RECEIPT_CHECK_ATTESTATION: &str =
+    "TRACE_COMMONS_INFERENCE_RECEIPT_CHECK_ATTESTATION";
+
+/// Read the attestation-check switch from the environment, for a client
+/// that has not written it into its config file. Only the literal `true`
+/// (after trimming, case-insensitive) turns it on; anything else, including
+/// absence, is off. A switch that sends a second request naming the model
+/// and a nonce must not turn itself on by a typo.
+pub fn inference_receipt_check_attestation_from_env() -> bool {
+    std::env::var(TRACE_COMMONS_INFERENCE_RECEIPT_CHECK_ATTESTATION)
+        .ok()
+        .is_some_and(|v| v.trim().eq_ignore_ascii_case("true"))
 }
 
 /// Build the allowlist to enforce for issuer/ingest requests: the `allowed_hosts`
@@ -740,6 +767,7 @@ mod tests {
     fn sample_config() -> ContributorConfig {
         ContributorConfig {
             inference_receipt_endpoint: None,
+            inference_receipt_check_attestation: false,
             schema_version: CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),
             issuer_url: "https://issuer.example".into(),
             ingest_url: "https://ingest.example".into(),
@@ -775,6 +803,15 @@ mod tests {
                 .mode();
             assert_eq!(mode & 0o777, 0o600);
         }
+    }
+
+    /// A config written before this field existed reads as off. The
+    /// check must never switch itself on for an existing install.
+    #[test]
+    fn the_attestation_check_is_off_for_a_config_that_predates_it() {
+        let json = r#"{"schema_version":"1","issuer_url":"https://i","ingest_url":"https://g","audience":"a","tenant_id":"t","instance_id":"i","user_subject":"s","device_key_id":"d","consent_scopes":[]}"#;
+        let cfg: ContributorConfig = serde_json::from_str(json).unwrap();
+        assert!(!cfg.inference_receipt_check_attestation);
     }
 
     #[test]
@@ -891,5 +928,44 @@ mod tests {
     // Test helper: expose the file path for assertions.
     fn store_path(store: &ConfigStore, name: &str) -> std::path::PathBuf {
         store.dir().join(name)
+    }
+
+    // `inference_receipt_check_attestation_from_env` reads process-wide env;
+    // serialize the mutating tests so they do not race each other.
+    static ATTESTATION_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn set_attestation_env(value: Option<&str>) {
+        // SAFETY: serialized through ATTESTATION_ENV_LOCK.
+        unsafe {
+            match value {
+                Some(v) => std::env::set_var(TRACE_COMMONS_INFERENCE_RECEIPT_CHECK_ATTESTATION, v),
+                None => std::env::remove_var(TRACE_COMMONS_INFERENCE_RECEIPT_CHECK_ATTESTATION),
+            }
+        }
+    }
+
+    #[test]
+    fn attestation_check_env_only_the_literal_true_turns_it_on() {
+        let _guard = ATTESTATION_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+
+        set_attestation_env(Some("true"));
+        assert!(inference_receipt_check_attestation_from_env());
+
+        set_attestation_env(Some(" TRUE "));
+        assert!(inference_receipt_check_attestation_from_env());
+
+        set_attestation_env(Some("1"));
+        assert!(!inference_receipt_check_attestation_from_env());
+
+        set_attestation_env(Some("yes"));
+        assert!(!inference_receipt_check_attestation_from_env());
+
+        set_attestation_env(Some(""));
+        assert!(!inference_receipt_check_attestation_from_env());
+
+        set_attestation_env(None);
+        assert!(!inference_receipt_check_attestation_from_env());
     }
 }

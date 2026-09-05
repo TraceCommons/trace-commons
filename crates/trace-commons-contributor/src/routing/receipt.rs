@@ -1,8 +1,10 @@
 //! Fetching the provider's receipt for one inference call.
 //!
-//! `GET {base}/signature/{chat_id}?model={model}&signing_algo=ecdsa` returns
+//! `GET {base}/signature/{chat_id}?model={model}&signing_algo=ed25519` returns
 //! the enclave's EIP-191 signature over `<requestHash>:<responseHash>`. This
-//! module is the only thing in the tree that calls it.
+//! module is the only thing in the tree that calls it. Ed25519, because that
+//! signer is the one bound into the gateway's attestation quote; the ECDSA
+//! signer appears in no report.
 //!
 //! # Why the contributor fetches it
 //!
@@ -62,7 +64,7 @@
 
 use std::time::Duration;
 
-use trace_commons_attestation::receipt::ReceiptPayload;
+use trace_commons_attestation::receipt::{ReceiptAlgo, ReceiptPayload};
 use trace_commons_operator_client::host_allowlist::HostAllowlist;
 
 use super::attested::AttestedCall;
@@ -78,6 +80,12 @@ const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 /// A receipt is three short strings. Anything larger is not one, and reading
 /// it would let a redirected or hostile endpoint spend this process's memory.
 const MAX_RECEIPT_BYTES: usize = 16 * 1024;
+
+/// How much of an attestation report response will be read.
+///
+/// A live report was measured at 284,003 bytes on 2026-09-05, so 1 MiB is a
+/// bound on a much larger document than a receipt, not a guess.
+const MAX_ATTESTATION_REPORT_BYTES: usize = 1 << 20;
 
 /// Why no receipt was obtained.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -104,6 +112,10 @@ pub enum ReceiptFetchError {
     /// The answer was not a receipt this verifier can read.
     #[error("the receipt response is not a receipt")]
     ResponseMalformed,
+    /// The receipt verified, but its signer is not the gateway key a
+    /// nonced attestation report bound. Carries nothing.
+    #[error("receipt signer is not the attested gateway key")]
+    SignerNotAttested,
 }
 
 /// Read a receipt out of the endpoint's JSON answer.
@@ -134,10 +146,21 @@ pub fn parse_receipt_response(body: &str) -> Result<ReceiptPayload, ReceiptFetch
             .map(str::to_string)
             .ok_or(ReceiptFetchError::ResponseMalformed)
     };
+    let signing_algo = match receipt.get("signing_algo") {
+        None => ReceiptAlgo::Ecdsa,
+        Some(serde_json::Value::String(s)) => {
+            ReceiptAlgo::from_wire(s).ok_or(ReceiptFetchError::ResponseMalformed)?
+        }
+        // Present but not a string: the provider said something this
+        // client cannot read. That is a malformed response, not an absent
+        // field, and it must not be read as the ECDSA default.
+        Some(_) => return Err(ReceiptFetchError::ResponseMalformed),
+    };
     Ok(ReceiptPayload {
         text: field("text")?,
         signature: field("signature")?,
         signing_address: field("signing_address")?,
+        signing_algo,
     })
 }
 
@@ -173,11 +196,12 @@ pub fn receipt_url(base: &str, chat_id: &str, model: &str) -> Result<url::Url, R
         .push(chat_id);
     url.query_pairs_mut()
         .append_pair("model", model)
-        // ECDSA over secp256k1, which is what `verify_receipt` recovers from.
-        // Pinned rather than configurable: a receipt in another algorithm is
-        // one this client cannot check, and asking for one would produce a
-        // signature that fails verification for a reason nobody could read.
-        .append_pair("signing_algo", "ecdsa");
+        // The signer bound into the gateway's TDX quote. Pinned rather than
+        // configurable: a receipt in another algorithm is one this client
+        // cannot check against the attestation, and asking for one would
+        // produce a signature that fails verification for a reason nobody
+        // could read.
+        .append_pair("signing_algo", ReceiptAlgo::Ed25519.as_wire());
     Ok(url)
 }
 
@@ -229,6 +253,59 @@ pub async fn fetch_receipt(
     parse_receipt_response(&body)
 }
 
+/// GET the attestation report. Same gate and same bounds as
+/// [`fetch_receipt`]: the allowlist is checked before the request so a
+/// second call site cannot omit it, and the body is bounded after reading
+/// because a chunked response declares no length. Returns the raw JSON;
+/// parsing is `attestation_report::gateway_ed25519_key`'s job.
+async fn fetch_attestation_report(
+    client: &reqwest::Client,
+    allowlist: &HostAllowlist,
+    base: &str,
+    model: &str,
+    nonce: &str,
+) -> Result<String, ReceiptFetchError> {
+    let url = super::attestation_report::attestation_report_url(base, model, nonce)
+        .map_err(|_| ReceiptFetchError::SignerNotAttested)?;
+    allowlist
+        .check(&url)
+        .map_err(|_| ReceiptFetchError::EndpointNotAllowed)?;
+    let response = client
+        .get(url)
+        .timeout(FETCH_TIMEOUT)
+        .send()
+        .await
+        .map_err(|_| ReceiptFetchError::Unreachable)?;
+    if !response.status().is_success() {
+        return Err(ReceiptFetchError::Unreachable);
+    }
+    if response
+        .content_length()
+        .is_some_and(|declared| declared > MAX_ATTESTATION_REPORT_BYTES as u64)
+    {
+        return Err(ReceiptFetchError::ResponseTooLarge);
+    }
+    let body = response
+        .text()
+        .await
+        .map_err(|_| ReceiptFetchError::Unreachable)?;
+    if body.len() > MAX_ATTESTATION_REPORT_BYTES {
+        return Err(ReceiptFetchError::ResponseTooLarge);
+    }
+    Ok(body)
+}
+
+/// A fresh 32-byte nonce, lowercase hex, for one attestation-report fetch.
+///
+/// Freshly random per call so a report bound to it cannot be a replay of one
+/// fetched for a previous submission.
+fn fresh_nonce_hex() -> Result<String, ReceiptFetchError> {
+    let mut bytes = [0u8; 32];
+    ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut bytes)
+        .map_err(|_| ReceiptFetchError::Unreachable)?;
+    Ok(hex::encode(bytes))
+}
+
 /// The receipt for one attested call, or none.
 ///
 /// The single entry point the submission path uses. Every failure -- no
@@ -244,6 +321,34 @@ pub async fn fetch_receipt(
 /// unattestable, which is a limit of the ledger's shape rather than a choice
 /// made here.
 ///
+/// The parse-and-compare half of the attestation check, with no network in
+/// it, so it can be tested without a stub. [`receipt_for_attested_call`]
+/// does the fetch and hands the body here.
+///
+/// # Errors
+///
+/// [`ReceiptFetchError::SignerNotAttested`] when the report cannot be
+/// parsed, is for a different nonce, or names a different signer.
+pub fn signer_matches_report(
+    signer: &str,
+    report_json: &str,
+    nonce: &str,
+) -> Result<(), ReceiptFetchError> {
+    let attested = super::attestation_report::gateway_ed25519_key(report_json, nonce)
+        .map_err(|_| ReceiptFetchError::SignerNotAttested)?;
+    if !super::attestation_report::signer_is_attested(signer, &attested) {
+        return Err(ReceiptFetchError::SignerNotAttested);
+    }
+    Ok(())
+}
+
+/// `check_attestation` additionally fetches a freshly-nonced attestation
+/// report and refuses the receipt if its signer is not the gateway key that
+/// report binds. Off by default at the config level -- see
+/// `ContributorConfig::inference_receipt_check_attestation` -- because it
+/// costs a second network call and this module does not verify the report's
+/// quote, only its internal consistency.
+///
 /// # Errors
 ///
 /// [`ReceiptFetchError`] for every reason no receipt was obtained.
@@ -251,6 +356,7 @@ pub async fn receipt_for_attested_call(
     endpoint: Option<&str>,
     allowlist: &HostAllowlist,
     call: &AttestedCall,
+    check_attestation: bool,
 ) -> Result<ReceiptPayload, ReceiptFetchError> {
     let endpoint = endpoint.ok_or(ReceiptFetchError::NotConfigured)?;
     // The endpoint requires a model and the proxy does not always record one.
@@ -267,7 +373,15 @@ pub async fn receipt_for_attested_call(
     // One attempt, no retry. A retry loop on the submission path multiplies a
     // provider outage into a stalled uploader; the cost of not retrying is one
     // unattested submission.
-    fetch_receipt(&client, allowlist, endpoint, call.upstream_id(), model).await
+    let payload = fetch_receipt(&client, allowlist, endpoint, call.upstream_id(), model).await?;
+
+    if check_attestation {
+        let nonce = fresh_nonce_hex()?;
+        let report = fetch_attestation_report(&client, allowlist, endpoint, model, &nonce).await?;
+        signer_matches_report(&payload.signing_address, &report, &nonce)?;
+    }
+
+    Ok(payload)
 }
 
 #[cfg(test)]
@@ -322,7 +436,7 @@ mod tests {
     async fn an_unconfigured_endpoint_fetches_nothing() {
         let (call, _dir) = attestable_call(Some("Qwen/Qwen3.6-27B-FP8"));
         assert_eq!(
-            receipt_for_attested_call(None, &HostAllowlist::permissive(), &call)
+            receipt_for_attested_call(None, &HostAllowlist::permissive(), &call, false)
                 .await
                 .unwrap_err(),
             ReceiptFetchError::NotConfigured
@@ -336,7 +450,7 @@ mod tests {
     async fn a_call_with_no_served_model_is_not_fetched_for() {
         let (call, _dir) = attestable_call(None);
         assert_eq!(
-            receipt_for_attested_call(Some(BASE), &HostAllowlist::permissive(), &call)
+            receipt_for_attested_call(Some(BASE), &HostAllowlist::permissive(), &call, false)
                 .await
                 .unwrap_err(),
             ReceiptFetchError::NotConfigured
@@ -353,7 +467,7 @@ mod tests {
         let (call, _dir) = attestable_call(Some("Qwen/Qwen3.6-27B-FP8"));
         let allowlist = HostAllowlist::from_csv("issuer.example,ingest.example");
         assert_eq!(
-            receipt_for_attested_call(Some(BASE), &allowlist, &call)
+            receipt_for_attested_call(Some(BASE), &allowlist, &call, false)
                 .await
                 .unwrap_err(),
             ReceiptFetchError::EndpointNotAllowed
@@ -370,6 +484,7 @@ mod tests {
                 Some("http://qwen3-6-27b.completions.near.ai/v1"),
                 &HostAllowlist::permissive(),
                 &call,
+                false,
             )
             .await
             .unwrap_err(),
@@ -383,8 +498,79 @@ mod tests {
         assert_eq!(
             url.as_str(),
             "https://qwen3-6-27b.completions.near.ai/v1/signature/chatcmpl-abc123\
-             ?model=Qwen%2FQwen3.6-27B-FP8&signing_algo=ecdsa"
+             ?model=Qwen%2FQwen3.6-27B-FP8&signing_algo=ed25519"
         );
+    }
+
+    /// The fetch asks for the scheme whose signer is bound into the gateway's
+    /// TDX quote. The ECDSA signer appears in no attestation report.
+    #[test]
+    fn the_receipt_url_asks_for_ed25519() {
+        let url = receipt_url(
+            "https://cloud-api.near.ai/v1",
+            "ee64b242d74f4c7eb59b05b046f33f7b",
+            "Qwen/Qwen3.6-35B-A3B-FP8",
+        )
+        .unwrap();
+        assert!(
+            url.query().unwrap().contains("signing_algo=ed25519"),
+            "{url}"
+        );
+        assert!(!url.query().unwrap().contains("ecdsa"), "{url}");
+    }
+
+    /// The response's own `signing_algo` is what the payload records, not
+    /// what was asked for. A provider answering a different scheme than
+    /// requested is a fact to carry, not to overwrite.
+    #[test]
+    fn the_parsed_receipt_carries_the_scheme_the_provider_answered() {
+        let body = r#"{"text":"81e9887990592366b55ef758cad3b3a097e890871bedc023a51b2828ed237cc3:6f7091a0fbe5917a631c70805833760fe63ceea3493466e3230bd830816a3f2e","signature":"838765bd299514ec80084d50b7cef9357172ce2923dd35aa837beed0c6af04e684673e61db6c0d3ae8d69476b680d94c8e1e36e05277a1b103c27a12f563eb0c","signing_address":"cb6fc58f6bd685919fa42fb54d3fcfe03222e324bdda91f0bac6d5c73dc4f1c6","signing_algo":"ed25519","signature_kind":"gateway"}"#;
+        let payload = parse_receipt_response(body).unwrap();
+        assert_eq!(payload.signing_algo, ReceiptAlgo::Ed25519);
+        assert_eq!(
+            payload.signing_address,
+            "cb6fc58f6bd685919fa42fb54d3fcfe03222e324bdda91f0bac6d5c73dc4f1c6"
+        );
+    }
+
+    /// A response with no `signing_algo` is ECDSA -- the pre-field form.
+    #[test]
+    fn a_response_without_signing_algo_is_ecdsa() {
+        let body = r#"{"text":"a:b","signature":"0xcc","signing_address":"0xdd"}"#;
+        assert_eq!(
+            parse_receipt_response(body).unwrap().signing_algo,
+            ReceiptAlgo::Ecdsa
+        );
+    }
+
+    /// An unrecognised `signing_algo` is a malformed response, not a guess.
+    #[test]
+    fn an_unknown_signing_algo_in_the_response_is_malformed() {
+        let body =
+            r#"{"text":"a:b","signature":"0xcc","signing_address":"0xdd","signing_algo":"rsa"}"#;
+        assert_eq!(
+            parse_receipt_response(body).unwrap_err(),
+            ReceiptFetchError::ResponseMalformed
+        );
+    }
+
+    /// A present-but-unreadable `signing_algo` is malformed, not absent. The
+    /// absent arm is for the pre-field response shape only; a provider that
+    /// sends the field as a number, null, or a list has said something this
+    /// client cannot read, and reading it as ECDSA would be a guess.
+    #[test]
+    fn a_non_string_signing_algo_is_malformed_not_absent() {
+        for body in [
+            r#"{"text":"a:b","signature":"0xcc","signing_address":"0xdd","signing_algo":7}"#,
+            r#"{"text":"a:b","signature":"0xcc","signing_address":"0xdd","signing_algo":null}"#,
+            r#"{"text":"a:b","signature":"0xcc","signing_address":"0xdd","signing_algo":["ed25519"]}"#,
+        ] {
+            assert_eq!(
+                parse_receipt_response(body).unwrap_err(),
+                ReceiptFetchError::ResponseMalformed,
+                "{body}"
+            );
+        }
     }
 
     /// The identifier comes off another process's database. A `..` or a `?`
@@ -445,5 +631,62 @@ mod tests {
                 "{body} must not parse as a receipt"
             );
         }
+    }
+
+    /// The nonce and key this module's attestation fixtures use throughout
+    /// -- the live values captured in `attestation_report`'s own tests.
+    const ATTESTATION_NONCE: &str =
+        "482934fb749d13aa81b2e543a253cf4d8cc847dab55a8d49989effd5023ddb5d";
+    const ATTESTATION_KEY: &str =
+        "cb6fc58f6bd685919fa42fb54d3fcfe03222e324bdda91f0bac6d5c73dc4f1c6";
+
+    fn attestation_report(nonce: &str) -> String {
+        format!(
+            r#"{{"gateway_attestation":{{"signing_address":"{ATTESTATION_KEY}","signing_algo":"ed25519","request_nonce":"{nonce}","report_data":"{ATTESTATION_KEY}{nonce}"}}}}"#
+        )
+    }
+
+    /// The composed check `receipt_for_attested_call` runs when the
+    /// attestation gate is on, tested without a network: a signer that
+    /// matches the report's attested key over the nonce it was fetched for.
+    #[test]
+    fn a_matching_signer_over_a_good_report_is_accepted() {
+        assert!(
+            signer_matches_report(
+                ATTESTATION_KEY,
+                &attestation_report(ATTESTATION_NONCE),
+                ATTESTATION_NONCE,
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_different_signer_over_a_good_report_is_refused() {
+        assert_eq!(
+            signer_matches_report(
+                "0000000000000000000000000000000000000000000000000000000000000000",
+                &attestation_report(ATTESTATION_NONCE),
+                ATTESTATION_NONCE,
+            )
+            .unwrap_err(),
+            ReceiptFetchError::SignerNotAttested
+        );
+    }
+
+    /// A good signer over a report issued for a *different* nonce is still
+    /// refused -- the report was not attested for this fetch.
+    #[test]
+    fn a_good_signer_over_a_report_for_a_different_nonce_is_refused() {
+        let other_nonce = "0".repeat(64);
+        assert_eq!(
+            signer_matches_report(
+                ATTESTATION_KEY,
+                &attestation_report(&other_nonce),
+                ATTESTATION_NONCE,
+            )
+            .unwrap_err(),
+            ReceiptFetchError::SignerNotAttested
+        );
     }
 }

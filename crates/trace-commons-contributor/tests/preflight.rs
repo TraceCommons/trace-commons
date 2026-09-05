@@ -68,6 +68,7 @@ fn enrolled_config() -> trace_commons_contributor::config::ContributorConfig {
         trace_commons_protocol::onboarding::derive_user_tenant_id("instance-test", "user-test");
     trace_commons_contributor::config::ContributorConfig {
         inference_receipt_endpoint: None,
+        inference_receipt_check_attestation: false,
         schema_version: "trace_commons.contributor_config.v1".to_string(),
         issuer_url: "https://issuer.example".to_string(),
         ingest_url: "https://ingest.example".to_string(),
@@ -98,6 +99,7 @@ fn write_enrolled_config(config_dir: &Path) {
 fn unenrolled_preview_config() -> trace_commons_contributor::config::ContributorConfig {
     trace_commons_contributor::config::ContributorConfig {
         inference_receipt_endpoint: None,
+        inference_receipt_check_attestation: false,
         schema_version: "trace_commons.contributor_config.v1".to_string(),
         issuer_url: "https://unenrolled-preview.invalid".to_string(),
         ingest_url: "https://unenrolled-preview.invalid".to_string(),
