@@ -3214,6 +3214,7 @@ mod witness_tests {
                 public_since: None,
                 witness,
                 inference_receipt_endpoint: None,
+                inference_receipt_check_attestation: false,
             })
             .unwrap();
     }

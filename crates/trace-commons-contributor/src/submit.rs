@@ -550,6 +550,7 @@ impl<'a> SubmitContext<'a> {
             // every other outbound call in this file reads it from.
             &allowlist_for(self.cfg.allowed_hosts.as_deref()),
             call,
+            self.effective_cfg.inference_receipt_check_attestation,
         )
         .await
         .ok()
@@ -1835,6 +1836,7 @@ mod tests {
     ) -> crate::config::ContributorConfig {
         crate::config::ContributorConfig {
             inference_receipt_endpoint: None,
+            inference_receipt_check_attestation: false,
             schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
             issuer_url: issuer.into(),
             ingest_url: ingest.into(),
@@ -1883,6 +1885,7 @@ mod tests {
         let preview_cfg = crate::commands::unenrolled_preview_config();
         let enrolled_cfg = crate::config::ContributorConfig {
             inference_receipt_endpoint: None,
+            inference_receipt_check_attestation: false,
             schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
             issuer_url: "https://issuer.example".into(),
             ingest_url: "https://ingest.example".into(),

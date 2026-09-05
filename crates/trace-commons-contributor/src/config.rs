@@ -130,6 +130,14 @@ pub struct ContributorConfig {
     /// read from files written by releases that had no such key.
     #[serde(default)]
     pub inference_receipt_endpoint: Option<String>,
+    /// Also fetch a nonced attestation report and refuse a receipt whose
+    /// signer is not the gateway key bound in it. Off by default: it costs a
+    /// second network call per submission, and it reads the report's
+    /// self-description without verifying the quote -- so what it adds is
+    /// consistency with NEAR AI's claim, not proof of it. Named so an
+    /// operator turning it on reads that limit first.
+    #[serde(default)]
+    pub inference_receipt_check_attestation: bool,
 }
 
 /// Where the redaction witness is, and what this client will accept from it.
@@ -740,6 +748,7 @@ mod tests {
     fn sample_config() -> ContributorConfig {
         ContributorConfig {
             inference_receipt_endpoint: None,
+            inference_receipt_check_attestation: false,
             schema_version: CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),
             issuer_url: "https://issuer.example".into(),
             ingest_url: "https://ingest.example".into(),
@@ -775,6 +784,15 @@ mod tests {
                 .mode();
             assert_eq!(mode & 0o777, 0o600);
         }
+    }
+
+    /// A config written before this field existed reads as off. The
+    /// check must never switch itself on for an existing install.
+    #[test]
+    fn the_attestation_check_is_off_for_a_config_that_predates_it() {
+        let json = r#"{"schema_version":"1","issuer_url":"https://i","ingest_url":"https://g","audience":"a","tenant_id":"t","instance_id":"i","user_subject":"s","device_key_id":"d","consent_scopes":[]}"#;
+        let cfg: ContributorConfig = serde_json::from_str(json).unwrap();
+        assert!(!cfg.inference_receipt_check_attestation);
     }
 
     #[test]

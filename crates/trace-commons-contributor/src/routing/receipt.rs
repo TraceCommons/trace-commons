@@ -81,6 +81,12 @@ const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 /// it would let a redirected or hostile endpoint spend this process's memory.
 const MAX_RECEIPT_BYTES: usize = 16 * 1024;
 
+/// How much of an attestation report response will be read.
+///
+/// A live report was measured at 284,003 bytes on 2026-09-05, so 1 MiB is a
+/// bound on a much larger document than a receipt, not a guess.
+const MAX_ATTESTATION_REPORT_BYTES: usize = 1 << 20;
+
 /// Why no receipt was obtained.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum ReceiptFetchError {
@@ -106,6 +112,10 @@ pub enum ReceiptFetchError {
     /// The answer was not a receipt this verifier can read.
     #[error("the receipt response is not a receipt")]
     ResponseMalformed,
+    /// The receipt verified, but its signer is not the gateway key a
+    /// nonced attestation report bound. Carries nothing.
+    #[error("receipt signer is not the attested gateway key")]
+    SignerNotAttested,
 }
 
 /// Read a receipt out of the endpoint's JSON answer.
@@ -243,6 +253,59 @@ pub async fn fetch_receipt(
     parse_receipt_response(&body)
 }
 
+/// GET the attestation report. Same gate and same bounds as
+/// [`fetch_receipt`]: the allowlist is checked before the request so a
+/// second call site cannot omit it, and the body is bounded after reading
+/// because a chunked response declares no length. Returns the raw JSON;
+/// parsing is `attestation_report::gateway_ed25519_key`'s job.
+async fn fetch_attestation_report(
+    client: &reqwest::Client,
+    allowlist: &HostAllowlist,
+    base: &str,
+    model: &str,
+    nonce: &str,
+) -> Result<String, ReceiptFetchError> {
+    let url = super::attestation_report::attestation_report_url(base, model, nonce)
+        .map_err(|_| ReceiptFetchError::SignerNotAttested)?;
+    allowlist
+        .check(&url)
+        .map_err(|_| ReceiptFetchError::EndpointNotAllowed)?;
+    let response = client
+        .get(url)
+        .timeout(FETCH_TIMEOUT)
+        .send()
+        .await
+        .map_err(|_| ReceiptFetchError::Unreachable)?;
+    if !response.status().is_success() {
+        return Err(ReceiptFetchError::Unreachable);
+    }
+    if response
+        .content_length()
+        .is_some_and(|declared| declared > MAX_ATTESTATION_REPORT_BYTES as u64)
+    {
+        return Err(ReceiptFetchError::ResponseTooLarge);
+    }
+    let body = response
+        .text()
+        .await
+        .map_err(|_| ReceiptFetchError::Unreachable)?;
+    if body.len() > MAX_ATTESTATION_REPORT_BYTES {
+        return Err(ReceiptFetchError::ResponseTooLarge);
+    }
+    Ok(body)
+}
+
+/// A fresh 32-byte nonce, lowercase hex, for one attestation-report fetch.
+///
+/// Freshly random per call so a report bound to it cannot be a replay of one
+/// fetched for a previous submission.
+fn fresh_nonce_hex() -> Result<String, ReceiptFetchError> {
+    let mut bytes = [0u8; 32];
+    ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut bytes)
+        .map_err(|_| ReceiptFetchError::Unreachable)?;
+    Ok(hex::encode(bytes))
+}
+
 /// The receipt for one attested call, or none.
 ///
 /// The single entry point the submission path uses. Every failure -- no
@@ -258,6 +321,13 @@ pub async fn fetch_receipt(
 /// unattestable, which is a limit of the ledger's shape rather than a choice
 /// made here.
 ///
+/// `check_attestation` additionally fetches a freshly-nonced attestation
+/// report and refuses the receipt if its signer is not the gateway key that
+/// report binds. Off by default at the config level -- see
+/// `ContributorConfig::inference_receipt_check_attestation` -- because it
+/// costs a second network call and this module does not verify the report's
+/// quote, only its internal consistency.
+///
 /// # Errors
 ///
 /// [`ReceiptFetchError`] for every reason no receipt was obtained.
@@ -265,6 +335,7 @@ pub async fn receipt_for_attested_call(
     endpoint: Option<&str>,
     allowlist: &HostAllowlist,
     call: &AttestedCall,
+    check_attestation: bool,
 ) -> Result<ReceiptPayload, ReceiptFetchError> {
     let endpoint = endpoint.ok_or(ReceiptFetchError::NotConfigured)?;
     // The endpoint requires a model and the proxy does not always record one.
@@ -281,7 +352,19 @@ pub async fn receipt_for_attested_call(
     // One attempt, no retry. A retry loop on the submission path multiplies a
     // provider outage into a stalled uploader; the cost of not retrying is one
     // unattested submission.
-    fetch_receipt(&client, allowlist, endpoint, call.upstream_id(), model).await
+    let payload = fetch_receipt(&client, allowlist, endpoint, call.upstream_id(), model).await?;
+
+    if check_attestation {
+        let nonce = fresh_nonce_hex()?;
+        let report = fetch_attestation_report(&client, allowlist, endpoint, model, &nonce).await?;
+        let attested = super::attestation_report::gateway_ed25519_key(&report, &nonce)
+            .map_err(|_| ReceiptFetchError::SignerNotAttested)?;
+        if !super::attestation_report::signer_is_attested(&payload.signing_address, &attested) {
+            return Err(ReceiptFetchError::SignerNotAttested);
+        }
+    }
+
+    Ok(payload)
 }
 
 #[cfg(test)]
@@ -336,7 +419,7 @@ mod tests {
     async fn an_unconfigured_endpoint_fetches_nothing() {
         let (call, _dir) = attestable_call(Some("Qwen/Qwen3.6-27B-FP8"));
         assert_eq!(
-            receipt_for_attested_call(None, &HostAllowlist::permissive(), &call)
+            receipt_for_attested_call(None, &HostAllowlist::permissive(), &call, false)
                 .await
                 .unwrap_err(),
             ReceiptFetchError::NotConfigured
@@ -350,7 +433,7 @@ mod tests {
     async fn a_call_with_no_served_model_is_not_fetched_for() {
         let (call, _dir) = attestable_call(None);
         assert_eq!(
-            receipt_for_attested_call(Some(BASE), &HostAllowlist::permissive(), &call)
+            receipt_for_attested_call(Some(BASE), &HostAllowlist::permissive(), &call, false)
                 .await
                 .unwrap_err(),
             ReceiptFetchError::NotConfigured
@@ -367,7 +450,7 @@ mod tests {
         let (call, _dir) = attestable_call(Some("Qwen/Qwen3.6-27B-FP8"));
         let allowlist = HostAllowlist::from_csv("issuer.example,ingest.example");
         assert_eq!(
-            receipt_for_attested_call(Some(BASE), &allowlist, &call)
+            receipt_for_attested_call(Some(BASE), &allowlist, &call, false)
                 .await
                 .unwrap_err(),
             ReceiptFetchError::EndpointNotAllowed
@@ -384,6 +467,7 @@ mod tests {
                 Some("http://qwen3-6-27b.completions.near.ai/v1"),
                 &HostAllowlist::permissive(),
                 &call,
+                false,
             )
             .await
             .unwrap_err(),

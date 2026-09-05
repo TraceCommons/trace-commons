@@ -43,6 +43,7 @@ struct Harness {
 fn cfg(device_key_id: String) -> ContributorConfig {
     ContributorConfig {
         inference_receipt_endpoint: None,
+        inference_receipt_check_attestation: false,
         schema_version: CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
         issuer_url: "http://issuer.invalid".into(),
         ingest_url: "http://ingest.invalid".into(),

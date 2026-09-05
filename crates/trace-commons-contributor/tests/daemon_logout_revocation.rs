@@ -31,6 +31,7 @@ fn enrolled_store(dir: &std::path::Path) -> ConfigStore {
     store
         .save_config(&ContributorConfig {
             inference_receipt_endpoint: None,
+            inference_receipt_check_attestation: false,
             schema_version: CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
             issuer_url: "https://issuer.example.ai".into(),
             ingest_url: "https://ingest.example.ai".into(),
