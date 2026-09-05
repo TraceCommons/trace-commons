@@ -738,6 +738,9 @@ fn receipt_error_label(error: &ReceiptError) -> &'static str {
         ReceiptError::RequestHashMismatch => "request_hash_mismatch",
         ReceiptError::ResponseHashMismatch => "response_hash_mismatch",
         ReceiptError::ModelMismatch => "model_mismatch",
+        ReceiptError::Ed25519KeyMalformed => "ed25519_key_malformed",
+        ReceiptError::Ed25519SignatureMalformed => "ed25519_signature_malformed",
+        ReceiptError::Ed25519SignatureInvalid => "ed25519_signature_invalid",
     }
 }
 
@@ -754,7 +757,7 @@ mod tests {
     use crate::near_attestation::AttestationReport;
     use crate::near_attestation::client::{AttestationStep, CompletionOutcome};
     use crate::near_attestation::quote::{Collateral, parse_collateral};
-    use crate::near_attestation::receipt::ReceiptPayload;
+    use crate::near_attestation::receipt::{ReceiptAlgo, ReceiptPayload};
 
     const REPORT: &str = include_str!(
         "../../../trace-commons-attestation/tests/fixtures/near_ai_attestation_report.json"
@@ -948,6 +951,7 @@ mod tests {
                 signature: personal_sign(&self.receipt_key, &text),
                 signing_address: eth_address(&self.receipt_key),
                 text,
+                signing_algo: ReceiptAlgo::Ecdsa,
             })
         }
     }

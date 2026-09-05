@@ -1146,6 +1146,7 @@ mod tests {
         let device = crate::identity::DeviceIdentity::load_or_generate(store).unwrap();
         ContributorConfig {
             inference_receipt_endpoint: None,
+            inference_receipt_check_attestation: false,
             schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
             issuer_url: "http://issuer.invalid".into(),
             ingest_url: "http://ingest.invalid".into(),
@@ -1968,6 +1969,15 @@ mod tests {
                 "consent_scopes",
                 "device_key_id",
                 "display_handle",
+                // Fingerprinted, deliberately, for the same reason as
+                // `inference_receipt_endpoint` just below: turning it on
+                // adds a second outbound request -- for a nonced attestation
+                // report -- that tells the provider this exchange is being
+                // checked for contribution, on top of the disclosure the
+                // receipt fetch itself already makes. A consent-bearing
+                // change, so an entry approved before it was set must be
+                // re-asked.
+                "inference_receipt_check_attestation",
                 // Fingerprinted, deliberately. It does not change a byte of
                 // the envelope -- the receipt goes to the witness, which
                 // strips the bodies before certifying -- but turning it on

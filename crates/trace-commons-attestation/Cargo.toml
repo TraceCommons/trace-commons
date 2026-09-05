@@ -31,6 +31,12 @@ dcap-qvl = { version = "0.6", default-features = false, features = [
 # pin, so the trees stay unified.
 hex = "0.4"
 k256 = "0.13"
+# Ed25519 receipt verification. Already a direct dependency of
+# trace-commons-contributor and trace-commons-server and already in this
+# crate's graph, so this line adds no packages -- it makes an existing
+# transitive edge a direct one. Measured before adding: `cargo tree -p
+# trace-commons-attestation -e normal | grep ring` was non-empty.
+ring = "0.17"
 serde_json = "1"
 sha2 = "0.10"
 sha3 = "0.10"

@@ -553,6 +553,7 @@ fn persist(
         public_since: None,
         witness: Some(witness),
         inference_receipt_endpoint: receipt_endpoint,
+        inference_receipt_check_attestation: true,
     };
     let session = crate::account_auth::AccountSession {
         access_token: result.access_token,
@@ -676,6 +677,8 @@ mod tests {
             let before = std::fs::read(dir.path().join("contributor.json")).unwrap();
             let config = store.load_config().unwrap().unwrap();
             assert!(config.consent_scopes.is_empty());
+            assert!(config.inference_receipt_check_attestation);
+            assert!(config.witness.as_ref().unwrap().admission_evidence);
             assert_eq!(config.witness, Some(witness.clone()));
             assert_eq!(
                 config.inference_receipt_endpoint.as_deref(),
