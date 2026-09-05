@@ -794,31 +794,22 @@ mod tests {
     }
 
     /// A receipt NEAR AI actually issued, verified as plain Ed25519 over the
-    /// raw text. The signature came from a key this project never held. The
-    /// digest checks are exercised separately, because this test does not hold
-    /// NEAR AI's real bodies and cannot forge ones with the same digests.
+    /// raw text. The signature came from a key this project never held.
+    ///
+    /// This is also the guard against applying the EIP-191 prefix on the
+    /// ed25519 path: a verifier that prefixes the text fails this test,
+    /// because the live signature is over the raw bytes. A separate
+    /// "pre-prefixed input is refused" test was tried and found vacuous -- a
+    /// prefixing verifier double-prefixes it and fails too -- so this one
+    /// test is deliberately the only guard, and it is the one that cannot be
+    /// fooled.
+    ///
+    /// The digest checks are exercised separately, because this test does not
+    /// hold NEAR AI's real bodies and cannot forge ones with the same digests.
     #[test]
     fn a_live_ed25519_receipt_signature_verifies_over_the_raw_text() {
         let payload = live_ed25519();
         verify_ed25519_signature(&payload).expect("NEAR AI's real signature verifies");
-    }
-
-    /// The EIP-191 prefix must NOT be applied on the ed25519 path. The live
-    /// signature is over the raw text; prefixing it makes verification fail.
-    /// This is the single most likely implementation mistake.
-    #[test]
-    fn the_ed25519_path_does_not_apply_the_eip191_prefix() {
-        let mut prefixed = live_ed25519();
-        prefixed.text = format!(
-            "\x19Ethereum Signed Message:\n{}{}",
-            LIVE_ED25519_TEXT.len(),
-            LIVE_ED25519_TEXT
-        );
-        assert_eq!(
-            verify_ed25519_signature(&prefixed),
-            Err(ReceiptError::Ed25519SignatureInvalid),
-            "a prefixed text must not verify; the signature is over the raw text"
-        );
     }
 
     /// A validly signed ed25519 receipt over different bytes is refused by
