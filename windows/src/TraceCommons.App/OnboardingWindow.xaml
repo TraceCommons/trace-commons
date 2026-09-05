@@ -95,8 +95,10 @@
             <Button Content="Connect" HorizontalAlignment="Right"
                     IsEnabled="{x:Bind ViewModel.CanConnect, Mode=OneWay}"
                     Click="OnConnect" />
-            <StackPanel Spacing="12" Visibility="{x:Bind ViewModel.NearAccount.Supported, Mode=OneWay}"
-                        IsEnabled="{x:Bind ViewModel.CanUseWallet, Mode=OneWay}">
+            <ContentControl Visibility="{x:Bind ViewModel.NearAccount.Supported, Mode=OneWay}"
+                            IsEnabled="{x:Bind ViewModel.CanUseWallet, Mode=OneWay}"
+                            HorizontalContentAlignment="Stretch">
+            <StackPanel Spacing="12">
                 <TextBlock Text="Join with a NEAR account" Style="{StaticResource TcTitleCardTextStyle}" />
                 <TextBlock Text="Check whether your commons accepts new accounts. Connecting proves control of your account and this device; it does not fund inference or enable capture." TextWrapping="Wrap" />
                 <TextBox Header="Commons HTTPS address" Text="{x:Bind ViewModel.NearAccount.Commons, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" IsEnabled="{x:Bind ViewModel.NearAccount.CanEdit, Mode=OneWay}" />
@@ -108,6 +110,7 @@
                 <TextBlock Text="{x:Bind ViewModel.NearAccount.Message, Mode=OneWay}" TextWrapping="Wrap" />
                 <Button Content="Cancel connection" Click="OnCancelNearAccount" Visibility="{x:Bind ViewModel.NearAccount.CanCancel, Mode=OneWay}" />
             </StackPanel>
+            </ContentControl>
         </StackPanel>
         </ScrollViewer>
 

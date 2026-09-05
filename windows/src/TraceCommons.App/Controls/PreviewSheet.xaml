@@ -621,14 +621,17 @@
                        Style="{StaticResource TcCaptionTextStyle}"
                        TextWrapping="Wrap" />
 
-            <StackPanel Orientation="Horizontal" Spacing="8" IsEnabled="{x:Bind ViewModel.CanEditOutcome, Mode=OneWay}">
-                <ToggleButton Content="{x:Bind ViewModel.VerdictWorkedLabel}"
+            <StackPanel Orientation="Horizontal" Spacing="8">
+                <ToggleButton IsEnabled="{x:Bind ViewModel.CanEditOutcome, Mode=OneWay}"
+                              Content="{x:Bind ViewModel.VerdictWorkedLabel}"
                               IsChecked="{x:Bind ViewModel.IsWorkedSelected, Mode=OneWay}"
                               Click="OnVerdictWorked" />
-                <ToggleButton Content="{x:Bind ViewModel.VerdictPartlyLabel}"
+                <ToggleButton IsEnabled="{x:Bind ViewModel.CanEditOutcome, Mode=OneWay}"
+                              Content="{x:Bind ViewModel.VerdictPartlyLabel}"
                               IsChecked="{x:Bind ViewModel.IsPartlySelected, Mode=OneWay}"
                               Click="OnVerdictPartly" />
-                <ToggleButton Content="{x:Bind ViewModel.VerdictFailedLabel}"
+                <ToggleButton IsEnabled="{x:Bind ViewModel.CanEditOutcome, Mode=OneWay}"
+                              Content="{x:Bind ViewModel.VerdictFailedLabel}"
                               IsChecked="{x:Bind ViewModel.IsFailedSelected, Mode=OneWay}"
                               Click="OnVerdictFailed" />
             </StackPanel>
