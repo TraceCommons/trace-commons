@@ -46,7 +46,7 @@ import SwiftUI
 /// coordinator does not advance past a failed one silently (see
 /// `advanceFromConsent`).
 ///
-/// The six-screen *sequence* is deliberately NOT atomic -- there is no
+/// The onboarding *sequence* is deliberately NOT atomic -- there is no
 /// wire-level transaction spanning `enroll` through the Done screen, and
 /// there could not be one without a contract change this task is not
 /// permitted to make. What makes that safe is that the two states an
@@ -88,6 +88,21 @@ struct OnboardingCoordinatorView: View {
         case privacyScan
         case projects
         case done
+
+        static func afterWelcome(needsRoots: Bool) -> Self {
+            needsRoots ? .roots : .connect
+        }
+
+        func previous(privacyScanConfigured: Bool) -> Self? {
+            switch self {
+            case .welcome: return nil
+            case .roots, .connect: return .welcome
+            case .consent: return .connect
+            case .privacyScan: return .consent
+            case .projects: return privacyScanConfigured ? .privacyScan : .consent
+            case .done: return .projects
+            }
+        }
     }
 
     @State private var step: Step
@@ -96,6 +111,7 @@ struct OnboardingCoordinatorView: View {
     /// does not lose the choice.
     @State private var selectedScopes: Set<String> = []
     @State private var consentSaveFailed = false
+    @State private var consentSaveInProgress = false
     /// Reference material for the welcome screen, presented as a sheet
     /// rather than a step of its own -- it asks for no decision, and this
     /// flow is one decision per screen.
@@ -114,6 +130,7 @@ struct OnboardingCoordinatorView: View {
             }
             content
         }
+        .disabled(consentSaveInProgress)
         .sheet(isPresented: $showingWhatGetsRemoved) {
             WhatGetsRemovedSheet()
         }
@@ -134,14 +151,7 @@ struct OnboardingCoordinatorView: View {
     /// already enrolled; that screen says so and offers Continue rather
     /// than a second enrolment (see `OnboardingConnectContent`).
     private var previousStep: Step? {
-        switch step {
-        case .welcome: return nil
-        case .roots, .connect: return .welcome
-        case .consent: return .connect
-        case .privacyScan: return .consent
-        case .projects: return model.daemonSettings?.nearAIConfigured == true ? .privacyScan : .consent
-        case .done: return .projects
-        }
+        step.previous(privacyScanConfigured: model.daemonSettings?.nearAIConfigured == true)
     }
 
     private func backBar(to previous: Step) -> some View {
@@ -169,7 +179,7 @@ struct OnboardingCoordinatorView: View {
             // None of these callbacks carry a default any more -- omitting
             // one is a compile error rather than a silent dead control.
             OnboardingWelcomeView(
-                onGetStarted: { step = model.startup == .needsRoots ? .roots : .connect },
+                onGetStarted: { step = .afterWelcome(needsRoots: model.startup == .needsRoots) },
                 onWhatGetsRemoved: { showingWhatGetsRemoved = true }
             )
 
@@ -180,7 +190,11 @@ struct OnboardingCoordinatorView: View {
             )
 
         case .connect:
-            OnboardingConnectView(onEnrolled: { step = .consent })
+            OnboardingConnectView(onEnrolled: {
+                // An invite request may finish after Back was pressed.
+                // Enrollment remains valid, but must not move a newer screen.
+                if step == .connect { step = .consent }
+            })
 
         case .consent:
             VStack(alignment: .leading, spacing: 8) {
@@ -227,11 +241,14 @@ struct OnboardingCoordinatorView: View {
     /// than silently moving on with the floor-only scope `enroll` left in
     /// place.
     private func advanceFromConsent(_ selected: Set<String>) {
+        guard !consentSaveInProgress else { return }
+        consentSaveInProgress = true
         selectedScopes = selected
         consentSaveFailed = false
         let alwaysOn = model.consentScopes.filter(\.alwaysOn).map(\.name)
         let scopes = Array(Set(alwaysOn).union(selected))
         Task {
+            defer { consentSaveInProgress = false }
             switch await model.setConsentScopes(scopes) {
             case .succeeded:
                 if model.daemonSettings?.nearAIConfigured == true {
