@@ -1,7 +1,8 @@
 # Admission: an invite or attested inference
 
-**Status:** implemented locally in the `native-onboarding-admission` worktree,
-with admission disabled unless explicitly configured. The implementation includes
+**Status:** implementation under review in [Trace Commons #602](https://github.com/TraceCommons/trace-commons/pull/602)
+and [IronWire #25](https://github.com/nearai/ironwire/pull/25), with admission
+disabled unless explicitly configured. The implementation includes
 NEAR device provisioning, account-bound evidence, PostgreSQL admission budgets,
 and native onboarding. See the [validation record](../plans/2026-09-04-native-onboarding-validation.md)
 for tested behavior and platform limits. Live pilot validation, operator-selected
@@ -258,6 +259,25 @@ Before opening a subsidized window or attestation admission, require:
 10. The invited live pilot verifies an actual provider receipt, accepted
     contribution, and absence of raw request/response bodies in the stored
     redacted artifact before broad enablement.
+
+## Explicitly deferred before rollout
+
+- Live wallet-to-provider-to-witness-to-accepted-upload pilot with designated
+  test accounts, operator-selected limits and funded inference credentials.
+- Credit settlement, redemption and provider credential provisioning. Accepted
+  contributions and pending credits do not yet supply spendable inference.
+- A sponsored starting path for contributors with neither existing sessions nor
+  funded inference; no starter subsidy is enabled by this implementation.
+- Economic policy selection and a person-level Sybil defense. The current window
+  is per eligible account, not per person; model and minimum request size are
+  configured eligibility controls, not proof of useful work or billed cost.
+- Independent remote quote verification of the provider gateway beyond the
+  configured key/report binding. An Ed25519 receipt binds gateway-signed bytes;
+  it does not itself prove the entire model execution occurred in that enclave.
+
+The new witness setting changes the approval fingerprint once on upgrade.
+Previously approved entries require a fresh explicit review; the client must not
+silently rebuild or upload an artifact approved under different settings.
 
 ## Related
 

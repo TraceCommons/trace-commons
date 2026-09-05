@@ -1,5 +1,11 @@
 //! Explicit wallet signup: daemon-owned device signing and PKCE, hosted wallet
 //! handoff, and a state-bound loopback callback. No shell handles private keys.
+//!
+//! Bootstrap trust is TOFU: witness and issuer pins are obtained over allowlisted
+//! HTTPS from the ingest origin chosen by the user. HTTPS authenticates that
+//! origin; it does not independently endorse its advertised keys or measurements.
+//! Later witness checks enforce the persisted pins. Operators must authenticate
+//! the service origin out of band before directing contributors to it.
 
 use super::ipc::{DaemonShared, ERR_BAD_PARAMS, ERR_UNAVAILABLE, Request, Response};
 use crate::config::{

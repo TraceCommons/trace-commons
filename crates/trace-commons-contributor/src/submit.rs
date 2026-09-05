@@ -4224,6 +4224,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn admission_review_without_body_consent_refuses_before_claim_or_witness() {
+        let (_dir, store) = crate::config::tests_support::temp_store();
+        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
+        let mut cfg = cfg_for(
+            "http://issuer.invalid",
+            "http://ingest.invalid",
+            &device.device_key_id,
+        );
+        cfg.witness = Some(WitnessSettings {
+            admission_evidence: true,
+            ..pinned_witness()
+        });
+        let opts = SubmitOptions {
+            dry_run: false,
+            pii_filter: None,
+            no_reasoning: false,
+            machine_readable: true,
+            unenrolled_preview: false,
+            remediate_quarantined: false,
+            verdict: None,
+        };
+        let mut context = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let selection = fixture_selection();
+        let (source, reference) = &selection[0];
+        let transcript = source.load(reference).unwrap();
+        let error = context
+            .prepare_witnessed_review(&transcript, None, false)
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_string(), "admission_receipt_unavailable");
+    }
+
+    #[tokio::test]
     async fn bound_receipt_fetch_failure_cannot_turn_into_a_window_review() {
         let (_dir, store) = crate::config::tests_support::temp_store();
         let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
