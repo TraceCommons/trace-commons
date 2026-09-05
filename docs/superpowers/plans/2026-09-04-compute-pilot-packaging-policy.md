@@ -1,6 +1,7 @@
 # Compute pilot packaging and resource-policy implementation
 
-Status: artifact inventory and inert validator implemented; later tasks remain open.
+Status: artifact inventory, inert validator, and standalone resource-policy reducer
+implemented. Actor enforcement, ABI projection, and native observers remain open.
 Evidence and the MLX runtime asset-location gap are recorded in
 [artifact inventory](../../compute-artifact-inventory.md). No shipping gate changed.
 Design: [contract and policy](../specs/2026-09-04-compute-pilot-packaging-policy.md).
@@ -19,6 +20,40 @@ Build on Trace Commons `bd523c22` and Holonear `cef95b36` in isolated worktrees.
 Exit: exact artifact inventory and deterministic refusal tests; shipping gate closed.
 
 ## 2. Shared resource-policy reducer
+
+Implemented foundation: `compute::policy` contains typed complete observations,
+a six-second monotonic lease, epoch/sequence rejection, latched normal/urgent stop
+requests, manual command precedence and explicit Resume after confirmed stop.
+Tests cover the 240 resource combinations, exact expiry, recovery, event reorder,
+critical escalation, clock errors, disabled/shutdown intent and wake invalidation.
+This module is **not wired to the actor** and does not change runtime enforcement.
+
+Local verification (2026-09-05): all 31 contributor compute tests passed with
+warnings denied; all nine standalone policy tests also passed on Rust 1.92.
+Contributor library Clippy passed with the repository allowances and warnings
+denied; workspace formatting passed. Tests use injected monotonic times, not
+sleeping or induced pressure on the host. No native observer validation is claimed.
+All four unchanged license-boundary tests passed when compiled directly with
+`rustc --test`, the cached `serde_json` dependency and this worktree's server
+manifest directory. The Cargo test invocation was interrupted during its large
+server rebuild; it is not recorded as a passing Cargo test run.
+
+Integration requirements:
+
+- Serialize policy updates with actor lifecycle actions; do not queue safety
+  updates behind the bounded start-command queue. Evaluate on timer ticks and
+  immediately before spawn. A `Decision` is a snapshot, not a reusable launch token.
+- Only acknowledge a stop after reaping or proving no owned child exists. A drain
+  acknowledgment or failed reap cannot clear the latch. Healthy updates cannot
+  downgrade an urgent request while draining.
+- Provide complete genuinely refreshed readings; never relabel cached fields
+  with a fresh timestamp. Use unknown when a current read is unavailable.
+- On wake discard adapter caches, use the new epoch, invalidate worker telemetry
+  and reconcile ownership. Epochs and intent are session-local, not persisted.
+- Consent persistence, signed package authorization and worker ownership stay
+  with their existing owners. The resource gate grants none of those permissions.
+- Wire urgent stop deadlines, ABI/shared copy and macOS observers before claiming
+  any of the live lifecycle matrix below passes.
 
 - Add pure typed observations, monotonic freshness, policy reasons and stop
   urgency to the contributor core. Project copy/state through both ABI headers.

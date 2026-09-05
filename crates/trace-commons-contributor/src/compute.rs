@@ -14,6 +14,7 @@ use crate::config::ConfigStore;
 pub mod artifact;
 mod controller;
 mod live;
+pub mod policy;
 mod process;
 pub mod worker_protocol;
 pub use controller::{
