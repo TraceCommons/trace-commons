@@ -196,3 +196,16 @@ The complete local ingest handler suite passed 1,074 tests with two ignored
 against the merged main. The existing stylesheet contract suite passed 5/5.
 Full Windows compilation and workspace-suite results should be read from the
 PR's latest head; earlier cancelled/failed runs do not establish that head's state.
+
+The next CI compiler stage exposed duplicate Windows loading-property names;
+local constants were renamed while public binding names stayed unchanged. RLS
+coverage now includes V58's creation migration and explicitly checks V58/V59
+ENABLE/FORCE and canonical policies without changing historical migrations or
+removing runtime registry entries. All 31 default RLS tests and the dedicated
+real-PostgreSQL provisioning/admission tests passed.
+
+An extra, optional full PostgreSQL RLS suite ran 30/31: the unchanged export
+fixture `store_facade_preserves_export_grant_job_scope_and_updates` inserts a
+random nonexistent grant and fails its foreign key. That fixture is outside this
+onboarding change and remains unresolved; this record does not claim the entire
+optional database suite passed.
