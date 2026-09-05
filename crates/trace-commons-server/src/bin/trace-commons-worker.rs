@@ -22,10 +22,13 @@ use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
 use reqwest::Method;
 use serde_json::Value;
-use trace_commons_operator_client::{Client, format as oc_format, host_allowlist::HostAllowlist};
+use trace_commons_operator_client::Client;
 use uuid::Uuid;
 
-use operator_common::{render_items, render_kv_fields, sanitized_url};
+use operator_common::{
+    BenchmarkConvertRequest, ConsentScope, CorpusStatus, ExportQuery, PrivacyRisk, build_client,
+    emit_json, render_kv_fields,
+};
 
 // --- per-route bearer env defaults (one per worker route gate) ---
 const UTILITY_CREDIT_BEARER_ENV: &str = "TRACE_COMMONS_UTILITY_CREDIT_WORKER_BEARER";
@@ -238,65 +241,6 @@ impl UtilityCreditEventType {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub(crate) enum PrivacyRisk {
-    Low,
-    Medium,
-    High,
-}
-
-impl PrivacyRisk {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Low => "low",
-            Self::Medium => "medium",
-            Self::High => "high",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub(crate) enum ConsentScope {
-    DebuggingEvaluation,
-    BenchmarkOnly,
-    RankingTraining,
-    ModelTraining,
-}
-
-impl ConsentScope {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::DebuggingEvaluation => "debugging-evaluation",
-            Self::BenchmarkOnly => "benchmark-only",
-            Self::RankingTraining => "ranking-training",
-            Self::ModelTraining => "model-training",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub(crate) enum CorpusStatus {
-    Accepted,
-    Quarantined,
-    Rejected,
-    Revoked,
-    Expired,
-    Purged,
-}
-
-impl CorpusStatus {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Accepted => "accepted",
-            Self::Quarantined => "quarantined",
-            Self::Rejected => "rejected",
-            Self::Revoked => "revoked",
-            Self::Expired => "expired",
-            Self::Purged => "purged",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub(crate) enum ProcessEvaluationRating {
     Good,
     Acceptable,
@@ -336,18 +280,6 @@ fn bearer_env(cmd: &WorkerSubcommand) -> &str {
         WorkerSubcommand::WorkerRankerTrainingPairs(a) => &a.bearer_token_env,
         WorkerSubcommand::ProcessEvaluationSubmit(a) => &a.bearer_token_env,
     }
-}
-
-fn build_client(
-    endpoint: &str,
-    bearer_token_env: &str,
-    allowed_hosts: Option<&str>,
-) -> Result<Client> {
-    let mut builder = Client::builder(endpoint, bearer_token_env);
-    if let Some(csv) = allowed_hosts {
-        builder = builder.host_allowlist(HostAllowlist::from_csv(csv));
-    }
-    Ok(builder.build()?)
 }
 
 async fn dispatch(cli: Cli) -> Result<()> {
@@ -548,50 +480,22 @@ async fn worker_benchmark_convert(
     args: WorkerBenchmarkConvertArgs,
     json: bool,
 ) -> Result<()> {
-    let trimmed = args.purpose.trim();
-    if trimmed.is_empty() {
-        anyhow::bail!("--purpose must be non-empty");
-    }
-    let path = "/v1/workers/benchmark-convert";
-    let mut body = serde_json::json!({ "purpose": trimmed });
-    if let Some(limit) = args.limit {
-        body["limit"] = serde_json::json!(limit);
-    }
-    if let Some(scope) = args.consent_scope {
-        body["consent_scope"] = Value::String(scope.as_str().to_string());
-    }
-    if let Some(status) = args.status {
-        body["status"] = Value::String(status.as_str().to_string());
-    }
-    if let Some(risk) = args.privacy_risk {
-        body["privacy_risk"] = Value::String(risk.as_str().to_string());
-    }
-    if let Some(external_ref) = args.external_ref {
-        body["external_ref"] = Value::String(external_ref);
-    }
-    let value: Value = client
-        .call_json::<Value, Value>(Method::POST, path, &[], Some(&body))
-        .await?;
-    if json {
-        emit_json(endpoint, "POST", path, &value)?;
-    } else {
-        let mut out = stdout();
-        writeln!(
-            out,
-            "Trace Commons benchmark conversion (worker) requested."
-        )?;
-        render_kv_fields(
-            &mut out,
-            &value,
-            &[
-                ("  conversion id", "conversion_id"),
-                ("  audit event id", "audit_event_id"),
-                ("  item count", "item_count"),
-                ("  purpose", "purpose"),
-            ],
-        )?;
-    }
-    Ok(())
+    operator_common::benchmark_convert(
+        client,
+        endpoint,
+        "/v1/workers/benchmark-convert",
+        "Trace Commons benchmark conversion (worker) requested.",
+        BenchmarkConvertRequest {
+            purpose: args.purpose,
+            limit: args.limit,
+            consent_scope: args.consent_scope.map(|s| s.as_str().to_string()),
+            status: args.status.map(|s| s.as_str().to_string()),
+            privacy_risk: args.privacy_risk.map(|r| r.as_str().to_string()),
+            external_ref: args.external_ref,
+        },
+        json,
+    )
+    .await
 }
 
 async fn worker_replay_dataset_export(
@@ -600,69 +504,21 @@ async fn worker_replay_dataset_export(
     args: WorkerReplayDatasetExportArgs,
     json: bool,
 ) -> Result<()> {
-    let path = "/v1/workers/replay-export";
-    let mut owned: Vec<(&str, String)> = Vec::new();
-    if let Some(limit) = args.limit {
-        owned.push(("limit", limit.to_string()));
-    }
-    if let Some(purpose) = args.purpose {
-        let trimmed = purpose.trim();
-        if trimmed.is_empty() {
-            anyhow::bail!("--purpose must be non-empty");
-        }
-        owned.push(("purpose", trimmed.to_string()));
-    }
-    if let Some(scope) = args.consent_scope {
-        owned.push(("consent_scope", scope.as_str().to_string()));
-    }
-    if let Some(status) = args.status {
-        owned.push(("status", status.as_str().to_string()));
-    }
-    if let Some(risk) = args.privacy_risk {
-        owned.push(("privacy_risk", risk.as_str().to_string()));
-    }
-    let query = borrow_query(&owned);
-    let raw = client
-        .call_raw::<()>(Method::GET, path, &query, None)
-        .await?;
-    let value: Value = serde_json::from_str(&raw).unwrap_or(Value::Null);
-
-    if let Some(output) = args.output.as_ref() {
-        let pretty = if value.is_null() {
-            raw.clone()
-        } else {
-            serde_json::to_string_pretty(&value)?
-        };
-        std::fs::write(output, pretty).map_err(|e| {
-            anyhow::anyhow!(
-                "failed to write replay dataset export {}: {}",
-                output.display(),
-                e
-            )
-        })?;
-        if json {
-            emit_json(endpoint, "GET", path, &value)?;
-        } else {
-            let mut out = stdout();
-            writeln!(
-                out,
-                "Wrote central replay dataset export to {}",
-                output.display()
-            )?;
-            render_kv_fields(
-                &mut out,
-                &value,
-                &[
-                    ("  export id", "export_id"),
-                    ("  manifest id", "manifest_id"),
-                    ("  audit event id", "audit_event_id"),
-                    ("  item count", "item_count"),
-                ],
-            )?;
-        }
-        return Ok(());
-    }
-    emit_json(endpoint, "GET", path, &value)
+    operator_common::replay_dataset_export(
+        client,
+        endpoint,
+        "/v1/workers/replay-export",
+        ExportQuery {
+            purpose: args.purpose,
+            consent_scope: args.consent_scope.map(|s| s.as_str().to_string()),
+            status: args.status.map(|s| s.as_str().to_string()),
+            privacy_risk: args.privacy_risk.map(|r| r.as_str().to_string()),
+            limit: args.limit,
+            output: args.output,
+        },
+        json,
+    )
+    .await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -675,89 +531,23 @@ async fn worker_ranker_training_export(
     item_field: &str,
     json: bool,
 ) -> Result<()> {
-    let mut owned: Vec<(&str, String)> = Vec::new();
-    if let Some(limit) = args.limit {
-        owned.push(("limit", limit.to_string()));
-    }
-    if let Some(purpose) = args.purpose {
-        let trimmed = purpose.trim();
-        if trimmed.is_empty() {
-            anyhow::bail!("--purpose must be non-empty");
-        }
-        owned.push(("purpose", trimmed.to_string()));
-    }
-    if let Some(scope) = args.consent_scope {
-        owned.push(("consent_scope", scope.as_str().to_string()));
-    }
-    if let Some(status) = args.status {
-        owned.push(("status", status.as_str().to_string()));
-    }
-    if let Some(risk) = args.privacy_risk {
-        owned.push(("privacy_risk", risk.as_str().to_string()));
-    }
-    let query = borrow_query(&owned);
-    let raw = client
-        .call_raw::<()>(Method::GET, path, &query, None)
-        .await?;
-    let value: Value = serde_json::from_str(&raw).unwrap_or(Value::Null);
-
-    if let Some(output) = args.output.as_ref() {
-        let pretty = if value.is_null() {
-            raw.clone()
-        } else {
-            serde_json::to_string_pretty(&value)?
-        };
-        std::fs::write(output, pretty).map_err(|e| {
-            anyhow::anyhow!(
-                "failed to write ranker training export {}: {}",
-                output.display(),
-                e
-            )
-        })?;
-        if json {
-            emit_json(endpoint, "GET", path, &value)?;
-        } else {
-            let mut out = stdout();
-            writeln!(
-                out,
-                "Wrote central {} export to {}",
-                output_label,
-                output.display()
-            )?;
-            render_kv_fields(
-                &mut out,
-                &value,
-                &[
-                    ("  export id", "export_id"),
-                    ("  audit event id", "audit_event_id"),
-                    ("  purpose", "purpose"),
-                    ("  item count", "item_count"),
-                ],
-            )?;
-        }
-        return Ok(());
-    }
-
-    if json {
-        emit_json(endpoint, "GET", path, &value)
-    } else {
-        let items_value = value.get(item_field).cloned().unwrap_or(Value::Null);
-        let envelope = serde_json::json!({ "items": items_value });
-        render_items(
-            &mut stdout(),
-            &format!("Central {output_label}"),
-            &envelope,
-            &[
-                "submission_id",
-                "trace_id",
-                "ranker_score",
-                "preferred_submission_id",
-                "rejected_submission_id",
-                "reason",
-            ],
-        )?;
-        Ok(())
-    }
+    operator_common::ranker_training_export(
+        client,
+        endpoint,
+        path,
+        output_label,
+        item_field,
+        ExportQuery {
+            purpose: args.purpose,
+            consent_scope: args.consent_scope.map(|s| s.as_str().to_string()),
+            status: args.status.map(|s| s.as_str().to_string()),
+            privacy_risk: args.privacy_risk.map(|r| r.as_str().to_string()),
+            limit: args.limit,
+            output: args.output,
+        },
+        json,
+    )
+    .await
 }
 
 async fn process_evaluation_submit(
@@ -888,16 +678,6 @@ async fn process_evaluation_submit(
 }
 
 // --- helpers ---
-
-fn borrow_query<'a>(owned: &'a [(&'a str, String)]) -> Vec<(&'a str, &'a str)> {
-    owned.iter().map(|(k, v)| (*k, v.as_str())).collect()
-}
-
-fn emit_json(endpoint: &str, method: &str, path: &str, value: &Value) -> Result<()> {
-    let url = sanitized_url(endpoint, path);
-    oc_format::emit_json(&mut stdout(), method, &url, value)?;
-    Ok(())
-}
 
 // --- tests ---
 
