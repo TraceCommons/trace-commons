@@ -104,18 +104,21 @@ public class HealthCopyTests
     }
 
     /// <summary>
-    /// Only the two labels the design gives an action get one. Every other
+    /// Only conditions with a contributor recovery step get an action. Every other
     /// condition clears on its own, and a button that cannot change what it
     /// sits beside is a button that teaches people not to trust buttons.
     /// </summary>
     [Theory]
     [MemberData(nameof(EveryLabel))]
-    public void OnlyTheTwoActionableLabelsCarryAButton(string label)
+    public void OnlyActionableLabelsCarryAButton(string label)
     {
         string? action = HealthCopy.ForLabel(label)!.ActionLabel;
 
         switch (label)
         {
+            case "queue-full":
+                Assert.Equal("Review", action);
+                break;
             case "not-logged-in":
                 Assert.Equal("Reconnect", action);
                 break;

@@ -730,7 +730,22 @@ public sealed partial class MainWindow : Window
 
     private void OnHealthAction(object sender, RoutedEventArgs e)
     {
+        var target = ViewModel.HealthDestination;
+        if (target == HealthNavigationTarget.Waiting)
+        {
+            ViewModel.ShowQueue();
+            return;
+        }
+        if (target == HealthNavigationTarget.None)
+        {
+            return;
+        }
+
         var onboarding = new OnboardingWindow(_host, OnboardingState.Default());
+        if (target == HealthNavigationTarget.Connect)
+        {
+            onboarding.ViewModel.GetStarted();
+        }
         onboarding.Activate();
     }
 
