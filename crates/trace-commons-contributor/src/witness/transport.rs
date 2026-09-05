@@ -2128,4 +2128,74 @@ mod tests {
         .expect_err("a response body that came back must be refused too");
         assert_eq!(err, WitnessTrustError::WitnessBodyNotStripped);
     }
+    #[tokio::test]
+    async fn redirects_never_forward_attestation_or_sensitive_witness_posts() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let target_hits = Arc::new(AtomicUsize::new(0));
+        let hits = target_hits.clone();
+        let target_app = Router::new().fallback(move || {
+            let hits = hits.clone();
+            async move {
+                hits.fetch_add(1, Ordering::SeqCst);
+                StatusCode::OK
+            }
+        });
+        let target = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_url = format!("http://{}/delegated", target.local_addr().unwrap());
+        let target_task = tokio::spawn(async move {
+            axum::serve(target, target_app).await.unwrap();
+        });
+        let origin_hits = Arc::new(AtomicUsize::new(0));
+        let hits = origin_hits.clone();
+        let origin_app = Router::new().fallback(move |request: Request| {
+            let destination = target_url.clone();
+            let hits = hits.clone();
+            async move {
+                let method = request.method().clone();
+                let body = axum::body::to_bytes(request.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                if method == axum::http::Method::POST {
+                    assert_eq!(body.as_ref(), b"private-test-transcript");
+                }
+                hits.fetch_add(1, Ordering::SeqCst);
+                (
+                    StatusCode::TEMPORARY_REDIRECT,
+                    [(header::LOCATION, destination)],
+                )
+            }
+        });
+        let origin = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin_url = format!("http://{}", origin.local_addr().unwrap());
+        let origin_task = tokio::spawn(async move {
+            axum::serve(origin, origin_app).await.unwrap();
+        });
+        let transport = transport_for(&origin_url, permissive());
+        assert_eq!(
+            transport
+                .attestation(&WitnessNonce::fresh().unwrap())
+                .await
+                .unwrap_err(),
+            WitnessTrustError::WitnessAttestationUnavailable
+        );
+        let verified = crate::witness::verify::verified_witness_for_test(
+            &origin_url,
+            "0x1111111111111111111111111111111111111111",
+        );
+        for admission in [false, true] {
+            let transport =
+                transport_for(&origin_url, permissive()).with_admission_evidence(admission);
+            assert_eq!(
+                transport
+                    .witness(&verified, b"private-test-transcript")
+                    .await
+                    .err(),
+                Some(WitnessTrustError::WitnessResponseMalformed)
+            );
+        }
+        assert_eq!(origin_hits.load(Ordering::SeqCst), 3);
+        assert_eq!(target_hits.load(Ordering::SeqCst), 0);
+        origin_task.abort();
+        target_task.abort();
+    }
 }
