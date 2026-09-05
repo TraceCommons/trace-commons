@@ -740,8 +740,21 @@
                                     </Grid>
                                 </Button>
 
+                                <!--
+                                    Emphasis goes to opening the folder, not
+                                    to sending it. One-click submit added
+                                    AVAILABILITY; accent styling is a
+                                    RECOMMENDATION, and the recommendation is
+                                    to look first. The row above opens the
+                                    folder too; this button is the same act
+                                    with the accent on it.
+                                -->
                                 <StackPanel Orientation="Horizontal" Spacing="8">
                                     <Button Style="{StaticResource TcPrimaryButtonStyle}"
+                                            Content="Look inside"
+                                            Tag="{x:Bind}"
+                                            Click="OnOpenFolder" />
+                                    <Button Style="{StaticResource TcSecondaryButtonStyle}"
                                             Content="{x:Bind SubmitAllText}"
                                             Visibility="{x:Bind ShowSubmitAll}"
                                             Tag="{x:Bind}"
@@ -850,11 +863,13 @@
                             -->
                             <!--
                                 The whole card is a second route to "Look
-                                inside". The button below keeps its accent: one
-                                click submit added AVAILABILITY, and accent
-                                styling is a RECOMMENDATION. What this adds is
-                                that the obvious gesture on a card does the
-                                obvious thing.
+                                inside". "Look inside" is the card's one
+                                accented button and "Submit" is secondary:
+                                one click submit added AVAILABILITY, and
+                                accent styling is a RECOMMENDATION, which is
+                                to read first. What the tap adds is that the
+                                obvious gesture on a card does the obvious
+                                thing.
 
                                 A WinUI Button handles its own pointer press,
                                 so a footer button does not raise Tapped on this
@@ -1144,7 +1159,7 @@
                                                      is the one thing on this
                                                      card that must never be
                                                      ambiguous. -->
-                                                <Button Style="{StaticResource TcSecondaryButtonStyle}"
+                                                <Button Style="{StaticResource TcPrimaryButtonStyle}"
                                                         Content="Look inside"
                                                         Tag="{x:Bind}"
                                                         Click="OnLookInside" />
@@ -1153,7 +1168,7 @@
                                                         Tag="{x:Bind}"
                                                         ToolTipService.ToolTip="Skips this session for good, even if you keep working in it. This project will keep being offered."
                                                         Click="OnNotThisOne" />
-                                                <Button Style="{StaticResource TcPrimaryButtonStyle}"
+                                                <Button Style="{StaticResource TcSecondaryButtonStyle}"
                                                         Content="Submit"
                                                         Tag="{x:Bind}"
                                                         ToolTipService.ToolTip="Sends this session without opening it. Scrubbing still runs, and Undo follows for a few seconds."
