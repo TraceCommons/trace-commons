@@ -420,8 +420,85 @@ pub async fn account_logout(store: &ConfigStore) -> Result<()> {
     Ok(())
 }
 
-/// Delete all local contributor state (config, device key, receipts).
-pub fn logout(store: &ConfigStore) -> Result<()> {
+/// What `logout` is about to delete, for the confirmation. Counts only:
+/// nothing here names a path, a submission or a key.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct LogoutInventory {
+    pub receipts: usize,
+    pub history_rows: usize,
+    pub device_key: bool,
+    pub account_session: bool,
+}
+
+/// Count what the wipe will remove. A file that cannot be read counts as
+/// empty: this is a summary for a prompt, and refusing to log out because
+/// a receipts file is corrupt would be the wrong failure.
+pub(crate) fn logout_inventory(store: &ConfigStore) -> LogoutInventory {
+    LogoutInventory {
+        receipts: store.load_receipts().map(|r| r.len()).unwrap_or(0),
+        history_rows: crate::daemon::history::HistoryCache::load(store)
+            .map(|h| h.len())
+            .unwrap_or(0),
+        device_key: store.device_key_path().exists(),
+        account_session: store
+            .daemon_path(crate::config::ACCOUNT_SESSION_FILE)
+            .exists(),
+    }
+}
+
+/// The summary a contributor confirms before `logout` wipes anything.
+pub(crate) fn logout_summary_lines(inv: &LogoutInventory) -> Vec<String> {
+    let device_key = if inv.device_key {
+        "deleted; this device's enrollment cannot be recovered afterwards"
+    } else {
+        "none stored"
+    };
+    let account = if inv.account_session {
+        "the signed-in account session is deleted too"
+    } else {
+        "no account session is stored"
+    };
+    vec![
+        "about to log out and delete this device's local Trace Commons state:".to_string(),
+        format!(
+            "  receipts   : {} receipt(s), the local record of what this device submitted",
+            inv.receipts
+        ),
+        format!(
+            "  history    : {} history row(s), plus the local audit log",
+            inv.history_rows
+        ),
+        format!("  device key : {device_key}"),
+        format!("  account    : {account}"),
+        "submitted traces stay on the server. `daemon withdraw` is what removes them, \
+         and it needs the account session logout deletes: withdraw first if you mean to."
+            .to_string(),
+    ]
+}
+
+/// Delete all local contributor state (config, device key, receipts,
+/// history, audit log). Asks first unless `yes`; a closed stdin is a no.
+pub fn logout(store: &ConfigStore, yes: bool) -> Result<()> {
+    logout_with(store, yes, &mut std::io::stdin(), &mut std::io::stdout())
+}
+
+/// `logout` over explicit streams, so the confirmation is testable.
+pub(crate) fn logout_with(
+    store: &ConfigStore,
+    yes: bool,
+    reader: &mut impl std::io::Read,
+    writer: &mut impl std::io::Write,
+) -> Result<()> {
+    if !yes {
+        for line in logout_summary_lines(&logout_inventory(store)) {
+            writeln!(writer, "{line}").context("writing logout summary")?;
+        }
+        if !read_yes_no("log out and delete this? [y/N] ", reader, writer)? {
+            writeln!(writer, "logout cancelled; nothing removed")
+                .context("writing logout outcome")?;
+            return Ok(());
+        }
+    }
     // Stop a running daemon first. It holds a minted claim that stays valid
     // for minutes, so wiping the state out from under it would leave it
     // uploading against an enrollment the contributor has just revoked, into
@@ -462,7 +539,7 @@ pub fn logout(store: &ConfigStore) -> Result<()> {
     store.wipe().context("wiping contributor state")?;
     let _ = store.remove_daemon_file(crate::config::DAEMON_SOCK_FILE);
     let _ = store.remove_daemon_file(crate::config::DAEMON_LOCK_FILE);
-    println!("logged out; local state removed");
+    writeln!(writer, "logged out; local state removed").context("writing logout outcome")?;
     Ok(())
 }
 
@@ -1018,7 +1095,17 @@ pub(crate) fn read_confirmation(
     reader: &mut impl std::io::Read,
     writer: &mut impl std::io::Write,
 ) -> Result<bool> {
-    write!(writer, "submit these? [y/N] ").context("writing confirmation prompt")?;
+    read_yes_no("submit these? [y/N] ", reader, writer)
+}
+
+/// One y/N question with the same rule as `read_confirmation`: only an
+/// explicit yes is a yes, and a closed stdin is a no.
+pub(crate) fn read_yes_no(
+    prompt: &str,
+    reader: &mut impl std::io::Read,
+    writer: &mut impl std::io::Write,
+) -> Result<bool> {
+    write!(writer, "{prompt}").context("writing confirmation prompt")?;
     writer.flush().context("flushing confirmation prompt")?;
     let mut line = String::new();
     std::io::BufRead::read_line(&mut std::io::BufReader::new(reader), &mut line)
@@ -4402,6 +4489,130 @@ mod submit_scope_tests {
             submit_selection_mode(true, false, true, false),
             SubmitSelectionMode::Picker
         );
+    }
+}
+
+#[cfg(test)]
+mod logout_tests {
+    use super::*;
+    use crate::config::tests_support::temp_store;
+
+    // `logout` wiped receipts, history, the audit log and the device key
+    // with no confirmation. It now lists what goes and asks, unless --yes.
+
+    fn a_populated_store() -> (tempfile::TempDir, ConfigStore) {
+        let (dir, store) = temp_store();
+        store.save_device_key(b"not-a-real-key").unwrap();
+        for _ in 0..3 {
+            store
+                .append_receipt(&crate::config::Receipt {
+                    submission_id: uuid::Uuid::new_v4(),
+                    session_hash: "abc".to_string(),
+                    source: "claude-code".to_string(),
+                    submitted_at: Utc::now(),
+                    status: "accepted".to_string(),
+                })
+                .unwrap();
+        }
+        let row = serde_json::json!({
+            "submission_id": uuid::Uuid::new_v4(),
+            "submitted_at": Utc::now(),
+            "project_label": "p",
+            "source": "claude-code",
+            "session_hash": "abc",
+            "status": "accepted",
+            "consent_scopes": [],
+            "credit_points_pending": 0.0,
+            "credit_points_final": null,
+            "explanations": [],
+            "last_refreshed_at": null,
+        });
+        let body = format!("{row}\n{row}\n");
+        store
+            .write_daemon_file(crate::config::DAEMON_HISTORY_FILE, body.as_bytes())
+            .unwrap();
+        (dir, store)
+    }
+
+    #[test]
+    fn the_inventory_counts_what_will_go() {
+        let (_d, store) = a_populated_store();
+        assert_eq!(
+            logout_inventory(&store),
+            LogoutInventory {
+                receipts: 3,
+                history_rows: 2,
+                device_key: true,
+                account_session: false,
+            }
+        );
+        let (_d, empty) = temp_store();
+        assert_eq!(
+            logout_inventory(&empty),
+            LogoutInventory {
+                receipts: 0,
+                history_rows: 0,
+                device_key: false,
+                account_session: false,
+            }
+        );
+    }
+
+    #[test]
+    fn the_summary_names_the_counts_the_key_and_what_stays() {
+        let text = logout_summary_lines(&LogoutInventory {
+            receipts: 3,
+            history_rows: 2,
+            device_key: true,
+            account_session: true,
+        })
+        .join("\n");
+        assert!(text.contains("3 receipt"), "got: {text}");
+        assert!(text.contains("2 history"), "got: {text}");
+        assert!(text.contains("device key"), "got: {text}");
+        assert!(text.contains("audit"), "got: {text}");
+        assert!(text.contains("stay on the server"), "got: {text}");
+        assert!(text.contains("daemon withdraw"), "got: {text}");
+        assert!(text.contains("account session"), "got: {text}");
+    }
+
+    #[test]
+    fn a_closed_stdin_or_no_leaves_everything_in_place() {
+        for answer in ["", "\n", "n\n", "no\n"] {
+            let (_d, store) = a_populated_store();
+            let mut out = Vec::new();
+            logout_with(&store, false, &mut answer.as_bytes(), &mut out).unwrap();
+            let text = String::from_utf8(out).unwrap();
+            assert!(text.contains("[y/N]"), "answer {answer:?}: {text}");
+            assert!(
+                text.contains("nothing removed"),
+                "answer {answer:?}: {text}"
+            );
+            assert!(store.device_key_path().exists(), "answer {answer:?}");
+            assert_eq!(store.load_receipts().unwrap().len(), 3);
+        }
+    }
+
+    #[test]
+    fn yes_on_stdin_wipes() {
+        let (_d, store) = a_populated_store();
+        let mut out = Vec::new();
+        logout_with(&store, false, &mut "y\n".as_bytes(), &mut out).unwrap();
+        assert!(!store.device_key_path().exists());
+        assert_eq!(store.load_receipts().unwrap().len(), 0);
+        assert!(String::from_utf8(out).unwrap().contains("logged out"));
+    }
+
+    #[test]
+    fn the_yes_flag_skips_the_prompt() {
+        let (_d, store) = a_populated_store();
+        let mut out = Vec::new();
+        // A closed stdin, so any attempt to prompt would read as "no".
+        logout_with(&store, true, &mut "".as_bytes(), &mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(!text.contains("[y/N]"), "got: {text}");
+        assert!(!store.device_key_path().exists());
+        assert_eq!(store.load_receipts().unwrap().len(), 0);
     }
 }
 
