@@ -233,6 +233,27 @@ pub fn inference_receipt_endpoint_from_env() -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+/// Validate an explicitly configured receipt service before trust-bootstrap
+/// persistence or admission preparation. No backend-derived URL is accepted.
+pub(crate) fn validate_inference_receipt_endpoint(
+    endpoint: &str,
+    allowlist: &HostAllowlist,
+) -> Result<()> {
+    let denied = || anyhow::anyhow!("inference_receipt_endpoint_invalid");
+    let url = reqwest::Url::parse(endpoint).map_err(|_| denied())?;
+    if !allowlist.is_enforcing()
+        || url.scheme() != "https"
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(denied());
+    }
+    allowlist.check(&url).map_err(|_| denied())
+}
+
 /// Build the allowlist to enforce for issuer/ingest requests: the `allowed_hosts`
 /// CSV when set (config's `allowed_hosts` field, or a pre-enrollment CLI
 /// flag), otherwise the `TRACE_COMMONS_ALLOWED_HOSTS` env fallback. Shared by
@@ -895,5 +916,30 @@ mod tests {
     // Test helper: expose the file path for assertions.
     fn store_path(store: &ConfigStore, name: &str) -> std::path::PathBuf {
         store.dir().join(name)
+    }
+    #[test]
+    fn native_receipt_endpoint_requires_explicit_https_allowed_host_without_credentials() {
+        let allowed = HostAllowlist::from_csv("receipts.example");
+        assert!(
+            validate_inference_receipt_endpoint("https://receipts.example/v1", &allowed).is_ok()
+        );
+        for value in [
+            "http://receipts.example/v1",
+            "https://other.example/v1",
+            "https://user:secret@receipts.example/v1",
+            "https://receipts.example/v1?token=secret",
+            "https://receipts.example/v1#fragment",
+            "not a URL",
+            "",
+        ] {
+            assert!(validate_inference_receipt_endpoint(value, &allowed).is_err());
+        }
+        assert!(
+            validate_inference_receipt_endpoint(
+                "https://receipts.example/v1",
+                &HostAllowlist::permissive()
+            )
+            .is_err()
+        );
     }
 }

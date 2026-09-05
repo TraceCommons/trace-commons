@@ -259,6 +259,10 @@ async fn prepare(
     ingest: trace_commons_operator_client::Client,
     id: &str,
 ) -> Result<serde_json::Value> {
+    let receipt_endpoint = crate::config::inference_receipt_endpoint_from_env();
+    if let Some(endpoint) = receipt_endpoint.as_deref() {
+        crate::config::validate_inference_receipt_endpoint(endpoint, &allowlist_for(None))?;
+    }
     let (issuer, audience, witness) = validated_capability(&options.ingest_url).await?;
     if (!options.issuer_url.is_empty() && options.issuer_url != issuer)
         || (!options.audience.is_empty() && options.audience != audience)
@@ -358,7 +362,15 @@ async fn prepare(
             .filter(|a| a.state.attempt_id == attempt_id && a.state.status == "waiting_for_wallet")
         {
             entry.state.status = match result.and_then(|completed| {
-                persist(&dir, &options, &identity, completed, &attempt_id, witness)
+                persist(
+                    &dir,
+                    &options,
+                    &identity,
+                    completed,
+                    &attempt_id,
+                    witness,
+                    receipt_endpoint,
+                )
             }) {
                 Ok(()) => "complete",
                 Err(_) => "failed",
@@ -502,6 +514,7 @@ fn persist(
     result: Completed,
     id: &str,
     witness: WitnessSettings,
+    receipt_endpoint: Option<String>,
 ) -> Result<()> {
     if result.token_type != "Bearer"
         || !result.access_token.starts_with("tcn1_")
@@ -539,7 +552,7 @@ fn persist(
         public_bio: None,
         public_since: None,
         witness: Some(witness),
-        inference_receipt_endpoint: None,
+        inference_receipt_endpoint: receipt_endpoint,
     };
     let session = crate::account_auth::AccountSession {
         access_token: result.access_token,
@@ -612,70 +625,79 @@ mod tests {
     }
     #[test]
     fn persists_no_capture_consent_and_never_replaces_enrollment() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = ConfigStore::open(dir.path().to_path_buf()).unwrap();
-        let identity = DeviceIdentity::load_or_generate(&store).unwrap();
-        let options = Options {
-            account_id: "alice.near".into(),
-            ingest_url: "https://commons.example".into(),
-            issuer_url: "https://issuer.example".into(),
-            audience: "traces".into(),
-        };
-        let witness: WitnessSettings = serde_json::from_value(serde_json::json!({"url":"https://witness.example","signing_address":format!("0x{}","ab".repeat(20)),"expected_measurements":[format!("mrtd={}","ab".repeat(48))],"admission_evidence":true})).unwrap();
-        let completed = || Completed {
-            access_token: "tcn1_example".into(),
-            token_type: "Bearer".into(),
-            expires_in_secs: 3600,
-            account_id: "example-account".into(),
-            tenant_id: format!("near-{}", "ab".repeat(32)),
-            device_key_id: identity.device_key_id.clone(),
-            anchor_hash: format!("sha256:{}", "ab".repeat(32)),
-        };
-        // A directory at the session destination makes atomic session install
-        // fail after config staging. Enrollment must remain absent and retryable.
-        std::fs::create_dir(dir.path().join(ACCOUNT_SESSION_FILE)).unwrap();
-        assert!(
+        for receipt_endpoint in [None, Some("https://receipts.example/v1".to_string())] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = ConfigStore::open(dir.path().to_path_buf()).unwrap();
+            let identity = DeviceIdentity::load_or_generate(&store).unwrap();
+            let options = Options {
+                account_id: "alice.near".into(),
+                ingest_url: "https://commons.example".into(),
+                issuer_url: "https://issuer.example".into(),
+                audience: "traces".into(),
+            };
+            let witness: WitnessSettings = serde_json::from_value(serde_json::json!({"url":"https://witness.example","signing_address":format!("0x{}","ab".repeat(20)),"expected_measurements":[format!("mrtd={}","ab".repeat(48))],"admission_evidence":true})).unwrap();
+            let completed = || Completed {
+                access_token: "tcn1_example".into(),
+                token_type: "Bearer".into(),
+                expires_in_secs: 3600,
+                account_id: "example-account".into(),
+                tenant_id: format!("near-{}", "ab".repeat(32)),
+                device_key_id: identity.device_key_id.clone(),
+                anchor_hash: format!("sha256:{}", "ab".repeat(32)),
+            };
+            // A directory at the session destination makes atomic session install
+            // fail after config staging. Enrollment must remain absent and retryable.
+            std::fs::create_dir(dir.path().join(ACCOUNT_SESSION_FILE)).unwrap();
+            assert!(
+                persist(
+                    dir.path(),
+                    &options,
+                    &identity,
+                    completed(),
+                    "failed-session",
+                    witness.clone(),
+                    None
+                )
+                .is_err()
+            );
+            assert!(store.load_config().unwrap().is_none());
+            assert!(!dir.path().join("near-signup-failed-session.json").exists());
+            std::fs::remove_dir(dir.path().join(ACCOUNT_SESSION_FILE)).unwrap();
             persist(
                 dir.path(),
                 &options,
                 &identity,
                 completed(),
-                "failed-session",
-                witness.clone()
+                "first",
+                witness.clone(),
+                receipt_endpoint.clone(),
             )
-            .is_err()
-        );
-        assert!(store.load_config().unwrap().is_none());
-        assert!(!dir.path().join("near-signup-failed-session.json").exists());
-        std::fs::remove_dir(dir.path().join(ACCOUNT_SESSION_FILE)).unwrap();
-        persist(
-            dir.path(),
-            &options,
-            &identity,
-            completed(),
-            "first",
-            witness.clone(),
-        )
-        .unwrap();
-        let before = std::fs::read(dir.path().join("contributor.json")).unwrap();
-        let config = store.load_config().unwrap().unwrap();
-        assert!(config.consent_scopes.is_empty());
-        assert_eq!(config.witness, Some(witness.clone()));
-        assert!(
-            persist(
-                dir.path(),
-                &options,
-                &identity,
-                completed(),
-                "second",
-                witness
-            )
-            .is_err()
-        );
-        assert_eq!(
-            std::fs::read(dir.path().join("contributor.json")).unwrap(),
-            before
-        );
+            .unwrap();
+            let before = std::fs::read(dir.path().join("contributor.json")).unwrap();
+            let config = store.load_config().unwrap().unwrap();
+            assert!(config.consent_scopes.is_empty());
+            assert_eq!(config.witness, Some(witness.clone()));
+            assert_eq!(
+                config.inference_receipt_endpoint.as_deref(),
+                receipt_endpoint.as_deref()
+            );
+            assert!(
+                persist(
+                    dir.path(),
+                    &options,
+                    &identity,
+                    completed(),
+                    "second",
+                    witness,
+                    None
+                )
+                .is_err()
+            );
+            assert_eq!(
+                std::fs::read(dir.path().join("contributor.json")).unwrap(),
+                before
+            );
+        }
     }
     #[test]
     fn callback_survives_originating_ipc_runtime_drop() {

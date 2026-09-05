@@ -18,10 +18,22 @@ PostgreSQL mirror writes and tenant RLS readiness, plus these operator settings:
   (nonempty array of attestation measurement pin strings).
 
 The native daemon additionally requires an explicitly enforcing
-`TRACE_COMMONS_ALLOWED_HOSTS` containing Commons, issuer, and witness hosts.
+`TRACE_COMMONS_ALLOWED_HOSTS` containing Commons, issuer, witness, and any configured receipt-service hosts.
 An unset or permissive allowlist refuses this trust-bootstrap flow. It also
 validates every published measurement set before persisting witness settings.
 The integrated native settings type must retain `admission_evidence=true`.
+
+As with invite enrollment, set `TRACE_COMMONS_INFERENCE_RECEIPT_ENDPOINT` to the
+provider's explicit receipt-service base URL before wallet signup. Native signup
+preserves it in `contributor.json` after validating HTTPS, an enforcing host
+allowlist, and absence of URL credentials, query, or fragment. It never guesses a
+receipt URL from the selected inference backend. An absent endpoint still allows
+identity enrollment and window-based history contributions; preparing a new bound
+inference session requires a saved endpoint. For existing accounts, configure
+`inference_receipt_endpoint` explicitly in their contributor configuration; merely
+changing the environment after enrollment does not retrofit saved configuration.
+The receipt client appends `/signature/{chat_id}` and the served-model query. It
+refuses redirects, so configure the canonical provider endpoint.
 
 `GET /v1/account/near/provision/capabilities` returns `ready: false` until the
 whole dependency chain is configured. A ready response includes `issuer_url`,

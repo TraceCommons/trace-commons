@@ -18,7 +18,12 @@ Required configuration:
   existing agent route through that proxy. Translation to that target is allowed
   where IronWire supports it. Subscription-only or unsupported backend modes
   cannot be used. This operation changes no route, credentials, or capture flag.
-- An enforcing Commons/issuer host allowlist and configured admission service.
+- An enforcing Commons/issuer/receipt-service host allowlist and configured
+  admission service. A saved `inference_receipt_endpoint` must explicitly name the
+  provider's HTTPS receipt-service base URL. Native signup preserves
+  `TRACE_COMMONS_INFERENCE_RECEIPT_ENDPOINT` when configured; it never derives it
+  from a backend name or funds. Existing enrollment configuration must be updated
+  explicitly when this endpoint was absent at signup.
 
 The daemon resolves the queue entry back to a declared native source and reads
 its exact session identifier from metadata: Codex `session_meta.payload.id` or
@@ -43,3 +48,9 @@ create inference funds or consume an upload entitlement.
 
 The required proxy implementation is in the separate IronWire repository; it
 must be built and configured before this capability can become available.
+
+Preparation refuses before contacting the proxy or issuer when that saved endpoint
+is absent (`admission_receipt_endpoint_required`) or fails trust validation
+(`admission_receipt_endpoint_invalid`). These fixed codes contain no URL or
+credentials. This prerequisite applies to preparation for the next bound inference;
+it does not add a receipt requirement to ordinary admission-window history uploads.

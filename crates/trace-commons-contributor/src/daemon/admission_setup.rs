@@ -42,6 +42,26 @@ struct Registered {
     expires_at: i64,
 }
 
+#[derive(Debug, thiserror::Error)]
+enum ReceiptEndpointSetupError {
+    #[error("admission_receipt_endpoint_required")]
+    Required,
+    #[error("admission_receipt_endpoint_invalid")]
+    Invalid,
+}
+fn require_receipt_endpoint(cfg: &ContributorConfig) -> Result<()> {
+    let endpoint = cfg
+        .inference_receipt_endpoint
+        .as_deref()
+        .ok_or(ReceiptEndpointSetupError::Required)?;
+    crate::config::validate_inference_receipt_endpoint(
+        endpoint,
+        &allowlist_for(cfg.allowed_hosts.as_deref()),
+    )
+    .map_err(|_| ReceiptEndpointSetupError::Invalid)?;
+    Ok(())
+}
+
 pub async fn handle_prepare_admission_session(shared: &DaemonShared, req: &Request) -> Response {
     let params: Params = match serde_json::from_value(req.params.clone()) {
         Ok(params) => params,
@@ -52,7 +72,14 @@ pub async fn handle_prepare_admission_session(shared: &DaemonShared, req: &Reque
             req.id,
             serde_json::json!({"status":"ready_for_next_inference","expires_at":expires_at}),
         ),
-        Err(_) => Response::err(req.id, ERR_UNAVAILABLE, "admission_setup_unavailable"),
+        Err(error) => {
+            let label = match error.downcast_ref::<ReceiptEndpointSetupError>() {
+                Some(ReceiptEndpointSetupError::Required) => "admission_receipt_endpoint_required",
+                Some(ReceiptEndpointSetupError::Invalid) => "admission_receipt_endpoint_invalid",
+                None => "admission_setup_unavailable",
+            };
+            Response::err(req.id, ERR_UNAVAILABLE, label)
+        }
     }
 }
 fn check_consent(cfg: &ContributorConfig, body_export: bool, confirmed: bool) -> Result<()> {
@@ -79,6 +106,7 @@ async fn prepare(shared: &DaemonShared, params: Params) -> Result<i64> {
         .ok_or_else(|| anyhow!("admission_setup_unenrolled"))?;
     let settings = shared.settings.lock().expect("settings lock").clone();
     check_consent(&cfg, settings.ironwire_attested_bodies, params.confirmed)?;
+    require_receipt_endpoint(&cfg)?;
     if params.backend.is_empty()
         || params.backend.len() > 128
         || params.backend.chars().any(char::is_control)
@@ -433,5 +461,36 @@ mod tests {
             expires
         );
         task.abort();
+    }
+    #[tokio::test]
+    async fn missing_receipt_endpoint_refuses_before_proxy_contact_with_useful_code() {
+        let (_dir, store) = crate::config::tests_support::temp_store();
+        store.save_config(&config()).unwrap();
+        let shared = DaemonShared::load(store).unwrap();
+        shared.settings.lock().unwrap().ironwire_attested_bodies = true;
+        let error = prepare(
+            &shared,
+            Params {
+                entry_id: uuid::Uuid::new_v4(),
+                backend: "near".into(),
+                confirmed: true,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<ReceiptEndpointSetupError>(),
+            Some(ReceiptEndpointSetupError::Required)
+        ));
+        let mut cfg = config();
+        cfg.inference_receipt_endpoint = Some("https://receipts.example/v1".into());
+        cfg.allowed_hosts = Some("receipts.example,issuer.example,ingest.example".into());
+        assert!(require_receipt_endpoint(&cfg).is_ok());
+        cfg.inference_receipt_endpoint = Some("http://receipts.example/v1".into());
+        let error = require_receipt_endpoint(&cfg).unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<ReceiptEndpointSetupError>(),
+            Some(ReceiptEndpointSetupError::Invalid)
+        ));
     }
 }
