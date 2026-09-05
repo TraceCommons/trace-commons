@@ -2175,6 +2175,29 @@ mod tests {
             &response.envelope_bytes,
         )
         .unwrap();
+        for restricted in [
+            AdmissionProviderTrust::new([provider_key.clone()], ["other-model".into()], 1).unwrap(),
+            AdmissionProviderTrust::new(
+                [provider_key.clone()],
+                ["fixture-model".into()],
+                request_body.len() as u64 + 1,
+            )
+            .unwrap(),
+        ] {
+            assert!(
+                verify_admission_evidence(
+                    &evidence,
+                    &signature,
+                    &artifact,
+                    &witness_pin,
+                    &restricted,
+                    &binding.account_anchor_sha256,
+                    now
+                )
+                .is_err(),
+                "ingest enforces its own policy on authenticated evidence"
+            );
+        }
         let now = chrono::Utc::now().timestamp();
         assert_eq!(evidence.challenge_sha256, binding.digest().unwrap());
         verify_admission_evidence(

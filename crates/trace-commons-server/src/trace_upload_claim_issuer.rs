@@ -2552,6 +2552,9 @@ impl TraceUploadClaimIssuerState {
                 .map_err(|_| IssuerError::internal())?
                 .is_some()
         {
+            if consent_scopes.is_empty() || allowed_uses.is_empty() {
+                return Err(IssuerError::forbidden("native claim scopes required"));
+            }
             return Ok(());
         }
         // Dual-read canonical method-bound refs and pre-#209 signed hashes so
@@ -6244,6 +6247,11 @@ mod tests {
             post_signed_device_claim_for_tenant(tenant_id, body).await;
         assert_eq!(status, StatusCode::OK, "claim must succeed: {:?}", response);
         let claims = decode_issued_claims(&response);
+        assert_eq!(
+            claims["allowed_consent_scopes"],
+            json!(["debugging_evaluation", "public_attribution"]),
+            "a grant-free device upload claim must retain a nonempty scope ceiling"
+        );
         assert_eq!(
             claims["allowed_uses"],
             json!(["debugging", "evaluation", "aggregate_analytics"]),
