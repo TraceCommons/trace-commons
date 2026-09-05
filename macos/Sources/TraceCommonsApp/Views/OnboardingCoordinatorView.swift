@@ -109,8 +109,8 @@ struct OnboardingCoordinatorView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            if showsBackToConsent {
-                backBar
+            if let previous = previousStep {
+                backBar(to: previous)
             }
             content
         }
@@ -119,19 +119,41 @@ struct OnboardingCoordinatorView: View {
         }
     }
 
-    private var showsBackToConsent: Bool {
-        step == .privacyScan || step == .projects
+    /// Where Back goes from the current step, or nil on Welcome, which has
+    /// nothing before it.
+    ///
+    /// Every step after Welcome has one. Back used to exist on only two of
+    /// them (the scan and projects screens, both returning to consent), so
+    /// a contributor on Connect who wanted to re-read the welcome screen,
+    /// or on Done who wanted to ignore one more project, had no way there
+    /// except quitting. Back from Done returns to the projects screen, and
+    /// the scan screen is skipped on the way back exactly when it was
+    /// skipped on the way forward.
+    ///
+    /// Back from consent lands on Connect, where the device is by then
+    /// already enrolled; that screen says so and offers Continue rather
+    /// than a second enrolment (see `OnboardingConnectContent`).
+    private var previousStep: Step? {
+        switch step {
+        case .welcome: return nil
+        case .roots, .connect: return .welcome
+        case .consent: return .connect
+        case .privacyScan: return .consent
+        case .projects: return model.daemonSettings?.nearAIConfigured == true ? .privacyScan : .consent
+        case .done: return .projects
+        }
     }
 
-    private var backBar: some View {
+    private func backBar(to previous: Step) -> some View {
         HStack {
             Button {
-                step = .consent
+                step = previous
             } label: {
-                Label("Back to permissions", systemImage: "chevron.left")
+                Label("Back", systemImage: "chevron.left")
             }
             .buttonStyle(.plain)
             .foregroundStyle(.secondary)
+            .accessibilityLabel("Back to the previous step")
             Spacer()
         }
         .padding(.horizontal, 24)

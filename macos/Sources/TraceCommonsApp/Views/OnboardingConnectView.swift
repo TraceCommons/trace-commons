@@ -74,11 +74,15 @@ struct OnboardingConnectContent: View {
     var body: some View {
         VStack(alignment: .leading, spacing: TC.Space.xl) {
             header
-            pasteField
-            phaseView
-            Divider()
-            NearAccountConnectView(onBusyChanged: { nearBusy = $0 }, onEnrolled: onEnrolled)
-                .disabled(isEnrolling)
+            if model.status.loggedIn {
+                alreadyConnected
+            } else {
+                pasteField
+                phaseView
+                Divider()
+                NearAccountConnectView(onBusyChanged: { nearBusy = $0 }, onEnrolled: onEnrolled)
+                    .disabled(isEnrolling)
+            }
         }
         .padding(TC.Space.xxl)
         .tcColumn(TC.Measure.prose)
@@ -133,6 +137,22 @@ struct OnboardingConnectContent: View {
                 .disabled(isEnrolling || nearBusy)
             Button("Look up", action: resolve)
                 .disabled(inviteText.trimmingCharacters(in: .whitespaces).isEmpty || isEnrolling || nearBusy)
+        }
+    }
+
+    private var alreadyConnected: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .firstTextBaseline, spacing: TC.Space.s) {
+                Image(systemName: TC.Tone.clear.symbol)
+                    .imageScale(.small)
+                    .foregroundStyle(TC.green)
+                    .accessibilityHidden(true)
+                Text("This device is already connected.")
+                    .font(.callout)
+            }
+            Button("Continue", action: onEnrolled)
+                .tcPrimaryAction()
+                .keyboardShortcut(.defaultAction)
         }
     }
 
