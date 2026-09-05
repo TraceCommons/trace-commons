@@ -5,6 +5,10 @@ pilot and production enablement remain gated.
 
 ### Current integration evidence
 
+Next slice: [packaging and resource-policy implementation](2026-09-04-compute-pilot-packaging-policy.md),
+with the [artifact contract and policy](../specs/2026-09-04-compute-pilot-packaging-policy.md).
+That design does not open the shipping compute gate.
+
 The debug-only Trace Commons adapter launched the actual pinned Holonear worker
 against an in-process loopback coordinator. The combined smoke completed a
 synthetic inference (three input tokens, five output tokens), observed signed
