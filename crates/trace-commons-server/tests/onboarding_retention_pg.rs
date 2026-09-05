@@ -83,6 +83,20 @@ async fn restricted_migrator_loses_guard_membership_and_retention_preserves_repl
     parsed.set_username("admission_retention_runtime").unwrap();
     let runtime = PgBackend::new(&cfg(parsed.to_string())).await.unwrap();
     assert!(runtime.admission_runtime_ready().await.unwrap());
+    client
+        .batch_execute("GRANT trace_onboarding_retention_guard TO admission_retention_runtime;")
+        .await
+        .unwrap();
+    assert!(
+        !runtime.admission_runtime_ready().await.unwrap(),
+        "runtime must not inherit global expired ceremony access"
+    );
+    client
+        .batch_execute("REVOKE trace_onboarding_retention_guard FROM admission_retention_runtime;")
+        .await
+        .unwrap();
+    assert!(runtime.admission_runtime_ready().await.unwrap());
+
     assert_eq!(
         runtime
             .prune_onboarding_expiry("alpha", 1, true)

@@ -95,6 +95,7 @@ impl PgBackend {
         let row=client.query_one(r#"
         SELECT NOT r.rolsuper AND NOT r.rolbypassrls
           AND NOT pg_has_role(current_user,'trace_admission_guard','MEMBER')
+          AND NOT COALESCE(pg_has_role(current_user,to_regrole('trace_onboarding_retention_guard'),'MEMBER'),FALSE)
           AND NOT has_table_privilege(current_user,'public.trace_admission_receipts','SELECT,INSERT,UPDATE,DELETE')
           AND NOT has_table_privilege(current_user,'public.trace_admission_global_budget','SELECT,INSERT,UPDATE,DELETE')
           AND has_function_privilege(current_user,'public.trace_reserve_admission(text,text,uuid,text,text,text,bigint,bigint,bigint,bigint,uuid,bigint)','EXECUTE')
