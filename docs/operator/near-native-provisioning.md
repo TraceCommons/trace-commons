@@ -81,3 +81,42 @@ cargo test -p trace-commons-server --bin trace-commons-ingest near_provisioning:
 
 The database test creates a restricted `tc_near_runtime` role in that disposable
 cluster. It never falls back to a deployment `DATABASE_URL`.
+
+## Existing-history onboarding window
+
+New signup keeps `witness.admission_evidence=true` for inference preparation,
+but this flag does not require a receipt for pre-inference history. Before any
+receipt lookup or witness request, the client inspects the captured final
+request: presence of `metadata.trace_commons_admission` selects the strict
+admission profile; no captured request or an unbound legacy request selects
+ordinary **signed** witness review. A malformed/present marker, expired binding,
+receipt-fetch failure, or witness HTTP failure never switches an admission
+request onto the window route. Malformed request JSON is refused when selecting
+the account-bound profile. No unsigned local fallback is introduced.
+
+A window-enabled deployment must allow receipt-less requests on its ordinary
+`POST /v1/witness` route. In the current witness binary, leave
+`TRACE_COMMONS_WITNESS_REQUIRE_ATTESTED_INFERENCE` unset/false on the witness
+published for that onboarding path. This controls the ordinary route only in
+practice: `/v1/witness/admission` independently always requires its trusted
+provider receipt and bound challenge. A deployment that requires receipts on
+the ordinary route cannot offer the existing-history window; do not silently
+retry another witness or weaken a requiring invited deployment to hide that
+mismatch. Both profiles retain the configured enclave pin and signed redaction
+artifact, explicit raw-session disclosure, and immutable approval bytes.
+
+Ingest remains authoritative: an ordinary signed artifact from a provisioned
+account consumes a configured window attempt/cost reservation or is rejected
+when unavailable/exhausted. Neither a client flag nor a v1 certificate grants
+admission. Existing real-PostgreSQL
+`actual_postgres_challenge_witness_ingest_and_terminal_retry` coverage exercises
+that server reservation and exhaustion, while contributor tests exercise the
+receipt-less signed review through stored approval, strict receipt failure,
+and absence of HTTP profile fallback. No remaining allowance is inferred by
+the client and no funding is promised.
+
+The V59 processing reservation begins at ingest, **after** remote witness review.
+Its account/global ceilings cover the configured ingest processing bound, not
+all earlier witness redaction or provider inference expenses. Witness request
+limits, concurrency controls and any deployment funding limits are separate;
+do not describe the ingest ledger as an end-to-end cap on pre-review spending.

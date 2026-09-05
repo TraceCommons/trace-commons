@@ -41,6 +41,32 @@ use crate::witness::transport::{
 };
 use crate::witness::{WITNESS_EXPECTED_MEASUREMENT_CONTROL, witness_session};
 
+/// Select the witness profile from source bytes before receipt lookup or HTTP.
+/// The signup flag enables account-bound evidence, but existing unbound history
+/// still needs an ordinary signed review for the server-controlled window.
+/// A present marker (even malformed/expired) must never become a window retry.
+pub(crate) fn admission_profile_for_request(
+    enabled: bool,
+    request_body: Option<&str>,
+) -> std::result::Result<bool, &'static str> {
+    if !enabled {
+        return Ok(false);
+    }
+    let Some(body) = request_body else {
+        return Ok(false);
+    };
+    let request: serde_json::Value =
+        serde_json::from_str(body).map_err(|_| "admission_request_malformed")?;
+    let object = request.as_object().ok_or("admission_request_malformed")?;
+    match object.get("metadata") {
+        None | Some(serde_json::Value::Null) => Ok(false),
+        Some(serde_json::Value::Object(metadata)) => {
+            Ok(metadata.contains_key(trace_commons_protocol::admission::REQUEST_METADATA_KEY))
+        }
+        Some(_) => Err("admission_request_malformed"),
+    }
+}
+
 /// Statuses that mean a session has already been accepted by the server;
 /// re-encountering a receipt with one of these statuses short-circuits the
 /// per-session flow instead of re-uploading.
@@ -642,6 +668,10 @@ impl<'a> SubmitContext<'a> {
             .trust()
             .map_err(|_| "witness_expected_measurement_malformed")?;
 
+        let admission_profile = admission_profile_for_request(
+            settings.admission_evidence,
+            attested.map(|call| call.request_body()),
+        )?;
         let transport = HttpWitnessTransport::new(
             settings.url.clone(),
             self.cfg.ingest_url.clone(),
@@ -649,14 +679,18 @@ impl<'a> SubmitContext<'a> {
             std::time::Duration::from_secs(120),
         )
         .map_err(|e| e.refusal_label())?
-        .with_admission_evidence(settings.admission_evidence);
+        .with_admission_evidence(admission_profile);
 
-        // Fetched before the witness sequence starts, and never allowed to
-        // fail it. See `inference_receipt_for`.
+        // The source-selected profile is already frozen. Optional legacy
+        // receipt failures retain ordinary review; a bound admission call
+        // must have its receipt and cannot switch to the window on failure.
         let receipt = match attested {
             Some(call) => self.inference_receipt_for(call).await,
             None => None,
         };
+        if admission_profile && receipt.is_none() {
+            return Err("admission_receipt_unavailable");
+        }
         let attested = attested.map(|call| crate::witness::transport::AttestedInference {
             call,
             receipt: receipt.as_ref(),
@@ -4102,14 +4136,18 @@ mod tests {
 
     /// An attestable call, built through the real reader.
     fn receipt_fixture_call() -> (crate::routing::attested::AttestedCall, tempfile::TempDir) {
+        receipt_fixture_call_with_request("{\"model\":\"Qwen/Qwen3.6-27B-FP8\"}")
+    }
+    fn receipt_fixture_call_with_request(
+        request: &str,
+    ) -> (crate::routing::attested::AttestedCall, tempfile::TempDir) {
         use sha2::Digest as _;
 
-        const REQUEST: &str = "{\"model\":\"Qwen/Qwen3.6-27B-FP8\"}";
         const RESPONSE: &str = "data: [DONE]\n\n";
 
         let dir = tempfile::tempdir().expect("a temporary body store");
         let reference = "00000000000000000011-000000";
-        std::fs::write(dir.path().join(format!("{reference}.req")), REQUEST).expect("req");
+        std::fs::write(dir.path().join(format!("{reference}.req")), request).expect("req");
         std::fs::write(dir.path().join(format!("{reference}.res")), RESPONSE).expect("res");
 
         let row = crate::routing::RoutedExchange {
@@ -4122,7 +4160,7 @@ mod tests {
             requested_model: Some("Qwen/Qwen3.6-27B-FP8".to_string()),
             served_model: Some("Qwen/Qwen3.6-27B-FP8".to_string()),
             upstream_id: Some("chatcmpl-abc123".to_string()),
-            request_sha256: Some(hex::encode(sha2::Sha256::digest(REQUEST.as_bytes()))),
+            request_sha256: Some(hex::encode(sha2::Sha256::digest(request.as_bytes()))),
             response_sha256: Some(hex::encode(sha2::Sha256::digest(RESPONSE.as_bytes()))),
             body_ref: Some(reference.to_string()),
             rung: "full".to_string(),
@@ -4137,6 +4175,97 @@ mod tests {
         let call = crate::routing::attested::attested_final_call(&[row], dir.path())
             .expect("the fixture must be attestable, or these tests prove nothing");
         (call, dir)
+    }
+
+    #[test]
+    fn window_profile_is_selected_from_source_before_receipt_fetch() {
+        use trace_commons_protocol::admission::REQUEST_METADATA_KEY;
+        assert_eq!(admission_profile_for_request(true, None), Ok(false));
+        for legacy in [
+            r#"{"model":"old-provider"}"#,
+            r#"{"metadata":null}"#,
+            r#"{"metadata":{"other":"value"}}"#,
+        ] {
+            assert_eq!(admission_profile_for_request(true, Some(legacy)), Ok(false));
+        }
+        for marker in [
+            serde_json::json!("tcad1:invalid"),
+            serde_json::Value::Null,
+            serde_json::json!(42),
+        ] {
+            let body = serde_json::json!({"metadata":{REQUEST_METADATA_KEY:marker}}).to_string();
+            assert_eq!(
+                admission_profile_for_request(true, Some(&body)),
+                Ok(true),
+                "a malformed marker cannot downgrade"
+            );
+        }
+        assert!(admission_profile_for_request(true, Some("not JSON")).is_err());
+        assert!(admission_profile_for_request(true, Some(r#"{"metadata":"malformed"}"#)).is_err());
+        assert_eq!(
+            admission_profile_for_request(false, Some("not JSON")),
+            Ok(false),
+            "invited configuration keeps its existing policy"
+        );
+    }
+
+    #[tokio::test]
+    async fn bound_receipt_fetch_failure_cannot_turn_into_a_window_review() {
+        let (_dir, store) = crate::config::tests_support::temp_store();
+        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
+        let witness_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let receipt_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let receipt_address = receipt_listener.local_addr().unwrap();
+        drop(receipt_listener); // Deterministic loopback connection refusal, no provider call.
+        let mut cfg = cfg_for(
+            "http://issuer.invalid",
+            "http://ingest.invalid",
+            &device.device_key_id,
+        );
+        cfg.allowed_hosts = Some("127.0.0.1".into());
+        cfg.inference_receipt_endpoint = Some(format!("https://{receipt_address}/v1"));
+        let settings = WitnessSettings {
+            admission_evidence: true,
+            url: format!("http://{}", witness_listener.local_addr().unwrap()),
+            ..pinned_witness()
+        };
+        cfg.witness = Some(settings.clone());
+        let opts = SubmitOptions {
+            dry_run: false,
+            pii_filter: None,
+            no_reasoning: false,
+            machine_readable: true,
+            unenrolled_preview: false,
+            remediate_quarantined: false,
+            verdict: None,
+        };
+        let ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let selection = fixture_selection();
+        let (source, reference) = &selection[0];
+        let transcript = source.load(reference).unwrap();
+        let raw = build_raw_contribution_with_verdict(&transcript, &cfg, Utc::now(), None);
+        let request = r#"{"model":"Qwen/Qwen3.6-27B-FP8","metadata":{"trace_commons_admission":"tcad1:bound-call"}}"#;
+        let (call, _bodies) = receipt_fixture_call_with_request(request);
+        let token = ClaimToken {
+            access_token: "fixture".into(),
+            expires_at: Utc::now() + chrono::Duration::minutes(5),
+            consent_scopes: vec!["debugging_evaluation".into()],
+            allowed_uses: vec!["debugging".into()],
+        };
+        let error = ctx
+            .witness_envelope(&settings, raw, Some(&call), &token, Utc::now())
+            .await
+            .unwrap_err();
+        assert_eq!(error, "admission_receipt_unavailable");
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(30),
+                witness_listener.accept()
+            )
+            .await
+            .is_err(),
+            "failed receipt fetch cannot send raw bodies to either witness route"
+        );
     }
 
     /// Nothing is fetched when no endpoint is configured, and the answer is

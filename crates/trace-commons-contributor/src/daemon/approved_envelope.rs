@@ -199,9 +199,10 @@ impl WitnessReviewArtifact {
             .witness
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("witness-review-stale"))?;
-        if settings.admission_evidence && self.response.admission.is_none() {
-            bail!("witness-review-stale");
-        }
+        // Ordinary signed reviews of pre-inference history are valid for new
+        // accounts too. Absence of admission evidence never grants entitlement:
+        // the authenticated server must reserve its bounded window at upload.
+
         if !settings
             .trust()
             .map_err(|_| anyhow::anyhow!("witness-review-stale"))?
@@ -430,6 +431,130 @@ pub fn sweep(store: &ConfigStore, keep: &HashSet<Uuid>) -> Result<()> {
 mod tests {
     use super::*;
     use crate::config::tests_support::temp_store;
+
+    #[tokio::test]
+    async fn new_account_receiptless_history_keeps_signed_window_review_through_approval() {
+        use crate::witness::transport::{
+            GrantedConsent, HttpWitnessTransport, witness_contribution,
+        };
+        use axum::response::IntoResponse as _;
+        use trace_commons_protocol::trace_contribution::{
+            ConsentScope, RawTraceCaptureTurn, RawTraceContribution,
+            RecordedTraceContributionOptions, TraceAllowedUse,
+        };
+        let (_dir, store) = temp_store();
+        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
+        let source_hash = "pre-inference-history";
+        let tenant = format!("near-{}", "ab".repeat(32));
+        let mut envelope = envelope().await;
+        envelope.submission_id = crate::source::submission_id_for(source_hash);
+        envelope.contributor.tenant_scope_ref = Some(tenant.clone());
+        envelope.contributor.pseudonymous_contributor_id = Some(
+            trace_commons_protocol::onboarding::user_subject_hash(&device.device_key_id),
+        );
+        let bytes = serde_json::to_vec(&envelope).unwrap();
+        let (response, address) = crate::witness::transport::signed_fixture(bytes.clone());
+        let answer = response.clone();
+        let router = axum::Router::new().route(
+            "/v1/witness",
+            axum::routing::post(move |axum::Json(body): axum::Json<serde_json::Value>| {
+                let answer = answer.clone();
+                async move {
+                    assert!(body.get("inference_receipt").is_none());
+                    let mut response = answer.envelope_bytes.into_response();
+                    response.headers_mut().insert(
+                        crate::witness::transport::WITNESS_CERTIFICATE_HEADER,
+                        answer.certificate_json.parse().unwrap(),
+                    );
+                    response.headers_mut().insert(
+                        crate::witness::transport::WITNESS_SIGNATURE_HEADER,
+                        answer.signature_hex.parse().unwrap(),
+                    );
+                    response
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        let cfg:crate::config::ContributorConfig=serde_json::from_value(serde_json::json!({
+            "schema_version":crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION,"issuer_url":"http://issuer.invalid","ingest_url":"http://ingest.invalid","audience":"upload","tenant_id":tenant,"instance_id":"","user_subject":device.device_key_id,"device_key_id":device.device_key_id,"consent_scopes":["debugging_evaluation"],
+            "witness":{"url":url,"signing_address":address,"expected_measurements":[format!("mrtd={}","aa".repeat(48))],"admission_evidence":true}
+        })).unwrap();
+        let settings = cfg.witness.as_ref().unwrap();
+        let profile =
+            crate::submit::admission_profile_for_request(settings.admission_evidence, None)
+                .unwrap();
+        assert!(!profile);
+        let transport = HttpWitnessTransport::new(
+            url.clone(),
+            cfg.ingest_url.clone(),
+            std::sync::Arc::new(
+                trace_commons_operator_client::host_allowlist::HostAllowlist::permissive(),
+            ),
+            Duration::from_secs(5),
+        )
+        .unwrap()
+        .with_admission_evidence(profile);
+        // Enclave attestation is injected only at the existing test seam;
+        // HTTP, returned artifact signature and approval validation are real.
+        let verified = crate::witness::verify::verified_witness_for_test(&url, &address);
+        let raw = RawTraceContribution::from_capture_turns(
+            &[RawTraceCaptureTurn {
+                user_input: "previous useful work".into(),
+                response: None,
+                tool_calls: Vec::new(),
+                started_at: chrono::Utc::now(),
+                completed_at: Some(chrono::Utc::now()),
+                state: Some("Completed".into()),
+            }],
+            RecordedTraceContributionOptions::default(),
+        );
+        let received = witness_contribution(
+            &transport,
+            &verified,
+            raw,
+            None,
+            &GrantedConsent {
+                scopes: vec![ConsentScope::DebuggingEvaluation],
+                uses: vec![TraceAllowedUse::Debugging],
+            },
+        )
+        .await
+        .unwrap();
+        assert!(received.admission.is_none());
+        let artifact = WitnessReviewArtifact::new(
+            received,
+            source_hash.into(),
+            "fingerprint".into(),
+            None,
+            None,
+        );
+        let id = Uuid::new_v4();
+        save_witnessed(&store, id, &artifact).unwrap();
+        let loaded = load_witnessed(&store, id).unwrap().unwrap();
+        loaded
+            .validate_stored(&cfg, source_hash, "fingerprint")
+            .unwrap();
+        assert_eq!(loaded.response.envelope_bytes, bytes);
+        let opts = crate::submit::SubmitOptions {
+            dry_run: false,
+            pii_filter: None,
+            no_reasoning: false,
+            machine_readable: true,
+            unenrolled_preview: false,
+            remediate_quarantined: false,
+            verdict: None,
+        };
+        let mut context = crate::submit::SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        context.use_approved_witness(loaded.response).unwrap();
+        // Server authority is separately exercised by the real-PG
+        // actual_postgres_challenge_witness_ingest_and_terminal_retry test:
+        // no evidence consumes one window slot; exhaustion refuses upload.
+        task.abort();
+    }
 
     #[tokio::test]
     async fn witness_review_persists_exact_bytes_and_refuses_partial_records() {

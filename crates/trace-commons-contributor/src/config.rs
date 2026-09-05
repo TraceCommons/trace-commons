@@ -141,7 +141,9 @@ pub struct ContributorConfig {
 /// an uncertified submission from someone enrolled as certified.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WitnessSettings {
-    /// Explicit account-bound admission profile; legacy invited devices stay false.
+    /// Enable account-bound admission for final calls carrying its request marker.
+    /// Existing unbound history still uses signed ordinary review and the server's
+    /// bounded window. Legacy invited devices stay false.
     #[serde(default)]
     pub admission_evidence: bool,
     /// Base URL of the witness, e.g. `https://witness.example`.

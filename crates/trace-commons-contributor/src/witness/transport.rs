@@ -1437,6 +1437,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn admission_http_failure_never_retries_the_ordinary_window_route() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let strict = Arc::new(AtomicUsize::new(0));
+        let ordinary = Arc::new(AtomicUsize::new(0));
+        let strict_count = strict.clone();
+        let ordinary_count = ordinary.clone();
+        let app = Router::new()
+            .route(
+                "/v1/witness/admission",
+                post(move || {
+                    let count = strict_count.clone();
+                    async move {
+                        count.fetch_add(1, Ordering::SeqCst);
+                        axum::http::StatusCode::BAD_REQUEST
+                    }
+                }),
+            )
+            .route(
+                "/v1/witness",
+                post(move || {
+                    let count = ordinary_count.clone();
+                    async move {
+                        count.fetch_add(1, Ordering::SeqCst);
+                        axum::http::StatusCode::OK
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let source = r#"{"metadata":{"trace_commons_admission":"tcad1:malformed"}}"#;
+        let profile = crate::submit::admission_profile_for_request(true, Some(source)).unwrap();
+        let transport = transport_for(&url, permissive()).with_admission_evidence(profile);
+        let key = test_signer("strict-window-test");
+        let witness = crate::witness::verify::verified_witness_for_test(&url, &address_of(&key));
+        assert!(
+            witness_contribution(&transport, &witness, raw_with_secret(), None, &granted())
+                .await
+                .is_err()
+        );
+        assert_eq!(strict.load(Ordering::SeqCst), 1);
+        assert_eq!(ordinary.load(Ordering::SeqCst), 0);
+        task.abort();
+    }
+
+    #[tokio::test]
     async fn a_correctly_signed_certificate_over_the_returned_bytes_is_accepted() {
         // The positive control. Without it, every refusal above would pass on
         // a `verify_certificate` that refused unconditionally.
