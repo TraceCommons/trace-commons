@@ -58,6 +58,8 @@ pub struct ComputeSnapshot {
 #[derive(Debug, Clone, Serialize)]
 pub struct ComputeCopy {
     pub destination: &'static str,
+    pub subtitle: &'static str,
+    pub retry: &'static str,
     pub introduction: &'static str,
     pub allowance_label: &'static str,
     pub allowance_detail: &'static str,
@@ -75,6 +77,8 @@ impl Default for ComputeCopy {
     fn default() -> Self {
         Self {
             destination: "Compute",
+            subtitle: "Contribute compute independently of your traces.",
+            retry: "Try again",
             introduction: "Contribute compute to Holonear independently of trace contribution. Enabling compute does not authorize access to your local traces. The test pilot does not promise paid earnings.",
             allowance_label: "RAM scheduling allowance (GiB)",
             allowance_detail: "Capacity advertised to the pool, not a hard memory limit. Actual memory use may differ.",
@@ -83,7 +87,7 @@ impl Default for ComputeCopy {
             pause: "Pause compute",
             disable: "Disable compute",
             loading: "Loading compute settings…",
-            unavailable: "Compute settings could not be loaded. Restart the app to try again.",
+            unavailable: "Compute settings could not be loaded. Check the state folder and try again.",
             quit_detail: "Enabled compute must stop before the app quits. Worker termination and coordinator drain acknowledgement are separate; a forced exit does not confirm a completed handoff.",
             quit_refused: "Quit was cancelled because worker termination was not confirmed in time. Keep the app open until stopping finishes, then try quitting again.",
         }
