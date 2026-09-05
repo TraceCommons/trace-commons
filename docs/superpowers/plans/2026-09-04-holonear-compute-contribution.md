@@ -1,6 +1,27 @@
 # Holonear compute contribution in Trace Commons
 
-Date: 2026-09-04. Status: implementation started in isolated worktrees.
+Date: 2026-09-04. Status: local controller/worker integration verified; packaged
+pilot and production enablement remain gated.
+
+### Current integration evidence
+
+The debug-only Trace Commons adapter launched the actual pinned Holonear worker
+against an in-process loopback coordinator. The combined smoke completed a
+synthetic inference (three input tokens, five output tokens), observed signed
+Serving status, then confirmed paused consent, process termination, a drain
+acknowledgement, and release of the worker lifetime lock. This passed again after
+integrating and rebuilding the final worker changes. The worker suite separately
+passed actual controller-process death followed by orphan drain/lock release.
+
+The reproducible paired runner is Holonear's
+`crates/holonear-e2e/examples/trace_commons_compute_smoke.rs`, documented in
+`docs/trace-commons-compute-local-smoke.md`. This is local CPU inference evidence,
+not MLX/device validation, training progress, spare migration, or a penalty-free
+shutdown guarantee. No production pool, private traces, wallet keys, or funds
+were used. The regular app constructor still refuses worker launch.
+
+Earlier slices below are historical progress notes, not the current capability
+summary. The phase exit gates remain open where their full criteria are unmet.
 
 ### First implementation slice
 
