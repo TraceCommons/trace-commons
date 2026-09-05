@@ -268,10 +268,10 @@ pub struct GrantedConsent {
 /// `attested.receipt` is the provider's signature over
 /// `<sha256 of the request as sent>:<sha256 of the response as received>`,
 /// fetched by [`crate::routing::receipt`]. It is forwarded as
-/// `inference_receipt` and nothing here reads it: the witness picks the
-/// exchange to verify against -- the last one the trace declares -- and this
-/// function names no exchange, because a caller that could nominate one
-/// would nominate whichever body suited it.
+/// `inference_receipt`; the witness verifies the last exchange the trace
+/// declares. When admission evidence comes back, this client additionally
+/// verifies the supplied receipt and compares its exact-byte identity to that
+/// evidence before returning the artifact.
 ///
 /// `None` is a first-class case, not a degraded one. A submission with the
 /// bodies and no receipt is honestly unattested; a witness configured to

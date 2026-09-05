@@ -209,3 +209,52 @@ fixture `store_facade_preserves_export_grant_job_scope_and_updates` inserts a
 random nonexistent grant and fails its foreign key. That fixture is outside this
 onboarding change and remains unresolved; this record does not claim the entire
 optional database suite passed.
+
+
+## Review revision, 2026-09-05
+
+The review revision incorporates main's Ed25519 receipt/report work and current
+witness deployment pin. Admission evidence v2 signs the model and request byte
+length and accepts only explicitly configured Ed25519 gateway keys, model names
+and a positive minimum request size. These policy inputs are rechecked at ingest.
+Client tests reject validly signed evidence for another account, challenge,
+receipt, request, response, model, size or expiry.
+
+New native profiles set both receipt-attestation checking and admission evidence
+on. Explicit body-export consent is now required before witness review for these
+profiles, including existing-history/window review; disabling consent refuses
+before claim or witness network access. This conservative guard prevents a
+previously bound session from appearing unbound when the source reader suppresses
+its bodies. It does not enable capture or consent automatically.
+
+The wallet lifecycle, origin validation, polling cadence and admission expiry
+check are owned by contributor core. macOS, Windows and GTK render shared copy
+and refusal states. Failed consent saves reread settings, and disabled approval
+controls have the immutable-artifact explanation beside them.
+
+Local verification during this revision:
+
+- Contributor library: 1,328 passed, one ignored.
+- Server library: 615 passed.
+- Real HTTP NEAR window review through `witness_preview_request`, approval and
+  uploader: passed; uploaded bytes and both certificate headers equal the witness
+  response. Only DCAP cryptography uses a one-shot test fixture; nonce, measurement,
+  claim signing, HTTP transport, builder, artifact pin and uploader remain real.
+  This case does not claim a live wallet ceremony or funded provider receipt.
+- Quote verification: 14 passed, including fixture consumption, nonce rejection
+  and the single production construction-site guard.
+- Swift app compiled; 49 focused tests passed. Windows adapters/copy/consent: 29
+  passed. GTK all-target check and Clippy passed; two focused tests passed, with
+  the display-backed wallet rendering test ignored in the local headless run.
+- Restricted PostgreSQL retention harness passed: migrator memberships revoked,
+  runtime grants remain possible, dry run and batch limit honored, foreign-tenant
+  challenges and durable receipt/budget/submission records preserved.
+- IronWire revision `cc1d826`: 936 Rust tests passed, two ignored; Clippy and
+  optimized privacy-cost checks passed. All five remote CI jobs passed, including
+  Ubuntu/macOS tests and the journey harness. A separate local journey run was
+  affected by an existing default-port daemon and fixed startup timing; it is not
+  cited as a passing run.
+
+Current-head CI and the optional PostgreSQL main-baseline comparison are recorded
+in PR #602. Earlier results above describe their stated revisions, not subsequent
+heads. No live pilot, deployment or provider spending occurred in this revision.
