@@ -467,6 +467,8 @@ jobs:
       # TCShellCore, TCUpdates, TCBridge and the app target all carry tests,
       # and a per-target list is how a new one joins untested -- the same
       # trap the cargo-test-default job records.
+      - name: Verify compute signature tools with the system verifier
+        run: python3 -m unittest discover -s macos/scripts -p 'test_*.py'
       - name: swift test
         working-directory: macos
         run: swift test

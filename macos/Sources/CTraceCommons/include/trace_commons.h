@@ -124,6 +124,44 @@ extern "C" {
 /* Opaque handle to a running daemon, returned by tc_daemon_start. */
 typedef struct tc_handle tc_handle;
 
+/* Independent compute controller, one per app, with no trace enrollment needed.
+ * Open restores consent as paused and never starts a worker. Production open
+ * has no packaged backend: available/can_enable/can_resume/can_pause are false.
+ * Status/command return owned JSON strings (tc_string_free), or NULL with a
+ * fixed tc_last_error label. Open errors use the owned err output. Commands
+ * serialize settings I/O and must run off the UI thread. command_json is a
+ * NUL-terminated string of at most 4096 bytes: {"command":"enable",
+ * "ram_allowance_gib":8}, or {"command":"resume"|"pause"|"disable"}.
+ * Unknown fields are refused. Never free concurrently with another handle call.
+ * Free refuses to release a local handle with pending work or unconfirmed stop
+ * (tc_last_error=compute-worker-still-owned). Shut down and retry after confirmed
+ * worker_stopped=true and command_pending=false. Free never drains synchronously. */
+typedef struct tc_compute_handle tc_compute_handle;
+tc_compute_handle *tc_compute_open(const char *config_dir, char **err);
+char *tc_compute_status_json(tc_compute_handle *handle);
+/* Native resource ingress: obtain a single-use {epoch,sequence} ticket BEFORE
+ * reading every field. Submit {event:"sample",ticket:{epoch,sequence},reading:
+ * {power,low_power_mode,thermal,memory}}, or {event:"sleep"}/{event:"wake"}.
+ * Snake-case enum strings; low_power_mode is bool/null. JSON <=4096 bytes.
+ * NULL for unavailable/refused; owned strings use tc_string_free. Short calls
+ * may run concurrently with shutdown, but NEVER with free. No launch authority. */
+char *tc_compute_resource_begin_json(tc_compute_handle *handle);
+char *tc_compute_resource_event_json(tc_compute_handle *handle, const char *json);
+char *tc_compute_command_json(tc_compute_handle *handle, const char *command_json);
+void tc_compute_free(tc_compute_handle *handle);
+/* Shared copy independent of handle; returned JSON is caller-owned. */
+char *tc_compute_copy_json(void);
+/* Background-thread stop; wait clamped to 30 seconds. Keep handle if returned
+ * worker_stopped is false. drain_outcome is separate coordinator evidence. */
+char *tc_compute_shutdown(tc_compute_handle *handle, uint64_t timeout_ms);
+/* Shutdown is terminal; starts are refused afterward. Retain/retry shutdown on
+ * unconfirmed exit; reopen only after worker_stopped=true to restore paused.
+ * Explicit Unix DEBUG development constructor; always refused in release.
+ * Strict <=4096-byte config JSON: binary, expected_sha256, coordinator,
+ * startup_timeout_secs. Absolute binary and loopback coordinator required.
+ * No worker launch until explicit consent. Not called by the production open. */
+tc_compute_handle *tc_compute_open_local(const char *config_dir, const char *local_config_json, char **err);
+
 /* Opaque handle to one open preview, returned by tc_preview_open. */
 typedef struct tc_preview tc_preview;
 

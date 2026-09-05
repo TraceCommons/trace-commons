@@ -14,6 +14,8 @@ import TCShellCore
 @main
 struct TraceCommonsShell: App {
     @StateObject private var model = AppModel()
+    @State private var compute = ComputeModel()
+    @State private var navigation = MainWindowNavigation()
     /// Quit confirmation, Dock reopen and invite links all arrive outside
     /// SwiftUI's reach. See `AppDelegate`.
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
@@ -35,12 +37,13 @@ struct TraceCommonsShell: App {
                 .environmentObject(model)
                 .tint(TC.green)
         } label: {
-            Launcher(model: model)
+            Launcher(model: model, compute: compute, navigation: navigation, appDelegate: appDelegate)
         }
 
         Window("Trace Commons", id: WindowID.main) {
-            MainWindowView()
+            MainWindowView(navigation: navigation)
                 .environmentObject(model)
+                .environment(compute)
                 .frame(minWidth: 760, minHeight: 520)
                 // The community site's primary is green, not the platform
                 // blue. Overriding the user's chosen accent colour is a real
@@ -61,6 +64,9 @@ struct TraceCommonsShell: App {
 /// `Review` action and the queue-full banner both need.
 private struct Launcher: View {
     @ObservedObject var model: AppModel
+    let compute: ComputeModel
+    let navigation: MainWindowNavigation
+    let appDelegate: AppDelegate
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
@@ -74,7 +80,13 @@ private struct Launcher: View {
             NSApp.activate(ignoringOtherApps: true)
             openWindow(id: WindowID.main)
         }
+        appDelegate.compute = compute
+        appDelegate.navigation = navigation
         model.start()
+        Task {
+            await compute.start()
+            compute.startMonitoring()
+        }
         // Update checks begin here and nowhere else. UpdateController itself
         // decides whether Sparkle runs at all: under a Homebrew install this
         // call constructs no updater and schedules nothing.

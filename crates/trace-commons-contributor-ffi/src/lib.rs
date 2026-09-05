@@ -208,7 +208,11 @@ enum AllocKind {
     String,
     Handle,
     Preview,
+    Compute,
 }
+
+mod compute;
+pub use compute::*;
 
 static REGISTRY: LazyLock<Mutex<HashMap<usize, AllocKind>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
