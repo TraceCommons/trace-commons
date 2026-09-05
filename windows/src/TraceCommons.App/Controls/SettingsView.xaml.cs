@@ -21,6 +21,8 @@ namespace TraceCommons.App.Controls;
 /// </summary>
 public sealed partial class SettingsView : UserControl
 {
+    private bool _inferenceEvidenceDialogOpen;
+
     public SettingsView(DaemonHost host)
     {
         InitializeComponent();
@@ -53,23 +55,40 @@ public sealed partial class SettingsView : UserControl
 
     private async void OnInferenceEvidence(object sender, RoutedEventArgs e)
     {
+        if (_inferenceEvidenceDialogOpen || !Settings.InferenceEvidenceControlsEnabled)
+        {
+            return;
+        }
+
         var dialog = new ContentDialog
         {
             XamlRoot = XamlRoot,
             Title = Settings.InferenceEvidenceHeading,
-            Content = new TextBlock
+            Content = new ScrollViewer
             {
-                Text = string.Join("\n\n", Settings.InferenceEvidenceDisclosure,
-                    Settings.InferenceEvidenceCaptureNote, Settings.InferenceEvidenceScopeNote),
-                TextWrapping = TextWrapping.Wrap,
+                Content = new TextBlock
+                {
+                    Text = string.Join("\n\n", Settings.InferenceEvidenceDisclosure,
+                        Settings.InferenceEvidenceCaptureNote, Settings.InferenceEvidenceScopeNote),
+                    TextWrapping = TextWrapping.Wrap,
+                },
             },
             PrimaryButtonText = Settings.InferenceEvidenceConfirm,
             CloseButtonText = Settings.InferenceEvidenceCancel,
             DefaultButton = ContentDialogButton.Close,
         };
-        if (await dialog.ShowAsync() == ContentDialogResult.Primary)
+
+        _inferenceEvidenceDialogOpen = true;
+        try
         {
-            await Settings.SetInferenceEvidenceAsync(true, disclosureConfirmed: true);
+            if (await DialogGuard.ShowOnceAsync(dialog) == ContentDialogResult.Primary)
+            {
+                await Settings.SetInferenceEvidenceAsync(true, disclosureConfirmed: true);
+            }
+        }
+        finally
+        {
+            _inferenceEvidenceDialogOpen = false;
         }
     }
 
