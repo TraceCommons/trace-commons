@@ -946,13 +946,20 @@ pub(crate) enum SubmitSelectionMode {
 /// Pick the selection mode. `--json` never reaches the summary: that surface
 /// is frozen on the picker branch it has always taken, so a collector driving
 /// this CLI programmatically sees no new prompt in a point release.
+///
+/// `--all` widens the scope to every session on the machine; it does not
+/// answer the y/N summary, which is what `--yes` is for. It used to be
+/// treated as `--yes`, so the widest batch was the one that uploaded
+/// without a look. The one exception is `--json --all`, which never read
+/// stdin and whose caller has nobody to answer a picker: it stays on the
+/// no-prompt branch it has always taken.
 pub(crate) fn submit_selection_mode(
     all: bool,
     yes: bool,
     pick: bool,
     json: bool,
 ) -> SubmitSelectionMode {
-    if all || yes {
+    if yes || (all && json) {
         SubmitSelectionMode::All
     } else if json || pick {
         SubmitSelectionMode::Picker
@@ -4353,10 +4360,17 @@ mod submit_scope_tests {
             submit_selection_mode(false, true, false, true),
             SubmitSelectionMode::All
         );
+        // Frozen too: `--json --all` never read stdin, and a programmatic
+        // caller has nobody to answer a picker. Under `--json` alone, `--all`
+        // keeps implying `--yes`.
+        assert_eq!(
+            submit_selection_mode(true, false, false, true),
+            SubmitSelectionMode::All
+        );
     }
 
     #[test]
-    fn the_summary_is_the_default_and_yes_all_and_pick_bypass_it() {
+    fn the_summary_is_the_default_and_only_yes_and_pick_bypass_it() {
         assert_eq!(
             submit_selection_mode(false, false, false, false),
             SubmitSelectionMode::Summary
@@ -4366,11 +4380,26 @@ mod submit_scope_tests {
             SubmitSelectionMode::All
         );
         assert_eq!(
+            submit_selection_mode(false, false, true, false),
+            SubmitSelectionMode::Picker
+        );
+    }
+
+    #[test]
+    fn all_widens_the_scope_and_still_asks() {
+        // `--all` says "every session on this machine", which is the batch
+        // that most needs a look before it uploads. It used to be treated as
+        // `--yes` and skipped the y/N summary.
+        assert_eq!(
             submit_selection_mode(true, false, false, false),
+            SubmitSelectionMode::Summary
+        );
+        assert_eq!(
+            submit_selection_mode(true, true, false, false),
             SubmitSelectionMode::All
         );
         assert_eq!(
-            submit_selection_mode(false, false, true, false),
+            submit_selection_mode(true, false, true, false),
             SubmitSelectionMode::Picker
         );
     }

@@ -69,7 +69,9 @@ enum Command {
     /// refuses to run from `$HOME` or a filesystem root, where the subtree
     /// would be every session on the machine; `--all` says that deliberately.
     Submit {
-        /// Every session on this machine, ignoring the working directory
+        /// Every session on this machine, ignoring the working directory.
+        /// Widens the scope only: the y/N summary still appears, and only
+        /// --yes skips it.
         #[arg(long)]
         all: bool,
         /// Only sessions started within this duration (e.g. 2d, 12h)
@@ -81,7 +83,8 @@ enum Command {
         /// Restrict to one source: claude-code | codex | trajectory
         #[arg(long)]
         source: Option<String>,
-        /// Skip the confirmation and submit everything selected
+        /// Skip the confirmation and submit everything selected. This is the
+        /// only flag that suppresses the prompt; --all does not.
         #[arg(long)]
         yes: bool,
         /// Choose sessions individually from a numbered table, instead of

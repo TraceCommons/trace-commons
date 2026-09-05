@@ -48,8 +48,11 @@ fn run_submit(config_dir: &Path, trajectory: &Path, json: bool, dry_run: bool) -
     if dry_run {
         command.arg("--dry-run");
     }
+    // `--all` widens the scope only; `--yes` is what answers the y/N
+    // summary, and this helper runs with a closed stdin.
     command
         .arg("--all")
+        .arg("--yes")
         .arg("--source")
         .arg("trajectory")
         .arg("--trajectory")
