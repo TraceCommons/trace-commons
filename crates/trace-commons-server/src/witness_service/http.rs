@@ -262,16 +262,30 @@ struct InferenceReceiptBody {
     signature: String,
     /// The address the provider claims signed it.
     signing_address: String,
+    /// Which scheme the receipt is in. Optional, defaulting to `ecdsa`:
+    /// every receipt issued before this field existed is ECDSA, and a
+    /// witness that required the field would refuse every existing client.
+    /// An unrecognised value is a malformed request, never a guess.
+    #[serde(default)]
+    signing_algo: Option<String>,
 }
 
-impl From<InferenceReceiptBody> for ReceiptPayload {
-    fn from(body: InferenceReceiptBody) -> Self {
-        ReceiptPayload {
+impl TryFrom<InferenceReceiptBody> for ReceiptPayload {
+    type Error = Refusal;
+
+    fn try_from(body: InferenceReceiptBody) -> Result<Self, Refusal> {
+        let signing_algo = match body.signing_algo.as_deref() {
+            None => ReceiptAlgo::Ecdsa,
+            Some(s) => ReceiptAlgo::from_wire(s).ok_or_else(|| {
+                Refusal::new(StatusCode::BAD_REQUEST, "witness_request_malformed")
+            })?,
+        };
+        Ok(ReceiptPayload {
             text: body.text,
             signature: body.signature,
             signing_address: body.signing_address,
-            signing_algo: ReceiptAlgo::Ecdsa,
-        }
+            signing_algo,
+        })
     }
 }
 
@@ -320,7 +334,10 @@ fn shape_of(body: WitnessRequestBody) -> Result<RequestShape, Refusal> {
             Ok(RequestShape::Transcript(super::WitnessRequest {
                 raw_transcript,
                 consent,
-                offered_receipt: body.inference_receipt.map(Into::into),
+                offered_receipt: body
+                    .inference_receipt
+                    .map(ReceiptPayload::try_from)
+                    .transpose()?,
             }))
         }
         (None, Some(raw_contribution)) => {
@@ -342,7 +359,10 @@ fn shape_of(body: WitnessRequestBody) -> Result<RequestShape, Refusal> {
                 WitnessContributionRequest {
                     raw_contribution: *raw_contribution,
                     granted: GrantedConsent { scopes, uses },
-                    offered_receipt: body.inference_receipt.map(Into::into),
+                    offered_receipt: body
+                        .inference_receipt
+                        .map(ReceiptPayload::try_from)
+                        .transpose()?,
                 },
             )))
         }
@@ -1743,6 +1763,48 @@ mod tests {
             "witness_inference_attestation_unavailable",
             "the text route carries no event order, so it can attest nothing; \
              the label must name that rather than reading as a bad request"
+        );
+    }
+
+    /// The wire field reaches the payload as the discriminator the verifier
+    /// dispatches on. Tested at this seam rather than through the route,
+    /// because every receipt failure is deliberately one label on the wire
+    /// (see `inference.rs`) and a route-level test therefore cannot tell an
+    /// ed25519 reading from an ECDSA one. Hardcoding `Ecdsa` in `try_from`
+    /// fails this test and nothing else -- which is the point.
+    #[test]
+    fn the_wire_signing_algo_becomes_the_payload_discriminator() {
+        let absent: InferenceReceiptBody = serde_json::from_value(serde_json::json!({
+            "text": "a:b", "signature": "cc", "signing_address": "0xdd"
+        }))
+        .unwrap();
+        assert_eq!(
+            ReceiptPayload::try_from(absent)
+                .ok()
+                .expect("an absent signing_algo is accepted")
+                .signing_algo,
+            ReceiptAlgo::Ecdsa
+        );
+
+        let ed: InferenceReceiptBody = serde_json::from_value(serde_json::json!({
+            "text": "a:b", "signature": "cc", "signing_address": "dd", "signing_algo": "ed25519"
+        }))
+        .unwrap();
+        assert_eq!(
+            ReceiptPayload::try_from(ed)
+                .ok()
+                .expect("a recognised signing_algo is accepted")
+                .signing_algo,
+            ReceiptAlgo::Ed25519
+        );
+
+        let unknown: InferenceReceiptBody = serde_json::from_value(serde_json::json!({
+            "text": "a:b", "signature": "cc", "signing_address": "0xdd", "signing_algo": "rsa"
+        }))
+        .unwrap();
+        assert!(
+            ReceiptPayload::try_from(unknown).is_err(),
+            "an unknown scheme is a refusal, never a default"
         );
     }
 }
