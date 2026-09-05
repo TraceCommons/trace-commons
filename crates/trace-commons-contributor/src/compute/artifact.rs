@@ -38,7 +38,10 @@ pub enum ArtifactError {
 
 /// Supplied from reviewed release policy, never derived from the manifest being
 /// checked. No shipping release policy is supplied by this module.
+#[derive(Clone)]
 pub struct ArtifactExpectation<'a> {
+    /// SHA-256 of the exact manifest bytes, obtained from independent reviewed policy.
+    pub manifest_sha256: [u8; 32],
     pub source_revision: &'a str,
     pub compatibility_id: &'a str,
     pub signing_identifier: &'a str,
@@ -186,10 +189,19 @@ fn regular_file(root: &Path, relative_path: &str) -> Result<File, ArtifactError>
     File::open(path).map_err(|_| ArtifactError::Read)
 }
 
-fn hash_file(mut file: File, size: u64, expected: &str) -> Result<(), ArtifactError> {
+// Retain only the bounded executable header prefix from the SAME stream that
+// is hashed, so path replacement or an in-place rewrite cannot substitute an
+// unhashed header for structural inspection.
+fn hash_file(
+    mut file: File,
+    size: u64,
+    expected: &str,
+    prefix_limit: usize,
+) -> Result<Vec<u8>, ArtifactError> {
     if file.metadata().map_err(|_| ArtifactError::Read)?.len() != size {
         return Err(ArtifactError::Integrity);
     }
+    let mut prefix = Vec::new();
     let mut digest = Sha256::new();
     let mut buffer = [0u8; 32 * 1024];
     let mut reader = (&mut file).take(size + 1);
@@ -201,16 +213,18 @@ fn hash_file(mut file: File, size: u64, expected: &str) -> Result<(), ArtifactEr
         }
         total += n as u64;
         digest.update(&buffer[..n]);
+        let keep = n.min(prefix_limit.saturating_sub(prefix.len()));
+        prefix.extend_from_slice(&buffer[..keep]);
     }
     if total != size || hex::encode(digest.finalize()) != expected {
         return Err(ArtifactError::Integrity);
     }
-    Ok(())
+    Ok(prefix)
 }
 
 /// Bounded thin arm64 Mach-O header inspection, not an executable loader or
 /// signature verifier. Fat binaries and legacy minimum-OS commands are refused.
-fn macho(mut file: File, minimum: [u16; 3]) -> Result<(), ArtifactError> {
+fn macho(mut file: impl Read, minimum: [u16; 3]) -> Result<(), ArtifactError> {
     let mut header = [0u8; 32];
     file.read_exact(&mut header)
         .map_err(|_| ArtifactError::Executable)?;
@@ -265,6 +279,60 @@ fn macho(mut file: File, minimum: [u16; 3]) -> Result<(), ArtifactError> {
     Ok(())
 }
 
+/// The helper and Compute resource directories are closed inventories. Only
+/// listed files and the directories necessary to contain them may exist.
+fn complete_inventory(root: &Path, manifest: &Manifest) -> Result<(), ArtifactError> {
+    let mut files = BTreeSet::from([MANIFEST_PATH.to_string(), WORKER_PATH.to_string()]);
+    let mut directories = BTreeSet::from([
+        "Contents/Helpers".to_string(),
+        "Contents/Resources/Compute".to_string(),
+        "Contents/Resources/Compute/assets".to_string(),
+    ]);
+    for asset in &manifest.assets {
+        let path = format!("Contents/Resources/Compute/assets/{}", asset.relative_path);
+        let mut parent = Path::new(&path).parent();
+        while let Some(dir) = parent {
+            let name = dir.to_str().ok_or(ArtifactError::Path)?;
+            if name == "Contents/Resources/Compute" {
+                break;
+            }
+            directories.insert(name.to_string());
+            parent = dir.parent();
+        }
+        files.insert(path);
+    }
+    let mut pending = vec![
+        "Contents/Helpers".to_string(),
+        "Contents/Resources/Compute".to_string(),
+    ];
+    let mut seen = BTreeSet::new();
+    while let Some(directory) = pending.pop() {
+        let metadata =
+            std::fs::symlink_metadata(root.join(&directory)).map_err(|_| ArtifactError::Read)?;
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return Err(ArtifactError::Path);
+        }
+        for entry in std::fs::read_dir(root.join(&directory)).map_err(|_| ArtifactError::Read)? {
+            let entry = entry.map_err(|_| ArtifactError::Read)?;
+            let name = entry.file_name();
+            let name = name.to_str().ok_or(ArtifactError::Path)?;
+            let relative = format!("{directory}/{name}");
+            let kind = entry.file_type().map_err(|_| ArtifactError::Read)?;
+            if kind.is_dir() && directories.contains(&relative) {
+                pending.push(relative);
+            } else if kind.is_file() && files.contains(&relative) {
+                seen.insert(relative);
+            } else {
+                return Err(ArtifactError::Path);
+            }
+        }
+    }
+    if seen != files {
+        return Err(ArtifactError::Read);
+    }
+    Ok(())
+}
+
 /// Read-only integrity inventory. Caller must not convert success into permission
 /// to spawn: backend metadata can lie, and no OS signature is checked here.
 pub fn check_integrity(
@@ -284,11 +352,19 @@ pub fn check_integrity(
         .take(MAX_MANIFEST + 1)
         .read_to_end(&mut bytes)
         .map_err(|_| ArtifactError::Read)?;
+    if bytes.len() as u64 > MAX_MANIFEST {
+        return Err(ArtifactError::Manifest);
+    }
+    if <[u8; 32]>::from(Sha256::digest(&bytes)) != expected.manifest_sha256 {
+        return Err(ArtifactError::Integrity);
+    }
     let m = Manifest::parse(&bytes, expected)?;
+    complete_inventory(&root, &m)?;
+    let worker = regular_file(&root, WORKER_PATH)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        if regular_file(&root, WORKER_PATH)?
+        if worker
             .metadata()
             .map_err(|_| ArtifactError::Read)?
             .permissions()
@@ -299,12 +375,13 @@ pub fn check_integrity(
             return Err(ArtifactError::Executable);
         }
     }
-    hash_file(
-        regular_file(&root, WORKER_PATH)?,
+    let header = hash_file(
+        worker,
         m.worker.size_bytes,
         &m.worker.sha256,
+        (MAX_LOAD_COMMANDS + 32) as usize,
     )?;
-    macho(regular_file(&root, WORKER_PATH)?, m.minimum_macos)?;
+    macho(header.as_slice(), m.minimum_macos)?;
     let mut total = m.worker.size_bytes;
     for asset in &m.assets {
         let path = format!("Contents/Resources/Compute/assets/{}", asset.relative_path);
@@ -323,7 +400,7 @@ pub fn check_integrity(
                 return Err(ArtifactError::Path);
             }
         }
-        hash_file(file, asset.size_bytes, &asset.sha256)?;
+        hash_file(file, asset.size_bytes, &asset.sha256, 0)?;
         total += asset.size_bytes;
     }
     Ok(IntegrityChecked {

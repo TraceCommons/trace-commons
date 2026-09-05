@@ -69,6 +69,9 @@ unavailable, and refuse missing/modified shaders before any worker launch.
 
 `trace_commons_contributor::compute::artifact::check_integrity` reads only the
 fixed manifest/helper paths and explicitly listed resources beneath a bundle.
+`ArtifactExpectation.manifest_sha256` pins the exact manifest bytes from independent
+reviewed policy, checked before JSON parsing; rewriting the manifest alongside a
+worker does not preserve a successful check.
 No constructor, consent, environment, FFI or shipping launch behavior changed.
 
 Schema v1 has strict fields: `schema_version`, `source_revision`, `target`,
@@ -81,7 +84,8 @@ case-colliding paths and traversal. Manifest limit 64 KiB; at most 128 resources
 512 MiB per file and 1 GiB combined. These bounds cover executable resources,
 not model weights or a runtime cache allowance.
 
-Checks stream file hashes, reject symlinks/non-regular files below the canonical
+Checks stream file hashes, inspect the worker header from the same hashed bytes,
+and reject symlinks/non-regular files below the canonical
 bundle root, inspect bounded thin-arm64 executable load commands and require the
 actual minimum OS to match metadata. Unix executable/resource mode checks reject
 an inert worker or executable-mode data resource. The expectation is independent
@@ -90,16 +94,20 @@ caller-supplied release metadata; no shipping expectation is installed yet.
 Success returns counts, not launch authorization. The validator does not verify
 OS signatures, prove metadata's backend claim, audit an entire bundle or dynamic
 library graph, enforce a filesystem sandbox, or prevent same-user replacement
-races. Unlisted resources are not certified. Framework/native-library inventory
+races. Both `Contents/Helpers` and `Contents/Resources/Compute` are closed
+inventories: extra files, symlinks and unnecessary directories at any depth are
+refused. Other app directories are outside this check. Framework/native-library inventory
 support and trusted signature verification are required before activation.
 
 The `compute-artifact` example is a read-only developer harness. Its signing
 labels are compared as metadata only; supplying real-looking labels proves no
-signature. It explicitly prints `signature_verified=false launch_authorized=false`.
+signature. Its final required argument is the independently obtained 64-hex-digit
+manifest SHA-256; do not derive that trust input from the bundle being checked.
+It explicitly prints `signature_verified=false launch_authorized=false`.
 
 ## Verification
 
-Nine artifact tests cover schema/bounds, required resources, independent
+Artifact tests cover schema/bounds, required resources, independent
 compatibility expectations, traversal/case collisions, missing/modified files,
 symlinks, executable permissions, post-sign byte changes and Mach-O mismatches
 even when the file hash matches. Header fixtures and signature-change bytes are
@@ -135,7 +143,9 @@ empty ones. Failed assembly may leave partial output for inspection; it is not
 automatically deleted and must not be shipped. Inputs are read only, copied with
 bounded streaming hashes, and staged with executable worker/non-executable asset
 permissions. The manifest pins the copied bytes, then the existing strict
-integrity validator checks the result. Only macOS 15 arm64 MLX with the single
+integrity validator checks the result against the digest of the bytes just generated.
+Assembly prints that digest for release review; this producer self-check is not
+independent provenance and does not install a trusted release policy. Only macOS 15 arm64 MLX with the single
 `mlx.metallib` asset is supported by this first assembly harness.
 
 This is not a complete app bundle or an integration into `make-app-bundle.sh` or
@@ -202,3 +212,13 @@ Other tests pin fixed command arguments, independent app/helper identities,
 outer-app failure, timeouts and symlink refusal. No positive Developer ID package
 was supplied, so mocked success tests establish command wiring only. No signing,
 worker launch, deployment or production enablement was performed.
+
+### Signature harness limits
+
+Use canonical absolute paths, including `/private/tmp` instead of macOS's
+symlinked `/tmp`. The harness deliberately refuses symlinked ancestors; this
+conservative developer-tool rule is not a race-free launch guarantee.
+
+A successful Developer ID requirement check does not establish notarization,
+Gatekeeper acceptance, or fresh revocation status. Those are separate release
+and runtime gates; this inert tool must not be used as a substitute for them.

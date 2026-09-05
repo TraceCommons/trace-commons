@@ -73,7 +73,7 @@ fn assemble(
     worker: &Path,
     metal: &Path,
     expected: &ArtifactExpectation<'_>,
-) -> Result<()> {
+) -> Result<[u8; 32]> {
     if !bundle.is_absolute() || bundle.file_name().is_none() {
         return Err("compute-package-destination-invalid".into());
     }
@@ -103,10 +103,18 @@ fn assemble(
         .write(true)
         .create_new(true)
         .open(bundle.join(MANIFEST_PATH))?;
-    output.write_all(&serde_json::to_vec_pretty(&manifest)?)?;
+    let bytes = serde_json::to_vec_pretty(&manifest)?;
+    let manifest_sha256: [u8; 32] = Sha256::digest(&bytes).into();
+    output.write_all(&bytes)?;
     output.sync_all()?;
-    check_integrity(bundle, expected)?;
-    Ok(())
+    // This producer checks its own staged bytes; this is not independent
+    // release provenance. A later verifier must receive a reviewed digest.
+    let staged = ArtifactExpectation {
+        manifest_sha256,
+        ..expected.clone()
+    };
+    check_integrity(bundle, &staged)?;
+    Ok(manifest_sha256)
 }
 
 fn run() -> Result<()> {
@@ -115,6 +123,7 @@ fn run() -> Result<()> {
         return Err("usage: compute-package ABS_NEW_BUNDLE ABS_WORKER ABS_METALLIB SOURCE_REV COMPAT_ID SIGNING_ID TEAM_ID".into());
     }
     let expected = ArtifactExpectation {
+        manifest_sha256: [0; 32], // Assembly produces a new manifest, not a trusted release pin.
         source_revision: &args[3],
         compatibility_id: &args[4],
         signing_identifier: &args[5],
@@ -122,14 +131,15 @@ fn run() -> Result<()> {
         host_target: "aarch64-apple-darwin",
         host_macos: [15, 0, 0],
     };
-    assemble(
+    let manifest_sha256 = assemble(
         Path::new(&args[0]),
         Path::new(&args[1]),
         Path::new(&args[2]),
         &expected,
     )?;
     println!(
-        "compute-package-integrity-checked signature_verified=false provenance_verified=false launch_authorized=false"
+        "compute-package-integrity-checked manifest_sha256={} signature_verified=false provenance_verified=false launch_authorized=false",
+        hex::encode(manifest_sha256)
     );
     Ok(())
 }
@@ -150,6 +160,7 @@ mod tests {
 
     fn expected() -> ArtifactExpectation<'static> {
         ArtifactExpectation {
+            manifest_sha256: [0; 32],
             source_revision: "1111111111111111111111111111111111111111",
             compatibility_id: "test-v1",
             signing_identifier: "org.example.worker",
@@ -188,7 +199,7 @@ mod tests {
         let dir = fixture();
         let root = dir.path().canonicalize().unwrap();
         let bundle = root.join("Pilot.app");
-        assemble(
+        let digest = assemble(
             &bundle,
             &root.join("worker"),
             &root.join("metal"),
@@ -208,9 +219,13 @@ mod tests {
             )
             .is_err()
         );
-        check_integrity(&bundle, &expected()).unwrap();
+        let policy = ArtifactExpectation {
+            manifest_sha256: digest,
+            ..expected()
+        };
+        check_integrity(&bundle, &policy).unwrap();
         fs::write(bundle.join(ASSET_PATH), b"tampered").unwrap();
-        assert!(check_integrity(&bundle, &expected()).is_err());
+        assert!(check_integrity(&bundle, &policy).is_err());
     }
     #[test]
     fn existing_destination_is_untouched() {

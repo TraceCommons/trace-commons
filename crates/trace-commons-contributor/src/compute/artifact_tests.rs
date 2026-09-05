@@ -3,6 +3,7 @@ use serde_json::{Value, json};
 
 fn expected() -> ArtifactExpectation<'static> {
     ArtifactExpectation {
+        manifest_sha256: Sha256::digest(serde_json::to_vec(&manifest()).unwrap()).into(),
         source_revision: "1111111111111111111111111111111111111111",
         compatibility_id: "tc-compute-v1",
         signing_identifier: "org.example.test-worker",
@@ -37,12 +38,12 @@ fn executable() -> Vec<u8> {
 fn manifest() -> Value {
     json!({
         "schema_version": 1,
-        "source_revision": expected().source_revision,
+        "source_revision": "1111111111111111111111111111111111111111",
         "target": "aarch64-apple-darwin", "backend": "mlx",
         "minimum_macos": [15, 0, 0], "ipc_version": 0,
-        "compatibility_id": expected().compatibility_id,
-        "signing_identifier": expected().signing_identifier,
-        "signing_team": expected().signing_team,
+        "compatibility_id": "tc-compute-v1",
+        "signing_identifier": "org.example.test-worker",
+        "signing_team": "TESTTEAM01",
         "worker": {"size_bytes": executable().len(), "sha256": hex::encode(Sha256::digest(executable()))},
         "assets": [{"relative_path": "mlx.metallib", "size_bytes": 5, "sha256": hex::encode(Sha256::digest(b"asset"))}]
     })
@@ -250,7 +251,13 @@ fn signed_byte_change_requires_new_pin() {
     m["worker"]["size_bytes"] = json!(modified.len());
     m["worker"]["sha256"] = json!(hex::encode(Sha256::digest(&modified)));
     write_manifest(root.path(), &m);
-    assert!(check_integrity(root.path(), &expected()).is_ok());
+    assert_eq!(
+        check_integrity(root.path(), &expected()),
+        Err(ArtifactError::Integrity)
+    );
+    let mut new_policy = expected();
+    new_policy.manifest_sha256 = Sha256::digest(serde_json::to_vec(&m).unwrap()).into();
+    assert!(check_integrity(root.path(), &new_policy).is_ok());
 }
 
 #[test]
@@ -273,8 +280,10 @@ fn actual_header_must_match_manifest_even_with_matching_hash() {
         let mut m = manifest();
         m["worker"]["sha256"] = json!(hex::encode(Sha256::digest(&bytes)));
         write_manifest(root.path(), &m);
+        let mut policy = expected();
+        policy.manifest_sha256 = Sha256::digest(serde_json::to_vec(&m).unwrap()).into();
         assert_eq!(
-            check_integrity(root.path(), &expected()),
+            check_integrity(root.path(), &policy),
             Err(ArtifactError::Executable),
             "{offset}"
         );
@@ -336,4 +345,90 @@ fn symlink_files_and_intermediate_directories_are_refused() {
         check_integrity(root.path(), &expected()),
         Err(ArtifactError::Path)
     );
+}
+
+#[test]
+fn unlisted_files_and_directories_are_refused_at_every_depth() {
+    for path in [
+        "Contents/Helpers/extra.dylib",
+        "Contents/Resources/Compute/extra.json",
+        "Contents/Resources/Compute/assets/extra.metallib",
+    ] {
+        let root = fixture();
+        std::fs::write(root.path().join(path), b"unlisted").unwrap();
+        assert_eq!(
+            check_integrity(root.path(), &expected()),
+            Err(ArtifactError::Path)
+        );
+    }
+    let root = fixture();
+    std::fs::create_dir(root.path().join("Contents/Resources/Compute/assets/empty")).unwrap();
+    assert_eq!(
+        check_integrity(root.path(), &expected()),
+        Err(ArtifactError::Path)
+    );
+}
+
+#[test]
+fn nested_listed_assets_are_checked_and_extra_siblings_refused() {
+    let root = fixture();
+    let mut m = manifest();
+    let mut asset = m["assets"][0].clone();
+    asset["relative_path"] = json!("nested/resource.bin");
+    m["assets"].as_array_mut().unwrap().push(asset);
+    std::fs::create_dir(root.path().join("Contents/Resources/Compute/assets/nested")).unwrap();
+    std::fs::write(
+        root.path()
+            .join("Contents/Resources/Compute/assets/nested/resource.bin"),
+        b"asset",
+    )
+    .unwrap();
+    write_manifest(root.path(), &m);
+    let mut policy = expected();
+    policy.manifest_sha256 = Sha256::digest(serde_json::to_vec(&m).unwrap()).into();
+    assert!(check_integrity(root.path(), &policy).is_ok());
+    std::fs::write(
+        root.path()
+            .join("Contents/Resources/Compute/assets/nested/extra.dylib"),
+        b"extra",
+    )
+    .unwrap();
+    assert_eq!(
+        check_integrity(root.path(), &policy),
+        Err(ArtifactError::Path)
+    );
+}
+
+#[test]
+fn manifest_bytes_are_pinned_before_parsing() {
+    let root = fixture();
+    std::fs::write(root.path().join(MANIFEST_PATH), b"invalid-json").unwrap();
+    assert_eq!(
+        check_integrity(root.path(), &expected()),
+        Err(ArtifactError::Integrity)
+    );
+    let mut policy = expected();
+    policy.manifest_sha256 = Sha256::digest(b"invalid-json").into();
+    assert_eq!(
+        check_integrity(root.path(), &policy),
+        Err(ArtifactError::Manifest)
+    );
+}
+
+#[test]
+fn header_inspection_uses_the_bytes_that_were_hashed() {
+    let root = fixture();
+    let worker = regular_file(root.path(), WORKER_PATH).unwrap();
+    let prefix = hash_file(
+        worker,
+        executable().len() as u64,
+        &hex::encode(Sha256::digest(executable())),
+        (MAX_LOAD_COMMANDS + 32) as usize,
+    )
+    .unwrap();
+    // A later pathname read would now inspect unrelated bytes. Inspection uses
+    // the authenticated prefix instead; success still never permits launch.
+    std::fs::write(root.path().join(WORKER_PATH), b"replacement-not-executable").unwrap();
+    assert!(macho(prefix.as_slice(), [15, 0, 0]).is_ok());
+    assert!(macho(regular_file(root.path(), WORKER_PATH).unwrap(), [15, 0, 0]).is_err());
 }
