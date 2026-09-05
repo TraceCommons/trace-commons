@@ -19,6 +19,8 @@ namespace TraceCommons.Interop;
 /// </summary>
 public sealed record WitnessCopy
 {
+    [JsonPropertyName("wallet")] public WalletCopy? Wallet { get; init; }
+    [JsonPropertyName("admission")] public AdmissionCopy? Admission { get; init; }
     [JsonPropertyName("review")] public WitnessReviewCopy? Review { get; init; }
     [JsonPropertyName("onboarding")] public FirstContributionCopy? Onboarding { get; init; }
     [JsonPropertyName("heading")] public string Heading { get; init; } = "";
@@ -229,4 +231,38 @@ public sealed record FirstContributionCopy
     [JsonPropertyName("review")] public string Review { get; init; } = "";
     [JsonPropertyName("follow_up")] public string FollowUp { get; init; } = "";
     [JsonPropertyName("agent_setup")] public string AgentSetup { get; init; } = "";
+}
+
+public sealed record WalletCopy
+{
+    [JsonPropertyName("heading")] public string Heading { get; init; } = "";
+    [JsonPropertyName("disclosure")] public string Disclosure { get; init; } = "";
+    [JsonPropertyName("commons")] public string Commons { get; init; } = "";
+    [JsonPropertyName("account")] public string Account { get; init; } = "";
+    [JsonPropertyName("check")] public string Check { get; init; } = "";
+    [JsonPropertyName("start")] public string Start { get; init; } = "";
+    [JsonPropertyName("cancel")] public string Cancel { get; init; } = "";
+    [JsonPropertyName("available")] public string Available { get; init; } = "";
+    [JsonPropertyName("unavailable")] public string Unavailable { get; init; } = "";
+    [JsonPropertyName("opening")] public string Opening { get; init; } = "";
+    [JsonPropertyName("waiting")] public string Waiting { get; init; } = "";
+    [JsonPropertyName("failed")] public string Failed { get; init; } = "";
+    [JsonPropertyName("cancelled")] public string Cancelled { get; init; } = "";
+    [JsonPropertyName("refused_glyph")] public string RefusedGlyph { get; init; } = "";
+    [JsonPropertyName("refused_tone")] public string RefusedTone { get; init; } = "";
+}
+public sealed record AdmissionCopy
+{
+    [JsonPropertyName("heading")] public string Heading { get; init; } = "";
+    [JsonPropertyName("disclosure")] public string Disclosure { get; init; } = "";
+    [JsonPropertyName("prerequisite")] public string Prerequisite { get; init; } = "";
+    [JsonPropertyName("backend")] public string Backend { get; init; } = "";
+    [JsonPropertyName("confirm")] public string Confirm { get; init; } = "";
+    [JsonPropertyName("cancel")] public string Cancel { get; init; } = "";
+    [JsonPropertyName("permission")] public string Permission { get; init; } = "";
+    [JsonPropertyName("working")] public string Working { get; init; } = "";
+    [JsonPropertyName("ready")] public string Ready { get; init; } = "";
+    [JsonPropertyName("failed")] public string Failed { get; init; } = "";
+    [JsonPropertyName("refused_glyph")] public string RefusedGlyph { get; init; } = "";
+    [JsonPropertyName("refused_tone")] public string RefusedTone { get; init; } = "";
 }

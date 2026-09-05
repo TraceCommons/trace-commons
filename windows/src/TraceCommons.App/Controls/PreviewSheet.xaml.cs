@@ -91,14 +91,14 @@ public sealed partial class PreviewSheet : UserControl, IDisposable
     private async void OnPrepareAdmission(object sender, RoutedEventArgs e)
     {
         if (!ViewModel.CanPrepareAdmission) return;
-        var backend = new TextBox { Header = "NEAR backend identifier" };
+        var backend = new TextBox { Header = AdmissionPreparation.Copy?.Backend };
         var content = new StackPanel { Spacing = 12 };
         content.Children.Add(new TextBlock { Text = AdmissionPreparation.Disclosure, TextWrapping = TextWrapping.Wrap });
         content.Children.Add(backend);
         var dialog = new ContentDialog {
             XamlRoot = XamlRoot, Title = AdmissionPreparation.Heading,
             Content = new ScrollViewer { Content = content },
-            PrimaryButtonText = "Prepare session", CloseButtonText = "Cancel",
+            PrimaryButtonText = AdmissionPreparation.Copy?.Confirm ?? "", CloseButtonText = AdmissionPreparation.Copy?.Cancel ?? "",
             DefaultButton = ContentDialogButton.Close, IsPrimaryButtonEnabled = false
         };
         backend.TextChanged += (_, _) => dialog.IsPrimaryButtonEnabled = !string.IsNullOrWhiteSpace(backend.Text);

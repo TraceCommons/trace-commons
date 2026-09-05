@@ -1082,7 +1082,7 @@ struct SettingsContent: View {
                 .disabled(model.inferenceEvidenceBusy)
             }
             if model.inferenceEvidenceSaveFailed {
-                Text(copy.inferenceSaveFailed).foregroundStyle(.secondary)
+                NativeFlowNotice(message: copy.inferenceSaveFailed, glyph: copy.wallet?.refusedGlyph ?? "", tone: copy.wallet?.refusedTone ?? "refused")
             }
         }
         .font(TC.Font_.meta)

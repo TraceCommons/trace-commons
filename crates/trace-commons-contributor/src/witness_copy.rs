@@ -446,7 +446,7 @@ pub fn witness_copy() -> WitnessCopy {
             cancel: "Not now",
             working: "Preparing your witness review. The session may already have left this device.",
             failed: "The witness review could not be confirmed. The session may already have reached the witness. No contribution has been approved here. Try again only if you want to send another review request.",
-            immutable: "This certified review is fixed. Outcome and correction edits are unavailable for this review.",
+            immutable: "Witness review uses fixed contribution content. Outcome and correction edits are unavailable here.",
         },
         wallet: WalletCopy {
             heading: "Join with a NEAR account",

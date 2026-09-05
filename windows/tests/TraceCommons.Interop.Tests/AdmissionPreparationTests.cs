@@ -15,9 +15,9 @@ public sealed class AdmissionPreparationTests
         Assert.False(AdmissionPreparation.Available(DaemonResponse.Parse("{\"result\":{}}"), new DaemonSettingsSnapshot { AdmissionEvidenceRequired = true }));
     }
     [Fact]
-    public void PreparationRequiresFreshExpiryAndExplicitStatus()
+    public void PreparationRequiresCoreReadinessInsteadOfRecomputingExpiry()
     {
-        var response = new DaemonResponse { Result = JsonSerializer.SerializeToElement(new { status = "ready_for_next_inference", expires_at = DateTimeOffset.UtcNow.ToUnixTimeSeconds() + 600 }) };
+        var response = new DaemonResponse { Result = JsonSerializer.SerializeToElement(new { status = "ready_for_next_inference", view = new { ready = true } }) };
         Assert.True(AdmissionPreparation.IsReady(response));
         foreach (var json in new[] { "{}", "{\"status\":\"ready_for_next_inference\"}", "{\"status\":\"ready_for_next_inference\",\"expires_at\":1}", "{\"status\":\"ready_for_next_inference\",\"expires_at\":\"tomorrow\"}" })
             Assert.False(AdmissionPreparation.IsReady(DaemonResponse.Parse("{\"result\":" + json + "}")));

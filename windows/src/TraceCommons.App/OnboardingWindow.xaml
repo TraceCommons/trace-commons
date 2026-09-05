@@ -99,16 +99,20 @@
                             IsEnabled="{x:Bind ViewModel.CanUseWallet, Mode=OneWay}"
                             HorizontalContentAlignment="Stretch">
             <StackPanel Spacing="12">
-                <TextBlock Text="Join with a NEAR account" Style="{StaticResource TcTitleCardTextStyle}" />
-                <TextBlock Text="Check whether your commons accepts new accounts. Connecting proves control of your account and this device; it does not fund inference or enable capture." TextWrapping="Wrap" />
-                <TextBox Header="Commons HTTPS address" Text="{x:Bind ViewModel.NearAccount.Commons, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" IsEnabled="{x:Bind ViewModel.NearAccount.CanEdit, Mode=OneWay}" />
-                <Button Content="Check availability" Click="OnCheckNearAccount" IsEnabled="{x:Bind ViewModel.NearAccount.CanCheck, Mode=OneWay}" />
+                <TextBlock Text="{x:Bind ViewModel.NearAccount.Copy.Heading}" Style="{StaticResource TcTitleCardTextStyle}" />
+                <TextBlock Text="{x:Bind ViewModel.NearAccount.Copy.Disclosure}" TextWrapping="Wrap" />
+                <TextBox Header="{x:Bind ViewModel.NearAccount.Copy.Commons}" Text="{x:Bind ViewModel.NearAccount.Commons, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" IsEnabled="{x:Bind ViewModel.NearAccount.CanEdit, Mode=OneWay}" />
+                <Button Content="{x:Bind ViewModel.NearAccount.Copy.Check}" Click="OnCheckNearAccount" IsEnabled="{x:Bind ViewModel.NearAccount.CanCheck, Mode=OneWay}" />
                 <StackPanel Spacing="12" Visibility="{x:Bind ViewModel.NearAccount.Ready, Mode=OneWay}">
-                    <TextBox Header="Your NEAR account" Text="{x:Bind ViewModel.NearAccount.Account, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" IsEnabled="{x:Bind ViewModel.NearAccount.CanEdit, Mode=OneWay}" />
-                    <Button Content="Continue in wallet" Click="OnStartNearAccount" IsEnabled="{x:Bind ViewModel.NearAccount.CanStart, Mode=OneWay}" />
+                    <TextBox Header="{x:Bind ViewModel.NearAccount.Copy.Account}" Text="{x:Bind ViewModel.NearAccount.Account, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" IsEnabled="{x:Bind ViewModel.NearAccount.CanEdit, Mode=OneWay}" />
+                    <Button Content="{x:Bind ViewModel.NearAccount.Copy.Start}" Click="OnStartNearAccount" IsEnabled="{x:Bind ViewModel.NearAccount.CanStart, Mode=OneWay}" />
                 </StackPanel>
-                <TextBlock Text="{x:Bind ViewModel.NearAccount.Message, Mode=OneWay}" TextWrapping="Wrap" />
-                <Button Content="Cancel connection" Click="OnCancelNearAccount" Visibility="{x:Bind ViewModel.NearAccount.CanCancel, Mode=OneWay}" />
+                <Grid ColumnDefinitions="Auto,*" ColumnSpacing="6">
+                    <TextBlock Grid.Column="0" Text="{x:Bind ViewModel.NearAccount.Glyph, Mode=OneWay}" Style="{StaticResource TcHeadingAlertTextStyle}" />
+                    <TextBlock Grid.Column="1" Text="{x:Bind ViewModel.NearAccount.RefusalMessage, Mode=OneWay}" Style="{StaticResource TcHeadingAlertTextStyle}" TextWrapping="Wrap" />
+                    <TextBlock Grid.Column="1" Text="{x:Bind ViewModel.NearAccount.NeutralMessage, Mode=OneWay}" TextWrapping="Wrap" />
+                </Grid>
+                <Button Content="{x:Bind ViewModel.NearAccount.Copy.Cancel}" Click="OnCancelNearAccount" Visibility="{x:Bind ViewModel.NearAccount.CanCancel, Mode=OneWay}" />
             </StackPanel>
             </ContentControl>
         </StackPanel>

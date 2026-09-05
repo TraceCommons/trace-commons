@@ -71,6 +71,8 @@
     of a privacy claim as one written in the branch table.
   -->
   <ItemGroup>
+    <None Include="$(MSBuildThisFileDirectory)../../src/TraceCommons.Interop/NearAccountConnection.cs" Link="NearAccountConnection.cs.txt" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="$(MSBuildThisFileDirectory)../../src/TraceCommons.Interop/AdmissionPreparation.cs" Link="AdmissionPreparation.cs.txt" CopyToOutputDirectory="PreserveNewest" />
     <None Include="$(MSBuildThisFileDirectory)../../src/TraceCommons.Interop/WitnessTools.cs"
           Link="WitnessTools.cs.txt"
           CopyToOutputDirectory="PreserveNewest" />

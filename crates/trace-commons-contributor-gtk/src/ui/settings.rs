@@ -473,7 +473,7 @@ impl SettingsView {
         let inference_status = gtk::Label::builder().wrap(true).xalign(0.0).build();
         witness_card.append(&inference_status);
         let inference_error = gtk::Label::builder().wrap(true).xalign(0.0).build();
-        inference_error.add_css_class("tc-caveat");
+        inference_error.add_css_class("tc-refused");
         witness_card.append(&inference_error);
         let inference_enable = gtk::Button::with_label(copy::WITNESS_INFERENCE_ENABLE);
         // No enabling before a persisted settings answer arrives.
@@ -3239,9 +3239,13 @@ fn save_inference_consent(app: &Rc<App>, enabled: bool) {
                 }
             }
             invalidate_inference_consent(app);
-            app.settings
-                .inference_error
-                .set_text(copy::WITNESS_INFERENCE_SAVE_FAILED);
+            app.settings.inference_error.set_text(&format!(
+                "{} {}",
+                trace_commons_contributor::witness_copy::witness_copy()
+                    .wallet
+                    .refused_glyph,
+                copy::WITNESS_INFERENCE_SAVE_FAILED
+            ));
             refresh(app);
         },
     );

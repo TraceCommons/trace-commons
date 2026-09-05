@@ -471,7 +471,10 @@
                         <Button Content="{x:Bind Settings.InferenceEvidenceDisable}"
                                 IsEnabled="{x:Bind Settings.WitnessControlsEnabled, Mode=OneWay}"
                                 Click="OnDisableInferenceEvidence" />
-                        <TextBlock Text="{x:Bind Settings.InferenceEvidenceNotice, Mode=OneWay}" TextWrapping="Wrap" />
+                        <Grid ColumnDefinitions="Auto,*" ColumnSpacing="6">
+                            <TextBlock Grid.Column="0" Text="{x:Bind Settings.InferenceEvidenceNoticeGlyph, Mode=OneWay}" Style="{StaticResource TcHeadingAlertTextStyle}" />
+                            <TextBlock Grid.Column="1" Text="{x:Bind Settings.InferenceEvidenceNotice, Mode=OneWay}" Style="{StaticResource TcHeadingAlertTextStyle}" TextWrapping="Wrap" />
+                        </Grid>
                         <TextBlock Text="{x:Bind Settings.WitnessCertificateMeans, Mode=OneWay}"
                                    Style="{StaticResource TcCaptionTextStyle}"
                                    TextWrapping="Wrap" />

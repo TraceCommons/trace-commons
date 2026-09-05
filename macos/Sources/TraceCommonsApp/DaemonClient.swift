@@ -49,21 +49,12 @@ final class DaemonClient {
 
     // MARK: - Read
 
-    func prepareAdmissionSession(entryID: String, backend: String) throws -> AdmissionPreparation {
-        try call("prepare_admission_session", params: ["entry_id": entryID, "backend": backend, "confirmed": true], as: AdmissionPreparation.self)
+    func nativeWalletFlow(action: String, flowID: String, commons: String, account: String) throws -> NativeWalletView {
+        try call("native_wallet_flow", params: ["action": action, "flow_id": flowID, "ingest_url": commons, "account_id": account], as: NativeWalletView.self)
     }
 
-    func nearAccountCapabilities(commons: String) throws -> NearAccountCapability {
-        try call("near_account_capabilities", params: ["ingest_url": commons], as: NearAccountCapability.self)
-    }
-    func nearAccountStart(commons: String, account: String) throws -> NearAccountProgress {
-        try call("near_account_start", params: ["ingest_url": commons, "account_id": account], as: NearAccountProgress.self)
-    }
-    func nearAccountStatus(attemptID: String) throws -> NearAccountProgress {
-        try call("near_account_status", params: ["attempt_id": attemptID], as: NearAccountProgress.self)
-    }
-    func nearAccountCancel(attemptID: String) throws {
-        _ = try rawResult("near_account_cancel", params: ["attempt_id": attemptID])
+    func prepareAdmissionSession(entryID: String, backend: String) throws -> AdmissionPreparation {
+        try call("prepare_admission_session", params: ["entry_id": entryID, "backend": backend, "confirmed": true], as: AdmissionPreparation.self)
     }
 
     func status() throws -> DaemonStatus {

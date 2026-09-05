@@ -109,17 +109,24 @@ public sealed class PreviewSheetViewModel : INotifyPropertyChanged, IDisposable
     private bool _admissionBusy;
     private string _admissionMessage = string.Empty;
     public bool CanPrepareAdmission => _admissionSupported && !_admissionBusy && !_witnessWorking;
+    private bool _admissionRefused;
     public string AdmissionMessage => _admissionMessage;
+    public string AdmissionRefusalMessage => _admissionRefused ? _admissionMessage : string.Empty;
+    public string AdmissionNeutralMessage => _admissionRefused ? string.Empty : _admissionMessage;
+    public string AdmissionGlyph => _admissionRefused ? AdmissionPreparation.Copy?.RefusedGlyph ?? string.Empty : string.Empty;
+    public string AdmissionHeading => AdmissionPreparation.Heading;
+    public string ImmutableNote => CanEditOutcome ? string.Empty : _witnessCopy?.Immutable ?? string.Empty;
     public async Task PrepareAdmissionAsync(string backend)
     {
         if (!CanPrepareAdmission || string.IsNullOrWhiteSpace(backend)) return;
-        _admissionBusy = true; _admissionMessage = "Preparing this session…";
-        Raise(nameof(CanPrepareAdmission)); Raise(nameof(AdmissionMessage)); Raise(nameof(CanRequestWitness));
+        _admissionBusy = true; _admissionRefused = false; _admissionMessage = AdmissionPreparation.Copy?.Working ?? "";
+        Raise(nameof(CanPrepareAdmission)); Raise(nameof(AdmissionMessage)); Raise(nameof(AdmissionRefusalMessage)); Raise(nameof(AdmissionNeutralMessage)); Raise(nameof(AdmissionGlyph)); Raise(nameof(CanRequestWitness));
         try {
             var response = await _host.CallAsync(AdmissionPreparation.Method, AdmissionPreparation.Request(Entry.EntryId, backend)).ConfigureAwait(true);
-            _admissionMessage = AdmissionPreparation.IsReady(response) ? AdmissionPreparation.Success : AdmissionPreparation.Failed;
-        } catch { _admissionMessage = AdmissionPreparation.Failed; }
-        finally { _admissionBusy = false; Raise(nameof(CanPrepareAdmission)); Raise(nameof(AdmissionMessage)); Raise(nameof(CanRequestWitness)); }
+            _admissionRefused = !AdmissionPreparation.IsReady(response);
+            _admissionMessage = _admissionRefused ? AdmissionPreparation.Failed : AdmissionPreparation.Success;
+        } catch { _admissionRefused = true; _admissionMessage = AdmissionPreparation.Failed; }
+        finally { _admissionBusy = false; Raise(nameof(CanPrepareAdmission)); Raise(nameof(AdmissionMessage)); Raise(nameof(AdmissionRefusalMessage)); Raise(nameof(AdmissionNeutralMessage)); Raise(nameof(AdmissionGlyph)); Raise(nameof(CanRequestWitness)); }
     }
 
     public string WitnessHeading => _witnessCopy?.Heading ?? string.Empty;
@@ -142,7 +149,7 @@ public sealed class PreviewSheetViewModel : INotifyPropertyChanged, IDisposable
         IsLoading = true;
         HasFailed = false;
         Raise(nameof(CanRequestWitness));
-        Raise(nameof(CanEditOutcome));
+        Raise(nameof(CanEditOutcome)); Raise(nameof(ImmutableNote));
         Raise(nameof(LoadingTitle));
         Raise(nameof(LoadingDetail));
         Raise(nameof(PreviewFailureDetail));
@@ -614,7 +621,7 @@ public sealed class PreviewSheetViewModel : INotifyPropertyChanged, IDisposable
         _admissionSupported = AdmissionPreparation.Available(hello, settings.ResultAs<DaemonSettingsSnapshot>());
         Raise(nameof(CanPrepareAdmission));
         Raise(nameof(CanRequestWitness));
-        Raise(nameof(CanEditOutcome));
+        Raise(nameof(CanEditOutcome)); Raise(nameof(ImmutableNote));
 
         TcPreview preview;
         try
@@ -643,7 +650,7 @@ public sealed class PreviewSheetViewModel : INotifyPropertyChanged, IDisposable
 
         _summary = summary;
         _witnessRequested = summary.EnvelopeDigest?.StartsWith("witness-sha256:", StringComparison.Ordinal) == true;
-        Raise(nameof(CanEditOutcome));
+        Raise(nameof(CanEditOutcome)); Raise(nameof(ImmutableNote));
         FillManifest(summary);
 
         // An unenrolled preview is an illustration: it was built from a

@@ -1,4 +1,4 @@
-//! Browser wallet handoff. The daemon alone owns device signing and PKCE.
+//! Native widget and browser adapter. Rust daemon owns the wallet state machine.
 use super::App;
 use super::onboarding::{Onboarding, Step, body_label, load_consent_options};
 use adw::prelude::*;
@@ -6,7 +6,23 @@ use std::{
     cell::{Cell, RefCell},
     rc::Rc,
 };
-
+use trace_commons_contributor::witness_copy::witness_copy;
+#[derive(Default, serde::Deserialize)]
+#[serde(default)]
+struct View {
+    flow_id: String,
+    state: String,
+    busy: bool,
+    can_check: bool,
+    can_start: bool,
+    can_edit: bool,
+    can_cancel: bool,
+    wait: bool,
+    message: String,
+    tone: String,
+    glyph: String,
+    browser_url: Option<String>,
+}
 struct Wallet {
     root: gtk::Box,
     commons: gtk::Entry,
@@ -15,14 +31,14 @@ struct Wallet {
     start: gtk::Button,
     cancel: gtk::Button,
     message: gtk::Label,
-    ready: Cell<bool>,
-    busy: Cell<bool>,
+    view: RefCell<View>,
+    pending: Cell<bool>,
     closed: Cell<bool>,
-    attempt: RefCell<Option<String>>,
 }
 impl Wallet {
     fn refresh(&self, onboarding: &Onboarding) {
-        let busy = self.busy.get() || self.attempt.borrow().is_some();
+        let view = self.view.borrow();
+        let busy = view.busy || self.pending.get();
         onboarding.connection_busy.set(busy);
         onboarding.invite.set_sensitive(!busy);
         onboarding.connect_button.set_sensitive(
@@ -32,82 +48,47 @@ impl Wallet {
                 )
                 .is_some(),
         );
-        self.commons.set_sensitive(!busy);
-        self.account.set_sensitive(!busy);
-        self.account.set_visible(self.ready.get());
-        self.check
-            .set_sensitive(!busy && !self.commons.text().trim().is_empty());
-        self.start.set_visible(self.ready.get());
+        self.root
+            .set_visible(!view.state.is_empty() && view.state != "Unsupported");
+        self.commons.set_sensitive(!busy && view.can_edit);
+        self.account.set_sensitive(!busy && view.can_edit);
+        self.account.set_visible(view.can_start);
+        self.start.set_visible(view.can_start);
         self.start
-            .set_sensitive(!busy && !self.account.text().trim().is_empty());
-        self.cancel.set_visible(self.attempt.borrow().is_some());
-    }
-    fn cancel(&self, app: &Rc<App>, onboarding: &Onboarding) {
-        if let Some(id) = self.attempt.borrow_mut().take() {
-            app.call(
-                "near_account_cancel",
-                serde_json::json!({"attempt_id":id}),
-                |_, _| {},
-            );
+            .set_sensitive(!self.pending.get() && view.can_start);
+        self.check
+            .set_sensitive(!self.pending.get() && view.can_check);
+        self.cancel.set_visible(view.can_cancel);
+        if view.tone == "refused" {
+            self.message.add_css_class("tc-refused");
+        } else {
+            self.message.remove_css_class("tc-refused");
         }
-        self.busy.set(false);
-        self.message.set_label("Connection cancelled.");
-        self.refresh(onboarding);
+        self.message.set_label(&format!(
+            "{}{}{}",
+            view.glyph,
+            if view.glyph.is_empty() { "" } else { " " },
+            view.message
+        ));
     }
 }
-
-pub(super) fn supported(value: &serde_json::Value) -> bool {
-    value
-        .get("methods")
-        .and_then(|v| v.as_array())
-        .is_some_and(|methods| {
-            [
-                "near_account_capabilities",
-                "near_account_start",
-                "near_account_status",
-                "near_account_cancel",
-            ]
-            .iter()
-            .all(|required| methods.iter().any(|v| v.as_str() == Some(required)))
-        })
-}
-pub(super) fn browser_destination(commons: &str, browser: &str) -> bool {
-    let parse = |value| glib::Uri::parse(value, glib::UriFlags::NONE).ok();
-    let (Some(origin), Some(target)) = (parse(commons), parse(browser)) else {
-        return false;
-    };
-    let port = |uri: &glib::Uri| if uri.port() == -1 { 443 } else { uri.port() };
-    origin.scheme() == "https"
-        && target.scheme() == "https"
-        && origin.userinfo().is_none()
-        && target.userinfo().is_none()
-        && origin.host().is_some()
-        && origin.host().as_deref().map(str::to_ascii_lowercase)
-            == target.host().as_deref().map(str::to_ascii_lowercase)
-        && port(&origin) == port(&target)
-}
-
 fn widgets() -> Rc<Wallet> {
+    let copy = witness_copy().wallet;
     let wallet = Rc::new(Wallet {
         root: gtk::Box::new(gtk::Orientation::Vertical, 12),
-        commons: gtk::Entry::builder()
-            .placeholder_text("Commons HTTPS address")
-            .build(),
-        account: gtk::Entry::builder()
-            .placeholder_text("Your NEAR account")
-            .build(),
-        check: gtk::Button::with_label("Check availability"),
-        start: gtk::Button::with_label("Continue in wallet"),
-        cancel: gtk::Button::with_label("Cancel connection"),
+        commons: gtk::Entry::builder().placeholder_text(copy.commons).build(),
+        account: gtk::Entry::builder().placeholder_text(copy.account).build(),
+        check: gtk::Button::with_label(copy.check),
+        start: gtk::Button::with_label(copy.start),
+        cancel: gtk::Button::with_label(copy.cancel),
         message: body_label(""),
-        ready: Cell::new(false),
-        busy: Cell::new(false),
+        view: RefCell::new(View::default()),
+        pending: Cell::new(false),
         closed: Cell::new(false),
-        attempt: RefCell::new(None),
     });
     wallet.root.set_visible(false);
-    wallet.root.append(&body_label("Join with a NEAR account"));
-    wallet.root.append(&body_label("Check whether your commons accepts new accounts. Connecting proves control of your account and this device; it does not fund inference or enable capture."));
+    wallet.root.append(&body_label(copy.heading));
+    wallet.root.append(&body_label(copy.disclosure));
     for widget in [
         &wallet.commons.clone().upcast::<gtk::Widget>(),
         &wallet.check.clone().upcast(),
@@ -120,129 +101,106 @@ fn widgets() -> Rc<Wallet> {
     }
     wallet
 }
-
 pub(super) fn build(app: &Rc<App>, onboarding: &Rc<Onboarding>) -> gtk::Box {
     let wallet = widgets();
-    wallet.refresh(onboarding);
-    app.call("hello", serde_json::json!({}), {
+    for (button, action) in [
+        (&wallet.check, "check"),
+        (&wallet.start, "start"),
+        (&wallet.cancel, "cancel"),
+    ] {
         let wallet = wallet.clone();
-        move |_, result| {
-            wallet
-                .root
-                .set_visible(result.ok().as_ref().is_some_and(supported))
-        }
-    });
-    wallet.commons.connect_changed({
-        let wallet = wallet.clone();
-        let onboarding = onboarding.clone();
-        move |_| {
-            wallet.ready.set(false);
-            wallet.refresh(&onboarding);
-        }
-    });
-    wallet.account.connect_changed({
-        let wallet = wallet.clone();
-        let onboarding = onboarding.clone();
-        move |_| wallet.refresh(&onboarding)
-    });
-    wallet.check.connect_clicked({ let wallet = wallet.clone(); let onboarding = onboarding.clone(); let app = app.clone(); move |_| {
-        if onboarding.connection_busy.get() || wallet.closed.get() { return; }
-        wallet.busy.set(true); wallet.ready.set(false); wallet.message.set_label(""); wallet.refresh(&onboarding);
-        app.call("near_account_capabilities", serde_json::json!({"ingest_url":wallet.commons.text().as_str()}), {
-            let wallet = wallet.clone(); let onboarding = onboarding.clone(); move |_, result| {
-                wallet.ready.set(result.ok().and_then(|v| v.get("ready").and_then(|b| b.as_bool())).unwrap_or(false));
-                wallet.busy.set(false);
-                wallet.message.set_label(if wallet.ready.get() { "This commons supports wallet signup." } else { "Wallet signup is unavailable for this commons. You can still use an invite." });
-                wallet.refresh(&onboarding);
-            }
-        });
-    }});
-    wallet.start.connect_clicked({ let wallet = wallet.clone(); let onboarding = onboarding.clone(); let app = app.clone(); move |_| {
-        if !wallet.ready.get() || onboarding.connection_busy.get() || wallet.closed.get() || wallet.account.text().trim().is_empty() { return; }
-        wallet.busy.set(true); wallet.message.set_label("Opening a wallet connection…"); wallet.refresh(&onboarding);
-        app.call("near_account_start", serde_json::json!({"ingest_url":wallet.commons.text().as_str(), "account_id":wallet.account.text().trim()}), {
-            let wallet = wallet.clone(); let onboarding = onboarding.clone(); move |app, result| {
-                let value = result.ok().unwrap_or_default();
-                let id = value.get("attempt_id").and_then(|v| v.as_str()).filter(|id| !id.is_empty());
-                *wallet.attempt.borrow_mut() = id.map(str::to_owned);
-                let browser = value.get("browser_url").and_then(|v| v.as_str()).unwrap_or("");
-                if wallet.closed.get() || id.is_none() || value.get("status").and_then(|v| v.as_str()) != Some("waiting_for_wallet") || !browser_destination(&wallet.commons.text(), browser) {
-                    wallet.cancel(app, &onboarding); wallet.message.set_label("The connection could not start. Check availability and try again."); return;
-                }
-                if gtk::gio::AppInfo::launch_default_for_uri(browser, None::<&gtk::gio::AppLaunchContext>).is_err() { wallet.cancel(app, &onboarding); return; }
-                wallet.busy.set(false); wallet.message.set_label("Finish signing in your wallet. Keep this window open."); wallet.refresh(&onboarding);
-                poll(app, &onboarding, &wallet, id.unwrap().to_owned());
-            }
-        });
-    }});
-    wallet.cancel.connect_clicked({
-        let wallet = wallet.clone();
-        let onboarding = onboarding.clone();
         let app = app.clone();
-        move |_| wallet.cancel(&app, &onboarding)
-    });
+        let onboarding = onboarding.clone();
+        button.connect_clicked(move |_| {
+            if action != "cancel" && (onboarding.connection_busy.get() || wallet.closed.get()) {
+                return;
+            }
+            command(&app, &onboarding, &wallet, action);
+        });
+    }
     onboarding.window.connect_close_request({
-        let wallet = wallet.clone();
-        let onboarding = onboarding.clone();
         let app = app.clone();
+        let onboarding = onboarding.clone();
+        let wallet = wallet.clone();
         move |_| {
             wallet.closed.set(true);
-            wallet.cancel(&app, &onboarding);
+            command(&app, &onboarding, &wallet, "cancel");
             glib::Propagation::Proceed
         }
     });
+    command(app, onboarding, &wallet, "open");
     wallet.root.clone()
 }
-fn poll(app: &Rc<App>, onboarding: &Rc<Onboarding>, wallet: &Rc<Wallet>, id: String) {
-    if wallet.closed.get() || wallet.attempt.borrow().as_deref() != Some(&id) {
-        return;
-    }
-    app.call(
-        "near_account_status",
-        serde_json::json!({"attempt_id":id}),
-        {
-            let wallet = wallet.clone();
-            let onboarding = onboarding.clone();
-            move |app, result| {
-                if wallet.closed.get() || wallet.attempt.borrow().as_deref() != Some(&id) {
+fn command(app: &Rc<App>, onboarding: &Rc<Onboarding>, wallet: &Rc<Wallet>, action: &'static str) {
+    wallet.pending.set(true);
+    wallet.refresh(onboarding);
+    let params = serde_json::json!({"action":action,"flow_id":wallet.view.borrow().flow_id,"ingest_url":wallet.commons.text().as_str(),"account_id":wallet.account.text().as_str()});
+    app.call("native_wallet_flow", params, {
+        let wallet = wallet.clone();
+        let onboarding = onboarding.clone();
+        move |app, result| {
+            wallet.pending.set(false);
+            match result
+                .ok()
+                .and_then(|v| serde_json::from_value::<View>(v).ok())
+            {
+                Some(view) => *wallet.view.borrow_mut() = view,
+                None => {
+                    let copy = witness_copy().wallet;
+                    let mut view = wallet.view.borrow_mut();
+                    view.message = copy.failed.into();
+                    view.tone = copy.refused_tone.into();
+                    view.glyph = copy.refused_glyph.into();
+                    drop(view);
+                    wallet.refresh(&onboarding);
                     return;
                 }
-                let value = result.ok().unwrap_or_default();
-                match value.get("status").and_then(|v| v.as_str()) {
-                    Some("complete") => {
-                        wallet.attempt.borrow_mut().take();
-                        wallet.account.set_text("");
-                        wallet.refresh(&onboarding);
-                        onboarding.invite.set_text("");
-                        load_consent_options(app, &onboarding);
-                        onboarding.go(Step::Consent);
+            }
+            wallet.refresh(&onboarding);
+            if wallet.closed.get() {
+                if action != "cancel" {
+                    command(app, &onboarding, &wallet, "cancel");
+                }
+                return;
+            }
+            if action == "start" {
+                let browser = wallet.view.borrow().browser_url.clone();
+                if let Some(browser) = browser {
+                    if gtk::gio::AppInfo::launch_default_for_uri(
+                        &browser,
+                        None::<&gtk::gio::AppLaunchContext>,
+                    )
+                    .is_err()
+                    {
+                        command(app, &onboarding, &wallet, "cancel");
+                        return;
                     }
-                    Some("failed" | "cancelled" | "expired") => {
-                        wallet.attempt.borrow_mut().take();
-                        wallet.message.set_label(
-                            "The wallet connection did not complete. You can try again.",
-                        );
-                        wallet.refresh(&onboarding);
-                    }
-                    Some("starting" | "waiting_for_wallet") => {
-                        let app = app.clone();
-                        glib::timeout_add_local_once(
-                            std::time::Duration::from_secs(2),
-                            move || poll(&app, &onboarding, &wallet, id),
-                        );
-                    }
-                    _ => wallet
-                        .message
-                        .set_label("The connection status is unavailable. Cancel and try again."),
                 }
             }
-        },
-    );
+            let wait = wallet.view.borrow().wait;
+            if wait {
+                command(app, &onboarding, &wallet, "wait");
+            } else if wallet.view.borrow().state == "Complete" {
+                wallet.account.set_text("");
+                onboarding.invite.set_text("");
+                load_consent_options(app, &onboarding);
+                onboarding.go(Step::Consent);
+            }
+        }
+    });
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn wallet_adapter_reads_core_capabilities_without_inventing_them() {
+        let empty: View = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(!empty.can_start && !empty.wait);
+        let view:View=serde_json::from_value(serde_json::json!({"state":"Refused","can_cancel":true,"glyph":"⊘","message":"fixture","tone":"refused"})).unwrap();
+        assert!(view.can_cancel);
+        assert!(!view.can_start);
+        assert_eq!(view.glyph, "⊘");
+    }
     /// Only synthetic widget data; never constructs App, a daemon, or a wallet request.
     #[test]
     #[ignore = "requires a display; run under Xvfb with --ignored --test-threads=1"]
@@ -289,31 +247,5 @@ mod tests {
             renderer.unrealize();
         }
         window.close();
-    }
-    #[test]
-    fn wallet_browser_requires_exact_https_origin() {
-        for bad in [
-            "http://commons.example/wallet",
-            "https://elsewhere.example/wallet",
-            "https://commons.example:444/wallet",
-            "https://user@commons.example/wallet",
-            "file:///tmp/wallet",
-        ] {
-            assert!(!browser_destination("https://commons.example", bad));
-        }
-        assert!(browser_destination(
-            "https://commons.example",
-            "https://commons.example:443/wallet?ceremony=synthetic"
-        ));
-    }
-    #[test]
-    fn wallet_needs_all_lifecycle_methods() {
-        assert!(!supported(
-            &serde_json::json!({"methods":["near_account_start"]})
-        ));
-        assert!(!supported(&serde_json::json!({})));
-        assert!(supported(
-            &serde_json::json!({"methods":["near_account_capabilities","near_account_start","near_account_status","near_account_cancel"]})
-        ));
     }
 }

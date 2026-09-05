@@ -395,10 +395,14 @@ public sealed class WitnessSurfaceTests
         var allowed = new HashSet<string>(StringComparer.Ordinal)
         {
             // tc_witness_status_json's keys.
-            "state_code",
+            "state_code", "", "Unsupported", "refused", "neutral", "Complete",
+            "native_wallet_flow", "open", "check", "start", "wait", "cancel",
+            "flow_id", "state", "busy", "can_edit", "can_check", "can_start",
+            "can_cancel", "message", "tone", "glyph", "browser_url",
+            "prepare_admission_session", "methods", "view", "ready",
         };
 
-        foreach (string file in new[] { "WitnessTools.cs.txt", "WitnessSurface.cs.txt" })
+        foreach (string file in new[] { "WitnessTools.cs.txt", "WitnessSurface.cs.txt", "NearAccountConnection.cs.txt", "AdmissionPreparation.cs.txt" })
         {
             string path = Path.Combine(AppContext.BaseDirectory, file);
             Assert.True(File.Exists(path), $"the implementation source was not copied to {path}");

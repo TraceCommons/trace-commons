@@ -636,6 +636,7 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
         : (_inferenceEvidenceEnabled ? _witnessCopy?.InferenceEnabled : _witnessCopy?.InferenceDisabled)
           ?? string.Empty;
     public string InferenceEvidenceNotice => _inferenceEvidenceNotice;
+    public string InferenceEvidenceNoticeGlyph => _inferenceEvidenceNotice.Length > 0 ? _witnessCopy?.Wallet?.RefusedGlyph ?? "" : "";
 
     private void FillInferenceEvidence(DaemonSettingsSnapshot settings)
     {
@@ -679,9 +680,13 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
             if (_inferenceEvidenceNotice.Length > 0)
             {
                 _inferenceEvidenceSupported = false;
+                try {
+                    var authoritative = await _host.CallAsync(DaemonProtocol.Methods.GetSettings).ConfigureAwait(true);
+                    if (authoritative.ResultAs<DaemonSettingsSnapshot>() is { } settings) FillInferenceEvidence(settings);
+                } catch { }
                 Raise(nameof(InferenceEvidenceState));
             }
-            Raise(nameof(InferenceEvidenceNotice));
+            Raise(nameof(InferenceEvidenceNotice)); Raise(nameof(InferenceEvidenceNoticeGlyph));
             IsBusy = false;
         }
     }

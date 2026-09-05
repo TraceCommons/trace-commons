@@ -1,87 +1,65 @@
 using System;
 using System.Collections.Generic;
-using System.Linq;
 using System.Text.Json;
 using System.Threading.Tasks;
 using TraceCommons.Interop;
 using Xunit;
 namespace TraceCommons.Interop.Tests;
-
 public sealed class NearAccountConnectionTests
 {
     private static DaemonResponse Response(object value) => new() { Result = JsonSerializer.SerializeToElement(value) };
-    private static readonly string[] Methods = { "near_account_capabilities", "near_account_start", "near_account_status", "near_account_cancel" };
+    [Fact]
+    public async Task AdapterUsesCoreViewAndWaitWithoutReimplementingTransitions()
+    {
+        var calls=new List<string>();string? opened=null;bool complete=false;
+        var flow=new NearAccountConnection((method,payload)=>{
+            Assert.Equal("native_wallet_flow",method);
+            using var request=JsonDocument.Parse(payload);var action=request.RootElement.GetProperty("action").GetString();calls.Add(action!);
+            object view=action switch {
+                "open"=>new{flow_id="fixture",state="Idle",can_check=true,can_edit=true},
+                "check"=>new{flow_id="fixture",state="Ready",can_check=true,can_edit=true,can_start=true},
+                "start"=>new{flow_id="fixture",state="WaitingForWallet",busy=true,can_cancel=true,wait=true,browser_url="https://commons.example/exact?token=synthetic"},
+                "wait"=>new{flow_id="fixture",state="Complete"},
+                _=>throw new Exception("unexpected")
+            };return Task.FromResult(Response(view));
+        },uri=>{opened=uri.AbsoluteUri;return Task.FromResult(true);},()=>true);
+        flow.Completed+=()=>complete=true;
+        await flow.InitializeAsync();flow.Commons="https://commons.example";await flow.CheckAsync();flow.Account="synthetic.near";await flow.StartAsync();
+        Assert.True(complete);Assert.Empty(flow.Account);Assert.Equal("https://commons.example/exact?token=synthetic",opened);
+        Assert.Equal(new[]{"open","check","start","wait"},calls);
+    }
     [Theory]
-    [InlineData("http://commons.example/wallet")]
-    [InlineData("https://elsewhere.example/wallet")]
-    [InlineData("https://commons.example:444/wallet")]
-    [InlineData("https://user@commons.example/wallet")]
-    [InlineData("file:///tmp/wallet")]
-    public void WalletRequiresExactHttpsOrigin(string destination) => Assert.Null(NearAccountConnection.BrowserDestination("https://commons.example", destination));
-
-    [Fact]
-    public async Task UnsupportedDaemonNeverStartsOrChecks()
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task BrowserRefusalUsesCoreCancel(bool throws)
     {
-        var calls = new List<string>();
-        var flow = new NearAccountConnection((method, _) => { calls.Add(method); return Task.FromResult(Response(new { methods = new[] { "near_account_start" } })); }, _ => Task.FromResult(true), () => true);
-        await flow.InitializeAsync(); flow.Commons = "https://commons.example"; flow.Account = "synthetic.near";
-        await flow.CheckAsync(); await flow.StartAsync();
-        Assert.False(flow.Supported); Assert.Equal(new[] { "hello" }, calls);
+        var cancelled=false;
+        var flow=new NearAccountConnection((_,payload)=>{
+            using var request=JsonDocument.Parse(payload);var action=request.RootElement.GetProperty("action").GetString();
+            if(action=="cancel")cancelled=true;
+            return Task.FromResult(Response(action=="start"?(object)new{flow_id="fixture",state="WaitingForWallet",wait=true,browser_url="https://commons.example"}:new{flow_id="fixture",state="Ready",can_start=true}));
+        },_=>throws ? Task.FromException<bool>(new InvalidOperationException()) : Task.FromResult(false),()=>true);
+        await flow.InitializeAsync();await flow.StartAsync();Assert.True(cancelled);
     }
     [Fact]
-    public async Task CompletedCeremonyClearsAccountAndUsesOnlyExactDaemonBrowserUrl()
+    public async Task FailedWaitStopsWithoutAutomaticRetryAndKeepsCancelAvailable()
     {
-        var calls = new List<string>(); string? opened = null; var completed = false;
-        var flow = new NearAccountConnection((method, payload) => {
-            calls.Add(method);
-            object result = method switch {
-                "hello" => new { methods = Methods },
-                "near_account_capabilities" => new { ready = true },
-                "near_account_start" => new { status = "waiting_for_wallet", attempt_id = "fixture", browser_url = "https://commons.example/wallet?ceremony=synthetic" },
-                "near_account_status" => new { status = "complete" },
-                _ => throw new Exception("unexpected call")
-            };
-            if (method == "near_account_start") { using var json = JsonDocument.Parse(payload); Assert.Equal("synthetic.near", json.RootElement.GetProperty("account_id").GetString()); Assert.Equal(2, json.RootElement.EnumerateObject().Count()); }
-            return Task.FromResult(Response(result));
-        }, uri => { opened = uri.AbsoluteUri; return Task.FromResult(true); }, () => true);
-        flow.Completed += () => completed = true;
-        await flow.InitializeAsync(); flow.Commons = "https://commons.example"; await flow.CheckAsync(); flow.Account = "synthetic.near"; await flow.StartAsync();
-        Assert.True(completed); Assert.Empty(flow.Account); Assert.False(flow.Busy);
-        Assert.Equal("https://commons.example/wallet?ceremony=synthetic", opened);
-        Assert.Equal(new[] { "hello", "near_account_capabilities", "near_account_start", "near_account_status" }, calls);
-    }
-    [Fact]
-    public async Task ClosingDuringStartCancelsReturnedAttemptWithoutOpeningBrowser()
-    {
-        var started = new TaskCompletionSource<DaemonResponse>(); var cancelled = false; var opened = false;
-        var flow = new NearAccountConnection((method, _) => method switch {
-            "hello" => Task.FromResult(Response(new { methods = Methods })),
-            "near_account_capabilities" => Task.FromResult(Response(new { ready = true })),
-            "near_account_start" => started.Task,
-            "near_account_cancel" => Cancel(),
-            _ => throw new Exception("unexpected")
-        }, _ => { opened = true; return Task.FromResult(true); }, () => true);
-        Task<DaemonResponse> Cancel() { cancelled = true; return Task.FromResult(Response(new { status = "cancelled" })); }
-        await flow.InitializeAsync(); flow.Commons = "https://commons.example"; await flow.CheckAsync(); flow.Account = "synthetic.near";
-        var pending = flow.StartAsync(); await flow.CloseAsync();
-        started.SetResult(Response(new { status = "waiting_for_wallet", attempt_id = "fixture", browser_url = "https://commons.example/wallet" }));
-        await pending; Assert.True(cancelled); Assert.False(opened); Assert.False(flow.Busy);
-    }
-    [Fact]
-    public async Task UnknownStatusRemainsCancellableAndDoesNotEnroll()
-    {
-        var cancelled = false;
-        var flow = new NearAccountConnection((method, _) => {
-            if (method == "near_account_cancel") cancelled = true;
-            return Task.FromResult(Response(method switch {
-                "hello" => (object)new { methods = Methods },
-                "near_account_capabilities" => new { ready = true },
-                "near_account_start" => new { status = "waiting_for_wallet", attempt_id = "fixture", browser_url = "https://commons.example/wallet" },
-                _ => new { status = "future-status", sensitive_error = "never show this" }
-            }));
+        var waits = 0;
+        var flow = new NearAccountConnection((_, payload) => {
+            using var request = JsonDocument.Parse(payload);
+            var action = request.RootElement.GetProperty("action").GetString();
+            if (action == "wait") { waits++; return Task.FromResult(new DaemonResponse()); }
+            return Task.FromResult(Response(action == "start"
+                ? (object)new { flow_id = "fixture", state = "WaitingForWallet", wait = true, can_cancel = true }
+                : new { flow_id = "fixture", state = "Ready", can_start = true }));
         }, _ => Task.FromResult(true), () => true);
-        await flow.InitializeAsync(); flow.Commons = "https://commons.example"; await flow.CheckAsync(); flow.Account = "synthetic.near"; await flow.StartAsync();
-        Assert.True(flow.Busy); Assert.True(flow.CanCancel); Assert.DoesNotContain("sensitive", flow.Message);
-        await flow.CancelAsync(); Assert.True(cancelled); Assert.False(flow.Busy);
+        await flow.InitializeAsync(); await flow.StartAsync();
+        Assert.Equal(1, waits); Assert.True(flow.CanCancel); Assert.True(flow.Refused);
+    }
+    [Fact]
+    public async Task UnavailableCoreDoesNotInventReadiness()
+    {
+        var flow=new NearAccountConnection((_,_)=>Task.FromResult(DaemonResponse.Parse("{\"error\":{\"code\":\"unknown\",\"message\":\"unknown\"}}")),_=>Task.FromResult(true),()=>true);
+        await flow.InitializeAsync();Assert.False(flow.Supported);Assert.False(flow.CanStart);Assert.False(flow.CanCheck);
     }
 }

@@ -60,6 +60,7 @@ pub fn open_with_search(app: &Rc<App>, index: usize, term: Option<String>, tab: 
 struct Sheet {
     app: Rc<App>,
     witness_button: gtk::Button,
+    immutable_note: gtk::Label,
     admission_button: gtk::Button,
     admission_message: gtk::Label,
     admission_required: Cell<bool>,
@@ -603,6 +604,17 @@ impl Sheet {
             .build();
         footer.append(&residual_risk);
         footer.append(&gate_statement);
+        let immutable_note = gtk::Label::builder()
+            .label(
+                trace_commons_contributor::witness_copy::witness_copy()
+                    .review
+                    .immutable,
+            )
+            .wrap(true)
+            .xalign(0.0)
+            .visible(false)
+            .build();
+        footer.append(&immutable_note);
         footer.append(&verdict_question);
         footer.append(&verdict_track);
         footer.append(&verdict_caption);
@@ -614,7 +626,11 @@ impl Sheet {
         );
         witness_button.set_visible(false);
         footer.append(&witness_button);
-        let admission_button = gtk::Button::with_label("Prepare next NEAR inference");
+        let admission_button = gtk::Button::with_label(
+            trace_commons_contributor::witness_copy::witness_copy()
+                .admission
+                .heading,
+        );
         admission_button.set_visible(false);
         let admission_message = gtk::Label::builder().wrap(true).xalign(0.0).build();
         footer.append(&admission_button);
@@ -634,6 +650,7 @@ impl Sheet {
         let sheet = Rc::new(Sheet {
             app: Rc::clone(app),
             witness_button: witness_button.clone(),
+            immutable_note,
             admission_button: admission_button.clone(),
             admission_message,
             admission_required: Cell::new(false),
@@ -813,6 +830,8 @@ impl Sheet {
             .set_sensitive(!self.admission_busy.get() && !self.witness_busy.get());
         let configured = super::settings::witness_read(&self.app.worker.dir).state
             == trace_commons_contributor::witness::status::WitnessTrustState::Pinned;
+        self.immutable_note
+            .set_visible(configured || self.witness_requested.get());
         self.witness_button
             .set_visible(configured && self.witness_supported.get() && !self.pinned.get());
         self.witness_button
@@ -832,14 +851,16 @@ impl Sheet {
         {
             return;
         }
-        let backend = gtk::Entry::builder()
-            .placeholder_text("NEAR backend identifier")
+        let copy = trace_commons_contributor::witness_copy::witness_copy().admission;
+        let backend = gtk::Entry::builder().placeholder_text(copy.backend).build();
+        let dialog = adw::MessageDialog::builder()
+            .transient_for(&self.window)
+            .modal(true)
+            .heading(copy.heading)
+            .body(copy.disclosure)
+            .extra_child(&backend)
             .build();
-        let dialog = adw::MessageDialog::builder().transient_for(&self.window).modal(true)
-            .heading("Prepare next NEAR inference")
-            .body("For new inference evidence, this adds an account-bound challenge to the next request in this session. Use your own funded NEAR AI backend, then continue the agent task and return here to review. You can separately choose witness review of eligible existing history, subject to server limits.")
-            .extra_child(&backend).build();
-        dialog.add_responses(&[("cancel", "Cancel"), ("prepare", "Prepare session")]);
+        dialog.add_responses(&[("cancel", copy.cancel), ("prepare", copy.confirm)]);
         dialog.set_default_response(Some("cancel"));
         dialog.set_close_response("cancel");
         dialog.set_response_enabled("prepare", false);
@@ -851,14 +872,16 @@ impl Sheet {
         dialog.connect_response(None, move |_, response| {
             if response != "prepare" || sheet.admission_busy.replace(true) { return; }
             let Some(entry) = sheet.pending.get(*sheet.index.borrow()) else { sheet.admission_busy.set(false); return; };
-            sheet.admission_message.set_label("Preparing this session…"); sheet.sync_witness();
+            sheet.admission_message.set_label(trace_commons_contributor::witness_copy::witness_copy().admission.working); sheet.sync_witness();
             let result_sheet = sheet.clone();
             let prepared_entry = entry.entry_id.clone();
             sheet.app.call("prepare_admission_session", serde_json::json!({"entry_id":entry.entry_id,"backend":backend.text().trim(),"confirmed":true}), move |_, result| {
                 let ready = result.ok().is_some_and(|v| admission_ready(&v));
                 result_sheet.admission_busy.set(false);
                 if result_sheet.current().is_none_or(|entry| entry.entry_id != prepared_entry) { result_sheet.sync_witness(); return; }
-                result_sheet.admission_message.set_label(if ready { "Ready. Continue this session in your agent, then review the updated session." } else { "This session could not be prepared. Check your supported agent, backend, and capture settings, then try again." });
+                let copy = trace_commons_contributor::witness_copy::witness_copy().admission;
+                if ready { result_sheet.admission_message.remove_css_class("tc-refused"); result_sheet.admission_message.set_label(copy.ready); }
+                else { result_sheet.admission_message.add_css_class("tc-refused"); result_sheet.admission_message.set_label(&format!("{} {}",copy.refused_glyph,copy.failed)); }
                 result_sheet.sync_witness();
             });
         });
@@ -2174,11 +2197,11 @@ fn context_around(body: &str, byte_start: usize, byte_end: usize) -> Excerpt {
 }
 
 fn admission_ready(value: &serde_json::Value) -> bool {
-    value.get("status").and_then(|v| v.as_str()) == Some("ready_for_next_inference")
-        && value
-            .get("expires_at")
-            .and_then(|v| v.as_i64())
-            .is_some_and(|expiry| expiry > chrono::Utc::now().timestamp())
+    value
+        .get("view")
+        .and_then(|view| view.get("ready"))
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
 }
 
 #[cfg(test)]
@@ -2187,7 +2210,7 @@ mod tests {
     fn admission_preparation_requires_fresh_explicit_success() {
         let future = chrono::Utc::now().timestamp() + 600;
         assert!(super::admission_ready(
-            &serde_json::json!({"status":"ready_for_next_inference","expires_at":future})
+            &serde_json::json!({"status":"ready_for_next_inference","expires_at":future,"view":{"ready":true}})
         ));
         for value in [
             serde_json::json!({}),

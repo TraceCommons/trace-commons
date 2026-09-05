@@ -366,3 +366,24 @@ final class NativeWitnessReviewTests: XCTestCase {
         XCTAssertEqual(daemon.lastParams?.count, 2)
     }
 }
+
+final class NativeFlowAdapterTests: XCTestCase {
+    func testWalletAdapterTransportsCoreViewWithoutLocalOriginOrCadenceLogic() throws {
+        let daemon = RecordingDaemon()
+        daemon.response = #"{"id":1,"result":{"flow_id":"fixture","state":"WaitingForWallet","busy":true,"can_check":false,"can_start":false,"can_edit":false,"can_cancel":true,"wait":true,"message":"fixture","tone":"neutral","glyph":"","browser_url":"https://commons.example/exact"}}"#
+        let result = try DaemonClient(daemon: daemon).nativeWalletFlow(action: "wait", flowID: "fixture", commons: "", account: "")
+        XCTAssertEqual(daemon.calls.last?.method, "native_wallet_flow")
+        XCTAssertEqual(daemon.lastParams?["action"] as? String, "wait")
+        XCTAssertTrue(result.wait)
+        XCTAssertTrue(result.canCancel)
+        XCTAssertFalse(result.canStart)
+        XCTAssertEqual(result.browserURL, "https://commons.example/exact")
+    }
+    func testAdmissionAdapterUsesCoreExpiryDecision() throws {
+        let daemon = RecordingDaemon()
+        daemon.response = #"{"id":1,"result":{"status":"ready_for_next_inference","expires_at":1,"view":{"ready":false,"message":"fixture refusal","tone":"refused","glyph":"⊘"}}}"#
+        let result = try DaemonClient(daemon: daemon).prepareAdmissionSession(entryID: "fixture", backend: "near")
+        XCTAssertFalse(try XCTUnwrap(result.view).ready)
+        XCTAssertEqual(result.view?.tone, "refused")
+    }
+}

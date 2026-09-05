@@ -1,142 +1,78 @@
 import SwiftUI
 
-/// The daemon owns wallet verification, PKCE and the device key. This view only
-/// presents readiness and opens the exact browser ceremony it returns.
+/// Native transport and browser presentation only; Rust owns lifecycle and cadence.
 struct NearAccountConnectView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.openURL) private var openURL
-    @State private var active = true
     @State private var commons = ""
     @State private var account = ""
-    @State private var ready = false
-    @State private var checking = false
-    @State private var attemptID: String?
-    @State private var message = ""
+    @State private var flow: NativeWalletView?
+    @State private var pending = false
+    @State private var closed = false
+    @State private var transportFailed = false
     var onBusyChanged: (Bool) -> Void = { _ in }
     var onEnrolled: () -> Void
-
+    private var busy: Bool { pending || flow?.busy == true }
     var body: some View {
-        VStack(alignment: .leading, spacing: TC.Space.m) {
-            Text("Join with a NEAR account").font(TC.Font_.cardTitle)
-            Text("Check whether your commons accepts new accounts. Connecting proves control of your account and this device; it does not fund inference or enable capture.")
-                .font(.callout).foregroundStyle(.secondary)
-            HStack {
-                TextField("Commons HTTPS address", text: $commons)
-                    .textFieldStyle(.roundedBorder).disabled(checking || attemptID != nil)
-                    .onChange(of: commons) { _, _ in ready = false }
-                Button("Check availability", action: checkAvailability)
-                    .disabled(commons.isEmpty || checking || attemptID != nil)
-            }
-            if ready {
-                TextField("Your NEAR account", text: $account)
-                    .textFieldStyle(.roundedBorder).disabled(attemptID != nil || checking)
-                if attemptID == nil {
-                    Button("Continue in wallet", action: start)
-                        .disabled(account.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || checking)
+        Group {
+            if let copy = model.witnessCopy?.wallet, let flow, flow.state != "Unsupported" {
+                VStack(alignment: .leading, spacing: TC.Space.m) {
+                    Text(copy.heading).font(TC.Font_.cardTitle)
+                    Text(copy.disclosure).font(.callout).foregroundStyle(.secondary)
+                    TextField(copy.commons, text: $commons).textFieldStyle(.roundedBorder).disabled(busy || !flow.canEdit)
+                    Button(copy.check) { run("check") }.disabled(pending || !flow.canCheck)
+                    if flow.canStart {
+                        TextField(copy.account, text: $account).textFieldStyle(.roundedBorder).disabled(busy)
+                        Button(copy.start) { run("start") }.disabled(pending)
+                    }
+                    if busy { ProgressView().controlSize(.small) }
+                    if transportFailed { NativeFlowNotice(message: copy.failed, glyph: copy.refusedGlyph, tone: copy.refusedTone) }
+                    else if flow.tone == "refused" { NativeFlowNotice(message: flow.message, glyph: flow.glyph, tone: flow.tone) }
+                    else if !flow.message.isEmpty { Text(flow.message).font(.callout).foregroundStyle(.secondary) }
+                    if flow.canCancel { Button(copy.cancel, role: .cancel) { run("cancel") } }
                 }
             }
-            if checking || attemptID != nil { ProgressView().controlSize(.small) }
-            if !message.isEmpty { Text(message).font(.callout).foregroundStyle(.secondary) }
-            if attemptID != nil { Button("Cancel connection", role: .cancel, action: cancel) }
         }
-        .task(id: attemptID) { await poll() }
-        .onAppear { active = true }
-        .onDisappear { active = false; cancel() }
+        .task {
+            flow = await model.nativeWalletFlow(action: "open", flowID: "", commons: "", account: "")
+            if closed { await cancel() }
+        }
+        .onChange(of: busy) { _, value in onBusyChanged(value) }
+        .onDisappear { closed = true; Task { await cancel() } }
     }
-
-    private func checkAvailability() {
-        checking = true
-        ready = false
-        message = ""
+    private func cancel() async {
+        guard let flow else { return }
+        self.flow = await model.nativeWalletFlow(action: "cancel", flowID: flow.flowID, commons: "", account: "") ?? flow
+    }
+    private func run(_ action: String) {
+        guard let flow else { return }
+        pending = true
+        transportFailed = false
         Task {
-            let capability = await model.nearAccountCapabilities(commons: commons)
-            ready = capability?.ready == true
-            message = ready ? "This commons supports wallet signup." : "Wallet signup is unavailable for this commons. You can still use an invite."
-            checking = false
+            defer { pending = false }
+            guard let result = await model.nativeWalletFlow(action: action, flowID: flow.flowID, commons: commons, account: account) else { transportFailed = true; return }
+            self.flow = result
+            if closed { await cancel(); return }
+            if action == "start", let browser = result.browserURL {
+                guard let url = URL(string: browser) else { await cancel(); return }
+                let accepted = await withCheckedContinuation { continuation in openURL(url) { continuation.resume(returning: $0) } }
+                if !accepted { await cancel(); return }
+            }
+            while !closed, self.flow?.wait == true {
+                guard let next = await model.nativeWalletFlow(action: "wait", flowID: result.flowID, commons: "", account: "") else { transportFailed = true; return }
+                self.flow = next
+            }
+            if !closed, self.flow?.state == "Complete" { account = ""; onEnrolled() }
         }
-    }
-
-    private func start() {
-        checking = true
-        onBusyChanged(true)
-        message = "Opening a wallet connection…"
-        Task {
-            let progress = await model.nearAccountStart(commons: commons, account: account.trimmingCharacters(in: .whitespacesAndNewlines))
-            checking = false
-            if !active {
-                if let id = progress?.attemptID { await model.nearAccountCancel(attemptID: id) }
-                onBusyChanged(false)
-                return
-            }
-            guard let progress, let id = progress.attemptID,
-                  let url = progress.browserURLFor(commons: commons) else {
-                if let id = progress?.attemptID { await model.nearAccountCancel(attemptID: id) }
-                message = "The connection could not start. Check availability and try again."
-                onBusyChanged(false)
-                return
-            }
-            attemptID = id
-            message = "Finish signing in your wallet. Keep this window open."
-            openURL(url) { accepted in
-                if !accepted { cancel() }
-            }
-        }
-    }
-
-    private func poll() async {
-        guard let id = attemptID else { return }
-        while !Task.isCancelled, attemptID == id {
-            guard let progress = await model.nearAccountStatus(attemptID: id) else {
-                message = "The connection status is unavailable. Cancel and try again."
-                return
-            }
-            guard !Task.isCancelled, attemptID == id else { return }
-            switch progress.status {
-            case "complete":
-                attemptID = nil
-                account = ""
-                onBusyChanged(false)
-                onEnrolled()
-                return
-            case "failed", "cancelled", "expired":
-                attemptID = nil
-                message = "The wallet connection did not complete. You can try again."
-                onBusyChanged(false)
-                return
-            case "starting", "waiting_for_wallet":
-                do { try await Task.sleep(for: .seconds(2)) } catch { return }
-            default:
-                message = "The connection status is unavailable. Cancel and try again."
-                return
-            }
-        }
-    }
-
-    private func cancel() {
-        guard let id = attemptID else { return }
-        attemptID = nil
-        onBusyChanged(false)
-        message = "Connection cancelled."
-        Task { await model.nearAccountCancel(attemptID: id) }
     }
 }
-
-struct NearAccountCapability: Decodable, Sendable {
-    let ready: Bool
-}
-struct NearAccountProgress: Decodable, Sendable {
-    let status: String
-    let attemptID: String?
+struct NativeWalletView: Decodable, Sendable {
+    let flowID: String, state: String, message: String, tone: String, glyph: String
+    let busy: Bool, canCheck: Bool, canStart: Bool, canEdit: Bool, canCancel: Bool, wait: Bool
     let browserURL: String?
-    func browserURLFor(commons: String) -> URL? {
-        guard let browserURL, let url = URL(string: browserURL), let origin = URL(string: commons),
-              url.scheme == "https", origin.scheme == "https", url.host == origin.host,
-              (url.port ?? 443) == (origin.port ?? 443), url.user == nil, url.password == nil else { return nil }
-        return url
-    }
     enum CodingKeys: String, CodingKey {
-        case status
-        case attemptID = "attempt_id"
-        case browserURL = "browser_url"
+        case state, message, tone, glyph, busy, wait
+        case flowID = "flow_id", canCheck = "can_check", canStart = "can_start"
+        case canEdit = "can_edit", canCancel = "can_cancel", browserURL = "browser_url"
     }
 }

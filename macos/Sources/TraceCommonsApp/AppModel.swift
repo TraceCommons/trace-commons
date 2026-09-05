@@ -867,23 +867,10 @@ final class AppModel: ObservableObject {
         return await Task.detached { try? client.prepareAdmissionSession(entryID: entryID, backend: backend) }.value
     }
 
-    func nearAccountCapabilities(commons: String) async -> NearAccountCapability? {
+    func nativeWalletFlow(action: String, flowID: String, commons: String, account: String) async -> NativeWalletView? {
         guard let client else { return nil }
-        return await Task.detached { try? client.nearAccountCapabilities(commons: commons) }.value
+        return await Task.detached { try? client.nativeWalletFlow(action: action, flowID: flowID, commons: commons, account: account) }.value
     }
-    func nearAccountStart(commons: String, account: String) async -> NearAccountProgress? {
-        guard let client else { return nil }
-        return await Task.detached { try? client.nearAccountStart(commons: commons, account: account) }.value
-    }
-    func nearAccountStatus(attemptID: String) async -> NearAccountProgress? {
-        guard let client else { return nil }
-        return await Task.detached { try? client.nearAccountStatus(attemptID: attemptID) }.value
-    }
-    func nearAccountCancel(attemptID: String) async {
-        guard let client else { return }
-        await Task.detached { try? client.nearAccountCancel(attemptID: attemptID) }.value
-    }
-
     func enroll(invite: String, scopes: [String] = []) async -> EnrollOutcome {
         guard let client else { return .failed }
         return await Task.detached(priority: .userInitiated) { () -> EnrollOutcome in
@@ -970,7 +957,7 @@ final class AppModel: ObservableObject {
             daemonSettings = settings
             refreshAudit()
         case .failure:
-            daemonSettings?.ironwireAttestedBodies = nil
+            daemonSettings = await Task.detached { try? client.settings() }.value
             inferenceEvidenceSaveFailed = true
         }
     }

@@ -400,6 +400,9 @@ struct PreviewSheet: View {
             // saying it.
             ScrubbingCaveatAtCommit()
             gateStatement
+            if model.witnessStateCode == 1 || witnessRequested || witnessWorking, let copy = model.witnessCopy?.review {
+                Text(copy.immutable).font(TC.Font_.meta).foregroundStyle(TC.inkSecondary)
+            }
             verdictQuestion.disabled(model.witnessStateCode == 1 || witnessRequested || witnessWorking)
             if correctionIsOffered {
                 correctionField.disabled(model.witnessStateCode == 1 || witnessRequested || witnessWorking)

@@ -174,10 +174,12 @@ public struct WitnessCopy: Decodable, Equatable, Sendable {
     public let inferenceSaveFailed: String
     public let review: WitnessReviewCopy?
     public let onboarding: FirstContributionCopy?
+    public let wallet: WalletCopy?
+    public let admission: AdmissionCopy?
 
 
     enum CodingKeys: String, CodingKey {
-        case review, onboarding
+        case review, onboarding, wallet, admission
         case heading
         case intro
         case certificateMeans = "certificate_means"
@@ -507,5 +509,68 @@ public struct FirstContributionCopy: Decodable, Equatable, Sendable {
     enum CodingKeys: String, CodingKey {
         case heading, start, review
         case followUp = "follow_up", agentSetup = "agent_setup"
+    }
+}
+
+public struct WalletCopy: Decodable, Equatable, Sendable {
+    public let heading: String
+    public let disclosure: String
+    public let commons: String
+    public let account: String
+    public let check: String
+    public let start: String
+    public let cancel: String
+    public let available: String
+    public let unavailable: String
+    public let opening: String
+    public let waiting: String
+    public let failed: String
+    public let cancelled: String
+    public let refusedGlyph: String
+    public let refusedTone: String
+    enum CodingKeys: String, CodingKey {
+        case heading = "heading"
+        case disclosure = "disclosure"
+        case commons = "commons"
+        case account = "account"
+        case check = "check"
+        case start = "start"
+        case cancel = "cancel"
+        case available = "available"
+        case unavailable = "unavailable"
+        case opening = "opening"
+        case waiting = "waiting"
+        case failed = "failed"
+        case cancelled = "cancelled"
+        case refusedGlyph = "refused_glyph"
+        case refusedTone = "refused_tone"
+    }
+}
+public struct AdmissionCopy: Decodable, Equatable, Sendable {
+    public let heading: String
+    public let disclosure: String
+    public let prerequisite: String
+    public let backend: String
+    public let confirm: String
+    public let cancel: String
+    public let permission: String
+    public let working: String
+    public let ready: String
+    public let failed: String
+    public let refusedGlyph: String
+    public let refusedTone: String
+    enum CodingKeys: String, CodingKey {
+        case heading = "heading"
+        case disclosure = "disclosure"
+        case prerequisite = "prerequisite"
+        case backend = "backend"
+        case confirm = "confirm"
+        case cancel = "cancel"
+        case permission = "permission"
+        case working = "working"
+        case ready = "ready"
+        case failed = "failed"
+        case refusedGlyph = "refused_glyph"
+        case refusedTone = "refused_tone"
     }
 }
