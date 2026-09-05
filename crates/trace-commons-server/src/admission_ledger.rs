@@ -76,11 +76,11 @@ fn database_refused() -> DatabaseError {
 /// Owns an isolated database session for one in-flight submission. Dropping the
 /// guard removes its connection from the pool and closes it, including cancellation;
 /// a session advisory lock can never leak into a recycled pooled connection.
-pub struct AdmissionProcessingGuard(Option<deadpool_postgres::Object>);
+pub struct AdmissionProcessingGuard(Option<deadpool_postgres::ClientWrapper>);
 impl Drop for AdmissionProcessingGuard {
     fn drop(&mut self) {
         if let Some(client) = self.0.take() {
-            drop(deadpool_postgres::Object::take(client));
+            drop(client);
         }
     }
 }
@@ -109,7 +109,8 @@ impl PgBackend {
             .await
             .map_err(|_| database_refused())?
             .get(0);
-        Ok(acquired.then(|| AdmissionProcessingGuard(Some(client))))
+        Ok(acquired
+            .then(|| AdmissionProcessingGuard(Some(deadpool_postgres::Object::take(client)))))
     }
 
     pub(crate) async fn insert_admission_challenge(

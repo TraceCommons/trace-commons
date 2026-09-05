@@ -101,7 +101,9 @@ BEGIN
  WHERE tenant_id=p_tenant AND submission_id=p_submission FOR UPDATE;
  is_new := NOT FOUND;
  IF NOT is_new THEN
-  IF prior.anchor_hash <> p_anchor OR prior.body_hash <> p_body THEN RETURN 'conflict'; END IF;
+  IF prior.anchor_hash <> p_anchor OR prior.body_hash <> p_body
+   OR prior.receipt_hash IS DISTINCT FROM p_receipt OR prior.challenge_hash IS DISTINCT FROM p_challenge
+   THEN RETURN 'conflict'; END IF;
   IF prior.status='completed' THEN RETURN 'completed'; END IF;
   IF prior.status <> 'released' AND prior.lease_expires_at > clock_timestamp() THEN RETURN 'busy'; END IF;
   -- Expiry never releases a cost bound. A repeated processing attempt reserves

@@ -2071,4 +2071,170 @@ mod tests {
         assert!(!artifact.contains(REQUEST_BODY_MARKER));
         assert!(!artifact.contains(RESPONSE_BODY_MARKER));
     }
+    #[tokio::test]
+    async fn admission_evidence_binds_trusted_final_call_account_and_witness_artifact() {
+        use crate::admission_evidence::{AdmissionProviderTrust, verify_admission_evidence};
+        use trace_commons_protocol::admission::{AdmissionBinding, REQUEST_METADATA_KEY, hash_hex};
+        use trace_commons_protocol::trace_contribution::TraceContributionEventType;
+        let provider = TestSigner::new("synthetic-provider");
+        let witness = Arc::new(TestSigner::new("synthetic-admission-witness"));
+        struct MatchingEnclave(String);
+        #[async_trait]
+        impl Enclave for MatchingEnclave {
+            fn signing_address(&self) -> &str {
+                &self.0
+            }
+            async fn measurement(&self) -> Result<String, SeamUnavailable> {
+                Ok(MEASUREMENT.into())
+            }
+            async fn attestation_quote(&self, _: &[u8]) -> Result<Vec<u8>, SeamUnavailable> {
+                Ok(vec![0xab; 8])
+            }
+        }
+        let trust = AdmissionProviderTrust::new([provider.address()]).unwrap();
+        let service = surface::WitnessService::new(
+            Arc::new(redactor()),
+            witness.clone(),
+            Arc::new(MatchingEnclave(witness.address())),
+            1024 * 1024,
+        )
+        .with_contribution_redactor(Arc::new(contribution_redactor()))
+        .with_admission_provider_trust(trust.clone());
+        let now = chrono::Utc::now().timestamp();
+        let binding = AdmissionBinding {
+            account_anchor_sha256: "a".repeat(64),
+            nonce_hex: "b".repeat(64),
+            expires_at: now + 60,
+        };
+        let request_body=serde_json::json!({"model":"fixture-model","metadata":{REQUEST_METADATA_KEY:binding.encode().unwrap()},"messages":[{"role":"user","content":"hello"}]}).to_string();
+        let response_body = r#"{"choices":[{"message":{"role":"assistant","content":"hello"}}]}"#;
+        let receipt_text = format!(
+            "fixture-model:{}:{}",
+            hash_hex(request_body.as_bytes()),
+            hash_hex(response_body.as_bytes())
+        );
+        let receipt = ReceiptPayload {
+            signature: provider.sign_eip191(receipt_text.as_bytes()).unwrap(),
+            signing_address: provider.address(),
+            text: receipt_text.clone(),
+        };
+        let mut request = contribution_request("built a useful fixture");
+        let event = request.raw_contribution.events.last_mut().unwrap();
+        event.event_type = TraceContributionEventType::HttpExchange;
+        event.structured_payload = serde_json::json!({"request":{"method":"POST","body":request_body},"response":{"status":200}});
+        event.content = Some(response_body.into());
+        request.offered_receipt = Some(receipt);
+        let (response, evidence, signature) = service
+            .witness_admission_contribution(request.clone())
+            .await
+            .unwrap();
+        let witness_pin = pin(&witness);
+        let artifact = verify_witness_certificate(
+            response.certificate,
+            &response.signature_hex,
+            Some(&witness_pin),
+            &response.envelope_bytes,
+        )
+        .unwrap();
+        let now = chrono::Utc::now().timestamp();
+        assert_eq!(evidence.challenge_sha256, binding.digest().unwrap());
+        verify_admission_evidence(
+            &evidence,
+            &signature,
+            &artifact,
+            &witness_pin,
+            &trust,
+            &binding.account_anchor_sha256,
+            now,
+        )
+        .unwrap();
+        assert!(
+            verify_admission_evidence(
+                &evidence,
+                &signature,
+                &artifact,
+                &witness_pin,
+                &trust,
+                &"c".repeat(64),
+                now
+            )
+            .is_err()
+        );
+        assert!(
+            verify_admission_evidence(
+                &evidence,
+                &signature,
+                &artifact,
+                &witness_pin,
+                &trust,
+                &binding.account_anchor_sha256,
+                now + 60
+            )
+            .is_err()
+        );
+        let mut altered = evidence.clone();
+        altered.artifact_sha256 = "d".repeat(64);
+        assert!(
+            verify_admission_evidence(
+                &altered,
+                &signature,
+                &artifact,
+                &witness_pin,
+                &trust,
+                &binding.account_anchor_sha256,
+                now
+            )
+            .is_err()
+        );
+        let mut mutated = request.clone();
+        mutated
+            .raw_contribution
+            .events
+            .last_mut()
+            .unwrap()
+            .structured_payload["request"]["body"] =
+            serde_json::Value::String(format!("{request_body} "));
+        assert!(
+            service
+                .witness_admission_contribution(mutated)
+                .await
+                .is_err(),
+            "receipt binds exact final bytes, including whitespace"
+        );
+        let untrusted =
+            AdmissionProviderTrust::new([TestSigner::new("untrusted-provider").address()]).unwrap();
+        assert!(
+            verify_admission_evidence(
+                &evidence,
+                &signature,
+                &artifact,
+                &witness_pin,
+                &untrusted,
+                &binding.account_anchor_sha256,
+                now
+            )
+            .is_err()
+        );
+        let attacker = TestSigner::new("self-reported-provider");
+        request.offered_receipt = Some(ReceiptPayload {
+            signature: attacker.sign_eip191(receipt_text.as_bytes()).unwrap(),
+            signing_address: attacker.address(),
+            text: receipt_text,
+        });
+        assert!(
+            service
+                .witness_admission_contribution(request.clone())
+                .await
+                .is_err(),
+            "valid self-signed receipt is not provider trust"
+        );
+        request.offered_receipt = None;
+        assert!(
+            service
+                .witness_admission_contribution(request)
+                .await
+                .is_err(),
+            "redaction v1 without provider evidence cannot become admission"
+        );
+    }
 }

@@ -152,3 +152,48 @@ pub fn receipt_identity(
     bytes.extend_from_slice(&hex::decode(response_hash).map_err(|_| EvidenceMalformed)?);
     Ok(hash_hex(&bytes))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn binding_is_canonical_and_domain_separated() {
+        let binding = AdmissionBinding {
+            account_anchor_sha256: "a".repeat(64),
+            nonce_hex: "b".repeat(64),
+            expires_at: 12345,
+        };
+        let encoded = binding.encode().unwrap();
+        assert_eq!(
+            AdmissionBinding::parse(&encoded).unwrap().digest().unwrap(),
+            binding.digest().unwrap()
+        );
+        for candidate in [
+            encoded.to_uppercase(),
+            encoded.replace(":12345", ":012345"),
+            format!("{encoded} "),
+            encoded.replace("tcad1:", "tcad2:"),
+        ] {
+            assert!(AdmissionBinding::parse(&candidate).is_err());
+        }
+        let mut another = binding.clone();
+        another.account_anchor_sha256 = "c".repeat(64);
+        assert_ne!(binding.digest().unwrap(), another.digest().unwrap());
+    }
+    #[test]
+    fn receipt_identity_uses_decoded_address_and_exact_body_digests() {
+        let signer = format!("0x{}", "ab".repeat(20));
+        let upper = format!("0x{}", "AB".repeat(20));
+        let request = "1".repeat(64);
+        let response = "2".repeat(64);
+        assert_eq!(
+            receipt_identity(&signer, &request, &response).unwrap(),
+            receipt_identity(&upper, &request, &response).unwrap()
+        );
+        assert_ne!(
+            receipt_identity(&signer, &request, &response).unwrap(),
+            receipt_identity(&signer, &response, &request).unwrap()
+        );
+        assert!(receipt_identity("0x1234", &request, &response).is_err());
+    }
+}
