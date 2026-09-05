@@ -16,7 +16,7 @@
 - `cargo --workspace` misses two configurations CI gates. After ANY change to `-contributor`, also run the four permissive crates with `--no-default-features` and the GTK workspace with `--manifest-path crates/trace-commons-contributor-gtk/Cargo.toml`.
 - Clippy allow-list, verbatim: `-A clippy::type_complexity -A clippy::collapsible_if -A clippy::manual_option_as_slice -A clippy::useless_vec -A clippy::redundant_pattern_matching`.
 - No emojis. Commit subjects short and imperative, no `feat:`/`fix:` prefix.
-- **Hash-only logging.** IronWire proxies prompts. Nothing this plan adds may log a prompt, completion, token, control token, or body. Fixed labels, counts, ports and durations only.
+- **Hash-only logging, in THIS repository only.** IronWire proxies prompts, so nothing added here may log a prompt, completion, token, control token, or body: fixed labels, counts, ports and durations. **This rule does not govern `nearai/ironwire`** — applying it there stripped error detail from eight log sites during Task 1. A sqlite or io error is not a prompt.
 - License boundary: `-contributor` is MIT OR Apache-2.0. `ironwire_proxy` and its tree are MIT OR Apache-2.0, so the boundary holds. Never edit `license_boundary.rs`.
 - **The dependency is approved and bounded:** `ironwire_proxy` adds 83 packages to `trace-commons-contributor` (223 in its tree, 140 already shared), notably `axum` and `rusqlite`/`libsqlite3-sys`. Adding anything beyond that tree needs separate approval.
 - **`flatpak/cargo-sources.json` must be regenerated** in the task that adds the dependency. Nothing in PR CI validates it; the first failure is the `linux-flatpak` job on an `app-v*` tag.
@@ -25,178 +25,71 @@
 
 ---
 
-### Task 1 (sub-project A, nearai/ironwire): an embeddable seam
+### Task 1 (sub-project A, nearai/ironwire): an embeddable seam — **LANDED**
 
-The assembly that produces `serve_on`'s arguments lives in the binary crate (`src/commands/serve.rs`), so no library consumer can start IronWire. This extracts it, changing no behaviour: the binary keeps its output and its `port_in_use` diagnostics by calling the new seam.
+Merged as nearai/ironwire#26, `b1ecde4f`, "Let another application own the
+IronWire proxy lifecycle". Do not implement; read this section only for what
+it corrects.
 
-**Repo:** `/Users/zakimanian/code/ironwire` (separate from trace-commons).
-
-**Files:**
-- Create: `crates/ironwire_proxy/src/embed.rs`
-- Modify: `crates/ironwire_proxy/src/lib.rs` (declare the module)
-- Modify: `src/commands/serve.rs` (call the seam instead of inlining the assembly)
-- Test: `crates/ironwire_proxy/tests/embed.rs`
-
-**Interfaces:**
-- Consumes: `ironwire_proxy::state::AppState`, `server::{bind, serve_on, ServeError}`, and the crates `serve.rs` already uses (`ironwire_core::config::Config`, `ironwire_creds::ConsentLedger`, `ironwire_ledger::{Ledger, bodies::BodyStore}`, `ironwire_catalog::CatalogStore`, `ironwire_upstream::*`).
-- Produces:
-  ```rust
-  pub struct EmbeddedProxy { /* private */ }
-  impl EmbeddedProxy {
-      pub fn port(&self) -> u16;
-      pub async fn shutdown(self);              // graceful; returns when the server has stopped
-  }
-  pub enum EmbedError {                          // carries no prompt, token, or body
-      Paths, Config, Lock { port: u16 }, PortInUse { port: u16 }, Bind, Registry,
-  }
-  pub async fn start(home: &std::path::Path, port_override: Option<u16>)
-      -> Result<EmbeddedProxy, EmbedError>;
-  ```
-  Task 2 calls `start` and holds the `EmbeddedProxy`.
-
-- [ ] **Step 1: Write the failing test**
-
-`crates/ironwire_proxy/tests/embed.rs`:
+**The shipped API, which is what Task 2 must call:**
 
 ```rust
-//! The embeddable seam, exercised the way a host application uses it.
+pub async fn start(home: &Path, port_override: Option<u16>)
+    -> Result<EmbeddedProxy, EmbedError>;
+pub async fn start_with(home: &Path, port_override: Option<u16>,
+    on_start: impl FnOnce(u16, &StartupReport)) -> Result<EmbeddedProxy, EmbedError>;
 
-/// A host can start the proxy against a scratch home and stop it, and the
-/// port it reports is the port it is listening on.
-///
-/// Port 0 asks the OS for a free one, so this test cannot collide with a
-/// developer's own IronWire on 8463 -- which is exactly the case the seam
-/// exists to coexist with.
-#[tokio::test]
-async fn a_host_can_start_and_stop_the_proxy_on_an_ephemeral_port() {
-    let home = tempfile::tempdir().expect("a temp home");
-    let proxy = ironwire_proxy::embed::start(home.path(), Some(0))
-        .await
-        .expect("the proxy starts against an empty home");
-
-    let port = proxy.port();
-    assert_ne!(port, 0, "the reported port must be the bound one, not the request");
-
-    let url = format!("http://127.0.0.1:{port}/_ironwire/health");
-    let response = reqwest::get(&url).await.expect("the health route answers");
-    assert!(response.status().is_success());
-
-    proxy.shutdown().await;
-
-    // After shutdown the port is free: binding it again succeeds.
-    let rebound = tokio::net::TcpListener::bind(("127.0.0.1", port)).await;
-    assert!(rebound.is_ok(), "shutdown must release the port");
+impl EmbeddedProxy {
+    pub fn port(&self) -> u16;
+    pub fn startup_report(&self) -> &StartupReport;
+    pub fn is_finished(&self) -> bool;
+    pub async fn wait(&mut self) -> Result<(), ExitError>;   // cancellation-safe, memoized
+    pub async fn shutdown(mut self);
 }
 
-/// An empty home is a working home. A host that has never run IronWire must
-/// not have to pre-create a config, a ledger, or a token.
-#[tokio::test]
-async fn an_empty_home_needs_no_preparation() {
-    let home = tempfile::tempdir().expect("a temp home");
-    let proxy = ironwire_proxy::embed::start(home.path(), Some(0))
-        .await
-        .expect("an empty home is enough");
-    assert!(home.path().join("control.token").exists(), "the token is created");
-    proxy.shutdown().await;
-}
-
-/// Two hosts cannot serve one home. The second start refuses by name rather
-/// than racing for the port or the ledger.
-#[tokio::test]
-async fn a_second_start_against_the_same_home_is_refused() {
-    let home = tempfile::tempdir().expect("a temp home");
-    let first = ironwire_proxy::embed::start(home.path(), Some(0))
-        .await
-        .expect("the first start succeeds");
-
-    let second = ironwire_proxy::embed::start(home.path(), Some(0)).await;
-    assert!(
-        matches!(second, Err(ironwire_proxy::embed::EmbedError::Lock { .. })),
-        "the second start must refuse with Lock"
-    );
-
-    first.shutdown().await;
+pub enum EmbedError { Paths, Config, Lock { port: u16 }, PortInUse { port: u16 },
+                      Bind, Registry { label: &'static str } }
+pub enum ExitError { Server, Task }
+pub struct StartupReport {
+    pub home: PathBuf, pub no_backends: bool, pub catalog_serial: u64,
+    pub ledger_warning: Option<String>, pub bodies_warning: Option<String>,
+    pub pointer_warning: bool,
 }
 ```
 
-Add `tempfile` and `reqwest` to `ironwire_proxy`'s `[dev-dependencies]` if absent; both are already in the workspace.
+**Six things this plan got wrong, recorded because Task 2 was written against
+the same assumptions:**
 
-- [ ] **Step 2: Run it and watch it fail**
+1. **"Change no behaviour" with only `port()` and `shutdown()` is not
+   implementable.** `serve.rs` interleaved `println!` *inside* the assembly
+   (empty registry, ledger warning, catalog serial, bodies warning), so
+   extraction forces a report channel back to the host. `StartupReport` and
+   `start_with`'s `on_start` are invention this plan should have contained.
+2. **There was no exit outcome.** A host must learn when the server dies on
+   its own. `wait` / `is_finished` / `ExitError` are a requirement, not scope
+   creep — and Task 2's `Failed { label: "crashed" }` depends on them.
+3. **The second-start test was unpassable as specified.** It expected
+   `EmbedError::Lock` while keeping the CLI's port-file lock, which
+   deliberately ignores a same-port record and probes liveness by HTTP
+   against a port nothing has bound. `Lock` cannot be produced without an OS
+   lock. The OS lock was this plan's bug, not the PR's.
+4. **It under-counted what lives in the binary.** `control_token`, `prune`,
+   `catalog` and `update::spawn_check` were all CLI-private and all had to
+   move, which is why `src/commands/lock.rs` is gone and `embed/` has
+   submodules.
+5. **It ignored discovery.** `Endpoint::publish()` writes the conventional
+   `~/.ironwire`, which an embedded host with a custom home must not hijack.
+   The home-local / CLI-conventional split was necessary and unplanned.
+6. **It never mentioned `--port 0`,** despite `Some(0)` being central to its
+   own first test.
 
-```bash
-cd /Users/zakimanian/code/ironwire
-cargo test -p ironwire_proxy --test embed
-```
-
-Expected: compile error — `ironwire_proxy::embed` does not exist.
-
-- [ ] **Step 3: Extract the assembly**
-
-Create `crates/ironwire_proxy/src/embed.rs` by **moving** the body of `src/commands/serve.rs::run` up to and including the `AppState::new(..)` builder chain, plus its helpers (`build_registry`, `restore_quota`, `open_ledger`, `open_bodies`, `sweep_bodies`, and the prune spawn), changing only what must change:
-
-- Take `home: &Path` instead of calling `paths()`; build `PathsConfig` from it the way `paths()` does.
-- Return `EmbedError` variants instead of `anyhow::bail!` — each variant carries at most a port. Keep the *conditions*: the `limits`-without-`capture` bail becomes `EmbedError::Config`.
-- Return the `EmbeddedProxy` instead of awaiting `serve_on` to completion: hold the lock guard, the `JoinHandle` from `tokio::spawn(serve_on(listener, state, shutdown_rx))`, the bound port, and a `oneshot::Sender` for shutdown.
-- `shutdown(self)` sends on the oneshot and awaits the `JoinHandle`.
-
-Module doc:
-
-```rust
-//! Starting the proxy from inside another application.
-//!
-//! Everything here was `src/commands/serve.rs`, which is a *binary* crate: no
-//! library consumer could produce `serve_on`'s arguments, so a host could not
-//! start IronWire without reimplementing a dozen steps that would drift.
-//!
-//! The binary now calls this too, so there is one assembly rather than two.
-//! What stays in the binary is what only a terminal wants: the printed
-//! summary and the `port_in_use` diagnostic that inspects the other process.
-//!
-//! Errors here carry a port at most -- never a prompt, a token, or a body.
-```
-
-- [ ] **Step 4: Rewire the binary to call the seam**
-
-In `src/commands/serve.rs::run`, replace the extracted body with a call to `ironwire_proxy::embed::start(&home, port_override)`, mapping `EmbedError::PortInUse` to the existing `port_in_use(port).await` diagnostic and the rest through `anyhow::Error`. Keep every line the binary prints today. Then await the proxy until the shutdown signal, and call `shutdown().await`.
-
-- [ ] **Step 5: Verify, including that the binary is unchanged in behaviour**
-
-```bash
-cd /Users/zakimanian/code/ironwire
-RUSTFLAGS='-D warnings' cargo test -p ironwire_proxy --test embed
-RUSTFLAGS='-D warnings' cargo test --all-features
-cargo fmt --all -- --check
-RUSTFLAGS='-D warnings' cargo clippy --all-targets --all-features
-```
-
-Expected: the new tests pass and the existing suites are unchanged — `passthrough`, `verbatim_bodies`, `rolling_bodies` and the settings tests all exercise the binary's behaviour through the same assembly.
-
-- [ ] **Step 6: Mutation — prove the second-start test bites**
-
-Temporarily drop the lock acquisition from `embed::start`. Expected: `a_second_start_against_the_same_home_is_refused` FAILS (the second start succeeds). Revert, re-run, paste both outputs.
-
-- [ ] **Step 7: Commit and open a PR**
-
-```bash
-git checkout -b embeddable-proxy
-git add -A
-git commit -m "Let another application start the proxy
-
-The assembly that produces serve_on's arguments -- paths, config, consent,
-control token, backend registry, lock, listener, ledger, catalog, body
-store, prune task -- lived in the binary crate, so no library consumer
-could start IronWire without reimplementing a dozen steps that would
-drift.
-
-Moved to ironwire_proxy::embed, which returns a running proxy and a
-shutdown handle. The binary calls it too, so there is one assembly rather
-than two; what stays behind is what only a terminal wants, the printed
-summary and the port-in-use diagnostic."
-git push -u origin embeddable-proxy
-gh pr create --repo nearai/ironwire --base main --fill
-```
-
-**This PR must merge before Task 2 starts** — Task 2 depends on the published seam.
+**One constraint in this plan caused a defect upstream.** "Hash-only logging"
+in the Global Constraints was written for the trace-commons side, where the
+daemon proxies prompts. Applied to `nearai/ironwire` it stripped `%error` and
+`backend = %id` from eight moved log sites, so `ironwire serve` no longer says
+why a prune failed or which backend was disabled. A sqlite error is not a
+prompt. **That rule governs this repository only** — see the corrected Global
+Constraints above. Restoring those fields is a separate upstream follow-up.
 
 ---
 
@@ -213,7 +106,7 @@ gh pr create --repo nearai/ironwire --base main --fill
 - Test: in `private_inference.rs`'s `#[cfg(test)] mod tests`
 
 **Interfaces:**
-- Consumes: `ironwire_proxy::embed::{start, EmbeddedProxy, EmbedError}` from Task 1.
+- Consumes: `ironwire_proxy::embed::{start, start_with, EmbeddedProxy, EmbedError, ExitError, StartupReport}` — see the shipped API in Task 1. Note `EmbedError::Registry` now carries `label: &'static str`, and `Lock`/`PortInUse` both carry `port`.
 - Produces:
   ```rust
   #[derive(Debug, Clone, PartialEq, Eq)]
@@ -354,7 +247,7 @@ In `crates/trace-commons-contributor/Cargo.toml`:
 # IronWire's ledger. All MIT OR Apache-2.0, so the permissive boundary
 # holds. Approved at that figure; anything beyond this tree needs its own
 # approval.
-ironwire_proxy = { git = "https://github.com/nearai/ironwire", rev = "<merge commit of Task 1>" }
+ironwire_proxy = { git = "https://github.com/nearai/ironwire", rev = "b1ecde4f" }
 ```
 
 Then, because nothing in PR CI validates the vendored set:
@@ -391,9 +284,11 @@ Expected: a large diff. If it is empty, the generator did not run — the GTK lo
 
 - `apply(true)`: if a pointer exists and probes and its token is not ours → `RunningElsewhere` and **return without binding**. Else `embed::start(home, port)`; map `EmbedError::PortInUse`/`Lock` → `Failed{"port_in_use"}`, other errors → `Failed{"start_failed"}`. On success, `Running{port}`.
 - `apply(false)`: `shutdown().await` if held, then `Off`. Idempotent.
-- The proxy's `JoinHandle` is watched; if it ends unexpectedly, state becomes `Failed{"crashed"}` and the daemon keeps running. A panic in the proxy must never take the daemon down.
+- **Use `is_finished()` and `wait()`, not a `JoinHandle`.** The shipped API gives a proper exit outcome, which this plan originally lacked. Poll `is_finished()` where the daemon already reports state, and on a finished proxy call `wait()` for the `Result<(), ExitError>`: `Err(_)` becomes `Failed { label: "crashed" }`, `Ok(())` after an unrequested exit is the same label. `wait` is cancellation-safe and memoized, so calling it twice is fine. A proxy that ends must never take the daemon down.
 
-**The `crashed` path has no automated test, deliberately.** Inducing a panic inside `serve_on` from outside means either a fault-injection hook in `ironwire_proxy` — a test-only seam in someone else's crate — or aborting the task, which exercises the watcher rather than a real panic. What *is* testable and must be tested is that the watcher observes an ended handle at all: drive it with a handle that returns immediately and assert the state becomes `Failed{"crashed"}` rather than staying `Running`. Note in the report which of the two you did.
+**Testing the crashed path is now straightforward and is required.** `ExitError` is a plain enum, so the state mapping is a pure function of the `wait` result — test that directly, both variants and the unrequested-`Ok` case. Do not attempt to induce a real panic inside `serve_on`; that needs a fault-injection seam in someone else's crate.
+
+- **Surface `StartupReport` rather than discarding it.** `start_with`'s `on_start` gives `no_backends`, `ledger_warning`, `bodies_warning`, `pointer_warning` and `catalog_serial`. A contributor whose IronWire started with **no backends configured** has private inference "running" and nothing will route — so `no_backends` must reach the reported state (a distinct label, not `Running`), or sub-project C will render a green light over a dead proxy. Decide the shape and say so in the report.
 
 Wire it into `daemon/mod.rs`'s shared state, applied at start from settings and on every settings change, and shut down on daemon shutdown.
 
