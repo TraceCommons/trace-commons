@@ -97,6 +97,11 @@ final class ComputeResourceBridgeTests: XCTestCase {
         let compute = try local()
         let entered = DispatchSemaphore(value: 0)
         let release = DispatchSemaphore(value: 0)
+        defer {
+            release.signal()
+            _ = try? compute.shutdownJSON(timeoutMilliseconds: 5000)
+            compute.close()
+        }
         compute.commandWillExecuteForTesting = {
             entered.signal()
             _ = release.wait(timeout: .now() + 5)
@@ -115,6 +120,14 @@ final class ComputeResourceBridgeTests: XCTestCase {
         XCTAssertLessThan(ProcessInfo.processInfo.systemUptime - start, 0.5)
         release.signal()
         _ = try await command.value
+        // commandJSON acknowledges the queued pause; the Rust actor may still
+        // be processing it. Handle lifetime is released before command_pending
+        // necessarily clears, and close must refuse that intermediate state.
+        let stopped = try await Task.detached {
+            try compute.shutdownJSON(timeoutMilliseconds: 5000)
+        }.value
+        let evidence = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(stopped.utf8)) as? [String: Any])
+        XCTAssertEqual(evidence["worker_stopped"] as? Bool, true)
         XCTAssertTrue(compute.close())
     }
 
