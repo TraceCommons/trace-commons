@@ -947,7 +947,11 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
             return;
         }
 
-        string next = project.Mode == "ignore" ? "ask" : "ignore";
+        string? next = ProjectManualMode.Next(project.Mode);
+        if (next is null)
+        {
+            return;
+        }
         string payload = JsonSerializer.Serialize(
             new Dictionary<string, string>
             {
@@ -1869,9 +1873,14 @@ public sealed class ProjectSettingViewModel : INotifyPropertyChanged
         _ => "Asks you first",
     };
 
-    public string ActionText => _mode == "ignore" ? "Ask again" : "Ignore";
+    public string ActionText => _mode switch
+    {
+        "auto_upload" => WatchCopy.AskMeFirst,
+        "ignore" => "Ask again",
+        _ => "Ignore",
+    };
 
-    public bool CanToggle => _mode is "ask" or "ignore";
+    public bool CanToggle => ProjectManualMode.Next(_mode) is not null;
 
     public void SetMode(string mode)
     {
