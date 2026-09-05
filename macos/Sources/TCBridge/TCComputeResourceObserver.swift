@@ -140,6 +140,19 @@ public final class TCComputeResourceObserver {
         // Do not clear sleeping here: stop/start is not evidence of wake.
     }
 
+    /// The app changed the bridge object used by the injected closures. Keep
+    /// native registration and sleep knowledge continuous across that change.
+    /// Replay lifecycle state before any fresh sample; this never sends Resume.
+    public func hostDidChange() {
+        guard running else { return }
+        if sleeping {
+            onSleep()
+        } else {
+            onWake()
+            refresh()
+        }
+    }
+
     deinit {
         if let cancel { Task { @MainActor in cancel() } }
     }

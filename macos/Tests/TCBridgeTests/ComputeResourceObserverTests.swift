@@ -74,6 +74,30 @@ struct ComputeResourceObserverTests {
         h.observer.stop()
     }
 
+    @Test func hostRebindingPreservesSleepAndContinuousRegistration() {
+        let h = Harness()
+        h.observer.start()
+        h.callbacks[0](.sleep)
+        h.observer.hostDidChange()
+        #expect(h.log.suffix(2) == ["sleep", "sleep"])
+        #expect(h.samples.count == 1)
+        #expect(h.callbacks.count == 1)
+        h.callbacks[0](.refresh)
+        #expect(h.samples.count == 1)
+        h.callbacks[0](.wake)
+        #expect(h.log.suffix(4) == ["wake", "begin", "read", "submit"])
+        h.observer.hostDidChange()
+        #expect(h.log.suffix(4) == ["wake", "begin", "read", "submit"])
+        #expect(h.callbacks.count == 1)
+        h.callbacks[0](.refresh)
+        #expect(h.samples.count == 4) // The original callback remains live.
+        #expect(h.log.allSatisfy { ["install", "begin", "read", "submit", "sleep", "wake"].contains($0) })
+        h.observer.stop()
+        let stoppedLog = h.log
+        h.observer.hostDidChange()
+        #expect(h.log == stoppedLog)
+    }
+
     @Test func failedBeginDoesNotReadOrSubmit() {
         let h = Harness()
         h.ticket = nil
