@@ -21,6 +21,7 @@
 //!   never degrades to sending unfiltered text.
 
 pub mod account_onboarding;
+pub mod admission_setup;
 pub mod approved_envelope;
 pub mod audit;
 pub mod client;
