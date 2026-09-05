@@ -159,8 +159,14 @@ struct SettingsContent: View {
                 // sent it. The two session rows are driven by the MODE --
                 // `*_root_configured` is `mode == "watch"` and cannot tell
                 // "not declared" from "declared off".
+                // All four sources the roots screen offers, not the two
+                // the app started with: a Gemini CLI or Cline folder a
+                // contributor declared was watched with no row here saying
+                // so.
                 sourceCheckRow(TCSourceChecks.claude, settings.routingSourceModes.claude)
                 sourceCheckRow(TCSourceChecks.codex, settings.routingSourceModes.codex)
+                sourceCheckRow(TCSourceChecks.gemini, settings.routingSourceModes.gemini)
+                sourceCheckRow(TCSourceChecks.cline, settings.routingSourceModes.cline)
                 checkRow("Extra privacy scan configured", settings.nearAIConfigured)
             }
         }

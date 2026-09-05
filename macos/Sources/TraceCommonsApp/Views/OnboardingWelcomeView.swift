@@ -297,11 +297,16 @@ struct OnboardingWelcomeContent: View {
     /// type. Section 5.8 does not draw them -- it draws the hero and stops --
     /// but the scrubbing concession is not droppable, so they stay, set at
     /// `body.brand` under the hero rather than competing with it.
+    ///
+    /// The first sentence names all four agents the roots screen offers.
+    /// The spec's wording names two, from before Gemini CLI and Cline were
+    /// sources; a welcome that names two and a next screen that asks about
+    /// four would have the app contradicting itself one click apart.
     private var supporting: some View {
         HStack(alignment: .top, spacing: CommunityBrand.Metric.heroGap) {
             Text("""
-            This app watches for finished Claude Code and Codex sessions on this \
-            machine and shows them to you.
+            This app watches for finished Claude Code, Codex, Gemini CLI and Cline \
+            sessions on this machine and shows them to you.
             """)
             .frame(maxWidth: .infinity, alignment: .leading)
 

@@ -53,10 +53,15 @@ struct OnboardingDoneContent: View {
                     .font(TC.Font_.sectionTitle)
             }
 
+            // "and in the Dock" is this shell's addition to the spec's
+            // sentence: the app is a regular one with a Dock icon
+            // (`AppDelegate` sets `.regular`), and a contributor told it
+            // lives in the menu bar would not think to look there.
             Text("""
-            Trace Commons lives in your menu bar. When a session finishes and goes \
-            quiet for 30 minutes, it'll show up there. You'll get at most one \
-            notification every 4 hours, and none at all if there's nothing waiting.
+            Trace Commons lives in your menu bar, and it has a Dock icon too. When a \
+            session finishes and goes quiet for 30 minutes, it'll show up there. \
+            You'll get at most one notification every 4 hours, and none at all if \
+            there's nothing waiting.
             """)
             .font(.body)
 
