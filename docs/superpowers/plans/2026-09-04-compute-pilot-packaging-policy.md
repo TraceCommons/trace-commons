@@ -139,3 +139,38 @@ Security-framework bridge. The remaining order is:
 
 Original worktrees are unchanged. The Orchard primary checkout was dirty during
 inventory; its uncommitted work was not read into or copied into this continuation.
+
+## Current-main integration checkpoint, 2026-09-05
+
+`resume/holonear-main-integration` joins the committed compute chain through
+`3c9731ee` onto Trace Commons main `52b4fa7e`. The merge needed no textual conflict
+resolution. It preserves the native NEAR onboarding changes and independent
+Compute navigation: choosing Compute does not enroll, discover trace sessions,
+or grant trace consent. The separately developed onboarding continuation
+`8119d971` also merges cleanly in a `git merge-tree` check; its single coordinator
+identity remains inside the Traces destination. That check is source integration
+evidence, not a test run of the combined future branches.
+
+Verification on the current-main integration:
+
+- Warnings-denied contributor compute tests: 44 passed; compute FFI tests: 2 passed.
+  The first sandboxed attempt refused two local socket binds with `EPERM`; the
+  approved local-socket rerun passed every case.
+- Full FFI library + ABI tests: 106 passed; warnings-denied server binaries check passed.
+- Both C/C++ header and ABI parity suites: 8 passed. Inert assembly: 5 passed.
+  Read-only signature harness: 8 passed, including actual OS refusal checks.
+- The final FFI dylib built and the full macOS suite passed: 520 XCTest cases
+  plus 8 native-observer tests. Existing RecentSearches/ProjectRow concurrency
+  warnings are unchanged; this is not a warnings-free Swift build.
+- The unchanged Cargo license-boundary suite passed all 4 tests. License checks
+  passed for default, near-ai-scorer, local-gpu-models, and all features.
+- Contributor/FFI library and example Clippy passed with warnings denied and the
+  repository allowances. Standalone contributor `--no-default-features` check passed.
+- Workspace formatting, package-script syntax, and patch whitespace checks passed.
+
+No new crate dependency or lockfile change is introduced; the original compute
+implementation enables the existing Tokio dependency's `process` feature.
+The production constructor remains unavailable. Developer signature checks do
+not complete the runtime signature gate. Orchard integration, compiled runtime
+trust requirements, complete packaging and separately authorized installed-device
+qualification remain unfinished as listed above.
