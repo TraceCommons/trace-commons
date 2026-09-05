@@ -7,12 +7,19 @@ Branch: `native-onboarding-admission`
 Worktree: `.worktrees/native-onboarding-admission`, based on `dd26e016`.
 The original checkout remains on `witness-production-config`.
 
-Progress: slice 1 and the first implementation wave are integrated. Explicit
-witness review now reaches daemon IPC, immutable preview reopening, approval,
-and byte-preserving retry. The second wave is implementing durable account
-signup, account-bound admission, and all three native shells. Public admission
-and inference funding remain disabled pending configured limits and provider
-funding terms.
+Progress: local account signup, witness review, account-bound admission,
+PostgreSQL budgets/replay protection, and macOS/Windows/GTK onboarding are
+integrated. The separate IronWire implementation is committed in
+`onboarding-admission-binding` (`7d5adc9`, `60746c0`) under
+`/private/tmp/ironwire-onboarding-admission`; it must ship with this feature.
+Public admission remains disabled until explicitly configured. Provider credit
+redemption is not implemented because a supported transfer/redemption contract
+has not been established. The live funded pilot remains pending an HTTPS test
+deployment and existing funded test-account configuration.
+
+Current validation: [integrated evidence and platform limits](2026-09-04-native-onboarding-validation.md).
+Operator setup: [NEAR enrollment](../../operator/near-native-provisioning.md) and
+[prepare the next inference](../../operator/native-admission-session.md).
 
 Design: [Native inference onboarding](../specs/2026-09-04-native-inference-onboarding-design.md).
 Admission: [Invite or attested inference](../specs/2026-09-04-admission-invite-or-attestation-design.md).
@@ -30,7 +37,7 @@ No agent changes deployed services or enables admission, capture, or public
 sponsorship. Shared copy is settled before native integration. Review checks
 that no shell authors a different privacy claim.
 
-## Remaining work: seven subagent assignments
+## Implementation work breakdown: seven subagent assignments
 
 Each assignment is a bounded handoff with its own deliverable. There are
 three worker slots alongside the primary coordinator; these are seven

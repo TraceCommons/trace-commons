@@ -92,3 +92,39 @@ TC_WALLET_RENDER_PATH=/tmp/wallet.png xvfb-run -a cargo test \
   --manifest-path crates/trace-commons-contributor-gtk/Cargo.toml wallet_widget_render \
   --locked -- --ignored --test-threads=1
 ```
+
+## Integrated signup and admission validation (2026-09-04)
+
+The integrated journey now supports: capability check, explicit NEAR wallet
+proof and device provisioning, purpose selection, separate body-export consent,
+preparation of the selected session's next inference, explicit witness review,
+immutable preview, and approved submission. Preparation requires an existing
+funded backend and configured IronWire route; it never enables capture or
+creates provider funds. Signup does not imply that a contribution was accepted.
+
+Actual restricted-role PostgreSQL tests cover challenge → provider-signed
+exchange → signed witness evidence → durable ingest, window exhaustion,
+attested submission after exhaustion, and terminal retry after evidence expiry
+without duplicate processing cost. The integrated handler test passed locally.
+The atomic ledger suite also covers receipt replay, cross-account rejection,
+account/global budgets, RLS, and processing locks with a one-slot connection pool.
+
+The complete macOS suite passed 501 tests, including wallet origin restrictions
+and the explicit session/backend preparation payload. The complete contributor
+suite passed 1,291 tests before the final recovery regressions (one ignored).
+Follow-up verification below supersedes these intermediate counts. Redirect
+regressions ensure attestation, raw witness bodies, device claims and bearer
+credentials never follow a service redirect. Session persistence failure leaves
+wallet signup retryable; malformed browser handoffs cancel their local attempt.
+
+The separate IronWire branch includes final-request metadata insertion before
+capture/send and the capture-readiness capability. Its conformance suite passed:
+175 core tests, 101 proxy unit tests, 8 passthrough, 9 verbatim, and 15 settings
+tests, plus all-target/all-feature Clippy. Native Claude/Codex sessions require a
+supported final OpenAI Chat target; supported protocol translation is allowed.
+
+These are local and synthetic results. Live wallet verification, deployed witness
+measurement verification and a funded provider inference have not been exercised
+as one production flow. Provider credit redemption remains unavailable; no
+production configuration, funds, or services were changed. Full WinUI compiler
+and render checks require a Windows runner.
