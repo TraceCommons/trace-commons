@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
 
 namespace TraceCommons.Interop;
@@ -59,6 +60,28 @@ public static class DeepLink
 
         string invite = ParseInviteParameter(uri.Query);
         return string.IsNullOrEmpty(invite) ? null : invite;
+    }
+
+    /// <summary>
+    /// Selects the cold-launch invite. A protocol payload is authoritative,
+    /// even when invalid; only ordinary launches fall back to argv.
+    /// Null denotes a non-protocol activation, while empty denotes a protocol
+    /// activation whose payload was missing. This never performs enrollment.
+    /// </summary>
+    public static string? InitialInvite(string? protocolUri, IEnumerable<string> arguments)
+    {
+        if (protocolUri is not null)
+        {
+            return InviteFrom(protocolUri);
+        }
+        foreach (string argument in arguments)
+        {
+            if (InviteFrom(argument) is string invite)
+            {
+                return invite;
+            }
+        }
+        return null;
     }
 
     /// <summary>
