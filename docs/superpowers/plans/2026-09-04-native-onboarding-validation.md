@@ -177,3 +177,22 @@ A live provider charge is confined to the authorized funded test configuration.
 This record contains no such live execution yet; successful local fixtures are
 not a substitute for it. Credit redemption needs its own verified provider
 contract before any earned-credit-to-inference loop can be offered.
+
+### Draft PR platform validation
+
+Coordinated drafts: [Trace Commons #602](https://github.com/TraceCommons/trace-commons/pull/602)
+and [IronWire #25](https://github.com/nearai/ironwire/pull/25). Current main was
+merged before publishing; its deployment manifests were retained without changes.
+
+IronWire CI passed on Linux and macOS, including all-feature tests, native macOS
+app build/tests, packaging, command-line journey, and size checks. Trace Commons
+CI exposed a missing GTK caption class, WinUI `IsEnabled` bindings on layout
+panels, and migration registration that did not use the repository's explicit
+versioned-block convention. The production code was corrected without relaxing
+those guards. Windows consent dialogs also use the existing collision guard and
+scrolling disclosure. The follow-up CI run is authoritative for these fixes.
+
+The complete local ingest handler suite passed 1,074 tests with two ignored
+against the merged main. The existing stylesheet contract suite passed 5/5.
+Full Windows compilation and workspace-suite results should be read from the
+PR's latest head; earlier cancelled/failed runs do not establish that head's state.
