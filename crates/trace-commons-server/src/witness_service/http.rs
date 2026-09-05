@@ -66,7 +66,7 @@ use trace_commons_protocol::trace_contribution::{
     ConsentMetadata, ConsentScope, RawTraceContribution, ResidualPiiRisk, TraceAllowedUse,
 };
 
-use crate::near_attestation::receipt::ReceiptPayload;
+use crate::near_attestation::receipt::{ReceiptAlgo, ReceiptPayload};
 use crate::redaction_witness::certificate::WitnessCertificate;
 
 use super::surface::{
@@ -270,6 +270,7 @@ impl From<InferenceReceiptBody> for ReceiptPayload {
             text: body.text,
             signature: body.signature,
             signing_address: body.signing_address,
+            signing_algo: ReceiptAlgo::Ecdsa,
         }
     }
 }

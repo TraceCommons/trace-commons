@@ -36,7 +36,7 @@ use sha2::{Digest as _, Sha256};
 use trace_commons_server::near_attestation::AttestationReport;
 use trace_commons_server::near_attestation::drill::attested_signer_address;
 use trace_commons_server::near_attestation::receipt::{
-    ReceiptError, ReceiptPayload, verify_receipt,
+    ReceiptAlgo, ReceiptError, ReceiptPayload, verify_receipt,
 };
 
 const TRIPLE: &str = include_str!("fixtures/near_ai_live_triple.json");
@@ -84,6 +84,7 @@ fn triple() -> Triple {
                 .as_str()
                 .expect("signing_address")
                 .to_string(),
+            signing_algo: ReceiptAlgo::Ecdsa,
         },
         expected_request_sha256: v["_checks"]["request_sha256"]
             .as_str()

@@ -62,7 +62,7 @@
 
 use std::time::Duration;
 
-use trace_commons_attestation::receipt::ReceiptPayload;
+use trace_commons_attestation::receipt::{ReceiptAlgo, ReceiptPayload};
 use trace_commons_operator_client::host_allowlist::HostAllowlist;
 
 use super::attested::AttestedCall;
@@ -138,6 +138,7 @@ pub fn parse_receipt_response(body: &str) -> Result<ReceiptPayload, ReceiptFetch
         text: field("text")?,
         signature: field("signature")?,
         signing_address: field("signing_address")?,
+        signing_algo: ReceiptAlgo::Ecdsa,
     })
 }
 

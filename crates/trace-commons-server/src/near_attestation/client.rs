@@ -55,7 +55,7 @@ use sha2::{Digest, Sha256};
 
 use super::AttestationReport;
 use super::quote::Collateral;
-use super::receipt::ReceiptPayload;
+use super::receipt::{ReceiptAlgo, ReceiptPayload};
 
 /// Missing-control name when no NEAR AI base URL is configured.
 pub const BASE_URL_CONTROL: &str = "near_ai_base_url";
@@ -401,6 +401,7 @@ impl AttestationClient for HttpAttestationClient {
             text: parsed.text,
             signature: parsed.signature,
             signing_address: parsed.signing_address,
+            signing_algo: ReceiptAlgo::Ecdsa,
         })
     }
 }

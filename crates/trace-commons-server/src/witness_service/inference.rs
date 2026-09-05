@@ -574,6 +574,7 @@ fn exchange_bodies(event: &RawTraceContributionEvent) -> Option<(&str, &str)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::near_attestation::receipt::ReceiptAlgo;
     use k256::ecdsa::SigningKey;
     use sha2::{Digest as _, Sha256};
     use sha3::Keccak256;
@@ -635,6 +636,7 @@ mod tests {
             signature: sign(&signer, &text),
             signing_address: address(&signer),
             text,
+            signing_algo: ReceiptAlgo::Ecdsa,
         }
     }
 
@@ -646,6 +648,7 @@ mod tests {
             signature: sign(&signer, &text),
             signing_address: address(&signer),
             text,
+            signing_algo: ReceiptAlgo::Ecdsa,
         }
     }
 

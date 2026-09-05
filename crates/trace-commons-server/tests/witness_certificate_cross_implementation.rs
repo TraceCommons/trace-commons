@@ -49,7 +49,7 @@ use sha3::Keccak256;
 use tower::ServiceExt as _;
 
 use trace_commons_protocol::trace_contribution::ResidualPiiRisk;
-use trace_commons_server::near_attestation::receipt::ReceiptPayload;
+use trace_commons_server::near_attestation::receipt::{ReceiptAlgo, ReceiptPayload};
 use trace_commons_server::redaction_witness::certificate::{
     CertificateDetails, WitnessCertificate,
 };
@@ -425,6 +425,7 @@ fn receipt_over(signer: &TestSigner, request_body: &str, response_body: &str) ->
         text,
         signature,
         signing_address: signer.address(),
+        signing_algo: ReceiptAlgo::Ecdsa,
     }
 }
 

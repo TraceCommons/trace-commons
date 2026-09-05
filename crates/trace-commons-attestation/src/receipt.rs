@@ -55,6 +55,49 @@
 
 use sha2::{Digest as _, Sha256};
 
+/// Which signature scheme a receipt carries.
+///
+/// NEAR AI issues both. Only the ed25519 signer is bound into the gateway's
+/// TDX quote (`report_data == signing_address || nonce`); the ECDSA signer
+/// appears in no attestation report. So `Ed25519` is the form that lets a
+/// verified receipt mean "signed inside an attested enclave", and `Ecdsa`
+/// remains for receipts already issued and for callers that have not moved.
+///
+/// Discriminated by the explicit wire field, never guessed from the length
+/// of `signing_address`: a 20-byte address and a 32-byte key are
+/// distinguishable by length, and a guess that happened to be right would
+/// be a control that could not fail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReceiptAlgo {
+    /// EIP-191 secp256k1 recovery; `signing_address` is a 20-byte `0x` address.
+    Ecdsa,
+    /// Plain Ed25519 over the raw `text` bytes -- NOT EIP-191 prefixed;
+    /// `signing_address` is the 32-byte public key, 64 hex chars, no `0x`.
+    Ed25519,
+}
+
+impl ReceiptAlgo {
+    /// The spelling NEAR AI uses in the `signing_algo` field and query param.
+    pub fn as_wire(self) -> &'static str {
+        match self {
+            Self::Ecdsa => "ecdsa",
+            Self::Ed25519 => "ed25519",
+        }
+    }
+
+    /// Parse the wire spelling. Exact match; case is not folded, because a
+    /// provider that started sending `ECDSA` would be sending something this
+    /// crate has not seen, and silently accepting it is how a second spelling
+    /// gets a second meaning.
+    pub fn from_wire(s: &str) -> Option<Self> {
+        match s {
+            "ecdsa" => Some(Self::Ecdsa),
+            "ed25519" => Some(Self::Ed25519),
+            _ => None,
+        }
+    }
+}
+
 /// A receipt as the provider returns it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReceiptPayload {
@@ -64,6 +107,9 @@ pub struct ReceiptPayload {
     pub signature: String,
     /// The address the provider claims signed it, hex, `0x`-prefixed.
     pub signing_address: String,
+    /// Which scheme `signature` and `signing_address` are in. See
+    /// [`ReceiptAlgo`] for why this is explicit rather than inferred.
+    pub signing_algo: ReceiptAlgo,
 }
 
 /// What a verified receipt establishes.
@@ -80,6 +126,7 @@ pub struct ReceiptVerdict {
     /// The model the receipt binds, when it carried one. `None` for the
     /// two-part form, which binds no model at all.
     pub model: Option<String>,
+    pub signing_algo: ReceiptAlgo,
 }
 
 /// Why a receipt was refused.
@@ -111,6 +158,18 @@ pub enum ReceiptError {
     /// `signing_address` is not a 20-byte hex address.
     #[error("receipt signing address is not a 20-byte hex address")]
     SigningAddressMalformed,
+    /// `signing_address` is not a 32-byte hex Ed25519 public key.
+    #[error("receipt ed25519 key is not 32 bytes of hex")]
+    Ed25519KeyMalformed,
+    /// The signature is not 64 bytes of hex.
+    #[error("receipt ed25519 signature is not 64 bytes of hex")]
+    Ed25519SignatureMalformed,
+    /// Well-formed key and signature, and the signature does not verify
+    /// over the text. Tampering, a different signer, or a prefix that
+    /// should not have been applied -- this variant cannot say which, and
+    /// it carries nothing.
+    #[error("receipt ed25519 signature does not verify")]
+    Ed25519SignatureInvalid,
     /// The signature verifies, but for a different key than claimed.
     #[error("receipt was signed by a different key than the one claimed")]
     SignerMismatch,
@@ -158,13 +217,26 @@ pub fn verify_receipt(
         decode_sha256_hex(request_hex).ok_or(ReceiptError::RequestHashMalformed)?;
     let signed_response_hash =
         decode_sha256_hex(response_hex).ok_or(ReceiptError::ResponseHashMalformed)?;
-    let claimed_address =
-        decode_address(&payload.signing_address).ok_or(ReceiptError::SigningAddressMalformed)?;
 
-    let recovered = recover_eip191_signer(payload.text.as_bytes(), &payload.signature)?;
-    if recovered != claimed_address {
-        return Err(ReceiptError::SignerMismatch);
-    }
+    // The signature check is scheme-specific; everything after it -- the
+    // two digests and the model -- is not.
+    let signing_address = match payload.signing_algo {
+        ReceiptAlgo::Ecdsa => {
+            let claimed = decode_address(&payload.signing_address)
+                .ok_or(ReceiptError::SigningAddressMalformed)?;
+            let recovered = recover_eip191_signer(payload.text.as_bytes(), &payload.signature)?;
+            if recovered != claimed {
+                return Err(ReceiptError::SignerMismatch);
+            }
+            format!("0x{}", hex::encode(recovered))
+        }
+        ReceiptAlgo::Ed25519 => {
+            verify_ed25519_signature(payload)?;
+            // Verified against the key as given; re-rendered lowercase so
+            // two spellings of one key compare equal downstream.
+            payload.signing_address.to_ascii_lowercase()
+        }
+    };
 
     if Sha256::digest(request_body).as_slice() != signed_request_hash {
         return Err(ReceiptError::RequestHashMismatch);
@@ -183,9 +255,43 @@ pub fn verify_receipt(
     Ok(ReceiptVerdict {
         request_sha256: hex::encode(signed_request_hash),
         response_sha256: hex::encode(signed_response_hash),
-        signing_address: format!("0x{}", hex::encode(recovered)),
+        signing_address,
         model: bound_model.map(str::to_string),
+        signing_algo: payload.signing_algo,
     })
+}
+
+/// Verify an ed25519 receipt's signature over its raw `text`.
+///
+/// Plain Ed25519, no EIP-191 prefix. Confirmed against a live NEAR AI
+/// receipt: the raw text verifies, the prefixed form does not. Public
+/// because a caller holding an attestation-report key may want the
+/// signature check alone, without bodies.
+///
+/// # Errors
+///
+/// Malformed key or signature by name, before any cryptography runs; then
+/// [`ReceiptError::Ed25519SignatureInvalid`] for a well-formed signature
+/// that does not verify.
+pub fn verify_ed25519_signature(payload: &ReceiptPayload) -> Result<(), ReceiptError> {
+    let key =
+        hex::decode(&payload.signing_address).map_err(|_| ReceiptError::Ed25519KeyMalformed)?;
+    if key.len() != 32 {
+        return Err(ReceiptError::Ed25519KeyMalformed);
+    }
+    let sig = hex::decode(
+        payload
+            .signature
+            .strip_prefix("0x")
+            .unwrap_or(&payload.signature),
+    )
+    .map_err(|_| ReceiptError::Ed25519SignatureMalformed)?;
+    if sig.len() != 64 {
+        return Err(ReceiptError::Ed25519SignatureMalformed);
+    }
+    ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, &key)
+        .verify(payload.text.as_bytes(), &sig)
+        .map_err(|_| ReceiptError::Ed25519SignatureInvalid)
 }
 
 /// Recover the 20-byte Ethereum address that produced `signature_hex` over
@@ -319,6 +425,7 @@ mod tests {
             text: text.to_string(),
             signature: sign(&k, text, VEncoding::Ethereum),
             signing_address: address_string(&k),
+            signing_algo: ReceiptAlgo::Ecdsa,
         }
     }
 
@@ -476,6 +583,7 @@ mod tests {
             text: text.clone(),
             signature: sign(&impostor, &text, VEncoding::Ethereum),
             signing_address: claimed,
+            signing_algo: ReceiptAlgo::Ecdsa,
         };
         let err = verify(&payload).expect_err("must be refused");
         assert_eq!(err, ReceiptError::SignerMismatch);
@@ -562,6 +670,7 @@ mod tests {
                 text: text.clone(),
                 signature,
                 signing_address: address_string(&k),
+                signing_algo: ReceiptAlgo::Ecdsa,
             };
             assert!(verify(&payload).is_ok());
         }
@@ -668,5 +777,125 @@ mod tests {
         payload.signing_address = payload.signing_address.to_uppercase().replace("0X", "0x");
         assert!(payload.signing_address.contains(char::is_uppercase));
         assert!(verify(&payload).is_ok());
+    }
+
+    const LIVE_ED25519_TEXT: &str = "81e9887990592366b55ef758cad3b3a097e890871bedc023a51b2828ed237cc3:6f7091a0fbe5917a631c70805833760fe63ceea3493466e3230bd830816a3f2e";
+    const LIVE_ED25519_SIGNATURE: &str = "838765bd299514ec80084d50b7cef9357172ce2923dd35aa837beed0c6af04e684673e61db6c0d3ae8d69476b680d94c8e1e36e05277a1b103c27a12f563eb0c";
+    const LIVE_ED25519_KEY: &str =
+        "cb6fc58f6bd685919fa42fb54d3fcfe03222e324bdda91f0bac6d5c73dc4f1c6";
+
+    fn live_ed25519() -> ReceiptPayload {
+        ReceiptPayload {
+            text: LIVE_ED25519_TEXT.to_string(),
+            signature: LIVE_ED25519_SIGNATURE.to_string(),
+            signing_address: LIVE_ED25519_KEY.to_string(),
+            signing_algo: ReceiptAlgo::Ed25519,
+        }
+    }
+
+    /// A receipt NEAR AI actually issued, verified as plain Ed25519 over the
+    /// raw text. The signature came from a key this project never held. The
+    /// digest checks are exercised separately, because this test does not hold
+    /// NEAR AI's real bodies and cannot forge ones with the same digests.
+    #[test]
+    fn a_live_ed25519_receipt_signature_verifies_over_the_raw_text() {
+        let payload = live_ed25519();
+        verify_ed25519_signature(&payload).expect("NEAR AI's real signature verifies");
+    }
+
+    /// The EIP-191 prefix must NOT be applied on the ed25519 path. The live
+    /// signature is over the raw text; prefixing it makes verification fail.
+    /// This is the single most likely implementation mistake.
+    #[test]
+    fn the_ed25519_path_does_not_apply_the_eip191_prefix() {
+        let mut prefixed = live_ed25519();
+        prefixed.text = format!(
+            "\x19Ethereum Signed Message:\n{}{}",
+            LIVE_ED25519_TEXT.len(),
+            LIVE_ED25519_TEXT
+        );
+        assert_eq!(
+            verify_ed25519_signature(&prefixed),
+            Err(ReceiptError::Ed25519SignatureInvalid),
+            "a prefixed text must not verify; the signature is over the raw text"
+        );
+    }
+
+    /// A validly signed ed25519 receipt over different bytes is refused by
+    /// the digest check, not the signature check -- the same ordering the
+    /// ECDSA path already pins.
+    #[test]
+    fn an_ed25519_receipt_over_other_bytes_is_refused() {
+        let payload = live_ed25519();
+        let err = verify_receipt(
+            &payload,
+            b"not the request",
+            b"not the response",
+            "Qwen/Qwen3.6-35B-A3B-FP8",
+        )
+        .expect_err("the bodies do not hash to the bound values");
+        assert_eq!(err, ReceiptError::RequestHashMismatch);
+    }
+
+    /// One flipped bit in the signature is refused as invalid, not as
+    /// malformed: it is still 64 well-formed bytes.
+    #[test]
+    fn a_tampered_ed25519_signature_is_invalid_not_malformed() {
+        let mut tampered = live_ed25519();
+        let mut bytes = hex::decode(LIVE_ED25519_SIGNATURE).unwrap();
+        bytes[0] ^= 0x01;
+        tampered.signature = hex::encode(bytes);
+        assert_eq!(
+            verify_ed25519_signature(&tampered),
+            Err(ReceiptError::Ed25519SignatureInvalid)
+        );
+    }
+
+    /// A key that is not 32 bytes, or a signature that is not 64, is refused
+    /// by name before any cryptography runs.
+    #[test]
+    fn malformed_ed25519_material_is_refused_by_name() {
+        let mut short_key = live_ed25519();
+        short_key.signing_address = "cb6f".to_string();
+        assert_eq!(
+            verify_ed25519_signature(&short_key),
+            Err(ReceiptError::Ed25519KeyMalformed)
+        );
+
+        let mut short_sig = live_ed25519();
+        short_sig.signature = "8387".to_string();
+        assert_eq!(
+            verify_ed25519_signature(&short_sig),
+            Err(ReceiptError::Ed25519SignatureMalformed)
+        );
+    }
+
+    /// The wire spelling round-trips, and anything else is `None` rather than
+    /// a guess.
+    #[test]
+    fn the_algo_wire_spelling_round_trips_and_rejects_the_unknown() {
+        assert_eq!(ReceiptAlgo::from_wire("ecdsa"), Some(ReceiptAlgo::Ecdsa));
+        assert_eq!(
+            ReceiptAlgo::from_wire("ed25519"),
+            Some(ReceiptAlgo::Ed25519)
+        );
+        assert_eq!(ReceiptAlgo::from_wire("ECDSA"), None, "case is not folded");
+        assert_eq!(ReceiptAlgo::from_wire("rsa"), None);
+        assert_eq!(ReceiptAlgo::Ecdsa.as_wire(), "ecdsa");
+        assert_eq!(ReceiptAlgo::Ed25519.as_wire(), "ed25519");
+    }
+
+    /// The ECDSA path is unchanged: every existing test in this module still
+    /// passes with `signing_algo: ReceiptAlgo::Ecdsa`, and an ECDSA payload
+    /// handed to the ed25519 verifier is refused as a malformed key -- a
+    /// 20-byte address is not a 32-byte public key.
+    #[test]
+    fn an_ecdsa_payload_is_not_an_ed25519_one() {
+        let mut wrong = live_ed25519();
+        wrong.signing_address = "0x614bc66ff0407dbb70b9c7ca1f5e983e4a02c921".to_string();
+        assert_eq!(
+            verify_ed25519_signature(&wrong),
+            Err(ReceiptError::Ed25519KeyMalformed)
+        );
     }
 }

@@ -678,6 +678,7 @@ mod tests {
     use axum::routing::{get, post};
     use std::collections::HashMap;
     use std::sync::Mutex;
+    use trace_commons_attestation::receipt::ReceiptAlgo;
 
     /// What a local witness saw.
     ///
@@ -1486,6 +1487,7 @@ mod tests {
             text: "aaaa1111:bbbb2222".to_string(),
             signature: "0xcccc3333".to_string(),
             signing_address: "0xdddd444444444444444444444444444444444444".to_string(),
+            signing_algo: ReceiptAlgo::Ecdsa,
         }
     }
 
