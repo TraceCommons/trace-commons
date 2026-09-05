@@ -226,7 +226,7 @@ impl QueueView {
                 .wrap(true)
                 .xalign(0.0)
                 .build();
-            label.add_css_class("tc-caption");
+            label.add_css_class("tc-meta");
             steps.append(&label);
         }
         first_contribution.set_child(Some(&steps));
