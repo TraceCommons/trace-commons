@@ -1,4 +1,5 @@
 import SwiftUI
+import UserNotifications
 
 /// Onboarding screen 6, "Done" -- the last onboarding screen and, by design,
 /// the first thing the app ever confirms about itself. Copy is verbatim from
@@ -33,6 +34,14 @@ struct OnboardingDoneContent: View {
     @State private var offerDismissed = false
     @State private var registerOutcome: LoginItemManager.RegisterOutcome?
 
+    /// The notification offer's state. `nil` until the system has been
+    /// asked where it stands, which happens on appear; the card shows only
+    /// when the answer is "not yet asked". `ImageRenderer` runs no `.task`,
+    /// so a screenshot of this screen never shows the card and never asks.
+    @State private var notificationStatus: UNAuthorizationStatus?
+    @State private var notificationOfferDismissed = false
+    @State private var notificationsAllowed: Bool?
+
     var body: some View {
         VStack(alignment: .leading, spacing: TC.Space.xl) {
             HStack(spacing: TC.Space.s) {
@@ -52,6 +61,7 @@ struct OnboardingDoneContent: View {
             .font(.body)
 
             loginItemOffer
+            notificationOffer
 
             Button("Done", action: onFinish)
                 .tcPrimaryAction()
@@ -60,6 +70,48 @@ struct OnboardingDoneContent: View {
         .padding(TC.Space.xxl)
         .tcColumn(TC.Measure.prose)
         .tcScreen()
+        .task { notificationStatus = await Notifier.shared.authorizationStatus() }
+    }
+
+    /// The permission prompt, where the spec puts it: at the end of
+    /// onboarding, under a sentence saying what the notifications are for.
+    /// It used to be fired from launch, before the app had said what it
+    /// was. Shown only while the system has never been asked; a yes or a
+    /// no already given is not re-asked here, and Settings shows the state
+    /// either way.
+    @ViewBuilder
+    private var notificationOffer: some View {
+        if let notificationsAllowed {
+            Text(
+                notificationsAllowed
+                    ? "You'll be told when sessions are waiting."
+                    : "No notifications. You can turn them on later in Settings."
+            )
+            .font(.callout)
+            .foregroundStyle(.secondary)
+        } else if !notificationOfferDismissed && notificationStatus == .notDetermined {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Let Trace Commons notify you?")
+                    .font(.callout.weight(.semibold))
+                Text(Notifier.purpose)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 12) {
+                    Button("Not now") {
+                        notificationOfferDismissed = true
+                    }
+                    .tint(.primary)
+                    Button("Allow notifications") {
+                        Task { notificationsAllowed = await Notifier.shared.requestAuthorization() }
+                    }
+                    .tcPrimaryAction()
+                }
+            }
+            .padding(TC.Space.l)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .tcCard()
+        }
     }
 
     /// Nothing is shown once the app is already an enabled login item --
