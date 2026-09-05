@@ -1,5 +1,6 @@
 using System;
 using Microsoft.UI.Xaml;
+using Microsoft.Windows.AppLifecycle;
 using TraceCommons.Interop;
 
 namespace TraceCommons.App;
@@ -27,10 +28,9 @@ public partial class App : Application
     /// launched with, if any.
     /// </summary>
     /// <remarks>
-    /// Read here rather than in the window because the command line belongs
-    /// to the process. Every argument is offered to the parser, including
-    /// this executable's own path, so the parser answers null rather than
-    /// throwing for anything that is not an invite.
+    /// MSIX protocol activations carry their URI through AppInstance rather
+    /// than argv. Unpackaged launches retain command-line parsing. Both use
+    /// the existing deep-link validator and only prefill Connect.
     ///
     /// Never logged. It is a credential, and invites are reusable.
     /// </remarks>
@@ -38,21 +38,15 @@ public partial class App : Application
 
     protected override void OnLaunched(LaunchActivatedEventArgs args)
     {
-        // Unpackaged, so the URL arrives as argv rather than through a
-        // packaged activation. Registering the scheme every launch keeps it
-        // correct after the folder is moved, which an unpackaged app in a
-        // folder someone keeps is free to be.
+        // Packaged installs use manifest registration; this helper only
+        // registers the scheme for unpackaged installs.
         UrlSchemeRegistration.EnsureRegistered();
 
-        foreach (string argument in Environment.GetCommandLineArgs())
-        {
-            string? invite = DeepLink.InviteFrom(argument);
-            if (invite is not null)
-            {
-                PendingInvite = invite;
-                break;
-            }
-        }
+        var activation = AppInstance.GetCurrent().GetActivatedEventArgs();
+        string? protocolUri = activation.Kind == ExtendedActivationKind.Protocol
+            ? (activation.Data as Windows.ApplicationModel.Activation.IProtocolActivatedEventArgs)?.Uri?.AbsoluteUri ?? string.Empty
+            : null;
+        PendingInvite = DeepLink.InitialInvite(protocolUri, Environment.GetCommandLineArgs());
 
         _window = new MainWindow();
         _window.Activate();
