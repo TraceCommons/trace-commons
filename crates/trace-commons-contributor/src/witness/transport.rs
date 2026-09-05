@@ -344,7 +344,76 @@ pub async fn witness_contribution(
     }
 
     verify_certificate(&response, witness.signing_address())?;
+    verify_admission_context(
+        &response,
+        offered.contributor.tenant_scope_ref.as_deref(),
+        attested,
+    )?;
     Ok(response)
+}
+
+/// Bind signed admission evidence to this account and the exact offered call.
+/// Signature verification alone cannot detect a valid certificate for another request.
+fn verify_admission_context(
+    response: &WitnessedEnvelope,
+    tenant: Option<&str>,
+    attested: Option<AttestedInference<'_>>,
+) -> Result<(), WitnessTrustError> {
+    use trace_commons_attestation::receipt::{ReceiptAlgo, verify_receipt};
+    use trace_commons_protocol::admission::{
+        AdmissionBinding, AdmissionEvidence, REQUEST_METADATA_KEY, receipt_identity,
+    };
+    let Some(headers) = &response.admission else {
+        return Ok(());
+    };
+    let refused = || WitnessTrustError::WitnessCertificateMismatched;
+    let evidence: AdmissionEvidence =
+        serde_json::from_str(&headers.evidence_json).map_err(|_| refused())?;
+    let anchor = tenant
+        .and_then(|value| value.strip_prefix("near-"))
+        .ok_or_else(refused)?;
+    let attested = attested.ok_or_else(refused)?;
+    let receipt = attested.receipt.ok_or_else(refused)?;
+    let request: serde_json::Value =
+        serde_json::from_str(attested.call.request_body()).map_err(|_| refused())?;
+    let model = request
+        .get("model")
+        .and_then(|v| v.as_str())
+        .ok_or_else(refused)?;
+    let encoded = request
+        .get("metadata")
+        .and_then(|v| v.get(REQUEST_METADATA_KEY))
+        .and_then(|v| v.as_str())
+        .ok_or_else(refused)?;
+    let binding = AdmissionBinding::parse(encoded).map_err(|_| refused())?;
+    let verified = verify_receipt(
+        receipt,
+        attested.call.request_body().as_bytes(),
+        attested.call.response_body().as_bytes(),
+        model,
+    )
+    .map_err(|_| refused())?;
+    let identity = receipt_identity(
+        &verified.signing_address,
+        &verified.request_sha256,
+        &verified.response_sha256,
+    )
+    .map_err(|_| refused())?;
+    if verified.signing_algo != ReceiptAlgo::Ed25519
+        || binding.account_anchor_sha256 != anchor
+        || evidence.account_anchor_sha256 != anchor
+        || evidence.challenge_sha256 != binding.digest().map_err(|_| refused())?
+        || evidence.expires_at != binding.expires_at
+        || evidence.provider_signer != verified.signing_address
+        || evidence.request_sha256 != verified.request_sha256
+        || evidence.response_sha256 != verified.response_sha256
+        || evidence.receipt_sha256 != identity
+        || evidence.model != model
+        || evidence.request_bytes != attested.call.request_body().len() as u64
+    {
+        return Err(refused());
+    }
+    Ok(())
 }
 
 /// The `POST /v1/witness` request document.
@@ -1141,7 +1210,9 @@ mod tests {
             profile: EVIDENCE_DOMAIN.into(),
             account_anchor_sha256: "11".repeat(32),
             challenge_sha256: "22".repeat(32),
-            provider_signer: format!("0x{}", "33".repeat(20)),
+            provider_signer: "33".repeat(32),
+            model: "test-model".into(),
+            request_bytes: 1,
             request_sha256: "44".repeat(32),
             response_sha256: "55".repeat(32),
             receipt_sha256: "66".repeat(32),
@@ -1170,6 +1241,98 @@ mod tests {
             response.admission = Some(headers_for(&altered, &key));
             assert!(verify_certificate(&response, &pinned).is_err());
         }
+    }
+
+    #[test]
+    fn signed_admission_must_match_our_account_challenge_and_exact_receipt() {
+        use ring::signature::{Ed25519KeyPair, KeyPair};
+        use trace_commons_protocol::admission::{
+            AdmissionBinding, AdmissionEvidence, EVIDENCE_DOMAIN, hash_hex, receipt_identity,
+        };
+        let binding = AdmissionBinding {
+            account_anchor_sha256: "11".repeat(32),
+            nonce_hex: "22".repeat(32),
+            expires_at: 200,
+        };
+        let request = serde_json::json!({"model":"Qwen/Qwen3.6-27B-FP8", "metadata":{"trace_commons_admission":binding.encode().unwrap()}}).to_string();
+        let (call, _dir) = attestable_call_with_bodies(&request, "response bytes");
+        let provider = Ed25519KeyPair::from_seed_unchecked(&[37; 32]).unwrap();
+        let text = format!(
+            "{}:{}",
+            hash_hex(request.as_bytes()),
+            hash_hex(call.response_body().as_bytes())
+        );
+        let receipt = ReceiptPayload {
+            signature: hex::encode(provider.sign(text.as_bytes()).as_ref()),
+            text,
+            signing_address: hex::encode(provider.public_key().as_ref()),
+            signing_algo: ReceiptAlgo::Ed25519,
+        };
+        let (mut response, pinned) = signed_fixture(envelope_bytes());
+        let witness = test_signer("witness-review-test-only");
+        let evidence = AdmissionEvidence {
+            profile: EVIDENCE_DOMAIN.into(),
+            account_anchor_sha256: binding.account_anchor_sha256.clone(),
+            challenge_sha256: binding.digest().unwrap(),
+            provider_signer: receipt.signing_address.clone(),
+            model: "Qwen/Qwen3.6-27B-FP8".into(),
+            request_bytes: request.len() as u64,
+            request_sha256: hash_hex(request.as_bytes()),
+            response_sha256: hash_hex(call.response_body().as_bytes()),
+            receipt_sha256: receipt_identity(
+                &receipt.signing_address,
+                &hash_hex(request.as_bytes()),
+                &hash_hex(call.response_body().as_bytes()),
+            )
+            .unwrap(),
+            artifact_sha256: hash_hex(&response.envelope_bytes),
+            witness_measurement: "aa".repeat(48),
+            redaction_policy_version: "deterministic-v1".into(),
+            issued_at: 1,
+            expires_at: 200,
+        };
+        let tenant = format!("near-{}", binding.account_anchor_sha256);
+        let attested = Some(AttestedInference {
+            call: &call,
+            receipt: Some(&receipt),
+        });
+        for field in [
+            "valid",
+            "account",
+            "challenge",
+            "provider",
+            "request",
+            "response",
+            "receipt",
+            "model",
+            "size",
+            "expiry",
+        ] {
+            let mut altered = evidence.clone();
+            match field {
+                "account" => altered.account_anchor_sha256 = "77".repeat(32),
+                "challenge" => altered.challenge_sha256 = "77".repeat(32),
+                "provider" => altered.provider_signer = "77".repeat(32),
+                "request" => altered.request_sha256 = "77".repeat(32),
+                "response" => altered.response_sha256 = "77".repeat(32),
+                "receipt" => altered.receipt_sha256 = "77".repeat(32),
+                "model" => altered.model = "other".into(),
+                "size" => altered.request_bytes += 1,
+                "expiry" => altered.expires_at += 1,
+                _ => {}
+            }
+            response.admission = Some(AdmissionHeaders {
+                evidence_json: serde_json::to_string(&altered).unwrap(),
+                signature_hex: sign_eip191(&witness, &altered.signing_bytes().unwrap()),
+            });
+            verify_certificate(&response, &pinned).unwrap();
+            assert_eq!(
+                verify_admission_context(&response, Some(&tenant), attested).is_ok(),
+                field == "valid",
+                "{field}"
+            );
+        }
+        assert!(verify_admission_context(&response, Some(&tenant), None).is_err());
     }
 
     fn test_signer(seed: &str) -> k256::ecdsa::SigningKey {
@@ -1562,16 +1725,22 @@ mod tests {
     /// non-alphabetical keys, ragged whitespace, non-ASCII inside a string,
     /// and a float with more precision than a round trip preserves.
     fn attestable_call() -> (crate::routing::attested::AttestedCall, tempfile::TempDir) {
-        use sha2::Digest as _;
-
         const AWKWARD: &str = "{\"model\":\"Qwen/Qwen3.6-27B-FP8\", \"temperature\":0.30000000000000004,\n  \"messages\":[{\"role\":\"user\",\"content\":\"café — naïve secret-in-prompt\"}]}";
         const RESPONSE: &str =
             "data: {\"choices\":[{\"delta\":{\"content\":\"café\"}}]}\n\ndata: [DONE]\n\n";
 
+        attestable_call_with_bodies(AWKWARD, RESPONSE)
+    }
+
+    fn attestable_call_with_bodies(
+        request: &str,
+        response: &str,
+    ) -> (crate::routing::attested::AttestedCall, tempfile::TempDir) {
+        use sha2::Digest as _;
         let dir = tempfile::tempdir().expect("tempdir");
         let reference = "00000000000000000003-000000";
-        std::fs::write(dir.path().join(format!("{reference}.req")), AWKWARD).expect("req");
-        std::fs::write(dir.path().join(format!("{reference}.res")), RESPONSE).expect("res");
+        std::fs::write(dir.path().join(format!("{reference}.req")), request).expect("req");
+        std::fs::write(dir.path().join(format!("{reference}.res")), response).expect("res");
 
         let row = crate::routing::RoutedExchange {
             id: Some(3),
@@ -1583,8 +1752,8 @@ mod tests {
             requested_model: Some("Qwen/Qwen3.6-27B-FP8".to_string()),
             served_model: Some("Qwen/Qwen3.6-27B-FP8".to_string()),
             upstream_id: Some("chatcmpl-abc123".to_string()),
-            request_sha256: Some(hex::encode(sha2::Sha256::digest(AWKWARD.as_bytes()))),
-            response_sha256: Some(hex::encode(sha2::Sha256::digest(RESPONSE.as_bytes()))),
+            request_sha256: Some(hex::encode(sha2::Sha256::digest(request.as_bytes()))),
+            response_sha256: Some(hex::encode(sha2::Sha256::digest(response.as_bytes()))),
             body_ref: Some(reference.to_string()),
             rung: "full".to_string(),
             attempts: 1,

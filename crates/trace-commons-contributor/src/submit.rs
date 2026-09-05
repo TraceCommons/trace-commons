@@ -485,6 +485,9 @@ impl<'a> SubmitContext<'a> {
         {
             anyhow::bail!("witness_expected_measurement");
         }
+        if settings.admission_evidence && !include_inference_bodies {
+            anyhow::bail!("admission_receipt_unavailable");
+        }
         let now = Utc::now();
         let token = self
             .ensure_claim(now, &transcript.session_hash)

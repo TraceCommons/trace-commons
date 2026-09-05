@@ -212,6 +212,15 @@ impl WitnessReviewArtifact {
         }
         verify_certificate(&self.response, &settings.signing_address)
             .map_err(|_| anyhow::anyhow!("witness-certificate-invalid"))?;
+        if let Some(headers) = &self.response.admission {
+            let evidence: trace_commons_protocol::admission::AdmissionEvidence =
+                serde_json::from_str(&headers.evidence_json)
+                    .map_err(|_| anyhow::anyhow!("witness-certificate-invalid"))?;
+            if cfg.tenant_id.strip_prefix("near-") != Some(evidence.account_anchor_sha256.as_str())
+            {
+                bail!("witness-certificate-invalid");
+            }
+        }
         let envelope = self.envelope()?;
         if envelope.submission_id != crate::source::submission_id_for(source_hash)
             || envelope.contributor.tenant_scope_ref.as_deref() != Some(cfg.tenant_id.as_str())
