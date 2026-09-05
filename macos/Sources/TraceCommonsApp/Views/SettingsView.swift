@@ -90,6 +90,18 @@ struct SettingsContent: View {
     /// the name to be looked up from a selection that has already moved.
     @State private var armingCandidate: ProjectRow?
 
+    /// The consent list's one failure line, and whether a write is in
+    /// flight. The rows read the daemon's own answer, so there is no draft
+    /// to hold here -- only the refusal, until the next press clears it.
+    @State private var consentSaveError: String?
+    @State private var consentBusy = false
+
+    /// Discovery candidates are suggestions, never the configured path.
+    /// The daemon reports modes only; Settings therefore displays modes.
+    @State private var sourceCandidates: [SourceCandidate] = []
+    @State private var sourceBusy = false
+    @State private var sourceSaveFailed = false
+
     /// Spec §5.4: the Settings content column is `max-width:520px` ("prose
     /// column, kept narrow on purpose"), narrower than the 660 that
     /// `TC.Measure.prose` carries for onboarding. There is no token for it,
@@ -106,6 +118,7 @@ struct SettingsContent: View {
             consent
             publicProfile
             watching
+            watchedFolders
             routing
             witness
             projects
@@ -390,37 +403,57 @@ struct SettingsContent: View {
                 // carries, and refusing here would refuse contributors the
                 // server would have allowed.
             }
-            Text("""
-            Changing permissions needs an enrolled account, which this build does \
-            not set up yet, so these show what is in force rather than offering to \
-            change it. Nothing here is pre-selected on your behalf.
-            """)
-            .font(TC.Font_.caption)
-            .foregroundStyle(.secondary)
+            if let consentSaveError {
+                Text(consentSaveError)
+                    .font(TC.Font_.caption)
+                    .foregroundStyle(TC.coralText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Text("Nothing here is pre-selected on your behalf.")
+                .font(TC.Font_.caption)
+                .foregroundStyle(.secondary)
         }
     }
 
+    /// One scope, as a row that can be ticked.
+    ///
+    /// The tick reflects `status.consent_scopes` -- what the daemon reports
+    /// is in force -- never a local copy of it, so nothing optional can
+    /// show as granted that the daemon does not hold. A press writes the
+    /// whole list back through `set_consent_scopes` and the row follows the
+    /// daemon's answer; a refusal is one line above, with the tick
+    /// unchanged. The footnote this replaced said changing permissions
+    /// needed an account this build did not set up, which had stopped
+    /// being true the day onboarding enrolled one.
     private func scopeRow(_ scope: ConsentScope, checked: Bool, alwaysOn: Bool) -> some View {
-        HStack(alignment: .top, spacing: TC.Space.m) {
-            TCReadGateCheckbox(checked: checked)
-            VStack(alignment: .leading, spacing: TC.Space.xxs) {
-                HStack(spacing: TC.Space.s) {
-                    Text(ScopeCopy.title(for: scope.name, options: model.consentScopes))
-                        .font(TC.Font_.cardTitle)
-                    if alwaysOn {
-                        TCTag(text: "always on", tone: .clear, symbol: "lock")
+        Button {
+            guard !alwaysOn else { return }
+            setScope(scope, granted: !checked)
+        } label: {
+            HStack(alignment: .top, spacing: TC.Space.m) {
+                TCReadGateCheckbox(checked: checked)
+                VStack(alignment: .leading, spacing: TC.Space.xxs) {
+                    HStack(spacing: TC.Space.s) {
+                        Text(ScopeCopy.title(for: scope.name, options: model.consentScopes))
+                            .font(TC.Font_.cardTitle)
+                        if alwaysOn {
+                            TCTag(text: "always on", tone: .clear, symbol: "lock")
+                        }
                     }
+                    Text(scope.description)
+                        .font(TC.Font_.body)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
-                Text(scope.description)
-                    .font(TC.Font_.body)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 0)
             }
-            Spacer(minLength: 0)
+            .padding(TC.Space.m)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .tcCard()
+            .contentShape(Rectangle())
         }
-        .padding(TC.Space.m)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .tcCard()
+        .buttonStyle(.plain)
+        .disabled(alwaysOn || consentBusy || !model.status.loggedIn)
         // `TCReadGateCheckbox` is drawn, and drawn shapes are hidden from
         // VoiceOver, so without this a scope announces its title and
         // description with no indication of whether it is granted. The row
@@ -429,6 +462,33 @@ struct SettingsContent: View {
         .accessibilityElement(children: .combine)
         .accessibilityValue(checked ? "Granted" : "Not granted")
         .accessibilityAddTraits(checked ? [.isSelected] : [])
+    }
+
+    /// Adds or removes one optional scope. The list sent is the always-on
+    /// scopes plus everything the daemon currently reports granted, with
+    /// this one added or taken out -- built from the daemon's list, not
+    /// from the ticks on screen, so two quick presses cannot race each
+    /// other into dropping a scope neither touched.
+    private func setScope(_ scope: ConsentScope, granted: Bool) {
+        guard !consentBusy, model.status.loggedIn, !scope.alwaysOn else { return }
+        var scopes = Set(model.status.consentScopes)
+        scopes.formUnion(model.consentScopes.filter(\.alwaysOn).map(\.name))
+        if granted {
+            scopes.insert(scope.name)
+        } else {
+            scopes.remove(scope.name)
+        }
+        consentSaveError = nil
+        consentBusy = true
+        Task {
+            switch await model.setConsentScopes(Array(scopes)) {
+            case .succeeded:
+                break
+            case .failed:
+                consentSaveError = "Couldn't change that -- the watcher may not be running. Try again."
+            }
+            consentBusy = false
+        }
     }
 
     // MARK: - Public profile (spec §5.6)
@@ -686,6 +746,90 @@ struct SettingsContent: View {
                 Text("Paused. Nothing is being queued or sent.").font(TC.Font_.body)
             }
         }
+    }
+
+    // MARK: - Watched folders
+
+    /// The roots screen's rows, after first run.
+    ///
+    /// Each answer writes straight through `set_settings` -- there is no
+    /// Save, because each row is one declaration and the daemon applies it
+    /// in the same call. What a row shows is the MODE the daemon reports
+    /// (`*_source_mode`), which is all `get_settings` says: it never
+    /// reports the path, so a watched folder shows as "Watching" with no
+    /// path, including after a write. The same explanation the roots screen gives
+    /// applies, and is given, because a blank Claude Code or Codex row still
+    /// means the standard location.
+    private var watchedFolders: some View {
+        VStack(alignment: .leading, spacing: TC.Space.sm) {
+            TCSectionHeader(title: "Watched folders")
+            Text("""
+            Which session folders this app reads. Declining is an answer; for \
+            Claude Code and Codex a row left blank means the standard location.
+            """)
+            .font(TC.Font_.meta)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+            if sourceSaveFailed {
+                Text("Couldn't confirm that folder change. Check the current setting and try again.")
+                    .font(TC.Font_.caption)
+                    .foregroundStyle(TC.coralText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            ForEach(OnboardingRootsView.offeredKinds, id: \.self) { kind in
+                SourceRootRow(
+                    kind: kind,
+                    candidate: sourceCandidates.first { $0.source == kind },
+                    choice: sourceChoice(for: kind),
+                    onWatchCandidate: { candidate in
+                        saveSource(kind, .watch(path: candidate.path))
+                    },
+                    onChoose: { path in
+                        saveSource(kind, .watch(path: path))
+                    },
+                    onDecline: {
+                        saveSource(kind, .off)
+                    }
+                )
+            }
+        }
+        .disabled(sourceBusy)
+        .onAppear(perform: discoverSources)
+    }
+
+    private func saveSource(_ kind: SourceKind, _ choice: SourceChoice) {
+        guard !sourceBusy else { return }
+        sourceBusy = true
+        sourceSaveFailed = false
+        Task {
+            sourceSaveFailed = !(await model.setSourceRoot(kind, choice))
+            sourceBusy = false
+        }
+    }
+
+    /// The daemon's answer for one source, as the row shows it. The path
+    /// is deliberately absent: the daemon only says that a folder is watched.
+    private func sourceChoice(for kind: SourceKind) -> SourceChoice {
+        guard let modes = model.daemonSettings?.routingSourceModes else { return .undecided }
+        let mode: String
+        switch kind {
+        case .claudeCode: mode = modes.claude
+        case .codex: mode = modes.codex
+        case .geminiCli: mode = modes.gemini
+        case .cline: mode = modes.cline
+        }
+        switch mode {
+        case "watch": return .watch(path: "")
+        case "off": return .off
+        default: return .undecided
+        }
+    }
+
+    /// Best-effort, exactly as on the roots screen: a row can always be
+    /// answered by hand.
+    private func discoverSources() {
+        guard sourceCandidates.isEmpty, let json = TCDiscovery.sourcesJSON() else { return }
+        sourceCandidates = (try? SourceCandidate.decodeList(from: json)) ?? []
     }
 
     // MARK: - Tools: the local proxy

@@ -768,6 +768,30 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Changes one source's declaration on the running daemon -- Settings'
+    /// "Watched folders", the after-first-run counterpart of the roots
+    /// screen's start-with-settings.
+    ///
+    /// Nothing is applied optimistically: the rows read the daemon's
+    /// answer, which `set_settings` returns in full, and an undecided
+    /// choice is never sent. A failed confirmation requests fresh settings.
+    func setSourceRoot(_ kind: SourceKind, _ choice: SourceChoice) async -> Bool {
+        guard let params = choice.settingsParams(for: kind), let client else { return false }
+        let result = await Task.detached(priority: .userInitiated) {
+            Result { try client.setSettings(params) }
+        }.value
+        switch result {
+        case .success(let settings):
+            daemonSettings = settings
+            return true
+        case .failure:
+            // A lost response does not prove the write failed. Read back the
+            // authoritative modes, and never retain the requested path.
+            daemonSettings = await Task.detached { try? client.settings() }.value
+            return false
+        }
+    }
+
     /// Write the declaration, then -- when it is on -- ask what was found.
     ///
     /// The evidence is dropped before the write, not after the answer: the
@@ -929,7 +953,8 @@ final class AppModel: ObservableObject {
                 return .failed
             }
         }.value
-        if case .succeeded = outcome {
+        if case .succeeded(let confirmed) = outcome {
+            status.consentScopes = confirmed
             refreshStatus()
             refreshAudit()
         }
@@ -1004,6 +1029,10 @@ final class AppModel: ObservableObject {
     /// tenant-keyed onboarding marker without a running daemon and a real
     /// enrolment. Debug-only, and deliberately routed through
     /// `publishIfChanged` so a test observes exactly what the app does.
+    func setClientForTesting(_ client: DaemonClient) {
+        self.client = client
+    }
+
     func setStatusForTesting(_ status: DaemonStatus) {
         publishIfChanged(\.status, status)
     }

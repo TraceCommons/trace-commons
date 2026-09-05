@@ -387,3 +387,38 @@ final class NativeFlowAdapterTests: XCTestCase {
         XCTAssertEqual(result.view?.tone, "refused")
     }
 }
+
+private final class SourceSettingsDaemon: DaemonCalling {
+    let refuseWrite: Bool
+    init(refuseWrite: Bool) { self.refuseWrite = refuseWrite }
+    func call(_ method: String, params paramsJSON: String) -> String {
+        if method == "set_settings", refuseWrite {
+            return #"{"id":1,"error":{"code":"unavailable","message":"settings-save-failed"}}"#
+        }
+        return settingsFrame.replacingOccurrences(
+            of: "\"near_ai_configured\":false",
+            with: "\"claude_source_mode\":\"off\",\"near_ai_configured\":false")
+    }
+    func searchOriginal(entryID: String, needle: String) -> Int? { nil }
+    func openPreview(entryID: String) throws -> TCPreview { throw TCDaemon.TCError.daemonGone }
+}
+
+final class SourceSettingsModelTests: XCTestCase {
+    @MainActor
+    func testFolderWriteDisplaysDaemonAnswerInsteadOfRequestedWatchMode() async {
+        let model = AppModel()
+        model.setClientForTesting(DaemonClient(daemon: SourceSettingsDaemon(refuseWrite: false)))
+        let succeeded = await model.setSourceRoot(.claudeCode, .watch(path: "/requested"))
+        XCTAssertTrue(succeeded)
+        XCTAssertEqual(model.daemonSettings?.claudeSourceMode, "off")
+    }
+
+    @MainActor
+    func testFailedWriteReadsBackModeWithoutClaimingRequestedPathWasSaved() async {
+        let model = AppModel()
+        model.setClientForTesting(DaemonClient(daemon: SourceSettingsDaemon(refuseWrite: true)))
+        let succeeded = await model.setSourceRoot(.claudeCode, .watch(path: "/requested"))
+        XCTAssertFalse(succeeded)
+        XCTAssertEqual(model.daemonSettings?.claudeSourceMode, "off")
+    }
+}
