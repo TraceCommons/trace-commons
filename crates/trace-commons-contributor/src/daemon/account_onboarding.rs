@@ -77,6 +77,22 @@ struct Attempt {
     abort: Option<tokio::task::AbortHandle>,
 }
 static ATTEMPTS: OnceLock<Mutex<HashMap<PathBuf, Attempt>>> = OnceLock::new();
+// Embedded FFI creates a short-lived runtime per IPC call. Wallet work and its
+// reactor must outlive that call, including while the app waits in the browser.
+fn signup_runtime() -> Result<&'static tokio::runtime::Runtime> {
+    static RUNTIME: OnceLock<Option<tokio::runtime::Runtime>> = OnceLock::new();
+    RUNTIME
+        .get_or_init(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .thread_name("near-signup")
+                .enable_all()
+                .build()
+                .ok()
+        })
+        .as_ref()
+        .ok_or_else(|| anyhow!("near_signup_unavailable"))
+}
 fn attempts() -> &'static Mutex<HashMap<PathBuf, Attempt>> {
     ATTEMPTS.get_or_init(Default::default)
 }
@@ -227,12 +243,12 @@ async fn begin(store: &ConfigStore, options: Options) -> Result<serde_json::Valu
         );
     }
     let result = prepare(store, options, ingest, &id).await;
-    if result.is_err() {
-        if let Some(a) = attempts().lock().expect("signup state lock").get_mut(&dir) {
-            if a.state.attempt_id == id && a.state.status != "cancelled" {
-                a.state.status = "failed";
-            }
-        }
+    if result.is_err()
+        && let Some(a) = attempts().lock().expect("signup state lock").get_mut(&dir)
+        && a.state.attempt_id == id
+        && a.state.status != "cancelled"
+    {
+        a.state.status = "failed";
     }
     result
 }
@@ -317,17 +333,24 @@ async fn prepare(
         bail!("near_signup_cancelled")
     }
     entry.state.status = "waiting_for_wallet";
-    let task = tokio::spawn(async move {
-        let result = finish(
-            listener,
-            &state,
-            &options,
-            &identity,
-            signed,
-            &verifier,
-            &device_signature,
-            &ingest,
-        )
+    let listener = listener.into_std()?;
+    let task = signup_runtime()?.spawn(async move {
+        let result = async {
+            let listener = tokio::net::TcpListener::from_std(listener)?;
+            // Never reuse a connection pool attached to the caller's reactor.
+            let ingest = client(&options.ingest_url)?;
+            finish(
+                listener,
+                &state,
+                &options,
+                &identity,
+                signed,
+                &verifier,
+                &device_signature,
+                &ingest,
+            )
+            .await
+        }
         .await;
         let mut map = attempts().lock().expect("signup state lock");
         if let Some(entry) = map
@@ -347,6 +370,7 @@ async fn prepare(
     Ok(serde_json::json!({"attempt_id":id,"status":"waiting_for_wallet","browser_url":browser_url}))
 }
 
+#[allow(clippy::too_many_arguments)] // One private, purpose-bound ceremony, never shell-provided keys.
 async fn finish(
     listener: tokio::net::TcpListener,
     state: &str,
@@ -628,6 +652,45 @@ mod tests {
         assert_eq!(
             std::fs::read(dir.path().join("contributor.json")).unwrap(),
             before
+        );
+    }
+    #[test]
+    fn callback_survives_originating_ipc_runtime_drop() {
+        use std::io::Write;
+        let origin = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (address, result) = origin.block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let listener = listener.into_std().unwrap();
+            let (send, result) = std::sync::mpsc::channel();
+            signup_runtime().unwrap().spawn(async move {
+                let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+                let _ = send.send(
+                    receive_wallet(listener, "state")
+                        .await
+                        .map(|v| v.account_id),
+                );
+            });
+            (address, result)
+        });
+        drop(origin);
+        let value = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(serde_json::to_vec(&serde_json::json!({"state":"state","account_id":"alice.near","wallet_public_key":"key","wallet_signature":"sig"})).unwrap());
+        let mut stream = std::net::TcpStream::connect(address).unwrap();
+        stream
+            .write_all(
+                format!("GET {LOOPBACK_PATH}?result={value} HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                    .as_bytes(),
+            )
+            .unwrap();
+        assert_eq!(
+            result
+                .recv_timeout(Duration::from_secs(3))
+                .unwrap()
+                .unwrap(),
+            "alice.near"
         );
     }
 }
