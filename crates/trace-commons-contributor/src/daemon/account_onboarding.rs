@@ -541,19 +541,25 @@ fn persist(
         witness: Some(witness),
         inference_receipt_endpoint: None,
     };
-    // Publish configuration without replacing concurrent invite enrollment.
-    let temporary = format!("near-signup-{id}.json");
-    store.write_daemon_file(&temporary, &serde_json::to_vec(&config)?)?;
-    let published = std::fs::hard_link(dir.join(&temporary), dir.join("contributor.json"));
-    let _ = store.remove_daemon_file(&temporary);
-    published?;
     let session = crate::account_auth::AccountSession {
         access_token: result.access_token,
         expires_at: Utc::now() + chrono::Duration::seconds(result.expires_in_secs),
         account_id: result.account_id,
     };
-    store.write_daemon_file(ACCOUNT_SESSION_FILE, &serde_json::to_vec(&session)?)?;
-    Ok(())
+    let session_bytes = serde_json::to_vec(&session)?;
+    // Stage the config, then persist the session before publishing enrollment.
+    // A failed session write leaves no enrolled config to block a fresh attempt.
+    // The final create-only link still cannot replace concurrent invite enrollment.
+    let temporary = format!("near-signup-{id}.json");
+    store.write_daemon_file(&temporary, &serde_json::to_vec(&config)?)?;
+    let published = store
+        .write_daemon_file(ACCOUNT_SESSION_FILE, &session_bytes)
+        .and_then(|()| {
+            std::fs::hard_link(dir.join(&temporary), dir.join("contributor.json"))
+                .map_err(Into::into)
+        });
+    let _ = store.remove_daemon_file(&temporary);
+    published
 }
 
 #[cfg(test)]
@@ -625,6 +631,23 @@ mod tests {
             device_key_id: identity.device_key_id.clone(),
             anchor_hash: format!("sha256:{}", "ab".repeat(32)),
         };
+        // A directory at the session destination makes atomic session install
+        // fail after config staging. Enrollment must remain absent and retryable.
+        std::fs::create_dir(dir.path().join(ACCOUNT_SESSION_FILE)).unwrap();
+        assert!(
+            persist(
+                dir.path(),
+                &options,
+                &identity,
+                completed(),
+                "failed-session",
+                witness.clone()
+            )
+            .is_err()
+        );
+        assert!(store.load_config().unwrap().is_none());
+        assert!(!dir.path().join("near-signup-failed-session.json").exists());
+        std::fs::remove_dir(dir.path().join(ACCOUNT_SESSION_FILE)).unwrap();
         persist(
             dir.path(),
             &options,
