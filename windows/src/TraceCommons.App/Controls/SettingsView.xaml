@@ -224,9 +224,6 @@
                         </DataTemplate>
                     </ItemsControl.ItemTemplate>
                 </ItemsControl>
-                <TextBlock Text="Arming a project so it contributes without asking is a deliberate confirmation flow, and it is not built yet."
-                           Style="{StaticResource TcCaptionTextStyle}"
-                           TextWrapping="Wrap" />
 
                 <!--
                     The routing surface.
