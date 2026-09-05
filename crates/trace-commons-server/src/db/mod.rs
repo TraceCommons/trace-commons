@@ -705,6 +705,38 @@ pub trait Database: TraceCorpusStore + Send + Sync {
     /// MUST error with a safe missing-control name, never fall back to the runtime
     /// pool. NO `ensure_trace_tenant` here: this is a pure read on a
     /// globally-UNIQUE column and MUST NOT write any tenant row for a forged key.
+    async fn store_near_provisioning_ceremony(
+        &self,
+        _ceremony_hash: &str,
+        _pending: crate::account_onboarding::NativeProvisioningPending,
+        _expires_at: i64,
+    ) -> Result<(), DatabaseError> {
+        Err(DatabaseError::Pool("near_provisioning_unconfigured".into()))
+    }
+
+    async fn take_near_provisioning_ceremony(
+        &self,
+        _ceremony_hash: &str,
+    ) -> Result<Option<crate::account_onboarding::NativeProvisioningPending>, DatabaseError> {
+        Err(DatabaseError::Pool("near_provisioning_unconfigured".into()))
+    }
+
+    async fn provision_verified_near_account(
+        &self,
+        _proof: crate::account_onboarding::VerifiedNearProvisioning,
+        _session: NewSession<'_>,
+    ) -> Result<crate::account_onboarding::ProvisionedNearAccount, DatabaseError> {
+        Err(DatabaseError::Pool("near_provisioning_unconfigured".into()))
+    }
+
+    async fn get_near_provisioned_anchor(
+        &self,
+        _tenant_id: &str,
+        _principal_ref: &str,
+    ) -> Result<Option<String>, DatabaseError> {
+        Err(DatabaseError::Pool("near_provisioning_unconfigured".into()))
+    }
+
     async fn resolve_near_public_key_tenant(
         &self,
         _public_key: &str,
@@ -1748,7 +1780,7 @@ pub struct DeviceKeyRecord {
     pub device_key_id: String,
     pub tenant_id: String,
     pub public_key: String,
-    pub invite_subject_hash: String,
+    pub invite_subject_hash: Option<String>,
     pub client_info: serde_json::Value,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub revoked_at: Option<chrono::DateTime<chrono::Utc>>,

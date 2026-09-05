@@ -146,6 +146,49 @@ pub fn user_subject_hash(user_subject: &str) -> String {
     format!("sha256:{}", hex::encode(hasher.finalize()))
 }
 
+/// Canonical wallet disclosure for explicit NEAR provisioning. This is encoding,
+/// not authorization; callers validate identity, recipient and expiration.
+pub fn near_provisioning_message(
+    network: &str,
+    account: &str,
+    device: &[u8; 32],
+    binding: &[u8; 32],
+    expires_at: i64,
+) -> String {
+    format!(
+        "Create or recover my Trace Commons contributor account\nPurpose: trace_commons.near_provisioning.v1\nNetwork: {network}\nAccount: {account}\nDevice: sha256:{}\nBrowser binding: sha256:{}\nExpires: {expires_at}",
+        hex::encode(Sha256::digest(device)),
+        hex::encode(binding)
+    )
+}
+
+/// Device proof preimage, shared so a native app can refuse arbitrary signing
+/// bytes received from a server. No wallet key material belongs here.
+pub fn near_provisioning_device_bytes(
+    nonce: &[u8; 32],
+    message: &str,
+    recipient: &str,
+    binding: &[u8; 32],
+    callback: Option<&str>,
+) -> Vec<u8> {
+    let mut bytes = b"trace_commons.near_provisioning_device.v1\n".to_vec();
+    for part in [
+        &nonce[..],
+        message.as_bytes(),
+        recipient.as_bytes(),
+        &binding[..],
+    ] {
+        bytes.extend_from_slice(&(part.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(part);
+    }
+    bytes.push(u8::from(callback.is_some()));
+    if let Some(callback) = callback {
+        bytes.extend_from_slice(&(callback.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(callback.as_bytes());
+    }
+    bytes
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

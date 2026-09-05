@@ -17,8 +17,6 @@ use crate::account_near::{near_account_has_full_access_key, verify_nep413};
 use crate::config::NearConfig;
 
 pub const PROVISIONING_TTL_SECONDS: i64 = 300;
-const PURPOSE: &str = "Create or recover my Trace Commons contributor account";
-const DEVICE_DOMAIN: &[u8] = b"trace_commons.near_provisioning_device.v1\n";
 
 /// Uniform safe label. Never attach account, key, RPC, or assertion text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -31,6 +29,7 @@ pub struct ProvisioningChallenge<'a> {
     pub nonce: &'a [u8; 32],
     pub recipient: &'a str,
     pub expires_at: i64,
+    pub callback_url: Option<&'a str>,
 }
 
 /// Untrusted finish input. Neither account nor recipient can be switched here.
@@ -52,6 +51,7 @@ pub struct PendingNearProvisioning {
     network: String,
     recipient: String,
     config_hash: [u8; 32],
+    callback_url: Option<String>,
     message: String,
     nonce: [u8; 32],
     device_public_key: [u8; 32],
@@ -103,7 +103,106 @@ impl VerifiedNearProvisioning {
     }
 }
 
+/// Hash-only durable ceremony payload. Raw account/key identities are supplied
+/// again at finish and checked against these server-stored commitments.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct StoredProvisioningCeremony {
+    callback_hash: Option<[u8; 32]>,
+    nonce: [u8; 32],
+    anchor_hash: [u8; 32],
+    device_hash: [u8; 32],
+    browser_binding: [u8; 32],
+    config_hash: [u8; 32],
+    issued_at: i64,
+    expires_at: i64,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct NativeProvisioningPending {
+    pub ceremony: StoredProvisioningCeremony,
+    pub code_challenge: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ProvisionedNearAccount {
+    pub tenant_id: String,
+    pub account_id: uuid::Uuid,
+    pub device_key_id: String,
+    pub anchor_hash: String,
+}
+
 impl PendingNearProvisioning {
+    pub fn into_stored(self) -> StoredProvisioningCeremony {
+        StoredProvisioningCeremony {
+            callback_hash: self
+                .callback_url
+                .as_ref()
+                .map(|s| Sha256::digest(s.as_bytes()).into()),
+            nonce: self.nonce,
+            anchor_hash: framed_hash(
+                b"trace_commons.near_account_anchor.v1\n",
+                &[self.network.as_bytes(), self.account_id.as_bytes()],
+            ),
+            device_hash: Sha256::digest(self.device_public_key).into(),
+            browser_binding: self.browser_binding,
+            config_hash: self.config_hash,
+            issued_at: self.issued_at,
+            expires_at: self.expires_at,
+        }
+    }
+
+    /// Rebuild only after atomically taking a server-held durable record. This
+    /// is not an endpoint accepting arbitrary stored records from a client.
+    pub fn restore(
+        stored: StoredProvisioningCeremony,
+        cfg: &NearConfig,
+        account_id: &str,
+        device_public_key: [u8; 32],
+        callback_url: Option<&str>,
+    ) -> Result<Self, ProvisioningRefused> {
+        let mut pending = Self::issue(
+            cfg,
+            account_id,
+            device_public_key,
+            stored.browser_binding,
+            stored.issued_at,
+        )?;
+        let anchor = framed_hash(
+            b"trace_commons.near_account_anchor.v1\n",
+            &[cfg.network.as_bytes(), account_id.as_bytes()],
+        );
+        let device_hash: [u8; 32] = Sha256::digest(device_public_key).into();
+        if stored.config_hash != pending.config_hash
+            || stored.anchor_hash != anchor
+            || stored.device_hash != device_hash
+            || stored.expires_at != pending.expires_at
+        {
+            return Err(ProvisioningRefused);
+        }
+        if stored.callback_hash != callback_url.map(|s| Sha256::digest(s.as_bytes()).into()) {
+            return Err(ProvisioningRefused);
+        }
+        pending.callback_url = callback_url.map(str::to_string);
+        pending.nonce = stored.nonce;
+        Ok(pending)
+    }
+
+    pub fn with_wallet_callback(mut self, callback_url: &str) -> Result<Self, ProvisioningRefused> {
+        let url = reqwest::Url::parse(callback_url).map_err(|_| ProvisioningRefused)?;
+        if url.path() != "/account/near/provision/wallet"
+            || url.query().is_some()
+            || url.fragment().is_some()
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || !(url.scheme() == "https"
+                || (url.scheme() == "http" && url.host_str() == Some("127.0.0.1")))
+        {
+            return Err(ProvisioningRefused);
+        }
+        self.callback_url = Some(callback_url.to_string());
+        Ok(self)
+    }
+
     /// `cfg` and `browser_binding` must come from server configuration and a
     /// browser-bound native authorization ceremony, never finish-request fields.
     /// Network labels namespace identities; operators must configure the matching
@@ -132,17 +231,19 @@ impl PendingNearProvisioning {
         ring::rand::SystemRandom::new()
             .fill(&mut nonce)
             .map_err(|_| ProvisioningRefused)?;
-        let device_hash = hex::encode(Sha256::digest(device_public_key));
-        let message = format!(
-            "{PURPOSE}\nPurpose: trace_commons.near_provisioning.v1\nNetwork: {}\nAccount: {account_id}\nDevice: sha256:{device_hash}\nBrowser binding: sha256:{}\nExpires: {expires_at}",
-            cfg.network,
-            hex::encode(browser_binding)
+        let message = trace_commons_protocol::onboarding::near_provisioning_message(
+            &cfg.network,
+            account_id,
+            &device_public_key,
+            &browser_binding,
+            expires_at,
         );
         Ok(Self {
             account_id: account_id.into(),
             network: cfg.network.clone(),
             recipient: cfg.recipient.clone(),
             config_hash: config_hash(cfg),
+            callback_url: None,
             message,
             nonce,
             device_public_key,
@@ -158,23 +259,20 @@ impl PendingNearProvisioning {
             nonce: &self.nonce,
             recipient: &self.recipient,
             expires_at: self.expires_at,
+            callback_url: self.callback_url.as_deref(),
         }
     }
 
     /// Exact bytes the named device signs to prove possession. Length-prefixing
     /// and a dedicated domain prevent replay as wallet login or inference evidence.
     pub fn device_signing_bytes(&self) -> Vec<u8> {
-        let mut out = DEVICE_DOMAIN.to_vec();
-        for field in [
-            &self.nonce[..],
-            self.message.as_bytes(),
-            self.recipient.as_bytes(),
-            &self.browser_binding[..],
-        ] {
-            out.extend_from_slice(&(field.len() as u64).to_le_bytes());
-            out.extend_from_slice(field);
-        }
-        out
+        trace_commons_protocol::onboarding::near_provisioning_device_bytes(
+            &self.nonce,
+            &self.message,
+            &self.recipient,
+            &self.browser_binding,
+            self.callback_url.as_deref(),
+        )
     }
 
     /// Production entry point: signature and local binding checks precede RPC.
@@ -217,7 +315,7 @@ impl PendingNearProvisioning {
             &self.message,
             &self.nonce,
             &self.recipient,
-            None,
+            self.callback_url.as_deref(),
             assertion.wallet_signature,
         )
         .map_err(|_| ProvisioningRefused)?;

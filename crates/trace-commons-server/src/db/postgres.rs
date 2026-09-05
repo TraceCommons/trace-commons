@@ -5,6 +5,9 @@
 
 use std::collections::HashSet;
 
+#[path = "postgres_account_onboarding.rs"]
+mod account_onboarding;
+
 use async_trait::async_trait;
 use deadpool_postgres::Pool;
 use sha2::{Digest, Sha256};
@@ -146,7 +149,8 @@ pub struct PgBackend {
 ///
 /// Deliberate exclusions, so an absence is never mistaken for an oversight
 /// again: `trace_instance_enrollments` and `onboarding_invite_grants` are
-/// isolated by subject hash rather than by tenant, and
+/// isolated by subject hash rather than by tenant;
+/// `trace_near_provisioning_ceremonies` uses an unpredictable ceremony hash, and
 /// `trace_community_snapshot_invalidations` and `trace_leaderboard_snapshots`
 /// are deployment-wide aggregate bookkeeping with no tenant column to
 /// predicate on -- inexpressible rather than merely unnecessary. The
@@ -198,6 +202,8 @@ pub const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "trace_account_audit",
     "trace_webauthn_credentials",
     "trace_near_identities",
+    "trace_near_account_anchors",
+    "trace_near_provisioned_devices",
     "trace_account_merge_proposals",
     "trace_community_withdrawal_evictions",
 ];
@@ -2124,25 +2130,14 @@ impl Database for PgBackend {
                 )
                 .await?;
         }
-        let applied = client
-            .query_opt(
-                "SELECT 1 FROM _trace_commons_migrations WHERE version=$1",
-                &[&59_i32],
-            )
-            .await?
-            .is_some();
-        if !applied {
-            client
-                .batch_execute(include_str!(
-                    "../../../../migrations/V59__trace_admission_ledger.sql"
-                ))
-                .await?;
-            client
-                .execute(
-                    "INSERT INTO _trace_commons_migrations(version,name) VALUES($1,$2)",
-                    &[&59_i32, &"trace_admission_ledger"],
-                )
-                .await?;
+        for (version,name,sql) in [
+            (58_i32,"near_account_provisioning",include_str!("../../../../migrations/V58__near_account_provisioning.sql")),
+            (59_i32,"trace_admission_ledger",include_str!("../../../../migrations/V59__trace_admission_ledger.sql")),
+        ] {
+            if client.query_opt("SELECT 1 FROM _trace_commons_migrations WHERE version=$1",&[&version]).await?.is_none() {
+                client.batch_execute(sql).await?;
+                client.execute("INSERT INTO _trace_commons_migrations(version,name) VALUES($1,$2)",&[&version,&name]).await?;
+            }
         }
         Ok(())
     }
@@ -3101,7 +3096,8 @@ impl Database for PgBackend {
         {
             let record = device_key_record_from_row(existing);
             if record.public_key == device_key.public_key
-                && record.invite_subject_hash == device_key.invite_subject_hash
+                && record.invite_subject_hash.as_deref()
+                    == Some(device_key.invite_subject_hash.as_str())
                 && record.revoked_at.is_none()
             {
                 upsert_onboarding_device_tenant_access_grant(
@@ -3176,7 +3172,8 @@ impl Database for PgBackend {
             if let Some(existing) = existing {
                 let record = device_key_record_from_row(existing);
                 if record.public_key == device_key.public_key
-                    && record.invite_subject_hash == device_key.invite_subject_hash
+                    && record.invite_subject_hash.as_deref()
+                        == Some(device_key.invite_subject_hash.as_str())
                     && record.revoked_at.is_none()
                 {
                     upsert_onboarding_device_tenant_access_grant(
@@ -3702,6 +3699,35 @@ impl Database for PgBackend {
         PgBackend::resolve_credential_tenant(self, credential_id)
             .await
             .map_err(|error| DatabaseError::Pool(error.to_string()))
+    }
+
+    async fn store_near_provisioning_ceremony(
+        &self,
+        hash: &str,
+        pending: crate::account_onboarding::NativeProvisioningPending,
+        expires_at: i64,
+    ) -> Result<(), DatabaseError> {
+        self.near_store_ceremony(hash, pending, expires_at).await
+    }
+    async fn take_near_provisioning_ceremony(
+        &self,
+        hash: &str,
+    ) -> Result<Option<crate::account_onboarding::NativeProvisioningPending>, DatabaseError> {
+        self.near_take_ceremony(hash).await
+    }
+    async fn provision_verified_near_account(
+        &self,
+        proof: crate::account_onboarding::VerifiedNearProvisioning,
+        session: crate::db::NewSession<'_>,
+    ) -> Result<crate::account_onboarding::ProvisionedNearAccount, DatabaseError> {
+        self.near_provision(proof, session).await
+    }
+    async fn get_near_provisioned_anchor(
+        &self,
+        tenant: &str,
+        principal: &str,
+    ) -> Result<Option<String>, DatabaseError> {
+        self.near_anchor_for_principal(tenant, principal).await
     }
 
     async fn resolve_near_public_key_tenant(
@@ -6789,6 +6815,7 @@ mod tests {
             include_str!("../../../../migrations/V34__account_consolidation.sql"),
             include_str!("../../../../migrations/V43__trace_withdrawal.sql"),
             include_str!("../../../../migrations/V56__community_withdrawal_eviction_rls.sql"),
+            include_str!("../../../../migrations/V58__near_account_provisioning.sql"),
         ];
         let force_rls_migrations = [
             include_str!("../../../../migrations/V6__trace_force_rls.sql"),
@@ -6806,6 +6833,7 @@ mod tests {
             include_str!("../../../../migrations/V34__account_consolidation.sql"),
             include_str!("../../../../migrations/V43__trace_withdrawal.sql"),
             include_str!("../../../../migrations/V56__community_withdrawal_eviction_rls.sql"),
+            include_str!("../../../../migrations/V58__near_account_provisioning.sql"),
         ];
 
         for table in TRACE_COMMONS_RLS_TABLES {
