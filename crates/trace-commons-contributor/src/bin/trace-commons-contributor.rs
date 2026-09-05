@@ -69,7 +69,9 @@ enum Command {
     /// refuses to run from `$HOME` or a filesystem root, where the subtree
     /// would be every session on the machine; `--all` says that deliberately.
     Submit {
-        /// Every session on this machine, ignoring the working directory
+        /// Every session on this machine, ignoring the working directory.
+        /// Widens the scope only: the y/N summary still appears, and only
+        /// --yes skips it. The existing --json --all mode remains non-interactive.
         #[arg(long)]
         all: bool,
         /// Only sessions started within this duration (e.g. 2d, 12h)
@@ -81,7 +83,8 @@ enum Command {
         /// Restrict to one source: claude-code | codex | trajectory
         #[arg(long)]
         source: Option<String>,
-        /// Skip the confirmation and submit everything selected
+        /// Skip the confirmation and submit everything selected. This is the
+        /// flag for suppressing the prompt in human-readable mode; --all does not.
         #[arg(long)]
         yes: bool,
         /// Choose sessions individually from a numbered table, instead of
@@ -189,8 +192,14 @@ enum Command {
         #[arg(long)]
         stage_only: bool,
     },
-    /// Delete local keystore, config, and receipts
-    Logout,
+    /// Delete local keystore, config, receipts, history and audit log.
+    /// Asks first, listing what goes; submitted traces stay on the server.
+    Logout {
+        /// Skip the confirmation. Nothing else suppresses it: a closed stdin
+        /// counts as no.
+        #[arg(long)]
+        yes: bool,
+    },
     /// Sign in to your account (needed to withdraw traces), or check/end that session
     Account {
         #[command(subcommand)]
@@ -445,7 +454,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         }
         Command::Whoami => commands::whoami(&store, cli.json),
         Command::Update { stage_only } => commands::update(&store, stage_only, cli.json).await,
-        Command::Logout => commands::logout(&store),
+        Command::Logout { yes } => commands::logout(&store, yes),
         Command::Account { action } => match action {
             AccountAction::Login { no_browser } => {
                 commands::account_login(&store, no_browser, cli.json).await
