@@ -189,7 +189,8 @@ pub(crate) async fn enroll_core(
         // environment or the config file, and never something enrollment
         // hands a contributor.
         inference_receipt_endpoint: crate::config::inference_receipt_endpoint_from_env(),
-        inference_receipt_check_attestation: false,
+        inference_receipt_check_attestation:
+            crate::config::inference_receipt_check_attestation_from_env(),
     };
     store
         .save_config(&cfg)
@@ -2658,7 +2659,8 @@ async fn enroll_with_invite_core(
         // environment or the config file, and never something enrollment
         // hands a contributor.
         inference_receipt_endpoint: crate::config::inference_receipt_endpoint_from_env(),
-        inference_receipt_check_attestation: false,
+        inference_receipt_check_attestation:
+            crate::config::inference_receipt_check_attestation_from_env(),
     };
     store
         .save_config(&cfg)

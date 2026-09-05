@@ -267,19 +267,34 @@ struct InferenceReceiptBody {
     /// every receipt issued before this field existed is ECDSA, and a
     /// witness that required the field would refuse every existing client.
     /// An unrecognised value is a malformed request, never a guess.
-    #[serde(default)]
-    signing_algo: Option<String>,
+    ///
+    /// Absent reads as ECDSA (the pre-field shape). An explicit `null` does
+    /// NOT: the client refuses it as malformed, and the witness matches. The
+    /// double `Option` is what lets serde tell the two apart -- outer `None`
+    /// is absent, inner `None` is null.
+    #[serde(default, deserialize_with = "deserialize_present")]
+    signing_algo: Option<Option<String>>,
+}
+
+/// Distinguishes an absent field from a present-but-`null` one: plain
+/// `Option<T>` deserialization collapses both to `None`, which is exactly
+/// the ambiguity `signing_algo` must not have.
+fn deserialize_present<'de, D>(d: D) -> Result<Option<Option<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<String>::deserialize(d).map(Some)
 }
 
 impl TryFrom<InferenceReceiptBody> for ReceiptPayload {
     type Error = Refusal;
 
     fn try_from(body: InferenceReceiptBody) -> Result<Self, Refusal> {
-        let signing_algo = match body.signing_algo.as_deref() {
+        let malformed = || Refusal::new(StatusCode::BAD_REQUEST, "witness_request_malformed");
+        let signing_algo = match body.signing_algo {
             None => ReceiptAlgo::Ecdsa,
-            Some(s) => ReceiptAlgo::from_wire(s).ok_or_else(|| {
-                Refusal::new(StatusCode::BAD_REQUEST, "witness_request_malformed")
-            })?,
+            Some(None) => return Err(malformed()),
+            Some(Some(s)) => ReceiptAlgo::from_wire(&s).ok_or_else(malformed)?,
         };
         Ok(ReceiptPayload {
             text: body.text,
@@ -1810,6 +1825,20 @@ mod tests {
                 assert_eq!(refusal.code, "witness_request_malformed");
             }
             Ok(_) => panic!("an unknown scheme is a refusal, never a default"),
+        }
+
+        // An explicit `null` is not absence: the client refuses it as
+        // malformed rather than guessing ECDSA, and the witness must match.
+        let null: InferenceReceiptBody = serde_json::from_value(serde_json::json!({
+            "text": "a:b", "signature": "cc", "signing_address": "0xdd", "signing_algo": null
+        }))
+        .unwrap();
+        match ReceiptPayload::try_from(null) {
+            Err(refusal) => {
+                assert_eq!(refusal.status, StatusCode::BAD_REQUEST);
+                assert_eq!(refusal.code, "witness_request_malformed");
+            }
+            Ok(_) => panic!("an explicit null signing_algo is a refusal, never ECDSA"),
         }
     }
 }

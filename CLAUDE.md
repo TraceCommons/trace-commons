@@ -127,8 +127,8 @@ carries the full statement of it; the essentials are repeated here.
   these crates carries a two-line copyright + SPDX header; new files need one.
 - **MIT OR Apache-2.0**: everything else (`-protocol`, `-contributor`,
   `-contributor-ffi`, `-contributor-gtk`, `-operator-client`, `-mark`,
-  `-build-info`). These ship inside proprietary agent harnesses and must stay
-  permissive.
+  `-build-info`, `-attestation`). These ship inside proprietary agent harnesses
+  and must stay permissive.
 
 **Contributions are licensed inbound under `MIT OR Apache-2.0`**, including to
 the AGPL crates -- deliberately not "inbound = outbound", so the project keeps

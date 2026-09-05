@@ -399,8 +399,13 @@ pub fn check_inference_attestation(
     // The verdict is discarded rather than inspected. Its `model` is `None`
     // for every receipt the provider signs today, its hashes are the ones just
     // checked, and its `signing_address` is the inference enclave's key --
-    // which this witness does not pin, because it has no attested value to pin
-    // it against and a self-reported one would prove nothing.
+    // which this witness does not pin TODAY. An attested value now exists:
+    // NEAR AI's attestation report binds the gateway's ed25519 signing key
+    // into a TDX quote, and the contributor's opt-in check compares against
+    // it. Pinning it here -- as deployment configuration, the way ingest pins
+    // this witness's own key -- is the follow-up that would make the check
+    // bind at the enforcement point rather than in a client that can be
+    // patched.
     verify_receipt(
         receipt,
         request_body.as_bytes(),
