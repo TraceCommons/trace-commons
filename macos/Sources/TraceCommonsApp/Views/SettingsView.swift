@@ -90,6 +90,12 @@ struct SettingsContent: View {
     /// the name to be looked up from a selection that has already moved.
     @State private var armingCandidate: ProjectRow?
 
+    /// The consent list's one failure line, and whether a write is in
+    /// flight. The rows read the daemon's own answer, so there is no draft
+    /// to hold here -- only the refusal, until the next press clears it.
+    @State private var consentSaveError: String?
+    @State private var consentBusy = false
+
     /// Spec §5.4: the Settings content column is `max-width:520px` ("prose
     /// column, kept narrow on purpose"), narrower than the 660 that
     /// `TC.Measure.prose` carries for onboarding. There is no token for it,
@@ -390,37 +396,57 @@ struct SettingsContent: View {
                 // carries, and refusing here would refuse contributors the
                 // server would have allowed.
             }
-            Text("""
-            Changing permissions needs an enrolled account, which this build does \
-            not set up yet, so these show what is in force rather than offering to \
-            change it. Nothing here is pre-selected on your behalf.
-            """)
-            .font(TC.Font_.caption)
-            .foregroundStyle(.secondary)
+            if let consentSaveError {
+                Text(consentSaveError)
+                    .font(TC.Font_.caption)
+                    .foregroundStyle(TC.coralText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Text("Nothing here is pre-selected on your behalf.")
+                .font(TC.Font_.caption)
+                .foregroundStyle(.secondary)
         }
     }
 
+    /// One scope, as a row that can be ticked.
+    ///
+    /// The tick reflects `status.consent_scopes` -- what the daemon reports
+    /// is in force -- never a local copy of it, so nothing optional can
+    /// show as granted that the daemon does not hold. A press writes the
+    /// whole list back through `set_consent_scopes` and the row follows the
+    /// daemon's answer; a refusal is one line above, with the tick
+    /// unchanged. The footnote this replaced said changing permissions
+    /// needed an account this build did not set up, which had stopped
+    /// being true the day onboarding enrolled one.
     private func scopeRow(_ scope: ConsentScope, checked: Bool, alwaysOn: Bool) -> some View {
-        HStack(alignment: .top, spacing: TC.Space.m) {
-            TCReadGateCheckbox(checked: checked)
-            VStack(alignment: .leading, spacing: TC.Space.xxs) {
-                HStack(spacing: TC.Space.s) {
-                    Text(ScopeCopy.title(for: scope.name, options: model.consentScopes))
-                        .font(TC.Font_.cardTitle)
-                    if alwaysOn {
-                        TCTag(text: "always on", tone: .clear, symbol: "lock")
+        Button {
+            guard !alwaysOn else { return }
+            setScope(scope, granted: !checked)
+        } label: {
+            HStack(alignment: .top, spacing: TC.Space.m) {
+                TCReadGateCheckbox(checked: checked)
+                VStack(alignment: .leading, spacing: TC.Space.xxs) {
+                    HStack(spacing: TC.Space.s) {
+                        Text(ScopeCopy.title(for: scope.name, options: model.consentScopes))
+                            .font(TC.Font_.cardTitle)
+                        if alwaysOn {
+                            TCTag(text: "always on", tone: .clear, symbol: "lock")
+                        }
                     }
+                    Text(scope.description)
+                        .font(TC.Font_.body)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
-                Text(scope.description)
-                    .font(TC.Font_.body)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 0)
             }
-            Spacer(minLength: 0)
+            .padding(TC.Space.m)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .tcCard()
+            .contentShape(Rectangle())
         }
-        .padding(TC.Space.m)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .tcCard()
+        .buttonStyle(.plain)
+        .disabled(alwaysOn || consentBusy)
         // `TCReadGateCheckbox` is drawn, and drawn shapes are hidden from
         // VoiceOver, so without this a scope announces its title and
         // description with no indication of whether it is granted. The row
@@ -429,6 +455,32 @@ struct SettingsContent: View {
         .accessibilityElement(children: .combine)
         .accessibilityValue(checked ? "Granted" : "Not granted")
         .accessibilityAddTraits(checked ? [.isSelected] : [])
+    }
+
+    /// Adds or removes one optional scope. The list sent is the always-on
+    /// scopes plus everything the daemon currently reports granted, with
+    /// this one added or taken out -- built from the daemon's list, not
+    /// from the ticks on screen, so two quick presses cannot race each
+    /// other into dropping a scope neither touched.
+    private func setScope(_ scope: ConsentScope, granted: Bool) {
+        var scopes = Set(model.status.consentScopes)
+        scopes.formUnion(model.consentScopes.filter(\.alwaysOn).map(\.name))
+        if granted {
+            scopes.insert(scope.name)
+        } else {
+            scopes.remove(scope.name)
+        }
+        consentSaveError = nil
+        consentBusy = true
+        Task {
+            switch await model.setConsentScopes(Array(scopes)) {
+            case .succeeded:
+                break
+            case .failed:
+                consentSaveError = "Couldn't change that -- the watcher may not be running. Try again."
+            }
+            consentBusy = false
+        }
     }
 
     // MARK: - Public profile (spec §5.6)
