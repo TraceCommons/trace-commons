@@ -3010,11 +3010,80 @@ fn daemon_shared(store: &ConfigStore) -> Result<DaemonShared> {
 /// `daemon::client`'s module doc for the full list of what silently did not
 /// work before this.
 fn daemon_call(store: &ConfigStore, method: &str, params: serde_json::Value) -> Result<Response> {
+    daemon_call_probed(store, method, params).map(|(resp, _)| resp)
+}
+
+/// Which of `daemon_call`'s two paths answered.
+///
+/// The two answers look the same on the wire and used to be rendered the
+/// same, which is how `daemon status` came to print `health: ok` beside
+/// `logged in: no` on a machine that had never started a daemon: the
+/// fallback loads a fresh `HealthState::default()` and nothing said so.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DaemonLiveness {
+    /// A running daemon answered over its socket.
+    Running,
+    /// Nothing is listening; the answer came from the state files, which
+    /// are what the next daemon start will load.
+    NotRunning,
+}
+
+/// `daemon_call`, also saying which path answered. The commands whose
+/// meaning changes with that -- `status`, `pause`, `resume` -- use this
+/// one; everything else keeps `daemon_call`.
+fn daemon_call_probed(
+    store: &ConfigStore,
+    method: &str,
+    params: serde_json::Value,
+) -> Result<(Response, DaemonLiveness)> {
     match crate::daemon::client::try_call(store, method, &params)? {
-        Some(resp) => Ok(resp),
+        Some(resp) => Ok((resp, DaemonLiveness::Running)),
         None => {
             let shared = daemon_shared(store)?;
-            Ok(handle_local(&shared, method, params))
+            Ok((
+                handle_local(&shared, method, params),
+                DaemonLiveness::NotRunning,
+            ))
+        }
+    }
+}
+
+/// The first line of a human `daemon status`.
+pub(crate) fn daemon_liveness_line(liveness: DaemonLiveness) -> &'static str {
+    match liveness {
+        DaemonLiveness::Running => "daemon:      running",
+        DaemonLiveness::NotRunning => {
+            "daemon:      not running (showing the state the next start will load)"
+        }
+    }
+}
+
+/// Add `daemon_running` to a status result. Additive: every existing field
+/// is untouched, so a `--json` caller parsing the old shape keeps working.
+/// An error response has no result to annotate and passes through.
+pub(crate) fn annotate_daemon_running(mut resp: Response, liveness: DaemonLiveness) -> Response {
+    if let Some(serde_json::Value::Object(map)) = resp.result.as_mut() {
+        map.insert(
+            "daemon_running".to_string(),
+            serde_json::Value::Bool(liveness == DaemonLiveness::Running),
+        );
+    }
+    resp
+}
+
+/// What `daemon pause` / `daemon resume` print. Against a stopped daemon
+/// the flag was written to the state files, which is real but takes effect
+/// only at the next start, and "paused" alone read as if something running
+/// had just stopped.
+pub(crate) fn daemon_pause_line(paused: bool, liveness: DaemonLiveness) -> String {
+    match (paused, liveness) {
+        (true, DaemonLiveness::Running) => "paused".to_string(),
+        (false, DaemonLiveness::Running) => "running".to_string(),
+        (true, DaemonLiveness::NotRunning) => {
+            "paused (no daemon is running; recorded for the next daemon start)".to_string()
+        }
+        (false, DaemonLiveness::NotRunning) => {
+            "not paused (no daemon is running; recorded for the next daemon start)".to_string()
         }
     }
 }
@@ -3052,9 +3121,11 @@ fn render(resp: Response, json: bool, table: impl FnOnce(&serde_json::Value)) ->
 /// persisted -- so this command printed `health: ok` unconditionally, even
 /// while the daemon was refusing every upload.
 pub fn daemon_status(store: &ConfigStore, json: bool) -> Result<()> {
-    let resp = daemon_call(store, "status", serde_json::json!({}))?;
+    let (resp, liveness) = daemon_call_probed(store, "status", serde_json::json!({}))?;
+    let resp = annotate_daemon_running(resp, liveness);
     render(resp, json, |v| {
         let health = &v["health"];
+        println!("{}", daemon_liveness_line(liveness));
         println!(
             "logged in:   {}",
             if v["logged_in"] == true { "yes" } else { "no" }
@@ -3346,20 +3417,14 @@ pub fn daemon_audit(store: &ConfigStore, limit: usize, json: bool) -> Result<()>
 }
 
 pub fn daemon_pause(store: &ConfigStore, pause: bool, json: bool) -> Result<()> {
-    let resp = daemon_call(
+    let (resp, liveness) = daemon_call_probed(
         store,
         if pause { "pause" } else { "resume" },
         serde_json::json!({}),
     )?;
+    let resp = annotate_daemon_running(resp, liveness);
     render(resp, json, |v| {
-        println!(
-            "{}",
-            if v["paused"] == true {
-                "paused"
-            } else {
-                "running"
-            }
-        );
+        println!("{}", daemon_pause_line(v["paused"] == true, liveness));
     })
 }
 
@@ -4307,6 +4372,68 @@ mod submit_scope_tests {
         assert_eq!(
             submit_selection_mode(false, false, true, false),
             SubmitSelectionMode::Picker
+        );
+    }
+}
+
+#[cfg(test)]
+mod daemon_liveness_tests {
+    use super::*;
+
+    // `daemon status` used to answer identically whether it had asked a
+    // running daemon or loaded the state files itself, and printed
+    // `health: ok` beside `logged in: no` on a machine with no daemon at
+    // all. The first line now says which it was.
+
+    #[test]
+    fn the_status_first_line_says_whether_a_daemon_answered() {
+        assert_eq!(
+            daemon_liveness_line(DaemonLiveness::Running),
+            "daemon:      running"
+        );
+        assert_eq!(
+            daemon_liveness_line(DaemonLiveness::NotRunning),
+            "daemon:      not running (showing the state the next start will load)"
+        );
+    }
+
+    #[test]
+    fn json_status_gains_daemon_running_without_touching_existing_fields() {
+        let resp = Response::ok(1, serde_json::json!({"logged_in": false, "paused": true}));
+        let v = annotate_daemon_running(resp, DaemonLiveness::NotRunning)
+            .result
+            .unwrap();
+        assert_eq!(v["daemon_running"], false);
+        assert_eq!(v["logged_in"], false);
+        assert_eq!(v["paused"], true);
+        assert_eq!(v.as_object().unwrap().len(), 3);
+
+        let resp = Response::ok(1, serde_json::json!({}));
+        let v = annotate_daemon_running(resp, DaemonLiveness::Running)
+            .result
+            .unwrap();
+        assert_eq!(v["daemon_running"], true);
+    }
+
+    #[test]
+    fn an_error_response_is_left_alone() {
+        let resp = Response::err(1, "nope", "no");
+        let out = annotate_daemon_running(resp, DaemonLiveness::Running);
+        assert!(out.result.is_none());
+        assert_eq!(out.error.unwrap().code, "nope");
+    }
+
+    #[test]
+    fn pause_and_resume_say_when_they_only_primed_the_next_start() {
+        assert_eq!(daemon_pause_line(true, DaemonLiveness::Running), "paused");
+        assert_eq!(daemon_pause_line(false, DaemonLiveness::Running), "running");
+        assert_eq!(
+            daemon_pause_line(true, DaemonLiveness::NotRunning),
+            "paused (no daemon is running; recorded for the next daemon start)"
+        );
+        assert_eq!(
+            daemon_pause_line(false, DaemonLiveness::NotRunning),
+            "not paused (no daemon is running; recorded for the next daemon start)"
         );
     }
 }
