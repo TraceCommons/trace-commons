@@ -41,6 +41,7 @@ struct OnboardingDoneContent: View {
     @State private var notificationStatus: UNAuthorizationStatus?
     @State private var notificationOfferDismissed = false
     @State private var notificationsAllowed: Bool?
+    @State private var notificationRequestPending = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: TC.Space.xl) {
@@ -59,9 +60,8 @@ struct OnboardingDoneContent: View {
             // lives in the menu bar would not think to look there.
             Text("""
             Trace Commons lives in your menu bar, and it has a Dock icon too. When a \
-            session finishes and goes quiet for 30 minutes, it'll show up there. \
-            You'll get at most one notification every 4 hours, and none at all if \
-            there's nothing waiting.
+            session finishes and goes quiet, it will appear for review. Notification \
+            timing follows your reminder settings.
             """)
             .font(.body)
 
@@ -69,6 +69,7 @@ struct OnboardingDoneContent: View {
             notificationOffer
 
             Button("Done", action: onFinish)
+                .disabled(notificationRequestPending)
                 .tcPrimaryAction()
                 .keyboardShortcut(.defaultAction)
         }
@@ -108,10 +109,16 @@ struct OnboardingDoneContent: View {
                     }
                     .tint(.primary)
                     Button("Allow notifications") {
-                        Task { notificationsAllowed = await Notifier.shared.requestAuthorization() }
+                        guard !notificationRequestPending else { return }
+                        notificationRequestPending = true
+                        Task {
+                            notificationsAllowed = await Notifier.shared.requestAuthorization()
+                            notificationRequestPending = false
+                        }
                     }
                     .tcPrimaryAction()
                 }
+                .disabled(notificationRequestPending)
             }
             .padding(TC.Space.l)
             .frame(maxWidth: .infinity, alignment: .leading)

@@ -50,6 +50,7 @@ struct SettingsContent: View {
     /// Nil until the system has answered, and nil for good where there is
     /// no notification centre to ask; the section renders nothing then.
     @State private var notificationStatus: UNAuthorizationStatus?
+    @State private var notificationRequestPending = false
     @State private var showingGoPublic = false
     @State private var showingInferenceDisclosure = false
     /// The panel's two editable fields. Seeded from the daemon's answer --
@@ -128,6 +129,9 @@ struct SettingsContent: View {
             model.refreshAudit()
         }
         .task { notificationStatus = await Notifier.shared.authorizationStatus() }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            Task { notificationStatus = await Notifier.shared.authorizationStatus() }
+        }
         .sheet(isPresented: $showingGoPublic) {
             // Handed the model explicitly rather than relying on the sheet
             // inheriting it: the dialog now makes a daemon call, and an
@@ -268,12 +272,16 @@ struct SettingsContent: View {
                 case .notDetermined:
                     checkRow("Not asked yet", false)
                     Button("Allow notifications") {
+                        guard !notificationRequestPending else { return }
+                        notificationRequestPending = true
                         Task {
+                            defer { notificationRequestPending = false }
                             _ = await Notifier.shared.requestAuthorization()
                             notificationStatus = await Notifier.shared.authorizationStatus()
                         }
                     }
                     .buttonStyle(.bordered)
+                    .disabled(notificationRequestPending)
                 @unknown default:
                     checkRow("Notifications allowed", false)
                 }

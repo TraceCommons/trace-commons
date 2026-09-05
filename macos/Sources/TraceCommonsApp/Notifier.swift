@@ -78,7 +78,7 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
     }
 
     /// Where the contributor turns notifications back on after saying no.
-    /// The pane URL is the one macOS 13+ opens for this app's row.
+    /// The pane URL opens macOS notification settings.
     static let systemSettingsURL = URL(
         string: "x-apple.systempreferences:com.apple.Notifications-Settings.extension"
     )!
@@ -86,8 +86,8 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
     /// The one sentence that says what a notification from this app is.
     /// Shown above the permission button on the Done screen and in Settings.
     static let purpose =
-        "Notifications are how this app tells you sessions are waiting for review: "
-        + "at most one every 4 hours, and none at all if nothing is waiting."
+        "Notifications tell you about sessions waiting for review and recent contributions. "
+        + "They never submit a session for you."
 
     /// The 4-hour digest. Passive, so Focus and Do Not Disturb hold it.
     ///
