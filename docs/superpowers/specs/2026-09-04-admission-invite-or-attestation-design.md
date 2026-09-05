@@ -1,10 +1,12 @@
 # Admission: an invite or attested inference
 
-**Status:** design in progress; admission changes are unimplemented. The user
-has authorized a worktree, a subagent implementation plan, and work on native
-onboarding. That scope authorizes the native foundation and this design work;
-it does not settle the subsidy amounts, credit redemption terms, or broad
-admission enablement proposed below.
+**Status:** implemented locally in the `native-onboarding-admission` worktree,
+with admission disabled unless explicitly configured. The implementation includes
+NEAR device provisioning, account-bound evidence, PostgreSQL admission budgets,
+and native onboarding. See the [validation record](../plans/2026-09-04-native-onboarding-validation.md)
+for tested behavior and platform limits. Live pilot validation, operator-selected
+economic limits, and provider credit redemption remain release prerequisites;
+no live deployment or subsidy enablement is claimed.
 
 Today admission to Trace Commons is by invite. The proposed alternative is
 **an invite or qualifying attested inference for each submission**, plus a
@@ -208,11 +210,10 @@ inference funds, verified receipts, or successful redemption. The initial
 consent slice exposes the existing attested-body contribution setting across
 native shells; it does not establish capture or activation readiness.
 
-The enrolled native preview/upload path currently refuses a configured witness
-with `witness_claim_unavailable`: it cannot obtain the upload claim needed to
-build the witness envelope (`daemon/preview.rs`). Resolve that claim acquisition
-and envelope construction path, preserving its fail-closed behavior, before
-claiming that the native invited pilot can complete attested contribution.
+The native preview/upload implementation now acquires a scoped upload claim,
+verifies the witness, saves the exact certified artifact, and reopens those bytes
+for approval and upload. It refuses changed source, permission, configuration,
+or approved answers; it does not silently rebuild an approved artifact.
 
 Before opening a subsidized window or attestation admission, require:
 
@@ -227,7 +228,7 @@ Before opening a subsidized window or attestation admission, require:
 - Explicit selection of economic limits and operator enablement; admission
   remains disabled when any required control is absent.
 
-## Acceptance tests for the future admission implementation
+## Admission acceptance requirements
 
 1. An unknown NEAR login cannot create an account or tenant. Invalid wallet
    signatures and missing ownership controls fail without provisioning state.

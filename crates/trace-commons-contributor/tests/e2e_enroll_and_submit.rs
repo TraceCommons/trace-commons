@@ -717,7 +717,7 @@ impl Database for InMemoryEnrollDb {
                 device_key_id: p.device_key_id,
                 tenant_id: p.tenant_id,
                 public_key: p.public_key,
-                invite_subject_hash: p.instance_subject_hash,
+                invite_subject_hash: Some(p.instance_subject_hash),
                 client_info: p.client_info,
                 created_at: Utc::now(),
                 revoked_at: None,
