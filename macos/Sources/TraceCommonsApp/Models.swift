@@ -158,7 +158,7 @@ struct DaemonStatus: Decodable, Equatable {
     let schemaVersion: String
     let loggedIn: Bool
     let tenantID: String?
-    let consentScopes: [String]
+    var consentScopes: [String]
     let paused: Bool
     let queueDepth: Int
     let nextDigestAt: Date?

@@ -96,12 +96,11 @@ struct SettingsContent: View {
     @State private var consentSaveError: String?
     @State private var consentBusy = false
 
-    /// What discovery found for the "Watched folders" rows, and the paths
-    /// this process has declared from them. `get_settings` reports modes,
-    /// not paths, so the path a row shows is remembered here from the
-    /// write that sent it and is otherwise not known.
+    /// Discovery candidates are suggestions, never the configured path.
+    /// The daemon reports modes only; Settings therefore displays modes.
     @State private var sourceCandidates: [SourceCandidate] = []
-    @State private var chosenPaths: [SourceKind: String] = [:]
+    @State private var sourceBusy = false
+    @State private var sourceSaveFailed = false
 
     /// Spec §5.4: the Settings content column is `max-width:520px` ("prose
     /// column, kept narrow on purpose"), narrower than the 660 that
@@ -454,7 +453,7 @@ struct SettingsContent: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .disabled(alwaysOn || consentBusy)
+        .disabled(alwaysOn || consentBusy || !model.status.loggedIn)
         // `TCReadGateCheckbox` is drawn, and drawn shapes are hidden from
         // VoiceOver, so without this a scope announces its title and
         // description with no indication of whether it is granted. The row
@@ -471,6 +470,7 @@ struct SettingsContent: View {
     /// from the ticks on screen, so two quick presses cannot race each
     /// other into dropping a scope neither touched.
     private func setScope(_ scope: ConsentScope, granted: Bool) {
+        guard !consentBusy, model.status.loggedIn, !scope.alwaysOn else { return }
         var scopes = Set(model.status.consentScopes)
         scopes.formUnion(model.consentScopes.filter(\.alwaysOn).map(\.name))
         if granted {
@@ -756,9 +756,8 @@ struct SettingsContent: View {
     /// Save, because each row is one declaration and the daemon applies it
     /// in the same call. What a row shows is the MODE the daemon reports
     /// (`*_source_mode`), which is all `get_settings` says: it never
-    /// reports the path, so a folder declared before this window opened
-    /// shows as "Watching" with no path, and one chosen here shows the path
-    /// this process just sent. The same explanation the roots screen gives
+    /// reports the path, so a watched folder shows as "Watching" with no
+    /// path, including after a write. The same explanation the roots screen gives
     /// applies, and is given, because a blank Claude Code or Codex row still
     /// means the standard location.
     private var watchedFolders: some View {
@@ -771,8 +770,8 @@ struct SettingsContent: View {
             .font(TC.Font_.meta)
             .foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)
-            if let error = model.lastActionError, error.hasPrefix("set_settings") {
-                Text("Couldn't change that folder -- the watcher refused it. Nothing was changed.")
+            if sourceSaveFailed {
+                Text("Couldn't confirm that folder change. Check the current setting and try again.")
                     .font(TC.Font_.caption)
                     .foregroundStyle(TC.coralText)
                     .fixedSize(horizontal: false, vertical: true)
@@ -783,26 +782,33 @@ struct SettingsContent: View {
                     candidate: sourceCandidates.first { $0.source == kind },
                     choice: sourceChoice(for: kind),
                     onWatchCandidate: { candidate in
-                        chosenPaths[kind] = candidate.path
-                        model.setSourceRoot(kind, .watch(path: candidate.path))
+                        saveSource(kind, .watch(path: candidate.path))
                     },
                     onChoose: { path in
-                        chosenPaths[kind] = path
-                        model.setSourceRoot(kind, .watch(path: path))
+                        saveSource(kind, .watch(path: path))
                     },
                     onDecline: {
-                        chosenPaths[kind] = nil
-                        model.setSourceRoot(kind, .off)
+                        saveSource(kind, .off)
                     }
                 )
             }
         }
+        .disabled(sourceBusy)
         .onAppear(perform: discoverSources)
     }
 
+    private func saveSource(_ kind: SourceKind, _ choice: SourceChoice) {
+        guard !sourceBusy else { return }
+        sourceBusy = true
+        sourceSaveFailed = false
+        Task {
+            sourceSaveFailed = !(await model.setSourceRoot(kind, choice))
+            sourceBusy = false
+        }
+    }
+
     /// The daemon's answer for one source, as the row shows it. The path
-    /// is the one this process sent, if it sent one; otherwise the daemon
-    /// only says that a folder is watched.
+    /// is deliberately absent: the daemon only says that a folder is watched.
     private func sourceChoice(for kind: SourceKind) -> SourceChoice {
         guard let modes = model.daemonSettings?.routingSourceModes else { return .undecided }
         let mode: String
@@ -813,7 +819,7 @@ struct SettingsContent: View {
         case .cline: mode = modes.cline
         }
         switch mode {
-        case "watch": return .watch(path: chosenPaths[kind] ?? "")
+        case "watch": return .watch(path: "")
         case "off": return .off
         default: return .undecided
         }
