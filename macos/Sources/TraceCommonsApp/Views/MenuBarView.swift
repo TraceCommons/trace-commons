@@ -44,17 +44,15 @@ struct MenuBarLabel: View {
         MenuBarStatus.state(
             decisionsOwed: model.decisionsOwed,
             unhealthy: model.health != nil,
-            paused: model.status.paused
+            paused: model.status.paused,
+            available: model.startup == .running
         )
     }
 
     private var accessibilityLabel: String {
-        if model.decisionsOwed > 0 {
-            return "Trace Commons. ^[\(model.decisionsOwed) session](inflect: true) waiting for your decision."
-        }
-        if model.health != nil { return "Trace Commons. Needs attention." }
-        if model.status.paused { return "Trace Commons. Paused." }
-        return "Trace Commons. Nothing waiting."
+        MenuBarStatus.accessibilityLabel(
+            decisionsOwed: model.decisionsOwed, unhealthy: model.health != nil,
+            paused: model.status.paused, available: model.startup == .running)
     }
 }
 
@@ -62,14 +60,11 @@ struct MenuBarLabel: View {
 /// can be rendered off a fixture -- the screenshot hook and the label test
 /// both do -- without an `AppModel`.
 ///
-/// Everything here is drawn in `.primary`, and the badge's digits are cut
-/// OUT of the capsule rather than painted in a second colour. That is what
-/// lets the whole item behave as one template image: the system recolours
-/// `.primary` across the menu bar's light, dark and selected states, and a
-/// knocked-out digit shows whatever the bar is showing behind it, which is
-/// the only colour guaranteed to contrast with the capsule in all three.
+/// The badge uses an opaque black/white pair rather than transparent digits.
+/// Its contrast is independent of the wallpaper behind the translucent menu bar.
 struct MenuBarGlyph: View {
     let state: MenuBarState
+    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         HStack(spacing: TC.Space.xxs) {
@@ -86,12 +81,11 @@ struct MenuBarGlyph: View {
             // bracket, which a trailing-pinned "12" was found to do.
             HStack(alignment: .top, spacing: -TC.MenuBar.badgeOverlap) {
                 BrandMark(size: TC.MenuBar.mark, variant: .template)
-                    .opacity(state == .paused ? 0.5 : 1)
-                if case .count(let text) = state {
+                    .opacity(state.isPaused ? 0.5 : 1)
+                if case .count(let text, _) = state {
                     // The halo punches a clear ring out of whatever the
                     // capsule touches so it sits on the mark instead of
-                    // merging with a stroke; the digits then punch out of
-                    // the capsule.
+                    // merging with a stroke. Digits have an opaque backdrop.
                     badge(text)
                         .offset(y: -TC.MenuBar.badgeOverhang)
                 }
@@ -130,8 +124,8 @@ struct MenuBarGlyph: View {
             .padding(.horizontal, TC.MenuBar.badgeInset)
             .frame(minWidth: TC.MenuBar.badgeHeight)
             .frame(height: TC.MenuBar.badgeHeight)
-            .blendMode(.destinationOut)
-            .background(Capsule().fill(.primary))
+            .foregroundStyle(colorScheme == .dark ? Color.black : Color.white)
+            .background(Capsule().fill(colorScheme == .dark ? Color.white : Color.black))
             .background(
                 Capsule()
                     .fill(.primary)

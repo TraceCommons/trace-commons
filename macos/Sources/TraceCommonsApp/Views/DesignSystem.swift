@@ -284,7 +284,7 @@ enum TC {
         /// anything else countable. Was `footnote`-sized mono (10pt).
         static let ledger = Font.system(.callout, design: .monospaced)
             .weight(.medium)
-        /// The status item's count, knocked out of a 10pt capsule. Rounded
+        /// The status item's count, drawn against an opaque 10pt capsule. Rounded
         /// and bold because at this size a hairline digit disappears when
         /// it is drawn in reverse.
         static let menuBarBadge = Font.system(size: 8, weight: .bold, design: .rounded)

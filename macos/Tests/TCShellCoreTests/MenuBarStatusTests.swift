@@ -24,7 +24,7 @@ final class MenuBarStatusTests: XCTestCase {
     func testACountOutranksEverything() {
         XCTAssertEqual(
             MenuBarStatus.state(decisionsOwed: 3, unhealthy: true, paused: true),
-            .count("3")
+            .count("3", paused: true)
         )
     }
 
@@ -47,5 +47,16 @@ final class MenuBarStatusTests: XCTestCase {
             MenuBarStatus.state(decisionsOwed: 0, unhealthy: false, paused: false),
             .idle
         )
+    }
+    func testPausedCountKeepsDimmingAndAccessiblePause() {
+        let state = MenuBarStatus.state(decisionsOwed: 3, unhealthy: false, paused: true)
+        XCTAssertTrue(state.isPaused)
+        XCTAssertTrue(MenuBarStatus.accessibilityLabel(decisionsOwed: 123, unhealthy: false, paused: true).contains("123 sessions"))
+        XCTAssertTrue(MenuBarStatus.accessibilityLabel(decisionsOwed: 3, unhealthy: false, paused: true).hasSuffix("Paused."))
+    }
+
+    func testUnavailableWatcherDoesNotPresentStaleCount() {
+        XCTAssertEqual(MenuBarStatus.state(decisionsOwed: 3, unhealthy: false, paused: false, available: false), .attention)
+        XCTAssertFalse(MenuBarStatus.accessibilityLabel(decisionsOwed: 3, unhealthy: false, paused: false, available: false).contains("3"))
     }
 }

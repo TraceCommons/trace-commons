@@ -18,7 +18,7 @@ final class MenuBarGlyphRenderTests: XCTestCase {
     }
 
     @MainActor
-    private func render(_ state: MenuBarState, scheme: ColorScheme) -> Rendered? {
+    private func render(_ state: MenuBarState, scheme: ColorScheme, scale: CGFloat) -> Rendered? {
         // A 22pt band, the menu bar's own height, so the capture shows the
         // item at the vertical room it actually gets.
         let renderer = ImageRenderer(
@@ -28,7 +28,7 @@ final class MenuBarGlyphRenderTests: XCTestCase {
                 .background(scheme == .dark ? Color.black : Color.white)
                 .environment(\.colorScheme, scheme)
         )
-        renderer.scale = 2
+        renderer.scale = scale
         guard let image = renderer.nsImage,
               let tiff = image.tiffRepresentation,
               let rep = NSBitmapImageRep(data: tiff),
@@ -57,27 +57,30 @@ final class MenuBarGlyphRenderTests: XCTestCase {
             ("0", .idle),
             ("3", .count("3")),
             ("12", .count("12")),
+            ("3-paused", .count("3", paused: true)),
             ("120", .count(try XCTUnwrap(MenuBarStatus.badgeText(decisionsOwed: 120)))),
             ("paused", .paused),
             ("health", .attention),
         ]
         var inked: [String: Int] = [:]
-        for scheme in [ColorScheme.light, .dark] {
-            for (name, state) in cases {
-                let rendered = try XCTUnwrap(render(state, scheme: scheme), "\(name) did not render")
-                let suffix = scheme == .dark ? "-dark" : ""
-                let path = outputDirectory.appendingPathComponent("menubar-label-\(name)\(suffix).png")
-                try rendered.png.write(to: path)
-                if scheme == .light { inked[name] = rendered.inked }
+        for scale in [CGFloat(1), 2] {
+            for scheme in [ColorScheme.light, .dark] {
+                for (name, state) in cases {
+                    let rendered = try XCTUnwrap(render(state, scheme: scheme, scale: scale), "\(name) did not render")
+                    let suffix = scheme == .dark ? "-dark" : ""
+                    let path = outputDirectory.appendingPathComponent("menubar-label-\(name)\(suffix)-\(Int(scale))x.png")
+                    try rendered.png.write(to: path)
+                    inked[name] = rendered.inked
+                }
+                let idle = try XCTUnwrap(inked["0"])
+                XCTAssertGreaterThan(idle, 0, "the mark itself must draw")
+                for name in ["3", "12", "120", "paused", "health"] {
+                    XCTAssertNotEqual(inked[name], idle, "\(name) must draw something the idle mark does not")
+                }
+                XCTAssertGreaterThan(try XCTUnwrap(inked["120"]), try XCTUnwrap(inked["12"]))
+                XCTAssertNotEqual(inked["health"], inked["paused"])
+                XCTAssertNotEqual(inked["3"], inked["3-paused"])
             }
         }
-        let idle = try XCTUnwrap(inked["0"])
-        XCTAssertGreaterThan(idle, 0, "the mark itself must draw")
-        for name in ["3", "12", "120", "paused", "health"] {
-            XCTAssertNotEqual(inked[name], idle, "\(name) must draw something the idle mark does not")
-        }
-        // "120" is drawn as "99+", which is wider than "12" and so carries
-        // more capsule.
-        XCTAssertGreaterThan(try XCTUnwrap(inked["120"]), try XCTUnwrap(inked["12"]))
     }
 }

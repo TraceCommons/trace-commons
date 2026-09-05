@@ -10,10 +10,18 @@ import Foundation
 /// state anybody can read.
 public enum MenuBarState: Equatable {
     /// The badge text, already formatted -- see `MenuBarStatus.badgeText`.
-    case count(String)
+    case count(String, paused: Bool = false)
     case attention
     case paused
     case idle
+
+    public var isPaused: Bool {
+        switch self {
+        case .paused: return true
+        case .count(_, let paused): return paused
+        default: return false
+        }
+    }
 }
 
 public enum MenuBarStatus {
@@ -31,10 +39,23 @@ public enum MenuBarStatus {
     /// Precedence: count, then unhealthy, then paused, then idle. A paused
     /// watcher with three decisions waiting shows the three; the pause is
     /// stated in the menu, and the mark dims either way.
-    public static func state(decisionsOwed: Int, unhealthy: Bool, paused: Bool) -> MenuBarState {
-        if let text = badgeText(decisionsOwed: decisionsOwed) { return .count(text) }
+    public static func state(decisionsOwed: Int, unhealthy: Bool, paused: Bool, available: Bool = true) -> MenuBarState {
+        guard available else { return .attention }
+        if let text = badgeText(decisionsOwed: decisionsOwed) { return .count(text, paused: paused) }
         if unhealthy { return .attention }
         if paused { return .paused }
         return .idle
+    }
+}
+
+public extension MenuBarStatus {
+    static func accessibilityLabel(decisionsOwed: Int, unhealthy: Bool, paused: Bool, available: Bool = true) -> String {
+        guard available else { return "Trace Commons. Watcher unavailable. Needs attention." }
+        let detail: String
+        if decisionsOwed > 0 {
+            detail = "\(decisionsOwed) \(decisionsOwed == 1 ? "session" : "sessions") waiting for your decision."
+        } else if unhealthy { detail = "Needs attention." }
+        else { detail = "Nothing waiting." }
+        return "Trace Commons. " + detail + (paused ? " Paused." : "")
     }
 }
