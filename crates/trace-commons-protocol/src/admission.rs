@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 pub const EVIDENCE_HEADER: &str = "x-trace-admission-evidence";
 pub const SIGNATURE_HEADER: &str = "x-trace-admission-signature";
 pub const REQUEST_METADATA_KEY: &str = "trace_commons_admission";
-pub const EVIDENCE_DOMAIN: &str = "trace_commons_admission_evidence.v1";
+pub const EVIDENCE_DOMAIN: &str = "trace_commons_admission_evidence.v2";
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -15,6 +15,8 @@ pub struct AdmissionEvidence {
     pub account_anchor_sha256: String,
     pub challenge_sha256: String,
     pub provider_signer: String,
+    pub model: String,
+    pub request_bytes: u64,
     pub request_sha256: String,
     pub response_sha256: String,
     pub receipt_sha256: String,
@@ -54,11 +56,11 @@ impl AdmissionEvidence {
             ]
             .into_iter()
             .all(|s| is_hash(s))
-            || self.provider_signer.len() != 42
-            || !self.provider_signer.starts_with("0x")
-            || !self.provider_signer[2..]
-                .bytes()
-                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            || !is_hash(&self.provider_signer)
+            || self.model.is_empty()
+            || self.model.len() > 256
+            || self.model.trim() != self.model
+            || self.request_bytes == 0
             || self.witness_measurement.is_empty()
             || self.witness_measurement.len() > 512
             || self.redaction_policy_version.is_empty()
@@ -72,6 +74,7 @@ impl AdmissionEvidence {
             &self.account_anchor_sha256,
             &self.challenge_sha256,
             &self.provider_signer,
+            &self.model,
             &self.request_sha256,
             &self.response_sha256,
             &self.receipt_sha256,
@@ -82,6 +85,7 @@ impl AdmissionEvidence {
             bytes.extend_from_slice(&(part.len() as u32).to_be_bytes());
             bytes.extend_from_slice(part.as_bytes());
         }
+        bytes.extend_from_slice(&self.request_bytes.to_be_bytes());
         bytes.extend_from_slice(&self.issued_at.to_be_bytes());
         bytes.extend_from_slice(&self.expires_at.to_be_bytes());
         Ok(bytes)
@@ -132,22 +136,19 @@ impl AdmissionBinding {
     }
 }
 
-/// Canonical identity ignores signature spelling and recovered-id representation.
+/// Admission v2 accepts only a canonical Ed25519 key; ordinary ECDSA
+/// receipts cannot acquire this identity by changing their wire discriminator.
 pub fn receipt_identity(
     signer: &str,
     request_hash: &str,
     response_hash: &str,
 ) -> Result<String, EvidenceMalformed> {
-    if signer.len() != 42
-        || !signer.starts_with("0x")
-        || !is_hash(request_hash)
-        || !is_hash(response_hash)
-    {
+    if !is_hash(signer) || !is_hash(request_hash) || !is_hash(response_hash) {
         return Err(EvidenceMalformed);
     }
-    let address = hex::decode(&signer[2..]).map_err(|_| EvidenceMalformed)?;
-    let mut bytes = b"trace_commons_admission_receipt.v1\0".to_vec();
-    bytes.extend_from_slice(&address);
+    let key = hex::decode(signer).map_err(|_| EvidenceMalformed)?;
+    let mut bytes = b"trace_commons_admission_receipt.v2.ed25519\0".to_vec();
+    bytes.extend_from_slice(&key);
     bytes.extend_from_slice(&hex::decode(request_hash).map_err(|_| EvidenceMalformed)?);
     bytes.extend_from_slice(&hex::decode(response_hash).map_err(|_| EvidenceMalformed)?);
     Ok(hash_hex(&bytes))
@@ -156,6 +157,37 @@ pub fn receipt_identity(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn evidence_v2_signs_admission_policy_inputs_and_refuses_v1() {
+        let evidence = AdmissionEvidence {
+            profile: EVIDENCE_DOMAIN.into(),
+            account_anchor_sha256: "a".repeat(64),
+            challenge_sha256: "b".repeat(64),
+            provider_signer: "c".repeat(64),
+            model: "operator-approved-model".into(),
+            request_bytes: 4096,
+            request_sha256: "d".repeat(64),
+            response_sha256: "e".repeat(64),
+            receipt_sha256: "f".repeat(64),
+            artifact_sha256: "0".repeat(64),
+            witness_measurement: "measurement".into(),
+            redaction_policy_version: "policy".into(),
+            issued_at: 1,
+            expires_at: 2,
+        };
+        let signed = evidence.signing_bytes().unwrap();
+        let mut changed = evidence.clone();
+        changed.model.push_str("-other");
+        assert_ne!(signed, changed.signing_bytes().unwrap());
+        changed = evidence.clone();
+        changed.request_bytes += 1;
+        assert_ne!(signed, changed.signing_bytes().unwrap());
+        changed.request_bytes = 0;
+        assert!(changed.signing_bytes().is_err());
+        changed = evidence;
+        changed.profile = "trace_commons_admission_evidence.v1".into();
+        assert!(changed.signing_bytes().is_err());
+    }
     #[test]
     fn binding_is_canonical_and_domain_separated() {
         let binding = AdmissionBinding {
@@ -181,15 +213,13 @@ mod tests {
         assert_ne!(binding.digest().unwrap(), another.digest().unwrap());
     }
     #[test]
-    fn receipt_identity_uses_decoded_address_and_exact_body_digests() {
-        let signer = format!("0x{}", "ab".repeat(20));
-        let upper = format!("0x{}", "AB".repeat(20));
+    fn receipt_identity_requires_ed25519_key_and_exact_body_digests() {
+        let signer = "ab".repeat(32);
+        let upper = "AB".repeat(32);
         let request = "1".repeat(64);
         let response = "2".repeat(64);
-        assert_eq!(
-            receipt_identity(&signer, &request, &response).unwrap(),
-            receipt_identity(&upper, &request, &response).unwrap()
-        );
+        assert!(receipt_identity(&upper, &request, &response).is_err());
+        assert!(receipt_identity(&format!("0x{}", "ab".repeat(20)), &request, &response).is_err());
         assert_ne!(
             receipt_identity(&signer, &request, &response).unwrap(),
             receipt_identity(&signer, &response, &request).unwrap()
