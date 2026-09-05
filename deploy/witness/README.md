@@ -939,3 +939,42 @@ Stated plainly so nobody reads the rest as tested:
   the server-side verification.
 - `docs/operator/pii-backstop.md` — the backstop this certificate does **not**
   replace.
+
+## The production deployment, as of 2026-09-04
+
+Read back from the running instance, not from what we asked for. Every value
+below came from `phala cvms get --json` or from a live certificate.
+
+| | |
+|---|---|
+| CVM | `8b8e6543-9743-41fc-ac05-a6b414888d5e` (upgraded, not recreated) |
+| App | `f1654b0beac2ac2afae4235ee3d907096cd8f3de` |
+| Image | `ghcr.io/tracecommons/trace-commons-witness@sha256:0a524356b2044fede8b6ec2e885df8cf83123c808c5f35b340de3f60a8c656d7` |
+| Mode | `full-pipeline` (NEAR AI classifier) |
+| Signing address | `0x655a17fcf6d0b9069e1b1dd07a7f5535d0c76798` |
+| Instance `compose_hash` | `68ecca830de51df5dfb4fee74e93684a6933a5980e45af1c90879bbd3cfae096` |
+| Measurement | `mrtd:f06dfda6dce1cf904d4e2bab1dc370634cf95cefa2ceb2de2eee127c9382698090d7a4a13e14c536ec6c9c3c8fa87077+mrconfigid:0168ecca830de51df5dfb4fee74e93684a6933a5980e45af1c90879bbd3cfae096000000000000000000000000000000` |
+| Policy version | `ironclaw-deterministic-secret-path-v3+privacy-filter-near-ai-v1` |
+| `public_logs` / `public_sysinfo` / `public_tcbinfo` | `false` / `false` / `true` |
+| `allowed_envs` | `["TRACE_NEAR_AI_PRIVACY_API_KEY"]` |
+
+**The signing address survived the upgrade**, which is the proof this was an
+upgrade rather than a recreation: the KMS re-derived the same key from the
+stable app id. An address that had changed would have meant a new app id and
+would have invalidated every pin.
+
+**MRCONFIGID is `01` + the instance `compose_hash` + zero padding, confirmed.**
+`0168ecca83...` against a `compose_hash` of `68ecca83...`. So the two answers
+agree, and either can be used to check the other -- but both come from the
+instance. `build-app-compose.sh` printed `bcbd152e` for the same deployment.
+
+**The visibility flags are set by `phala deploy` arguments, not by the
+manifest.** `--public-logs` and `--public-sysinfo` default to **true**, and
+`phala deploy` never reads `app-compose.json`. An earlier deployment served
+container logs publicly for exactly this reason -- the setting was written
+where nothing reads it. Pass `--no-public-logs --no-public-sysinfo` on every
+deploy, and read the manifest back afterwards.
+
+Note that toggling either flag changes `compose_hash`, and therefore the
+measurement. Re-read the measurement after any such change before publishing
+it.
