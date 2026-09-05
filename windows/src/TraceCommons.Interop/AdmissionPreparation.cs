@@ -7,7 +7,7 @@ public static class AdmissionPreparation
 {
     public const string Method = "prepare_admission_session";
     public const string Heading = "Prepare next NEAR inference";
-    public const string Disclosure = "This adds an account-bound challenge to the next inference request in this session. Use your own funded NEAR AI backend, then continue the agent task and return here to review.";
+    public const string Disclosure = "For new inference evidence, this adds an account-bound challenge to the next request in this session. Use your own funded NEAR AI backend, then continue the agent task and return here to review. You can separately choose witness review of eligible existing history, subject to server limits.";
     public const string Success = "Ready. Continue this session in your agent, then review the updated session.";
     public const string Failed = "This session could not be prepared. Check your supported agent, backend, and capture settings, then try again.";
     public static bool Available(DaemonResponse hello, DaemonSettingsSnapshot? settings) => settings?.AdmissionEvidenceRequired == true

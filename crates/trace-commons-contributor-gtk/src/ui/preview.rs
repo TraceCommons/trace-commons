@@ -837,7 +837,7 @@ impl Sheet {
             .build();
         let dialog = adw::MessageDialog::builder().transient_for(&self.window).modal(true)
             .heading("Prepare next NEAR inference")
-            .body("This adds an account-bound challenge to the next inference request in this session. Use your own funded NEAR AI backend, then continue the agent task and return here to review.")
+            .body("For new inference evidence, this adds an account-bound challenge to the next request in this session. Use your own funded NEAR AI backend, then continue the agent task and return here to review. You can separately choose witness review of eligible existing history, subject to server limits.")
             .extra_child(&backend).build();
         dialog.add_responses(&[("cancel", "Cancel"), ("prepare", "Prepare session")]);
         dialog.set_default_response(Some("cancel"));

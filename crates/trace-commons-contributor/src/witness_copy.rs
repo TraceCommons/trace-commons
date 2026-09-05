@@ -413,10 +413,10 @@ pub fn witness_copy() -> WitnessCopy {
         },
         onboarding: FirstContributionCopy {
             heading: "Your first contribution",
-            start: "Choose a supported agent and a project you can share. Complete a small task, then return here to review the session. Setup alone does not prove inference ran or that a contribution was accepted.",
-            review: "Open a waiting session with Look inside. Check what would be sent, then choose whether to contribute. A configured witness asks separately before the session leaves this device for review.",
+            start: "Start with an existing session you can share, or complete a new task in a supported agent. Choose its session folder in Settings, then return here to review. Setup alone does not mean a contribution was accepted.",
+            review: "Open a waiting session with Look inside. A configured witness asks separately before the session leaves this device for review. Check the returned contribution before sending it. The server may allow limited initial submissions from eligible existing history; this screen does not show a remaining allowance.",
             follow_up: "Open History to follow the server's recorded result. Upload, acceptance, and credit are separate steps. Points are not a spendable NEAR AI balance.",
-            agent_setup: "For an existing funded NEAR AI account, configure the selected agent using your own provider credentials and model settings. Choose its session folder in Settings. IronWire capture and sending captured bodies each require separate setup. This app does not create a funded provider account.",
+            agent_setup: "To generate new NEAR AI inference evidence, configure your selected agent using your own funded provider account and model settings. IronWire capture and sending captured bodies each require separate setup. Existing-history review is a separate choice; this app does not create a funded provider account.",
         },
     }
 }

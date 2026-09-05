@@ -10,7 +10,7 @@ struct AdmissionPreparationView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: TC.Space.m) {
             Text("Prepare next NEAR inference").font(TC.Font_.cardTitle)
-            Text("This adds an account-bound challenge to the next inference request in this session. Use your own funded NEAR AI backend, then continue the agent task and return here to review.")
+            Text("For new inference evidence, this adds an account-bound challenge to the next request in this session. Use your own funded NEAR AI backend, then continue the agent task and return here to review. You can separately choose witness review of eligible existing history, subject to server limits.")
                 .font(.callout).foregroundStyle(.secondary)
             Text("IronWire must already route this agent to that backend and capture request bodies. Inference-body evidence also needs your separate permission in Settings.")
                 .font(.caption).foregroundStyle(.secondary)
