@@ -528,7 +528,8 @@ impl Actor {
                 self.running = true;
                 self.observe(status, epoch);
             }
-            Err(_) => {
+            Err(error) => {
+                let already_running = error.is::<super::process::WorkerAlreadyRunning>();
                 let policy_stop = self.resource.decision().stop;
                 let report = self.stop().await;
                 if report.stopped {
@@ -539,6 +540,8 @@ impl Actor {
                             "Compute is stopped",
                             stop.reason.detail(),
                         );
+                    } else if already_running {
+                        self.message(ComputeState::Error, "worker-already-running", "Another local worker is still running", "A previous app session may still own a compute worker. Stop that worker through its owning app, or restart the machine if the app crashed, then explicitly Resume. This app will not adopt or kill an unknown process.");
                     } else {
                         self.message(ComputeState::Error, "worker-start-failed", "Compute could not start", "The local worker failed verification or authenticated readiness. It has been stopped; check the local test setup before resuming.");
                     }

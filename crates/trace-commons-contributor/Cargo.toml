@@ -96,3 +96,7 @@ tokio = { version = "1", features = ["net"] }
 # [dev-dependencies] without first fixing the openssl-sys link on Windows.
 [target.'cfg(not(windows))'.dev-dependencies]
 trace-commons-server = { path = "../trace-commons-server" }
+
+[[example]]
+name = "compute-package"
+test = true

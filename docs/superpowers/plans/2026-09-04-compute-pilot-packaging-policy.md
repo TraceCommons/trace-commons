@@ -174,3 +174,44 @@ The production constructor remains unavailable. Developer signature checks do
 not complete the runtime signature gate. Orchard integration, compiled runtime
 trust requirements, complete packaging and separately authorized installed-device
 qualification remain unfinished as listed above.
+
+## PR 610 review follow-up
+
+The first readying pass was stopped when the substantive review arrived. The
+revision addresses its eleven required items as follows:
+
+| Item | Change and evidence |
+| --- | --- |
+| 1 | Compute failures render Rust-owned recovery copy, coral refusal glyph and Retry; native tests repair invalid settings and reopen. |
+| 2 | Quit refusal uses coral and the refused glyph. |
+| 3 | All Swift pointer calls use an active-call pin and release the lifetime lock during Rust work; a blocked-command test exercises resource ingress and close refusal concurrently. |
+| 4 | Compute resolves its directory independently of daemon startup/socket-path constraints and offers retry; native directory tests cover that separation. |
+| 5 | Vector provenance is explicitly source-derived, not captured upstream interoperability evidence. |
+| 6 | A real child fixture publishes the launch-instance endpoint, verifies signed requests, sends signed status and drain, and exits; tests reach Training and Serving and reject wrong/bounded endpoint data. |
+| 7 | The compute-package Cargo example is explicitly registered with `test = true`; all five assembly tests run under default test discovery. |
+| 8 | Independently supplied manifest SHA-256 is checked before parsing; coordinated manifest/worker rewrites fail without replacing that independent pin. |
+| 9 | Helper and Compute resource inventories reject unlisted files/directories; executable header validation uses the same bytes that were hashed. |
+| 10 | Existing macOS CI invokes Python signature tests, including actual csreq compilation and system-verifier refusals. |
+| 11 | A held worker lock returns a distinct typed refusal and Rust-owned explanation; tests prove no child is adopted or spawned. |
+
+The disconnected-peer test now accepts a real loopback connection before closing,
+and asserts an I/O failure. The command drops its seed environment entry after
+spawn, without claiming secure erasure of allocator or child-environment copies.
+Canonical path requirements remain conservative; `/private/tmp` is supported
+rather than weakening ancestor symlink checks for `/tmp`. Documentation distinguishes
+signature verification from notarization, fresh revocation checks and Gatekeeper.
+
+The existing development entrypoint is controlled by `debug_assertions`, not the
+Cargo profile name. This is documented rather than removing exported C symbols
+and silently changing ABI availability. Ordinary production construction remains
+unavailable. Runtime launch authorization, actual upstream interoperability and
+installed-device qualification remain separate unfinished gates.
+
+Combined local revision validation: 53 contributor compute tests and 2 compute
+FFI tests passed; the one ignored test is the child-process entrypoint invoked by
+the successful lifecycle tests. All-target contributor/FFI Clippy and Windows-GNU
+contributor test compilation passed with warnings denied. The package example's
+5 tests, Python signature suite's 8 tests, and unchanged license boundary's 4 tests
+passed. The final FFI dylib built; the full native suite passed 524 XCTest cases
+plus 8 observer tests. Formatting and patch whitespace checks passed. CI still
+must validate the pushed revision before it is marked ready for review.

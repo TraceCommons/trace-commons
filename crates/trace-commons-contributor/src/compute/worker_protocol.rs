@@ -1,4 +1,5 @@
-//! Holonear IPC v0 pinned to ef4e6e2479e8395f7d972d3342bad97851f2104e.
+//! Protocol model derived from reading Holonear revision ef4e6e2479e8395f7d972d3342bad97851f2104e.
+//! Local vectors are not captured output or proof of upstream interoperability.
 //! Field order and signature domains are part of the executable contract.
 
 use ring::{
@@ -177,7 +178,7 @@ impl Credential {
 mod tests {
     use super::*;
     #[test]
-    fn pinned_holonear_vectors_match_both_directions_and_reject_tampering() {
+    fn source_derived_vectors_pin_both_directions_and_reject_tampering() {
         let fixture: serde_json::Value =
             serde_json::from_str(include_str!("../../tests/fixtures/worker_ipc_v0.json")).unwrap();
         for case in fixture["cases"].as_array().unwrap() {
@@ -221,7 +222,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn refuses_oversized_empty_malformed_and_disconnected_frames() {
+    async fn rejects_invalid_frames_and_non_loopback_addresses() {
         for frame in [0, MAX_FRAME_BYTES as u32 + 1, 2] {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let address = listener.local_addr().unwrap();
@@ -235,12 +236,18 @@ mod tests {
                     stream.write_all(b"{}").await.unwrap();
                 }
             });
-            assert!(
-                Credential::from_seed(&[3; 32])
-                    .unwrap()
-                    .exchange(address, Command::Status)
-                    .await
-                    .is_err()
+            let error = Credential::from_seed(&[3; 32])
+                .unwrap()
+                .exchange(address, Command::Status)
+                .await
+                .unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                if frame == 2 {
+                    "worker-response-invalid"
+                } else {
+                    "worker-frame-invalid"
+                }
             );
             peer.await.unwrap();
         }
@@ -251,5 +258,25 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn actual_loopback_disconnect_is_an_io_error_after_accept() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let peer = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let len = stream.read_u32().await.unwrap();
+            let mut bytes = vec![0; len as usize];
+            stream.read_exact(&mut bytes).await.unwrap();
+            // Close after a real request, without returning a frame.
+        });
+        let error = Credential::from_seed(&[3; 32])
+            .unwrap()
+            .exchange(address, Command::Status)
+            .await
+            .unwrap_err();
+        peer.await.unwrap();
+        assert!(error.downcast_ref::<std::io::Error>().is_some());
     }
 }

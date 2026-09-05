@@ -207,7 +207,7 @@ impl ComputeController {
         inner.snapshot()
     }
 
-    /// Explicit local-only development entrypoint. Release builds refuse it;
+    /// Explicit local-only development entrypoint. Builds without debug assertions refuse it;
     /// the production constructor never consults environment overrides.
     pub fn open_local(
         root: &std::path::Path,

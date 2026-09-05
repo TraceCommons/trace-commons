@@ -2,7 +2,7 @@
 
 The production `ComputeController::open` / `tc_compute_open` path remains
 unavailable. Only the explicit `open_local` constructor enables a Unix debug-build
-development worker. Release builds refuse that constructor. The native app does
+development worker. Builds without debug assertions refuse that constructor. The native app does
 not discover a worker through PATH, environment overrides, or persisted settings.
 
 The local harness accepts an absolute state root, an absolute worker binary, its
@@ -24,7 +24,7 @@ does not configure a wallet, contact a production pool, or move funds.
 ## Contract and dependency decision
 
 The IPC v0 executable contract is pinned to Holonear revision
-`ef4e6e2479e8395f7d972d3342bad97851f2104e`, with committed cross-implementation
+`ef4e6e2479e8395f7d972d3342bad97851f2104e`, with committed source-derived
 vectors in `crates/trace-commons-contributor/tests/fixtures/worker_ipc_v0.json`.
 Trace Commons independently signs and verifies those exact body bytes/signatures
 using its existing `ring` dependency. Golden cases cover Status and Drain;
@@ -87,3 +87,32 @@ Cross-instance machine-wide resource arbitration, enforced resource limits,
 filesystem restrictions, platform signing/attestation acceptance, and production
 account/pool configuration remain unimplemented. The production capability must
 remain closed until those gates and real-device lifecycle validation pass.
+
+
+## Evidence scope and local credential boundary
+
+The IPC vectors were derived from reading revision
+`ef4e6e2479e8395f7d972d3342bad97851f2104e`. They are reproducible local protocol
+fixtures, not captured responses or upstream-generated interoperability evidence.
+The signed fake-worker child exercises real endpoint publication, request checking,
+readiness, state transitions and drain, but implements the same source-derived
+model. An independently generated upstream transcript remains a release gate.
+
+The per-launch seed is passed through the child process environment. After spawn,
+the parent removes the credential from its `Command` configuration and clears the
+original byte array; this is not a guarantee that allocator copies or the child's
+environment have been erased. Same-user process inspection remains inside the
+local trust boundary. No seed is included in logs or status snapshots.
+
+The development gate is `debug_assertions`, not the Cargo profile name. A release
+profile explicitly built with debug assertions enables the local-development
+entrypoint; such a build is not a production compute capability. Ordinary app
+construction stays unavailable regardless. Removing the existing C ABI symbol
+would change the published header contract; an explicit build capability and
+release-policy decision remain required before any packaged launch path exists.
+
+When an unknown process still holds `worker.lock`, the controller reports
+`worker-already-running` and tells the user to stop its owning app or restart the
+machine after a crash, then explicitly Resume. It never adopts an endpoint or kills
+by PID. `tc_compute_free` deliberately retains a handle while worker termination
+is unconfirmed; losing that ownership would be less safe than retaining it.

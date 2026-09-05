@@ -14,6 +14,10 @@ use std::{
 };
 use tokio::process::{Child, Command};
 
+#[derive(Debug, thiserror::Error)]
+#[error("worker-already-running")]
+pub(super) struct WorkerAlreadyRunning;
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LocalWorkerConfig {
@@ -306,6 +310,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn signed_child_publishes_endpoint_and_completes_readiness_and_drain() {
+        let root = tempfile::tempdir().unwrap();
+        let mut worker =
+            WorkerProcess::new(root.path(), super::super::test_worker::config(root.path()))
+                .unwrap();
+        crate::config::ConfigStore::open(worker.home.join("node")).unwrap();
+        // An earlier launch's endpoint cannot satisfy the fresh launch instance.
+        std::fs::write(
+            worker.home.join("node/worker-endpoint.json"),
+            serde_json::to_vec(
+                &serde_json::json!({"version": 0, "instance": vec![0u8; 32], "address": "127.0.0.1:1"}),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let status = worker.start(1).await.unwrap();
+        assert_eq!(status.state, wire::State::Training);
+        assert_eq!(status.admission, wire::Admission::Assigned);
+        assert!(worker.child.is_some());
+        assert!(worker.read_endpoint().is_ok());
+        let report = worker.stop().await;
+        assert!(report.stopped);
+        assert_eq!(report.drain, Some(wire::DrainOutcome::Acknowledged));
+        assert_eq!(report.process, StopOutcome::Exited);
+    }
+
+    #[test]
+    fn endpoint_requires_current_instance_loopback_port_and_exact_size_bound() {
+        let root = tempfile::tempdir().unwrap();
+        let mut worker =
+            WorkerProcess::new(root.path(), super::super::test_worker::config(root.path()))
+                .unwrap();
+        crate::config::ConfigStore::open(worker.home.join("node")).unwrap();
+        let credential = wire::Credential::from_seed(&[7; 32]).unwrap();
+        let valid = serde_json::json!({"version": 0, "instance": credential.instance(), "address": "127.0.0.1:1234"});
+        worker.credential = Some(credential);
+        let endpoint = worker.home.join("node/worker-endpoint.json");
+        for (field, value) in [
+            ("version", serde_json::json!(1)),
+            ("instance", serde_json::json!(vec![0u8; 32])),
+            ("address", serde_json::json!("192.0.2.1:1234")),
+            ("address", serde_json::json!("127.0.0.1:0")),
+        ] {
+            let mut invalid = valid.clone();
+            invalid[field] = value;
+            std::fs::write(&endpoint, serde_json::to_vec(&invalid).unwrap()).unwrap();
+            assert_eq!(
+                worker.read_endpoint().unwrap_err().to_string(),
+                "worker-endpoint-mismatch"
+            );
+        }
+        let mut bytes = serde_json::to_vec(&valid).unwrap();
+        bytes.resize(4096, b' ');
+        std::fs::write(&endpoint, &bytes).unwrap();
+        assert_eq!(
+            worker.read_endpoint().unwrap(),
+            "127.0.0.1:1234".parse().unwrap()
+        );
+        bytes.push(b' ');
+        std::fs::write(&endpoint, &bytes).unwrap();
+        assert_eq!(
+            worker.read_endpoint().unwrap_err().to_string(),
+            "worker-endpoint-too-large"
+        );
+    }
+
+    #[tokio::test]
     async fn wrong_artifact_and_existing_worker_fail_before_launch_and_release_parent_lock() {
         let root = tempfile::tempdir().unwrap();
         let binary = PathBuf::from("/usr/bin/true");
@@ -328,7 +399,13 @@ mod tests {
             .open(worker.home.join("node/worker.lock"))
             .unwrap();
         held.try_lock().unwrap();
-        assert!(worker.start(1).await.is_err());
+        assert!(
+            worker
+                .start(1)
+                .await
+                .unwrap_err()
+                .is::<WorkerAlreadyRunning>()
+        );
         assert!(worker.child.is_none());
         let parent = OpenOptions::new()
             .read(true)
@@ -377,8 +454,13 @@ impl WorkerProcess {
                 .read(true)
                 .write(true)
                 .open(self.home.join("node").join(name))?;
-            file.try_lock()?;
-            Ok(file)
+            match file.try_lock() {
+                Ok(()) => Ok(file),
+                Err(std::fs::TryLockError::WouldBlock) if name == "worker.lock" => {
+                    Err(WorkerAlreadyRunning.into())
+                }
+                Err(error) => Err(error.into()),
+            }
         };
         let parent_lock = lock("controller.lock")?;
         drop(lock("worker.lock")?);
@@ -423,6 +505,9 @@ impl WorkerProcess {
             command.env("SystemRoot", root);
         }
         let spawned = spawn(&mut command);
+        // Drop Command's copy promptly; this is not a secure wipe of String or
+        // the child's process environment, which remain part of the local trust boundary.
+        command.env_remove(wire::CREDENTIAL_ENV);
         seed.fill(0);
         let child = spawned?;
         self.child = Some(child);

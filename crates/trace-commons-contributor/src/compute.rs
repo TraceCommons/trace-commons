@@ -11,6 +11,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::ConfigStore;
 
+#[cfg(all(test, unix))]
+mod test_worker;
+
 pub mod artifact;
 mod controller;
 mod live;

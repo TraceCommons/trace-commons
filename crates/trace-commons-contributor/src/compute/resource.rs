@@ -231,6 +231,60 @@ pub(crate) mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn signed_worker_reaches_training_and_serving_then_acknowledges_shutdown() {
+        let root = tempfile::tempdir().unwrap();
+        let controller = ComputeController::open_local(
+            root.path(),
+            crate::compute::test_worker::config(root.path()),
+        )
+        .unwrap();
+        healthy(&controller);
+        controller.command(ComputeCommand::Enable {
+            ram_allowance_gib: 1,
+        });
+        wait_for(&controller, 5, |s| s.state == ComputeState::Training);
+        assert!(!controller.snapshot().worker_stopped);
+        assert!(controller.snapshot().consent_granted);
+        std::fs::write(root.path().join("compute/worker/node/serve"), b"").unwrap();
+        healthy(&controller);
+        wait_for(&controller, 5, |s| s.state == ComputeState::Serving);
+        let stopped = controller.shutdown(Duration::from_secs(3));
+        assert!(stopped.worker_stopped);
+        assert_eq!(
+            stopped.drain_outcome,
+            Some(crate::compute::worker_protocol::DrainOutcome::Acknowledged)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn held_worker_lock_explains_unknown_process_without_killing_or_adopting_it() {
+        let root = tempfile::tempdir().unwrap();
+        let controller = local(root.path());
+        let node = root.path().join("compute/worker/node");
+        std::fs::create_dir_all(&node).unwrap();
+        let held = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(node.join("worker.lock"))
+            .unwrap();
+        held.try_lock().unwrap();
+        healthy(&controller);
+        controller.command(ComputeCommand::Enable {
+            ram_allowance_gib: 1,
+        });
+        wait_for(&controller, 3, |s| s.reason == "worker-already-running");
+        let snapshot = controller.snapshot();
+        assert!(snapshot.worker_stopped); // No child owned by this controller.
+        assert!(snapshot.detail.contains("restart the machine"));
+        assert!(snapshot.detail.contains("will not adopt or kill"));
+        assert!(controller.shutdown(Duration::from_secs(1)).worker_stopped);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn watchdog_stops_readiness_without_any_native_callbacks() {
         let root = tempfile::tempdir().unwrap();
         let controller = local(root.path());
