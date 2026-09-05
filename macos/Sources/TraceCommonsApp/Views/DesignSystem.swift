@@ -283,11 +283,11 @@ enum TC {
         /// Spec `mono.figure`, 12/500 mono. Figures on the manifest strip, and
         /// anything else countable. Was `footnote`-sized mono (10pt).
         static let ledger = Font.system(.callout, design: .monospaced)
+            .weight(.medium)
         /// The status item's count, knocked out of a 10pt capsule. Rounded
         /// and bold because at this size a hairline digit disappears when
         /// it is drawn in reverse.
         static let menuBarBadge = Font.system(size: 8, weight: .bold, design: .rounded)
-            .weight(.medium)
         /// Spec `mono.chip`, 11/500 mono. Status-pill text.
         static let monoChip = Font.system(.subheadline, design: .monospaced)
             .weight(.medium)
