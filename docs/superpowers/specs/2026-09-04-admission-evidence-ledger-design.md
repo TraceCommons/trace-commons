@@ -29,7 +29,7 @@ A reservation atomically locks the global ceiling, account and submission, check
 | reserved → processing | Mark that work started; the window slot can no longer be refunded. |
 | processing → completed | Terminal marker after required durable ingest writes. |
 | expired reserved/processing → reserved | Retain prior conservative cost bounds, reserve another bound, reuse the same already-consumed window slot. |
-| completed → retry | Return terminal status for exactly the same account/body/evidence; no new work or charge. |
+| completed → retry | Authenticate the same owning principal and match stored account/body/submission; return the existing receipt even when original evidence has expired, with no new work or charge. |
 
 Expiry is not evidence that spending did not occur. Costs remain conservative configured bounds, not inferred provider prices, USD conversions, or measured settlement. Quality failures consume the attempt and retain the bound. No automated budget reset or post-processing refund is invented. Account/global configurations are fixed on first reservation and mismatched runtime configuration refuses until an explicit operator migration/reconciliation policy exists.
 
@@ -52,7 +52,7 @@ GRANT EXECUTE ON FUNCTION trace_reserve_admission(TEXT,TEXT,UUID,TEXT,TEXT,TEXT,
   trace_transition_admission(TEXT,UUID,UUID,TEXT) TO runtime_role;
 ```
 
-Do not grant runtime membership in `trace_admission_guard`, access to the global receipt/budget tables, `BYPASSRLS`, or ownership. Readiness must verify runtime permissions with a non-owner connection and inspect active mappings/limits; missing permission produces `admission_database_unavailable`, not a legacy authorization fallback. Existing V58 mapping and normal trace storage permissions are additionally required.
+Do not grant runtime membership in `trace_admission_guard`, access to the global receipt/budget tables, `BYPASSRLS`, or ownership. Enabled startup calls `admission_runtime_ready` on the actual runtime connection. It requires non-owner/NOBYPASSRLS, no guard membership or direct global-table privileges, forced RLS, tenant-table privileges and function EXECUTE. Missing permission refuses startup (`admission_runtime_permissions_not_ready` or `admission_database_unavailable`), never a legacy authorization fallback. Operators must also inspect active mappings and configured limits. Existing V58 mapping and normal trace storage permissions are additionally required.
 
 ## External capture gap
 
@@ -64,6 +64,7 @@ Use `RUSTFLAGS='-D warnings' CARGO_TARGET_DIR=/tmp/trace-commons-inference-fundi
 
 - `cargo check -p trace-commons-server --bin trace-commons-witness --locked --offline` passed after service/adapter integration.
 - `cargo test -p trace-commons-server --test admission_ledger_pg --locked --offline -- --ignored` uses only explicit `TRACE_COMMONS_ADMISSION_PG_TEST_URL`, a localhost database whose name starts with `admission_test`. The fixture resets only its dedicated V59 tables. It creates a separate non-owner runtime role and exercises actual PostgreSQL concurrency, replay, budget, refunds and RLS. Missing/broken explicit DB fails; no implicit skip.
+- `TRACE_COMMONS_ADMISSION_INGEST_PG_TEST_URL=postgresql://<local-test-admin>@127.0.0.1:55439/admission_test_ingest cargo test -p trace-commons-server --bin trace-commons-ingest actual_postgres_challenge_witness --locked --offline -- --ignored` passed: full migrations, non-owner runtime readiness, real provisioned mapping lookup, challenge, synthetic provider receipt through structured witness, actual router/durable ingest, window exhaustion, expired terminal retry and unchanged cost. The account mapping is a labeled synthetic SQL fixture; B separately tests signed wallet/device provisioning.
 - The synthetic witness test `admission_evidence_binds_trusted_final_call_account_and_witness_artifact` covers a real signed provider fixture through the structured witness and both artifact/evidence verifiers. Root's ingest tests provide the route-level continuation.
 
 Production enablement remains separate from passing local tests, including provider signer attestation, final-byte IronWire capture, configured cost ceilings, runtime grants, recovery policy and funding capabilities.

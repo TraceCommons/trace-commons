@@ -86,6 +86,46 @@ impl Drop for AdmissionProcessingGuard {
 }
 
 impl PgBackend {
+    pub(crate) async fn check_admission_runtime(&self) -> Result<bool, DatabaseError> {
+        let client = self
+            .trace_pool()
+            .get()
+            .await
+            .map_err(|_| database_refused())?;
+        let row=client.query_one(r#"
+        SELECT NOT r.rolsuper AND NOT r.rolbypassrls
+          AND NOT pg_has_role(current_user,'trace_admission_guard','MEMBER')
+          AND NOT has_table_privilege(current_user,'public.trace_admission_receipts','SELECT,INSERT,UPDATE,DELETE')
+          AND NOT has_table_privilege(current_user,'public.trace_admission_global_budget','SELECT,INSERT,UPDATE,DELETE')
+          AND has_function_privilege(current_user,'public.trace_reserve_admission(text,text,uuid,text,text,text,bigint,bigint,bigint,bigint,uuid,bigint)','EXECUTE')
+          AND has_function_privilege(current_user,'public.trace_transition_admission(text,uuid,uuid,text)','EXECUTE')
+          AND (SELECT bool_and(c.relrowsecurity AND c.relforcerowsecurity AND c.relowner<>r.oid)
+            FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+            WHERE n.nspname='public' AND c.relname IN ('trace_admission_challenges','trace_admission_accounts','trace_admission_submissions','trace_admission_receipts','trace_admission_global_budget'))
+          AND (SELECT bool_and(has_table_privilege(current_user,t,p)) FROM
+            unnest(ARRAY['public.trace_admission_challenges','public.trace_admission_accounts','public.trace_admission_submissions']) t
+            CROSS JOIN unnest(ARRAY['SELECT','INSERT','UPDATE']) p)
+        FROM pg_roles r WHERE r.rolname=current_user
+        "#,&[]).await.map_err(|_|database_refused())?;
+        Ok(row.get::<_, Option<bool>>(0).unwrap_or(false))
+    }
+    pub(crate) async fn completed_admission(
+        &self,
+        tenant: &str,
+        anchor: &str,
+        submission: Uuid,
+        body_hash: &str,
+    ) -> Result<bool, DatabaseError> {
+        let mut client = self
+            .trace_pool()
+            .get()
+            .await
+            .map_err(|_| database_refused())?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant).await?;
+        let found=tx.query_opt("SELECT 1 FROM trace_admission_submissions WHERE tenant_id=$1 AND anchor_hash=$2 AND submission_id=$3 AND body_hash=$4 AND status='completed'", &[&tenant,&anchor,&submission,&body_hash]).await.map_err(|_|database_refused())?.is_some();
+        tx.commit().await.map_err(|_| database_refused())?;
+        Ok(found)
+    }
     pub(crate) async fn lock_admission(
         &self,
         tenant: &str,

@@ -3827,6 +3827,16 @@ impl AppState {
             witness_bypass.as_ref(),
             db_mirror.is_some() && require_db_mirror_writes && require_postgres_trace_rls_ready,
         )?;
+        if admission.is_some()
+            && !db_mirror
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("admission_database_unavailable"))?
+                .admission_runtime_ready()
+                .await
+                .map_err(|_| anyhow::anyhow!("admission_database_unavailable"))?
+        {
+            anyhow::bail!("admission_runtime_permissions_not_ready");
+        }
         let benchmark_registry_scheduler =
             parse_trace_benchmark_registry_scheduler_config_from_env()?;
         let benchmark_pipeline_scheduler =

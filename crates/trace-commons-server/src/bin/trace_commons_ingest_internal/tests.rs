@@ -90474,3 +90474,5 @@ async fn near_provisioning_default_disabled_returns_uniform_denial() {
     assert_eq!(body["funding_available"], false);
     assert!(body.get("witness").is_none());
 }
+#[path = "admission_pg_tests.rs"]
+mod admission_pg_tests;

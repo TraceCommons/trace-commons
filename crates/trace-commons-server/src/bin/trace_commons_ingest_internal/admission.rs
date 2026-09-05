@@ -140,6 +140,32 @@ pub(super) async fn reserve(
         .await
         .map_err(|_| denied())?
         .ok_or_else(|| api_error(StatusCode::CONFLICT, "admission_in_progress"))?;
+    // A terminal retry is a read of an already-admitted immutable request.
+    // Short-lived evidence may now be expired or absent; no new work or
+    // authorization is derived from those retry headers. The handler still
+    // checks ownership before returning the existing receipt.
+    let body_hash = hash_hex(body);
+    if db
+        .lookup_completed_submission_admission(tenant.tenant_id(), &anchor, submission, &body_hash)
+        .await
+        .map_err(|_| denied())?
+    {
+        return Ok(Some(Attempt {
+            reservation: AdmissionReservation {
+                tenant_id: tenant.tenant_id().into(),
+                anchor_hash: anchor,
+                submission_id: submission,
+                body_hash,
+                receipt_hash: None,
+                challenge_hash: None,
+                lease_id: Uuid::new_v4(),
+                limits: config.limits.clone(),
+            },
+            _guard: guard,
+            processing: false,
+            completed: true,
+        }));
+    }
     let (receipt_hash, challenge_hash) = if headers.contains_key(EVIDENCE_HEADER)
         || headers.contains_key(SIGNATURE_HEADER)
     {
@@ -187,7 +213,7 @@ pub(super) async fn reserve(
         tenant_id: tenant.tenant_id().to_string(),
         anchor_hash: anchor,
         submission_id: submission,
-        body_hash: hash_hex(body),
+        body_hash,
         receipt_hash,
         challenge_hash,
         lease_id: Uuid::new_v4(),

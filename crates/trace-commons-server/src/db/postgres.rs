@@ -819,6 +819,19 @@ const INVITE_GRANT_COLUMNS: &str = "invite_subject_hash, policy_label, tenant_mo
 
 #[async_trait]
 impl Database for PgBackend {
+    async fn admission_runtime_ready(&self) -> Result<bool, DatabaseError> {
+        self.check_admission_runtime().await
+    }
+    async fn lookup_completed_submission_admission(
+        &self,
+        tenant: &str,
+        anchor: &str,
+        submission: uuid::Uuid,
+        body_hash: &str,
+    ) -> Result<bool, DatabaseError> {
+        self.completed_admission(tenant, anchor, submission, body_hash)
+            .await
+    }
     async fn acquire_admission_processing_lock(
         &self,
         tenant: &str,
