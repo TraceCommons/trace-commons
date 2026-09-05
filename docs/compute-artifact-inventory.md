@@ -162,3 +162,43 @@ The source revision declaration was
 `0b348bc0b4820b1a53404b0fa59f213b7a3ca130`; assembly does not independently prove
 that provenance. Independent review identified destination-parent symlink
 handling, which was tightened and covered by regression before this checkpoint.
+
+## Read-only Developer ID verification checkpoint
+
+After assembly and separately authorized signing, an operator can inspect the
+helper and outer app without launching or modifying either:
+
+```sh
+python3 macos/scripts/verify-compute-signatures.py \
+  /absolute/Installed.app org.example.app org.example.worker TEAMID1234
+```
+
+Supply identifiers and the team from independently reviewed release policy,
+never from the package's manifest. The harness calls the fixed system
+`/usr/bin/codesign` verifier for the helper and then the outer app, requiring
+strict validity for every architecture and an Apple Developer ID Application
+certificate chain with those identifiers and team. Ad-hoc signatures and Apple's
+own differently signed system programs do not satisfy that requirement. Each
+invocation has a 30-second timeout; missing verification, failure, missing worker,
+symlinked paths, or malformed policy refuses. Verifier output is suppressed to
+avoid disclosing private paths. It performs no signing, network request of its
+own, executable launch, or package modification; system certificate validation
+may consult macOS trust services.
+
+This is a developer verification tool, **not** the runtime Security-framework
+bridge or a packaged-worker constructor. It does not verify notarization,
+hardened-runtime flags, accepted entitlements, model licensing, arbitrary nested
+code inventory, source provenance, integrity manifests, or race-free launch.
+Success reports `integrity_verified=false provenance_verified=false
+launch_authorized=false`. Run the separate integrity check against the final
+signed bytes; a pre-sign manifest is invalid after the helper changes. Runtime
+policy must ultimately be compiled from reviewed release requirements rather
+than accepting user-supplied authority.
+
+Checkpoint verification, 2026-09-05: eight Python tests pass. The real macOS
+`csreq` compiler accepts the generated requirement; the real `codesign` verifier
+refuses both the unsigned fixture and `/bin/ls` under the worker requirement.
+Other tests pin fixed command arguments, independent app/helper identities,
+outer-app failure, timeouts and symlink refusal. No positive Developer ID package
+was supplied, so mocked success tests establish command wiring only. No signing,
+worker launch, deployment or production enablement was performed.

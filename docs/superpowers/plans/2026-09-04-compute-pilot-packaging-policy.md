@@ -111,3 +111,31 @@ tests; native changes build the FFI dylib and run the relevant Swift suites.
 Package scripts get syntax checks and temporary-fixture tests before real builds.
 No new dependency without explicit approval. Do not rerun expensive production
 or credentialed workflows to compensate for missing local test evidence.
+
+## Continuation checkpoint, 2026-09-05
+
+The isolated `resume/holonear-package-verification` branch starts from the committed
+package-assembly snapshot `64063443`. That snapshot already integrates the resource
+reducer, urgent stop actor and native observers. It does not yet include current
+Trace Commons main `52b4fa7e`; reconcile those independently active native changes
+before claiming merge readiness.
+
+The next read-only signature gate now has a Developer ID verification harness and
+negative OS-verifier evidence; see [artifact inventory](../../compute-artifact-inventory.md).
+It supplies neither runtime launch authorization nor the still-required
+Security-framework bridge. The remaining order is:
+
+1. Integrate the compute snapshots with current Trace Commons main and reconcile
+   native ownership/lifecycle changes; repeat contributor/FFI and native suites.
+2. Review Orchard worker IPC `7d6f7051` and bundle relocation `0b348bc0` against
+   current Orchard main, including the still-open Metal guard PR #2452. A declared
+   source revision is not verified artifact provenance.
+3. Implement compiled signature policy, the runtime Security-framework bridge,
+   complete nested-code/hardened-runtime checks and release-script staging order.
+   Preserve the disabled production constructor throughout preparation.
+4. Obtain the existing separate authorization for signing/test distribution and
+   perform installed Apple Silicon resource and MLX qualification. Synthetic
+   fixtures and an inert signature harness do not close that gate.
+
+Original worktrees are unchanged. The Orchard primary checkout was dirty during
+inventory; its uncommitted work was not read into or copied into this continuation.
