@@ -50475,6 +50475,23 @@ async fn retention_maintenance_handler(
     )
     .await
     .map_err(maintenance_error)?;
+    if state.near_provisioning_enabled || state.admission.is_some() {
+        let db = state.db_mirror.as_ref().ok_or_else(|| {
+            api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "onboarding_retention_unavailable",
+            )
+        })?;
+        // Fixed batch ceiling is an operational work bound, never a subsidy.
+        db.prune_onboarding_expiry(&tenant.tenant_id, 1000, body.dry_run)
+            .await
+            .map_err(|_| {
+                api_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "onboarding_retention_unavailable",
+                )
+            })?;
+    }
     Ok(Json(response))
 }
 

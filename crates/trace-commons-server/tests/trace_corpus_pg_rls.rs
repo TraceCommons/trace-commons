@@ -1653,6 +1653,26 @@ fn onboarding_creation_migrations_enforce_their_rls_boundaries() {
 }
 
 #[test]
+fn onboarding_retention_keeps_scoped_policies_and_never_prunes_durable_ledger() {
+    let sql = include_str!("../../../migrations/V60__onboarding_retention.sql");
+    let normalized: String = sql.split_whitespace().collect();
+    assert!(normalized.contains("CREATEPOLICYtrace_near_ceremony_expiryONtrace_near_provisioning_ceremoniesTOtrace_onboarding_retention_guardUSING(expires_at<=statement_timestamp());"));
+    assert!(sql.contains("NOLOGIN NOBYPASSRLS"));
+    assert!(sql.contains("REVOKE trace_onboarding_retention_guard FROM CURRENT_USER"));
+    assert!(sql.contains("p_limit > 1000"));
+    assert!(sql.contains("tenant_id=p_tenant AND expires_at <= statement_timestamp()"));
+    for table in [
+        "trace_admission_accounts",
+        "trace_admission_submissions",
+        "trace_admission_receipts",
+        "trace_admission_global_budget",
+    ] {
+        assert!(!sql.contains(&format!("DELETE FROM public.{table}")));
+        assert!(!sql.contains(&format!("UPDATE public.{table}")));
+    }
+}
+
+#[test]
 fn trace_corpus_rls_diagnostics_ready_requires_complete_safe_policy_state() {
     assert!(ready_rls_diagnostics().rls_ready());
 

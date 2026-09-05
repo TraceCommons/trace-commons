@@ -210,6 +210,16 @@ pub trait Database: TraceCorpusStore + Send + Sync {
     ) -> Result<Option<crate::admission_ledger::AdmissionProcessingGuard>, DatabaseError> {
         Err(DatabaseError::Pool("admission_database_unavailable".into()))
     }
+    async fn prune_onboarding_expiry(
+        &self,
+        _tenant: &str,
+        _limit: i32,
+        _dry_run: bool,
+    ) -> Result<u64, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "onboarding_retention_unavailable".into(),
+        ))
+    }
     async fn issue_admission_challenge(
         &self,
         _tenant: &str,

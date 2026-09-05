@@ -285,3 +285,24 @@ silently rebuild or upload an artifact approved under different settings.
   records deployment ordering and the limits of the current evidence profile.
 - [Credit numbers API design](2026-09-01-credit-numbers-api-design.md) separates
   reported contribution credit from spendable value.
+
+## Review implementation clarification (2026-09-05)
+
+Admission evidence is now a distinct v2 profile: canonical Ed25519 gateway key,
+exact-body receipt verification, and signed model/request-size inputs. Operators
+must configure accepted models and a positive byte floor independently on witness
+and ingest. Byte length can include padding and binding metadata; it establishes
+neither actual paid cost nor a minimum amount of useful inference. Provider key
+provenance remains an operator attestation-trust prerequisite, not something a pin
+or the receipt itself proves. See the [admission runbook](../../operator/native-admission-session.md).
+
+The window is per account anchor. Account control is not proof of one human, and
+this design assigns no fixed or minimum NEAR account-acquisition cost. Multiple
+accounts per actor remain in the threat model; the global processing budget is
+the final bound. Its scope begins at ingest reservation, after witness review.
+
+No-downgrade is a client bound-request property and a persisted reservation
+identity property. Evidence rejected before reservation leaves no ledger record;
+a later evidence-less request can request a bounded window slot. Receipt dedup,
+account counters and completed submission identities are never removed by expiry
+maintenance; only expired temporary ceremonies/challenges are eligible.

@@ -839,6 +839,30 @@ impl Database for PgBackend {
     ) -> Result<Option<crate::admission_ledger::AdmissionProcessingGuard>, DatabaseError> {
         self.lock_admission(tenant, submission).await
     }
+    async fn prune_onboarding_expiry(
+        &self,
+        tenant: &str,
+        limit: i32,
+        dry_run: bool,
+    ) -> Result<u64, DatabaseError> {
+        let mut client = self.trace_pool().get().await?;
+        let tx = client.transaction().await?;
+        tx.execute(
+            "SELECT set_config('trace_commons.trace_tenant_id',$1,true)",
+            &[&tenant],
+        )
+        .await?;
+        let count: i64 = tx
+            .query_one(
+                "SELECT trace_prune_onboarding_expiry($1,$2,$3)",
+                &[&tenant, &limit, &dry_run],
+            )
+            .await?
+            .get(0);
+        tx.commit().await?;
+        u64::try_from(count)
+            .map_err(|_| DatabaseError::Pool("onboarding_retention_unavailable".into()))
+    }
     async fn issue_admission_challenge(
         &self,
         tenant: &str,
@@ -2182,6 +2206,26 @@ impl Database for PgBackend {
                 .execute(
                     "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
                     &[&59_i32, &"trace_admission_ledger"],
+                )
+                .await?;
+        }
+        let already_applied = client
+            .query_opt(
+                "SELECT 1 FROM _trace_commons_migrations WHERE version = $1",
+                &[&60_i32],
+            )
+            .await?
+            .is_some();
+        if !already_applied {
+            client
+                .batch_execute(include_str!(
+                    "../../../../migrations/V60__onboarding_retention.sql"
+                ))
+                .await?;
+            client
+                .execute(
+                    "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
+                    &[&60_i32, &"onboarding_retention"],
                 )
                 .await?;
         }
