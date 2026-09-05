@@ -508,8 +508,10 @@ fn artifact_still_carries(
 
 /// Check a certificate against the bytes that came back with it.
 ///
-/// Split out so it is testable without a transport, and so the two checks it
-/// makes are visible in one place.
+/// This is the signature/artifact primitive, not request authorization.
+/// `witness_contribution` additionally checks admission against the account,
+/// binding and exact receipt it supplied before returning a persistable artifact.
+/// Stored review validation checks the configured account again.
 ///
 /// `pub` so the AGPL server crate's
 /// `tests/witness_certificate_cross_implementation.rs` can drive the witness's
