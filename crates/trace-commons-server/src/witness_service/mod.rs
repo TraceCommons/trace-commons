@@ -2074,9 +2074,11 @@ mod tests {
     #[tokio::test]
     async fn admission_evidence_binds_trusted_final_call_account_and_witness_artifact() {
         use crate::admission_evidence::{AdmissionProviderTrust, verify_admission_evidence};
+        use ring::signature::KeyPair as _;
         use trace_commons_protocol::admission::{AdmissionBinding, REQUEST_METADATA_KEY, hash_hex};
         use trace_commons_protocol::trace_contribution::TraceContributionEventType;
-        let provider = TestSigner::new("synthetic-provider");
+        let provider = ring::signature::Ed25519KeyPair::from_seed_unchecked(&[7; 32]).unwrap();
+        let provider_key = hex::encode(provider.public_key().as_ref());
         let witness = Arc::new(TestSigner::new("synthetic-admission-witness"));
         struct MatchingEnclave(String);
         #[async_trait]
@@ -2091,7 +2093,9 @@ mod tests {
                 Ok(vec![0xab; 8])
             }
         }
-        let trust = AdmissionProviderTrust::new([provider.address()]).unwrap();
+        let trust =
+            AdmissionProviderTrust::new([provider_key.clone()], ["fixture-model".into()], 1)
+                .unwrap();
         let service = surface::WitnessService::new(
             Arc::new(redactor()),
             witness.clone(),
@@ -2114,8 +2118,9 @@ mod tests {
             hash_hex(response_body.as_bytes())
         );
         let receipt = ReceiptPayload {
-            signature: provider.sign_eip191(receipt_text.as_bytes()).unwrap(),
-            signing_address: provider.address(),
+            signature: hex::encode(provider.sign(receipt_text.as_bytes()).as_ref()),
+            signing_address: provider_key.clone(),
+            signing_algo: crate::near_attestation::receipt::ReceiptAlgo::Ed25519,
             text: receipt_text.clone(),
         };
         let mut request = contribution_request("built a useful fixture");
@@ -2128,6 +2133,40 @@ mod tests {
             .witness_admission_contribution(request.clone())
             .await
             .unwrap();
+        assert_eq!(evidence.model, "fixture-model");
+        assert_eq!(evidence.request_bytes, request_body.len() as u64);
+        for restricted in [
+            AdmissionProviderTrust::new([provider_key.clone()], ["other-model".into()], 1).unwrap(),
+            AdmissionProviderTrust::new(
+                [provider_key.clone()],
+                ["fixture-model".into()],
+                request_body.len() as u64 + 1,
+            )
+            .unwrap(),
+        ] {
+            assert!(
+                crate::admission_evidence::verify_admission_call(
+                    &request.raw_contribution,
+                    request.offered_receipt.as_ref().unwrap(),
+                    &restricted,
+                    now,
+                    1024 * 1024
+                )
+                .is_err()
+            );
+        }
+        let mut wrong_algo = request.offered_receipt.clone().unwrap();
+        wrong_algo.signing_algo = crate::near_attestation::receipt::ReceiptAlgo::Ecdsa;
+        assert!(
+            crate::admission_evidence::verify_admission_call(
+                &request.raw_contribution,
+                &wrong_algo,
+                &trust,
+                now,
+                1024 * 1024
+            )
+            .is_err()
+        );
         let witness_pin = pin(&witness);
         let artifact = verify_witness_certificate(
             response.certificate,
@@ -2202,7 +2241,7 @@ mod tests {
             "receipt binds exact final bytes, including whitespace"
         );
         let untrusted =
-            AdmissionProviderTrust::new([TestSigner::new("untrusted-provider").address()]).unwrap();
+            AdmissionProviderTrust::new(["f".repeat(64)], ["fixture-model".into()], 1).unwrap();
         assert!(
             verify_admission_evidence(
                 &evidence,
@@ -2219,6 +2258,7 @@ mod tests {
         request.offered_receipt = Some(ReceiptPayload {
             signature: attacker.sign_eip191(receipt_text.as_bytes()).unwrap(),
             signing_address: attacker.address(),
+            signing_algo: crate::near_attestation::receipt::ReceiptAlgo::Ecdsa,
             text: receipt_text,
         });
         assert!(

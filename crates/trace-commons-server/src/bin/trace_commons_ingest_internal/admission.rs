@@ -26,10 +26,8 @@ pub(super) fn config_from_env(
     if witness.is_none() || !durable_db {
         anyhow::bail!("admission_requires_witness_and_durable_database");
     }
-    let signers = std::env::var("TRACE_COMMONS_ADMISSION_PROVIDER_SIGNERS")
-        .map_err(|_| anyhow::anyhow!("admission_provider_trust_missing"))?;
-    let providers = AdmissionProviderTrust::new(signers.split(',').map(|s| s.trim().to_string()))
-        .map_err(|_| anyhow::anyhow!("admission_provider_trust_invalid"))?;
+    let providers = AdmissionProviderTrust::from_env("TRACE_COMMONS_ADMISSION")
+        .map_err(|_| anyhow::anyhow!("admission_provider_policy_missing_or_invalid"))?;
     Ok(Some(AdmissionConfig { limits, providers }))
 }
 

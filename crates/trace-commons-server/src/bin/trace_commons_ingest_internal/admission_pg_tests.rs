@@ -160,9 +160,12 @@ async fn actual_postgres_challenge_witness_ingest_and_terminal_retry() {
             .unwrap(),
         Some(prefixed)
     );
-    let provider = FixtureSigner::new("admission-route-provider");
+    use ring::signature::KeyPair as _;
+    let provider = ring::signature::Ed25519KeyPair::from_seed_unchecked(&[7; 32]).unwrap();
+    let provider_key = hex::encode(provider.public_key().as_ref());
     let signer = Arc::new(FixtureSigner::new("admission-route-witness"));
-    let trust = AdmissionProviderTrust::new([provider.address()]).unwrap();
+    let trust =
+        AdmissionProviderTrust::new([provider_key.clone()], ["synthetic-model".into()], 1).unwrap();
     let temp = tempfile::tempdir().unwrap();
     let mut state = test_state_with_tokens(temp.path().to_path_buf(), tokens);
     let state_mut = Arc::make_mut(&mut state);
@@ -240,8 +243,9 @@ async fn actual_postgres_challenge_witness_ingest_and_terminal_retry() {
     );
     let receipt = trace_commons_server::near_attestation::receipt::ReceiptPayload {
         text: receipt_text.clone(),
-        signature: provider.sign_eip191(receipt_text.as_bytes()).unwrap(),
-        signing_address: provider.address(),
+        signature: hex::encode(provider.sign(receipt_text.as_bytes()).as_ref()),
+        signing_address: provider_key.clone(),
+        signing_algo: trace_commons_server::near_attestation::receipt::ReceiptAlgo::Ed25519,
     };
     use trace_commons_protocol::trace_contribution::{
         RawTraceCaptureTurn, RawTraceContribution, TraceContributionEventType,

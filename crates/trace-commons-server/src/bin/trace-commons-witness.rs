@@ -342,11 +342,11 @@ async fn main() -> Result<()> {
     )
     .requiring_attested_inference(inference_policy)
     .with_contribution_redactor(contribution_redactor);
-    if let Ok(signers) = std::env::var("TRACE_COMMONS_WITNESS_ADMISSION_PROVIDER_SIGNERS") {
-        let trust = trace_commons_server::admission_evidence::AdmissionProviderTrust::new(
-            signers.split(',').map(str::trim).map(str::to_string),
+    if std::env::var_os("TRACE_COMMONS_WITNESS_ADMISSION_PROVIDER_SIGNERS").is_some() {
+        let trust = trace_commons_server::admission_evidence::AdmissionProviderTrust::from_env(
+            "TRACE_COMMONS_WITNESS_ADMISSION",
         )
-        .map_err(|_| anyhow::anyhow!("admission_provider_trust_invalid"))?;
+        .map_err(|_| anyhow::anyhow!("admission_provider_policy_missing_or_invalid"))?;
         service = service.with_admission_provider_trust(trust);
     }
     let service = Arc::new(service);
