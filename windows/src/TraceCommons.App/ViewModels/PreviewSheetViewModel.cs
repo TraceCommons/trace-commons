@@ -61,9 +61,9 @@ public sealed class PreviewSheetViewModel : INotifyPropertyChanged, IDisposable
     /// <summary>
     /// Shown where the sheet body would be while the redaction pass runs.
     /// </summary>
-    public const string LoadingTitle = "Scrubbing it locally…";
+    private const string LocalLoadingTitle = "Scrubbing it locally…";
 
-    public const string LoadingDetail = "Reading the session and running the redaction pass.";
+    private const string LocalLoadingDetail = "Reading the session and running the redaction pass.";
 
     /// <summary>
     /// A preview that could not be opened or could not be understood. The
@@ -128,8 +128,8 @@ public sealed class PreviewSheetViewModel : INotifyPropertyChanged, IDisposable
     public string WitnessConfirm => _witnessCopy?.Confirm ?? string.Empty;
     public string WitnessCancel => _witnessCopy?.Cancel ?? string.Empty;
     public string PreviewFailureDetail => _witnessRequested ? _witnessCopy?.Failed ?? FailureDetail : FailureDetail;
-    public string LoadingTitle => _witnessWorking ? _witnessCopy?.Heading ?? string.Empty : "Scrubbing it locally…";
-    public string LoadingDetail => _witnessWorking ? _witnessCopy?.Working ?? string.Empty : "Reading the session and running the redaction pass.";
+    public string LoadingTitle => _witnessWorking ? _witnessCopy?.Heading ?? string.Empty : LocalLoadingTitle;
+    public string LoadingDetail => _witnessWorking ? _witnessCopy?.Working ?? string.Empty : LocalLoadingDetail;
     public bool CanRequestWitness => _witnessSupported && _witnessConfigured && !_witnessWorking && !_admissionBusy && _witnessCopy?.IsComplete == true;
     public bool CanEditOutcome => !_witnessConfigured && !_witnessRequested && !_witnessWorking;
 
