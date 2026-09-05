@@ -173,6 +173,9 @@
                            Style="{StaticResource TcCaptionTextStyle}"
                            TextWrapping="Wrap"
                            TextAlignment="Center" />
+                <Button Content="Prepare next NEAR inference" Click="OnPrepareAdmission"
+                        Visibility="{x:Bind ViewModel.CanPrepareAdmission, Mode=OneWay}" />
+                <TextBlock Text="{x:Bind ViewModel.AdmissionMessage, Mode=OneWay}" TextWrapping="Wrap" />
                 <Button Content="{x:Bind ViewModel.WitnessAction}" Click="OnWitnessReview"
                         Visibility="{x:Bind ViewModel.CanRequestWitness, Mode=OneWay}" />
             </StackPanel>

@@ -88,6 +88,24 @@ public sealed partial class PreviewSheet : UserControl, IDisposable
         SearchBox.Focus(FocusState.Programmatic);
     }
 
+    private async void OnPrepareAdmission(object sender, RoutedEventArgs e)
+    {
+        if (!ViewModel.CanPrepareAdmission) return;
+        var backend = new TextBox { Header = "NEAR backend identifier" };
+        var content = new StackPanel { Spacing = 12 };
+        content.Children.Add(new TextBlock { Text = AdmissionPreparation.Disclosure, TextWrapping = TextWrapping.Wrap });
+        content.Children.Add(backend);
+        var dialog = new ContentDialog {
+            XamlRoot = XamlRoot, Title = AdmissionPreparation.Heading,
+            Content = new ScrollViewer { Content = content },
+            PrimaryButtonText = "Prepare session", CloseButtonText = "Cancel",
+            DefaultButton = ContentDialogButton.Close, IsPrimaryButtonEnabled = false
+        };
+        backend.TextChanged += (_, _) => dialog.IsPrimaryButtonEnabled = !string.IsNullOrWhiteSpace(backend.Text);
+        if (await DialogGuard.ShowOnceAsync(dialog) == ContentDialogResult.Primary)
+            await ViewModel.PrepareAdmissionAsync(backend.Text);
+    }
+
     private async void OnWitnessReview(object sender, RoutedEventArgs e)
     {
         if (!ViewModel.CanRequestWitness) return;
@@ -101,7 +119,7 @@ public sealed partial class PreviewSheet : UserControl, IDisposable
             CloseButtonText = ViewModel.WitnessCancel,
             DefaultButton = ContentDialogButton.Close
         };
-        if (await dialog.ShowAsync() == ContentDialogResult.Primary)
+        if (await DialogGuard.ShowOnceAsync(dialog) == ContentDialogResult.Primary)
             await ViewModel.RequestWitnessAsync();
     }
 

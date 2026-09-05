@@ -618,6 +618,8 @@ pub struct Settings {
     /// Separate consent to carry captured inference bodies to the witness.
     #[serde(default)]
     pub ironwire_attested_bodies: bool,
+    #[serde(default)]
+    pub admission_evidence_required: Option<bool>,
 }
 
 /// `get_settings`'s `ironwire` block.

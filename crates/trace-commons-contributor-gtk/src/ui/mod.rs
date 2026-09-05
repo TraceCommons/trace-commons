@@ -10,6 +10,7 @@ mod css_contract;
 pub mod history;
 pub mod mark;
 pub mod onboarding;
+mod onboarding_wallet;
 pub mod preview;
 pub mod queue;
 pub mod roots;

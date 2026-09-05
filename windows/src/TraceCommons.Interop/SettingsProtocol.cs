@@ -57,6 +57,9 @@ public sealed class DaemonSettingsSnapshot
     [JsonPropertyName("near_ai_configured")]
     public bool NearAiConfigured { get; set; }
 
+    [JsonPropertyName("admission_evidence_required")]
+    public bool? AdmissionEvidenceRequired { get; set; }
+
     [JsonPropertyName("ironwire_attested_bodies")]
     public bool? IronwireAttestedBodies { get; set; }
     public bool InferenceEvidenceEnabled => IronwireAttestedBodies == true;

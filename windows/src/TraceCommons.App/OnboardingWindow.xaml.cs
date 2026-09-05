@@ -29,6 +29,8 @@ public sealed partial class OnboardingWindow : Window
 
         ViewModel = new OnboardingViewModel(host, state);
         ViewModel.Finished += OnFinished;
+        ((FrameworkElement)Content).Loaded += async (_, _) => await ViewModel.NearAccount.InitializeAsync();
+        Closed += async (_, _) => await ViewModel.NearAccount.CloseAsync();
     }
 
     public OnboardingViewModel ViewModel { get; }
@@ -76,6 +78,10 @@ public sealed partial class OnboardingWindow : Window
 
     private async void OnConnect(object sender, RoutedEventArgs e) =>
         await ViewModel.ConnectAsync();
+
+    private async void OnCheckNearAccount(object sender, RoutedEventArgs e) => await ViewModel.NearAccount.CheckAsync();
+    private async void OnStartNearAccount(object sender, RoutedEventArgs e) => await ViewModel.NearAccount.StartAsync();
+    private async void OnCancelNearAccount(object sender, RoutedEventArgs e) => await ViewModel.NearAccount.CancelAsync();
 
     private async void OnConsent(object sender, RoutedEventArgs e) =>
         await ViewModel.ConfirmConsentAsync();

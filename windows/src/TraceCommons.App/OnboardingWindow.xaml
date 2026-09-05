@@ -67,11 +67,12 @@
         </StackPanel>
 
         <!-- 2. Connect -->
-        <StackPanel Spacing="16" Visibility="{x:Bind ViewModel.IsConnect, Mode=OneWay}">
+        <ScrollViewer Visibility="{x:Bind ViewModel.IsConnect, Mode=OneWay}">
+        <StackPanel Spacing="16">
             <TextBlock Style="{StaticResource TcTitleScreenTextStyle}" Text="Connect" />
             <TextBlock Style="{StaticResource TcBodyTextStyle}" TextWrapping="Wrap"
                        Text="Paste the invite link someone sent you, or click it from your email." />
-            <TextBox PlaceholderText="https://.../onboard#..."
+            <TextBox IsEnabled="{x:Bind ViewModel.CanUseInvite, Mode=OneWay}" PlaceholderText="https://.../onboard#..."
                      Text="{x:Bind ViewModel.Invite, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                      TextChanged="OnInviteChanged" />
             <!--
@@ -94,7 +95,21 @@
             <Button Content="Connect" HorizontalAlignment="Right"
                     IsEnabled="{x:Bind ViewModel.CanConnect, Mode=OneWay}"
                     Click="OnConnect" />
+            <StackPanel Spacing="12" Visibility="{x:Bind ViewModel.NearAccount.Supported, Mode=OneWay}"
+                        IsEnabled="{x:Bind ViewModel.CanUseWallet, Mode=OneWay}">
+                <TextBlock Text="Join with a NEAR account" Style="{StaticResource TcTitleCardTextStyle}" />
+                <TextBlock Text="Check whether your commons accepts new accounts. Connecting proves control of your account and this device; it does not fund inference or enable capture." TextWrapping="Wrap" />
+                <TextBox Header="Commons HTTPS address" Text="{x:Bind ViewModel.NearAccount.Commons, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" IsEnabled="{x:Bind ViewModel.NearAccount.CanEdit, Mode=OneWay}" />
+                <Button Content="Check availability" Click="OnCheckNearAccount" IsEnabled="{x:Bind ViewModel.NearAccount.CanCheck, Mode=OneWay}" />
+                <StackPanel Spacing="12" Visibility="{x:Bind ViewModel.NearAccount.Ready, Mode=OneWay}">
+                    <TextBox Header="Your NEAR account" Text="{x:Bind ViewModel.NearAccount.Account, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" IsEnabled="{x:Bind ViewModel.NearAccount.CanEdit, Mode=OneWay}" />
+                    <Button Content="Continue in wallet" Click="OnStartNearAccount" IsEnabled="{x:Bind ViewModel.NearAccount.CanStart, Mode=OneWay}" />
+                </StackPanel>
+                <TextBlock Text="{x:Bind ViewModel.NearAccount.Message, Mode=OneWay}" TextWrapping="Wrap" />
+                <Button Content="Cancel connection" Click="OnCancelNearAccount" Visibility="{x:Bind ViewModel.NearAccount.CanCancel, Mode=OneWay}" />
+            </StackPanel>
         </StackPanel>
+        </ScrollViewer>
 
         <!-- 3. Consent scopes -->
         <Grid RowDefinitions="Auto,Auto,*,Auto" RowSpacing="16"
