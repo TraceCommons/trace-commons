@@ -4012,6 +4012,9 @@ fn routed_tools(body: &[u8]) -> Vec<serde_json::Value> {
 
 #[cfg(test)]
 mod tests {
+    mod witnessed_flow {
+        include!("ipc_witness_flow_test.rs");
+    }
     use super::*;
     use crate::config::tests_support::temp_store;
     use crate::daemon::policy::UNKNOWN_PROJECT_KEY;
