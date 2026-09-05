@@ -260,5 +260,5 @@ The final PostgreSQL checks passed 32 RLS tests, the restricted-role retention
 test (including refusal of runtime membership in either guard), and the atomic
 admission-ledger test. The main-baseline failure and minimal fixture repair are
 recorded in [the reproduction note](2026-09-05-export-fixture-validation.md).
-Current-head CI is recorded in PR #602. Earlier results above describe their stated revisions, not subsequent
-heads. No live pilot, deployment or provider spending occurred in this revision.
+Current-head CI is recorded in PR #602. Earlier results above describe their
+stated revisions, not subsequent heads. No live pilot, deployment or provider spending occurred in this revision.

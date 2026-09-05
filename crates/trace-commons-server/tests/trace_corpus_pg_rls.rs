@@ -3244,11 +3244,30 @@ async fn store_facade_preserves_export_grant_job_scope_and_updates() {
 
     let stale_job_id = Uuid::new_v4();
     let stale_expires_at = requested_at - chrono::Duration::minutes(1);
+    let stale_grant_id = Uuid::new_v4();
+    // The stale job still belongs to a real grant; expiry does not remove the
+    // tenant/grant foreign key required by the production storage schema.
+    backend
+        .upsert_trace_export_access_grant(TraceExportAccessGrantWrite {
+            tenant_id: tenant_alpha.clone(),
+            export_job_id: stale_job_id,
+            grant_id: stale_grant_id,
+            caller_principal_ref: "principal:alpha-exporter".to_string(),
+            requested_dataset_kind: "replay".to_string(),
+            purpose: "alpha-stale-eval".to_string(),
+            max_item_cap: Some(8),
+            status: TraceExportAccessGrantStatus::Active,
+            requested_at: requested_at - chrono::Duration::minutes(10),
+            expires_at: stale_expires_at,
+            metadata: BTreeMap::new(),
+        })
+        .await
+        .expect("insert stale alpha export access grant");
     backend
         .upsert_trace_export_job(TraceExportJobWrite {
             tenant_id: tenant_alpha.clone(),
             export_job_id: stale_job_id,
-            grant_id: Uuid::new_v4(),
+            grant_id: stale_grant_id,
             caller_principal_ref: "principal:alpha-exporter".to_string(),
             requested_dataset_kind: "replay".to_string(),
             purpose: "alpha-stale-eval".to_string(),
