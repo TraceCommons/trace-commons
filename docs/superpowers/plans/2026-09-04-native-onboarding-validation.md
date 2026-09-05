@@ -113,9 +113,9 @@ The atomic ledger suite also covers receipt replay, cross-account rejection,
 account/global budgets, RLS, and processing locks with a one-slot connection pool.
 
 The complete macOS suite passed 501 tests, including wallet origin restrictions
-and the explicit session/backend preparation payload. The complete contributor
-suite passed 1,291 tests before the final recovery regressions (one ignored).
-Follow-up verification below supersedes these intermediate counts. Redirect
+and the explicit session/backend preparation payload. The final complete contributor
+suite passed 1,300 tests (one ignored), including the existing-history profile
+and receipt-endpoint followups. Redirect
 regressions ensure attestation, raw witness bodies, device claims and bearer
 credentials never follow a service redirect. Session persistence failure leaves
 wallet signup retryable; malformed browser handoffs cancel their local attempt.
@@ -134,10 +134,12 @@ and render checks require a Windows runner.
 
 ### Final integration gates
 
-- Contributor library: 1,293 passed, one ignored (before the existing-history
-  profile and receipt-endpoint followups); invited enroll/claim/submit regression
+- Contributor library: 1,300 passed, one ignored, including the existing-history
+  profile and receipt-endpoint followups; invited enroll/claim/submit regression
   passed. Both contributor and FFI all-target Clippy passed with warnings denied.
-- Native FFI rebuilt; real-daemon body consent round-trip passed.
+- Native FFI rebuilt; real-daemon body consent round-trip passed. After the
+  final profile/endpoint integration, 50 focused Swift/native read-back tests
+  passed against the fresh FFI; final preparation snapshot inspected.
 - macOS: all 501 tests passed against the rebuilt FFI. AppKit snapshots show real
   controls for wallet signup and preparation; all four snapshots were inspected.
 - Windows: 39 integrated witness/onboarding/wallet/preparation interop tests passed.
