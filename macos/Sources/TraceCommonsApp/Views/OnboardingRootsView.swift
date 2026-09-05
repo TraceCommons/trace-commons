@@ -8,7 +8,8 @@ import TCShellCore
 /// It runs BEFORE the daemon starts, and therefore before any IPC exists --
 /// which is why it makes no daemon call of its own (the coordinator
 /// sequences it between Welcome and Connect, but nothing on it is
-/// daemon-backed) and why it is not the "What to watch" screen. That screen lists projects the
+/// daemon-backed) and why it is not the "What to watch" screen. That screen
+/// lists projects the
 /// daemon has already discovered and sets a per-project mode; it is
 /// downstream of a scan. This one decides whether a scan may happen at all.
 ///
@@ -239,6 +240,7 @@ struct OnboardingRootsView: View {
         // A refusal here is not the roots refusal -- that one cannot recur,
         // the settings were just persisted -- so it is something else and
         // belongs on this screen rather than silently returning to it.
+        // startDaemon is synchronous: its final startup state is available here.
         switch model.startup {
         case .refused(let reason):
             failure = reason

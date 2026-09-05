@@ -81,7 +81,7 @@ struct MainWindowView: View {
             // `startAt: .consent`, throwing away whatever step the
             // contributor had just reached. One branch keeps one identity
             // (and therefore one `@State step`) for the entire flow.
-            if model.startup == .needsRoots || !model.status.loggedIn || !model.isOnboardingComplete {
+            if model.requiresOnboarding {
                 OnboardingCoordinatorView(
                     startAt: model.status.loggedIn ? .consent : .welcome,
                     onComplete: { model.markOnboardingComplete() }

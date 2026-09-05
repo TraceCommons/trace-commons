@@ -116,4 +116,13 @@ final class OnboardingCompletionTests: XCTestCase {
 
         XCTAssertFalse(model.isOnboardingComplete)
     }
+    @MainActor
+    func testMissingRootsAlwaysRequiresOnboardingEvenForCompletedEnrollment() {
+        let model = enrolledModel(tenantID: tenant)
+        model.markOnboardingComplete()
+        model.setStartupForTesting(.running)
+        XCTAssertFalse(model.requiresOnboarding)
+        model.setStartupForTesting(.needsRoots)
+        XCTAssertTrue(model.requiresOnboarding)
+    }
 }

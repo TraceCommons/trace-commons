@@ -22,6 +22,9 @@ import SwiftUI
 /// refusing and straight to Connect once it is running. The roots screen
 /// needs no daemon, so nothing about it changes by moving it.
 ///
+/// Returning contributors whose folder declarations were lost repeat Welcome,
+/// folder consent, and the remaining setup. Existing enrollment remains valid.
+///
 /// ## Call ordering (why `enroll` carries no scopes)
 ///
 /// The contract's `enroll` entry (`docs/contributor-daemon-ipc-v1_1.md`)
@@ -77,41 +80,16 @@ struct OnboardingCoordinatorView: View {
     /// what replaces it.
     var onComplete: () -> Void
 
-    enum Step: Equatable {
-        case welcome
-        /// Only on a fresh install: the daemon is refusing to start until
-        /// the session roots are declared. Never resumed to -- a daemon that
-        /// is running already has its roots.
-        case roots
-        case connect
-        case consent
-        case privacyScan
-        case projects
-        case done
+    typealias Step = OnboardingNavigation.Step
 
-        static func afterWelcome(needsRoots: Bool) -> Self {
-            needsRoots ? .roots : .connect
-        }
-
-        func previous(privacyScanConfigured: Bool) -> Self? {
-            switch self {
-            case .welcome: return nil
-            case .roots, .connect: return .welcome
-            case .consent: return .connect
-            case .privacyScan: return .consent
-            case .projects: return privacyScanConfigured ? .privacyScan : .consent
-            case .done: return .projects
-            }
-        }
-    }
-
-    @State private var step: Step
+    @State private var navigation: OnboardingNavigation
+    private var step: Step { navigation.step }
     /// Names of optional scopes ticked on screen 3, kept here (not just
     /// inside `ConsentScopesContent`) so a trip to screen 4 or 5 and back
     /// does not lose the choice.
     @State private var selectedScopes: Set<String> = []
     @State private var consentSaveFailed = false
-    @State private var consentSaveInProgress = false
+    @State private var settingsUnavailable = false
     /// Reference material for the welcome screen, presented as a sheet
     /// rather than a step of its own -- it asks for no decision, and this
     /// flow is one decision per screen.
@@ -120,7 +98,7 @@ struct OnboardingCoordinatorView: View {
     init(startAt: Step = .welcome, onComplete: @escaping () -> Void) {
         self.startAt = startAt
         self.onComplete = onComplete
-        _step = State(initialValue: startAt)
+        _navigation = State(initialValue: OnboardingNavigation(step: startAt))
     }
 
     var body: some View {
@@ -130,7 +108,7 @@ struct OnboardingCoordinatorView: View {
             }
             content
         }
-        .disabled(consentSaveInProgress)
+        .disabled(navigation.consentSaveInProgress)
         .sheet(isPresented: $showingWhatGetsRemoved) {
             WhatGetsRemovedSheet()
         }
@@ -151,13 +129,13 @@ struct OnboardingCoordinatorView: View {
     /// already enrolled; that screen says so and offers Continue rather
     /// than a second enrolment (see `OnboardingConnectContent`).
     private var previousStep: Step? {
-        step.previous(privacyScanConfigured: model.daemonSettings?.nearAIConfigured == true)
+        step.previous(privacyScanConfigured: navigation.scanIncluded)
     }
 
     private func backBar(to previous: Step) -> some View {
         HStack {
             Button {
-                step = previous
+                navigation.enter(previous)
             } label: {
                 Label("Back", systemImage: "chevron.left")
             }
@@ -179,25 +157,26 @@ struct OnboardingCoordinatorView: View {
             // None of these callbacks carry a default any more -- omitting
             // one is a compile error rather than a silent dead control.
             OnboardingWelcomeView(
-                onGetStarted: { step = .afterWelcome(needsRoots: model.startup == .needsRoots) },
+                onGetStarted: { navigation.enter(.afterWelcome(needsRoots: model.startup == .needsRoots)) },
                 onWhatGetsRemoved: { showingWhatGetsRemoved = true }
             )
 
         case .roots:
             OnboardingRootsView(
                 configDirectory: model.configDirectory,
-                onStarted: { step = .connect }
+                onStarted: { navigation.enter(.connect) }
             )
 
         case .connect:
-            OnboardingConnectView(onEnrolled: {
-                // An invite request may finish after Back was pressed.
-                // Enrollment remains valid, but must not move a newer screen.
-                if step == .connect { step = .consent }
-            })
+            let visit = navigation.connectVisit
+            OnboardingConnectView(onEnrolled: { navigation.enrolled(visit: visit) })
 
         case .consent:
             VStack(alignment: .leading, spacing: 8) {
+                if settingsUnavailable {
+                    Text("Watcher settings are still loading. Try Continue again once they are available.")
+                        .font(.callout)
+                }
                 if consentSaveFailed {
                     Text("""
                     Couldn't save your choices -- the watcher may not be running. \
@@ -212,19 +191,23 @@ struct OnboardingCoordinatorView: View {
             }
 
         case .privacyScan:
-            OnboardingPrivacyScanView(onContinue: { step = .projects })
-                // The operator may not have configured the second scanner at
-                // all (`OnboardingPrivacyScanView` renders nothing in that
-                // case, per its own gate) -- skip straight past it rather
-                // than leave the contributor on a blank screen.
-                .onAppear {
-                    if model.daemonSettings?.nearAIConfigured != true {
-                        step = .projects
-                    }
+            if model.daemonSettings?.nearAIConfigured == true {
+                OnboardingPrivacyScanView(onContinue: { navigation.enter(.projects) })
+            } else {
+                VStack {
+                    Text("The extra privacy scan is no longer available.")
+                    Button("Continue") { navigation.enter(.projects) }
                 }
+            }
 
         case .projects:
-            OnboardingProjectsView(onContinue: { step = .done })
+            VStack {
+                if !navigation.scanIncluded {
+                    Text("The extra privacy scan was not included in this setup.")
+                        .font(.callout).foregroundStyle(.secondary)
+                }
+                OnboardingProjectsView(onContinue: { navigation.enter(.done) })
+            }
 
         case .done:
             OnboardingDoneView(onFinish: onComplete)
@@ -241,22 +224,22 @@ struct OnboardingCoordinatorView: View {
     /// than silently moving on with the floor-only scope `enroll` left in
     /// place.
     private func advanceFromConsent(_ selected: Set<String>) {
-        guard !consentSaveInProgress else { return }
-        consentSaveInProgress = true
+        guard navigation.beginConsentSave(scanConfigured: model.daemonSettings?.nearAIConfigured) else {
+            settingsUnavailable = model.daemonSettings == nil
+            model.refreshAll()
+            return
+        }
+        settingsUnavailable = false
         selectedScopes = selected
         consentSaveFailed = false
         let alwaysOn = model.consentScopes.filter(\.alwaysOn).map(\.name)
         let scopes = Array(Set(alwaysOn).union(selected))
         Task {
-            defer { consentSaveInProgress = false }
             switch await model.setConsentScopes(scopes) {
             case .succeeded:
-                if model.daemonSettings?.nearAIConfigured == true {
-                    step = .privacyScan
-                } else {
-                    step = .projects
-                }
+                navigation.finishConsentSave(succeeded: true)
             case .failed:
+                navigation.finishConsentSave(succeeded: false)
                 consentSaveFailed = true
             }
         }
