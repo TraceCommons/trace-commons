@@ -536,6 +536,7 @@ struct DaemonSettingsView: Decodable, Equatable {
     /// never mentioned.
     let ironwire: IronWireDeclarationView?
     /// Older daemons omit this independent, default-off consent.
+    var admissionEvidenceRequired: Bool? = nil
     var ironwireAttestedBodies: Bool? = nil
     var inferenceEvidenceEnabled: Bool { ironwireAttestedBodies == true }
 
@@ -566,6 +567,7 @@ struct DaemonSettingsView: Decodable, Equatable {
         case geminiSourceMode = "gemini_source_mode"
         case clineSourceMode = "cline_source_mode"
         case ironwire
+        case admissionEvidenceRequired = "admission_evidence_required"
         case ironwireAttestedBodies = "ironwire_attested_bodies"
     }
 }

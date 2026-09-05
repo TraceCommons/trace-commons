@@ -862,6 +862,28 @@ final class AppModel: ObservableObject {
     /// `failure.message`, and `enroll`'s failure message must never reach a
     /// screen -- `OnboardingConnectView` renders one fixed sentence for
     /// every failure of this call instead.
+    func prepareAdmissionSession(entryID: String, backend: String) async -> AdmissionPreparation? {
+        guard let client else { return nil }
+        return await Task.detached { try? client.prepareAdmissionSession(entryID: entryID, backend: backend) }.value
+    }
+
+    func nearAccountCapabilities(commons: String) async -> NearAccountCapability? {
+        guard let client else { return nil }
+        return await Task.detached { try? client.nearAccountCapabilities(commons: commons) }.value
+    }
+    func nearAccountStart(commons: String, account: String) async -> NearAccountProgress? {
+        guard let client else { return nil }
+        return await Task.detached { try? client.nearAccountStart(commons: commons, account: account) }.value
+    }
+    func nearAccountStatus(attemptID: String) async -> NearAccountProgress? {
+        guard let client else { return nil }
+        return await Task.detached { try? client.nearAccountStatus(attemptID: attemptID) }.value
+    }
+    func nearAccountCancel(attemptID: String) async {
+        guard let client else { return }
+        await Task.detached { try? client.nearAccountCancel(attemptID: attemptID) }.value
+    }
+
     func enroll(invite: String, scopes: [String] = []) async -> EnrollOutcome {
         guard let client else { return .failed }
         return await Task.detached(priority: .userInitiated) { () -> EnrollOutcome in

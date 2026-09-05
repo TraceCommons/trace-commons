@@ -1677,8 +1677,18 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
             Response::ok(req.id, serde_json::json!({ "requested": true }))
         }
         "get_settings" => {
-            let settings = shared.settings.lock().expect("settings lock");
-            Response::ok(req.id, redacted_settings(&settings))
+            let mut value = {
+                let settings = shared.settings.lock().expect("settings lock");
+                redacted_settings(&settings)
+            };
+            value["admission_evidence_required"] = match shared.store.load_config() {
+                Ok(cfg) => serde_json::json!(
+                    cfg.and_then(|c| c.witness)
+                        .is_some_and(|w| w.admission_evidence)
+                ),
+                Err(_) => serde_json::Value::Null,
+            };
+            Response::ok(req.id, value)
         }
         "set_settings" => {
             let mut settings = shared.settings.lock().expect("settings lock");

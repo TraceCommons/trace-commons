@@ -2130,13 +2130,33 @@ impl Database for PgBackend {
                 )
                 .await?;
         }
-        for (version,name,sql) in [
-            (58_i32,"near_account_provisioning",include_str!("../../../../migrations/V58__near_account_provisioning.sql")),
-            (59_i32,"trace_admission_ledger",include_str!("../../../../migrations/V59__trace_admission_ledger.sql")),
+        for (version, name, sql) in [
+            (
+                58_i32,
+                "near_account_provisioning",
+                include_str!("../../../../migrations/V58__near_account_provisioning.sql"),
+            ),
+            (
+                59_i32,
+                "trace_admission_ledger",
+                include_str!("../../../../migrations/V59__trace_admission_ledger.sql"),
+            ),
         ] {
-            if client.query_opt("SELECT 1 FROM _trace_commons_migrations WHERE version=$1",&[&version]).await?.is_none() {
+            if client
+                .query_opt(
+                    "SELECT 1 FROM _trace_commons_migrations WHERE version=$1",
+                    &[&version],
+                )
+                .await?
+                .is_none()
+            {
                 client.batch_execute(sql).await?;
-                client.execute("INSERT INTO _trace_commons_migrations(version,name) VALUES($1,$2)",&[&version,&name]).await?;
+                client
+                    .execute(
+                        "INSERT INTO _trace_commons_migrations(version,name) VALUES($1,$2)",
+                        &[&version, &name],
+                    )
+                    .await?;
             }
         }
         Ok(())

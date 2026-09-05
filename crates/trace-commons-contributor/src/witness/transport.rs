@@ -589,6 +589,8 @@ impl HttpWitnessTransport {
         timeout: Duration,
     ) -> Result<Self, WitnessTrustError> {
         let http = reqwest::Client::builder()
+            // Raw sessions are authorized for this attested endpoint only.
+            .redirect(reqwest::redirect::Policy::none())
             .timeout(timeout)
             .build()
             .map_err(|_| WitnessTrustError::WitnessAttestationUnavailable)?;

@@ -38,6 +38,8 @@ struct OnboardingConnectView: View {
 struct OnboardingConnectContent: View {
     @EnvironmentObject private var model: AppModel
 
+    @State private var nearBusy = false
+
     enum Phase: Equatable {
         case idle
         case resolved(InviteLink)
@@ -74,6 +76,9 @@ struct OnboardingConnectContent: View {
             header
             pasteField
             phaseView
+            Divider()
+            NearAccountConnectView(onBusyChanged: { nearBusy = $0 }, onEnrolled: onEnrolled)
+                .disabled(isEnrolling)
         }
         .padding(TC.Space.xxl)
         .tcColumn(TC.Measure.prose)
@@ -125,9 +130,9 @@ struct OnboardingConnectContent: View {
             TextField("https://…/onboard#…", text: $inviteText)
                 .textFieldStyle(.roundedBorder)
                 .onSubmit(resolve)
-                .disabled(isEnrolling)
+                .disabled(isEnrolling || nearBusy)
             Button("Look up", action: resolve)
-                .disabled(inviteText.trimmingCharacters(in: .whitespaces).isEmpty || isEnrolling)
+                .disabled(inviteText.trimmingCharacters(in: .whitespaces).isEmpty || isEnrolling || nearBusy)
         }
     }
 
@@ -169,6 +174,7 @@ struct OnboardingConnectContent: View {
             Text("This invite is for **\(link.issuerHost)**.")
                 .font(.callout)
             Button("Join \(link.issuerHost)") { join(link) }
+                .disabled(nearBusy)
                 .tcPrimaryAction()
                 .keyboardShortcut(.defaultAction)
         }
