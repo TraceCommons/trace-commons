@@ -331,19 +331,19 @@ struct OnboardingWelcomeContent: View {
         .padding(.horizontal, TC.Space.s)
     }
 
-    /// The promise, restated small, and the step counter. Both in the mono
-    /// micro-label; a 1px ink rule above, not the header's 2px.
+    /// The promise, restated small, in the mono micro-label; a 1px ink rule
+    /// above, not the header's 2px.
+    ///
+    /// There used to be a step counter here, stated as "01 — 06". It was
+    /// wrong on the one path where a counter matters: a fresh install has a
+    /// roots screen after this one, and the privacy-scan screen exists only
+    /// when the operator configured it, so the real count is not knowable
+    /// on this screen and is not six. A counter that miscounts is worse
+    /// than none.
     private var footer: some View {
         VStack(alignment: .leading, spacing: TC.Space.m) {
             Rectangle().fill(CommunityBrand.ink).frame(height: TC.Space.hairline)
-            HStack(alignment: .firstTextBaseline) {
-                Text("Scrubbed locally · shown to you · sent only on your word")
-                Spacer(minLength: TC.Space.m)
-                // Screen 1 of the six-step flow owned by
-                // `OnboardingCoordinatorView`. This screen is only ever
-                // step 1, so the counter is stated rather than plumbed.
-                Text("01 — 06")
-            }
+            Text("Scrubbed locally · shown to you · sent only on your word")
             .font(CommunityBrand.Font_.labelMono)
             .tracking(CommunityBrand.Font_.monoTracking)
             .foregroundStyle(CommunityBrand.muted)

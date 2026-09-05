@@ -1,13 +1,26 @@
 import SwiftUI
 
-/// Chains the six existing onboarding screens into one first-run flow.
+/// Chains the existing onboarding screens into one first-run flow.
 ///
-/// Each screen already exists (`OnboardingWelcomeView`, `OnboardingConnectView`,
-/// `ConsentScopesView`, `OnboardingPrivacyScanView`, `OnboardingProjectsView`,
-/// `OnboardingDoneView`) and drives its own daemon call. This view owns only
-/// the sequencing between them and the one piece of state that must survive
-/// a screen change: the consent scopes chosen on screen 3, which screen 4/5
-/// must not discard if the contributor goes back to revisit them.
+/// Each screen already exists (`OnboardingWelcomeView`, `OnboardingRootsView`,
+/// `OnboardingConnectView`, `ConsentScopesView`, `OnboardingPrivacyScanView`,
+/// `OnboardingProjectsView`, `OnboardingDoneView`) and drives its own daemon
+/// call. This view owns only the sequencing between them and the one piece
+/// of state that must survive a screen change: the consent scopes chosen on
+/// the consent screen, which the screens after it must not discard if the
+/// contributor goes back to revisit them.
+///
+/// ## The roots screen comes second, not first
+///
+/// On a fresh install the daemon refuses to start until the session roots
+/// are declared (`AppModel.Startup.needsRoots`), and the roots screen is
+/// what clears that. It used to be rendered directly on that state, so the
+/// first thing a new contributor ever saw was "Which folders may this app
+/// watch?" -- a consent question asked before the screen that says what the
+/// app is and why it wants anything. Welcome now comes first on that path
+/// too; `Get started` goes to the roots screen while the daemon is still
+/// refusing and straight to Connect once it is running. The roots screen
+/// needs no daemon, so nothing about it changes by moving it.
 ///
 /// ## Call ordering (why `enroll` carries no scopes)
 ///
@@ -66,6 +79,10 @@ struct OnboardingCoordinatorView: View {
 
     enum Step: Equatable {
         case welcome
+        /// Only on a fresh install: the daemon is refusing to start until
+        /// the session roots are declared. Never resumed to -- a daemon that
+        /// is running already has its roots.
+        case roots
         case connect
         case consent
         case privacyScan
@@ -79,9 +96,9 @@ struct OnboardingCoordinatorView: View {
     /// does not lose the choice.
     @State private var selectedScopes: Set<String> = []
     @State private var consentSaveFailed = false
-    /// Reference material for screen 1, presented as a sheet rather than a
-    /// seventh step -- it asks for no decision, and this flow is six screens
-    /// with one decision each.
+    /// Reference material for the welcome screen, presented as a sheet
+    /// rather than a step of its own -- it asks for no decision, and this
+    /// flow is one decision per screen.
     @State private var showingWhatGetsRemoved = false
 
     init(startAt: Step = .welcome, onComplete: @escaping () -> Void) {
@@ -130,8 +147,14 @@ struct OnboardingCoordinatorView: View {
             // None of these callbacks carry a default any more -- omitting
             // one is a compile error rather than a silent dead control.
             OnboardingWelcomeView(
-                onGetStarted: { step = .connect },
+                onGetStarted: { step = model.startup == .needsRoots ? .roots : .connect },
                 onWhatGetsRemoved: { showingWhatGetsRemoved = true }
+            )
+
+        case .roots:
+            OnboardingRootsView(
+                configDirectory: model.configDirectory,
+                onStarted: { step = .connect }
             )
 
         case .connect:

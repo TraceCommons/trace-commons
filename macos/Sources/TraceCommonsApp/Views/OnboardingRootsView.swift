@@ -6,8 +6,9 @@ import TCShellCore
 /// The roots screen: which session folders this app may watch.
 ///
 /// It runs BEFORE the daemon starts, and therefore before any IPC exists --
-/// which is why it cannot be part of the daemon-backed onboarding flow and
-/// why it is not the "What to watch" screen. That screen lists projects the
+/// which is why it makes no daemon call of its own (the coordinator
+/// sequences it between Welcome and Connect, but nothing on it is
+/// daemon-backed) and why it is not the "What to watch" screen. That screen lists projects the
 /// daemon has already discovered and sets a per-project mode; it is
 /// downstream of a scan. This one decides whether a scan may happen at all.
 ///
@@ -43,6 +44,10 @@ struct OnboardingRootsView: View {
     /// in rather than re-resolved so the screen and the start agree even if
     /// the environment changes underneath them.
     let configDirectory: String
+    /// Called once the daemon has started against the declared roots. The
+    /// coordinator advances from here; this screen has no opinion on what
+    /// comes next.
+    var onStarted: () -> Void
 
     @State private var roots = SessionRoots()
     @State private var candidates: [SourceCandidate] = []
@@ -234,8 +239,13 @@ struct OnboardingRootsView: View {
         // A refusal here is not the roots refusal -- that one cannot recur,
         // the settings were just persisted -- so it is something else and
         // belongs on this screen rather than silently returning to it.
-        if case .refused(let reason) = model.startup {
+        switch model.startup {
+        case .refused(let reason):
             failure = reason
+        case .running:
+            onStarted()
+        case .starting, .needsRoots:
+            break
         }
     }
 }
