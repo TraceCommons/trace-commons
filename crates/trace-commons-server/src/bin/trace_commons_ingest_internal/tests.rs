@@ -16,6 +16,37 @@ use trace_commons_protocol::trace_contribution::{
 use trace_commons_server::db::postgres::PgBackend;
 use trace_commons_server::trace_corpus_storage::TraceCorpusStore;
 
+#[tokio::test]
+async fn admission_origin_refuses_without_mapping_even_when_legacy_grants_are_disabled() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut tokens = BTreeMap::new();
+    insert_token(
+        &mut tokens,
+        &format!("near-{}", "11".repeat(32)),
+        "unmapped-near-token",
+        TokenRole::Contributor,
+    );
+    let state = test_state_with_tokens(temp.path().to_path_buf(), tokens);
+    assert!(!state.require_tenant_access_grants);
+    let result = submit_trace_handler(
+        State(state),
+        auth_headers("unmapped-near-token"),
+        submit_body(sample_envelope().await),
+    )
+    .await;
+    let error = result.unwrap_err();
+    assert_eq!(error.0, StatusCode::FORBIDDEN);
+    assert_eq!(error.1.0.error, "admission_refused");
+}
+
+#[tokio::test]
+async fn admission_challenge_is_disabled_for_existing_invited_credentials() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = test_state(temp.path().to_path_buf());
+    let result = admission::challenge_handler(State(state), auth_headers("token-a")).await;
+    assert_eq!(result.unwrap_err().0, StatusCode::FORBIDDEN);
+}
+
 /// `/health` is the surface an operator curls to answer "what is deployed
 /// here?", so the build identity has to be on it, and the fields that were
 /// already there have to keep their names.
@@ -5136,6 +5167,7 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         perplexity_score_driver: None,
         pii_backstop_driver: None,
         witness_bypass: None,
+        admission: None,
         benchmark_registry_scheduler: None,
         benchmark_pipeline_scheduler: None,
         credit_cycle_scheduler: None,
@@ -26079,6 +26111,7 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         perplexity_score_driver: None,
         pii_backstop_driver: None,
         witness_bypass: None,
+        admission: None,
         benchmark_registry_scheduler: None,
         benchmark_pipeline_scheduler: None,
         credit_cycle_scheduler: None,

@@ -1,6 +1,9 @@
 // Copyright (C) 2026 K&Z Partners LLC
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+#[path = "trace_commons_ingest_internal/admission.rs"]
+mod admission;
+
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::io::{BufRead, Write};
@@ -1626,6 +1629,7 @@ struct AppState {
     /// verifying against all three keeps a submission out of the hold. It
     /// lifts no quarantine and never means the trace is clean.
     witness_bypass: Option<WitnessBypassConfig>,
+    admission: Option<admission::AdmissionConfig>,
     benchmark_registry_scheduler: Option<TraceBenchmarkRegistrySchedulerConfig>,
     benchmark_pipeline_scheduler: Option<TraceBenchmarkPipelineSchedulerConfig>,
     credit_cycle_scheduler: Option<TraceCreditCycleSchedulerConfig>,
@@ -3816,6 +3820,10 @@ impl AppState {
         // which is not an acceptance of anything.
         let witness_bypass = witness_bypass_config_from_env()
             .map_err(|err| anyhow::anyhow!("witness bypass configuration refused: {err}"))?;
+        let admission = admission::config_from_env(
+            witness_bypass.as_ref(),
+            db_mirror.is_some() && require_db_mirror_writes && require_postgres_trace_rls_ready,
+        )?;
         let benchmark_registry_scheduler =
             parse_trace_benchmark_registry_scheduler_config_from_env()?;
         let benchmark_pipeline_scheduler =
@@ -4096,6 +4104,7 @@ impl AppState {
             perplexity_score_driver,
             pii_backstop_driver,
             witness_bypass,
+            admission,
             benchmark_registry_scheduler,
             benchmark_pipeline_scheduler,
             credit_cycle_scheduler,
@@ -7431,6 +7440,10 @@ fn app(state: Arc<AppState>) -> Router {
             get(list_traces_handler)
                 .post(submit_trace_handler)
                 .delete(revoke_trace_body_handler),
+        )
+        .route(
+            "/v1/admission/challenge",
+            post(admission::challenge_handler),
         )
         .route("/v1/traces/{submission_id}", delete(revoke_trace_handler))
         .route(
@@ -13030,262 +13043,326 @@ async fn submit_trace_handler(
     };
     #[cfg(test)]
     pause_submit_after_rate_limit_for_test(&submit_key).await;
-    let tenant = authorize_tenant_access_grant_ctx(state.as_ref(), authenticated_tenant).await?;
-    validate_envelope(&envelope)?;
-
-    // Idempotency: same submission_id always addresses the same record.
-    // Owned quarantined rows are the exception — a re-POST supersedes the
-    // stored envelope and reclassifies under current server rules (#214).
-    // Fresh submission ids for the same session are rejected: they would
-    // compete with themselves for novelty credit.
-    let remediating_prior = if let Some(existing) = tenant
-        .read_submission_record(&state.root, envelope.submission_id)
-        .map_err(internal_error)?
+    let mut admission = admission::reserve(
+        &state,
+        &authenticated_tenant,
+        &headers,
+        &raw_body,
+        envelope.submission_id,
+    )
+    .await?;
+    let tenant = if admission.is_some() {
+        authenticated_tenant
+    } else {
+        authorize_tenant_access_grant_ctx(state.as_ref(), authenticated_tenant).await?
+    };
+    // A completed admission is an idempotent read, including quarantined
+    // records. Re-running remediation here would bypass the processing ledger.
+    if admission
+        .as_ref()
+        .is_some_and(admission::Attempt::is_completed)
     {
+        let existing = tenant
+            .read_submission_record(&state.root, envelope.submission_id)
+            .map_err(internal_error)?
+            .ok_or_else(|| internal_error("admission_record_unavailable"))?;
         if !tenant.can_access_submission(&existing) {
             return Err(api_error(
                 StatusCode::CONFLICT,
-                "submission id already belongs to another principal",
+                "admission_identity_conflict",
             ));
         }
-        if principal_can_remediate_quarantined(tenant.auth(), &existing) {
-            Some(existing)
+        return Ok(Json(receipt_from_record(
+            &existing,
+            state.near_settlement_mode,
+        )));
+    }
+    let result = async {
+        validate_envelope(&envelope)?;
+
+        // Idempotency: same submission_id always addresses the same record.
+        // Owned quarantined rows are the exception — a re-POST supersedes the
+        // stored envelope and reclassifies under current server rules (#214).
+        // Fresh submission ids for the same session are rejected: they would
+        // compete with themselves for novelty credit.
+        let remediating_prior = if let Some(existing) = tenant
+            .read_submission_record(&state.root, envelope.submission_id)
+            .map_err(internal_error)?
+        {
+            if !tenant.can_access_submission(&existing) {
+                return Err(api_error(
+                    StatusCode::CONFLICT,
+                    "submission id already belongs to another principal",
+                ));
+            }
+            if principal_can_remediate_quarantined(tenant.auth(), &existing) {
+                Some(existing)
+            } else {
+                let receipt = receipt_from_record(&existing, state.near_settlement_mode);
+                append_audit_event(
+                    &state.root,
+                    tenant.tenant_id(),
+                    tenant.idempotent_submit_audit_event(envelope.submission_id),
+                )
+                .map_err(internal_error)?;
+                return Ok(Json(receipt));
+            }
         } else {
-            let receipt = receipt_from_record(&existing, state.near_settlement_mode);
-            append_audit_event(
-                &state.root,
-                tenant.tenant_id(),
-                tenant.idempotent_submit_audit_event(envelope.submission_id),
-            )
-            .map_err(internal_error)?;
-            return Ok(Json(receipt));
+            None
+        };
+
+        let tenant_policy =
+            tenant_submission_policy_for_request(state.as_ref(), tenant.auth()).await?;
+        enforce_signed_claim_submission_restrictions(&tenant, &envelope)?;
+        enforce_tenant_submission_policy(
+            tenant.auth(),
+            &envelope,
+            tenant_policy.as_ref(),
+            state.require_tenant_submission_policy,
+        )?;
+
+        // AT RECEIPT: against `raw_body`, the bytes the extractor captured before
+        // any handler code ran. `rescrub_trace_envelope` on the next line rewrites
+        // the envelope in place, so verifying against the parsed value -- or off
+        // the stored artifact, or off any re-serialisation -- would fail every
+        // honest witnessed submission.
+        //
+        // Placed here rather than at the top of the handler so that signature
+        // recovery sits BEHIND the submit rate limiter and the tenant-access-grant
+        // check. The bytes are captured either way, so this costs the guarantee
+        // nothing and denies an authenticated caller a free ECDSA-recovery
+        // amplifier. `the_certificate_is_verified_before_the_rescrub_runs` pins
+        // that it stays above the rescrub.
+        let witness = verified_witness_for_submission(state.as_ref(), &headers, &raw_body);
+
+        // The basis is a return value of the pass, never a field on the
+        // envelope: the envelope is deserialised from contributor input, so a
+        // basis carried there would be client-asserted by construction.
+        if let Some(attempt) = admission.as_mut() {
+            attempt
+                .processing(
+                    state
+                        .db_mirror
+                        .as_ref()
+                        .ok_or_else(|| internal_error("admission_database_unavailable"))?
+                        .as_ref(),
+                )
+                .await?;
         }
-    } else {
-        None
-    };
+        let residual_risk_basis = rescrub_trace_envelope(&mut envelope)
+            .map_err(|err| internal_error(format!("privacy filter config invalid: {err}")))?;
+        bind_envelope_server_tenant_scope_for_storage(&mut envelope, tenant.tenant_id());
+        let existing_revocations = read_revocations_for_submit(state.as_ref(), tenant.tenant_id())
+            .await
+            .map_err(internal_error)?;
+        let existing_derived =
+            read_all_derived_records(&state.root, tenant.tenant_id()).map_err(internal_error)?;
+        let derived_precheck = build_derived_precheck(&envelope, &existing_derived);
+        ensure_not_revoked_by_tombstone(
+            &existing_revocations,
+            envelope.submission_id,
+            &envelope.privacy.redaction_hash,
+            &derived_precheck.canonical_summary_hash,
+        )?;
+        // Same-id quarantine remediation does not consume a new quota slot — the
+        // prior quarantined row already counted.
+        if remediating_prior.is_none() {
+            enforce_submission_quota(state.as_ref(), &tenant)?;
+        }
+        apply_embedding_precheck(&mut envelope, &derived_precheck);
+        apply_credit_estimate_to_envelope(&mut envelope);
+        let corpus_status = status_for_risk(
+            envelope.privacy.residual_pii_risk,
+            state.accept_medium_risk_submissions,
+        );
+        if corpus_status != TraceCorpusStatus::Accepted {
+            envelope.value.credit_points_pending = 0.0;
+            envelope.value.explanation = vec![
+                "Submission is quarantined until privacy review completes; credit is held at 0.0."
+                    .to_string(),
+            ];
+            envelope.value_card.user_visible_explanation = envelope.value.explanation.clone();
+        }
 
-    let tenant_policy = tenant_submission_policy_for_request(state.as_ref(), tenant.auth()).await?;
-    enforce_signed_claim_submission_restrictions(&tenant, &envelope)?;
-    enforce_tenant_submission_policy(
-        tenant.auth(),
-        &envelope,
-        tenant_policy.as_ref(),
-        state.require_tenant_submission_policy,
-    )?;
+        // PII-backstop hold: an Accepted, content-bearing trace is held on
+        // `AwaitingPiiBackstop` (not the corpus) until the driver re-redacts it,
+        // whenever the backstop driver is configured. The credit-zeroing block above
+        // ran against the risk-derived status, so a held-but-otherwise-Accepted trace
+        // keeps its pending credit intact for the eventual release to Accepted; the
+        // consumer/Accepted gates enforce the hold purely off the stored status.
+        // No enrol row is written: the `awaiting_pii_backstop` status is the
+        // enrolment (the driver enumeration tolerates an absent bookkeeping row).
+        let held_without_a_witness = corpus_status_with_pii_backstop_hold(
+            corpus_status,
+            &envelope.consent,
+            state.pii_backstop_driver.is_some(),
+            None,
+            None,
+        );
+        let corpus_status = corpus_status_with_pii_backstop_hold(
+            corpus_status,
+            &envelope.consent,
+            state.pii_backstop_driver.is_some(),
+            witness.as_ref(),
+            state.witness_bypass.as_ref(),
+        );
+        // The certificate changed the outcome only if the same inputs WITHOUT it
+        // would have held. Derived by comparing the two decisions rather than by
+        // re-deriving the five conditions here: a second copy of that predicate
+        // would eventually disagree with the one that decides the status, and the
+        // receipt would then describe a pass that did not happen.
+        let witness_admitted = corpus_status != held_without_a_witness;
 
-    // AT RECEIPT: against `raw_body`, the bytes the extractor captured before
-    // any handler code ran. `rescrub_trace_envelope` on the next line rewrites
-    // the envelope in place, so verifying against the parsed value -- or off
-    // the stored artifact, or off any re-serialisation -- would fail every
-    // honest witnessed submission.
-    //
-    // Placed here rather than at the top of the handler so that signature
-    // recovery sits BEHIND the submit rate limiter and the tenant-access-grant
-    // check. The bytes are captured either way, so this costs the guarantee
-    // nothing and denies an authenticated caller a free ECDSA-recovery
-    // amplifier. `the_certificate_is_verified_before_the_rescrub_runs` pins
-    // that it stays above the rescrub.
-    let witness = verified_witness_for_submission(state.as_ref(), &headers, &raw_body);
-
-    // The basis is a return value of the pass, never a field on the
-    // envelope: the envelope is deserialised from contributor input, so a
-    // basis carried there would be client-asserted by construction.
-    let residual_risk_basis = rescrub_trace_envelope(&mut envelope)
-        .map_err(|err| internal_error(format!("privacy filter config invalid: {err}")))?;
-    bind_envelope_server_tenant_scope_for_storage(&mut envelope, tenant.tenant_id());
-    let existing_revocations = read_revocations_for_submit(state.as_ref(), tenant.tenant_id())
-        .await
+        let artifact_label = if remediating_prior.is_some() {
+            "remediated-envelope"
+        } else {
+            "submitted-envelope"
+        };
+        let stored_envelope = store_envelope(
+            &state,
+            tenant.tenant_id(),
+            corpus_status,
+            artifact_label,
+            &envelope,
+        )
         .map_err(internal_error)?;
-    let existing_derived =
-        read_all_derived_records(&state.root, tenant.tenant_id()).map_err(internal_error)?;
-    let derived_precheck = build_derived_precheck(&envelope, &existing_derived);
-    ensure_not_revoked_by_tombstone(
-        &existing_revocations,
-        envelope.submission_id,
-        &envelope.privacy.redaction_hash,
-        &derived_precheck.canonical_summary_hash,
-    )?;
-    // Same-id quarantine remediation does not consume a new quota slot — the
-    // prior quarantined row already counted.
-    if remediating_prior.is_none() {
-        enforce_submission_quota(state.as_ref(), &tenant)?;
-    }
-    apply_embedding_precheck(&mut envelope, &derived_precheck);
-    apply_credit_estimate_to_envelope(&mut envelope);
-    let corpus_status = status_for_risk(
-        envelope.privacy.residual_pii_risk,
-        state.accept_medium_risk_submissions,
-    );
-    if corpus_status != TraceCorpusStatus::Accepted {
-        envelope.value.credit_points_pending = 0.0;
-        envelope.value.explanation = vec![
-            "Submission is quarantined until privacy review completes; credit is held at 0.0."
-                .to_string(),
-        ];
-        envelope.value_card.user_visible_explanation = envelope.value.explanation.clone();
-    }
-
-    // PII-backstop hold: an Accepted, content-bearing trace is held on
-    // `AwaitingPiiBackstop` (not the corpus) until the driver re-redacts it,
-    // whenever the backstop driver is configured. The credit-zeroing block above
-    // ran against the risk-derived status, so a held-but-otherwise-Accepted trace
-    // keeps its pending credit intact for the eventual release to Accepted; the
-    // consumer/Accepted gates enforce the hold purely off the stored status.
-    // No enrol row is written: the `awaiting_pii_backstop` status is the
-    // enrolment (the driver enumeration tolerates an absent bookkeeping row).
-    let held_without_a_witness = corpus_status_with_pii_backstop_hold(
-        corpus_status,
-        &envelope.consent,
-        state.pii_backstop_driver.is_some(),
-        None,
-        None,
-    );
-    let corpus_status = corpus_status_with_pii_backstop_hold(
-        corpus_status,
-        &envelope.consent,
-        state.pii_backstop_driver.is_some(),
-        witness.as_ref(),
-        state.witness_bypass.as_ref(),
-    );
-    // The certificate changed the outcome only if the same inputs WITHOUT it
-    // would have held. Derived by comparing the two decisions rather than by
-    // re-deriving the five conditions here: a second copy of that predicate
-    // would eventually disagree with the one that decides the status, and the
-    // receipt would then describe a pass that did not happen.
-    let witness_admitted = corpus_status != held_without_a_witness;
-
-    let artifact_label = if remediating_prior.is_some() {
-        "remediated-envelope"
-    } else {
-        "submitted-envelope"
-    };
-    let stored_envelope = store_envelope(
-        &state,
-        tenant.tenant_id(),
-        corpus_status,
-        artifact_label,
-        &envelope,
-    )
-    .map_err(internal_error)?;
-    let derived_record = build_derived_record(
-        tenant.tenant_id(),
-        corpus_status,
-        &envelope,
-        derived_precheck,
-    );
-    let retention_policy = retention_policy_for_trace(&envelope);
-    // Preserve original receipt time on remediation so retention and hourly
-    // quota windows stay anchored to first receipt of this submission_id.
-    let received_at = remediating_prior
-        .as_ref()
-        .map(|prior| prior.received_at)
-        .unwrap_or_else(Utc::now);
-    let expires_at = retention_policy
-        .max_age_days
-        .map(|days| received_at + Duration::days(i64::from(days)));
-    let auth_principal_ref = remediating_prior
-        .as_ref()
-        .map(|prior| prior.auth_principal_ref.clone())
-        .unwrap_or_else(|| tenant.principal_ref().to_string());
-    let mut record = TraceCommonsSubmissionRecord {
-        tenant_id: tenant.tenant_id().to_string(),
-        tenant_storage_ref: tenant.tenant_storage_ref(),
-        auth_principal_ref,
-        submitted_tenant_scope_ref: tenant.submitted_tenant_scope_ref(),
-        contributor_pseudonym: envelope.contributor.pseudonymous_contributor_id.clone(),
-        submission_id: envelope.submission_id,
-        trace_id: envelope.trace_id,
-        status: corpus_status,
-        privacy_risk: envelope.privacy.residual_pii_risk,
-        submission_score: envelope.value.submission_score,
-        credit_points_pending: envelope.value.credit_points_pending,
-        credit_points_final: envelope.value.credit_points_final,
-        consent_scopes: envelope.consent.scopes.clone(),
-        allowed_uses: envelope.trace_card.allowed_uses.clone(),
-        redaction_counts: envelope.privacy.redaction_counts.clone(),
-        received_at,
-        review_assigned_to_principal_ref: None,
-        review_assigned_at: None,
-        review_lease_expires_at: None,
-        review_due_at: None,
-        retention_policy_id: retention_policy.name,
-        expires_at,
-        purged_at: None,
-        // Which pass admitted this trace, when it was not the ordinary one.
-        // `safe_status_reason_label` is the allowlist choke point: a label
-        // that is not on it becomes "other" rather than reaching the column.
-        last_status_reason: witness_admitted
-            .then(|| safe_status_reason_label(WITNESS_ADMITTED_STATUS_REASON).to_string()),
-        residual_risk_basis: Some(safe_residual_risk_basis_labels(&residual_risk_basis)),
-        object_key: stored_envelope.object_key,
-        artifact_receipt: stored_envelope.artifact_receipt,
-        artifact_object_store: stored_envelope.artifact_object_store,
-    };
-    // Remediating a quarantined row always clears any outstanding review lease;
-    // the prior assessment is obsolete.
-    clear_review_lease_metadata(&mut record);
-    let audit_event = if remediating_prior.is_some() {
-        tenant.quarantine_remediated_audit_event(&record)
-    } else {
-        tenant.submitted_audit_event(&record)
-    };
-    if state.require_db_mirror_writes {
-        let mirror_result =
-            mirror_submission_to_db(&state, tenant.auth(), &record, &derived_record, &envelope)
-                .await;
-        if let Err(error) = &mirror_result {
-            tracing::warn!(
-                error_hash = %safe_runtime_error_hash(error),
-                submission_id = %record.submission_id,
-                "Trace Commons DB dual-write mirror failed"
-            );
-            cleanup_submission_file_side_writes(state.as_ref(), &record).map_err(internal_error)?;
-        }
-        enforce_db_mirror_write_result(state.as_ref(), "submission", mirror_result)
-            .map_err(internal_error)?;
-        write_submission_record(&state.root, &record).map_err(internal_error)?;
-        write_derived_record(&state.root, &derived_record).map_err(internal_error)?;
-        append_audit_event(&state.root, tenant.tenant_id(), audit_event).map_err(internal_error)?;
-    } else {
-        write_submission_record(&state.root, &record).map_err(internal_error)?;
-        write_derived_record(&state.root, &derived_record).map_err(internal_error)?;
-        append_audit_event(&state.root, tenant.tenant_id(), audit_event).map_err(internal_error)?;
-        let mirror_result =
-            mirror_submission_to_db(&state, tenant.auth(), &record, &derived_record, &envelope)
-                .await;
-        if let Err(error) = &mirror_result {
-            tracing::warn!(
-                error_hash = %safe_runtime_error_hash(error),
-                submission_id = %record.submission_id,
-                "Trace Commons DB dual-write mirror failed"
-            );
-        }
-        enforce_db_mirror_write_result(state.as_ref(), "submission", mirror_result)
-            .map_err(internal_error)?;
-    }
-
-    // Best-effort cleanup of the pre-remediation artifact once the new
-    // pointers are durable. Same-path overwrite (status stayed quarantined) is
-    // a no-op because object keys match.
-    if let Some(prior) = remediating_prior.as_ref() {
-        let object_moved = prior.object_key != record.object_key
-            || prior.artifact_receipt.as_ref().map(|r| &r.object_key)
-                != record.artifact_receipt.as_ref().map(|r| &r.object_key);
-        if object_moved {
-            if let Err(error) = delete_trace_objects_for_record(state.as_ref(), prior) {
+        let derived_record = build_derived_record(
+            tenant.tenant_id(),
+            corpus_status,
+            &envelope,
+            derived_precheck,
+        );
+        let retention_policy = retention_policy_for_trace(&envelope);
+        // Preserve original receipt time on remediation so retention and hourly
+        // quota windows stay anchored to first receipt of this submission_id.
+        let received_at = remediating_prior
+            .as_ref()
+            .map(|prior| prior.received_at)
+            .unwrap_or_else(Utc::now);
+        let expires_at = retention_policy
+            .max_age_days
+            .map(|days| received_at + Duration::days(i64::from(days)));
+        let auth_principal_ref = remediating_prior
+            .as_ref()
+            .map(|prior| prior.auth_principal_ref.clone())
+            .unwrap_or_else(|| tenant.principal_ref().to_string());
+        let mut record = TraceCommonsSubmissionRecord {
+            tenant_id: tenant.tenant_id().to_string(),
+            tenant_storage_ref: tenant.tenant_storage_ref(),
+            auth_principal_ref,
+            submitted_tenant_scope_ref: tenant.submitted_tenant_scope_ref(),
+            contributor_pseudonym: envelope.contributor.pseudonymous_contributor_id.clone(),
+            submission_id: envelope.submission_id,
+            trace_id: envelope.trace_id,
+            status: corpus_status,
+            privacy_risk: envelope.privacy.residual_pii_risk,
+            submission_score: envelope.value.submission_score,
+            credit_points_pending: envelope.value.credit_points_pending,
+            credit_points_final: envelope.value.credit_points_final,
+            consent_scopes: envelope.consent.scopes.clone(),
+            allowed_uses: envelope.trace_card.allowed_uses.clone(),
+            redaction_counts: envelope.privacy.redaction_counts.clone(),
+            received_at,
+            review_assigned_to_principal_ref: None,
+            review_assigned_at: None,
+            review_lease_expires_at: None,
+            review_due_at: None,
+            retention_policy_id: retention_policy.name,
+            expires_at,
+            purged_at: None,
+            // Which pass admitted this trace, when it was not the ordinary one.
+            // `safe_status_reason_label` is the allowlist choke point: a label
+            // that is not on it becomes "other" rather than reaching the column.
+            last_status_reason: witness_admitted
+                .then(|| safe_status_reason_label(WITNESS_ADMITTED_STATUS_REASON).to_string()),
+            residual_risk_basis: Some(safe_residual_risk_basis_labels(&residual_risk_basis)),
+            object_key: stored_envelope.object_key,
+            artifact_receipt: stored_envelope.artifact_receipt,
+            artifact_object_store: stored_envelope.artifact_object_store,
+        };
+        // Remediating a quarantined row always clears any outstanding review lease;
+        // the prior assessment is obsolete.
+        clear_review_lease_metadata(&mut record);
+        let audit_event = if remediating_prior.is_some() {
+            tenant.quarantine_remediated_audit_event(&record)
+        } else {
+            tenant.submitted_audit_event(&record)
+        };
+        if state.require_db_mirror_writes {
+            let mirror_result =
+                mirror_submission_to_db(&state, tenant.auth(), &record, &derived_record, &envelope)
+                    .await;
+            if let Err(error) = &mirror_result {
                 tracing::warn!(
-                    error_hash = %safe_runtime_error_hash(&error),
+                    error_hash = %safe_runtime_error_hash(error),
                     submission_id = %record.submission_id,
-                    "Trace Commons prior quarantine artifact cleanup failed after remediation"
+                    "Trace Commons DB dual-write mirror failed"
+                );
+                cleanup_submission_file_side_writes(state.as_ref(), &record)
+                    .map_err(internal_error)?;
+            }
+            enforce_db_mirror_write_result(state.as_ref(), "submission", mirror_result)
+                .map_err(internal_error)?;
+            write_submission_record(&state.root, &record).map_err(internal_error)?;
+            write_derived_record(&state.root, &derived_record).map_err(internal_error)?;
+            append_audit_event(&state.root, tenant.tenant_id(), audit_event)
+                .map_err(internal_error)?;
+        } else {
+            write_submission_record(&state.root, &record).map_err(internal_error)?;
+            write_derived_record(&state.root, &derived_record).map_err(internal_error)?;
+            append_audit_event(&state.root, tenant.tenant_id(), audit_event)
+                .map_err(internal_error)?;
+            let mirror_result =
+                mirror_submission_to_db(&state, tenant.auth(), &record, &derived_record, &envelope)
+                    .await;
+            if let Err(error) = &mirror_result {
+                tracing::warn!(
+                    error_hash = %safe_runtime_error_hash(error),
+                    submission_id = %record.submission_id,
+                    "Trace Commons DB dual-write mirror failed"
                 );
             }
+            enforce_db_mirror_write_result(state.as_ref(), "submission", mirror_result)
+                .map_err(internal_error)?;
         }
-    }
 
-    Ok(Json(receipt_from_record(
-        &record,
-        state.near_settlement_mode,
-    )))
+        // Best-effort cleanup of the pre-remediation artifact once the new
+        // pointers are durable. Same-path overwrite (status stayed quarantined) is
+        // a no-op because object keys match.
+        if let Some(prior) = remediating_prior.as_ref() {
+            let object_moved = prior.object_key != record.object_key
+                || prior.artifact_receipt.as_ref().map(|r| &r.object_key)
+                    != record.artifact_receipt.as_ref().map(|r| &r.object_key);
+            if object_moved {
+                if let Err(error) = delete_trace_objects_for_record(state.as_ref(), prior) {
+                    tracing::warn!(
+                        error_hash = %safe_runtime_error_hash(&error),
+                        submission_id = %record.submission_id,
+                        "Trace Commons prior quarantine artifact cleanup failed after remediation"
+                    );
+                }
+            }
+        }
+
+        Ok(Json(receipt_from_record(
+            &record,
+            state.near_settlement_mode,
+        )))
+    }
+    .await;
+    if let Some(attempt) = admission.as_mut() {
+        attempt
+            .finish(
+                state
+                    .db_mirror
+                    .as_ref()
+                    .ok_or_else(|| internal_error("admission_database_unavailable"))?
+                    .as_ref(),
+                result.is_ok(),
+            )
+            .await?;
+    }
+    result
 }
 
 async fn revoke_trace_handler(
