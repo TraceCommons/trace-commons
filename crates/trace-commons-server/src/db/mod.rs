@@ -729,14 +729,6 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         Err(DatabaseError::Pool("near_provisioning_unconfigured".into()))
     }
 
-    async fn get_near_provisioned_anchor(
-        &self,
-        _tenant_id: &str,
-        _principal_ref: &str,
-    ) -> Result<Option<String>, DatabaseError> {
-        Err(DatabaseError::Pool("near_provisioning_unconfigured".into()))
-    }
-
     async fn resolve_near_public_key_tenant(
         &self,
         _public_key: &str,

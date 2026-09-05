@@ -4107,6 +4107,7 @@ impl AppState {
             perplexity_score_driver,
             pii_backstop_driver,
             witness_bypass,
+            near_provisioning_admission_ready: admission.is_some(),
             admission,
             benchmark_registry_scheduler,
             benchmark_pipeline_scheduler,
@@ -4137,8 +4138,6 @@ impl AppState {
             ),
             account_webauthn,
             account_ceremony_store,
-            // Integration: set from validated admission.is_some(), never an independent env flag.
-            near_provisioning_admission_ready: false,
             near_provisioning_public_origin: std::env::var(
                 "TRACE_COMMONS_NEAR_PROVISIONING_PUBLIC_ORIGIN",
             )

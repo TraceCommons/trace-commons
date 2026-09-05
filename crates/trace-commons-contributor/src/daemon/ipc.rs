@@ -244,6 +244,10 @@ pub const METHODS: &[&str] = &[
     "arming_suggestion",
     "decline_arming",
     "enroll",
+    "near_account_capabilities",
+    "near_account_start",
+    "near_account_status",
+    "near_account_cancel",
     "get_public_profile",
     "get_settings",
     "hello",
@@ -1393,6 +1397,11 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         // async. Same treatment as `"enroll"`: an honest refusal here rather
         // than a partial answer. No real caller reaches it -- see the module
         // doc's "Sync vs. async dispatch" section.
+        "near_account_status" => super::account_onboarding::handle_status(shared, req),
+        "near_account_cancel" => super::account_onboarding::handle_cancel(shared, req),
+        "near_account_start" | "near_account_capabilities" => {
+            Response::err(req.id, ERR_UNAVAILABLE, "near-signup-requires-async")
+        }
         "witness_preview_request" => {
             Response::err(req.id, ERR_UNAVAILABLE, "witness-review-requires-async")
         }
@@ -1744,6 +1753,10 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
 /// `handle_request` directly.
 pub async fn handle_request_async(shared: &DaemonShared, req: &Request) -> Response {
     match req.method.as_str() {
+        "near_account_start" => super::account_onboarding::handle_start(shared, req).await,
+        "near_account_capabilities" => {
+            super::account_onboarding::handle_capabilities(shared, req).await
+        }
         "witness_preview_request" => handle_witness_preview_request(shared, req).await,
         "approve" => handle_approve(shared, req).await,
         "preview" => handle_preview(shared, req).await,
