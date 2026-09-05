@@ -71,7 +71,7 @@ enum Command {
     Submit {
         /// Every session on this machine, ignoring the working directory.
         /// Widens the scope only: the y/N summary still appears, and only
-        /// --yes skips it.
+        /// --yes skips it. The existing --json --all mode remains non-interactive.
         #[arg(long)]
         all: bool,
         /// Only sessions started within this duration (e.g. 2d, 12h)
@@ -84,7 +84,7 @@ enum Command {
         #[arg(long)]
         source: Option<String>,
         /// Skip the confirmation and submit everything selected. This is the
-        /// only flag that suppresses the prompt; --all does not.
+        /// flag for suppressing the prompt in human-readable mode; --all does not.
         #[arg(long)]
         yes: bool,
         /// Choose sessions individually from a numbered table, instead of
