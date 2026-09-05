@@ -114,6 +114,51 @@ integrity-only bundle tree containing those real files: one resource and
 the result reported signature verification and launch authorization both false.
 That tree is not a runnable or signed application bundle.
 
-Resource policy, OS signature checks, bundle-aware MLX
-lookup, signed distribution, test-pool acceptance and installed GPU execution
-remain subsequent gates.
+Resource policy is now enforced through native observations (see
+`compute-native-observers.md`); the separate Holonear bundle-aware MLX lookup
+patch has local relocation evidence. OS signature checks, signed distribution,
+test-pool acceptance and installed GPU qualification remain subsequent gates.
+
+## Inert assembly harness
+
+`compute-package` assembles only the compute subtree in a **new** directory:
+
+```sh
+cargo run -p trace-commons-contributor --locked --example compute-package -- \
+  /absolute/new/Pilot.app /absolute/input/holonear /absolute/input/mlx.metallib \
+  FULL_40_CHARACTER_SOURCE_REVISION tc-compute-v1 org.example.worker TESTTEAM01
+```
+
+The parent must exist. Use canonical absolute input paths: file and parent
+symlinks are refused. Existing output directories are never overwritten, including
+empty ones. Failed assembly may leave partial output for inspection; it is not
+automatically deleted and must not be shipped. Inputs are read only, copied with
+bounded streaming hashes, and staged with executable worker/non-executable asset
+permissions. The manifest pins the copied bytes, then the existing strict
+integrity validator checks the result. Only macOS 15 arm64 MLX with the single
+`mlx.metallib` asset is supported by this first assembly harness.
+
+This is not a complete app bundle or an integration into `make-app-bundle.sh` or
+`make-release-dmg.sh`. No keys, network, signing, launch, or production constructor
+are involved. Metadata supplied on the command line is a declaration, not source
+provenance or signature proof. Success explicitly reports all three of signature
+verification, provenance verification, and launch authorization as false.
+
+For a future signed release, sign nested code before generating its final hash
+manifest, then seal the outer app. Re-signing the staged helper invalidates this
+manifest. Do not copy this subtree into an already sealed app. Trusted signature
+requirements and complete nested-code inventory still need implementation before
+the release scripts can safely opt into compute. Same-user replacement races are
+not prevented by this developer tool.
+
+Assembly checkpoint verification: five harness tests and nine existing artifact
+tests passed with warnings denied, as did example Clippy and formatting checks.
+The harness also assembled and integrity-checked the previously built worker
+(`d97a49703334bf74e5b3985a4a15e442afadc1c29dce33a4dc441062e7e61eb2`)
+and Metal library
+(`dec47dccc97538d2758eb27ab09bcb7c5de4660e298521ecee9cae4fb2bca802`)
+into a fresh temporary tree using test signing labels. No worker was launched.
+The source revision declaration was
+`0b348bc0b4820b1a53404b0fa59f213b7a3ca130`; assembly does not independently prove
+that provenance. Independent review identified destination-parent symlink
+handling, which was tightened and covered by regression before this checkpoint.
