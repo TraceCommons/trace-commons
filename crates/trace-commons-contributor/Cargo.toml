@@ -125,7 +125,116 @@ hex = "0.4"
 # branch=main: use --locked. Re-advance only in a reviewed update that
 # measures names/features/licenses, tests embedding and privacy behavior, and
 # updates both locks plus Flatpak sources together.
-ironwire_proxy = { git = "https://github.com/nearai/ironwire", rev = "924f8e3a02ce5fb18e4ee2759cd0bb49fec318b1" }
+#
+# ---------------------------------------------------------------------------
+# 4f58f5a1 (upstream #47), reviewed 2026-09-07.
+#
+# One commit in the range, verified with `git log --oneline 924f8e3a..4f58f5a1`.
+# It adds `AgentSetting::requires`: a precondition that lets a catalog entry say
+# "write this key only where the file already shows the tool using this
+# provider". Nothing in this repository uses it yet, and the honest summary of
+# this advance is that it costs nothing and is almost entirely dormant here.
+# What made it worth taking now is that `requires` is the only mechanism by
+# which a tool whose config uses per-provider blocks can be described at all:
+# writing such a key is itself what promotes a provider, so an unconditional
+# entry silently changes which model a contributor's tool selects. Without this
+# field that class of tool cannot be added safely; with it, it can.
+#
+# COST. Zero, measured rather than assumed. `cargo metadata --locked` on both
+# workspaces: 577 root packages and 930 root lock entries before and after, 535
+# GTK packages and 535 GTK lock entries before and after, and this crate's
+# `cargo tree -e normal` still 303 deduplicated names. The entire delta in both
+# locks is the eleven `ironwire_*` source strings -- 22 changed lines each, all
+# of them the rev. Unlike the previous advance, which pulled in a sha2 edge, no
+# package entered the graph and no edge was added: upstream changed no
+# `Cargo.toml` and no `Cargo.lock` in the range. `cargo deny check licenses`
+# passes on all four configurations (default, near-ai-scorer, local-gpu-models,
+# --all-features), necessarily, since no crate entered the audit.
+#
+# SURFACE. Each of this crate's three imports diffed rev-to-rev:
+#   * `ironwire_proxy::embed` -- not one byte moved;
+#     `git diff --stat 924f8e3a..4f58f5a1 -- crates/ironwire_proxy` is empty.
+#     #47's `src/commands/connect.rs` hunk is the upstream CLI binary's own
+#     `connect` command printing the new skipped rows, not the embed module.
+#   * `ironwire_agents::tools` -- `Error` is UNCHANGED. That was this advance's
+#     compile-break risk and it did not fire: the enum is not
+#     `#[non_exhaustive]`, so a new variant would have broken the matches in
+#     `daemon::harness`, and there is none. `Planned` gains a public `skipped`
+#     field; `Planned` still has private fields, so no downstream struct literal
+#     exists to break, and we only ever read one.
+#   * `ironwire_catalog::schema` -- `AgentSetting` gains
+#     `requires: Option<String>`, `#[serde(default)]`. Note that `AgentSetting`
+#     is NOT `#[non_exhaustive]`: this IS a struct-literal break for anyone who
+#     constructs one, and upstream had to patch six of its own literals. It is
+#     not a break for us, and the reason is checked rather than remembered --
+#     `owned_agents()` is `Vec::new()`, we construct no setting and no entry,
+#     and the type is not even in scope in `daemon::harness`, whose import line
+#     names only `AgentEntry`, `Catalog` and `ConfigLocation`. `AgentEntry`,
+#     `Catalog` and `ConfigLocation` are otherwise unchanged, and the location
+#     rules `config_location_is_allowed` restates did not move.
+#
+# SCHEMA_VERSION 2 -> 3, and this is the number that looks alarming and is not.
+# The gate that reads it is `catalog.schema_version > SCHEMA_VERSION` in
+# `ironwire_catalog::store` -- strictly greater-than -- so a build at 3 still
+# accepts a document declaring 1 or 2. Nothing is stranded and no re-issue is
+# forced. The bump exists to protect an OLD build from a NEW document, because
+# a build predating `requires` would tolerate the unknown field, ignore the
+# condition and write the key unconditionally, which is precisely the edit the
+# field exists to prevent. Advancing the pin is therefore the safe direction of
+# this bump; the dangerous direction belongs to contributors still on an older
+# release, and it is a publishing decision, not one this pin makes.
+#
+# BEHAVIOUR, not just types. Three changes alter what happens on a
+# contributor's machine with no signature change to catch them:
+#   * `requires` is a PRESENCE check and nothing more -- the key exists,
+#     whatever its value -- evaluated against the tool's own config file as
+#     found, cloned before any edit, so one setting cannot satisfy a later
+#     one's precondition and an entry does not depend on the order of its own
+#     settings. `None`, which is what every entry written before #47 means,
+#     short-circuits to "write it", so the default is a strict no-op. An
+#     unsatisfied precondition SKIPS the write silently and raises no error,
+#     reporting through `Planned::skipped`; a caller that does not read that
+#     field will believe it wrote something it did not.
+#   * `plan_disconnect` is deliberately NOT gated -- all three arms push an
+#     empty `skipped`. Removal stays unconditional, which is what our "remove
+#     only what we put there" rule needs: a condition that held when we wrote a
+#     value may not hold when we remove it, and filtering there would strand
+#     our value in exactly the case where stranding it does most damage.
+#   * `catalog::is_wired` no longer answers vacuously true for the empty set.
+#     Both arms gained an `!applicable.is_empty() &&` guard, so an entry with
+#     no settings, or whose settings are all gated off, now reports NOT wired
+#     where it previously reported wired. This one has nothing to do with
+#     `requires` and is the easiest change in the commit to miss.
+#
+# NOT REACHED. All of the above is dormant here, checked and not inferred. Our
+# compiled-in catalog is empty (`owned_agents()` is `Vec::new()`, and
+# `catalog_present_follows_our_own_table` ties the wire field to that), so the
+# loops that call the precondition never run, `Planned::skipped` is always
+# empty on this daemon, and the `is_wired` empty-set change is unreachable --
+# the Claude and Codex arms use `claude_settings::is_wired` and
+# `codex_config::is_wired`, neither of which this commit touches. We load no
+# signed catalog document at all: there is no `CatalogStore` in this crate, and
+# the embedded proxy's own refresh is off, asserted by
+# `the_daemon_declines_both_kinds_of_request_it_never_asked_for`. The single
+# reachable consequence of this advance is that the in-memory
+# `Catalog::default().schema_version` moves 2 -> 3, which nothing here reads.
+#
+# FLATPAK. `cargo-sources.json` was REGENERATED with flatpak-cargo-generator.py
+# against the new GTK lock, not hand-edited, and the diff is why that matters:
+# thirteen entries move, not the two that contain the full revision. Eleven are
+# `shell` entries keyed on the SHORT hash (`flatpak-cargo/git/ironwire-924f8e3`
+# -> `-4f58f5a`). Editing only the occurrences of the 40-character rev would
+# leave eleven vendor paths pointing at a directory the build no longer creates,
+# and nothing in PR CI would catch it -- the first failure would be the
+# `linux-flatpak` job on an `app-v*` tag. The other 1060 entries are
+# byte-identical, so there is no unrelated checksum churn in this update.
+#
+# The IronClaw note in the section above still applies: both locks continue to
+# hold the reviewed IronClaw revision, upstream still names branch=main, and
+# `cargo update -p ironwire_proxy` would advance it. This update did not need
+# that command -- re-resolving the changed rev alone was enough -- and the lock
+# diff was checked for non-ironwire movement, of which there was none.
+ironwire_proxy = { git = "https://github.com/nearai/ironwire", rev = "4f58f5a1bb16b13a8952fdf4c86b238d662b4069" }
 # The same IronWire revision, two more of its crates, promoted from
 # transitive to direct. `ironwire_agents` is the crate whose entire purpose is
 # "which coding tools does this machine have, are they pointed at us, and how
@@ -139,8 +248,8 @@ ironwire_proxy = { git = "https://github.com/nearai/ironwire", rev = "924f8e3a02
 # crate does not reimplement, in a second place, the three config-editing
 # rules (never rewrite a file we cannot parse; fill an empty slot but report a
 # full one; remove only what we put there) that crate exists to hold.
-ironwire_agents = { git = "https://github.com/nearai/ironwire", rev = "924f8e3a02ce5fb18e4ee2759cd0bb49fec318b1" }
-ironwire_catalog = { git = "https://github.com/nearai/ironwire", rev = "924f8e3a02ce5fb18e4ee2759cd0bb49fec318b1" }
+ironwire_agents = { git = "https://github.com/nearai/ironwire", rev = "4f58f5a1bb16b13a8952fdf4c86b238d662b4069" }
+ironwire_catalog = { git = "https://github.com/nearai/ironwire", rev = "4f58f5a1bb16b13a8952fdf4c86b238d662b4069" }
 notify = "8.2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
 ring = "0.17"
