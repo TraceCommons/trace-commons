@@ -178,7 +178,7 @@ public struct PrivateInferenceState: Equatable, Sendable {
     }
 }
 
-/// The seven calls this surface makes into the Rust, injected so
+/// The five calls this surface makes into the Rust, injected so
 /// `TCShellCore` can be tested without linking the dylib.
 ///
 /// Production wiring is `TCPrivateInference`; see `AppModel`.
