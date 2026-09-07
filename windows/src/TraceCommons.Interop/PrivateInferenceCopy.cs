@@ -83,6 +83,12 @@ public sealed record PrivateInferenceCopy
     [JsonPropertyName("state_running_no_backends")]
     public string StateRunningNoBackends { get; init; } = string.Empty;
 
+    [JsonPropertyName("state_running_answered_elsewhere")]
+    public string StateRunningAnsweredElsewhere { get; init; } = string.Empty;
+
+    [JsonPropertyName("state_running_destination_unknown")]
+    public string StateRunningDestinationUnknown { get; init; } = string.Empty;
+
     [JsonPropertyName("state_running_elsewhere")]
     public string StateRunningElsewhere { get; init; } = string.Empty;
 
@@ -244,6 +250,8 @@ public sealed record PrivateInferenceCopy
             StateOff,
             StateRunning,
             StateRunningNoBackends,
+            StateRunningAnsweredElsewhere,
+            StateRunningDestinationUnknown,
             StateRunningElsewhere,
             StatePortInUse,
             StateStartFailed,
