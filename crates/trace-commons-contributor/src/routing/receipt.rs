@@ -115,9 +115,63 @@ pub enum ReceiptFetchError {
     /// no served model to name on the query the endpoint requires.
     #[error("no receipt endpoint is configured for this call")]
     NotConfigured,
-    /// The provider was unreachable, slow, or answered with an error status.
+    /// The provider could not be reached at all: no connection, a timeout, a
+    /// body that stopped arriving mid-read, or this process failing to build
+    /// the client or a nonce for the call. Nothing was answered, so this says
+    /// nothing whatever about the call the receipt would have been for.
+    ///
+    /// Deliberately *not* the home of an error status any more. An endpoint
+    /// that answered told us something; see [`Self::ReceiptNotFound`].
     #[error("the receipt endpoint did not answer")]
     Unreachable,
+    /// The endpoint answered 404: it holds no receipt for this call.
+    ///
+    /// Three unrelated situations produce this, and none of them is a
+    /// transport failure, which is why it may not share a value with one:
+    ///
+    /// - a **brokered** model, where receipts do not exist at all and 404 is
+    ///   the permanent, expected answer -- the discrimination this client
+    ///   already relies on;
+    /// - a **hosted** call the provider never wrote a record for. Once
+    ///   `nearai/cloud-api` #943 lands, Responses-API attestation is
+    ///   best-effort and an interrupted stream creates no `resp_*` record and
+    ///   no legacy disconnect fallback, so a call that should have carried a
+    ///   receipt answers 404 like a brokered one;
+    /// - an identifier the provider has expired or never had.
+    ///
+    /// This variant does not tell those three apart -- nothing on this
+    /// machine can, from a 404 alone. It separates them from the endpoint
+    /// being unreachable, which is the distinction that was being lost.
+    #[error("the receipt endpoint has no receipt for this call")]
+    ReceiptNotFound,
+    /// The endpoint refused this client's credentials (401 or 403).
+    ///
+    /// Absence to the submission, like every other variant here, but the only
+    /// one an operator fixes by fixing this machine's configuration rather
+    /// than by looking at the provider or the call.
+    #[error("the receipt endpoint refused this client's credentials")]
+    ReceiptEndpointUnauthorized,
+    /// The endpoint answered with some other non-success status: a 5xx, a
+    /// rate limit, anything else. Reachable and not refusing us, but not
+    /// serving a receipt on this attempt.
+    #[error("the receipt endpoint answered with an unexpected status")]
+    ReceiptEndpointUnexpectedStatus,
+    /// The attestation-report endpoint answered 404 for this model. Only
+    /// reachable with `check_attestation` on.
+    ///
+    /// Named apart from [`Self::ReceiptNotFound`] because the two send an
+    /// operator to different places: a receipt exists and verified by the
+    /// time this can happen, and what is missing is the report that would say
+    /// whether its signer is attested.
+    #[error("no attestation report was served for this model")]
+    AttestationReportNotFound,
+    /// The attestation-report endpoint refused this client's credentials.
+    #[error("the attestation report endpoint refused this client's credentials")]
+    AttestationReportUnauthorized,
+    /// The attestation-report endpoint answered with some other non-success
+    /// status.
+    #[error("the attestation report endpoint answered with an unexpected status")]
+    AttestationReportUnexpectedStatus,
     /// The answer was larger than a receipt can be.
     #[error("the receipt response is larger than a receipt")]
     ResponseTooLarge,
@@ -140,6 +194,74 @@ pub enum ReceiptFetchError {
     /// the underlying `ReceiptError` is caller data.
     #[error("the receipt does not verify against this call")]
     ReceiptUnverified,
+}
+
+impl ReceiptFetchError {
+    /// The fixed label for this outcome.
+    ///
+    /// The only part of this type that reaches a log line. Every arm is a
+    /// literal: no identifier, URL, status code or response body is
+    /// interpolated, so the set of strings this can ever emit is the set
+    /// written here and cannot grow with caller data.
+    ///
+    /// `SignerNotAttested` keeps the exact string `submit.rs` has always
+    /// logged; a narrower enum is no reason to rename a label someone may
+    /// already be grepping for.
+    #[must_use]
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::EndpointNotHttps => "receipt_endpoint_not_https",
+            Self::IdentifierMalformed => "receipt_identifier_malformed",
+            Self::EndpointNotAllowed => "receipt_endpoint_not_allowed",
+            Self::NotConfigured => "receipt_not_configured",
+            Self::Unreachable => "receipt_endpoint_unreachable",
+            Self::ReceiptNotFound => "receipt_not_found",
+            Self::ReceiptEndpointUnauthorized => "receipt_endpoint_unauthorized",
+            Self::ReceiptEndpointUnexpectedStatus => "receipt_endpoint_unexpected_status",
+            Self::AttestationReportNotFound => "attestation_report_not_found",
+            Self::AttestationReportUnauthorized => "attestation_report_unauthorized",
+            Self::AttestationReportUnexpectedStatus => "attestation_report_unexpected_status",
+            Self::ResponseTooLarge => "receipt_response_too_large",
+            Self::ResponseMalformed => "receipt_response_malformed",
+            Self::SignerNotAttested => "receipt_signer_not_attested",
+            Self::ReceiptUnverified => "receipt_unverified",
+        }
+    }
+}
+
+/// Which outcome a non-success status from the *receipt* endpoint is.
+///
+/// Split out from the fetch for the same reason `parse_receipt_response` is:
+/// the receipt endpoint is https-only and allowlisted, so there is no way to
+/// stand a test server in front of it, and the mapping would otherwise be
+/// reachable only from a live provider. A pure function over a status is the
+/// whole of the decision and is testable on its own.
+///
+/// Only the two classes worth acting on are named. Everything else is one
+/// value on purpose: a client that cannot do anything different for a 500
+/// than for a 429 should not pretend it can.
+fn receipt_status_error(status: reqwest::StatusCode) -> ReceiptFetchError {
+    match status {
+        reqwest::StatusCode::NOT_FOUND => ReceiptFetchError::ReceiptNotFound,
+        reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN => {
+            ReceiptFetchError::ReceiptEndpointUnauthorized
+        }
+        _ => ReceiptFetchError::ReceiptEndpointUnexpectedStatus,
+    }
+}
+
+/// The same three-way split for the *attestation report* endpoint, under its
+/// own names. The two resources fail independently -- by the time a report is
+/// fetched a receipt has already arrived and verified -- so sharing one set
+/// of labels would report a missing receipt when what is missing is a report.
+fn attestation_report_status_error(status: reqwest::StatusCode) -> ReceiptFetchError {
+    match status {
+        reqwest::StatusCode::NOT_FOUND => ReceiptFetchError::AttestationReportNotFound,
+        reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN => {
+            ReceiptFetchError::AttestationReportUnauthorized
+        }
+        _ => ReceiptFetchError::AttestationReportUnexpectedStatus,
+    }
 }
 
 /// Read a receipt out of the endpoint's JSON answer.
@@ -272,7 +394,11 @@ pub async fn fetch_receipt(
         .await
         .map_err(|_| ReceiptFetchError::Unreachable)?;
     if !response.status().is_success() {
-        return Err(ReceiptFetchError::Unreachable);
+        // An answer, not a failure to get one. Which answer decides whether
+        // this call could ever have had a receipt, whether this machine's
+        // credentials are wrong, or whether the provider is simply having a
+        // bad minute -- see `receipt_status_error`.
+        return Err(receipt_status_error(response.status()));
     }
     // The declared length is a hint, not a bound -- a chunked response
     // declares none -- so the body is bounded again after reading.
@@ -316,7 +442,7 @@ async fn fetch_attestation_report(
         .await
         .map_err(|_| ReceiptFetchError::Unreachable)?;
     if !response.status().is_success() {
-        return Err(ReceiptFetchError::Unreachable);
+        return Err(attestation_report_status_error(response.status()));
     }
     if response
         .content_length()
@@ -1168,5 +1294,145 @@ mod tests {
             .unwrap_err(),
             ReceiptFetchError::SignerNotAttested
         );
+    }
+
+    /// A 404 says the endpoint has no receipt for this call. That is an
+    /// answer, not a failure to get one, and the three situations it used to
+    /// be indistinguishable from -- a brokered model, an outage, and (once
+    /// `nearai/cloud-api` #943 makes Responses-API attestation best-effort) a
+    /// hosted call whose stream was interrupted before a record was written
+    /// -- are what this fetch has to be able to tell apart.
+    #[test]
+    fn a_receipt_endpoint_404_is_absence_not_a_transport_failure() {
+        assert_eq!(
+            receipt_status_error(reqwest::StatusCode::NOT_FOUND),
+            ReceiptFetchError::ReceiptNotFound
+        );
+        assert_ne!(
+            receipt_status_error(reqwest::StatusCode::NOT_FOUND),
+            ReceiptFetchError::Unreachable,
+            "an endpoint that answered is not an endpoint that did not"
+        );
+    }
+
+    /// A credential the endpoint rejects looks exactly like absence from the
+    /// caller's side unless it is named: both leave the submission
+    /// unattested, but only one is fixed by fixing this machine's config.
+    #[test]
+    fn a_receipt_endpoint_auth_refusal_is_its_own_case() {
+        for status in [
+            reqwest::StatusCode::UNAUTHORIZED,
+            reqwest::StatusCode::FORBIDDEN,
+        ] {
+            assert_eq!(
+                receipt_status_error(status),
+                ReceiptFetchError::ReceiptEndpointUnauthorized
+            );
+        }
+    }
+
+    /// Everything else the endpoint can answer -- 500, 502, a rate limit --
+    /// is a fourth thing again: the endpoint is there and did not refuse us,
+    /// it just did not serve a receipt this time.
+    #[test]
+    fn any_other_receipt_endpoint_status_is_neither_absence_nor_refusal() {
+        for status in [
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            reqwest::StatusCode::BAD_GATEWAY,
+            reqwest::StatusCode::TOO_MANY_REQUESTS,
+        ] {
+            assert_eq!(
+                receipt_status_error(status),
+                ReceiptFetchError::ReceiptEndpointUnexpectedStatus
+            );
+        }
+    }
+
+    /// The point of the split, stated as one assertion: the four ways a
+    /// receipt can fail to arrive from a reachable-or-not endpoint are four
+    /// values, not one. Collapse any pair and this fails.
+    #[test]
+    fn the_four_receipt_fetch_outcomes_are_pairwise_distinct() {
+        let outcomes = [
+            receipt_status_error(reqwest::StatusCode::NOT_FOUND),
+            receipt_status_error(reqwest::StatusCode::UNAUTHORIZED),
+            receipt_status_error(reqwest::StatusCode::INTERNAL_SERVER_ERROR),
+            ReceiptFetchError::Unreachable,
+        ];
+        for (i, a) in outcomes.iter().enumerate() {
+            for b in &outcomes[i + 1..] {
+                assert_ne!(a, b, "two receipt-fetch outcomes share one value");
+            }
+        }
+    }
+
+    /// The report fetch gets the same three-way split, under its own names.
+    /// Reusing the receipt's names would report "no receipt for this call"
+    /// when what happened is that the *attestation report* was missing, which
+    /// is a different thing to go look at.
+    #[test]
+    fn the_attestation_report_statuses_split_the_same_way_under_their_own_names() {
+        assert_eq!(
+            attestation_report_status_error(reqwest::StatusCode::NOT_FOUND),
+            ReceiptFetchError::AttestationReportNotFound
+        );
+        assert_eq!(
+            attestation_report_status_error(reqwest::StatusCode::FORBIDDEN),
+            ReceiptFetchError::AttestationReportUnauthorized
+        );
+        assert_eq!(
+            attestation_report_status_error(reqwest::StatusCode::BAD_GATEWAY),
+            ReceiptFetchError::AttestationReportUnexpectedStatus
+        );
+        assert_ne!(
+            attestation_report_status_error(reqwest::StatusCode::NOT_FOUND),
+            receipt_status_error(reqwest::StatusCode::NOT_FOUND),
+            "a missing report is not a missing receipt"
+        );
+    }
+
+    /// Every variant carries a distinct fixed label, because the label is the
+    /// only thing that reaches a log line and two variants sharing one would
+    /// undo the split at exactly the surface that has to show it.
+    #[test]
+    fn every_fetch_error_has_its_own_fixed_label() {
+        let all = [
+            ReceiptFetchError::EndpointNotHttps,
+            ReceiptFetchError::IdentifierMalformed,
+            ReceiptFetchError::EndpointNotAllowed,
+            ReceiptFetchError::NotConfigured,
+            ReceiptFetchError::Unreachable,
+            ReceiptFetchError::ReceiptNotFound,
+            ReceiptFetchError::ReceiptEndpointUnauthorized,
+            ReceiptFetchError::ReceiptEndpointUnexpectedStatus,
+            ReceiptFetchError::AttestationReportNotFound,
+            ReceiptFetchError::AttestationReportUnauthorized,
+            ReceiptFetchError::AttestationReportUnexpectedStatus,
+            ReceiptFetchError::ResponseTooLarge,
+            ReceiptFetchError::ResponseMalformed,
+            ReceiptFetchError::SignerNotAttested,
+            ReceiptFetchError::ReceiptUnverified,
+        ];
+        for (i, a) in all.iter().enumerate() {
+            for b in &all[i + 1..] {
+                assert_ne!(a.label(), b.label(), "two variants share one label");
+            }
+        }
+        // The label submit.rs has always logged for this one, unchanged: a
+        // narrower enum should not rename a label an operator already greps.
+        assert_eq!(
+            ReceiptFetchError::SignerNotAttested.label(),
+            "receipt_signer_not_attested"
+        );
+        // Labels are fixed strings, never caller data: nothing here is
+        // interpolated, and this asserts the shape rather than trusting it.
+        for err in all {
+            assert!(
+                err.label()
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b == b'_'),
+                "a label is not a fixed lowercase token"
+            );
+        }
     }
 }

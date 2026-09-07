@@ -663,8 +663,20 @@ impl<'a> SubmitContext<'a> {
             self.effective_cfg.inference_receipt_check_attestation,
         )
         .await;
-        if let Err(crate::routing::receipt::ReceiptFetchError::SignerNotAttested) = result {
-            tracing::debug!("inference receipt omitted: receipt_signer_not_attested");
+        // Every failure still yields no receipt and still does not block the
+        // submission -- an unattested submission is an honest description of
+        // what happened, and the witness decides whether that is acceptable.
+        // What changed is that the reason is now sayable. A brokered model
+        // (a permanent 404), a provider outage, and a hosted call the
+        // provider wrote no record for are three different facts about a
+        // trace that used to arrive here as one value.
+        //
+        // `label()` is a fixed string per variant, so this line's vocabulary
+        // is closed and cannot grow with the identifier, the URL, the status
+        // or the body. The label for `SignerNotAttested` is the one this line
+        // has always emitted.
+        if let Err(err) = &result {
+            tracing::debug!("inference receipt omitted: {}", err.label());
         }
         result.ok()
     }
