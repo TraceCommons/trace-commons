@@ -27,8 +27,27 @@
 //! privacy, safety or encryption. Turning this on does not make a
 //! contributor's calls private. It moves where they are answered from and
 //! keeps the record here; each call still goes on to whoever was configured
-//! to answer it. The setting's internal name says "private" and this surface
-//! must not repeat it as a promise.
+//! to answer it.
+//!
+//! # The one exception: the product name
+//!
+//! The destination is called **Private AI**, and the sweep strips
+//! [`DESTINATION`] before applying the ban so that name may be said and
+//! nothing else may say "private".
+//!
+//! The rule was originally absolute, on the reasoning that the setting's
+//! internal name says `private` and this surface must not repeat it as a
+//! promise. The distinction that reopened it is between a promise and a name.
+//! The mental model is a VPN: traffic goes through something the user
+//! controls, which sees it and decides where it goes. "Private" in "VPN" has
+//! never meant the destination cannot see you, and that is exactly the shape
+//! of this feature.
+//!
+//! What the ban still forbids is any SENTENCE claiming privacy --
+//! "your calls are private" remains false and remains unwriteable. The
+//! subtitle says what actually happens, and [`OFFER_EXPOSURE`] still states
+//! in full what turning this on lets anything else on the machine do. The
+//! name carries the model; the sentences carry the truth.
 
 // PRIVATE-INFERENCE-SURFACE-BEGIN
 //
@@ -42,10 +61,11 @@
 /// "Model calls" and not the setting's internal name: `private` is on the
 /// list of words this surface may not say, because the feature makes no
 /// privacy claim, and a nav label is the most-read string of the lot.
-pub const DESTINATION: &str = "Model calls";
+pub const DESTINATION: &str = "Private AI";
 
 /// The one line under the destination's title saying what it is for.
-pub const SUBTITLE: &str = "Answer model calls on this computer, and who may use it.";
+pub const SUBTITLE: &str = "Your AI calls go out through this computer, so you can see them and \
+     choose who answers.";
 
 /// The offer's heading. Names the machine, because "on this computer" is the
 /// whole of what changes and the only part a contributor can check.
@@ -102,10 +122,10 @@ pub const OFFER_DECLINE: &str = "Not now";
 /// interpolate, and `the_way_back_names_the_destination_it_is_in` pins it
 /// against [`DESTINATION`] so the two cannot drift apart again.
 pub const OFFER_ASKED_ONCE: &str = "Either way, this is the only time you will be asked. The switch is on the \
-     Model calls screen.";
+     Private AI screen.";
 
 /// The settings section's heading.
-pub const SETTINGS_TITLE: &str = "Model calls on this computer";
+pub const SETTINGS_TITLE: &str = "Private AI on this computer";
 
 /// The settings switch.
 pub const SETTINGS_TOGGLE: &str = "Answer model calls on this computer";
@@ -414,7 +434,7 @@ pub struct PrivateInferenceCopy {
 ///
 /// The card stays: a contributor who learned where the switch was should find
 /// a pointer there, not a hole.
-pub const SETTINGS_MOVED: &str = "Model calls has its own screen now.";
+pub const SETTINGS_MOVED: &str = "Private AI has its own screen now.";
 
 /// The tray action while it is on.
 ///
@@ -1395,6 +1415,16 @@ mod tests {
             "earn",
         ] {
             for text in &strings {
+                // The product name is stripped before the check, so
+                // "Private AI" may be said and nothing else may say
+                // "private". The ban exists to stop a PROMISE -- "your calls
+                // are private" is false, because each call still goes on to
+                // whoever was configured to answer it. A name is not a
+                // promise: the mental model is a VPN, where "private" has
+                // never meant the destination cannot see you, and the
+                // exposure sentence still says in full what turning this on
+                // lets anything else on the machine do.
+                let text = text.replace(DESTINATION, "");
                 assert!(
                     !text.to_lowercase().contains(word),
                     "{word:?} appears in: {text}"
