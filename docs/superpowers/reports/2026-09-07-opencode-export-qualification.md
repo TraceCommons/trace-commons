@@ -47,6 +47,8 @@ comes from the local mock. This is not a live NEAR AI qualification.
 | --- | --- | --- |
 | Fresh, before provider block | `opencode/big-pickle` | yes |
 | Fresh, after provider block | `trace-test/trace-model` | yes |
+| Empty-string model, before provider block | `opencode/big-pickle` | yes |
+| Empty-string model, after provider block | `trace-test/trace-model` | yes |
 | Explicit model, before provider block | `existing/existing-model` | yes |
 | Explicit model, after provider block | `existing/existing-model` | yes |
 | Valid recent model, after provider block | `existing/existing-model` | yes |
@@ -55,6 +57,8 @@ These are generated synthetic configurations, **not** a test of IronWire's
 preview/commit writer or conflict handling. Existing digest-bound writes,
 unreadable-file refusals and full-slot preservation must remain intact. The
 fresh-profile counterexample is sufficient to reject broad catalog admission.
+The empty-string counterexample also means the existing presence-only
+`AgentSetting.requires = "model"` cannot establish safe explicit selection.
 A future explicitly selected-model routing flow or a proven restrictive
 precondition needs its own upstream implementation and qualification before
 catalog enablement. This PR does not change the IronWire catalog or pin.

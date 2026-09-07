@@ -74,6 +74,8 @@ existing = {"existing": provider("existing-model")}
 cases = [
     ("fresh-before", {}, None),
     ("fresh-after", {"provider": {"trace-test": provider("trace-model")}}, None),
+    ("blank-before", {"model": ""}, None),
+    ("blank-after", {"model": "", "provider": {"trace-test": provider("trace-model")}}, None),
     ("explicit-before", {"model": "existing/existing-model", "provider": existing}, None),
     ("explicit-after", {"model": "existing/existing-model", "provider": {**existing, "trace-test": provider("trace-model")}}, None),
     ("recent-after", {"provider": {"trace-test": provider("trace-model"), **existing}},
@@ -110,7 +112,7 @@ try:
                 deadline = time.monotonic() + 15
                 while time.monotonic() < deadline:
                     found = re.search(r"message=stream providerID=(\S+) modelID=(\S+).*small=false", log.read_text())
-                    if found and (name == "fresh-before" or len(observed) > start):
+                    if found and (name in ("fresh-before", "blank-before") or len(observed) > start):
                         break
                     if proc.poll() is not None:
                         break
@@ -131,6 +133,8 @@ try:
     by_name = {r["case"]: r for r in results}
     assert by_name["fresh-before"]["primary_model"] != by_name["fresh-after"]["primary_model"]
     assert by_name["fresh-after"]["primary_model"] == "trace-test/trace-model"
+    assert by_name["blank-before"]["primary_model"] != by_name["blank-after"]["primary_model"]
+    assert by_name["blank-after"]["primary_model"] == "trace-test/trace-model"
     assert by_name["explicit-before"]["primary_model"] == by_name["explicit-after"]["primary_model"] == "existing/existing-model"
     assert by_name["recent-after"]["primary_model"] == "existing/existing-model"
     assert all(r["config_unchanged"] for r in results)
