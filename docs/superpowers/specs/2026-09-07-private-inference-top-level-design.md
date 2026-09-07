@@ -78,17 +78,28 @@ fail-open would be introduced by accident. Therefore:
 **Cut 1 (this spec):** the tab, the tray/menu-bar section, and in-app keyboard
 shortcuts, on macOS, Windows and GTK together.
 
-**Amended after implementation: the shortcuts landed on macOS and Windows
-only.** GTK has no keyboard accelerators anywhere in the crate -- no
-`set_accels_for_action`, no `ShortcutController`, and the one `accel` mention is
-a comment in `preview.rs` saying there deliberately is not one. Adding the first
-accelerator to that shell is its own piece of work with its own conventions to
-establish, and it was not done here.
+**Amended twice. The shortcuts now exist on all three shells.**
 
-This is recorded because the plan quietly narrowed the scope to two shells and
-nothing said so. A scope cut that has to be inferred from a coverage line is a
-scope cut nobody agreed to. The destination, the tray section and the copy DID
-land on all three.
+The first amendment recorded that they had landed on macOS and Windows only:
+GTK had no keyboard accelerators anywhere in the crate -- no
+`set_accels_for_action`, no `ShortcutController` -- and the only `accel`
+mention was a comment in `preview.rs` saying there deliberately is not one.
+
+That gap has since been closed. GTK has `Ctrl-1..N` per screen, derived from
+the `SCREENS` array by position so a screen added later gets its accelerator
+without anyone remembering to, and `Ctrl-Shift-M` for the switch -- the same
+chord Windows uses. The toggle asks `tray::toggle_request`, the same table the
+tray asks, so the asymmetry is stated once: turning it off acts, turning it on
+opens the destination and writes nothing.
+
+The `preview.rs` comment still stands and was not touched. Its reason -- "the
+one irreversible action in the product is reachable by pointing at it and
+nothing else" -- is scoped to the Contribute button, and it argues FOR the
+toggle's asymmetry rather than against accelerators generally.
+
+Both amendments are kept rather than the first being deleted, because the
+original scope cut had to be inferred from a coverage line and nothing said so.
+A spec that quietly narrows and then quietly widens teaches a reader nothing.
 
 **Cut 2 (deferred, not specified here):** a global system-wide hotkey. It is the
 only piece requiring per-platform permission work — macOS Accessibility / Input
