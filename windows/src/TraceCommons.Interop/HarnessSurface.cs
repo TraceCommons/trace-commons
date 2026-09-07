@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
@@ -136,10 +137,11 @@ public sealed record HarnessRow
     /// it, or null.
     /// </summary>
     /// <remarks>
-    /// Carried and not rendered by this shell. The sentence that says when is
-    /// assembled in the Rust (<c>harness_last_call_line</c>) and is not
-    /// exported across the C ABI in this build, and composing one here would
-    /// be a fourth place the wording could drift.
+    /// Carried as the daemon spelled it. The sentence that says when is
+    /// assembled in the Rust and crosses the ABI as
+    /// <c>tc_harness_last_call_line</c>; see
+    /// <see cref="HarnessSurface.LastCallSentence(string?, DateTimeOffset)"/>.
+    /// Composing one here would be a fourth place the wording could drift.
     /// </remarks>
     [JsonPropertyName("last_call_at")]
     public string? LastCallAt { get; init; }
@@ -471,33 +473,63 @@ public static class HarnessSurface
     public static bool ReadsAsWorking(HarnessState state) => state == HarnessState.Answering;
 
     /// <summary>
-    /// The sentence for one state, from the payload, or the empty string --
-    /// drawn as no line at all.
+    /// The sentence for one row's state label, or the empty string -- drawn
+    /// as no line at all.
     /// </summary>
     /// <remarks>
+    /// ONE TABLE, ASKED. This used to be a <c>switch</c> over the payload's
+    /// fields, and the macOS and GNOME shells each held their own: three
+    /// copies of one decision, agreeing today and drifting in silence
+    /// tomorrow. It takes the LABEL and not the decoded state, so a state a
+    /// later daemon grows never has to be spelled in C# before it can be
+    /// shown.
+    ///
     /// Three of the five states have a sentence and two deliberately do not.
-    /// <see cref="HarnessState.ActivityShared"/> may not borrow
-    /// <see cref="PrivateInferenceCopy.HarnessAnswering"/>, which would claim
-    /// an attribution the ledger cannot make -- it records a protocol family,
-    /// and a family two connected tools both speak names neither of them. Nor
-    /// may it borrow <see cref="PrivateInferenceCopy.HarnessConnectedNothingSeen"/>,
+    /// The shared table answers the empty string for
+    /// <see cref="HarnessState.ActivityShared"/> rather than letting it borrow
+    /// the answering sentence, which would claim an attribution the ledger
+    /// cannot make -- it records a protocol family, and a family two connected
+    /// tools both speak names neither of them -- or the nothing-seen one,
     /// which would be false: something did arrive.
     /// <see cref="HarnessState.Unknown"/> is the same shape for a different
-    /// reason -- a state this build has no words for claims nothing rather
-    /// than borrowing the nearest sentence. Both render at a non-clear tone
-    /// with no line, which is the honest gap; the words for them are missing
-    /// from the payload and are tracked centrally.
+    /// reason: a state this build has no words for claims nothing rather than
+    /// borrowing the nearest sentence. Both render at a non-clear tone with no
+    /// line, which is the honest gap.
     /// </remarks>
-    public static string StateSentence(HarnessState state, PrivateInferenceCopy copy)
+    public static string StateSentence(string? stateLabel) =>
+        NativeMethods.TakeOwnedString(NativeMethods.tc_harness_state_line(stateLabel))
+        ?? string.Empty;
+
+    /// <summary>
+    /// When the last call from this tool was answered here, or the empty
+    /// string.
+    /// </summary>
+    /// <remarks>
+    /// Assembled on the far side, like the state sentence: this shell works
+    /// out how many seconds ago and hands the number over. An absent or
+    /// unparseable timestamp -- and one dated in the future -- crosses as a
+    /// negative number, which is the shared convention for "nothing to
+    /// report" and comes back empty.
+    ///
+    /// Before this crossed the ABI the sentence existed in Rust and was
+    /// reachable only by the shell that links the crate natively, so this app
+    /// drew nothing where the GNOME one drew a line.
+    /// </remarks>
+    public static string LastCallSentence(string? lastCallAt, DateTimeOffset now)
     {
-        ArgumentNullException.ThrowIfNull(copy);
-        return state switch
+        long secondsAgo = -1;
+        if (DateTimeOffset.TryParse(
+                lastCallAt,
+                CultureInfo.InvariantCulture,
+                DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal,
+                out DateTimeOffset at))
         {
-            HarnessState.NotConnected => copy.HarnessNotConnected,
-            HarnessState.ConnectedNoCalls => copy.HarnessConnectedNothingSeen,
-            HarnessState.Answering => copy.HarnessAnswering,
-            _ => string.Empty,
-        };
+            double elapsed = (now - at).TotalSeconds;
+            secondsAgo = elapsed >= 0 && elapsed < long.MaxValue ? (long)elapsed : -1;
+        }
+
+        return NativeMethods.TakeOwnedString(NativeMethods.tc_harness_last_call_line(secondsAgo))
+            ?? string.Empty;
     }
 
     /// <summary>

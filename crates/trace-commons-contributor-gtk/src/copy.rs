@@ -2117,11 +2117,17 @@ pub use trace_commons_contributor::private_inference_copy::{
     state_line as private_inference_state_line, state_tone as private_inference_state_tone,
     write_confirmed as private_inference_write_confirmed,
 };
+//
+// The three per-state sentences are NOT re-exported one by one. Which of
+// them a row shows is `harness_state_line`'s decision, and it is the same
+// decision the macOS and Windows shells reach across the C ABI as
+// `tc_harness_state_line`. This shell asks it too rather than matching on
+// the state itself, so the three cannot answer differently.
 pub use trace_commons_contributor::private_inference_copy::{
-    HARNESS_ANSWERING, HARNESS_CONNECT, HARNESS_CONNECTED_NOTHING_SEEN, HARNESS_DISCONNECT,
-    HARNESS_NEEDS_RESTART, HARNESS_NOT_CONNECTED, HARNESS_PREVIEW_CANCEL, HARNESS_PREVIEW_CONFIRM,
-    HARNESS_PREVIEW_TITLE, HARNESS_SLOT_TAKEN, HARNESS_UNREADABLE_CONFIG, HARNESSES_NONE_FOUND,
-    HARNESSES_TITLE, HARNESSES_WHAT, harness_last_call_line,
+    HARNESS_CONNECT, HARNESS_DISCONNECT, HARNESS_NEEDS_RESTART, HARNESS_PREVIEW_CANCEL,
+    HARNESS_PREVIEW_CONFIRM, HARNESS_PREVIEW_TITLE, HARNESS_SLOT_TAKEN, HARNESS_UNREADABLE_CONFIG,
+    HARNESSES_NONE_FOUND, HARNESSES_TITLE, HARNESSES_WHAT, harness_last_call_line,
+    harness_state_line,
 };
 
 // --- The redaction witness ---------------------------------------------

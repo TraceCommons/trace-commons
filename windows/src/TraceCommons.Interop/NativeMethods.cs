@@ -354,6 +354,44 @@ internal static class NativeMethods
         [MarshalAs(UnmanagedType.LPUTF8Str)] string? outcome);
 
     /// <summary>
+    /// The sentence for one <c>harness_list</c> row's state.
+    ///
+    /// THE SENTENCE CROSSES, NOT ONLY THE CODE. With the code alone this shell
+    /// held its own map from a state onto one of
+    /// <c>tc_private_inference_copy</c>'s fields, and so did the other two:
+    /// three copies of one decision.
+    ///
+    /// TWO STATES ANSWER THE EMPTY STRING, AND THE EMPTINESS IS THE POINT.
+    /// "activity_shared" and "unknown" have no sentence and may not borrow one
+    /// -- the answering sentence says a call from IT reached this computer, and
+    /// the pronoun names the row's own tool, which is what activity_shared says
+    /// cannot be worked out. Draw an empty string as no line at all. A label
+    /// this build has never heard of, a NULL one, and a caught panic answer the
+    /// same way.
+    ///
+    /// Returns an owned string; free it with <see cref="tc_string_free"/>,
+    /// which <see cref="TakeOwnedString"/> does.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    internal static extern IntPtr tc_harness_state_line(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? state);
+
+    /// <summary>
+    /// When the last call from a connected tool was answered here, assembled.
+    ///
+    /// ABSENCE IS AN OUT-OF-RANGE INTEGER, the convention
+    /// <see cref="tc_private_inference_serving_line"/> already uses: any
+    /// negative value -- including the one this shell passes for an absent or
+    /// unparseable timestamp -- gives the EMPTY STRING rather than a sentence
+    /// about a call nobody saw.
+    ///
+    /// Returns an owned string; free it with <see cref="tc_string_free"/>,
+    /// which <see cref="TakeOwnedString"/> does.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_harness_last_call_line(long secondsAgo);
+
+    /// <summary>
     /// Whether one action may be offered for a tool in this state. Non-zero to
     /// offer.
     ///

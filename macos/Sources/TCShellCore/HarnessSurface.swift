@@ -227,23 +227,36 @@ public enum HarnessPlanOutcome: Equatable, Sendable {
     }
 }
 
-/// The three branch tables this surface reads across the C ABI, injected so
-/// `TCShellCore` can be tested without linking the dylib.
+/// The shared tables and sentences this surface reads across the C ABI,
+/// injected so `TCShellCore` can be tested without linking the dylib.
 ///
-/// Production wiring is `TCHarness`; see `AppModel`.
+/// `stateLine` and `lastCallLine` are here for the reason the branch tables
+/// are: the sentence a state gets is one decision, and three shells choosing
+/// between the payload's fields is three copies of it. Production wiring is
+/// `TCHarness`; see `AppModel`.
 public struct HarnessCalls: Sendable {
     public let stateCode: @Sendable (String) -> Int32
     public let planOutcomeCode: @Sendable (String) -> Int32
     public let actionAvailable: @Sendable (String, Bool, Bool) -> Bool
+    /// The sentence for one row's `state` label, or the empty string for the
+    /// two states that must claim nothing.
+    public let stateLine: @Sendable (String) -> String
+    /// The when-line, for a number of seconds. Negative means nothing to
+    /// report, and answers the empty string.
+    public let lastCallLine: @Sendable (Int64) -> String
 
     public init(
         stateCode: @escaping @Sendable (String) -> Int32,
         planOutcomeCode: @escaping @Sendable (String) -> Int32,
-        actionAvailable: @escaping @Sendable (String, Bool, Bool) -> Bool
+        actionAvailable: @escaping @Sendable (String, Bool, Bool) -> Bool,
+        stateLine: @escaping @Sendable (String) -> String,
+        lastCallLine: @escaping @Sendable (Int64) -> String
     ) {
         self.stateCode = stateCode
         self.planOutcomeCode = planOutcomeCode
         self.actionAvailable = actionAvailable
+        self.stateLine = stateLine
+        self.lastCallLine = lastCallLine
     }
 }
 
@@ -309,19 +322,47 @@ public enum HarnessSurface {
 
     /// The sentence for one state, or nothing at all.
     ///
-    /// `.activityShared` and `.unknown` answer nil deliberately. Neither has
-    /// a sentence in the payload, and neither may borrow one: the shared
-    /// case would have to claim either that a call arrived from this tool --
-    /// which is exactly what cannot be attributed -- or that none did, which
-    /// is false. A row with no state line claims nothing, and claiming
-    /// nothing is the honest answer to a question the ledger cannot settle.
-    public static func stateSentence(_ state: HarnessState, copy: PrivateInferenceCopy) -> String? {
-        switch state {
-        case .notConnected: return copy.harnessNotConnected
-        case .connectedNoCalls: return copy.harnessConnectedNothingSeen
-        case .answering: return copy.harnessAnswering
-        case .activityShared, .unknown: return nil
-        }
+    /// ONE TABLE, ASKED. This used to be a `switch` here over
+    /// `PrivateInferenceCopy`'s fields, and the Windows and GNOME shells each
+    /// held their own; three copies of one decision, agreeing today and
+    /// drifting in silence tomorrow. The label goes to the shared table and
+    /// the sentence comes back. It takes the LABEL, not the decoded state,
+    /// so a state a later daemon grows never has to be spelled in Swift
+    /// before it can be shown.
+    ///
+    /// `activity_shared` and `unknown` answer nil, and the nil is the point.
+    /// Neither has a sentence, and neither may borrow one: the shared case
+    /// would have to claim either that a call arrived from this tool -- which
+    /// is exactly what cannot be attributed -- or that none did, which is
+    /// false. A row with no state line claims nothing, and claiming nothing
+    /// is the honest answer to a question the ledger cannot settle.
+    public static func stateSentence(_ label: String, calls: HarnessCalls) -> String? {
+        let sentence = calls.stateLine(label)
+        return sentence.isEmpty ? nil : sentence
+    }
+
+    public static func stateSentence(_ row: HarnessRow, calls: HarnessCalls) -> String? {
+        stateSentence(row.state, calls: calls)
+    }
+
+    /// When the last call from this tool was answered here, or nothing.
+    ///
+    /// Assembled on the far side, like the state sentence: this shell works
+    /// out how many seconds ago and hands the number over. An absent
+    /// timestamp, and one dated in the future, both cross as a negative
+    /// number, which is the shared convention for "nothing to report" and
+    /// comes back empty.
+    ///
+    /// Drawn as no line at all when nil. The state sentence above it has
+    /// already said the part that is true.
+    public static func lastCallSentence(
+        _ row: HarnessRow, now: Date = Date(), calls: HarnessCalls
+    ) -> String? {
+        guard let at = row.lastCallAt else { return nil }
+        let elapsed = now.timeIntervalSince(at)
+        guard elapsed >= 0, elapsed.isFinite, elapsed < Double(Int64.max) else { return nil }
+        let sentence = calls.lastCallLine(Int64(elapsed))
+        return sentence.isEmpty ? nil : sentence
     }
 
     /// The sentence about the copy of the tool that is still running, or
