@@ -527,6 +527,42 @@ pub const HARNESS_UNREADABLE_CONFIG: &str = "This app could not make sense of th
      the right thing: open it yourself, or use the command shown, and the \
      file stays exactly as it is until you do.";
 
+/// The sentence for one tool's state, or the empty string.
+///
+/// ONE TABLE, NOT THREE. Every shell used to hold its own map from a
+/// `harness_list` row's `state` onto one of the sentences above -- Swift,
+/// C# and Rust, three copies of one decision, agreeing today and drifting
+/// in silence tomorrow. This is that decision, in the only place it may
+/// live; the shells reach it through `tc_harness_state_line`.
+///
+/// Two states answer the empty string, which a shell draws as no line at
+/// all, and the emptiness is the point:
+///
+/// - [`HarnessState::ActivityShared`] must not borrow [`HARNESS_ANSWERING`].
+///   That sentence says a call from *it* was answered here, and the pronoun
+///   names the row's own tool -- which is precisely what this state says
+///   cannot be worked out. Nor may it borrow
+///   [`HARNESS_CONNECTED_NOTHING_SEEN`], which would be false: something did
+///   arrive.
+/// - [`HarnessState::Unknown`], and a label this build has never heard of,
+///   claim nothing rather than take the nearest sentence.
+///
+/// A row with no state line claims nothing, and claiming nothing is the
+/// honest answer to a question the ledger cannot settle.
+///
+/// [`HarnessState::ActivityShared`]: crate::harness_state::HarnessState::ActivityShared
+/// [`HarnessState::Unknown`]: crate::harness_state::HarnessState::Unknown
+#[must_use]
+pub fn harness_state_line(state: &str) -> &'static str {
+    use crate::harness_state::HarnessState;
+    match HarnessState::from_label(state) {
+        Some(HarnessState::NotConnected) => HARNESS_NOT_CONNECTED,
+        Some(HarnessState::ConnectedNoCalls) => HARNESS_CONNECTED_NOTHING_SEEN,
+        Some(HarnessState::Answering) => HARNESS_ANSWERING,
+        Some(HarnessState::ActivityShared | HarnessState::Unknown) | None => "",
+    }
+}
+
 /// When the last call from a connected tool was answered here, assembled on
 /// this side rather than exported as a sentence with a hole in it.
 ///
@@ -963,6 +999,56 @@ mod tests {
             "the list's line stopped qualifying what the list is: {}",
             copy.harnesses_what
         );
+    }
+
+    /// One state, one sentence, decided in one place.
+    ///
+    /// This is the table the three shells used to each hold a copy of. It is
+    /// asserted against the payload fields rather than against literals, so
+    /// it cannot be the second place a sentence is written.
+    #[test]
+    fn one_harness_state_table_answers_for_every_shell() {
+        use crate::harness_state::HarnessState;
+        let copy = private_inference_copy();
+        assert_eq!(
+            harness_state_line(HarnessState::NotConnected.label()),
+            copy.harness_not_connected
+        );
+        assert_eq!(
+            harness_state_line(HarnessState::ConnectedNoCalls.label()),
+            copy.harness_connected_nothing_seen
+        );
+        assert_eq!(
+            harness_state_line(HarnessState::Answering.label()),
+            copy.harness_answering
+        );
+    }
+
+    /// The two states that must claim nothing, and must not borrow the
+    /// nearest sentence to do it.
+    ///
+    /// `activity_shared` may not take [`HARNESS_ANSWERING`]: that sentence
+    /// says a call from *this tool* was answered, and the pronoun names the
+    /// one thing the state exists to say is unknown. Nor may it take
+    /// [`HARNESS_CONNECTED_NOTHING_SEEN`], which would be flatly false --
+    /// something did arrive. `unknown`, and a label this build has never
+    /// heard of, are the same shape for the same reason.
+    #[test]
+    fn two_harness_states_say_nothing_and_borrow_nothing() {
+        use crate::harness_state::HarnessState;
+        let copy = private_inference_copy();
+        for label in [
+            HarnessState::ActivityShared.label(),
+            HarnessState::Unknown.label(),
+            "a_state_from_a_later_daemon",
+            "",
+        ] {
+            let line = harness_state_line(label);
+            assert_eq!(line, "", "{label} grew a sentence");
+            assert_ne!(line, copy.harness_answering);
+            assert_ne!(line, copy.harness_connected_nothing_seen);
+            assert_ne!(line, copy.harness_not_connected);
+        }
     }
 
     /// The when-sentence is finished on this side, says nothing when there is
