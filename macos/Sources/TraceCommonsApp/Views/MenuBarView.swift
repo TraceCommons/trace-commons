@@ -302,11 +302,26 @@ struct MenuBarContent: View {
     /// assert the one that matters: while it is off, `turnOff` is never
     /// called. That is the safety claim, and it is checked directly rather
     /// than inferred from which sentence the row was showing.
+    ///
+    /// The stop direction raises the destination as well as writing, which
+    /// is not decoration. The write goes through
+    /// `PrivateInferenceSurface.settingsParams`, and that carries
+    /// `private_inference_offer_seen` -- a marker whose entire contract is
+    /// that it records an *asking*. A menu press showing no sentence at all
+    /// would record a question nobody was asked and permanently suppress the
+    /// first-run offer for a contributor who had enabled the switch out of
+    /// band. On Windows and in GTK the switch only exists on the screen that
+    /// carries `offer_exposure`, so their off press always shows those
+    /// words; raising the destination here is what gives this shell the same
+    /// property, and the destination shows `offer_exposure` whether or not
+    /// the offer card is still due.
     static func performPrivateInferenceTray(
         on: Bool, turnOff: () -> Void, open: () -> Void
     ) {
         switch privateInferenceTrayAction(on: on) {
-        case .stopAnswering: turnOff()
+        case .stopAnswering:
+            turnOff()
+            open()
         case .openDestination: open()
         }
     }

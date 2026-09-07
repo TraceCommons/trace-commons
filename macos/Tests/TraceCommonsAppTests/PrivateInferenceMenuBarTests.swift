@@ -47,6 +47,12 @@ final class PrivateInferenceMenuBarTests: XCTestCase {
     /// The no-write half is the safety claim, so it is asserted directly
     /// rather than inferred from the wording: pressing the row while it is
     /// off calls nothing that writes.
+    ///
+    /// The stop press opens the destination too. Its write carries
+    /// `private_inference_offer_seen`, which records that the question was
+    /// put, so the press that records it must be the press that shows
+    /// `offer_exposure` -- as the Windows and GTK off switches do, living
+    /// only on that screen.
     func testTheMenuTurnsItOffAndOpensTheScreenToTurnItOn() {
         XCTAssertEqual(MenuBarContent.privateInferenceTrayAction(on: false), .openDestination)
         XCTAssertEqual(MenuBarContent.privateInferenceTrayAction(on: true), .stopAnswering)
@@ -63,7 +69,9 @@ final class PrivateInferenceMenuBarTests: XCTestCase {
         MenuBarContent.performPrivateInferenceTray(
             on: true, turnOff: { wrote = true }, open: { opened = true })
         XCTAssertTrue(wrote, "the menu could not stop this computer answering model calls")
-        XCTAssertFalse(opened)
+        XCTAssertTrue(
+            opened,
+            "the stop recorded that the question was asked without showing the words")
     }
 
     /// Both rows read the Rust's words, and the two directions are two
@@ -119,14 +127,19 @@ final class PrivateInferenceCommandTests: XCTestCase {
         XCTAssertTrue(opened, "the off direction opens the destination instead")
     }
 
-    /// While it is on, the shortcut turns it off -- the one write it may make.
+    /// While it is on, the shortcut turns it off -- the one write it may make
+    /// -- and raises the destination with it.
+    ///
+    /// That write carries `private_inference_offer_seen`, which records that
+    /// the question was put. A shortcut press with the window closed would
+    /// otherwise record an asking with `offer_exposure` nowhere on screen.
     func testTheShortcutStopsAnsweringWhileItIsOn() {
         var wrote = false
         var opened = false
         MenuBarContent.performPrivateInferenceTray(
             on: true, turnOff: { wrote = true }, open: { opened = true })
         XCTAssertTrue(wrote, "the on direction stops answering")
-        XCTAssertFalse(opened, "stopping does not need the window")
+        XCTAssertTrue(opened, "the press that records the asking must show the words")
     }
 
     /// The label follows the same table, so the menu cannot offer to turn it
