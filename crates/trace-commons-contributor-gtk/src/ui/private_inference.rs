@@ -135,6 +135,14 @@ impl PrivateInferenceView {
         switch.update_property(&[gtk::accessible::Property::Label(
             copy::PRIVATE_INFERENCE_TOGGLE,
         )]);
+        // How the toggle chord is discovered: the chord and nothing else,
+        // spelled by GTK in the contributor's own keyboard and language, so
+        // no word of it is authored anywhere in this shell. `None` -- an
+        // accelerator GTK would not parse -- leaves no tooltip rather than a
+        // wrong one. What the chord then does is `shortcuts`' business and
+        // not this file's; pressing it while answering is off opens this
+        // screen and writes nothing.
+        switch.set_tooltip_text(super::shortcuts::toggle_accel_label().as_deref());
         row.append(&label);
         row.append(&switch);
         card.append(&row);
