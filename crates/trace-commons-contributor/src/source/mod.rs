@@ -16,6 +16,7 @@ pub mod cline;
 pub mod codex;
 pub mod discovery;
 pub mod gemini_cli;
+pub mod opencode;
 pub mod trajectory;
 
 /// A load declined because of what the session *is*, not because of what
@@ -76,6 +77,7 @@ pub const SOURCE_CODEX: &str = "codex";
 pub const SOURCE_TRAJECTORY: &str = "trajectory";
 pub const SOURCE_GEMINI_CLI: &str = "gemini-cli";
 pub const SOURCE_CLINE: &str = "cline";
+pub const SOURCE_OPENCODE: &str = "opencode";
 
 #[derive(Debug, Clone)]
 pub struct SessionRef {
@@ -525,6 +527,13 @@ struct SourceSpec {
 /// Every native adapter, in the order sources are offered.
 static NATIVE_SOURCES: &[SourceSpec] = &[
     SourceSpec {
+        name: SOURCE_OPENCODE,
+        // Export-only: this path is never used without a declaration.
+        conventional_root: PathBuf::new,
+        build: |path| Box::new(opencode::OpenCodeSource::new(path)),
+        undeclared: Undeclared::Nothing,
+    },
+    SourceSpec {
         name: SOURCE_CLAUDE_CODE,
         conventional_root: || home_dir().join(".claude/projects"),
         build: |path| Box::new(claude_code::ClaudeCodeSource::new(path)),
@@ -712,6 +721,10 @@ impl SourceRoots {
     pub fn conventional() -> Self {
         let mut roots = Self::new();
         for spec in NATIVE_SOURCES {
+            // OpenCode exports have no conventional store or implicit opt-in.
+            if spec.name == SOURCE_OPENCODE {
+                continue;
+            }
             roots = roots.declare(
                 spec.name,
                 Some(SourceDeclaration::Watch {
