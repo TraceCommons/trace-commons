@@ -2123,11 +2123,23 @@ pub use trace_commons_contributor::private_inference_copy::{
 // decision the macOS and Windows shells reach across the C ABI as
 // `tc_harness_state_line`. This shell asks it too rather than matching on
 // the state itself, so the three cannot answer differently.
+//
+// The per-outcome sentences are not re-exported one by one either, and for
+// the same reason. `HARNESS_UNREADABLE_CONFIG` used to be, because it was
+// the only outcome with a sentence anywhere and this shell held the one arm
+// that picked it -- while the four other non-committable outcomes had none,
+// so their preview opened with a title, a path, no changes and a way out.
+// `harness_outcome_line` is that decision, and it is the same one the other
+// two shells reach as `tc_harness_outcome_line`.
+//
+// `HARNESS_NOT_INSTALLED` is re-exported, because it is not one of those
+// tables: it is what a row whose tool is not on this computer shows INSTEAD
+// of any state sentence, and the condition is a boolean on the row.
 pub use trace_commons_contributor::private_inference_copy::{
-    HARNESS_CONNECT, HARNESS_DISCONNECT, HARNESS_NEEDS_RESTART, HARNESS_PREVIEW_CANCEL,
-    HARNESS_PREVIEW_CONFIRM, HARNESS_PREVIEW_TITLE, HARNESS_SLOT_TAKEN, HARNESS_UNREADABLE_CONFIG,
+    HARNESS_CONNECT, HARNESS_DISCONNECT, HARNESS_NEEDS_RESTART, HARNESS_NOT_INSTALLED,
+    HARNESS_PREVIEW_CANCEL, HARNESS_PREVIEW_CONFIRM, HARNESS_PREVIEW_TITLE, HARNESS_SLOT_TAKEN,
     HARNESSES_NONE_FOUND, HARNESSES_TITLE, HARNESSES_WHAT, harness_last_call_line,
-    harness_state_line,
+    harness_outcome_line, harness_state_line,
 };
 
 // --- The redaction witness ---------------------------------------------

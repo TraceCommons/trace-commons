@@ -55,6 +55,16 @@ public struct PrivateInferenceCopy: Decodable, Equatable, Sendable {
     public let harnessesNoneFound: String
     /// A file that could not be read, refused rather than rewritten.
     public let harnessUnreadableConfig: String
+    /// A tool this app could not find on this computer.
+    ///
+    /// Rendered INSTEAD of `harnessNotConnected` and never beside it: that
+    /// sentence says a tool's own settings still send its calls wherever they
+    /// went before, which is a claim about the settings of something that is
+    /// not on this computer.
+    public let harnessNotInstalled: String
+    public let harnessPlanNothingToChange: String
+    public let harnessPlanEntryUnusable: String
+    public let harnessPlanNoConfigPath: String
 
     /// `CaseIterable` so a test on the far side can compare the exported
     /// field set against the declared one in BOTH directions -- a field the
@@ -102,6 +112,10 @@ public struct PrivateInferenceCopy: Decodable, Equatable, Sendable {
         case harnessNeedsRestart = "harness_needs_restart"
         case harnessesNoneFound = "harnesses_none_found"
         case harnessUnreadableConfig = "harness_unreadable_config"
+        case harnessNotInstalled = "harness_not_installed"
+        case harnessPlanNothingToChange = "harness_plan_nothing_to_change"
+        case harnessPlanEntryUnusable = "harness_plan_entry_unusable"
+        case harnessPlanNoConfigPath = "harness_plan_no_config_path"
     }
 
     /// All or nothing, for the reason on the type.

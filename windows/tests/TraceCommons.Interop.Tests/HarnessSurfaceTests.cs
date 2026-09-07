@@ -315,6 +315,72 @@ public class HarnessSurfaceTests
     }
 
     /// <summary>
+    /// Every outcome that writes nothing explains itself, and it is the
+    /// shared table that says how.
+    /// </summary>
+    /// <remarks>
+    /// The expected values are read off <see cref="PrivateInferenceCopy"/>
+    /// rather than typed here, so this cannot become the place a sentence is
+    /// written. Four of these five outcomes had no sentence at all before,
+    /// and their preview opened with a title, a path, no changes, no
+    /// explanation and a way out.
+    /// </remarks>
+    [Fact]
+    public void EveryOutcomeThatChangesNothingSaysWhy()
+    {
+        PrivateInferenceCopy? copy = PrivateInferenceSurface.Copy();
+        Assert.NotNull(copy);
+
+        var expected = new Dictionary<string, string>
+        {
+            ["noop"] = copy!.HarnessPlanNothingToChange,
+            ["unparseable"] = copy.HarnessUnreadableConfig,
+            ["not_installed"] = copy.HarnessNotInstalled,
+            ["entry_unusable"] = copy.HarnessPlanEntryUnusable,
+            ["no_config_path"] = copy.HarnessPlanNoConfigPath,
+        };
+
+        foreach (KeyValuePair<string, string> pair in expected)
+        {
+            Assert.False(string.IsNullOrWhiteSpace(HarnessSurface.OutcomeSentence(pair.Key)));
+            Assert.Equal(pair.Value, HarnessSurface.OutcomeSentence(pair.Key));
+        }
+
+        // A plan with changes shows them; a sentence above them would be this
+        // app narrating its own list. An outcome from a later daemon may not
+        // borrow the nearest refusal either.
+        foreach (string silent in new[] { "changes", "an_outcome_from_a_later_daemon", "" })
+        {
+            Assert.Equal(string.Empty, HarnessSurface.OutcomeSentence(silent));
+        }
+    }
+
+    /// <summary>
+    /// A tool that is not on this machine says so, and does not keep a
+    /// sentence about settings it does not have.
+    /// </summary>
+    /// <remarks>
+    /// Before this the two rendered identically: same not-connected sentence,
+    /// connect button simply absent, nothing saying why.
+    /// </remarks>
+    [Fact]
+    public void AMissingToolSaysSoRatherThanBorrowingTheNotConnectedSentence()
+    {
+        PrivateInferenceCopy? copy = PrivateInferenceSurface.Copy();
+        Assert.NotNull(copy);
+
+        HarnessListing present = HarnessSurface.ParseListing(OneRow);
+        Assert.True(present.Harnesses[0].Installed);
+        Assert.Equal(copy!.HarnessNotConnected, HarnessSurface.RowSentence(present.Harnesses[0], copy));
+
+        HarnessListing missing = HarnessSurface.ParseListing(
+            OneRow.Replace("\"installed\":true", "\"installed\":false", StringComparison.Ordinal));
+        Assert.False(missing.Harnesses[0].Installed);
+        Assert.Equal(copy.HarnessNotInstalled, HarnessSurface.RowSentence(missing.Harnesses[0], copy));
+        Assert.NotEqual(copy.HarnessNotConnected, HarnessSurface.RowSentence(missing.Harnesses[0], copy));
+    }
+
+    /// <summary>
     /// The when-line crosses the ABI, so this shell draws it at all.
     /// </summary>
     /// <remarks>

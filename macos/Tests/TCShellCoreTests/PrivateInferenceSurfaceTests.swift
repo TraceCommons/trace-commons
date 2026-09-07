@@ -28,7 +28,11 @@ final class PrivateInferenceSurfaceTests: XCTestCase {
          "harness_preview_title":"H-PREVIEW","harness_preview_confirm":"H-CONFIRM",
          "harness_preview_cancel":"H-CANCEL","harness_slot_taken":"H-TAKEN",
          "harness_needs_restart":"H-RESTART","harnesses_none_found":"H-NONE",
-         "harness_unreadable_config":"H-UNREADABLE"}
+         "harness_unreadable_config":"H-UNREADABLE",
+         "harness_not_installed":"H-NOT-INSTALLED",
+         "harness_plan_nothing_to_change":"H-NOTHING-TO-CHANGE",
+         "harness_plan_entry_unusable":"H-ENTRY-UNUSABLE",
+         "harness_plan_no_config_path":"H-NO-CONFIG-PATH"}
         """
 
     private func copy() -> PrivateInferenceCopy {

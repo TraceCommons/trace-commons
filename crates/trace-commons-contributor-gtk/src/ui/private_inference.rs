@@ -251,6 +251,26 @@ pub fn harness_line(state: &str) -> &'static str {
     copy::harness_state_line(state)
 }
 
+/// The sentence one plan outcome carries, read from the shared module.
+///
+/// **ONE TABLE, ASKED -- NOT A COPY OF IT.** This used to be an
+/// `if outcome == Some(PlanOutcome::Unparseable)` arm reaching for one
+/// constant, and macOS and Windows each held the same arm; the four other
+/// non-committable outcomes had no sentence at all, so a preview for one of
+/// them opened with a title, a path, no changes, no explanation and a way
+/// out. The decision now lives in
+/// `private_inference_copy::harness_outcome_line`, which the other two shells
+/// reach as `tc_harness_outcome_line`. Do not put the arm back.
+///
+/// `Changes` answers the EMPTY STRING, which this view draws as no row at
+/// all: a plan with changes in it shows them, and a sentence above them
+/// saying there are changes is this shell narrating its own list. An outcome
+/// this build has never heard of answers the same way rather than borrowing
+/// the nearest refusal.
+pub fn harness_outcome_line(outcome: &str) -> &'static str {
+    copy::harness_outcome_line(outcome)
+}
+
 /// The tone [`harness_line`]'s sentence is painted in.
 ///
 /// **`Clear` for `Answering` and for nothing else.** Everything else here is
@@ -347,9 +367,21 @@ fn harness_card(app: &Rc<App>, row: &crate::model::Harness) -> gtk::Box {
     // Three of the five states have a sentence and two deliberately do not.
     // An empty sentence is drawn as no row at all, never as a blank one at
     // the working colour.
-    let state_line = harness_line(&row.state);
-    if !state_line.is_empty() {
-        card.append(&tone_row(state_line, harness_tone(&row.state)));
+    //
+    // A tool that is not on this computer is not one of those states, and
+    // takes the missing-tool sentence INSTEAD. The row is listed rather than
+    // hidden -- a tool left out cannot be told apart from one this app was
+    // never taught about -- and it may not keep the not-connected sentence,
+    // which claims a tool's own settings still send its calls wherever they
+    // went before. Before this the two rendered identically, with the connect
+    // button simply insensitive and nothing saying why.
+    if row.installed {
+        let state_line = harness_line(&row.state);
+        if !state_line.is_empty() {
+            card.append(&tone_row(state_line, harness_tone(&row.state)));
+        }
+    } else {
+        card.append(&tone_row(copy::HARNESS_NOT_INSTALLED, Tone::Neutral));
     }
     // A tool that was already running holds the old setting until it is
     // started again. Said while nothing has arrived, and dropped the moment
@@ -491,8 +523,9 @@ fn plan_harness(app: &Rc<App>, id: &str, action: HarnessAction) {
 ///
 /// The confirm response exists only where there is something to commit. A
 /// plan that has nothing to do, and a file that could not be read at all,
-/// each get the way out and nothing else -- and the second says so, because
-/// a refusal is not a file that already said the right thing.
+/// each get the way out and nothing else -- and each says which it is,
+/// because a refusal is not a file that already said the right thing, and
+/// neither of them is an empty sheet.
 fn present_plan(app: &Rc<App>, plan: &crate::model::HarnessPlan) {
     let dialog = adw::MessageDialog::new(
         Some(&app.window),
@@ -501,8 +534,22 @@ fn present_plan(app: &Rc<App>, plan: &crate::model::HarnessPlan) {
     );
     let body = gtk::Box::new(gtk::Orientation::Vertical, space::M);
     let outcome = PlanOutcome::from_label(&plan.outcome);
-    if outcome == Some(PlanOutcome::Unparseable) {
-        body.append(&tone_row(copy::HARNESS_UNREADABLE_CONFIG, Tone::Refused));
+    // Every outcome that writes nothing says why, and which sentence it says
+    // is the shared table's decision rather than an arm held here. An empty
+    // answer -- `changes`, and an outcome this build has never heard of --
+    // draws no row at all.
+    // The tone is not a table: it is the one distinction between a plan that
+    // found nothing to do and a plan this app refused to carry out. Which
+    // sentence appears is decided on the shared side; only how firmly it
+    // reads is decided here.
+    let outcome_line = harness_outcome_line(&plan.outcome);
+    if !outcome_line.is_empty() {
+        let tone = if outcome == Some(PlanOutcome::Noop) {
+            Tone::Held
+        } else {
+            Tone::Refused
+        };
+        body.append(&tone_row(outcome_line, tone));
     }
     for change in &plan.changes {
         style::append_body(&body, change);
@@ -1094,6 +1141,62 @@ mod tests {
             assert_ne!(harness_line(silent), shared.harness_answering);
             assert_ne!(harness_line(silent), shared.harness_connected_nothing_seen);
         }
+    }
+
+    /// Every outcome that writes nothing explains itself, and it is the
+    /// shared table that says how.
+    ///
+    /// Four of these five had no sentence at all before, and their preview
+    /// opened with a title, a path, no changes and a way out. The values are
+    /// asserted against the shared payload rather than against literals, so
+    /// this shell cannot become the second place they are written.
+    #[test]
+    fn every_plan_outcome_that_changes_nothing_says_why() {
+        use trace_commons_contributor::harness_state::PlanOutcome;
+        use trace_commons_contributor::private_inference_copy::private_inference_copy;
+        let shared = private_inference_copy();
+        assert_eq!(
+            harness_outcome_line(PlanOutcome::Noop.label()),
+            shared.harness_plan_nothing_to_change
+        );
+        assert_eq!(
+            harness_outcome_line(PlanOutcome::Unparseable.label()),
+            shared.harness_unreadable_config
+        );
+        assert_eq!(
+            harness_outcome_line(PlanOutcome::NotInstalled.label()),
+            shared.harness_not_installed
+        );
+        assert_eq!(
+            harness_outcome_line(PlanOutcome::EntryUnusable.label()),
+            shared.harness_plan_entry_unusable
+        );
+        assert_eq!(
+            harness_outcome_line(PlanOutcome::NoConfigPath.label()),
+            shared.harness_plan_no_config_path
+        );
+        for silent in [
+            PlanOutcome::Changes.label(),
+            "an_outcome_from_a_later_daemon",
+            "",
+        ] {
+            assert_eq!(harness_outcome_line(silent), "", "{silent} grew a sentence");
+        }
+    }
+
+    /// A tool that is not on this computer says so, and does not keep a
+    /// sentence about settings it does not have.
+    #[test]
+    fn a_missing_tool_says_so_rather_than_borrowing_the_not_connected_sentence() {
+        use trace_commons_contributor::harness_state::HarnessState;
+        use trace_commons_contributor::private_inference_copy::private_inference_copy;
+        let shared = private_inference_copy();
+        assert_ne!(copy::HARNESS_NOT_INSTALLED, shared.harness_not_connected);
+        assert_eq!(copy::HARNESS_NOT_INSTALLED, shared.harness_not_installed);
+        assert_ne!(
+            copy::HARNESS_NOT_INSTALLED,
+            harness_line(HarnessState::NotConnected.label())
+        );
     }
 
     /// `activity_shared` cannot happen yet, and the day it can, this fails.

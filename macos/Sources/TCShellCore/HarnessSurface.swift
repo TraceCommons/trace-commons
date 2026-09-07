@@ -244,19 +244,24 @@ public struct HarnessCalls: Sendable {
     /// The when-line, for a number of seconds. Negative means nothing to
     /// report, and answers the empty string.
     public let lastCallLine: @Sendable (Int64) -> String
+    /// The sentence a plan's outcome carries, or the empty string for
+    /// `changes`, whose changes are shown instead.
+    public let outcomeLine: @Sendable (String) -> String
 
     public init(
         stateCode: @escaping @Sendable (String) -> Int32,
         planOutcomeCode: @escaping @Sendable (String) -> Int32,
         actionAvailable: @escaping @Sendable (String, Bool, Bool) -> Bool,
         stateLine: @escaping @Sendable (String) -> String,
-        lastCallLine: @escaping @Sendable (Int64) -> String
+        lastCallLine: @escaping @Sendable (Int64) -> String,
+        outcomeLine: @escaping @Sendable (String) -> String
     ) {
         self.stateCode = stateCode
         self.planOutcomeCode = planOutcomeCode
         self.actionAvailable = actionAvailable
         self.stateLine = stateLine
         self.lastCallLine = lastCallLine
+        self.outcomeLine = outcomeLine
     }
 }
 
@@ -343,6 +348,23 @@ public enum HarnessSurface {
 
     public static func stateSentence(_ row: HarnessRow, calls: HarnessCalls) -> String? {
         stateSentence(row.state, calls: calls)
+    }
+
+    /// The sentence one ROW shows, which is not always its state's.
+    ///
+    /// A tool that is not on this machine gets the missing-tool sentence and
+    /// nothing else. Both halves matter. The row is LISTED rather than
+    /// hidden, because a tool left out cannot be told apart from a tool this
+    /// app was never taught about; and it may not keep the not-connected
+    /// sentence, which says a tool's own settings still send its calls
+    /// wherever they went before -- a claim about the settings of something
+    /// that is not here. Before this the two rendered identically, with the
+    /// connect button simply absent and nothing saying why.
+    public static func rowSentence(
+        _ row: HarnessRow, copy: PrivateInferenceCopy, calls: HarnessCalls
+    ) -> String? {
+        guard row.installed else { return copy.harnessNotInstalled }
+        return stateSentence(row.state, calls: calls)
     }
 
     /// When the last call from this tool was answered here, or nothing.
@@ -445,14 +467,20 @@ public enum HarnessSurface {
 
     /// The sentence the preview carries about the outcome itself, or none.
     ///
-    /// Only the refused file has one, and it is the one that matters: a file
-    /// this app could not read is not a file that already said the right
-    /// thing, and a preview that showed the two the same way would tell a
-    /// contributor with a broken config that everything was fine.
-    public static func outcomeSentence(
-        _ plan: HarnessPlan, copy: PrivateInferenceCopy, calls: HarnessCalls
-    ) -> String? {
-        outcome(plan, calls: calls) == .unparseable ? copy.harnessUnreadableConfig : nil
+    /// ONE TABLE, ASKED. This used to be a `== .unparseable` branch here
+    /// choosing one of the payload's fields, and Windows and GNOME each held
+    /// the same arm; the four other non-committable outcomes had no sentence
+    /// at all, so their preview held a title, a path, no changes, no
+    /// explanation and a way out. The LABEL goes to the shared table and the
+    /// sentence comes back, so an outcome a later daemon grows never has to
+    /// be spelled in Swift before it can be shown.
+    ///
+    /// `changes` answers nil, and the nil is the point: the preview shows the
+    /// changes themselves, and a sentence above them announcing that there
+    /// are changes is this app narrating its own list.
+    public static func outcomeSentence(_ plan: HarnessPlan, calls: HarnessCalls) -> String? {
+        let sentence = calls.outcomeLine(plan.outcome)
+        return sentence.isEmpty ? nil : sentence
     }
 
     /// The words over the occupied slots. They report what was left alone

@@ -230,7 +230,7 @@ final class AppModel: ObservableObject {
 
     // MARK: - The tools on this computer
 
-    /// The branch tables and the two sentences the harness list turns on, all
+    /// The branch tables and the sentences the harness list turns on, all
     /// decided in the Rust. This shell owns no `switch` over a state or an
     /// outcome, and picks none of the words either.
     let harnessCalls = HarnessCalls(
@@ -238,7 +238,8 @@ final class AppModel: ObservableObject {
         planOutcomeCode: { TCHarness.planOutcomeCode(outcome: $0) },
         actionAvailable: { TCHarness.actionAvailable(action: $0, installed: $1, connected: $2) },
         stateLine: { TCHarness.stateLine(state: $0) },
-        lastCallLine: { TCHarness.lastCallLine(secondsAgo: $0) }
+        lastCallLine: { TCHarness.lastCallLine(secondsAgo: $0) },
+        outcomeLine: { TCHarness.outcomeLine(outcome: $0) }
     )
 
     /// The tools, as of the last read. `.none` is "nothing is known", which

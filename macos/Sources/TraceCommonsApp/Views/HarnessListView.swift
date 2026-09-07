@@ -78,8 +78,12 @@ private struct HarnessRowView: View {
             }
             // The one state that means a call arrived is the only one drawn
             // as working, and the two that cannot be attributed say nothing
-            // rather than borrow a claim.
-            if let sentence = HarnessSurface.stateSentence(row, calls: model.harnessCalls) {
+            // rather than borrow a claim. A tool that is not on this machine
+            // is listed and says so, rather than borrowing a sentence about
+            // settings it does not have.
+            if let sentence = HarnessSurface.rowSentence(
+                row, copy: copy, calls: model.harnessCalls)
+            {
                 Label(sentence, systemImage: tone.symbol)
                     .font(TC.Font_.body)
                     .foregroundStyle(tone.textColor)
@@ -152,10 +156,12 @@ private struct HarnessPreviewSheet: View {
                     .foregroundStyle(.secondary)
                     .textSelection(.enabled)
             }
-            // A file this app refused to rewrite is not a file with nothing
-            // to change, and this is the sentence that keeps them apart.
+            // Every outcome that writes nothing says why. A file this app
+            // refused to rewrite is not a file with nothing to change, and
+            // neither is a tool that is not here or a path this build could
+            // not work out; the shared table keeps all of them apart.
             if let sentence = HarnessSurface.outcomeSentence(
-                plan, copy: copy, calls: model.harnessCalls)
+                plan, calls: model.harnessCalls)
             {
                 Text(sentence).font(TC.Font_.body).fixedSize(horizontal: false, vertical: true)
             }

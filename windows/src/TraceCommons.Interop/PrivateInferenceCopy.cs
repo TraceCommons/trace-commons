@@ -186,6 +186,32 @@ public sealed record PrivateInferenceCopy
     [JsonPropertyName("harness_unreadable_config")]
     public string HarnessUnreadableConfig { get; init; } = string.Empty;
 
+    /// <summary>
+    /// A tool this app could not find on this computer.
+    /// </summary>
+    /// <remarks>
+    /// Rendered INSTEAD of <see cref="HarnessNotConnected"/> and never beside
+    /// it: that sentence says a tool's own settings still send its calls
+    /// wherever they went before, which is a claim about the settings of
+    /// something that is not on this computer. The row is listed and says
+    /// this rather than being hidden, because a tool left out of the list
+    /// cannot be told apart from a tool this app was never taught about.
+    /// </remarks>
+    [JsonPropertyName("harness_not_installed")]
+    public string HarnessNotInstalled { get; init; } = string.Empty;
+
+    /// <summary>A plan that found the file already saying what was wanted.</summary>
+    [JsonPropertyName("harness_plan_nothing_to_change")]
+    public string HarnessPlanNothingToChange { get; init; } = string.Empty;
+
+    /// <summary>This app's own description of a tool did not survive checking.</summary>
+    [JsonPropertyName("harness_plan_entry_unusable")]
+    public string HarnessPlanEntryUnusable { get; init; } = string.Empty;
+
+    /// <summary>This build could not work out where a tool keeps its settings.</summary>
+    [JsonPropertyName("harness_plan_no_config_path")]
+    public string HarnessPlanNoConfigPath { get; init; } = string.Empty;
+
     /// <summary>Every sentence for the complete-payload check, not a rendering order.</summary>
     public string[] Sentences =>
         new[]
@@ -231,5 +257,9 @@ public sealed record PrivateInferenceCopy
             HarnessNeedsRestart,
             HarnessesNoneFound,
             HarnessUnreadableConfig,
+            HarnessNotInstalled,
+            HarnessPlanNothingToChange,
+            HarnessPlanEntryUnusable,
+            HarnessPlanNoConfigPath,
         };
 }
