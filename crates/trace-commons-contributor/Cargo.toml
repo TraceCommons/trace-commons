@@ -234,7 +234,107 @@ hex = "0.4"
 # `cargo update -p ironwire_proxy` would advance it. This update did not need
 # that command -- re-resolving the changed rev alone was enough -- and the lock
 # diff was checked for non-ironwire movement, of which there was none.
-ironwire_proxy = { git = "https://github.com/nearai/ironwire", rev = "4f58f5a1bb16b13a8952fdf4c86b238d662b4069" }
+#
+# ---------------------------------------------------------------------------
+# 6c5d6289 (upstream #50, #51), reviewed 2026-09-08.
+#
+# Two commits in the range, verified with `git log --oneline 4f58f5a1..6c5d6289`.
+# #49 (tolerant JSONC read) had NOT landed at this pin -- it is still the
+# unmerged branch `read-jsonc-tolerantly` upstream -- so it is not in this
+# advance and a later one will have to review it.
+#
+# The range touches exactly three files upstream, and only one of them is code
+# this crate links: `crates/ironwire_proxy/src/embed.rs`, its tests, and
+# `docs/EMBEDDING.md`. `git diff --stat 4f58f5a1..6c5d6289 -- crates/ironwire_agents`
+# and the same for `crates/ironwire_catalog` are both EMPTY, so two of this
+# crate's three imports did not move at all and are not discussed further.
+#
+# The second commit is ours. #50 broke the embedding path, we found it here
+# rather than upstream, and #51 is the one-line fix; see THE BREAK below.
+#
+# COST. Zero, measured on both workspaces before and after rather than assumed.
+# `cargo metadata --locked`: 577 root packages and 930 root lock entries before
+# and after, 535 GTK packages and 535 GTK lock entries before and after, and
+# this crate's `cargo tree -e normal` still 303 deduplicated names. Upstream
+# changed no `Cargo.toml` and no `Cargo.lock` in the range, so no package
+# entered either graph and no license entered the audit. `cargo deny check
+# licenses` passes on all four configurations (default, near-ai-scorer,
+# local-gpu-models, --all-features).
+#
+# SURFACE. `ironwire_proxy::embed` is the only import that moved:
+#   * `EmbedOptions` LOSES `Copy`, `PartialEq` and `Eq`, and its derived
+#     `Debug` becomes a hand-written one that renders the new field as
+#     "host-owned" or "discovered" and never a secret. The lost traits are the
+#     advance's compile-break risk and they did not fire, for a reason that is
+#     checked and not remembered: `embed_options()` builds a value and returns
+#     it, and every assertion in `the_daemon_declines_both_kinds_of_request_it_
+#     never_asked_for` compares a FIELD -- `update_checks`, `startup_probes`,
+#     `update_policy` -- each of whose enums keeps `PartialEq`. Nothing here
+#     compares or copies an `EmbedOptions` whole. `Clone` and `Default` remain,
+#     which is all the builder form needs.
+#   * `EmbedOptions` GAINS `credentials: Option<CredentialSource>` and a
+#     `with_credentials` builder, plus the public `CredentialSource` alias and
+#     a `HostSecret` re-export of `secrecy::SecretString`. All additive.
+#   * `build_registry` takes a new `Credentials<'a>`, and `EnvLookup` now
+#     yields `SecretString` rather than `String`. Neither reaches us: both are
+#     PRIVATE to that module (`enum Credentials`, `type EnvLookup`, no `pub`),
+#     and this crate calls `start_with_options`, never the registry builder.
+#     `start`/`start_with`/`start_with_policy` all still exist.
+#
+# THE BREAK, and why a downstream repository was the only thing that could see
+# it. #50 wrote `EnvLookup` as a bare `dyn Fn` with no `Send + Sync`.
+# `Credentials::Discovered` wraps that alias and `start_with_options` holds a
+# `Credentials` across an await, so the returned future stopped being `Send`
+# and could no longer be `tokio::spawn`ed -- which is exactly what
+# `daemon::private_inference` does at the `runtime.spawn` in `poll`. It failed
+# as E0277 here while upstream CI stayed green, because upstream's own CLI
+# (`src/commands/serve.rs`) and every test in #50 `.await` the start directly
+# and so never demand `Send` of it. Note which path broke: the PUBLIC
+# `CredentialSource` was correctly `Send + Sync` from the start, and it was the
+# private discovered path -- the default, what a host that configures nothing
+# gets -- that did not compile. #51 adds the bound. An embedder is the only
+# thing that exercises this, so if a future advance ever fails this way again,
+# the fix belongs upstream and not in a contortion of `poll`.
+#
+# HOST-OWNED CREDENTIALS ARE DORMANT HERE BY CHOICE, not by oversight, and the
+# choice is the substance of this advance. #50 exists so an embedding host can
+# supply every backend credential itself instead of leaking one through the
+# process environment, which is a real improvement and one we should eventually
+# take. We do NOT take it yet, because this daemon has no credential
+# acquisition flow: there is nothing to answer `NEARAI_API_KEY` with. Supplying
+# a source that answers nothing is NOT equivalent to supplying none --
+# `Credentials` is one switch governing two things, whose answers count AND
+# whether the credential files Claude Code and Codex write may be read at all
+# (`discovers_files`). Adopting it today would therefore silently drop the
+# Claude and Codex subscription backends for every contributor who has one.
+#
+# And the failure would not announce itself. It would NOT be
+# `NoRoute::NoBackendsConfigured`: the NEAR AI backend is pushed
+# UNCONDITIONALLY, registered whether or not a key was found, so the registry
+# is never empty and `StartupReport::no_backends` never fires. The daemon would
+# keep reporting `running` while quietly answering from fewer backends than the
+# contributor has. That is a worse failure than a refusal, and it is the reason
+# this stays on the discovered path until there is a flow to feed it.
+#
+# FLATPAK. `cargo-sources.json` was REGENERATED with flatpak-cargo-generator.py
+# against the new GTK lock, not hand-edited, and this advance is a clean
+# demonstration of why that rule exists. Thirteen entries move; TWO of them
+# contain the 40-character revision (the git source's `commit`, and the
+# vendored-sources `contents` string). The other TWELVE key on the SHORT hash
+# -- one `dest` and eleven `cp --reflink` vendor lines, `flatpak-cargo/git/
+# ironwire-4f58f5a` -> `-6c5d628`. Editing the occurrences of the full rev
+# would leave twelve vendor paths pointing at a directory the build no longer
+# creates, and nothing in PR CI would catch it: the first failure would be the
+# `linux-flatpak` job on an `app-v*` tag. The file holds 1073 entries before
+# and after and 1060 are byte-identical, so there is no unrelated churn.
+#
+# The IronClaw note above still applies and was re-checked rather than assumed:
+# both locks still name 6dccbfbcbddfdfb53c11d3876f94bf3e716b55f9, upstream
+# still names branch=main, and `cargo update -p ironwire_proxy` would advance
+# it. This update did not need that command -- re-resolving the changed rev
+# through `cargo metadata` alone was enough -- and the changed lines of both
+# lock diffs were grepped for non-ironwire movement, of which there were zero.
+ironwire_proxy = { git = "https://github.com/nearai/ironwire", rev = "6c5d62897a9018b75bb306de9074548899e9642c" }
 # The same IronWire revision, two more of its crates, promoted from
 # transitive to direct. `ironwire_agents` is the crate whose entire purpose is
 # "which coding tools does this machine have, are they pointed at us, and how
@@ -248,8 +348,8 @@ ironwire_proxy = { git = "https://github.com/nearai/ironwire", rev = "4f58f5a1bb
 # crate does not reimplement, in a second place, the three config-editing
 # rules (never rewrite a file we cannot parse; fill an empty slot but report a
 # full one; remove only what we put there) that crate exists to hold.
-ironwire_agents = { git = "https://github.com/nearai/ironwire", rev = "4f58f5a1bb16b13a8952fdf4c86b238d662b4069" }
-ironwire_catalog = { git = "https://github.com/nearai/ironwire", rev = "4f58f5a1bb16b13a8952fdf4c86b238d662b4069" }
+ironwire_agents = { git = "https://github.com/nearai/ironwire", rev = "6c5d62897a9018b75bb306de9074548899e9642c" }
+ironwire_catalog = { git = "https://github.com/nearai/ironwire", rev = "6c5d62897a9018b75bb306de9074548899e9642c" }
 notify = "8.2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
 ring = "0.17"
