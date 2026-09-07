@@ -421,6 +421,28 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn explicit_file_loader_refuses_symlinks_and_oversized_regular_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ordinary.json");
+        std::fs::write(&path, encoded(&fixture("second-client", false))).unwrap();
+        assert!(read_import(&path).is_ok());
+        let link = dir.path().join("alias.json");
+        std::os::unix::fs::symlink(&path, &link).unwrap();
+        assert!(read_import(&link).is_err());
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(MAX_IMPORT_BYTES as u64 + 1)
+            .unwrap();
+        assert_eq!(
+            read_import(&path).unwrap_err().to_string(),
+            "import-too-large"
+        );
+    }
+
     #[test]
     fn corrupt_and_oversized_imports_fail_before_use() {
         for bytes in [b"{".as_slice(), &[0xff, 0xfe]] {

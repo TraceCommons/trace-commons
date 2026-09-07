@@ -60,3 +60,43 @@ fn two_ordinary_imports_preview_without_creating_contributor_state() {
         );
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn a_fifo_import_is_refused_without_waiting_for_a_writer() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("input.fifo");
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(&path)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_trace-commons-contributor"))
+        .args(["import-preview", "--file"])
+        .arg(path)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            assert!(!status.success());
+            let output = child.wait_with_output().unwrap();
+            assert!(
+                String::from_utf8(output.stderr)
+                    .unwrap()
+                    .contains("import-file-not-regular")
+            );
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("FIFO import blocked waiting for a writer");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
