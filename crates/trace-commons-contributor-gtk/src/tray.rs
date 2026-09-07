@@ -104,8 +104,33 @@ impl TrayState {
         self.answering.store(on, Ordering::Relaxed);
     }
 
-    fn answering(&self) -> bool {
+    /// Which way the one action points, for the menu here and for the
+    /// window's toggle accelerator. Never a claim that a listener is
+    /// running -- see the type's own note.
+    pub fn answering(&self) -> bool {
         self.answering.load(Ordering::Relaxed)
+    }
+}
+
+/// What "toggle answering" means, in one place.
+///
+/// **The whole of the asymmetry lives here**, and both surfaces that offer a
+/// toggle ask this rather than restating it: the menu row below, and the
+/// window's keyboard chord (`ui::shortcuts`). Turning it OFF only ever
+/// reduces what this computer will answer, so it is safe to press with
+/// nothing else on screen. Turning it ON changes what anything else running
+/// here may send through, charged to the contributor's own accounts -- so
+/// this never answers with a write for that direction. It answers with an
+/// open, and the screen it opens is the one carrying the sentence that says
+/// what the exposure is.
+///
+/// [`TrayRequest`] having no word for the other direction is what makes that
+/// unforgeable rather than merely intended: this function cannot return one.
+pub fn toggle_request(answering: bool) -> TrayRequest {
+    if answering {
+        TrayRequest::StopAnsweringModelCalls
+    } else {
+        TrayRequest::Open(crate::ui::PRIVATE_INFERENCE_SCREEN)
     }
 }
 
@@ -125,20 +150,19 @@ fn menu_rows(answering: bool) -> Vec<(&'static str, TrayRequest)> {
         .iter()
         .map(|(name, label, _)| (*label, TrayRequest::Open(name)))
         .collect();
-    rows.push(if answering {
-        (
-            crate::copy::PRIVATE_INFERENCE_TRAY_TURN_OFF,
-            TrayRequest::StopAnsweringModelCalls,
-        )
-    } else {
-        // The trailing ellipsis on this one is the convention for an item
-        // that opens something rather than acting, and it is the copy
-        // module's, not this file's.
-        (
-            crate::copy::PRIVATE_INFERENCE_TRAY_OPEN_TO_TURN_ON,
-            TrayRequest::Open(crate::ui::PRIVATE_INFERENCE_SCREEN),
-        )
-    });
+    // Which request the row carries is `toggle_request`'s decision and is
+    // not made again here; this only picks the words for the request it was
+    // handed. The trailing ellipsis on the open one is the convention for an
+    // item that opens something rather than acting, and it is the copy
+    // module's, not this file's.
+    let request = toggle_request(answering);
+    rows.push((
+        match request {
+            TrayRequest::StopAnsweringModelCalls => crate::copy::PRIVATE_INFERENCE_TRAY_TURN_OFF,
+            TrayRequest::Open(_) => crate::copy::PRIVATE_INFERENCE_TRAY_OPEN_TO_TURN_ON,
+        },
+        request,
+    ));
     rows
 }
 

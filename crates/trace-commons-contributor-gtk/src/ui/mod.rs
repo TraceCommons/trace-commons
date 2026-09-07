@@ -16,6 +16,7 @@ pub mod private_inference;
 pub mod queue;
 pub mod roots;
 pub mod settings;
+pub(crate) mod shortcuts;
 pub mod style;
 pub mod update;
 
@@ -377,6 +378,11 @@ impl App {
         app.wire_quit();
         app.wire_health_action();
         app.wire_tray();
+        // After `wire_tray`, and reaching the same handler it does. GNOME
+        // has no tray, so on most Linux desktops this is the only surface
+        // besides the window's own controls -- and it is still an
+        // accelerant, never the only path to anything.
+        shortcuts::wire(&app, application);
         queue::wire(&app);
         history::wire(&app);
         private_inference::wire(&app);
@@ -562,16 +568,7 @@ impl App {
         let app = Rc::clone(self);
         glib::spawn_future_local(async move {
             while let Ok(request) = rx.recv().await {
-                match request {
-                    crate::tray::TrayRequest::Open(screen) => {
-                        app.stack.set_visible_child_name(screen);
-                    }
-                    crate::tray::TrayRequest::StopAnsweringModelCalls => {
-                        app.stack.set_visible_child_name(PRIVATE_INFERENCE_SCREEN);
-                        private_inference::turn_off(&app);
-                    }
-                }
-                app.window.present();
+                apply_tray_request(&app, request);
             }
         });
     }
@@ -1167,6 +1164,30 @@ impl App {
 
 /// The segmented view switcher, §5.1's Linux column.
 ///
+/// Carry out one [`crate::tray::TrayRequest`].
+///
+/// A free function rather than the body of `wire_tray`'s loop because the
+/// toggle accelerator (`ui::shortcuts`) arrives here as well, and the two
+/// surfaces must not each hold their own idea of what a request does. The
+/// vocabulary is still the tray's two words, so what a keypress can ask for
+/// is bounded by the same type: there is no request that starts answering.
+///
+/// The window comes up either way, including for the stop: the daemon's
+/// answer is a sentence only the model-calls screen renders, and a change
+/// nobody can see the result of is the shape both surfaces avoid.
+pub(crate) fn apply_tray_request(app: &Rc<App>, request: crate::tray::TrayRequest) {
+    match request {
+        crate::tray::TrayRequest::Open(screen) => {
+            app.stack.set_visible_child_name(screen);
+        }
+        crate::tray::TrayRequest::StopAnsweringModelCalls => {
+            app.stack.set_visible_child_name(PRIVATE_INFERENCE_SCREEN);
+            private_inference::turn_off(app);
+        }
+    }
+    app.window.present();
+}
+
 /// Hand-built rather than an `AdwViewSwitcher` because the design puts a
 /// count badge inside one item, and `AdwViewSwitcher` builds its own buttons
 /// from the stack pages' titles and icons with nowhere to put one.
@@ -1183,7 +1204,7 @@ fn view_switcher(stack: &adw::ViewStack, queue_badge: &gtk::Label) -> gtk::Box {
     track.add_css_class("tc-switcher");
 
     let mut items: Vec<(&'static str, gtk::ToggleButton)> = Vec::new();
-    for (name, label, icon_name) in SCREENS {
+    for (index, (name, label, icon_name)) in SCREENS.into_iter().enumerate() {
         let content = gtk::Box::new(gtk::Orientation::Horizontal, style::space::XXS);
         // A real `GtkImage`, not a glyph: §6.6 turns the selected item's icon
         // green while its label stays ink, and style.css matches that on the
@@ -1201,6 +1222,13 @@ fn view_switcher(stack: &adw::ViewStack, queue_badge: &gtk::Label) -> gtk::Box {
         // `flat` drops Adwaita's own button face, so the track underneath is
         // what the unselected items sit on.
         item.add_css_class("flat");
+        // How the accelerator is discovered. The chord and nothing else: the
+        // item's own label is right beside it, and the text is GTK's --
+        // `accelerator_get_label` in the contributor's keyboard and language
+        // -- so no word of this is authored in this shell. A shortcuts
+        // window would need section and group titles nobody has written,
+        // which is the reason it is not one.
+        item.set_tooltip_text(shortcuts::screen_accel_label(index).as_deref());
         if let Some((_, first)) = items.first() {
             item.set_group(Some(first));
         }
