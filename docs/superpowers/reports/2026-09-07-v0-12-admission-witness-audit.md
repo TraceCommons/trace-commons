@@ -6,7 +6,7 @@ Baseline: `7d518662`. Workstream C; implementation in progress, not release evid
 
 | Identity / contribution | Required authority | Current verification |
 | --- | --- | --- |
-| Redeemed invite, ordinary local trace | Existing authenticated invite grants, ordinary privacy and approval | Real registry resolution + synthetic authenticated tenant + ordinary ingest succeeds for two source names; full enrollment/use-count test pending |
+| Redeemed invite, ordinary local trace | Existing authenticated invite grants, ordinary privacy and approval | Real registry resolution and device-registration transaction (idempotency and use cap), then synthetic authenticated tenant + ordinary ingest succeeds for two source names |
 | NEAR identity without invite, ordinary trace | Refuse | Real PostgreSQL/RLS ingest reproduced HTTP200; fixed to403 |
 | NEAR identity, verified single-call witness artifact | Receipt, account challenge, exact artifact certificate, authenticated approved upload | Existing synthetic signed witness-to-ingest PostgreSQL fixture passes after narrowing |
 | Valid receipt plus unrelated companion history | Refuse unsupported coverage | Reproduced witness success; fixed by single-exchange admission restriction |
@@ -41,7 +41,7 @@ invited credentials do not acquire a global receipt requirement.
   success, value and companion metadata claims before certification. This
   first profile yields a conservative single-call artifact, not useful full
   session history; useful text projection is a separate supported-shape task.
-- Still required: complete native invite enrollment/use-count qualification,
+- Still required: complete native HTTP invite enrollment qualification,
   deployed signer/quote verification, real client/provider sessions and agreed
   native coverage/approval presentation. Local preview is not eligibility.
 - Metadata traversal shares existing byte/node/depth budgets and refuses
@@ -53,8 +53,11 @@ invited credentials do not acquire a global receipt requirement.
 
 The admission route test uses real local PostgreSQL with a restricted runtime
 role, real synthetic Ed25519 receipt signatures, and real EIP-191 witness
-signatures. Invite registry resolution is real, but the subsequently authenticated token is
-a fixture rather than a complete native device-enrollment ceremony. Enclave
+signatures. Invite registry resolution and the issuer's durable device-registration transaction
+are real: first registration succeeds, same-device retry is idempotent, a second
+device exceeds the invite allowance, and unknown/expired registry lookups refuse.
+The subsequently authenticated token is a fixture rather than a complete native
+HTTP device-enrollment ceremony. Enclave
 measurement/quote and classifier are synthetic test seams.
 It does not establish deployed-enclave attestation, live NEAR AI provider
 qualification, or a real OpenCode model call. No provider requests or deployments

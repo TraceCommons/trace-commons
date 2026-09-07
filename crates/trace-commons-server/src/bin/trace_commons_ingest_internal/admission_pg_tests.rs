@@ -215,6 +215,66 @@ async fn actual_postgres_challenge_witness_ingest_and_terminal_retry() {
         .await
         .unwrap()
         .unwrap();
+    // Exercise the same durable enrollment transaction the issuer calls,
+    // including idempotency and global use-count enforcement.
+    use trace_commons_server::db::{DeviceKeyWrite, OnboardDeviceKeyError};
+    client
+        .execute(
+            "INSERT INTO trace_tenants(tenant_id) VALUES($1) ON CONFLICT DO NOTHING",
+            &[&redeemed.tenant_id],
+        )
+        .await
+        .unwrap();
+    let enrollment_seed: [u8; 32] = sha2::Sha256::digest(Uuid::new_v4().as_bytes()).into();
+    let enrollment = |seed: [u8; 32], invite: &str| {
+        let key = ring::signature::Ed25519KeyPair::from_seed_unchecked(&seed).unwrap();
+        DeviceKeyWrite {
+            device_key_id: trace_commons_protocol::onboarding::device_key_id_from_public_key_bytes(
+                key.public_key().as_ref(),
+            ),
+            tenant_id: redeemed.tenant_id.clone(),
+            public_key: base64::engine::general_purpose::STANDARD.encode(key.public_key().as_ref()),
+            invite_subject_hash: invite.into(),
+            client_info: serde_json::json!({}),
+            allowed_consent_scopes: Some(redeemed.allowed_consent_scopes.clone()),
+            allowed_uses: Some(redeemed.allowed_uses.clone()),
+        }
+    };
+    admin
+        .onboard_device_key(enrollment(enrollment_seed, &invite_hash), 1)
+        .await
+        .unwrap();
+    admin
+        .onboard_device_key(enrollment(enrollment_seed, &invite_hash), 1)
+        .await
+        .unwrap();
+    let second_seed: [u8; 32] = sha2::Sha256::digest(Uuid::new_v4().as_bytes()).into();
+    assert!(matches!(
+        admin
+            .onboard_device_key(enrollment(second_seed, &invite_hash), 1)
+            .await,
+        Err(OnboardDeviceKeyError::InviteAlreadyConsumed)
+    ));
+    let unknown_invite = format!("sha256:{}", hash_hex(Uuid::new_v4().as_bytes()));
+    // Registry authorization precedes enrollment; the storage transaction also
+    // supports legacy file-authorized invites and cannot reject all absent rows.
+    assert!(
+        admin
+            .redeem_invite_grant(&unknown_invite, "v012-unknown-user")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    client.execute("UPDATE onboarding_invite_grants SET expires_at=now()-interval '1 second' WHERE invite_subject_hash=$1", &[&invite_hash]).await.unwrap();
+    assert!(
+        admin
+            .redeem_invite_grant(&invite_hash, "v012-expired-user")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    // Expiring the invite prevents new enrollments; the already enrolled
+    // contributor still follows ordinary authenticated contribution policy.
     let mut invited_tokens = BTreeMap::new();
     insert_token(
         &mut invited_tokens,
