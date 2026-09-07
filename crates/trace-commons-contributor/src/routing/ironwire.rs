@@ -45,6 +45,31 @@ struct LogView {
     exchanges: Vec<serde_json::Value>,
 }
 
+/// The proxy's status object. Only the one field this reads.
+///
+/// `spend_today_usd` is deliberately not summed here from the log rows we
+/// already hold, and the difference is the whole reason this second request
+/// exists. Those rows price EVERY exchange, including the ones a monthly
+/// plan already paid for -- `RoutedExchange::cost_usd` says so, and forbids
+/// rendering it as money anyone spent. The proxy's status object filters the
+/// same rows down to the metered ones, which it can do and we cannot,
+/// because which backend is metered is knowable only where the registry is.
+///
+/// It is also already `None` for "the figure is unmeasured", which is
+/// exactly the distinction this surface has to keep: unmeasured and nothing
+/// spent are different facts.
+#[derive(Debug, Deserialize)]
+struct StatusView {
+    #[serde(default)]
+    balance: BalanceView,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct BalanceView {
+    #[serde(default)]
+    spend_today_usd: Option<f64>,
+}
+
 /// One page of the proxy's log, as this client read it.
 #[derive(Debug, Default)]
 struct Page {
@@ -111,6 +136,18 @@ pub struct IronWireLedger {
     /// take down the whole daemon over a condition this module otherwise
     /// shrugs off.
     client: Option<reqwest::Client>,
+    /// What the proxy last said had been spent on this computer since local
+    /// midnight, in millionths of a dollar, or `None` for "not known".
+    ///
+    /// Held rather than fetched on demand for the reason the snapshot is:
+    /// the surface that renders it is answered synchronously, off a
+    /// snapshot the poll tick refreshes.
+    ///
+    /// `None` is load-bearing and covers every way of not knowing -- never
+    /// refreshed, unreachable, refused, a body this build cannot parse, and
+    /// the proxy's own `null` for a figure it did not measure. A reader must
+    /// render it as nothing at all, never as zero.
+    spend_today_micros: Arc<RwLock<Option<u64>>>,
 }
 
 impl std::fmt::Debug for IronWireLedger {
@@ -157,6 +194,7 @@ impl IronWireLedger {
             last_refresh_at: Arc::new(RwLock::new(None)),
             unreadable_rows: Arc::new(RwLock::new(0)),
             client: reqwest::Client::builder().build().ok(),
+            spend_today_micros: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -250,6 +288,67 @@ impl IronWireLedger {
         if let Ok(mut at) = self.last_refresh_at.write() {
             *at = Some(Utc::now());
         }
+        // After the rows, and never fatal to them. A proxy old enough not to
+        // serve `/status` still serves the log, and losing the amount must
+        // not lose the window as well.
+        self.refresh_spend(client).await;
+    }
+
+    /// Read what the proxy says has been spent on this computer today.
+    ///
+    /// A separate request from the log pages, because it is a separate
+    /// question with a separate answer: the log is priced, the status object
+    /// is metered. Failure of any kind writes `None`, which is not the same
+    /// as writing zero and is the reason this does not simply leave the old
+    /// value in place: a figure from an hour ago is not what the surface
+    /// promises, and "unknown" is the honest answer for a proxy that has
+    /// stopped answering.
+    async fn refresh_spend(&self, client: &reqwest::Client) {
+        let micros = self.fetch_spend(client).await;
+        if let Ok(mut held) = self.spend_today_micros.write() {
+            *held = micros;
+        }
+    }
+
+    /// The figure, or `None` for every way of not having one.
+    async fn fetch_spend(&self, client: &reqwest::Client) -> Option<u64> {
+        let response = client
+            .get(format!("http://127.0.0.1:{}/_ironwire/status", self.port))
+            .timeout(REFRESH_TIMEOUT)
+            .header("authorization", format!("Bearer {}", self.token))
+            .send()
+            .await
+            .ok()?;
+        if !response.status().is_success() {
+            return None;
+        }
+        let body = response.bytes().await.ok()?;
+        // The error is discarded rather than logged: the status object
+        // carries model names and prices, and serde quotes what it choked
+        // on.
+        let view = serde_json::from_slice::<StatusView>(&body).ok()?;
+        let usd = view.balance.spend_today_usd?;
+        // Negative, infinite and NaN are not amounts of money. They reach
+        // absence rather than zero, for the same reason `null` does: a
+        // figure nobody can make sense of is one nobody measured.
+        if !usd.is_finite() || usd < 0.0 {
+            return None;
+        }
+        let micros = (usd * 1_000_000.0).round();
+        if micros > u64::MAX as f64 {
+            return None;
+        }
+        Some(micros as u64)
+    }
+
+    /// What has been spent on this computer since local midnight, in
+    /// millionths of a dollar, or `None` for not known.
+    ///
+    /// See the field of the same name: `None` covers every way of not
+    /// knowing and must never be rendered as zero.
+    #[must_use]
+    pub fn spend_today_micros(&self) -> Option<u64> {
+        self.spend_today_micros.read().ok().and_then(|held| *held)
     }
 
     /// One page of rows, or `None` when the body is not readable JSON.
@@ -363,6 +462,7 @@ mod tests {
             last_refresh_at: Arc::new(RwLock::new(None)),
             unreadable_rows: Arc::new(RwLock::new(0)),
             client: None,
+            spend_today_micros: Arc::new(RwLock::new(None)),
         };
         ledger.refresh().await;
         assert!(
@@ -464,6 +564,77 @@ mod tests {
         );
         assert!(ledger.has_rows(), "the window is not blanked");
         assert_eq!(ledger.unreadable_rows(), 1, "and the loss is reported");
+    }
+
+    /// A helper that serves one `/status` body on loopback and refreshes a
+    /// ledger against it.
+    async fn spend_after_status(body: Option<&'static str>) -> Option<u64> {
+        let mut router = axum::Router::new().route(
+            "/_ironwire/log",
+            axum::routing::get(|| async { r#"{"exchanges":[]}"# }),
+        );
+        if let Some(body) = body {
+            router = router.route(
+                "/_ironwire/status",
+                axum::routing::get(move || async move { body }),
+            );
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback");
+        let port = listener.local_addr().expect("addr").port();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        let ledger = IronWireLedger::new(port, "t".to_string());
+        ledger.refresh().await;
+        ledger.spend_today_micros()
+    }
+
+    /// The access path this surface is built on: the proxy's own status
+    /// object, whose `spend_today_usd` is already metered-only and already
+    /// `None` for "unmeasured".
+    #[tokio::test]
+    async fn the_status_object_answers_what_was_spent() {
+        let spend = spend_after_status(Some(r#"{"balance":{"spend_today_usd":1.23}}"#)).await;
+        assert_eq!(spend, Some(1_230_000));
+    }
+
+    /// A MEASURED ZERO IS NOT AN ABSENCE. It arrives as `Some(0)` and must
+    /// stay distinguishable from every way of not knowing.
+    #[tokio::test]
+    async fn a_measured_zero_is_not_absence() {
+        let spend = spend_after_status(Some(r#"{"balance":{"spend_today_usd":0.0}}"#)).await;
+        assert_eq!(spend, Some(0));
+    }
+
+    /// Every way of not knowing answers the same absence: the proxy said the
+    /// figure is unmeasured, the route is not there, the body will not
+    /// parse, or the number is not one money can be made of.
+    #[tokio::test]
+    async fn every_way_of_not_knowing_is_absence() {
+        for body in [
+            Some(r#"{"balance":{"spend_today_usd":null}}"#),
+            Some(r#"{"balance":{}}"#),
+            Some("{}"),
+            Some("not json at all"),
+            Some(r#"{"balance":{"spend_today_usd":-4.0}}"#),
+            None,
+        ] {
+            assert_eq!(
+                spend_after_status(body).await,
+                None,
+                "{body:?} claimed a figure"
+            );
+        }
+    }
+
+    /// A refresh that never reached the proxy leaves the figure unknown
+    /// rather than reporting a day with nothing on it.
+    #[tokio::test]
+    async fn a_ledger_that_never_refreshed_knows_nothing() {
+        let ledger = IronWireLedger::new(1, "t".to_string());
+        assert_eq!(ledger.spend_today_micros(), None);
     }
 
     #[test]

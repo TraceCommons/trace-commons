@@ -412,6 +412,7 @@ pub struct PrivateInferenceCopy {
     pub tray_open_to_turn_on: &'static str,
     pub harnesses_title: &'static str,
     pub harnesses_what: &'static str,
+    pub harnesses_spend_scope: &'static str,
     pub harness_not_installed: &'static str,
     pub harness_not_connected: &'static str,
     pub harness_connected_nothing_seen: &'static str,
@@ -469,6 +470,25 @@ pub const HARNESSES_TITLE: &str = "Tools on this computer";
 pub const HARNESSES_WHAT: &str = "Each of these can be set to send its model calls to this computer, one \
      tool at a time. The list is what this app knows how to look for, not \
      every tool there is.";
+
+/// What the amount [`harness_spend_line`] names does and does not cover.
+///
+/// **A number without this sentence is a lie of omission.** The figure is
+/// measured where the calls were answered -- here -- and a contributor
+/// signed in to the same account on a second computer, or in a browser, has
+/// spent more than it says. Stating the scope is the same duty
+/// [`HARNESSES_WHAT`] discharges for the list above it, which says what this
+/// app knows how to look for rather than implying it knows about everything.
+///
+/// The second omission is subtler and needs saying just as plainly: work
+/// served by something already paid for by the month is not added in. That
+/// is deliberate upstream -- summing it would produce a figure for a day on
+/// which nothing was billed -- but a contributor who saw a busy afternoon
+/// come back as nothing would conclude the number was broken rather than
+/// that it was narrow.
+pub const HARNESSES_SPEND_SCOPE: &str = "Only calls answered on this computer are in that figure. Calls answered \
+     on another machine, or in a browser, are not, and neither is work a \
+     monthly plan has already paid for.";
 
 /// A tool this app could not find on this computer.
 ///
@@ -708,6 +728,57 @@ pub fn harness_last_call_line(seconds_ago: Option<u64>) -> String {
     format!("Last call answered here: {count} {unit}{plural} ago.")
 }
 
+/// What the calls answered here have cost since midnight, assembled on this
+/// side, or the empty string.
+///
+/// `micros` is millionths of a dollar. An integer rather than a float
+/// because it crosses the C ABI as one, and because a sentence about money
+/// should round exactly once, here, rather than once per shell.
+///
+/// # `None` is not zero
+///
+/// `None` means nothing could be read -- no ledger, an answer that did not
+/// arrive, an answer this build could not parse -- and it produces the empty
+/// string, which a shell draws as no line at all. It must never be rendered
+/// as `$0.00`. A day on which nothing was spent and a day nobody could
+/// measure are different facts, and collapsing them would put a confident
+/// figure in front of a contributor that nothing supports. It is the same
+/// rule [`harness_state_line`] follows for a state this build has no words
+/// for, and the same rule [`harness_last_call_line`] follows for a call
+/// nobody saw.
+///
+/// # The window is in the sentence
+///
+/// Since the most recent midnight, which is the window the figure is kept
+/// over. A sentence that named an amount without naming its window would
+/// invite it to be read as a total, exactly as `ACTIVITY_WINDOW_HOURS` would
+/// be misread if the state sentence left it out.
+///
+/// The scope the figure does *not* cover is [`HARNESSES_SPEND_SCOPE`], drawn
+/// beside this sentence and only when this sentence is drawn at all.
+#[must_use]
+pub fn harness_spend_line(micros: Option<u64>) -> String {
+    let Some(micros) = micros else {
+        return String::new();
+    };
+    // Rounded to cents ONCE, before splitting. Dividing first and rounding
+    // the remainder separately carries into a third digit -- 1_999_999
+    // micros renders as "$1.100" -- which is the shape of a bug a
+    // contributor would read as a price.
+    let cents = (micros + 5_000) / 10_000;
+    if cents == 0 && micros > 0 {
+        // Too small to show, and not nothing. Rounding it down into the
+        // sentence a day with no calls gets would say something false about
+        // a day that had them.
+        return "Cost of calls answered here since midnight: less than $0.01.".to_string();
+    }
+    format!(
+        "Cost of calls answered here since midnight: ${}.{:02}.",
+        cents / 100,
+        cents % 100
+    )
+}
+
 /// The payload, built from the constants above.
 #[must_use]
 pub fn private_inference_copy() -> PrivateInferenceCopy {
@@ -741,6 +812,7 @@ pub fn private_inference_copy() -> PrivateInferenceCopy {
         tray_open_to_turn_on: TRAY_OPEN_TO_TURN_ON,
         harnesses_title: HARNESSES_TITLE,
         harnesses_what: HARNESSES_WHAT,
+        harnesses_spend_scope: HARNESSES_SPEND_SCOPE,
         harness_not_installed: HARNESS_NOT_INSTALLED,
         harness_not_connected: HARNESS_NOT_CONNECTED,
         harness_connected_nothing_seen: HARNESS_CONNECTED_NOTHING_SEEN,
@@ -1296,6 +1368,50 @@ mod tests {
         assert!(harness_last_call_line(Some(172_800)).contains("2 days ago"));
     }
 
+    /// UNKNOWN AND NONE-SPENT ARE DIFFERENT FACTS, and the difference is the
+    /// whole reason this function takes an `Option` rather than a number.
+    ///
+    /// A figure nobody could read must draw no line at all. Rendering it as
+    /// `$0.00` would be the same defect as painting a state this build has no
+    /// words for as `Answering`: a confident claim assembled out of an
+    /// absence.
+    #[test]
+    fn an_unreadable_amount_says_nothing_and_a_measured_zero_says_zero() {
+        assert_eq!(harness_spend_line(None), "");
+        let zero = harness_spend_line(Some(0));
+        assert!(
+            zero.contains("$0.00"),
+            "a measured zero must name it: {zero}"
+        );
+        assert_ne!(zero, harness_spend_line(None));
+    }
+
+    /// The window is named in the sentence, not left for a shell to add.
+    #[test]
+    fn the_amount_names_its_own_window() {
+        assert!(harness_spend_line(Some(1_230_000)).contains("since midnight"));
+        assert!(HARNESSES_SPEND_SCOPE.contains("this computer"));
+    }
+
+    /// Whole cents, rounded once, and never a carry that spills a third
+    /// digit past the point.
+    #[test]
+    fn an_amount_reads_as_money() {
+        assert!(harness_spend_line(Some(1_230_000)).contains("$1.23"));
+        assert!(harness_spend_line(Some(1_999_999)).contains("$2.00"));
+        assert!(harness_spend_line(Some(12_345_678)).contains("$12.35"));
+        assert!(harness_spend_line(Some(1_000_000_000)).contains("$1000.00"));
+    }
+
+    /// An amount too small to show is said to be small, not rounded away to
+    /// the sentence a day with nothing on it gets.
+    #[test]
+    fn a_fraction_of_a_cent_is_not_reported_as_nothing() {
+        let tiny = harness_spend_line(Some(1));
+        assert!(tiny.contains("less than $0.01"), "{tiny}");
+        assert_ne!(tiny, harness_spend_line(Some(0)));
+    }
+
     /// Every field of the payload carries a finished sentence: no empties,
     /// and no template markers a shell would have to fill in.
     #[test]
@@ -1305,7 +1421,7 @@ mod tests {
         let fields = payload.as_object().expect("a JSON object");
         assert_eq!(
             fields.len(),
-            45,
+            46,
             "the payload's field count changed -- update the shells' decoders \
              and the tests that pin the set"
         );
@@ -1374,6 +1490,9 @@ mod tests {
         strings.push(serving_line(Some(8463)));
         for seconds in [None, Some(0), Some(1), Some(60), Some(3_600), Some(86_400)] {
             strings.push(harness_last_call_line(seconds));
+        }
+        for micros in [None, Some(0), Some(1), Some(1_230_000), Some(1_000_000_000)] {
+            strings.push(harness_spend_line(micros));
         }
         for label in [
             LABEL_OFF,

@@ -71,6 +71,21 @@
                                    Style="{StaticResource TcCaptionTextStyle}"
                                    TextWrapping="Wrap" />
                         <!--
+                            What today's calls cost, and what that figure
+                            leaves out. Both are shown or neither is: an
+                            amount nobody could read draws no line, and the
+                            scope sentence alone would qualify a number that
+                            is not on screen.
+                        -->
+                        <TextBlock Text="{x:Bind ViewModel.HarnessesSpend, Mode=OneWay}"
+                                   Visibility="{x:Bind ViewModel.HasHarnessesSpend, Mode=OneWay}"
+                                   Style="{StaticResource TcBodyTextStyle}"
+                                   TextWrapping="Wrap" />
+                        <TextBlock Text="{x:Bind ViewModel.HarnessesSpendScope, Mode=OneWay}"
+                                   Visibility="{x:Bind ViewModel.HasHarnessesSpend, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   TextWrapping="Wrap" />
+                        <!--
                             Nothing found, said in terms of what was looked for.
                             Drawn only once a list has actually come back, so an
                             unread list is not reported as an empty machine.

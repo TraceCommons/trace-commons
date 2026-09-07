@@ -239,7 +239,8 @@ final class AppModel: ObservableObject {
         actionAvailable: { TCHarness.actionAvailable(action: $0, installed: $1, connected: $2) },
         stateLine: { TCHarness.stateLine(state: $0) },
         lastCallLine: { TCHarness.lastCallLine(secondsAgo: $0) },
-        outcomeLine: { TCHarness.outcomeLine(outcome: $0) }
+        outcomeLine: { TCHarness.outcomeLine(outcome: $0) },
+        spendLine: { TCHarness.spendLine(micros: $0) }
     )
 
     /// The tools, as of the last read. `.none` is "nothing is known", which

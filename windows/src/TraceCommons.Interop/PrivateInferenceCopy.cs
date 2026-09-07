@@ -135,6 +135,16 @@ public sealed record PrivateInferenceCopy
     [JsonPropertyName("harnesses_what")]
     public string HarnessesWhat { get; init; } = string.Empty;
 
+    /// <summary>
+    /// What the amount <see cref="HarnessSurface.SpendSentence"/> names does
+    /// and does not cover: only calls answered on this computer, and not work
+    /// a monthly plan has already paid for. Drawn beside that sentence and
+    /// only when that sentence is drawn -- a scope line on its own qualifies
+    /// a figure that is not on screen.
+    /// </summary>
+    [JsonPropertyName("harnesses_spend_scope")]
+    public string HarnessesSpendScope { get; init; } = string.Empty;
+
     [JsonPropertyName("harness_not_connected")]
     public string HarnessNotConnected { get; init; } = string.Empty;
 
@@ -245,6 +255,7 @@ public sealed record PrivateInferenceCopy
             TrayOpenToTurnOn,
             HarnessesTitle,
             HarnessesWhat,
+            HarnessesSpendScope,
             HarnessNotConnected,
             HarnessConnectedNothingSeen,
             HarnessAnswering,

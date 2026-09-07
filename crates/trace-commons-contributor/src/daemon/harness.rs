@@ -723,6 +723,32 @@ fn activity_for(shared: &DaemonShared) -> FamilyActivity {
     family_activity(&rows, true)
 }
 
+/// What has been spent on this computer today, or `None` for not known.
+///
+/// Millionths of a dollar, since the most recent local midnight, and only
+/// what a metered backend charged for -- the proxy's own status object does
+/// that filtering, which is the reason this asks it rather than summing the
+/// rows [`activity_for`] already holds. Those rows price every exchange,
+/// including work a monthly plan already paid for, and
+/// `RoutedExchange::cost_usd` says in as many words that no surface may
+/// render them as money anyone spent.
+///
+/// EVERY WAY OF NOT KNOWING IS `None`, and none of them is zero: no
+/// declared, readable proxy; a refresh that has not landed; an answer that
+/// did not come back; a figure the proxy itself did not measure. A day with
+/// nothing on it is `Some(0)`, and a shell must be able to tell the two
+/// apart -- which is the whole reason this is an `Option` on the wire as
+/// well as here.
+fn spend_for(shared: &DaemonShared) -> Option<u64> {
+    let ledger = shared.routing_ledger()?;
+    // The same gate `activity_for` applies, for the same reason: a ledger
+    // that has never completed a refresh holds a cold zero, and reporting
+    // that as a measured figure is the defect this whole surface exists to
+    // avoid.
+    ledger.last_refresh_at()?;
+    ledger.spend_today_micros()
+}
+
 /// A path, or absent.
 ///
 /// Null rather than `""`: a surface renders nothing for absent, and an empty
@@ -769,6 +795,7 @@ fn offers_disconnect(row: &HarnessRow) -> bool {
 pub fn handle_list(shared: &DaemonShared, req: &Request) -> Response {
     let catalog = catalog();
     let activity = activity_for(shared);
+    let spend = spend_for(shared);
     let destination_port = shared.destination_port();
     let rows = list(&catalog, &activity, destination_port);
 
@@ -826,6 +853,14 @@ pub fn handle_list(shared: &DaemonShared, req: &Request) -> Response {
                         "calls": count,
                     }))
                     .collect::<Vec<_>>(),
+            },
+            // What the calls answered here have cost since local midnight,
+            // in millionths of a dollar. `known` is false and `micros` is
+            // null for every way of not knowing, which a shell must draw
+            // as no line at all rather than as nothing spent.
+            "spend": {
+                "known": spend.is_some(),
+                "micros": spend,
             },
             // The port a connect would write into a config file. Null when
             // nothing on this machine is answering model calls, which is
