@@ -34,6 +34,22 @@ final class PrivateInferenceDestinationTests: XCTestCase {
         }
     }
 
+    /// Settings is the last row, here and on every other shell.
+    ///
+    /// This is a cross-shell rule, not a macOS preference: GTK's `SCREENS`
+    /// ends with `settings` and the Windows panes are declared in the same
+    /// order. This shell used to place it third, which left two destinations
+    /// below the settings row and made the three sidebars disagree. Pinning
+    /// it here is what keeps a later addition from quietly reopening that
+    /// gap -- a new destination appended after `settings` would restore
+    /// exactly the layout this test exists to rule out.
+    @MainActor
+    func testSettingsIsTheLastDestination() {
+        XCTAssertEqual(
+            MainWindowView.Section.allCases.last, .settings,
+            "settings is the last row on every shell; a new destination goes before it")
+    }
+
     /// The label and the subtitle are the Rust's words, read through the
     /// copy payload -- never retyped in Swift, and never the raw value.
     @MainActor

@@ -10,11 +10,19 @@ struct MainWindowView: View {
     enum Section: String, CaseIterable, Identifiable {
         case queue = "Waiting"
         case history = "History"
-        case settings = "Settings"
         case compute = "compute"
         // The raw value is an identity, not a label: this destination takes
         // its words from the Rust copy payload, the way `compute` does.
         case privateInference = "privateInference"
+        // Settings is last, and last on every shell. GTK and Windows already
+        // ordered it that way; this shell had it third, which put two
+        // destinations BELOW the settings row and made the sidebar disagree
+        // with itself across platforms. Declaration order is the sidebar
+        // order and, through `shortcut`, the Cmd-N numbering -- so this move
+        // renumbers Settings from Cmd-3 to Cmd-5, Compute to Cmd-3 and
+        // Private AI to Cmd-4, which is the intended coupling, not a side
+        // effect of it.
+        case settings = "Settings"
         var id: String { rawValue }
 
         /// The nav glyph, drawn from the design's own path data rather than
