@@ -168,13 +168,52 @@ fn config_digest(path: &Path) -> Option<String> {
     Some(format!("{:x}", hasher.finalize()))
 }
 
+/// Whether a tool's config names the destination answering on THIS machine.
+///
+/// `ironwire_agents` answers a deliberately broader question. Its
+/// `points_at_us` accepts any loopback port, and its own comment says why:
+/// "A port change still counts as ours, which is what lets `connect` follow
+/// the daemon to a new port instead of giving up." For a single product with
+/// a single listener that is the right question and the right answer.
+///
+/// It is not our question. We hold a `destination_port` and want to know
+/// whether this tool sends its calls to *that*, and borrowing the broader
+/// answer makes the surface claim things that are false: a config left
+/// pointing at a port the daemon no longer uses reads as "its settings send
+/// its calls here", under a restart prompt that can never come true.
+///
+/// Checked as text rather than by re-parsing each tool's format: the file has
+/// already satisfied upstream's own check, so the only remaining question is
+/// which port it names. A file that cannot be read is not ours, which is the
+/// safe direction.
+fn points_at_our_port(path: Option<&PathBuf>, port: Option<u16>) -> bool {
+    let (Some(path), Some(port)) = (path, port) else {
+        return false;
+    };
+    std::fs::read_to_string(path)
+        .map(|text| text.contains(&format!("127.0.0.1:{port}")))
+        .unwrap_or(false)
+}
+
 /// One tool, as the wire describes it.
 #[derive(Debug, Clone)]
 pub struct HarnessRow {
     pub id: String,
     pub name: String,
     pub installed: bool,
+    /// Whether this tool's config names OUR destination.
+    ///
+    /// Narrower than upstream's `wired`, and deliberately so -- see
+    /// [`points_at_our_port`]. This is the one that drives the state and the
+    /// sentence, because "its settings send its calls here" must not be said
+    /// about a file naming somebody else's port.
     pub connected: bool,
+    /// Whether the config names *a* local proxy, which is upstream's answer.
+    ///
+    /// Kept because it is the right input to the disconnect control: a line
+    /// pointing at a stale or foreign port is still a line, and a contributor
+    /// who cannot see a way to remove it is stuck.
+    pub wired: bool,
     pub config_path: Option<PathBuf>,
     pub connect_command: String,
     pub family: Option<&'static str>,
@@ -246,7 +285,11 @@ pub fn family_activity(rows: &[crate::routing::RoutedExchange], readable: bool) 
 /// `catalog_present: false` so a surface can say so rather than implying the
 /// machine has only two.
 #[must_use]
-pub fn list(catalog: &Catalog, activity: &FamilyActivity) -> Vec<HarnessRow> {
+pub fn list(
+    catalog: &Catalog,
+    activity: &FamilyActivity,
+    destination_port: Option<u16>,
+) -> Vec<HarnessRow> {
     let found = tools::all(catalog);
 
     // Which families more than one *connected* tool speaks. Counted over the
@@ -254,7 +297,10 @@ pub fn list(catalog: &Catalog, activity: &FamilyActivity) -> Vec<HarnessRow> {
     // made the call, so it must not blur the attribution of one that is.
     let mut connected_per_family: Vec<(&str, usize)> = Vec::new();
     for tool in &found {
-        if !tool.wired {
+        // Ours, not merely wired: a tool pointed at somebody else's local
+        // proxy did not make the call and must not blur the attribution of
+        // one that did.
+        if !(tool.wired && points_at_our_port(tool.config_path.as_ref(), destination_port)) {
             continue;
         }
         let Some(family) = built_in_family(&tool.id) else {
@@ -279,8 +325,10 @@ pub fn list(catalog: &Catalog, activity: &FamilyActivity) -> Vec<HarnessRow> {
                     .any(|(name, count)| *name == f && *count > 1)
             });
             let saw_call = family.is_some_and(|f| activity.last_call_for(f).is_some());
+            let ours =
+                tool.wired && points_at_our_port(tool.config_path.as_ref(), destination_port);
             let state = harness_state::harness_state(HarnessEvidence {
-                connected: tool.wired,
+                connected: ours,
                 activity_readable: activity.readable,
                 family,
                 family_saw_call: saw_call,
@@ -290,7 +338,8 @@ pub fn list(catalog: &Catalog, activity: &FamilyActivity) -> Vec<HarnessRow> {
                 id: tool.id,
                 name: tool.name,
                 installed: tool.installed,
-                connected: tool.wired,
+                connected: ours,
+                wired: tool.wired,
                 config_path: tool.config_path,
                 connect_command: tool.connect_command,
                 family,
@@ -663,7 +712,8 @@ fn path_value(path: Option<&Path>) -> serde_json::Value {
 pub fn handle_list(shared: &DaemonShared, req: &Request) -> Response {
     let catalog = catalog();
     let activity = activity_for(shared);
-    let rows = list(&catalog, &activity);
+    let destination_port = shared.destination_port();
+    let rows = list(&catalog, &activity, destination_port);
 
     let harnesses: Vec<serde_json::Value> = rows
         .iter()
@@ -691,8 +741,11 @@ pub fn handle_list(shared: &DaemonShared, req: &Request) -> Response {
                 "can_connect": harness_state::action_available(
                     HarnessAction::Connect, row.installed, row.connected,
                 ),
+                // Deliberately `wired`, not `connected`: a line naming a
+                // stale or foreign port is still a line this app can remove,
+                // and hiding the control would strand it.
                 "can_disconnect": harness_state::action_available(
-                    HarnessAction::Disconnect, row.installed, row.connected,
+                    HarnessAction::Disconnect, row.installed, row.wired,
                 ),
             })
         })
@@ -1100,11 +1153,61 @@ mod tests {
         assert_eq!(activity.last_call(), None);
     }
 
+    /// A config naming a DIFFERENT local port is not "sends its calls here".
+    ///
+    /// Upstream's `wired` accepts any loopback port on purpose, so `connect`
+    /// can follow the daemon to a new one. Borrowing that answer made the row
+    /// say "Connected, and nothing has arrived from it yet. Its settings send
+    /// its calls here" about a file that names somebody else's port -- and
+    /// under it the shells draw "Quit this tool and open it again", advice
+    /// that can never come true and that is shown until a call arrives.
+    ///
+    /// The disconnect control must survive the narrowing: the line is still a
+    /// line this app can remove, and hiding the only control would strand it.
+    #[test]
+    fn a_config_pointing_at_another_port_is_not_connected_to_us() {
+        let (_dir, _guard, _path) =
+            claude_config(r#"{"env":{"ANTHROPIC_BASE_URL":"http://127.0.0.1:9999/anthropic"}}"#);
+
+        let ours = list(&Catalog::default(), &FamilyActivity::default(), Some(8463));
+        let claude = ours.iter().find(|r| r.id == "claude").expect("claude row");
+
+        assert!(
+            !claude.connected,
+            "a file naming port 9999 does not send its calls to 8463"
+        );
+        assert_ne!(
+            claude.state,
+            HarnessState::ConnectedNoCalls,
+            "the row must not claim its settings send calls here"
+        );
+        assert!(
+            claude.wired,
+            "upstream still recognises the line, which is what keeps disconnect offered"
+        );
+        assert!(
+            harness_state::action_available(
+                HarnessAction::Disconnect,
+                claude.installed,
+                claude.wired
+            ),
+            "the contributor must still have a way to remove the stale line"
+        );
+
+        // The same file IS ours once the port matches.
+        let theirs = list(&Catalog::default(), &FamilyActivity::default(), Some(9999));
+        let claude = theirs
+            .iter()
+            .find(|r| r.id == "claude")
+            .expect("claude row");
+        assert!(claude.connected, "the very same file names 9999");
+    }
+
     /// With no catalog the list is the two built-in tools, and every row is
     /// still a full row -- installed or not.
     #[test]
     fn the_list_degrades_to_the_two_built_in_tools() {
-        let rows = list(&Catalog::default(), &FamilyActivity::default());
+        let rows = list(&Catalog::default(), &FamilyActivity::default(), Some(8463));
         let ids: Vec<&str> = rows.iter().map(|r| r.id.as_str()).collect();
         assert_eq!(ids, vec!["claude", "codex"]);
         assert_eq!(rows[0].family, Some("anthropic"));
@@ -1115,7 +1218,7 @@ mod tests {
     /// tool is `unknown` rather than "no calls yet".
     #[test]
     fn no_ledger_never_reports_no_calls_yet() {
-        let rows = list(&Catalog::default(), &FamilyActivity::default());
+        let rows = list(&Catalog::default(), &FamilyActivity::default(), Some(8463));
         for row in rows {
             assert!(
                 matches!(
