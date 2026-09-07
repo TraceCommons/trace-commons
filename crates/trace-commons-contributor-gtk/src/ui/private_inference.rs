@@ -429,7 +429,11 @@ fn present_exposure(app: &Rc<App>, id: &str) {
     let body = gtk::Box::new(gtk::Orientation::Vertical, space::M);
     style::append_body(&body, copy::PRIVATE_INFERENCE_OFFER_EXPOSURE);
     style::append_body(&body, copy::PRIVATE_INFERENCE_OFFER_NO_REPOINT);
-    style::append_caveat(&body, copy::PRIVATE_INFERENCE_OFFER_ASKED_ONCE);
+    // No `OFFER_ASKED_ONCE` here. It promises "this is the only time you will
+    // be asked" and that "the switch stays in Settings"; on this surface both
+    // are false -- the harness gate re-asks whenever the destination is off,
+    // and the switch has moved here from Settings. It stays on the first-run
+    // offer, where it is true.
     dialog.set_extra_child(Some(&body));
     dialog.add_responses(&[
         ("decline", copy::PRIVATE_INFERENCE_OFFER_DECLINE),

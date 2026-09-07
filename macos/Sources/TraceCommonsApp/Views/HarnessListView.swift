@@ -222,8 +222,14 @@ private struct HarnessExposureSheet: View {
                 .fixedSize(horizontal: false, vertical: true)
             Text(copy.offerNoRepoint).font(TC.Font_.body)
                 .fixedSize(horizontal: false, vertical: true)
-            Text(copy.offerAskedOnce).font(TC.Font_.meta).foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+            // `offerAskedOnce` is deliberately NOT shown here. It says "this
+            // is the only time you will be asked. The switch stays in
+            // Settings", and both halves are false on this surface: the
+            // harness gate is `connectNeedsExposure(listenerOn:)`, which is
+            // wider than `shouldOffer` on purpose so a connect after the kill
+            // switch asks again; and the switch now lives on this destination,
+            // with Settings holding only a pointer. It remains true on the
+            // first-run offer, which is the sentence's home.
             HStack(spacing: TC.Space.s) {
                 Spacer(minLength: TC.Space.m)
                 Button(copy.offerDecline) { model.answerHarnessExposure(accepted: false) }
