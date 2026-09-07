@@ -977,7 +977,21 @@ mod tests {
                 .split("\n}\n")
                 .next()
                 .unwrap_or_else(|| panic!("{opening} closes"));
-            for literal in body.split('"').skip(1).step_by(2) {
+            // Comment lines are stripped before splitting on quotes.
+            //
+            // The scan below takes every odd-indexed quote-delimited segment,
+            // which is only the literals while the quote count ahead of each
+            // one is even. A comment that quotes a sentence -- to explain why
+            // it is NOT rendered, say -- otherwise reads as a literal, and one
+            // carrying an odd number of quotes shifts the parity so real
+            // literals land in the skipped positions and the scan passes
+            // having examined nothing.
+            let code_only: String = body
+                .lines()
+                .filter(|line| !line.trim_start().starts_with("//"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            for literal in code_only.split('"').skip(1).step_by(2) {
                 assert!(
                     !literal.contains(' ') || literal.starts_with("tc-"),
                     "{literal:?} is a sentence written in {opening} rather than read from copy"
