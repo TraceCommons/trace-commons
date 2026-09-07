@@ -44,26 +44,88 @@ hex = "0.4"
 # changes between IronWire revisions. Licenses remain compatible permissive
 # terms; curve25519-dalek and ed25519-dalek specifically use BSD-3-Clause.
 #
-# Advancing to 90c9ff94 (upstream #29, legacy ownership probes) adds no
+# Advancing to 90c9ff94 (upstream #29, legacy ownership probes) added no
 # package: 577 workspace packages before and after, and this crate's normal
-# graph stays at 303 deduplicated names. The only lock change is a new edge,
+# graph stayed at 303 deduplicated names. Its only lock change was a new edge,
 # ironwire_proxy -> rustix 1.1.4 (Apache-2.0 WITH LLVM-exception OR
 # Apache-2.0 OR MIT) under cfg(unix), for a safe effective-UID lookup;
 # rustix was already vendored here through tempfile.
 #
 # Pinned to a revision, not a branch: the embed API is the whole seam this
 # crate depends on, it holds credentials, and a moving branch would let an
-# upstream change reach a release without anyone choosing it. This pin was
-# reviewed against that API: EmbedError's variants, StartupReport,
-# EmbeddedProxy, start/start_with_policy and the non-exhaustive UpdatePolicy
-# are all unchanged from the previous revision -- #29 touches only the
-# private embed::lock module.
+# upstream change reach a release without anyone choosing it.
+#
+# ---------------------------------------------------------------------------
+# 924f8e3a (upstream #33, #34, #37, #39, #40, #42, #45), reviewed 2026-09-07.
+#
+# The claim the previous pin made -- "nothing this crate touches changed" -- is
+# NOT the claim here, and copying it forward would have been false. Six of the
+# seven changes land on the two modules this crate imports, and one of them
+# broke the build. What was checked, and how:
+#
+# COST. `cargo metadata --locked` on both workspaces: 930 packages before and
+# after in the root lock, 535 before and after in the GTK lock, and this
+# crate's `cargo tree -e normal` still 303 deduplicated names. The entire lock
+# delta is the eleven `ironwire_*` source strings plus one new edge,
+# ironwire_agents -> sha2 0.10.9 (MIT OR Apache-2.0), for `Planned::digest`.
+# sha2 was already a direct dependency of this crate and already in both locks
+# and the Flatpak vendor set, so no crate entered the graph and no new license
+# entered the audit. `cargo deny check licenses` passes on all four
+# configurations (default, near-ai-scorer, local-gpu-models, --all-features).
+#
+# SURFACE. Every one of this crate's three imports was diffed rev-to-rev
+# rather than assumed:
+#   * `ironwire_proxy::embed` -- EmbedError, EmbeddedProxy, ExitError and
+#     UpdatePolicy are unchanged. StartupReport GAINS `update_checks`; it is a
+#     `#[non_exhaustive]`-free struct we only read, so a new field is additive.
+#     `start`/`start_with`/`start_with_policy` all still exist and still
+#     delegate to the new `start_with_options`, whose `EmbedOptions::default()`
+#     is byte-for-byte the old behaviour (HostManaged, FromConfig, All).
+#   * `ironwire_agents::tools` -- `Error::Edit(String)` is GONE, split into
+#     `Unparseable`, `Jsonc` and `UnusableEntry`. That is the break: it is a
+#     hard compile error rather than a silent behaviour change, which is the
+#     good case, and `daemon::harness` now matches those variants instead of
+#     the front of a sentence. `Planned` gains `digest()`, and `commit` gains
+#     `commit_if_unchanged`; both are additive and both are used.
+#   * `ironwire_catalog::schema` -- `AgentSetting` gains `style: UrlStyle` and
+#     SCHEMA_VERSION goes 1 -> 2. `style` is `#[serde(default)]` and
+#     `owned_agents()` is deliberately empty, so this crate constructs no
+#     setting and the field cannot be wrong here. `AgentEntry`, `Catalog` and
+#     `ConfigLocation` are otherwise unchanged, and the location rules
+#     `config_location_is_allowed` restates are unchanged.
+#
+# BEHAVIOUR, not just types. Two changes alter what happens on a
+# contributor's machine with no signature change to catch them:
+#   * #33 makes Codex's `connect` REPORT a `model_provider` the contributor
+#     chose instead of replacing it, and populates `Planned::occupied` for the
+#     codex arm, which was hard-coded empty. The daemon's occupied-slot path
+#     and the `HARNESS_SLOT_TAKEN` sentence were previously unreachable for
+#     Codex; `harness::tests::codex_reports_a_provider_the_contributor_chose_
+#     and_leaves_it_there` now exercises them end to end and asserts the
+#     contributor's provider survives the commit.
+#   * #40 and #45 make two requests declinable in code that were previously
+#     only reachable through `$IRONWIRE_HOME/config.toml`. The workaround that
+#     wrote that file is deleted; see `daemon::private_inference::embed_options`
+#     for what is chosen and why, and for the `StartupProbes::Configured`
+#     rather than `Off` decision.
+#
+# NOT REACHED. #42 (`ConnectOptions`/`StatusLine`) is available and left at
+# `StatusLine::Offer`: this daemon plans Claude Code edits through
+# `plan_connect`, and the status line it installs names the `ironwire` binary,
+# not ours -- revisit if this crate ever becomes the executable in that slot.
+# #37 also renames the control API's `if_unchanged` request field to
+# `as_previewed`; that is IronWire's HTTP surface, which nothing in this
+# repository calls (checked by grep across crates/, macos/ and windows/), so
+# the rename cannot reach us.
+#
 # Both workspace locks deliberately and temporarily roll IronClaw back to
-# reviewed 6dccbfbcbddfdfb53c11d3876f94bf3e716b55f9 (and rig-core/open with it).
-# Upstream still names branch=main: use --locked. Re-advance only in a reviewed
-# update that measures names/features/licenses, tests embedding and privacy
-# behavior, and updates both locks plus Flatpak sources together.
-ironwire_proxy = { git = "https://github.com/nearai/ironwire", rev = "90c9ff946ee424977f7a7d8a97440264559fddd4" }
+# reviewed 6dccbfbcbddfdfb53c11d3876f94bf3e716b55f9 (and rig-core/open with
+# it). `cargo update -p ironwire_proxy` advances both on either lock and was
+# reverted by hand in this update, as in the last one. Upstream still names
+# branch=main: use --locked. Re-advance only in a reviewed update that
+# measures names/features/licenses, tests embedding and privacy behavior, and
+# updates both locks plus Flatpak sources together.
+ironwire_proxy = { git = "https://github.com/nearai/ironwire", rev = "924f8e3a02ce5fb18e4ee2759cd0bb49fec318b1" }
 # The same IronWire revision, two more of its crates, promoted from
 # transitive to direct. `ironwire_agents` is the crate whose entire purpose is
 # "which coding tools does this machine have, are they pointed at us, and how
@@ -77,8 +139,8 @@ ironwire_proxy = { git = "https://github.com/nearai/ironwire", rev = "90c9ff946e
 # crate does not reimplement, in a second place, the three config-editing
 # rules (never rewrite a file we cannot parse; fill an empty slot but report a
 # full one; remove only what we put there) that crate exists to hold.
-ironwire_agents = { git = "https://github.com/nearai/ironwire", rev = "90c9ff946ee424977f7a7d8a97440264559fddd4" }
-ironwire_catalog = { git = "https://github.com/nearai/ironwire", rev = "90c9ff946ee424977f7a7d8a97440264559fddd4" }
+ironwire_agents = { git = "https://github.com/nearai/ironwire", rev = "924f8e3a02ce5fb18e4ee2759cd0bb49fec318b1" }
+ironwire_catalog = { git = "https://github.com/nearai/ironwire", rev = "924f8e3a02ce5fb18e4ee2759cd0bb49fec318b1" }
 notify = "8.2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
 ring = "0.17"
