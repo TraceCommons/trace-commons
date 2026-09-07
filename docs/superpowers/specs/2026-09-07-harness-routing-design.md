@@ -133,7 +133,15 @@ all.
 
 It must therefore still be asked -- but as a **gate on the first connect**,
 where it is finally about something concrete, rather than as a standalone
-switch flipped into a void. Once answered it is not asked again
+switch flipped into a void.
+
+**Amended after implementation: it IS asked again, deliberately.** This section
+originally said the question is not asked once answered, deferring to
+`offer_asked_once`. What shipped is `connect_needs_exposure(listener_on)`, which
+is wider than `should_offer` on purpose: a contributor who answered once and then
+used the kill switch is making the exposure decision afresh when a connect would
+reopen the listener, and silently reopening it would be the fail-open this
+surface exists to prevent. The first-run offer is asked once
 (`offer_asked_once` already covers this).
 
 The master switch does not disappear. It becomes what it actually is: a kill

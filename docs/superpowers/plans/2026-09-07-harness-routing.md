@@ -117,7 +117,9 @@ Claude Code and Codex. The copy that says what the list is
   1. Rust: the `PrivateInferenceCopy` struct
      (`private_inference_copy.rs:354`), the `private_inference_copy()`
      constructor (`:406`), and the pinned field count in
-     `every_sentence_arrives_finished` (`:722`) — **currently 27**.
+     `every_sentence_arrives_finished` (`:722`) — **27 when this plan was
+     written; 45 as shipped.** Read the assertion rather than trusting this
+     number: it moved four times during implementation.
   2. Swift: the `PrivateInferenceCopy` struct and its `CodingKeys`
      (`macos/Sources/TCShellCore/PrivateInferenceSurface.swift:9`, `:44`), and
      the all-or-nothing sentinel payload in
@@ -218,7 +220,8 @@ Nothing here renders.
 - Produces: the label constants `HARNESS_NOT_INSTALLED`, `HARNESS_NOT_CONNECTED`,
   `HARNESS_CONNECTED_UNSEEN`, `HARNESS_ANSWERING`, `HARNESS_ANSWERING_SHARED`,
   `HARNESS_SLOT_TAKEN`, `HARNESS_CONFIG_UNREADABLE`
-- Produces: 17 new `PrivateInferenceCopy` fields, taking the count 27 → 44
+- Produces: new `PrivateInferenceCopy` fields. Planned as 27 → 44; shipped
+  as 45, after review added a not-installed sentence and an outcome table
 
 **Conflicts with:** Task 3 (both touch `PrivateInferenceSurface.swift` and
 `PrivateInferenceCopy.cs`) and Task 7 (both touch
@@ -476,7 +479,7 @@ sentences work.
 
 - [ ] **Step 4: Raise the pinned field count and extend the sweep**
 
-In `every_sentence_arrives_finished`, `27` becomes `44`. In
+In `every_sentence_arrives_finished`, `27` becomes `44` (45 as shipped). In
 `the_offer_surface_says_nothing_it_should_not`, push the new assembled sentences
 and every harness label through the table, so a banned word in one of them
 cannot hide behind a function:
