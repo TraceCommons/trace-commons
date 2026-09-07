@@ -139,10 +139,16 @@ struct MenuBarContent: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.openWindow) private var openWindow
 
+    /// Where the window is pointed before it is raised. Optional so the
+    /// screenshot hook can render this menu without one; a menu with no
+    /// navigation still opens the window, it just opens it where it was.
+    var navigation: MainWindowNavigation?
+
     var body: some View {
         Group {
             waitingSection
             Divider()
+            privateInferenceSection
             healthSection
             armedSection
             weekSection
@@ -206,6 +212,131 @@ struct MenuBarContent: View {
                 }
             }
         }
+    }
+
+    // MARK: - Answering model calls on this computer
+
+    /// The state line and one action, in the shape `waitingSection` uses:
+    /// what is true first, then the one thing to do about it.
+    ///
+    /// The action is asymmetric and that is the whole point of this section.
+    /// See `privateInferenceTrayAction`.
+    ///
+    /// Renders nothing at all when the words did not arrive, for the reason
+    /// `AppModel.privateInferenceCopy` gives.
+    @ViewBuilder
+    private var privateInferenceSection: some View {
+        if let copy = model.privateInferenceCopy {
+            let state = model.privateInferenceState
+            let on = model.daemonSettings?.privateInferenceOn ?? false
+            // The glyph comes from the reported state, never from the
+            // switch below it. They differ exactly when it matters -- a
+            // listener that refused to start leaves the switch on -- and a
+            // menu bar is read at a glance, which is where a green mark
+            // over a dead listener does the most damage.
+            Label(
+                PrivateInferenceSurface.stateLine(
+                    state, copy: copy, calls: model.privateInferenceCalls),
+                systemImage: Self.privateInferenceSymbol(
+                    state, calls: model.privateInferenceCalls)
+            )
+            // One action, not a switch. A switch in a menu is symmetrical
+            // and these two directions are not: see
+            // `privateInferenceTrayAction`. Both words are the Rust's.
+            Button {
+                Self.performPrivateInferenceTray(
+                    on: on,
+                    turnOff: { model.applyPrivateInference(false) },
+                    open: { openPrivateInference() }
+                )
+            } label: {
+                Text(Self.privateInferenceTrayLabel(on: on, copy: copy))
+            }
+            // Only the direction that writes can be busy. Opening a window is
+            // always available, and a menu that greyed the way in while the
+            // daemon was quiet would leave nowhere to go.
+            .disabled(
+                Self.privateInferenceTrayAction(on: on) == .stopAnswering
+                    && (model.privateInferenceBusy
+                        || model.daemonSettings?.privateInference == nil))
+            Divider()
+        }
+    }
+
+    /// What a press on the model-calls row does.
+    ///
+    /// Two values rather than a toggle, because the two directions are not
+    /// symmetrical. Turning it OFF only ever reduces what this computer will
+    /// answer, so it is safe from a menu with nothing else on screen. Turning
+    /// it ON changes what anything else running on this computer may send
+    /// through, charged to the contributor's own accounts, and the sentence
+    /// saying so (`offer_exposure`) is the reason model calls became a
+    /// top-level destination rather than a settings switch. A menu press that
+    /// enabled it would route around that sentence, so out here the on
+    /// direction opens the screen and writes nothing.
+    enum PrivateInferenceTrayAction: Equatable {
+        /// Stop answering. The one write this menu may make.
+        case stopAnswering
+        /// Raise the window at the destination. Writes nothing.
+        case openDestination
+    }
+
+    /// The action for one switch position.
+    ///
+    /// Reads the switch and not the tone, deliberately: a listener that
+    /// refused to start still leaves something to turn off, and a row that
+    /// vanished because nothing was running would strand the one press this
+    /// menu exists to offer.
+    static func privateInferenceTrayAction(on: Bool) -> PrivateInferenceTrayAction {
+        on ? .stopAnswering : .openDestination
+    }
+
+    /// The row's words, both of them the Rust's. The off direction's ends in
+    /// an ellipsis, which is this platform's convention for an item that
+    /// opens something rather than acting -- see the copy module.
+    static func privateInferenceTrayLabel(on: Bool, copy: PrivateInferenceCopy) -> String {
+        on ? copy.trayTurnOff : copy.trayOpenToTurnOn
+    }
+
+    /// Runs the action, with the two things it can do handed in so a test can
+    /// assert the one that matters: while it is off, `turnOff` is never
+    /// called. That is the safety claim, and it is checked directly rather
+    /// than inferred from which sentence the row was showing.
+    ///
+    /// The stop direction raises the destination as well as writing, which
+    /// is not decoration. The write goes through
+    /// `PrivateInferenceSurface.settingsParams`, and that carries
+    /// `private_inference_offer_seen` -- a marker whose entire contract is
+    /// that it records an *asking*. A menu press showing no sentence at all
+    /// would record a question nobody was asked and permanently suppress the
+    /// first-run offer for a contributor who had enabled the switch out of
+    /// band. On Windows and in GTK the switch only exists on the screen that
+    /// carries `offer_exposure`, so their off press always shows those
+    /// words; raising the destination here is what gives this shell the same
+    /// property, and the destination shows `offer_exposure` whether or not
+    /// the offer card is still due.
+    static func performPrivateInferenceTray(
+        on: Bool, turnOff: () -> Void, open: () -> Void
+    ) {
+        switch privateInferenceTrayAction(on: on) {
+        case .stopAnswering:
+            turnOff()
+            open()
+        case .openDestination: open()
+        }
+    }
+
+    /// The glyph beside the state line, as a pure function of the reported
+    /// state so a test can ask for it without a menu.
+    ///
+    /// Takes no switch, deliberately: a function that cannot see what was
+    /// asked for cannot paint it as what is true.
+    static func privateInferenceSymbol(
+        _ state: PrivateInferenceState, calls: PrivateInferenceCalls
+    ) -> String {
+        PrivateInferenceIndicator.palette(
+            PrivateInferenceSurface.tone(state, calls: calls)
+        ).symbol
     }
 
     @ViewBuilder
@@ -272,6 +403,17 @@ struct MenuBarContent: View {
     private func openMain() {
         NSApp.activate(ignoringOtherApps: true)
         openWindow(id: WindowID.main)
+    }
+
+    /// The window, at the model-calls destination.
+    ///
+    /// The destination and not just the window: the point of opening rather
+    /// than acting is that the sentence about what answering model calls
+    /// exposes is on screen when the switch is, and a window raised at
+    /// whatever screen it was last on would not carry it.
+    private func openPrivateInference() {
+        navigation?.section = .privateInference
+        openMain()
     }
 }
 

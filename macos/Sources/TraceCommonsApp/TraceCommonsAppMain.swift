@@ -33,7 +33,7 @@ struct TraceCommonsShell: App {
 
     var body: some Scene {
         MenuBarExtra {
-            MenuBarContent()
+            MenuBarContent(navigation: navigation)
                 .environmentObject(model)
                 .tint(TC.green)
         } label: {
@@ -56,6 +56,12 @@ struct TraceCommonsShell: App {
                 .tint(TC.green)
         }
         .defaultSize(width: 940, height: 660)
+        // Cmd-1..5 for the five destinations, and Cmd-Shift-M for the one
+        // switch worth reaching without the window. Menu items, so they are
+        // in-app only; see `MainWindowCommands`.
+        .commands {
+            MainWindowCommands(model: model, compute: compute, navigation: navigation)
+        }
     }
 }
 

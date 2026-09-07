@@ -146,6 +146,18 @@
     <None Include="$(MSBuildThisFileDirectory)../../src/TraceCommons.App/Controls/SettingsView.xaml"
           Link="SettingsView.xaml.txt"
           CopyToOutputDirectory="PreserveNewest" />
+    <!--
+      The model-calls destination, which holds the switch and the line that
+      says what the listener actually did. Copied beside the settings surface
+      above because it is held to the same strict rule: every string in it is
+      a binding or a wire value, and the sentences arrive from the Rust.
+    -->
+    <None Include="$(MSBuildThisFileDirectory)../../src/TraceCommons.App/ViewModels/PrivateInferenceViewModel.cs"
+          Link="PrivateInferenceViewModel.cs.txt"
+          CopyToOutputDirectory="PreserveNewest" />
+    <None Include="$(MSBuildThisFileDirectory)../../src/TraceCommons.App/Controls/PrivateInferenceView.xaml"
+          Link="PrivateInferenceView.xaml.txt"
+          CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <!--

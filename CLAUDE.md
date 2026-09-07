@@ -79,7 +79,7 @@ is not a full inventory -- read the workflow for that. (It said "nine" while the
 file held fifteen, and "eighteen" while it held twenty, so treat any count
 here as stale until re-checked.)
 
-Running is not the same as blocking. **Thirteen** of the twenty-one are required
+Running is not the same as blocking. **Fourteen** of the twenty-one are required
 status checks on `main`, and only those block a merge -- `README.md` lists
 them. `main` is also behind a merge queue (`main merge queue`), so the
 required checks are re-run against `main` at merge time; a PR that never

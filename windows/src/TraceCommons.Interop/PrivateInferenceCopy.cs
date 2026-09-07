@@ -42,6 +42,20 @@ public sealed record PrivateInferenceCopy
     [JsonPropertyName("offer_asked_once")]
     public string OfferAskedOnce { get; init; } = string.Empty;
 
+    /// <summary>
+    /// The rail label for the top-level destination this surface owns.
+    ///
+    /// Read rather than typed. A shell that spelled the label itself would
+    /// keep spelling the old one after a rename in the Rust, and this is the
+    /// one word in the whole surface a contributor navigates by.
+    /// </summary>
+    [JsonPropertyName("destination")]
+    public string Destination { get; init; } = string.Empty;
+
+    /// <summary>The one line under the destination's title saying what it is for.</summary>
+    [JsonPropertyName("subtitle")]
+    public string Subtitle { get; init; } = string.Empty;
+
     [JsonPropertyName("settings_title")]
     public string SettingsTitle { get; init; } = string.Empty;
 
@@ -93,6 +107,111 @@ public sealed record PrivateInferenceCopy
     [JsonPropertyName("write_unconfirmed")]
     public string WriteUnconfirmed { get; init; } = string.Empty;
 
+    /// <summary>The sentence the settings card shows once the control has moved out of it.</summary>
+    [JsonPropertyName("settings_moved")]
+    public string SettingsMoved { get; init; } = string.Empty;
+
+    /// <summary>The tray action while it is on. Turning it off needs no sentence in front of it.</summary>
+    [JsonPropertyName("tray_turn_off")]
+    public string TrayTurnOff { get; init; } = string.Empty;
+
+    /// <summary>
+    /// The tray action while it is off. Opens the screen rather than acting: turning it ON
+    /// changes what anything else on this computer may send through, which is not a decision
+    /// to take from a menu with the consequence off-screen.
+    /// </summary>
+    [JsonPropertyName("tray_open_to_turn_on")]
+    public string TrayOpenToTurnOn { get; init; } = string.Empty;
+
+    /// <summary>The heading over the list of tools found on this computer.</summary>
+    [JsonPropertyName("harnesses_title")]
+    public string HarnessesTitle { get; init; } = string.Empty;
+
+    /// <summary>
+    /// The line under that heading. It says the choice is made one tool at a
+    /// time, and that the list is what this app knows how to look for rather
+    /// than a claim about every tool that exists.
+    /// </summary>
+    [JsonPropertyName("harnesses_what")]
+    public string HarnessesWhat { get; init; } = string.Empty;
+
+    [JsonPropertyName("harness_not_connected")]
+    public string HarnessNotConnected { get; init; } = string.Empty;
+
+    /// <summary>
+    /// Settings are right and nothing has arrived yet. Never drawn the same
+    /// way as <see cref="HarnessAnswering"/>: a value in a file is not
+    /// evidence that a call was ever answered.
+    /// </summary>
+    [JsonPropertyName("harness_connected_nothing_seen")]
+    public string HarnessConnectedNothingSeen { get; init; } = string.Empty;
+
+    /// <summary>The only per-harness state that means a call was answered.</summary>
+    [JsonPropertyName("harness_answering")]
+    public string HarnessAnswering { get; init; } = string.Empty;
+
+    [JsonPropertyName("harness_connect")]
+    public string HarnessConnect { get; init; } = string.Empty;
+
+    [JsonPropertyName("harness_disconnect")]
+    public string HarnessDisconnect { get; init; } = string.Empty;
+
+    /// <summary>The heading over the preview shown before anything is written.</summary>
+    [JsonPropertyName("harness_preview_title")]
+    public string HarnessPreviewTitle { get; init; } = string.Empty;
+
+    [JsonPropertyName("harness_preview_confirm")]
+    public string HarnessPreviewConfirm { get; init; } = string.Empty;
+
+    [JsonPropertyName("harness_preview_cancel")]
+    public string HarnessPreviewCancel { get; init; } = string.Empty;
+
+    /// <summary>
+    /// A slot that already had a value in it, which was left alone. Reported,
+    /// never offered: this must not be drawn as a fault to be cleared, and no
+    /// shell may pair it with an action that takes the slot.
+    /// </summary>
+    [JsonPropertyName("harness_slot_taken")]
+    public string HarnessSlotTaken { get; init; } = string.Empty;
+
+    /// <summary>A tool holding an old setting in a process that is still running.</summary>
+    [JsonPropertyName("harness_needs_restart")]
+    public string HarnessNeedsRestart { get; init; } = string.Empty;
+
+    /// <summary>No tool was found, said in terms of what was looked for.</summary>
+    [JsonPropertyName("harnesses_none_found")]
+    public string HarnessesNoneFound { get; init; } = string.Empty;
+
+    /// <summary>A settings file that could not be read, and was therefore refused.</summary>
+    [JsonPropertyName("harness_unreadable_config")]
+    public string HarnessUnreadableConfig { get; init; } = string.Empty;
+
+    /// <summary>
+    /// A tool this app could not find on this computer.
+    /// </summary>
+    /// <remarks>
+    /// Rendered INSTEAD of <see cref="HarnessNotConnected"/> and never beside
+    /// it: that sentence says a tool's own settings still send its calls
+    /// wherever they went before, which is a claim about the settings of
+    /// something that is not on this computer. The row is listed and says
+    /// this rather than being hidden, because a tool left out of the list
+    /// cannot be told apart from a tool this app was never taught about.
+    /// </remarks>
+    [JsonPropertyName("harness_not_installed")]
+    public string HarnessNotInstalled { get; init; } = string.Empty;
+
+    /// <summary>A plan that found the file already saying what was wanted.</summary>
+    [JsonPropertyName("harness_plan_nothing_to_change")]
+    public string HarnessPlanNothingToChange { get; init; } = string.Empty;
+
+    /// <summary>This app's own description of a tool did not survive checking.</summary>
+    [JsonPropertyName("harness_plan_entry_unusable")]
+    public string HarnessPlanEntryUnusable { get; init; } = string.Empty;
+
+    /// <summary>This build could not work out where a tool keeps its settings.</summary>
+    [JsonPropertyName("harness_plan_no_config_path")]
+    public string HarnessPlanNoConfigPath { get; init; } = string.Empty;
+
     /// <summary>Every sentence for the complete-payload check, not a rendering order.</summary>
     public string[] Sentences =>
         new[]
@@ -104,6 +223,8 @@ public sealed record PrivateInferenceCopy
             OfferAccept,
             OfferDecline,
             OfferAskedOnce,
+            Destination,
+            Subtitle,
             SettingsTitle,
             SettingsToggle,
             SettingsAppliesAtOnce,
@@ -119,5 +240,26 @@ public sealed record PrivateInferenceCopy
             StateCrashed,
             QuitAlsoStops,
             WriteUnconfirmed,
+            SettingsMoved,
+            TrayTurnOff,
+            TrayOpenToTurnOn,
+            HarnessesTitle,
+            HarnessesWhat,
+            HarnessNotConnected,
+            HarnessConnectedNothingSeen,
+            HarnessAnswering,
+            HarnessConnect,
+            HarnessDisconnect,
+            HarnessPreviewTitle,
+            HarnessPreviewConfirm,
+            HarnessPreviewCancel,
+            HarnessSlotTaken,
+            HarnessNeedsRestart,
+            HarnessesNoneFound,
+            HarnessUnreadableConfig,
+            HarnessNotInstalled,
+            HarnessPlanNothingToChange,
+            HarnessPlanEntryUnusable,
+            HarnessPlanNoConfigPath,
         };
 }

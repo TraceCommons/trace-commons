@@ -287,6 +287,39 @@ final class DaemonClient {
         case unconfirmedWrite
     }
 
+    // MARK: - The tools on this computer
+
+    /// Every tool this machine knows about, and its state.
+    ///
+    /// Re-read rather than cached: `connected` is a fact about somebody
+    /// else's file, which they may change without this app, and the state
+    /// above it turns on a ledger that moves on its own.
+    func harnessList() throws -> HarnessList {
+        HarnessSurface.list(fromJSON: try rawResultJSON("harness_list"))
+    }
+
+    /// Works out one tool's edit and writes nothing.
+    ///
+    /// The half of the pair that lets the contributor see the change first.
+    /// It is never called back-to-back with `harnessCommit`.
+    func harnessPlan(id: String, action: HarnessAction) throws -> HarnessPlan? {
+        HarnessSurface.plan(
+            fromJSON: try rawResultJSON(
+                "harness_plan", params: HarnessSurface.planParams(id: id, action: action)))
+    }
+
+    /// Makes an edit that was already shown, naming only the plan the daemon
+    /// minted.
+    ///
+    /// There is deliberately no other way in: this client cannot describe a
+    /// change, only point at one the daemon worked out and the contributor
+    /// confirmed.
+    func harnessCommit(planID: String) throws -> HarnessCommit? {
+        HarnessSurface.commit(
+            fromJSON: try rawResultJSON(
+                "harness_commit", params: HarnessSurface.commitParams(planID: planID)))
+    }
+
     /// Shape-checks a settings object, refusing rather than returning one
     /// that cannot honestly be sent.
     ///
@@ -699,6 +732,13 @@ final class DaemonClient {
             throw Failure(code: "unavailable", message: "unparseable-response")
         }
         return object
+    }
+
+    /// A call's result as raw JSON text, for the surfaces in `TCShellCore`
+    /// that own their own decoding and their own degrading -- so the decoder
+    /// the tests exercise is the decoder production runs.
+    private func rawResultJSON(_ method: String, params: [String: Any] = [:]) throws -> String {
+        String(decoding: try rawResult(method, params: params), as: UTF8.self)
     }
 
     private func rawResult(_ method: String, params: [String: Any] = [:]) throws -> Data {

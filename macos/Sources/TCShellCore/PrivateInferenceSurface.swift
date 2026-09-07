@@ -7,6 +7,10 @@ import Foundation
 /// than rendered with a blank where a sentence should be, and on this surface
 /// the blank could be the sentence about what turning the switch on exposes.
 public struct PrivateInferenceCopy: Decodable, Equatable, Sendable {
+    /// The switcher label for the top-level destination, from the Rust.
+    public let destination: String
+    /// The line under the destination's title, from the Rust.
+    public let subtitle: String
     public let offerTitle: String
     public let offerWhat: String
     public let offerExposure: String
@@ -29,12 +33,46 @@ public struct PrivateInferenceCopy: Decodable, Equatable, Sendable {
     public let stateCrashed: String
     public let quitAlsoStops: String
     public let writeUnconfirmed: String
+    public let settingsMoved: String
+    public let trayTurnOff: String
+    public let trayOpenToTurnOn: String
+    /// The heading over the list of tools found on this computer.
+    public let harnessesTitle: String
+    /// The line under that heading, qualifying what the list is.
+    public let harnessesWhat: String
+    public let harnessNotConnected: String
+    public let harnessConnectedNothingSeen: String
+    /// The only per-harness state that means a call was answered.
+    public let harnessAnswering: String
+    public let harnessConnect: String
+    public let harnessDisconnect: String
+    public let harnessPreviewTitle: String
+    public let harnessPreviewConfirm: String
+    public let harnessPreviewCancel: String
+    /// A slot already in use, reported and never offered.
+    public let harnessSlotTaken: String
+    public let harnessNeedsRestart: String
+    public let harnessesNoneFound: String
+    /// A file that could not be read, refused rather than rewritten.
+    public let harnessUnreadableConfig: String
+    /// A tool this app could not find on this computer.
+    ///
+    /// Rendered INSTEAD of `harnessNotConnected` and never beside it: that
+    /// sentence says a tool's own settings still send its calls wherever they
+    /// went before, which is a claim about the settings of something that is
+    /// not on this computer.
+    public let harnessNotInstalled: String
+    public let harnessPlanNothingToChange: String
+    public let harnessPlanEntryUnusable: String
+    public let harnessPlanNoConfigPath: String
 
     /// `CaseIterable` so a test on the far side can compare the exported
     /// field set against the declared one in BOTH directions -- a field the
     /// Rust grows and this struct drops would sail past a test that only
     /// checked the fields it already knows about.
     public enum CodingKeys: String, CodingKey, CaseIterable {
+        case destination
+        case subtitle
         case offerTitle = "offer_title"
         case offerWhat = "offer_what"
         case offerExposure = "offer_exposure"
@@ -57,6 +95,27 @@ public struct PrivateInferenceCopy: Decodable, Equatable, Sendable {
         case stateCrashed = "state_crashed"
         case quitAlsoStops = "quit_also_stops"
         case writeUnconfirmed = "write_unconfirmed"
+        case settingsMoved = "settings_moved"
+        case trayTurnOff = "tray_turn_off"
+        case trayOpenToTurnOn = "tray_open_to_turn_on"
+        case harnessesTitle = "harnesses_title"
+        case harnessesWhat = "harnesses_what"
+        case harnessNotConnected = "harness_not_connected"
+        case harnessConnectedNothingSeen = "harness_connected_nothing_seen"
+        case harnessAnswering = "harness_answering"
+        case harnessConnect = "harness_connect"
+        case harnessDisconnect = "harness_disconnect"
+        case harnessPreviewTitle = "harness_preview_title"
+        case harnessPreviewConfirm = "harness_preview_confirm"
+        case harnessPreviewCancel = "harness_preview_cancel"
+        case harnessSlotTaken = "harness_slot_taken"
+        case harnessNeedsRestart = "harness_needs_restart"
+        case harnessesNoneFound = "harnesses_none_found"
+        case harnessUnreadableConfig = "harness_unreadable_config"
+        case harnessNotInstalled = "harness_not_installed"
+        case harnessPlanNothingToChange = "harness_plan_nothing_to_change"
+        case harnessPlanEntryUnusable = "harness_plan_entry_unusable"
+        case harnessPlanNoConfigPath = "harness_plan_no_config_path"
     }
 
     /// All or nothing, for the reason on the type.
@@ -94,6 +153,14 @@ public enum PrivateInferenceTone: Equatable, Sendable {
         default: return .neutral
         }
     }
+
+    /// Whether an indicator may paint this tone as working.
+    ///
+    /// `Clear` alone. A tab badge and a tray glyph both invite a green dot,
+    /// and painting `refused` or `held` as "on" is the fail-open this
+    /// surface exists to prevent. Shells must ask this, never the settings
+    /// boolean: the switch says what was asked for, this says what is true.
+    public var readsAsWorking: Bool { self == .clear }
 }
 
 /// `private_inference_state` as the daemon reports it.
@@ -125,7 +192,7 @@ public struct PrivateInferenceState: Equatable, Sendable {
     }
 }
 
-/// The seven calls this surface makes into the Rust, injected so
+/// The five calls this surface makes into the Rust, injected so
 /// `TCShellCore` can be tested without linking the dylib.
 ///
 /// Production wiring is `TCPrivateInference`; see `AppModel`.

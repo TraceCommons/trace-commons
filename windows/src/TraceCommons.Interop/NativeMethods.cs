@@ -329,6 +329,107 @@ internal static class NativeMethods
     internal static extern int tc_private_inference_quit_needs_notice(int requestedOn, [MarshalAs(UnmanagedType.LPUTF8Str)] string state);
 
     /// <summary>
+    /// One <c>harness_list</c> row's state, as a TC_HARNESS_STATE_* code.
+    ///
+    /// THE BRANCH TABLE CROSSES. "answering" is the only value meaning a call
+    /// was actually served, and it is the one a shell is most tempted to infer
+    /// from "connected". Do not infer it: a config file naming this computer is
+    /// not evidence that anything was ever sent. A label this build has never
+    /// heard of answers TC_HARNESS_STATE_UNKNOWN.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    internal static extern int tc_harness_state_code(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? state);
+
+    /// <summary>
+    /// One <c>harness_plan</c> outcome, as a TC_HARNESS_PLAN_* code.
+    ///
+    /// The branch that matters is unparseable against noop: one is "nothing to
+    /// change", the other is "we refused to rewrite a file we could not read".
+    /// An outcome this build has never heard of answers TC_HARNESS_PLAN_UNKNOWN,
+    /// which is not committable.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    internal static extern int tc_harness_plan_outcome_code(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? outcome);
+
+    /// <summary>
+    /// The sentence for one <c>harness_list</c> row's state.
+    ///
+    /// THE SENTENCE CROSSES, NOT ONLY THE CODE. With the code alone this shell
+    /// held its own map from a state onto one of
+    /// <c>tc_private_inference_copy</c>'s fields, and so did the other two:
+    /// three copies of one decision.
+    ///
+    /// TWO STATES ANSWER THE EMPTY STRING, AND THE EMPTINESS IS THE POINT.
+    /// "activity_shared" and "unknown" have no sentence and may not borrow one
+    /// -- the answering sentence says a call from IT reached this computer, and
+    /// the pronoun names the row's own tool, which is what activity_shared says
+    /// cannot be worked out. Draw an empty string as no line at all. A label
+    /// this build has never heard of, a NULL one, and a caught panic answer the
+    /// same way.
+    ///
+    /// Returns an owned string; free it with <see cref="tc_string_free"/>,
+    /// which <see cref="TakeOwnedString"/> does.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    internal static extern IntPtr tc_harness_state_line(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? state);
+
+    /// <summary>
+    /// The sentence one <c>harness_plan</c> outcome carries.
+    ///
+    /// THE SENTENCE CROSSES, NOT ONLY THE CODE, for the reason
+    /// <see cref="tc_harness_state_line"/> gives. "unparseable" was the only
+    /// outcome with a sentence anywhere, and this shell held that arm itself;
+    /// the other four non-committable outcomes had none, so a preview for one
+    /// of them opened holding a title, a path, no changes, no explanation and
+    /// a way out.
+    ///
+    /// "changes" ANSWERS THE EMPTY STRING, and the emptiness is the point: the
+    /// preview shows the changes, and a sentence above them announcing that
+    /// there are changes is this app narrating its own list. An outcome this
+    /// build has never heard of answers the same way, rather than borrowing
+    /// the nearest refusal, as do a NULL one and a caught panic.
+    ///
+    /// Returns an owned string; free it with <see cref="tc_string_free"/>,
+    /// which <see cref="TakeOwnedString"/> does.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    internal static extern IntPtr tc_harness_outcome_line(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? outcome);
+
+    /// <summary>
+    /// When the last call from a connected tool was answered here, assembled.
+    ///
+    /// ABSENCE IS AN OUT-OF-RANGE INTEGER, the convention
+    /// <see cref="tc_private_inference_serving_line"/> already uses: any
+    /// negative value -- including the one this shell passes for an absent or
+    /// unparseable timestamp -- gives the EMPTY STRING rather than a sentence
+    /// about a call nobody saw.
+    ///
+    /// Returns an owned string; free it with <see cref="tc_string_free"/>,
+    /// which <see cref="TakeOwnedString"/> does.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_harness_last_call_line(long secondsAgo);
+
+    /// <summary>
+    /// Whether one action may be offered for a tool in this state. Non-zero to
+    /// offer.
+    ///
+    /// The second rule is the one worth crossing the ABI for: a tool that is
+    /// not installed cannot be connected, but a tool that IS connected can
+    /// always be disconnected, installed or not. Answers 0 -- do not offer --
+    /// for an action this build does not know.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    internal static extern int tc_harness_action_available(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? action,
+        int installed,
+        int connected);
+
+    /// <summary>
     /// The routing surface's "that file could not be used" sentence, already
     /// assembled. <paramref name="tokenPath"/> may be NULL, which is the
     /// "nothing resolved at all" case and a different sentence, not an error.

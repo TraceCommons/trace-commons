@@ -49,20 +49,20 @@ public sealed partial class SettingsView : UserControl
     }
 
     /// <summary>
-    /// The switch that makes this app answer model calls itself.
+    /// Asks the window for the model-calls destination, which owns the
+    /// switch now.
     ///
-    /// Guarded against the programmatic fill: the toggle is bound one-way to
-    /// the view model, so re-rendering it after a write raises Toggled again
-    /// and would echo the value straight back at the daemon.
+    /// <para>
+    /// Raised as an event rather than navigating from here: this control is
+    /// one pane's content and knows nothing about the rail it sits in, and a
+    /// reference back to the window would be the only one in the file.
+    /// </para>
     /// </summary>
-    private async void OnPrivateInferenceToggled(object sender, RoutedEventArgs e)
-    {
-        if (sender is not ToggleSwitch toggle || toggle.IsOn == Settings.PrivateInferenceEnabled)
-        {
-            return;
-        }
+    public event EventHandler? OpenPrivateInferenceRequested;
 
-        await Settings.SetPrivateInferenceAsync(toggle.IsOn);
+    private void OnOpenPrivateInference(object sender, RoutedEventArgs e)
+    {
+        OpenPrivateInferenceRequested?.Invoke(this, EventArgs.Empty);
     }
 
     private async void OnDisableInferenceEvidence(object sender, RoutedEventArgs e)

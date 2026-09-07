@@ -29,6 +29,24 @@
 
     <Grid RowDefinitions="Auto,*" Background="{ThemeResource TcWindowBackgroundBrush}">
 
+        <!--
+            In app shortcuts: one per rail destination, plus the switch on the
+            fourth.
+
+            KeyboardAccelerator rather than RegisterHotKey, and the difference
+            is the whole point. These fire only while this window has focus. A
+            global hot key takes a chord away from every other application on
+            the machine whether or not this app is running, which was cut
+            deliberately and is not to be reinstated here.
+        -->
+        <Grid.KeyboardAccelerators>
+            <KeyboardAccelerator Modifiers="Control" Key="Number1" Invoked="OnQueueAccelerator" />
+            <KeyboardAccelerator Modifiers="Control" Key="Number2" Invoked="OnHistoryAccelerator" />
+            <KeyboardAccelerator Modifiers="Control" Key="Number3" Invoked="OnPrivateInferenceAccelerator" />
+            <KeyboardAccelerator Modifiers="Control" Key="Number4" Invoked="OnSettingsAccelerator" />
+            <KeyboardAccelerator Modifiers="Control,Shift" Key="M" Invoked="OnTogglePrivateInferenceAccelerator" />
+        </Grid.KeyboardAccelerators>
+
         <Grid.Resources>
             <!--
                 The outer list is one item per project now, not one per
@@ -89,7 +107,7 @@
             <!--
                 Nav rail.
 
-                Three destinations now that there are three views. Settings
+                Four destinations now that there are four views. Settings
                 carries only the public profile panel so far; the rest of what
                 the spec puts on that screen is absent from the screen rather
                 than drawn disabled, for the same reason the row itself was
@@ -225,6 +243,76 @@
                             </StackPanel>
 
                             <Rectangle Visibility="{x:Bind ViewModel.ShowingHistory, Mode=OneWay}"
+                                       Width="3"
+                                       HorizontalAlignment="Left"
+                                       Margin="0,8,0,8"
+                                       RadiusX="2" RadiusY="2"
+                                       Fill="{ThemeResource TcGreenFillBrush}" />
+                        </Grid>
+                    </Button>
+
+                    <!--
+                        Model calls.
+
+                        The label is NOT typed here. It arrives from
+                        crates/trace-commons-contributor/src/private_inference_copy.rs
+                        across the C ABI, like every other word on this
+                        surface: the rail label is the one word a contributor
+                        navigates by, and a shell that spelled it itself would
+                        go on spelling the old one after a rename in the Rust.
+
+                        The badge is bound to the reported STATE, never to the
+                        switch. The switch says what was asked for; the badge
+                        says what is true, and the two disagree exactly when it
+                        matters (the switch on, the port already taken). Only
+                        the clear tone gets the green dot; attention and
+                        refusal get the gold one, which is visibly a different
+                        claim; everything else gets nothing at all.
+                    -->
+                    <Button HorizontalAlignment="Stretch"
+                            HorizontalContentAlignment="Stretch"
+                            Background="Transparent"
+                            BorderThickness="0"
+                            Padding="0"
+                            Click="OnShowPrivateInference">
+                        <Grid>
+                            <Border Visibility="{x:Bind ViewModel.ShowingPrivateInference, Mode=OneWay}"
+                                    Background="{ThemeResource TcSurfaceScrimBrush}"
+                                    CornerRadius="{StaticResource TcControlCornerRadius}" />
+                            <StackPanel Orientation="Horizontal" Spacing="10" Padding="10,7">
+                                <!-- Two arrows passing each other, on the same
+                                     16 unit grid as the three above and at the
+                                     same stroke width. A call arriving and an
+                                     answer going back, which is what this
+                                     screen is about. Deliberately not the
+                                     monitor or the clock: a rail that reused a
+                                     glyph would be ambiguous at a glance. -->
+                                <Viewbox Width="13" Height="13" VerticalAlignment="Center">
+                                    <Canvas Width="16" Height="16">
+                                        <Path Data="M2.5 5.5h9M9 3l2.5 2.5L9 8"
+                                              Stroke="{ThemeResource TcGreenTextBrush}"
+                                              StrokeThickness="1.5" />
+                                        <Path Data="M13.5 10.5h-9M7 8l-2.5 2.5L7 13"
+                                              Stroke="{ThemeResource TcGreenTextBrush}"
+                                              StrokeThickness="1.5" />
+                                    </Canvas>
+                                </Viewbox>
+                                <TextBlock Text="{x:Bind ViewModel.PrivateInferenceDestination, Mode=OneWay}"
+                                           Style="{StaticResource TcNavLabelTextStyle}"
+                                           VerticalAlignment="Center" />
+
+                                <Ellipse Width="7" Height="7"
+                                         Visibility="{x:Bind ViewModel.PrivateInferenceIsWorking, Mode=OneWay}"
+                                         Fill="{ThemeResource TcGreenFillBrush}"
+                                         VerticalAlignment="Center" />
+                                <FontIcon Glyph="&#xE7BA;"
+                                          FontSize="12"
+                                          Visibility="{x:Bind ViewModel.PrivateInferenceNeedsAttention, Mode=OneWay}"
+                                          Foreground="{ThemeResource TcGoldTextBrush}"
+                                          VerticalAlignment="Center" />
+                            </StackPanel>
+
+                            <Rectangle Visibility="{x:Bind ViewModel.ShowingPrivateInference, Mode=OneWay}"
                                        Width="3"
                                        HorizontalAlignment="Left"
                                        Margin="0,8,0,8"
@@ -567,6 +655,18 @@
                 did, and that sentence is the only report of an outward facing
                 act this window ever gives.
             -->
+            <!--
+                The model calls pane, created once and kept for the same
+                reason History and Settings are: it holds the daemon's last
+                report about the listener, and rebuilding it on every nav
+                click would replace the sentence naming a refusal with a
+                blank until the next read landed.
+            -->
+            <ContentPresenter x:Name="PrivateInferencePane"
+                              Grid.Row="2"
+                              Grid.Column="1"
+                              Visibility="{x:Bind ViewModel.ShowingPrivateInference, Mode=OneWay}" />
+
             <ContentPresenter x:Name="SettingsPane"
                               Grid.Row="2"
                               Grid.Column="1"

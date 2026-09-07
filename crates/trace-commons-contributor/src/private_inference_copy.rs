@@ -27,8 +27,27 @@
 //! privacy, safety or encryption. Turning this on does not make a
 //! contributor's calls private. It moves where they are answered from and
 //! keeps the record here; each call still goes on to whoever was configured
-//! to answer it. The setting's internal name says "private" and this surface
-//! must not repeat it as a promise.
+//! to answer it.
+//!
+//! # The one exception: the product name
+//!
+//! The destination is called **Private AI**, and the sweep strips
+//! [`DESTINATION`] before applying the ban so that name may be said and
+//! nothing else may say "private".
+//!
+//! The rule was originally absolute, on the reasoning that the setting's
+//! internal name says `private` and this surface must not repeat it as a
+//! promise. The distinction that reopened it is between a promise and a name.
+//! The mental model is a VPN: traffic goes through something the user
+//! controls, which sees it and decides where it goes. "Private" in "VPN" has
+//! never meant the destination cannot see you, and that is exactly the shape
+//! of this feature.
+//!
+//! What the ban still forbids is any SENTENCE claiming privacy --
+//! "your calls are private" remains false and remains unwriteable. The
+//! subtitle says what actually happens, and [`OFFER_EXPOSURE`] still states
+//! in full what turning this on lets anything else on the machine do. The
+//! name carries the model; the sentences carry the truth.
 
 // PRIVATE-INFERENCE-SURFACE-BEGIN
 //
@@ -36,6 +55,17 @@
 // by `the_offer_surface_says_nothing_it_should_not`, which reads this file
 // rather than a hand-kept list of names. A string literal added anywhere in
 // this region is checked automatically; one added outside it is not.
+
+/// The switcher label for the top-level destination this surface owns.
+///
+/// "Model calls" and not the setting's internal name: `private` is on the
+/// list of words this surface may not say, because the feature makes no
+/// privacy claim, and a nav label is the most-read string of the lot.
+pub const DESTINATION: &str = "Private AI";
+
+/// The one line under the destination's title saying what it is for.
+pub const SUBTITLE: &str = "Your AI calls go out through this computer, so you can see them and \
+     choose who answers.";
 
 /// The offer's heading. Names the machine, because "on this computer" is the
 /// whole of what changes and the only part a contributor can check.
@@ -80,11 +110,22 @@ pub const OFFER_DECLINE: &str = "Not now";
 /// congratulated on the next launch either. Saying so here is what makes "Not
 /// now" an honest button: it is not a deferral, it is an answer, and the way
 /// back is the switch this sentence names.
-pub const OFFER_ASKED_ONCE: &str = "Either way, this is the only time you will be asked. The switch stays in \
-     Settings.";
+///
+/// It named Settings until the switch moved out of Settings to its own
+/// destination, at which point the second clause was simply false -- pointing
+/// a contributor who had just declined at a place the control is no longer in.
+/// The first clause stays true here and only here: this is the first-run
+/// offer, and the harness gate asks again on purpose, which is why that
+/// surface does not show this sentence at all.
+///
+/// The destination is named as a literal because a payload sentence may not
+/// interpolate, and `the_way_back_names_the_destination_it_is_in` pins it
+/// against [`DESTINATION`] so the two cannot drift apart again.
+pub const OFFER_ASKED_ONCE: &str = "Either way, this is the only time you will be asked. The switch is on the \
+     Private AI screen.";
 
 /// The settings section's heading.
-pub const SETTINGS_TITLE: &str = "Model calls on this computer";
+pub const SETTINGS_TITLE: &str = "Private AI on this computer";
 
 /// The settings switch.
 pub const SETTINGS_TOGGLE: &str = "Answer model calls on this computer";
@@ -204,6 +245,21 @@ pub enum PrivateInferenceTone {
     /// Asked for and not happening. Always paired with a sentence naming the
     /// way out.
     Refused,
+}
+
+impl PrivateInferenceTone {
+    /// Whether an indicator may paint this tone as working. [`Self::Clear`]
+    /// alone.
+    ///
+    /// The one predicate every shell indicator asks -- a tab badge, a tray
+    /// glyph, a menu-bar dot. Painting [`Self::Refused`] or [`Self::Held`] as
+    /// on is the fail-open this surface exists to prevent, and asking the
+    /// settings switch instead is the other way to arrive at it: the switch
+    /// says what was asked for, this says what is true.
+    #[must_use]
+    pub fn reads_as_working(self) -> bool {
+        matches!(self, PrivateInferenceTone::Clear)
+    }
 }
 
 /// The sentence for one state label, as reported by `private_inference_state`.
@@ -327,6 +383,8 @@ pub fn quit_needs_notice(requested_on: bool, label: &str) -> bool {
 /// against.
 #[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
 pub struct PrivateInferenceCopy {
+    pub destination: &'static str,
+    pub subtitle: &'static str,
     pub offer_title: &'static str,
     pub offer_what: &'static str,
     pub offer_exposure: &'static str,
@@ -349,12 +407,313 @@ pub struct PrivateInferenceCopy {
     pub state_crashed: &'static str,
     pub quit_also_stops: &'static str,
     pub write_unconfirmed: &'static str,
+    pub settings_moved: &'static str,
+    pub tray_turn_off: &'static str,
+    pub tray_open_to_turn_on: &'static str,
+    pub harnesses_title: &'static str,
+    pub harnesses_what: &'static str,
+    pub harness_not_installed: &'static str,
+    pub harness_not_connected: &'static str,
+    pub harness_connected_nothing_seen: &'static str,
+    pub harness_answering: &'static str,
+    pub harness_connect: &'static str,
+    pub harness_disconnect: &'static str,
+    pub harness_preview_title: &'static str,
+    pub harness_preview_confirm: &'static str,
+    pub harness_preview_cancel: &'static str,
+    pub harness_slot_taken: &'static str,
+    pub harness_needs_restart: &'static str,
+    pub harnesses_none_found: &'static str,
+    pub harness_unreadable_config: &'static str,
+    pub harness_plan_nothing_to_change: &'static str,
+    pub harness_plan_entry_unusable: &'static str,
+    pub harness_plan_no_config_path: &'static str,
+}
+
+/// The sentence the settings card shows once the control has moved out of it.
+///
+/// The card stays: a contributor who learned where the switch was should find
+/// a pointer there, not a hole.
+pub const SETTINGS_MOVED: &str = "Private AI has its own screen now.";
+
+/// The tray action while it is on.
+///
+/// Turning it OFF from a menu is safe in a way turning it on is not: it only
+/// ever reduces what this computer will answer, so it needs no sentence in
+/// front of it.
+pub const TRAY_TURN_OFF: &str = "Stop answering model calls";
+
+/// The tray action while it is off.
+///
+/// Trailing ellipsis because it opens the screen rather than acting: turning
+/// it ON changes what anything else on this computer may send through, and
+/// that is not a decision to take from a menu with the consequence off-screen.
+pub const TRAY_OPEN_TO_TURN_ON: &str = "Answer model calls on this computer…";
+
+/// The heading over the list of tools found on this computer.
+///
+/// The destination leads with this list rather than with the switch, because
+/// a tool is the unit a contributor can decide about. Answering model calls
+/// at all is a consequence of connecting one, not a question to be settled
+/// first.
+pub const HARNESSES_TITLE: &str = "Tools on this computer";
+
+/// The one line under that heading.
+///
+/// Two things have to be said in it. That the choice is per tool -- the same
+/// promise [`OFFER_NO_REPOINT`] makes -- and that the list is what this app
+/// knows how to look for, not a claim about every tool that exists. An
+/// unqualified list reads as the second, and a contributor whose tool is
+/// missing from it would conclude their tool cannot be connected rather than
+/// that this app has not been taught about it yet.
+pub const HARNESSES_WHAT: &str = "Each of these can be set to send its model calls to this computer, one \
+     tool at a time. The list is what this app knows how to look for, not \
+     every tool there is.";
+
+/// A tool this app could not find on this computer.
+///
+/// **Listed, not hidden.** A tool left out of the list cannot be told apart
+/// from a tool this app has never been taught about, and the contributor's
+/// question in both cases is the same one. So the row stays and says what
+/// was looked for.
+///
+/// It must be rendered INSTEAD of [`HARNESS_NOT_CONNECTED`] and never
+/// beside it. That sentence says a tool's own settings still send its calls
+/// somewhere, which is a claim about settings belonging to something that is
+/// not on this computer at all.
+pub const HARNESS_NOT_INSTALLED: &str = "Not found on this computer. This app looked where this tool keeps its \
+     own settings and found nothing there, so there is nothing here to \
+     connect.";
+
+/// A tool whose own settings still send its calls wherever they went before.
+///
+/// Said as a fact about the tool's settings rather than as a fault. Nothing
+/// is wrong with a tool nobody has connected.
+pub const HARNESS_NOT_CONNECTED: &str = "Not connected. Its own settings still send its calls wherever they went \
+     before.";
+
+/// A tool whose settings are right and from which nothing has arrived yet.
+///
+/// The state this three-way split exists for. A settings file with the right
+/// value in it is not evidence that a single call was ever answered, and a
+/// surface that showed those two the same way would tell a contributor their
+/// tool was working while it sent every call somewhere else.
+pub const HARNESS_CONNECTED_NOTHING_SEEN: &str = "Connected, and nothing has arrived from it yet. Its settings send its \
+     calls here; none has come in so far.";
+
+/// A tool a call actually arrived from. The only state that means it works.
+///
+/// Paired with [`harness_last_call_line`], which says when. The sentence
+/// stops at what this computer did, because which tool a call came from is
+/// worked out from how the call was phrased, and two tools that phrase calls
+/// the same way cannot be told apart.
+pub const HARNESS_ANSWERING: &str =
+    "Answering. A call from it reached this computer and was answered here.";
+
+/// The action that connects one tool.
+pub const HARNESS_CONNECT: &str = "Send this tool's calls here";
+
+/// The action that disconnects one tool.
+///
+/// Says what the tool stops doing, not what this app stops doing: the file
+/// being changed is the tool's, and the listener is left exactly as it was
+/// for every other tool.
+pub const HARNESS_DISCONNECT: &str = "Stop sending this tool's calls here";
+
+/// The heading over the preview shown before anything is written.
+///
+/// This app is about to edit a file it does not own, so the change is shown
+/// before it is made. The same reason the destination exists at all: the
+/// consequence is stated where the decision is taken.
+pub const HARNESS_PREVIEW_TITLE: &str = "What would change in this tool's own settings file";
+
+/// The button that writes the change.
+pub const HARNESS_PREVIEW_CONFIRM: &str = "Make this change";
+
+/// The button that does not.
+///
+/// Not "Cancel". The file is the contributor's, and the outcome of saying no
+/// is that it keeps every value it has.
+pub const HARNESS_PREVIEW_CANCEL: &str = "Leave the file as it is";
+
+/// A slot that already had a value in it, which was left alone.
+///
+/// **Not a fault, and not an offer.** The value in that slot is somebody's
+/// deliberate choice, and taking it over would move their calls without
+/// telling them. So this sentence reports what was left alone and stops
+/// there: it must not read as an error to be cleared, and it must not
+/// suggest that this app could take the slot if asked.
+pub const HARNESS_SLOT_TAKEN: &str = "This tool is already set to send those calls somewhere, so that setting \
+     was left exactly as you had it. Nothing here changed it, and nothing \
+     here will.";
+
+/// A tool holding an old setting in a process that is still running.
+///
+/// Kept in front of the contributor until a call actually arrives, because
+/// the alternative is a list claiming a tool sends its calls here while the
+/// window in front of them does not.
+pub const HARNESS_NEEDS_RESTART: &str = "Its settings changed while it was running. Quit this tool and open it \
+     again; until then the copy of it that is running still has the old \
+     setting.";
+
+/// No tool was found.
+///
+/// Says what was looked for. An empty list that explains nothing cannot be
+/// told apart from a broken one, and the contributor's next question is
+/// always which tools were even considered.
+pub const HARNESSES_NONE_FOUND: &str = "None of the tools this app knows about was found here. It looked for \
+     each of them in the place that tool keeps its own settings, and found \
+     no settings file to work with.";
+
+/// A settings file that could not be read, and was therefore not touched.
+///
+/// Distinct from having nothing to change, and the distinction is the whole
+/// point of the sentence. A file this app cannot make sense of might already
+/// say the right thing or nothing at all; either way it is refused, so that
+/// somebody's own mistake in their own file never comes back looking like
+/// this app's.
+pub const HARNESS_UNREADABLE_CONFIG: &str = "This app could not make sense of the settings file named above, so it \
+     changed nothing in it. This is a refusal, not a file that already said \
+     the right thing: open it yourself, or use the command shown, and the \
+     file stays exactly as it is until you do.";
+
+/// A plan that found the file already saying what the action wanted.
+///
+/// **Not a failure, and not a blank sheet.** Before this sentence existed a
+/// plan with nothing in it opened a preview holding a title, a path and
+/// nothing else, which reads as this app having lost the change rather than
+/// as there being none to make.
+pub const HARNESS_PLAN_NOTHING_TO_CHANGE: &str = "There is nothing to change. This tool's own settings file already says \
+     what this would have written, so it was left exactly as it is.";
+
+/// This app's own description of a tool did not survive checking.
+///
+/// Says whose fault it is, because the file named above is the
+/// contributor's and this one is not their doing. A refusal that let them
+/// think their own file was at fault would send them to edit something that
+/// is already right.
+pub const HARNESS_PLAN_ENTRY_UNUSABLE: &str = "This app's own description of this tool did not hold up when it was \
+     checked, so nothing was worked out and nothing was written. That is a \
+     fault here, not in any file of yours.";
+
+/// This build could not work out where a tool keeps its settings.
+///
+/// Names the way forward rather than stopping at the refusal: the command
+/// shown on the row does by hand exactly what this app could not work out
+/// how to do.
+pub const HARNESS_PLAN_NO_CONFIG_PATH: &str = "This app could not work out where this tool keeps its own settings on \
+     this computer, so it has no file to change. The command shown on the \
+     tool does the same thing by hand.";
+
+/// The sentence for one tool's state, or the empty string.
+///
+/// ONE TABLE, NOT THREE. Every shell used to hold its own map from a
+/// `harness_list` row's `state` onto one of the sentences above -- Swift,
+/// C# and Rust, three copies of one decision, agreeing today and drifting
+/// in silence tomorrow. This is that decision, in the only place it may
+/// live; the shells reach it through `tc_harness_state_line`.
+///
+/// Two states answer the empty string, which a shell draws as no line at
+/// all, and the emptiness is the point:
+///
+/// - [`HarnessState::ActivityShared`] must not borrow [`HARNESS_ANSWERING`].
+///   That sentence says a call from *it* was answered here, and the pronoun
+///   names the row's own tool -- which is precisely what this state says
+///   cannot be worked out. Nor may it borrow
+///   [`HARNESS_CONNECTED_NOTHING_SEEN`], which would be false: something did
+///   arrive.
+/// - [`HarnessState::Unknown`], and a label this build has never heard of,
+///   claim nothing rather than take the nearest sentence.
+///
+/// A row with no state line claims nothing, and claiming nothing is the
+/// honest answer to a question the ledger cannot settle.
+///
+/// [`HarnessState::ActivityShared`]: crate::harness_state::HarnessState::ActivityShared
+/// [`HarnessState::Unknown`]: crate::harness_state::HarnessState::Unknown
+#[must_use]
+pub fn harness_state_line(state: &str) -> &'static str {
+    use crate::harness_state::HarnessState;
+    match HarnessState::from_label(state) {
+        Some(HarnessState::NotConnected) => HARNESS_NOT_CONNECTED,
+        Some(HarnessState::ConnectedNoCalls) => HARNESS_CONNECTED_NOTHING_SEEN,
+        Some(HarnessState::Answering) => HARNESS_ANSWERING,
+        Some(HarnessState::ActivityShared | HarnessState::Unknown) | None => "",
+    }
+}
+
+/// The sentence a plan's outcome carries, or the empty string.
+///
+/// ONE TABLE, NOT THREE -- the same rule [`harness_state_line`] follows, for
+/// the same reason, and reached by the shells through
+/// `tc_harness_outcome_line`. Before this existed only `unparseable` had a
+/// sentence anywhere, and each shell wrote that one arm itself: macOS in
+/// `outcomeSentence`, Windows in a `== Unparseable` branch, GNOME in a
+/// `Some(PlanOutcome::Unparseable)` arm. Three copies of one decision.
+///
+/// [`PlanOutcome::Changes`] answers the EMPTY STRING, and the emptiness is
+/// the point: a plan with changes in it shows them, and a sentence above
+/// them saying there are changes would be this app narrating its own list.
+/// Every other outcome answers a sentence, because every other outcome
+/// writes nothing, and a preview that says nothing about why is a dialog
+/// holding a title, a path and a way out.
+///
+/// A label this build has never heard of also answers the empty string. It
+/// may not borrow the nearest sentence: guessing which refusal an unknown
+/// outcome is would tell a contributor something nobody worked out.
+///
+/// [`PlanOutcome::Changes`]: crate::harness_state::PlanOutcome::Changes
+#[must_use]
+pub fn harness_outcome_line(outcome: &str) -> &'static str {
+    use crate::harness_state::PlanOutcome;
+    match PlanOutcome::from_label(outcome) {
+        Some(PlanOutcome::Changes) | None => "",
+        Some(PlanOutcome::Noop) => HARNESS_PLAN_NOTHING_TO_CHANGE,
+        Some(PlanOutcome::Unparseable) => HARNESS_UNREADABLE_CONFIG,
+        Some(PlanOutcome::NotInstalled) => HARNESS_NOT_INSTALLED,
+        Some(PlanOutcome::EntryUnusable) => HARNESS_PLAN_ENTRY_UNUSABLE,
+        Some(PlanOutcome::NoConfigPath) => HARNESS_PLAN_NO_CONFIG_PATH,
+    }
+}
+
+/// When the last call from a connected tool was answered here, assembled on
+/// this side rather than exported as a sentence with a hole in it.
+///
+/// The same rule [`serving_line`] follows, for the same reason: a shell
+/// handed a template is a fourth place the wording can drift. `None` -- and
+/// nothing to report -- produces the empty string, which a shell draws as no
+/// line at all, because [`HARNESS_ANSWERING`] above it has already said the
+/// part that is true.
+///
+/// The buckets are coarse on purpose. A timestamp to the second invites a
+/// contributor to read it as a live count of calls; all this sentence is for
+/// is settling whether anything has ever come through.
+#[must_use]
+pub fn harness_last_call_line(seconds_ago: Option<u64>) -> String {
+    let Some(seconds) = seconds_ago else {
+        return String::new();
+    };
+    let minutes = seconds / 60;
+    let hours = minutes / 60;
+    let days = hours / 24;
+    let (count, unit) = if seconds < 60 {
+        return "Last call answered here: just now.".to_string();
+    } else if minutes < 60 {
+        (minutes, "minute")
+    } else if hours < 24 {
+        (hours, "hour")
+    } else {
+        (days, "day")
+    };
+    let plural = if count == 1 { "" } else { "s" };
+    format!("Last call answered here: {count} {unit}{plural} ago.")
 }
 
 /// The payload, built from the constants above.
 #[must_use]
 pub fn private_inference_copy() -> PrivateInferenceCopy {
     PrivateInferenceCopy {
+        destination: DESTINATION,
+        subtitle: SUBTITLE,
         offer_title: OFFER_TITLE,
         offer_what: OFFER_WHAT,
         offer_exposure: OFFER_EXPOSURE,
@@ -377,6 +736,27 @@ pub fn private_inference_copy() -> PrivateInferenceCopy {
         state_crashed: STATE_CRASHED,
         quit_also_stops: QUIT_ALSO_STOPS,
         write_unconfirmed: WRITE_UNCONFIRMED,
+        settings_moved: SETTINGS_MOVED,
+        tray_turn_off: TRAY_TURN_OFF,
+        tray_open_to_turn_on: TRAY_OPEN_TO_TURN_ON,
+        harnesses_title: HARNESSES_TITLE,
+        harnesses_what: HARNESSES_WHAT,
+        harness_not_installed: HARNESS_NOT_INSTALLED,
+        harness_not_connected: HARNESS_NOT_CONNECTED,
+        harness_connected_nothing_seen: HARNESS_CONNECTED_NOTHING_SEEN,
+        harness_answering: HARNESS_ANSWERING,
+        harness_connect: HARNESS_CONNECT,
+        harness_disconnect: HARNESS_DISCONNECT,
+        harness_preview_title: HARNESS_PREVIEW_TITLE,
+        harness_preview_confirm: HARNESS_PREVIEW_CONFIRM,
+        harness_preview_cancel: HARNESS_PREVIEW_CANCEL,
+        harness_slot_taken: HARNESS_SLOT_TAKEN,
+        harness_needs_restart: HARNESS_NEEDS_RESTART,
+        harnesses_none_found: HARNESSES_NONE_FOUND,
+        harness_unreadable_config: HARNESS_UNREADABLE_CONFIG,
+        harness_plan_nothing_to_change: HARNESS_PLAN_NOTHING_TO_CHANGE,
+        harness_plan_entry_unusable: HARNESS_PLAN_ENTRY_UNUSABLE,
+        harness_plan_no_config_path: HARNESS_PLAN_NO_CONFIG_PATH,
     }
 }
 
@@ -396,6 +776,84 @@ pub use crate::daemon::private_inference::{
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Only `Clear` may be painted as working. The GTK shell reads this
+    /// predicate directly rather than through the ABI, so it is pinned here
+    /// as well as in Swift.
+    #[test]
+    fn only_clear_reads_as_working() {
+        assert!(PrivateInferenceTone::Clear.reads_as_working());
+        for tone in [
+            PrivateInferenceTone::Neutral,
+            PrivateInferenceTone::Held,
+            PrivateInferenceTone::Attention,
+            PrivateInferenceTone::Refused,
+        ] {
+            assert!(
+                !tone.reads_as_working(),
+                "{tone:?} must not read as working"
+            );
+        }
+    }
+
+    /// The states a daemon can report, filtered through the shared table:
+    /// `running` is the only one an indicator may light up.
+    #[test]
+    fn only_a_running_listener_reads_as_working() {
+        assert!(state_tone(LABEL_RUNNING).reads_as_working());
+        for label in [
+            "",
+            LABEL_OFF,
+            LABEL_STOPPING,
+            LABEL_RUNNING_NO_BACKENDS,
+            LABEL_RUNNING_ELSEWHERE,
+            LABEL_PORT_IN_USE,
+            LABEL_START_FAILED,
+            LABEL_CRASHED,
+            "a_state_from_a_later_daemon",
+        ] {
+            assert!(
+                !state_tone(label).reads_as_working(),
+                "{label} must not read as working"
+            );
+        }
+    }
+
+    /// The nav wording exists, because a top-level destination needs a label
+    /// in the switcher and a line under its title.
+    /// The way back names the place the switch is actually in.
+    ///
+    /// This sentence said "The switch stays in Settings" until the switch
+    /// moved to its own destination, and nothing failed -- no test pinned the
+    /// copy, so a sentence that had become false went on being shown to every
+    /// contributor at first run. Found in review.
+    #[test]
+    fn the_way_back_names_the_destination_it_is_in() {
+        assert!(
+            OFFER_ASKED_ONCE.contains(DESTINATION),
+            "the offer must name the destination the switch is in, not a stale one: {OFFER_ASKED_ONCE}"
+        );
+        assert!(
+            !OFFER_ASKED_ONCE.contains("Settings"),
+            "the switch is no longer in Settings, which holds only a pointer"
+        );
+    }
+
+    #[test]
+    fn the_copy_carries_nav_wording_for_a_top_level_destination() {
+        let copy = private_inference_copy();
+        assert!(!copy.destination.is_empty(), "the nav item needs a label");
+        assert!(
+            !copy.subtitle.is_empty(),
+            "the destination needs a subtitle"
+        );
+        // The label sits in a sidebar beside Waiting/History/Computer/Settings.
+        assert!(
+            copy.destination.chars().count() <= 24,
+            "nav label too long for the sidebar: {}",
+            copy.destination
+        );
+    }
 
     /// The offer has to say what turning the switch on exposes. This is the
     /// one sentence the design will not ship without: the listener's
@@ -595,6 +1053,249 @@ mod tests {
         assert_eq!(serving_line(Some(0)), "");
     }
 
+    /// The three per-harness states are three different sentences, and only
+    /// one of them says a call was answered.
+    ///
+    /// Connected and answering are the pair most likely to be collapsed by a
+    /// well-meaning simplification, and collapsing them would tell a
+    /// contributor their tool works on the strength of a value in a file.
+    #[test]
+    fn only_one_harness_state_says_a_call_arrived() {
+        let copy = private_inference_copy();
+        let states = [
+            copy.harness_not_connected,
+            copy.harness_connected_nothing_seen,
+            copy.harness_answering,
+        ];
+        for (i, one) in states.iter().enumerate() {
+            for other in &states[i + 1..] {
+                assert_ne!(one, other, "two harness states share a sentence");
+            }
+        }
+        assert!(
+            copy.harness_answering.contains("was answered"),
+            "the answering state stopped saying a call was answered: {}",
+            copy.harness_answering
+        );
+        assert!(
+            copy.harness_connected_nothing_seen
+                .contains("nothing has arrived"),
+            "the connected state stopped saying nothing has arrived: {}",
+            copy.harness_connected_nothing_seen
+        );
+    }
+
+    /// An occupied slot is reported, never offered. The sentence says what
+    /// was left alone and stops; it must not read as a fault to clear or as
+    /// an offer to take the slot.
+    #[test]
+    fn an_occupied_slot_is_reported_and_never_offered() {
+        let taken = private_inference_copy().harness_slot_taken;
+        assert!(
+            taken.contains("left exactly as you had it"),
+            "the occupied sentence stopped saying it was left alone: {taken}"
+        );
+        for word in ["error", "failed", "instead", "take over", "override"] {
+            assert!(
+                !taken.to_lowercase().contains(word),
+                "the occupied sentence reads as {word}: {taken}"
+            );
+        }
+    }
+
+    /// A file that could not be read is a refusal, and says so in words that
+    /// cannot be read as having found nothing to change.
+    #[test]
+    fn an_unreadable_file_is_a_refusal_and_not_a_no_op() {
+        let refused = private_inference_copy().harness_unreadable_config;
+        assert!(
+            refused.contains("refusal"),
+            "the unreadable sentence stopped naming itself a refusal: {refused}"
+        );
+        assert!(
+            refused.contains("changed nothing"),
+            "the unreadable sentence stopped saying nothing was written: {refused}"
+        );
+    }
+
+    /// An empty list says what was looked for. An empty list that explains
+    /// nothing cannot be told apart from a broken one.
+    #[test]
+    fn an_empty_list_says_what_was_looked_for() {
+        let copy = private_inference_copy();
+        assert!(
+            copy.harnesses_none_found.contains("looked for"),
+            "the empty-list sentence stopped saying what was looked for: {}",
+            copy.harnesses_none_found
+        );
+        assert!(
+            copy.harnesses_what.contains("not"),
+            "the list's line stopped qualifying what the list is: {}",
+            copy.harnesses_what
+        );
+    }
+
+    /// One state, one sentence, decided in one place.
+    ///
+    /// This is the table the three shells used to each hold a copy of. It is
+    /// asserted against the payload fields rather than against literals, so
+    /// it cannot be the second place a sentence is written.
+    #[test]
+    fn one_harness_state_table_answers_for_every_shell() {
+        use crate::harness_state::HarnessState;
+        let copy = private_inference_copy();
+        assert_eq!(
+            harness_state_line(HarnessState::NotConnected.label()),
+            copy.harness_not_connected
+        );
+        assert_eq!(
+            harness_state_line(HarnessState::ConnectedNoCalls.label()),
+            copy.harness_connected_nothing_seen
+        );
+        assert_eq!(
+            harness_state_line(HarnessState::Answering.label()),
+            copy.harness_answering
+        );
+    }
+
+    /// The two states that must claim nothing, and must not borrow the
+    /// nearest sentence to do it.
+    ///
+    /// `activity_shared` may not take [`HARNESS_ANSWERING`]: that sentence
+    /// says a call from *this tool* was answered, and the pronoun names the
+    /// one thing the state exists to say is unknown. Nor may it take
+    /// [`HARNESS_CONNECTED_NOTHING_SEEN`], which would be flatly false --
+    /// something did arrive. `unknown`, and a label this build has never
+    /// heard of, are the same shape for the same reason.
+    #[test]
+    fn two_harness_states_say_nothing_and_borrow_nothing() {
+        use crate::harness_state::HarnessState;
+        let copy = private_inference_copy();
+        for label in [
+            HarnessState::ActivityShared.label(),
+            HarnessState::Unknown.label(),
+            "a_state_from_a_later_daemon",
+            "",
+        ] {
+            let line = harness_state_line(label);
+            assert_eq!(line, "", "{label} grew a sentence");
+            assert_ne!(line, copy.harness_answering);
+            assert_ne!(line, copy.harness_connected_nothing_seen);
+            assert_ne!(line, copy.harness_not_connected);
+        }
+    }
+
+    /// A tool that is not on this machine says so, and does not borrow the
+    /// not-connected sentence to do it.
+    ///
+    /// The two used to render identically, because only one of them had
+    /// words: a missing tool drew "Its own settings still send its calls
+    /// wherever they went before", which is a claim about the settings of
+    /// something that is not there.
+    #[test]
+    fn a_missing_tool_says_it_is_missing_and_claims_nothing_about_settings() {
+        let copy = private_inference_copy();
+        assert_ne!(copy.harness_not_installed, copy.harness_not_connected);
+        assert!(
+            !copy.harness_not_installed.contains("send its calls"),
+            "the missing-tool sentence claims something about its settings: {}",
+            copy.harness_not_installed
+        );
+        assert!(
+            copy.harness_not_installed
+                .contains("Not found on this computer"),
+            "the missing-tool sentence stopped saying it is missing: {}",
+            copy.harness_not_installed
+        );
+    }
+
+    /// One outcome, one sentence, decided in one place.
+    ///
+    /// Asserted against the payload fields rather than against literals, so
+    /// this cannot become the second place a sentence is written.
+    #[test]
+    fn one_plan_outcome_table_answers_for_every_shell() {
+        use crate::harness_state::PlanOutcome;
+        let copy = private_inference_copy();
+        assert_eq!(
+            harness_outcome_line(PlanOutcome::Noop.label()),
+            copy.harness_plan_nothing_to_change
+        );
+        assert_eq!(
+            harness_outcome_line(PlanOutcome::Unparseable.label()),
+            copy.harness_unreadable_config
+        );
+        assert_eq!(
+            harness_outcome_line(PlanOutcome::NotInstalled.label()),
+            copy.harness_not_installed
+        );
+        assert_eq!(
+            harness_outcome_line(PlanOutcome::EntryUnusable.label()),
+            copy.harness_plan_entry_unusable
+        );
+        assert_eq!(
+            harness_outcome_line(PlanOutcome::NoConfigPath.label()),
+            copy.harness_plan_no_config_path
+        );
+    }
+
+    /// Every outcome that writes nothing explains itself, and the one that
+    /// writes something says nothing.
+    ///
+    /// This is the finding: four non-committable outcomes opened a preview
+    /// with a title, a path, no changes and a way out. `is_noop` is the one
+    /// the design names explicitly, and it is in here with the other three.
+    #[test]
+    fn every_outcome_that_changes_nothing_says_why() {
+        use crate::harness_state::PlanOutcome;
+        assert_eq!(
+            harness_outcome_line(PlanOutcome::Changes.label()),
+            "",
+            "a plan with changes in it needs no sentence above them"
+        );
+        let mut seen: Vec<&str> = Vec::new();
+        for outcome in [
+            PlanOutcome::Noop,
+            PlanOutcome::Unparseable,
+            PlanOutcome::NotInstalled,
+            PlanOutcome::EntryUnusable,
+            PlanOutcome::NoConfigPath,
+        ] {
+            assert!(!outcome.is_committable(), "{outcome:?} became committable");
+            let line = harness_outcome_line(outcome.label());
+            assert!(
+                !line.trim().is_empty(),
+                "{outcome:?} opens an empty preview"
+            );
+            assert!(
+                !seen.contains(&line),
+                "{outcome:?} borrows another outcome's sentence: {line}"
+            );
+            seen.push(line);
+        }
+        for unknown in ["an_outcome_from_a_later_daemon", ""] {
+            assert_eq!(
+                harness_outcome_line(unknown),
+                "",
+                "{unknown} borrowed a sentence"
+            );
+        }
+    }
+
+    /// The when-sentence is finished on this side, says nothing when there is
+    /// nothing to report, and counts in whole units.
+    #[test]
+    fn the_last_call_sentence_names_a_time_or_says_nothing() {
+        assert_eq!(harness_last_call_line(None), "");
+        assert!(harness_last_call_line(Some(0)).contains("just now"));
+        assert!(harness_last_call_line(Some(59)).contains("just now"));
+        assert!(harness_last_call_line(Some(60)).contains("1 minute ago"));
+        assert!(harness_last_call_line(Some(120)).contains("2 minutes ago"));
+        assert!(harness_last_call_line(Some(3_600)).contains("1 hour ago"));
+        assert!(harness_last_call_line(Some(86_400)).contains("1 day ago"));
+        assert!(harness_last_call_line(Some(172_800)).contains("2 days ago"));
+    }
+
     /// Every field of the payload carries a finished sentence: no empties,
     /// and no template markers a shell would have to fill in.
     #[test]
@@ -604,7 +1305,7 @@ mod tests {
         let fields = payload.as_object().expect("a JSON object");
         assert_eq!(
             fields.len(),
-            22,
+            45,
             "the payload's field count changed -- update the shells' decoders \
              and the tests that pin the set"
         );
@@ -635,19 +1336,45 @@ mod tests {
             .split_once("PRIVATE-INFERENCE-SURFACE-END")
             .expect("end marker present")
             .0;
-        let mut strings: Vec<String> = region
+        // Comment lines are stripped BEFORE splitting on quotes.
+        //
+        // The extraction below takes every odd-indexed `"`-delimited segment,
+        // which is only the literals while the quote count ahead of each one
+        // is even. A doc comment carrying an odd number of `"` shifts that
+        // parity, and from there every real literal lands in a skipped
+        // position -- the sweep still passes, having examined nothing. It is
+        // the failure mode this test exists to prevent, in this test.
+        let code_only: String = region
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut strings: Vec<String> = code_only
             .split('"')
             .skip(1)
             .step_by(2)
             .map(str::to_string)
             .collect();
+
+        // The floor is the number of constants actually declared between the
+        // markers, not a number typed once and left behind. A hardcoded floor
+        // silently stops meaning anything the moment the module grows past it,
+        // which is how a parity shift would have gone unnoticed.
+        let declared = code_only.matches("pub const ").count();
         assert!(
-            strings.len() >= 18,
-            "the sweep found only {} literals -- did the constants move out \
-             from between the markers?",
+            declared >= 18,
+            "only {declared} constants between the markers -- did they move out?"
+        );
+        assert!(
+            strings.len() >= declared,
+            "the sweep found {} literals for {declared} declared constants -- \
+             a literal is being skipped, most likely a quote-parity shift",
             strings.len()
         );
         strings.push(serving_line(Some(8463)));
+        for seconds in [None, Some(0), Some(1), Some(60), Some(3_600), Some(86_400)] {
+            strings.push(harness_last_call_line(seconds));
+        }
         for label in [
             LABEL_OFF,
             LABEL_RUNNING,
@@ -659,6 +1386,17 @@ mod tests {
             "a_state_from_a_later_daemon",
         ] {
             strings.push(state_line(label).to_string());
+        }
+        for outcome in [
+            "changes",
+            "noop",
+            "unparseable",
+            "not_installed",
+            "entry_unusable",
+            "no_config_path",
+            "an_outcome_from_a_later_daemon",
+        ] {
+            strings.push(harness_outcome_line(outcome).to_string());
         }
         for word in [
             "ironwire",
@@ -677,6 +1415,16 @@ mod tests {
             "earn",
         ] {
             for text in &strings {
+                // The product name is stripped before the check, so
+                // "Private AI" may be said and nothing else may say
+                // "private". The ban exists to stop a PROMISE -- "your calls
+                // are private" is false, because each call still goes on to
+                // whoever was configured to answer it. A name is not a
+                // promise: the mental model is a VPN, where "private" has
+                // never meant the destination cannot see you, and the
+                // exposure sentence still says in full what turning this on
+                // lets anything else on the machine do.
+                let text = text.replace(DESTINATION, "");
                 assert!(
                     !text.to_lowercase().contains(word),
                     "{word:?} appears in: {text}"

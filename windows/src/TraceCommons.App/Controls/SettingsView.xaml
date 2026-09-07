@@ -428,17 +428,25 @@
                 <!--
                     Answering model calls on this computer.
 
-                    Its own card rather than a row on the routing one above:
-                    that card is about READING a record another process keeps,
-                    and this is about this app being the thing that answers.
+                    The switch, the exposure sentence and the line saying what
+                    the listener actually did all live on the model-calls
+                    destination now: that is the one place that can show the
+                    state beside the control, and it was five cards down this
+                    list before.
+
+                    The card stays rather than going. Somebody who learned
+                    where the switch was should find a sentence and a way
+                    there, not a hole.
+
+                    Nothing on it is painted as working, because nothing on it
+                    reports a state: the indicator belongs beside the switch,
+                    on the page that has both.
 
                     Every string in this block is bound. Not one is typed
                     here: the wording lives once, in
                     crates/trace-commons-contributor/src/private_inference_copy.rs,
                     and reaches this shell across the C ABI. The whole card is
-                    collapsed when those words did not arrive, rather than
-                    rendered with a switch and nothing beside it. That shape
-                    is what says "on" over a listener that refused to start.
+                    collapsed when those words did not arrive.
                 -->
                 <TextBlock Text="{x:Bind Settings.PrivateInferenceTitle, Mode=OneWay}"
                            Visibility="{x:Bind Settings.PrivateInferenceAvailable, Mode=OneWay}"
@@ -450,61 +458,17 @@
                         Padding="14,12"
                         Visibility="{x:Bind Settings.PrivateInferenceAvailable, Mode=OneWay}">
                     <StackPanel Spacing="10">
-                        <TextBlock Text="{x:Bind Settings.PrivateInferenceWhat, Mode=OneWay}"
+                        <TextBlock Text="{x:Bind Settings.PrivateInferenceMoved, Mode=OneWay}"
                                    Style="{StaticResource TcCaptionTextStyle}"
                                    TextWrapping="Wrap" />
                         <!--
-                            What turning it on exposes. On the settings card
-                            as well as in the offer: a contributor who
-                            declined and came back later is making the same
-                            decision and is owed the same sentence.
+                            The button carries the destination's own label, so
+                            the rail and this pointer can never name it
+                            differently.
                         -->
-                        <TextBlock Text="{x:Bind Settings.PrivateInferenceExposure, Mode=OneWay}"
-                                   Style="{StaticResource TcCaptionTextStyle}"
-                                   TextWrapping="Wrap" />
-                        <ToggleSwitch Header="{x:Bind Settings.PrivateInferenceToggle, Mode=OneWay}"
-                                      IsOn="{x:Bind Settings.PrivateInferenceEnabled, Mode=OneWay}"
-                                      IsEnabled="{x:Bind Settings.PrivateInferenceControlsEnabled, Mode=OneWay}"
-                                      Toggled="OnPrivateInferenceToggled" />
-                        <!--
-                            The switch says what was ASKED FOR; these say what
-                            happened. One line per tone, chosen from the tone
-                            and never from the text: three of the seven
-                            sentences begin with the same two words, so a
-                            colour picked by reading the sentence would be
-                            picked by matching a prefix.
-                        -->
-                        <TextBlock Text="{x:Bind Settings.PrivateInferenceStateText, Mode=OneWay}"
-                                   Visibility="{x:Bind Settings.PrivateInferenceStateIsNeutral, Mode=OneWay}"
-                                   Style="{StaticResource TcCaptionTextStyle}"
-                                   TextWrapping="Wrap" />
-                        <TextBlock Text="{x:Bind Settings.PrivateInferenceStateText, Mode=OneWay}"
-                                   Visibility="{x:Bind Settings.PrivateInferenceStateIsHeld, Mode=OneWay}"
-                                   Style="{StaticResource TcCaptionTextStyle}"
-                                   Foreground="{ThemeResource TcBlueBrandBrush}"
-                                   TextWrapping="Wrap" />
-                        <TextBlock Text="{x:Bind Settings.PrivateInferenceStateText, Mode=OneWay}"
-                                   Visibility="{x:Bind Settings.PrivateInferenceStateIsClear, Mode=OneWay}"
-                                   Style="{StaticResource TcCaptionTextStyle}"
-                                   Foreground="{ThemeResource TcGreenTextBrush}"
-                                   TextWrapping="Wrap" />
-                        <TextBlock Text="{x:Bind Settings.PrivateInferenceStateText, Mode=OneWay}"
-                                   Visibility="{x:Bind Settings.PrivateInferenceStateIsAttention, Mode=OneWay}"
-                                   Style="{StaticResource TcCaptionTextStyle}"
-                                   Foreground="{ThemeResource TcGoldTextBrush}"
-                                   TextWrapping="Wrap" />
-                        <TextBlock Text="{x:Bind Settings.PrivateInferenceStateText, Mode=OneWay}"
-                                   Visibility="{x:Bind Settings.PrivateInferenceStateIsRefused, Mode=OneWay}"
-                                   Style="{StaticResource TcCaptionTextStyle}"
-                                   Foreground="{ThemeResource TcCoralTextBrush}"
-                                   TextWrapping="Wrap" />
-                        <TextBlock Text="{x:Bind Settings.PrivateInferenceServingText, Mode=OneWay}"
-                                   Visibility="{x:Bind Settings.HasPrivateInferenceServingText, Mode=OneWay}"
-                                   Style="{StaticResource TcCaptionTextStyle}"
-                                   TextWrapping="Wrap" />
-                        <TextBlock Text="{x:Bind Settings.PrivateInferenceAppliesAtOnce, Mode=OneWay}"
-                                   Style="{StaticResource TcCaptionTextStyle}"
-                                   TextWrapping="Wrap" />
+                        <Button Content="{x:Bind Settings.PrivateInferenceDestination, Mode=OneWay}"
+                                HorizontalAlignment="Left"
+                                Click="OnOpenPrivateInference" />
                     </StackPanel>
                 </Border>
 

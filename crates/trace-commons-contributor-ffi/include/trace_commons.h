@@ -655,6 +655,183 @@ int32_t     tc_private_inference_should_offer(int32_t answered, int32_t on);
  * An absent request is a marker-only decline. Invalid values return 0. */
 int32_t     tc_private_inference_write_confirmed(int32_t requested_on, int32_t echoed_seen, int32_t echoed_on);
 
+/* ---------------------------------------------------------------------------
+ * The harness list: which coding tools this machine has, and whether they send
+ * their model calls here.
+ *
+ * The data comes over the daemon socket (harness_list / harness_plan /
+ * harness_commit). What is exported here is the branch tables over it, because
+ * a branch written three times in three languages agrees today and drifts in
+ * silence tomorrow. The fixed words are in tc_private_inference_copy; the two
+ * calls that pick between them -- tc_harness_state_line and
+ * tc_harness_last_call_line -- are here for the same reason the tables are.
+ * -------------------------------------------------------------------------*/
+
+/* The per-tool states of the harness list.
+ *
+ * DELIBERATELY DISJOINT from TC_ROUTING_TONE_* (0..3), TC_WITNESS_TONE_*
+ * (10..14) and TC_PRIVATE_INFERENCE_TONE_* (20..24), for the reason those
+ * ranges give: a shell that cross-wired two mappers with overlapping ranges
+ * would render one surface's value as another's meaning.
+ *
+ * A VALUE THIS HEADER DOES NOT DEFINE MUST BE RENDERED AS
+ * TC_HARNESS_STATE_UNKNOWN. The unsafe direction here is the working light:
+ * ANSWERING is a claim that a call actually arrived and was served, and a
+ * state a shell has no words for must never be painted as that.
+ *
+ * ACTIVITY_SHARED is its own value, not a flavour of ANSWERING: a call arrived
+ * in this tool's protocol family and more than one connected tool speaks that
+ * family, so it cannot be attributed to either. The ledger records a facade,
+ * not a tool id. Say a call arrived; do not name the tool.
+ */
+#define TC_HARNESS_STATE_UNKNOWN            30
+#define TC_HARNESS_STATE_NOT_CONNECTED      31
+#define TC_HARNESS_STATE_CONNECTED_NO_CALLS 32
+#define TC_HARNESS_STATE_ANSWERING          33
+#define TC_HARNESS_STATE_ACTIVITY_SHARED    34
+
+/* What planning an edit turned out to be.
+ *
+ * UNKNOWN is the answer for an outcome this build has never heard of, and it
+ * is not committable -- the safe direction. Only CHANGES is committable, and
+ * only CHANGES comes back with a plan_id.
+ */
+#define TC_HARNESS_PLAN_UNKNOWN        40
+#define TC_HARNESS_PLAN_CHANGES        41
+#define TC_HARNESS_PLAN_NOOP           42
+#define TC_HARNESS_PLAN_UNPARSEABLE    43
+#define TC_HARNESS_PLAN_NOT_INSTALLED  44
+#define TC_HARNESS_PLAN_ENTRY_UNUSABLE 45
+#define TC_HARNESS_PLAN_NO_CONFIG_PATH 46
+
+/* One harness_list row's state field, as a TC_HARNESS_STATE_* code.
+ *
+ * state is "not_connected", "connected_no_calls", "answering",
+ * "activity_shared" or "unknown".
+ *
+ * Exported for the reason tc_private_inference_state_tone is: the mapping from
+ * a label onto what a surface draws is one decision. The dangerous direction
+ * is specific here -- "answering" is the only value meaning a call was
+ * actually served, and it is the one a shell is most tempted to infer from
+ * "connected". DO NOT INFER IT. A config file naming this computer is not
+ * evidence that anything was ever sent.
+ *
+ * Answers TC_HARNESS_STATE_UNKNOWN for a label this build has never heard of,
+ * for a NULL or non-UTF-8 state, and on a caught panic.
+ */
+int32_t     tc_harness_state_code(const char* state);
+
+/* One harness_plan result's outcome field, as a TC_HARNESS_PLAN_* code.
+ *
+ * outcome is "changes", "noop", "unparseable", "not_installed",
+ * "entry_unusable" or "no_config_path".
+ *
+ * The branch that matters is unparseable against noop: one is "nothing to
+ * change", the other is "we refused to rewrite a file we could not read, and
+ * it needs a human". A shell that collapses them tells a contributor with a
+ * broken config file that everything is fine.
+ *
+ * OCCUPIED IS NOT AN OUTCOME. A plan can carry changes and occupied slots at
+ * once, so the occupied list rides alongside on the response and must be
+ * rendered whatever this returns. An occupied slot is a value the contributor
+ * put there themselves; it is reported, never taken over.
+ *
+ * Answers TC_HARNESS_PLAN_UNKNOWN for a label this build has never heard of,
+ * for a NULL or non-UTF-8 outcome, and on a caught panic.
+ */
+int32_t     tc_harness_plan_outcome_code(const char* outcome);
+
+/* Whether one action may be offered for a tool in this state.
+ *
+ * action is "connect" or "disconnect"; installed and connected are the
+ * booleans of the same names on a harness_list row (0/nonzero).
+ *
+ * THE BRANCH TABLE CROSSES, NOT ONLY THE WORDS, and the second rule is the one
+ * worth crossing: a tool that is not installed cannot be connected, but a tool
+ * that IS connected can always be disconnected, installed or not. Uninstalling
+ * a coding tool does not remove the line we put in its config file, and
+ * "remove only what we put there" is worth nothing if a shell hides the
+ * control that does the removing.
+ *
+ * The daemon answers the same thing per row, as can_connect / can_disconnect,
+ * from this same function. A shell may read either.
+ *
+ * Answers 0 -- do not offer -- for an action this build does not know, for a
+ * NULL or non-UTF-8 action, and on a caught panic.
+ */
+int32_t     tc_harness_action_available(const char* action, int32_t installed, int32_t connected);
+
+/* The sentence for one harness_list row's state field.
+ *
+ * state is the same label tc_harness_state_code takes: "not_connected",
+ * "connected_no_calls", "answering", "activity_shared" or "unknown".
+ *
+ * THE SENTENCE CROSSES, NOT ONLY THE CODE. With the code alone each shell
+ * wrote its own map from a state onto one of tc_private_inference_copy's
+ * sentences -- three copies of one decision, agreeing today and drifting in
+ * silence tomorrow. Do not write a fourth.
+ *
+ * TWO STATES ANSWER THE EMPTY STRING, AND THE EMPTINESS IS THE POINT.
+ * "activity_shared" and "unknown" have no sentence and MAY NOT BORROW ONE.
+ * The answering sentence says a call from IT reached this computer, and the
+ * pronoun names the row's own tool -- which is exactly what activity_shared
+ * says cannot be worked out. The connected sentence would be flatly false:
+ * something did arrive. Render an empty string as no line at all, never as
+ * the working light.
+ *
+ * The empty string is also the answer for a label this build has never heard
+ * of, for a NULL or non-UTF-8 state, and on a caught panic.
+ *
+ * Returns an owned string; free it with tc_string_free. NULL only on a caught
+ * panic.
+ */
+char*       tc_harness_state_line(const char* state);
+
+/* The sentence one harness_plan outcome carries.
+ *
+ * outcome is the same label tc_harness_plan_outcome_code takes: changes,
+ * noop, unparseable, not_installed, entry_unusable or no_config_path.
+ *
+ * THE SENTENCE CROSSES, NOT ONLY THE CODE, for the reason
+ * tc_harness_state_line gives. Only unparseable had a sentence anywhere
+ * before this, and each shell wrote that one arm itself; the other four
+ * non-committable outcomes had none, so a preview opened holding a title, a
+ * path, no changes, no explanation and a way out.
+ *
+ * changes ANSWERS THE EMPTY STRING, and the emptiness is the point: a plan
+ * with changes in it shows them, and a sentence above them announcing that
+ * there are changes is the app narrating its own list. Draw an empty string
+ * as no line at all.
+ *
+ * The empty string is also the answer for a label this build has never heard
+ * of -- which may not borrow the nearest refusal -- for a NULL or non-UTF-8
+ * outcome, and on a caught panic.
+ *
+ * Returns an owned string; free it with tc_string_free. NULL only on a caught
+ * panic.
+ */
+char*       tc_harness_outcome_line(const char* outcome);
+
+/* When the last call from a connected tool was answered here, assembled.
+ *
+ * seconds_ago is how long ago the caller worked out that call arrived, from a
+ * harness_list row's last_call_at. ABSENCE IS AN OUT-OF-RANGE INTEGER, the
+ * convention tc_private_inference_serving_line already uses: ANY NEGATIVE
+ * VALUE -- including the one to pass for an absent or unparseable timestamp --
+ * gives the EMPTY STRING rather than a sentence about a call nobody saw. Draw
+ * nothing for it; the state line above has already said what is true.
+ *
+ * Assembled on the Rust side rather than handed over as a template with a hole
+ * in it, for the reason on tc_routing_token_line. The buckets are coarse on
+ * purpose: this settles whether anything has ever come through, and is not a
+ * live count of calls.
+ *
+ * Returns an owned string; free it with tc_string_free. NULL only on a caught
+ * panic.
+ */
+char*       tc_harness_last_call_line(int64_t seconds_ago);
+
+
 /* The settings screen's session-source row for one tool, assembled.
  *
  * tool is "claude", "codex", "gemini" or "cline". source_mode is get_settings's

@@ -2190,6 +2190,290 @@ pub extern "C" fn tc_consent_copy() -> *mut c_char {
     })
 }
 
+/// The per-tool states of the harness list.
+///
+/// DELIBERATELY DISJOINT from `TC_ROUTING_TONE_*` (0..=3),
+/// `TC_WITNESS_TONE_*` (10..=14) and `TC_PRIVATE_INFERENCE_TONE_*`
+/// (20..=24), for the reason those ranges give: a shell that cross-wired two
+/// mappers with overlapping ranges would render one surface's value as
+/// another's meaning, and a disjoint range makes that mistake wrong for every
+/// value rather than only for the dangerous one.
+///
+/// A value this header does not define must be rendered as
+/// `TC_HARNESS_STATE_UNKNOWN`. The unsafe direction here is the working
+/// light: `TC_HARNESS_STATE_ANSWERING` is a claim that a call actually
+/// arrived, and a state a shell has no words for must never be painted as
+/// that.
+pub const TC_HARNESS_STATE_UNKNOWN: i32 = 30;
+pub const TC_HARNESS_STATE_NOT_CONNECTED: i32 = 31;
+pub const TC_HARNESS_STATE_CONNECTED_NO_CALLS: i32 = 32;
+pub const TC_HARNESS_STATE_ANSWERING: i32 = 33;
+/// A call arrived in this tool's protocol family, and more than one connected
+/// tool speaks that family, so it cannot be attributed to either. Its own
+/// value precisely so a shell cannot render it as `ANSWERING` -- the ledger
+/// records a facade, not a tool id, and this is the state where that limit
+/// shows.
+pub const TC_HARNESS_STATE_ACTIVITY_SHARED: i32 = 34;
+
+/// What planning an edit turned out to be.
+///
+/// Disjoint again, and for the same reason. `TC_HARNESS_PLAN_UNKNOWN` is the
+/// answer for an outcome this build has never heard of; it is not
+/// committable, which is the safe direction.
+pub const TC_HARNESS_PLAN_UNKNOWN: i32 = 40;
+pub const TC_HARNESS_PLAN_CHANGES: i32 = 41;
+pub const TC_HARNESS_PLAN_NOOP: i32 = 42;
+pub const TC_HARNESS_PLAN_UNPARSEABLE: i32 = 43;
+pub const TC_HARNESS_PLAN_NOT_INSTALLED: i32 = 44;
+pub const TC_HARNESS_PLAN_ENTRY_UNUSABLE: i32 = 45;
+pub const TC_HARNESS_PLAN_NO_CONFIG_PATH: i32 = 46;
+
+/// One `harness_list` row's `state`, as a code.
+///
+/// `state` is the `state` field of a `harness_list` harness row:
+/// `not_connected`, `connected_no_calls`, `answering`, `activity_shared` or
+/// `unknown`.
+///
+/// Exported for the reason `tc_private_inference_state_tone` is: the mapping
+/// from a label onto what a surface draws is one decision, and three native
+/// copies of it agree today and drift in silence tomorrow. The dangerous
+/// direction is specific here -- `answering` is the only value that means a
+/// call was actually served, and it is the one a shell is most tempted to
+/// infer from `connected`.
+///
+/// Answers `TC_HARNESS_STATE_UNKNOWN` for a label this build has never heard
+/// of, for a NULL or non-UTF-8 `state`, and on a caught panic.
+///
+/// # Safety
+/// `state`, if non-null, must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_harness_state_code(state: *const c_char) -> i32 {
+    use trace_commons_contributor::harness_state::HarnessState;
+    guard(|| {
+        let state = if state.is_null() {
+            ""
+        } else {
+            unsafe { borrow_str(state) }.unwrap_or("")
+        };
+        Ok(match HarnessState::from_label(state) {
+            Some(HarnessState::NotConnected) => TC_HARNESS_STATE_NOT_CONNECTED,
+            Some(HarnessState::ConnectedNoCalls) => TC_HARNESS_STATE_CONNECTED_NO_CALLS,
+            Some(HarnessState::Answering) => TC_HARNESS_STATE_ANSWERING,
+            Some(HarnessState::ActivityShared) => TC_HARNESS_STATE_ACTIVITY_SHARED,
+            Some(HarnessState::Unknown) | None => TC_HARNESS_STATE_UNKNOWN,
+        })
+    })
+    .unwrap_or(TC_HARNESS_STATE_UNKNOWN)
+}
+
+/// One `harness_plan` result's `outcome`, as a code.
+///
+/// `outcome` is `changes`, `noop`, `unparseable`, `not_installed`,
+/// `entry_unusable` or `no_config_path`.
+///
+/// The branch that matters is `unparseable` against `noop`: one is "nothing
+/// to change" and the other is "we refused to rewrite a file we could not
+/// read, and it needs a human". A shell that collapses them tells a
+/// contributor with a broken config file that everything is fine.
+///
+/// `occupied` is NOT an outcome. A plan can carry changes and occupied slots
+/// at once, so the occupied list rides alongside on the response and must be
+/// rendered whatever this returns.
+///
+/// Answers `TC_HARNESS_PLAN_UNKNOWN` for a label this build has never heard
+/// of, for a NULL or non-UTF-8 `outcome`, and on a caught panic.
+///
+/// # Safety
+/// `outcome`, if non-null, must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_harness_plan_outcome_code(outcome: *const c_char) -> i32 {
+    use trace_commons_contributor::harness_state::PlanOutcome;
+    guard(|| {
+        let outcome = if outcome.is_null() {
+            ""
+        } else {
+            unsafe { borrow_str(outcome) }.unwrap_or("")
+        };
+        Ok(match PlanOutcome::from_label(outcome) {
+            Some(PlanOutcome::Changes) => TC_HARNESS_PLAN_CHANGES,
+            Some(PlanOutcome::Noop) => TC_HARNESS_PLAN_NOOP,
+            Some(PlanOutcome::Unparseable) => TC_HARNESS_PLAN_UNPARSEABLE,
+            Some(PlanOutcome::NotInstalled) => TC_HARNESS_PLAN_NOT_INSTALLED,
+            Some(PlanOutcome::EntryUnusable) => TC_HARNESS_PLAN_ENTRY_UNUSABLE,
+            Some(PlanOutcome::NoConfigPath) => TC_HARNESS_PLAN_NO_CONFIG_PATH,
+            None => TC_HARNESS_PLAN_UNKNOWN,
+        })
+    })
+    .unwrap_or(TC_HARNESS_PLAN_UNKNOWN)
+}
+
+/// The sentence for one `harness_list` row's `state`.
+///
+/// `state` is the same label [`tc_harness_state_code`] takes:
+/// `not_connected`, `connected_no_calls`, `answering`, `activity_shared` or
+/// `unknown`.
+///
+/// THE SENTENCE CROSSES, NOT ONLY THE CODE. Exporting the code alone left
+/// each shell to write its own map from a state onto one of the payload's
+/// sentences -- Swift, C# and Rust, three copies of one decision, agreeing
+/// today and drifting in silence tomorrow. This is that decision.
+///
+/// TWO STATES ANSWER THE EMPTY STRING, AND THE EMPTINESS IS THE POINT.
+/// `activity_shared` and `unknown` have no sentence and may not borrow one:
+/// the answering sentence says a call from *it* reached this computer, and
+/// the pronoun names the row's own tool, which is exactly what
+/// `activity_shared` says cannot be worked out. Render an empty string as no
+/// line at all, and never as the working light.
+///
+/// The empty string is also the answer for a label this build has never
+/// heard of, for a NULL or non-UTF-8 `state`, and on a caught panic.
+///
+/// Returns an owned string; free it with [`tc_string_free`]. NULL only on a
+/// caught panic.
+///
+/// # Safety
+/// `state`, if non-null, must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_harness_state_line(state: *const c_char) -> *mut c_char {
+    guarded_string_no_err(|| {
+        let state = if state.is_null() {
+            ""
+        } else {
+            unsafe { borrow_str(state) }.unwrap_or("")
+        };
+        Ok(to_owned_cstring(
+            trace_commons_contributor::private_inference_copy::harness_state_line(state),
+        ))
+    })
+}
+
+/// The sentence one `harness_plan` outcome carries.
+///
+/// `outcome` is the same label [`tc_harness_plan_outcome_code`] takes:
+/// `changes`, `noop`, `unparseable`, `not_installed`, `entry_unusable` or
+/// `no_config_path`.
+///
+/// THE SENTENCE CROSSES, NOT ONLY THE CODE, for the reason
+/// [`tc_harness_state_line`] gives. Only `unparseable` had a sentence
+/// anywhere before this, and each shell wrote that one arm itself; the other
+/// four non-committable outcomes had none at all, so a preview opened with a
+/// title, a path, no changes, no explanation and a way out.
+///
+/// `changes` ANSWERS THE EMPTY STRING, and the emptiness is the point: a
+/// plan with changes in it shows them, and a sentence above them announcing
+/// that there are changes is this app narrating its own list. Render an
+/// empty string as no line at all.
+///
+/// The empty string is also the answer for a label this build has never
+/// heard of -- which may not borrow the nearest refusal -- for a NULL or
+/// non-UTF-8 `outcome`, and on a caught panic.
+///
+/// Returns an owned string; free it with [`tc_string_free`]. NULL only on a
+/// caught panic.
+///
+/// # Safety
+/// `outcome`, if non-null, must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_harness_outcome_line(outcome: *const c_char) -> *mut c_char {
+    guarded_string_no_err(|| {
+        let outcome = if outcome.is_null() {
+            ""
+        } else {
+            unsafe { borrow_str(outcome) }.unwrap_or("")
+        };
+        Ok(to_owned_cstring(
+            trace_commons_contributor::private_inference_copy::harness_outcome_line(outcome),
+        ))
+    })
+}
+
+/// When the last call from a connected tool was answered here, assembled.
+///
+/// `seconds_ago` is how long ago the caller worked out that call arrived,
+/// from a `harness_list` row's `last_call_at`. ABSENCE IS AN OUT-OF-RANGE
+/// INTEGER, the convention [`tc_private_inference_serving_line`] already
+/// uses: any negative value -- including the one a shell passes for an
+/// absent or unparseable timestamp -- gives the empty string rather than a
+/// sentence about a call nobody saw. A shell draws nothing for it, because
+/// the state line above has already said the part that is true.
+///
+/// Assembled here rather than exported as a template with a hole in it, for
+/// the reason on [`tc_routing_token_line`]: a shell handed a pattern is a
+/// fourth place the wording drifts. Before this existed the sentence was
+/// reachable only by the one shell that links this crate natively, and the
+/// other two rendered nothing at all for the same state.
+///
+/// Returns an owned string; free it with [`tc_string_free`]. NULL only on a
+/// caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_harness_last_call_line(seconds_ago: i64) -> *mut c_char {
+    guarded_string_no_err(|| {
+        let seconds = u64::try_from(seconds_ago).ok();
+        Ok(to_owned_cstring(
+            &trace_commons_contributor::private_inference_copy::harness_last_call_line(seconds),
+        ))
+    })
+}
+
+/// Whether one action may be offered for a tool in this state.
+///
+/// `action` is `connect` or `disconnect`; `installed` and `connected` are the
+/// booleans of the same names on a `harness_list` row, as `0` or non-zero.
+///
+/// THE BRANCH TABLE CROSSES, NOT ONLY THE WORDS, and the second rule is the
+/// one worth crossing: a tool that is not installed cannot be connected, but
+/// a tool that IS connected can always be disconnected, installed or not.
+/// Uninstalling a coding tool does not remove the line we put in its config
+/// file, and "remove only what we put there" is worth nothing if a shell
+/// hides the control that does the removing.
+///
+/// The daemon also answers this per row, as `can_connect` / `can_disconnect`,
+/// and **a shell must read the row's answer rather than asking here.** They do
+/// not agree, deliberately.
+///
+/// This function takes `connected`, which on the wire is narrowed to "names
+/// OUR destination port". The daemon derives both row flags from the broader
+/// `wired` -- "names any local proxy" -- which is not on the wire, because
+/// that is the value `plan` itself gates on, so the row never offers an action
+/// the plan would refuse. A config left naming a stale or foreign port is
+/// `wired && !connected`: the daemon offers only a disconnect, and asking this
+/// function instead answers the reverse, stranding the row behind a connect
+/// that comes back as a no-op.
+///
+/// It remains the right question for a caller that has no row -- the CLI, or a
+/// test -- and it is what the daemon itself calls.
+///
+/// Answers `0` -- do not offer -- for an action this build does not know, for
+/// a NULL or non-UTF-8 `action`, and on a caught panic. Not offering an
+/// action is the safe direction; offering one that then refuses is not.
+///
+/// # Safety
+/// `action`, if non-null, must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_harness_action_available(
+    action: *const c_char,
+    installed: i32,
+    connected: i32,
+) -> i32 {
+    use trace_commons_contributor::harness_state::{HarnessAction, action_available};
+    guard(|| {
+        let action = if action.is_null() {
+            ""
+        } else {
+            unsafe { borrow_str(action) }.unwrap_or("")
+        };
+        let Some(action) = HarnessAction::from_label(action) else {
+            return Ok(0);
+        };
+        Ok(i32::from(action_available(
+            action,
+            installed != 0,
+            connected != 0,
+        )))
+    })
+    .unwrap_or(0)
+}
+
 /// The tones the private-inference surface is painted in.
 ///
 /// DELIBERATELY DISJOINT FROM BOTH `TC_ROUTING_TONE_*` (0..=3) AND

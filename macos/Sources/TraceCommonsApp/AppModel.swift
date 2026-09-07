@@ -228,6 +228,172 @@ final class AppModel: ObservableObject {
         }
     }
 
+    // MARK: - The tools on this computer
+
+    /// The branch tables and the sentences the harness list turns on, all
+    /// decided in the Rust. This shell owns no `switch` over a state or an
+    /// outcome, and picks none of the words either.
+    let harnessCalls = HarnessCalls(
+        stateCode: { TCHarness.stateCode(state: $0) },
+        planOutcomeCode: { TCHarness.planOutcomeCode(outcome: $0) },
+        actionAvailable: { TCHarness.actionAvailable(action: $0, installed: $1, connected: $2) },
+        stateLine: { TCHarness.stateLine(state: $0) },
+        lastCallLine: { TCHarness.lastCallLine(secondsAgo: $0) },
+        outcomeLine: { TCHarness.outcomeLine(outcome: $0) }
+    )
+
+    /// The tools, as of the last read. `.none` is "nothing is known", which
+    /// is what an unreadable payload and a daemon that has never heard of
+    /// the call both honestly say.
+    @Published private(set) var harnesses: HarnessList = .none
+
+    /// One action at a time, and never a second while a write is in flight.
+    @Published private(set) var harnessBusy = false
+
+    /// The worked-out change, waiting to be shown. Nothing is written while
+    /// this is nil, and nothing is written without it having been non-nil
+    /// first: the preview is the only route to a commit.
+    @Published private(set) var harnessPreview: HarnessPlan?
+
+    /// One tool and one action, held while the exposure question is put.
+    struct HarnessRequest: Equatable {
+        let id: String
+        let action: HarnessAction
+    }
+
+    /// The connect that is waiting on the exposure question, if any.
+    @Published private(set) var harnessExposureRequest: HarnessRequest?
+
+    /// Re-read, never cached. `connected` is a fact about a file this app
+    /// does not own, and the state above it turns on a ledger that moves on
+    /// its own.
+    func refreshHarnesses() {
+        perform("harness_list", work: { try $0.harnessList() }) {
+            self.publishIfChanged(\.harnesses, $0)
+        }
+    }
+
+    /// The contributor pressed the one button on a row.
+    ///
+    /// A connect made while nothing here answers model calls stops at the
+    /// exposure question first: starting the listener opens it to everything
+    /// on this machine, and that does not follow from connecting one tool.
+    /// A disconnect never asks -- it only ever removes something.
+    func beginHarnessAction(id: String, action: HarnessAction) {
+        guard !harnessBusy, harnessPreview == nil, harnessExposureRequest == nil else { return }
+        if action == .connect,
+            HarnessSurface.connectNeedsExposure(
+                listenerOn: daemonSettings?.privateInferenceOn ?? false)
+        {
+            harnessExposureRequest = HarnessRequest(id: id, action: action)
+            return
+        }
+        planHarness(id: id, action: action)
+    }
+
+    /// The answer to that question.
+    ///
+    /// Declining writes the marker alone and connects nothing. Accepting
+    /// turns the destination on and records the answer in one write, and
+    /// only then works out the change -- which is still shown before it is
+    /// made.
+    func answerHarnessExposure(accepted: Bool) {
+        guard let request = harnessExposureRequest else { return }
+        harnessExposureRequest = nil
+        guard accepted else {
+            answerPrivateInferenceOffer(accepted: false)
+            return
+        }
+        guard let client, !harnessBusy else { return }
+        harnessBusy = true
+        Task.detached(priority: .userInitiated) {
+            let outcome = Result { () -> (DaemonSettingsView, HarnessPlan?) in
+                let settings = try client.setPrivateInference(true)
+                return (settings, try client.harnessPlan(id: request.id, action: request.action))
+            }
+            await MainActor.run {
+                self.harnessBusy = false
+                switch outcome {
+                case .success(let (settings, plan)):
+                    self.publishIfChanged(\.daemonSettings, settings)
+                    self.harnessPreview = plan
+                case .failure:
+                    self.reportHarnessFailure()
+                }
+                self.refreshHarnesses()
+            }
+        }
+    }
+
+    /// Works the change out and shows it. Writes nothing.
+    private func planHarness(id: String, action: HarnessAction) {
+        guard let client else {
+            reportHarnessFailure()
+            return
+        }
+        harnessBusy = true
+        Task.detached(priority: .userInitiated) {
+            let outcome = Result { try client.harnessPlan(id: id, action: action) }
+            await MainActor.run {
+                self.harnessBusy = false
+                switch outcome {
+                case .success(let plan):
+                    self.harnessPreview = plan
+                case .failure(let error):
+                    // A connect the daemon refused for want of somewhere to
+                    // point the tool is the exposure question, not an error
+                    // to show: the listener is off, and turning it on is a
+                    // decision with words of its own.
+                    if let failure = error as? DaemonClient.Failure,
+                        HarnessSurface.isNoDestination(failure.message)
+                    {
+                        self.harnessExposureRequest = HarnessRequest(id: id, action: action)
+                    } else {
+                        self.reportHarnessFailure()
+                    }
+                }
+            }
+        }
+    }
+
+    /// The contributor said no to the change. The file keeps every value it
+    /// has, and the plan is simply dropped -- it expires on the far side.
+    func cancelHarnessPreview() {
+        harnessPreview = nil
+    }
+
+    /// The contributor said yes.
+    ///
+    /// The only thing sent is the id the daemon minted, so what is written
+    /// can only be what was shown. A plan the daemon no longer holds --
+    /// expired, already committed, or a file that moved underneath it -- is
+    /// reported as a change that did not happen and is NOT retried: the
+    /// contributor is shown a fresh list, and a fresh preview if they ask
+    /// again.
+    func confirmHarnessPreview() {
+        guard let plan = harnessPreview,
+            HarnessSurface.canCommit(plan, calls: harnessCalls),
+            let planID = plan.planID,
+            let client, !harnessBusy
+        else { return }
+        harnessPreview = nil
+        harnessBusy = true
+        Task.detached(priority: .userInitiated) {
+            let outcome = Result { try client.harnessCommit(planID: planID) }
+            await MainActor.run {
+                self.harnessBusy = false
+                if case .failure = outcome { self.reportHarnessFailure() }
+                self.refreshHarnesses()
+            }
+        }
+    }
+
+    /// One sentence for every way a change can fail to happen, and it is the
+    /// payload's: the change was not confirmed, look and try again.
+    private func reportHarnessFailure() {
+        lastActionError = privateInferenceCopy?.writeUnconfirmed
+    }
+
     // MARK: - The redaction witness
 
     /// The witness surface's fixed words, decoded once from the Rust.
@@ -605,6 +771,9 @@ final class AppModel: ObservableObject {
             refreshHistory()
         case .statusChanged:
             refreshStatus()
+            // The listener's own state moves under this, and with it whether
+            // any tool has answered yet. Re-read rather than left to age.
+            refreshHarnesses()
         case .digestDue(let count, let contributed, let contributedProjects, let credit, _):
             refreshQueue()
             // A digest can now be about what went out unasked, with nothing
@@ -705,6 +874,7 @@ final class AppModel: ObservableObject {
         refreshOutcomeCounts()
         refreshAudit()
         refreshPublicProfile()
+        refreshHarnesses()
     }
 
     /// The local change log. Refreshed alongside everything else at launch,

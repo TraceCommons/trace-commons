@@ -28,6 +28,7 @@ pub mod client;
 pub mod community;
 pub mod eligibility;
 pub mod enroll;
+pub mod harness;
 pub mod health;
 pub mod history;
 pub mod install;

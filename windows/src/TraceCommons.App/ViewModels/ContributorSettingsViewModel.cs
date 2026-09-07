@@ -700,157 +700,34 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
         }
     }
 
-    // Answering model calls on this computer. Its own block rather than a row
-    // on the routing card: that card is about READING a record another
-    // process keeps, and this is about this app being the thing that answers.
-    private bool _privateInferenceOn;
-    private bool _privateInferenceAnswered;
-    private PrivateInferenceState _privateInferenceState = new(string.Empty, null);
+    // Answering model calls on this computer. The switch, the exposure
+    // sentence and the line saying what the listener actually did all live on
+    // the model-calls destination now -- PrivateInferenceViewModel owns them,
+    // beside each other, which is the only place they can be read together.
+    //
+    // What stays here is a pointer. Somebody who learned where the switch was
+    // should find a sentence and a way there, not a hole.
 
     /// <summary>
     /// The whole block is collapsed when the words did not arrive, rather
-    /// than rendered with a switch and no sentence beside it.
+    /// than rendered as a card with nothing on it.
     /// </summary>
     public bool PrivateInferenceAvailable => _privateInferenceCopy is not null;
 
-    public bool PrivateInferenceControlsEnabled => !_isBusy && _privateInferenceCopy is not null;
-
     public string PrivateInferenceTitle => _privateInferenceCopy?.SettingsTitle ?? string.Empty;
 
-    public string PrivateInferenceWhat => _privateInferenceCopy?.OfferWhat ?? string.Empty;
+    /// <summary>
+    /// The sentence saying where the switch went. The Rust's, like every
+    /// other word on this surface.
+    /// </summary>
+    public string PrivateInferenceMoved => _privateInferenceCopy?.SettingsMoved ?? string.Empty;
 
     /// <summary>
-    /// What turning it on exposes, on the settings card as well as in the
-    /// offer. A contributor who declined and came back months later is making
-    /// the same decision and is owed the same sentence.
+    /// The label on the way out, which is the destination's own: the rail and
+    /// this pointer read one definition, so they cannot name it differently.
     /// </summary>
-    public string PrivateInferenceExposure => _privateInferenceCopy?.OfferExposure ?? string.Empty;
-
-    public string PrivateInferenceToggle => _privateInferenceCopy?.SettingsToggle ?? string.Empty;
-
-    public string PrivateInferenceAppliesAtOnce =>
-        _privateInferenceCopy?.SettingsAppliesAtOnce ?? string.Empty;
-
-    /// <summary>What was ASKED FOR.</summary>
-    public bool PrivateInferenceEnabled => _privateInferenceOn;
-
-    /// <summary>
-    /// What HAPPENED. Never derived from the switch: a listener that refused
-    /// to start leaves the switch on, and that is the case this line exists
-    /// for.
-    /// </summary>
-    public string PrivateInferenceStateText => _privateInferenceCopy is null
-        ? string.Empty
-        : PrivateInferenceSurface.StateLine(_privateInferenceState, _privateInferenceCopy);
-
-    /// <summary>Where it is answering, or nothing at all.</summary>
-    public string PrivateInferenceServingText =>
-        PrivateInferenceSurface.ServingLine(_privateInferenceState);
-
-    public bool HasPrivateInferenceServingText => PrivateInferenceServingText.Length > 0;
-
-    private PrivateInferenceTone PrivateInferenceStateTone =>
-        PrivateInferenceSurface.Tone(_privateInferenceState);
-
-    // One visibility per tone, chosen from the tone and never from the text.
-    // The sentence must not be read back to pick a colour: three of the seven
-    // begin with the same two words.
-    public bool PrivateInferenceStateIsNeutral =>
-        PrivateInferenceStateTone == PrivateInferenceTone.Neutral;
-
-    public bool PrivateInferenceStateIsHeld =>
-        PrivateInferenceStateTone == PrivateInferenceTone.Held;
-
-    public bool PrivateInferenceStateIsClear =>
-        PrivateInferenceStateTone == PrivateInferenceTone.Clear;
-
-    public bool PrivateInferenceStateIsAttention =>
-        PrivateInferenceStateTone == PrivateInferenceTone.Attention;
-
-    public bool PrivateInferenceStateIsRefused =>
-        PrivateInferenceStateTone == PrivateInferenceTone.Refused;
-
-    /// <summary>
-    /// Takes what the daemon reported. This card draws the SWITCH and the
-    /// line beneath it, never the offer: the offer belongs on the screen the
-    /// app opens on, and MainViewModel owns it -- together with the
-    /// has-the-daemon-answered guard a second copy here would not have had.
-    /// </summary>
-    private void FillPrivateInference(DaemonSettingsSnapshot settings)
-    {
-        _privateInferenceOn = settings.PrivateInferenceOn;
-        _privateInferenceAnswered = settings.PrivateInferenceAnswered;
-        _privateInferenceState = PrivateInferenceState.From(settings.PrivateInferenceReport);
-        Raise(nameof(PrivateInferenceEnabled));
-        Raise(nameof(PrivateInferenceStateText));
-        Raise(nameof(PrivateInferenceServingText));
-        Raise(nameof(HasPrivateInferenceServingText));
-        Raise(nameof(PrivateInferenceStateIsNeutral));
-        Raise(nameof(PrivateInferenceStateIsHeld));
-        Raise(nameof(PrivateInferenceStateIsClear));
-        Raise(nameof(PrivateInferenceStateIsAttention));
-        Raise(nameof(PrivateInferenceStateIsRefused));
-    }
-
-    /// <summary>
-    /// Writes the switch and renders from the daemon's echo, never
-    /// optimistically: the echo carries the only thing that knows whether the
-    /// listener actually started.
-    ///
-    /// The marker rides along, so a contributor who found the switch on their
-    /// own is not asked the question on the next launch.
-    /// </summary>
-    public async Task SetPrivateInferenceAsync(bool on)
-    {
-        if (!IsLoaded || IsBusy || _privateInferenceCopy is null)
-        {
-            // The toggle is bound one-way and has ALREADY moved to wherever
-            // the contributor dragged it. Nothing below is going to write it,
-            // so push the daemon's value back at it: a card left showing "on"
-            // over a listener nobody started is the switch-lies shape this
-            // whole surface is built to avoid.
-            Raise(nameof(PrivateInferenceEnabled));
-            return;
-        }
-
-        IsBusy = true;
-        try
-        {
-            DaemonResponse response = await _host
-                .CallAsync(
-                    DaemonProtocol.Methods.SetSettings,
-                    PrivateInferenceSurface.SerializeSwitch(on))
-                .ConfigureAwait(true);
-            if (response.ResultAs<DaemonSettingsSnapshot>() is { } settings &&
-                PrivateInferenceSurface.WriteConfirmed(on, settings))
-            {
-                if (Notice == _privateInferenceCopy.WriteUnconfirmed) Notice = string.Empty;
-                FillPrivateInference(settings);
-            }
-            else
-            {
-                // The reply did not confirm the full write. Preserve the
-                // previous snapshot without claiming persistence failed.
-                Notice = _privateInferenceCopy.WriteUnconfirmed;
-                Raise(nameof(PrivateInferenceEnabled));
-            }
-        }
-        catch
-        {
-            // The state LINE is left to the next refresh -- nothing here
-            // invents a sentence, because the daemon owns that one and this
-            // shell has none of its own to substitute. The SWITCH is not
-            // left: it is snapped back to what the daemon last reported,
-            // because a switch is not a sentence and a stuck one is a claim.
-            System.Diagnostics.Trace.TraceWarning(nameof(SetPrivateInferenceAsync));
-            Notice = _privateInferenceCopy.WriteUnconfirmed;
-            Raise(nameof(PrivateInferenceEnabled));
-        }
-        finally
-        {
-            IsBusy = false;
-        }
-    }
+    public string PrivateInferenceDestination =>
+        _privateInferenceCopy?.Destination ?? string.Empty;
 
     /// <summary>Whether the witness actions may be pressed.</summary>
     public bool WitnessControlsEnabled => !_isBusy && _witnessCopy is not null;
@@ -867,7 +744,6 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
                 Raise(nameof(RoutingConnectOffered));
                 Raise(nameof(WitnessControlsEnabled));
                 Raise(nameof(InferenceEvidenceControlsEnabled));
-                Raise(nameof(PrivateInferenceControlsEnabled));
             }
         }
     }
@@ -1226,7 +1102,6 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
         if (settings is not null)
         {
             FillInferenceEvidence(settings);
-            FillPrivateInference(settings);
         }
         ConnectionRows.Clear();
         if (settings is null)

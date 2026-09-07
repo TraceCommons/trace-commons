@@ -160,21 +160,12 @@ pub struct SettingsView {
     /// into the controls, so the signals that fires are not mistaken for a
     /// contributor declaring something and echoed straight back.
     filling_routing: std::cell::Cell<bool>,
-    /// The switch that makes this daemon answer model calls itself.
+    /// The way out to the model-calls screen, which owns the switch now.
     ///
-    /// Built once and refilled, like the routing switch beside it and for
-    /// the same reason.
-    private_inference_switch: gtk::Switch,
-    /// What the listener is actually doing, rebuilt on each render: one
-    /// sentence and its tone, from the shared table.
-    private_inference_status: gtk::Box,
-    /// Set while `render_private_inference` writes the daemon's own answer
-    /// into the switch, so the signal that fires is not echoed back as a
-    /// contributor declaring something.
-    filling_private_inference: std::cell::Cell<bool>,
-    /// Last confirmed requested setting; no answer is not an off declaration.
-    confirmed_private_inference: std::cell::Cell<Option<bool>>,
-    private_inference_write_pending: std::cell::Cell<bool>,
+    /// Nothing on this card reports a state, so nothing on it is filled from
+    /// the daemon and nothing on it can be painted as working: the indicator
+    /// belongs beside the control, on the screen that has both.
+    private_inference_link: gtk::Button,
     /// The port a running IronWire published, or `None` for a machine that
     /// published nothing.
     ///
@@ -352,50 +343,27 @@ impl SettingsView {
         style::append_caveat(&routing_card, copy::IRONWIRE_APPLIES_AT_ONCE);
         content.append(&routing_card);
 
-        // Answering model calls on this computer. Its own section rather
-        // than a row on the card above: that card is about READING a record
-        // another process keeps, and this is about this daemon being the
-        // thing that answers. Two different questions, answered
-        // independently, and folding them together is what made the switch
-        // undiscoverable in the first place.
+        // Answering model calls on this computer. The switch, the exposure
+        // sentence and the line saying what the listener actually did all
+        // live on the model-calls screen now -- that is the one place that
+        // can show the state beside the control, and it was five sections
+        // down a settings list before.
+        //
+        // The card stays rather than going: somebody who learned where the
+        // switch was should find a sentence and a way there, not a hole.
         content.append(&style::section(copy::PRIVATE_INFERENCE_TITLE));
         let private_inference_card = style::card(gtk::Orientation::Vertical, space::M);
-        style::append_body(&private_inference_card, copy::PRIVATE_INFERENCE_OFFER_WHAT);
-        // The exposure sentence is on the settings card too, not only in the
-        // offer. A contributor who declined and came back months later is
-        // making the same decision and is owed the same sentence.
         style::append_body(
             &private_inference_card,
-            copy::PRIVATE_INFERENCE_OFFER_EXPOSURE,
+            copy::PRIVATE_INFERENCE_SETTINGS_MOVED,
         );
-        let private_inference_row = gtk::Box::new(gtk::Orientation::Horizontal, space::S);
-        let private_inference_label = gtk::Label::builder()
-            .label(copy::PRIVATE_INFERENCE_TOGGLE)
-            .xalign(0.0)
-            .wrap(true)
-            .hexpand(true)
+        // The button's label is the screen's own, so the switcher and this
+        // pointer can never name the destination differently.
+        let private_inference_link = gtk::Button::builder()
+            .label(copy::PRIVATE_INFERENCE_DESTINATION)
+            .halign(gtk::Align::Start)
             .build();
-        private_inference_label.add_css_class("tc-body");
-        let private_inference_switch = gtk::Switch::builder().halign(gtk::Align::End).build();
-        private_inference_switch.set_sensitive(false);
-        private_inference_switch.set_valign(gtk::Align::Center);
-        private_inference_switch.update_property(&[gtk::accessible::Property::Label(
-            copy::PRIVATE_INFERENCE_TOGGLE,
-        )]);
-        private_inference_row.append(&private_inference_label);
-        private_inference_row.append(&private_inference_switch);
-        private_inference_card.append(&private_inference_row);
-        let private_inference_status = gtk::Box::new(gtk::Orientation::Vertical, space::XS);
-        private_inference_status.append(&tone_row(
-            copy::PRIVATE_INFERENCE_STATE_UNKNOWN,
-            Tone::Neutral,
-            None,
-        ));
-        private_inference_card.append(&private_inference_status);
-        style::append_caveat(
-            &private_inference_card,
-            copy::PRIVATE_INFERENCE_APPLIES_AT_ONCE,
-        );
+        private_inference_card.append(&private_inference_link);
         content.append(&private_inference_card);
 
         // The witness card. Its own section rather than a row on the card
@@ -663,11 +631,7 @@ impl SettingsView {
             routing_evidence: RefCell::new(None),
             routing_evidence_pending: std::cell::Cell::new(false),
             filling_routing: std::cell::Cell::new(false),
-            private_inference_switch,
-            private_inference_status,
-            filling_private_inference: std::cell::Cell::new(false),
-            confirmed_private_inference: std::cell::Cell::new(None),
-            private_inference_write_pending: std::cell::Cell::new(false),
+            private_inference_link,
             routing_discovered_port: std::cell::Cell::new(None),
             witness_status,
             witness_form,
@@ -755,17 +719,15 @@ pub fn wire(app: &Rc<App>) {
             set_routing_sensitivity(&a, on);
             send_routing(&a, on);
         });
-    // The switch that makes this daemon answer model calls itself. Writes
-    // on its own, like the one above: flipping it IS the contributor
-    // acting, and there is nothing else on the card to fill in first.
+    // The pointer out to the model-calls screen. It only moves the stack:
+    // nothing here writes the setting, because the screen it opens is the
+    // one that shows what the listener actually did next to the switch.
     let a = Rc::clone(app);
     app.settings
-        .private_inference_switch
-        .connect_active_notify(move |sw| {
-            if a.settings.filling_private_inference.get() {
-                return;
-            }
-            send_private_inference(&a, sw.is_active());
+        .private_inference_link
+        .connect_clicked(move |_| {
+            a.stack
+                .set_visible_child_name(crate::ui::PRIVATE_INFERENCE_SCREEN);
         });
     let a = Rc::clone(app);
     app.settings.routing_apply.connect_clicked(move |_| {
@@ -1764,7 +1726,6 @@ pub fn refresh(app: &Rc<App>) {
         render_connection_checks(app, &settings);
         render_knobs(app, &settings);
         render_routing(app, &settings);
-        render_private_inference(app, &settings);
         render_inference_consent(app, &settings);
     });
     // The roster state, from the daemon rather than from what this window
@@ -2851,120 +2812,6 @@ fn state_tone(tone: copy::StateTone) -> Tone {
         copy::StateTone::Attention => Tone::Attention,
         copy::StateTone::Neutral => Tone::Neutral,
     }
-}
-
-/// The private-inference tone onto this shell's palette.
-///
-/// NOT A BRANCH TABLE HERE, for the reason `routing_tone` gives: which tone
-/// each state reads in is decided once, in `private_inference_copy`, beside
-/// the sentence it goes with. This only carries that answer onto
-/// `style::Tone`.
-///
-/// **No catch-all arm, deliberately** -- the rule `witness_tone` states. A
-/// tone this shell has not been taught must fail to compile rather than fall
-/// through to `Neutral`.
-fn private_inference_tone(tone: copy::PrivateInferenceTone) -> Tone {
-    match tone {
-        copy::PrivateInferenceTone::Neutral => Tone::Neutral,
-        copy::PrivateInferenceTone::Held => Tone::Held,
-        copy::PrivateInferenceTone::Clear => Tone::Clear,
-        copy::PrivateInferenceTone::Attention => Tone::Attention,
-        copy::PrivateInferenceTone::Refused => Tone::Refused,
-    }
-}
-
-/// The switch, and what actually happened underneath it.
-///
-/// The switch shows what was ASKED FOR and the row beneath shows what
-/// happened, because they differ exactly when it matters: a listener that
-/// refused to start leaves the switch on, and a screen with only the switch
-/// on it would say the thing is running.
-fn render_private_inference(app: &Rc<App>, settings: &crate::model::Settings) {
-    let view = &app.settings;
-    view.confirmed_private_inference
-        .set(Some(settings.private_inference));
-    view.private_inference_switch
-        .set_sensitive(!view.private_inference_write_pending.get());
-    view.filling_private_inference.set(true);
-    view.private_inference_switch
-        .set_active(settings.private_inference);
-    view.filling_private_inference.set(false);
-
-    let status = &view.private_inference_status;
-    while let Some(child) = status.first_child() {
-        status.remove(&child);
-    }
-    // A daemon that has never heard of the field sends nothing, and the
-    // shared table renders that as unreported, separately from an unfamiliar
-    // nonempty state. Neither is evidence that a listener stopped.
-    let (label, port) = match settings.private_inference_state.as_ref() {
-        Some(state) => (state.state.as_str(), state.port),
-        None => ("", None),
-    };
-    status.append(&tone_row(
-        copy::private_inference_state_line(label),
-        private_inference_tone(copy::private_inference_state_tone(label)),
-        None,
-    ));
-    // Assembled on the shared side, and empty when there is no port. An
-    // empty sentence is drawn as no row at all rather than as a blank line.
-    let serving = copy::private_inference_serving_line(port);
-    if !serving.is_empty() {
-        style::append_meta(status, serving);
-    }
-}
-
-/// Write the switch, and render from the daemon's echo.
-///
-/// Never optimistic: what comes back carries `private_inference_state`, and
-/// that is the only thing that knows whether the listener actually started.
-/// Turning it on from here also records that the question has been answered,
-/// so the offer does not appear on the next launch for a contributor who
-/// found the switch themselves.
-fn send_private_inference(app: &Rc<App>, on: bool) {
-    let view = &app.settings;
-    // The signal fires after the thumb moved. Put back the confirmed value
-    // while waiting, so an error cannot leave an unconfirmed request on screen.
-    view.filling_private_inference.set(true);
-    view.private_inference_switch
-        .set_active(view.confirmed_private_inference.get().unwrap_or(false));
-    view.filling_private_inference.set(false);
-    if view.confirmed_private_inference.get().is_none()
-        || view.private_inference_write_pending.replace(true)
-    {
-        return;
-    }
-    view.private_inference_switch.set_sensitive(false);
-    app.call(
-        "set_settings",
-        serde_json::json!({
-            "private_inference": on,
-            "private_inference_offer_seen": true,
-        }),
-        move |app, result| {
-            app.settings.private_inference_write_pending.set(false);
-            app.settings.private_inference_switch.set_sensitive(true);
-            let confirmed = result.as_ref().is_ok_and(|value| {
-                copy::private_inference_write_confirmed(
-                    Some(on),
-                    value
-                        .get("private_inference_offer_seen")
-                        .and_then(serde_json::Value::as_bool),
-                    value
-                        .get("private_inference")
-                        .and_then(serde_json::Value::as_bool),
-                )
-            });
-            let settings = result
-                .ok()
-                .and_then(|value| serde_json::from_value::<crate::model::Settings>(value).ok());
-            if let Some(settings) = settings.filter(|_| confirmed) {
-                render_private_inference(app, &settings);
-            } else {
-                app.toast(copy::PRIVATE_INFERENCE_WRITE_UNCONFIRMED);
-            }
-        },
-    );
 }
 
 /// The witness tone onto this shell's palette.
@@ -4543,104 +4390,34 @@ mod tests {
         }
     }
 
-    /// The tone this shell paints a state in comes from the shared table,
-    /// not from a second copy written out here.
+    /// Settings points at the model-calls screen; it does not hold the
+    /// switch any more.
     ///
-    /// Reads this file's own source, the way the routing twin does. The
-    /// words could not drift -- they are `pub use`d -- but the branching
-    /// could, in three shells, and nothing in this repository would notice.
+    /// The card stays. Somebody who learned where the switch was should find
+    /// a pointer there rather than a hole, and the sentence saying so is the
+    /// shared module's, like every other word on this surface. The forbidden
+    /// spellings are assembled rather than written out, because this test
+    /// reads the file it is written in.
     #[test]
-    fn the_private_inference_tone_is_not_branched_on_in_this_shell() {
+    fn the_settings_card_points_at_the_screen_rather_than_holding_the_switch() {
         let source = include_str!("settings.rs");
-        let start = source
-            .find("fn private_inference_tone(")
-            .expect("the tone mapper exists");
-        let end = source[start..].find("\n}\n").expect("its body ends") + start;
-        let body = &source[start..end];
-        for spelled in [
-            "running_no_backends",
-            "running_elsewhere",
-            "port_in_use",
-            "start_failed",
-            "crashed",
-        ] {
-            assert!(
-                !body.contains(spelled),
-                "the state is branched on in this shell: {spelled}"
-            );
-        }
-        // And the render path asks the shared table for both halves rather
-        // than deriving one from the other.
-        let start = source
-            .find("fn render_private_inference(")
-            .expect("the renderer exists");
-        let end = source[start..].find("\n}\n").expect("its body ends") + start;
-        let body = &source[start..end];
-        assert!(body.contains("copy::private_inference_state_line(label)"));
-        assert!(body.contains("copy::private_inference_state_tone(label)"));
-    }
-
-    /// Every state this daemon can report gets a tone, and only one of them
-    /// may be painted as working.
-    ///
-    /// The named value matters more than the mapping: `running_no_backends`
-    /// is a listener that answers a health check and can pass no call on,
-    /// and a green light over it is the exact thing that state exists to
-    /// prevent.
-    #[test]
-    fn only_a_listener_with_somewhere_to_send_is_painted_clear() {
-        let tone = |label: &str| private_inference_tone(copy::private_inference_state_tone(label));
-        assert_eq!(tone("running"), Tone::Clear);
-        assert_eq!(tone("running_no_backends"), Tone::Attention);
-        assert_ne!(tone("running_no_backends"), Tone::Clear);
-        assert_eq!(tone("running_elsewhere"), Tone::Held);
-        assert_eq!(tone("off"), Tone::Neutral);
-        assert_eq!(tone("stopping"), Tone::Held);
-        assert_ne!(
-            copy::private_inference_state_line(""),
-            copy::private_inference_state_line("off")
-        );
-        assert_ne!(
-            copy::private_inference_state_line("stopping"),
-            copy::private_inference_state_line("off")
-        );
-        for failure in ["port_in_use", "start_failed", "crashed"] {
-            assert_eq!(tone(failure), Tone::Refused, "{failure}");
-        }
-        // A state a later daemon grows, and a daemon that reports none at
-        // all, both claim nothing rather than falling through to the
-        // working light.
-        assert_eq!(tone("a_state_from_a_later_daemon"), Tone::Neutral);
-        assert_eq!(tone(""), Tone::Neutral);
-    }
-
-    /// A refusal names the way out, and the way out is the switch.
-    #[test]
-    fn a_refusal_on_this_card_says_what_to_do() {
-        for failure in ["port_in_use", "start_failed", "crashed"] {
-            let line = copy::private_inference_state_line(failure);
-            assert!(line.contains("off and on again"), "{failure}: {line}");
-        }
-    }
-
-    /// The switch writes one call carrying both keys.
-    ///
-    /// Turning it on from Settings answers the question too, so a
-    /// contributor who found the switch on their own is not asked about it
-    /// on the next launch.
-    #[test]
-    fn the_switch_records_that_the_question_is_answered() {
-        let source = include_str!("settings.rs");
-        let start = source
-            .find("fn send_private_inference(")
-            .expect("the writer exists");
-        let end = source[start..].find("\n}\n").expect("its body ends") + start;
-        let body = &source[start..end];
-        assert!(body.contains("\"private_inference\": on"));
-        assert!(body.contains("\"private_inference_offer_seen\": true"));
         assert!(
-            body.contains("set_settings"),
-            "the switch must go through set_settings"
+            source.contains("copy::PRIVATE_INFERENCE_SETTINGS_MOVED"),
+            "the card must show the sentence saying where the switch went"
+        );
+        assert!(
+            source.contains("crate::ui::PRIVATE_INFERENCE_SCREEN"),
+            "the pointer must name the screen it opens"
+        );
+        let toggle = format!("copy::{}", "PRIVATE_INFERENCE_TOGGLE");
+        assert!(
+            !source.contains(&toggle),
+            "the switch belongs on the model-calls screen, not on this card"
+        );
+        let sender = format!("fn send_private{}", "_inference(");
+        assert!(
+            !source.contains(&sender),
+            "Settings must not write the setting; the screen does"
         );
     }
 

@@ -9,6 +9,10 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use trace_commons_contributor_ffi::{
+    TC_HARNESS_PLAN_CHANGES, TC_HARNESS_PLAN_ENTRY_UNUSABLE, TC_HARNESS_PLAN_NO_CONFIG_PATH,
+    TC_HARNESS_PLAN_NOOP, TC_HARNESS_PLAN_NOT_INSTALLED, TC_HARNESS_PLAN_UNKNOWN,
+    TC_HARNESS_PLAN_UNPARSEABLE, TC_HARNESS_STATE_ACTIVITY_SHARED, TC_HARNESS_STATE_ANSWERING,
+    TC_HARNESS_STATE_CONNECTED_NO_CALLS, TC_HARNESS_STATE_NOT_CONNECTED, TC_HARNESS_STATE_UNKNOWN,
     TC_PRIVATE_INFERENCE_TONE_ATTENTION, TC_PRIVATE_INFERENCE_TONE_CLEAR,
     TC_PRIVATE_INFERENCE_TONE_HELD, TC_PRIVATE_INFERENCE_TONE_NEUTRAL,
     TC_PRIVATE_INFERENCE_TONE_REFUSED, TC_WITNESS_STATE_ABSENT, TC_WITNESS_STATE_NOT_ENROLLED,
@@ -29,6 +33,10 @@ use trace_commons_contributor_ffi::{
     tc_subscribe, tc_unsubscribe, tc_witness_clear, tc_witness_configure, tc_witness_copy,
     tc_witness_last_result_json, tc_witness_last_result_line, tc_witness_last_result_tone,
     tc_witness_state_line, tc_witness_state_tone, tc_witness_status_json, tc_witness_trust_state,
+};
+use trace_commons_contributor_ffi::{
+    tc_harness_action_available, tc_harness_last_call_line, tc_harness_outcome_line,
+    tc_harness_plan_outcome_code, tc_harness_state_code, tc_harness_state_line,
 };
 
 fn cstr(p: &Path) -> CString {
@@ -3568,4 +3576,299 @@ fn private_inference_write_confirmation_preserves_absent_values_and_rejects_inva
         assert_eq!(confirmed(1, invalid, 1), 0);
         assert_eq!(confirmed(1, 1, invalid), 0);
     }
+}
+
+/// The harness state mapper crosses the ABI, and it never invents the one
+/// value that claims a call was served.
+#[test]
+fn the_harness_state_table_crosses_the_abi() {
+    use trace_commons_contributor::harness_state::HarnessState;
+    let code = |state: &str| {
+        let state = cstr_str(state);
+        unsafe { tc_harness_state_code(state.as_ptr()) }
+    };
+
+    for state in [
+        HarnessState::NotConnected,
+        HarnessState::ConnectedNoCalls,
+        HarnessState::Answering,
+        HarnessState::ActivityShared,
+        HarnessState::Unknown,
+    ] {
+        let expected = match state {
+            HarnessState::NotConnected => TC_HARNESS_STATE_NOT_CONNECTED,
+            HarnessState::ConnectedNoCalls => TC_HARNESS_STATE_CONNECTED_NO_CALLS,
+            HarnessState::Answering => TC_HARNESS_STATE_ANSWERING,
+            HarnessState::ActivityShared => TC_HARNESS_STATE_ACTIVITY_SHARED,
+            HarnessState::Unknown => TC_HARNESS_STATE_UNKNOWN,
+        };
+        assert_eq!(code(state.label()), expected, "{state:?}");
+    }
+
+    // A shared family is its own value. A shell that rendered it as
+    // ANSWERING would name a tool the ledger cannot name.
+    assert_ne!(
+        code("activity_shared"),
+        TC_HARNESS_STATE_ANSWERING,
+        "a shared protocol family must not be painted as one tool answering"
+    );
+
+    // A label from a later daemon, a wrong case, and no pointer at all: none
+    // of them may become the working light.
+    for unknown in ["a_state_from_a_later_daemon", "ANSWERING", ""] {
+        assert_eq!(code(unknown), TC_HARNESS_STATE_UNKNOWN, "{unknown:?}");
+    }
+    assert_eq!(
+        unsafe { tc_harness_state_code(std::ptr::null()) },
+        TC_HARNESS_STATE_UNKNOWN
+    );
+}
+
+/// The harness state SENTENCE crosses the ABI too, not only the code.
+///
+/// Without this call each shell keeps its own map from a state onto one of
+/// the payload's sentences -- Swift, C# and Rust, three copies of one
+/// decision. Every value here is checked against the payload rather than a
+/// literal, so this test cannot become the place a sentence is written.
+#[test]
+fn the_harness_state_sentence_crosses_the_abi() {
+    use trace_commons_contributor::harness_state::HarnessState;
+    let line = |state: &str| {
+        let state = cstr_str(state);
+        take_owned(unsafe { tc_harness_state_line(state.as_ptr()) })
+    };
+    let copy = trace_commons_contributor::private_inference_copy::private_inference_copy();
+
+    assert_eq!(
+        line(HarnessState::NotConnected.label()),
+        copy.harness_not_connected
+    );
+    assert_eq!(
+        line(HarnessState::ConnectedNoCalls.label()),
+        copy.harness_connected_nothing_seen
+    );
+    assert_eq!(
+        line(HarnessState::Answering.label()),
+        copy.harness_answering
+    );
+
+    // The two that must claim nothing, and must borrow nothing to do it.
+    // `activity_shared` taking the answering sentence would say a call from
+    // *this tool* arrived, which is the one thing the state denies knowing.
+    for silent in [
+        HarnessState::ActivityShared.label(),
+        HarnessState::Unknown.label(),
+        "a_state_from_a_later_daemon",
+        "ANSWERING",
+        "",
+    ] {
+        let sentence = line(silent);
+        assert_eq!(sentence, "", "{silent:?} grew a sentence");
+        assert_ne!(sentence, copy.harness_answering, "{silent:?}");
+        assert_ne!(sentence, copy.harness_connected_nothing_seen, "{silent:?}");
+    }
+    assert_eq!(
+        take_owned(unsafe { tc_harness_state_line(std::ptr::null()) }),
+        ""
+    );
+}
+
+/// The plan outcome's SENTENCE crosses the ABI too, not only the code.
+///
+/// Four non-committable outcomes had no sentence at all before this, so a
+/// preview for one of them opened with a title, a path, no changes and a way
+/// out. Every value here is checked against the payload rather than a
+/// literal, so this test cannot become the place a sentence is written.
+#[test]
+fn the_harness_plan_outcome_sentence_crosses_the_abi() {
+    use trace_commons_contributor::harness_state::PlanOutcome;
+    let line = |outcome: &str| {
+        let outcome = cstr_str(outcome);
+        take_owned(unsafe { tc_harness_outcome_line(outcome.as_ptr()) })
+    };
+    let copy = trace_commons_contributor::private_inference_copy::private_inference_copy();
+
+    assert_eq!(
+        line(PlanOutcome::Noop.label()),
+        copy.harness_plan_nothing_to_change
+    );
+    assert_eq!(
+        line(PlanOutcome::Unparseable.label()),
+        copy.harness_unreadable_config
+    );
+    assert_eq!(
+        line(PlanOutcome::NotInstalled.label()),
+        copy.harness_not_installed
+    );
+    assert_eq!(
+        line(PlanOutcome::EntryUnusable.label()),
+        copy.harness_plan_entry_unusable
+    );
+    assert_eq!(
+        line(PlanOutcome::NoConfigPath.label()),
+        copy.harness_plan_no_config_path
+    );
+
+    // A plan that has changes shows them; a sentence above them would be the
+    // app narrating its own list. And an outcome from a later daemon may not
+    // borrow the nearest refusal.
+    for silent in [
+        PlanOutcome::Changes.label(),
+        "an_outcome_from_a_later_daemon",
+        "NOOP",
+        "",
+    ] {
+        assert_eq!(line(silent), "", "{silent:?} grew a sentence");
+    }
+    assert_eq!(
+        take_owned(unsafe { tc_harness_outcome_line(std::ptr::null()) }),
+        ""
+    );
+}
+
+/// The when-line crosses the ABI, so all three shells can draw it.
+///
+/// It used to exist in Rust and stop there: the GTK shell links the crate
+/// and rendered it, and macOS and Windows drew nothing. Absence is encoded
+/// the way `tc_private_inference_serving_line` encodes it -- an
+/// out-of-range integer is the empty string, drawn as no line at all --
+/// rather than as a second convention.
+#[test]
+fn the_harness_last_call_sentence_crosses_the_abi() {
+    assert!(take_owned(tc_harness_last_call_line(0)).contains("just now"));
+    assert!(take_owned(tc_harness_last_call_line(59)).contains("just now"));
+    assert!(take_owned(tc_harness_last_call_line(60)).contains("1 minute ago"));
+    assert!(take_owned(tc_harness_last_call_line(120)).contains("2 minutes ago"));
+    assert!(take_owned(tc_harness_last_call_line(3_600)).contains("1 hour ago"));
+    assert!(take_owned(tc_harness_last_call_line(86_400)).contains("1 day ago"));
+    assert!(take_owned(tc_harness_last_call_line(172_800)).contains("2 days ago"));
+
+    // Nothing to report is out of range, and draws no line.
+    for absent in [-1, -2, i64::MIN] {
+        assert_eq!(
+            take_owned(tc_harness_last_call_line(absent)),
+            "",
+            "{absent}"
+        );
+    }
+
+    // Whatever a shell computes, it is the shared sentence.
+    for seconds in [0_u64, 30, 90, 7_200, 900_000] {
+        assert_eq!(
+            take_owned(tc_harness_last_call_line(
+                i64::try_from(seconds).expect("fits")
+            )),
+            trace_commons_contributor::private_inference_copy::harness_last_call_line(Some(
+                seconds
+            ))
+        );
+    }
+}
+
+/// The plan-outcome mapper crosses the ABI, and keeps the refusal that needs
+/// a human distinct from the one that needs nothing.
+#[test]
+fn the_harness_plan_outcome_table_crosses_the_abi() {
+    let code = |outcome: &str| {
+        let outcome = cstr_str(outcome);
+        unsafe { tc_harness_plan_outcome_code(outcome.as_ptr()) }
+    };
+
+    assert_eq!(code("changes"), TC_HARNESS_PLAN_CHANGES);
+    assert_eq!(code("noop"), TC_HARNESS_PLAN_NOOP);
+    assert_eq!(code("unparseable"), TC_HARNESS_PLAN_UNPARSEABLE);
+    assert_eq!(code("not_installed"), TC_HARNESS_PLAN_NOT_INSTALLED);
+    assert_eq!(code("entry_unusable"), TC_HARNESS_PLAN_ENTRY_UNUSABLE);
+    assert_eq!(code("no_config_path"), TC_HARNESS_PLAN_NO_CONFIG_PATH);
+
+    // The distinction the design is emphatic about.
+    assert_ne!(
+        code("unparseable"),
+        code("noop"),
+        "a file we refused to rewrite is not the same as nothing to change"
+    );
+
+    for unknown in ["an_outcome_from_a_later_daemon", "CHANGES", ""] {
+        assert_eq!(code(unknown), TC_HARNESS_PLAN_UNKNOWN, "{unknown:?}");
+    }
+    assert_eq!(
+        unsafe { tc_harness_plan_outcome_code(std::ptr::null()) },
+        TC_HARNESS_PLAN_UNKNOWN
+    );
+}
+
+/// The two availability rules cross the ABI, including the one that is easy
+/// to get backwards.
+#[test]
+fn the_harness_action_table_crosses_the_abi() {
+    let available = |action: &str, installed: i32, connected: i32| {
+        let action = cstr_str(action);
+        unsafe { tc_harness_action_available(action.as_ptr(), installed, connected) }
+    };
+
+    // A tool that is not installed cannot be connected.
+    assert_eq!(available("connect", 0, 0), 0);
+    assert_eq!(available("connect", 1, 0), 1);
+    // Nor can one that already is.
+    assert_eq!(available("connect", 1, 1), 0);
+    // But a connected tool can always be taken back off, installed or not:
+    // uninstalling it does not remove the line we put in its config.
+    assert_eq!(available("disconnect", 0, 1), 1);
+    assert_eq!(available("disconnect", 1, 0), 0);
+
+    // An action this build does not know, and no pointer at all, offer
+    // nothing rather than offering a write.
+    assert_eq!(available("take-over", 1, 0), 0);
+    assert_eq!(available("", 1, 0), 0);
+    assert_eq!(
+        unsafe { tc_harness_action_available(std::ptr::null(), 1, 0) },
+        0
+    );
+}
+
+/// The harness numbering is disjoint from every other range on this ABI.
+///
+/// Not a style rule: a shell that fed a harness state to the private
+/// inference tone mapper, or the reverse, would render one surface's value as
+/// another's meaning. Disjoint ranges make that mistake wrong for every value
+/// rather than only for the dangerous one.
+#[test]
+fn the_harness_codes_do_not_collide_with_the_other_ranges() {
+    let harness = [
+        TC_HARNESS_STATE_UNKNOWN,
+        TC_HARNESS_STATE_NOT_CONNECTED,
+        TC_HARNESS_STATE_CONNECTED_NO_CALLS,
+        TC_HARNESS_STATE_ANSWERING,
+        TC_HARNESS_STATE_ACTIVITY_SHARED,
+        TC_HARNESS_PLAN_UNKNOWN,
+        TC_HARNESS_PLAN_CHANGES,
+        TC_HARNESS_PLAN_NOOP,
+        TC_HARNESS_PLAN_UNPARSEABLE,
+        TC_HARNESS_PLAN_NOT_INSTALLED,
+        TC_HARNESS_PLAN_ENTRY_UNUSABLE,
+        TC_HARNESS_PLAN_NO_CONFIG_PATH,
+    ];
+    let others = [
+        TC_PRIVATE_INFERENCE_TONE_NEUTRAL,
+        TC_PRIVATE_INFERENCE_TONE_HELD,
+        TC_PRIVATE_INFERENCE_TONE_CLEAR,
+        TC_PRIVATE_INFERENCE_TONE_ATTENTION,
+        TC_PRIVATE_INFERENCE_TONE_REFUSED,
+        TC_WITNESS_TONE_NEUTRAL,
+        TC_WITNESS_TONE_HELD,
+        TC_WITNESS_TONE_CLEAR,
+        TC_WITNESS_TONE_ATTENTION,
+        TC_WITNESS_TONE_REFUSED,
+    ];
+    for code in harness {
+        assert!(
+            !others.contains(&code),
+            "{code} collides with another range"
+        );
+    }
+    // And the two harness ranges do not collide with each other.
+    let mut seen = harness.to_vec();
+    seen.sort_unstable();
+    seen.dedup();
+    assert_eq!(seen.len(), harness.len(), "two harness codes share a value");
 }

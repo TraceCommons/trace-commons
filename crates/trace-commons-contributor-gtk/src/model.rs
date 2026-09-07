@@ -658,6 +658,98 @@ pub struct PrivateInferenceState {
     pub port: Option<u16>,
 }
 
+/// `harness_list`'s answer: the coding tools on this computer.
+///
+/// `catalog_present` is a fact about this build, not about the machine. With
+/// no signed catalog loaded the list is the tools this build ships knowing
+/// about, and the daemon says so rather than letting a short list imply the
+/// machine has only those.
+#[derive(Debug, Clone, Deserialize)]
+pub struct HarnessList {
+    #[serde(default)]
+    pub catalog_present: bool,
+    /// The port this computer answers model calls on, or absent when
+    /// nothing here answers. A connect has nothing to write without one.
+    #[serde(default)]
+    pub destination_port: Option<u16>,
+    #[serde(default)]
+    pub harnesses: Vec<Harness>,
+}
+
+/// One row of `harness_list`.
+///
+/// `name` is IronWire's, never this shell's: a tool's name is not wording
+/// this app authors, and a list that spelled it here would go stale the day
+/// the catalog grows.
+///
+/// `state` is carried as the daemon's own label and handed to
+/// [`crate::ui::private_inference::harness_line`] and its tone twin, for the
+/// reason [`PrivateInferenceState`] gives: a label a later daemon grows
+/// would otherwise have to be spelled here before it could be shown.
+///
+/// `can_connect` and `can_disconnect` are the daemon's answers to whether
+/// each action may be offered, and this shell reads them rather than
+/// re-deriving them from `installed` and `connected`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Harness {
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub installed: bool,
+    #[serde(default)]
+    pub connected: bool,
+    #[serde(default)]
+    pub config_path: Option<String>,
+    #[serde(default)]
+    pub connect_command: String,
+    #[serde(default)]
+    pub state: String,
+    /// When a call of this tool's kind last arrived, as RFC 3339. Present
+    /// only for the states that mean a call actually arrived.
+    #[serde(default)]
+    pub last_call_at: Option<String>,
+    #[serde(default)]
+    pub can_connect: bool,
+    #[serde(default)]
+    pub can_disconnect: bool,
+}
+
+/// `harness_plan`'s answer: an edit worked out, with nothing written.
+///
+/// `plan_id` is minted only where there is something to commit, and
+/// `harness_commit` takes it and nothing else -- which is what stops this
+/// shell from constructing a write of its own.
+#[derive(Debug, Clone, Deserialize)]
+pub struct HarnessPlan {
+    #[serde(default)]
+    pub outcome: String,
+    #[serde(default)]
+    pub plan_id: Option<String>,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub changes: Vec<String>,
+    /// Slots left exactly as the contributor had them.
+    ///
+    /// NOT an outcome, and carried whatever the outcome says. A plan can
+    /// have changes and occupied slots at once, and flattening the two would
+    /// lose whichever half came second.
+    #[serde(default)]
+    pub occupied: Vec<HarnessOccupied>,
+}
+
+/// One slot that already had a value in it, and the value that is in it.
+///
+/// The value is shown deliberately: reporting rather than overwriting is the
+/// whole point, and a report that hid what it found would not be one.
+#[derive(Debug, Clone, Deserialize)]
+pub struct HarnessOccupied {
+    pub slot: String,
+    #[serde(default)]
+    pub current: String,
+}
+
 /// `get_settings`'s `ironwire` block.
 #[derive(Debug, Clone, Deserialize)]
 pub struct RoutingDeclaration {

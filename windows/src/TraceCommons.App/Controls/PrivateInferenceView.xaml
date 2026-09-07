@@ -1,0 +1,255 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    The model calls destination.
+
+    Not one string on this screen is typed here, the title and the screen's
+    own name included. Every word arrives from
+    crates/trace-commons-contributor/src/private_inference_copy.rs across the
+    C ABI, and the whole screen collapses when they did not arrive rather
+    than drawing a switch with nothing beside it. That shape is what says
+    "on" over a listener that refused to start.
+
+    The switch and the status line are two different claims and are drawn as
+    two different things. The switch is where the contributor put it; the
+    status line is what the daemon reported, coloured from the tone and never
+    from the switch's own value. A contributor who turned this on over a port
+    that was already taken must see the refusal, not a green light.
+
+    XML comments cannot contain a double hyphen, so the prose here uses
+    commas and parentheses where the C# files use dashes.
+-->
+<UserControl
+    x:Class="TraceCommons.App.Controls.PrivateInferenceView"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:vm="using:TraceCommons.App.ViewModels"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d">
+
+    <Grid RowDefinitions="Auto,*">
+
+        <StackPanel Grid.Row="0"
+                    Spacing="2"
+                    Padding="20,9"
+                    BorderBrush="{ThemeResource TcHairlineDividerBrush}"
+                    BorderThickness="0,0,0,1">
+            <TextBlock Text="{x:Bind ViewModel.Title, Mode=OneWay}"
+                       Style="{StaticResource TcTitleScreenTextStyle}" />
+            <TextBlock Text="{x:Bind ViewModel.Subtitle, Mode=OneWay}"
+                       Style="{StaticResource TcCaptionTextStyle}"
+                       TextWrapping="Wrap" />
+        </StackPanel>
+
+        <ScrollViewer Grid.Row="1" Padding="22,16,22,16">
+            <StackPanel Spacing="12" MaxWidth="640" HorizontalAlignment="Left">
+
+                <!--
+                    The tools on this computer, and they come FIRST. Connecting
+                    one is what a contributor came here to do; the switch below
+                    is the kill switch over all of them, not the first question.
+
+                    Every action is one tool at a time. There is no "connect
+                    all", and nothing on this screen writes two files.
+
+                    Each row is painted from its state and never from whether
+                    its settings file names this computer. A value in a file is
+                    not evidence that a call was ever answered, and only the
+                    answering state is drawn in the working colour.
+                -->
+                <Border Background="{ThemeResource TcSurfaceCardBrush}"
+                        BorderBrush="{ThemeResource TcHairlineBrush}"
+                        BorderThickness="1"
+                        CornerRadius="{StaticResource TcCardCornerRadius}"
+                        Padding="14,12"
+                        Visibility="{x:Bind ViewModel.Available, Mode=OneWay}">
+                    <StackPanel Spacing="10">
+                        <TextBlock Text="{x:Bind ViewModel.HarnessesTitle, Mode=OneWay}"
+                                   Style="{StaticResource TcTitleSectionTextStyle}"
+                                   TextWrapping="Wrap" />
+                        <TextBlock Text="{x:Bind ViewModel.HarnessesWhat, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   TextWrapping="Wrap" />
+                        <!--
+                            Nothing found, said in terms of what was looked for.
+                            Drawn only once a list has actually come back, so an
+                            unread list is not reported as an empty machine.
+                        -->
+                        <TextBlock Text="{x:Bind ViewModel.HarnessesNoneFound, Mode=OneWay}"
+                                   Visibility="{x:Bind ViewModel.HasNoHarnesses, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   TextWrapping="Wrap" />
+                        <ItemsControl ItemsSource="{x:Bind ViewModel.Harnesses, Mode=OneWay}">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate x:DataType="vm:HarnessRowViewModel">
+                                    <StackPanel Spacing="4"
+                                                Margin="0,10,0,0"
+                                                BorderBrush="{ThemeResource TcHairlineDividerBrush}"
+                                                BorderThickness="0,1,0,0"
+                                                Padding="0,10,0,0">
+                                        <!--
+                                            The tool's own name, off the wire.
+                                            No shell spells one: a tool renamed
+                                            upstream must not go on being called
+                                            the old thing here.
+                                        -->
+                                        <TextBlock Text="{x:Bind Name}"
+                                                   Style="{StaticResource TcTitleCardTextStyle}"
+                                                   TextWrapping="Wrap" />
+                                        <!--
+                                            The file an action would change,
+                                            shown to the contributor. It goes on
+                                            no log line and into no audit row.
+                                        -->
+                                        <TextBlock Text="{x:Bind ConfigPath}"
+                                                   Visibility="{x:Bind HasConfigPath}"
+                                                   Style="{StaticResource TcMonoCodeTextStyle}"
+                                                   IsTextSelectionEnabled="True"
+                                                   TextWrapping="Wrap" />
+                                        <!--
+                                            Two lines, one state, chosen from
+                                            the state rather than from the text.
+                                            Only the answering one is green.
+                                        -->
+                                        <TextBlock Text="{x:Bind StateText}"
+                                                   Visibility="{x:Bind StateIsPlain}"
+                                                   Style="{StaticResource TcCaptionTextStyle}"
+                                                   TextWrapping="Wrap" />
+                                        <TextBlock Text="{x:Bind StateText}"
+                                                   Visibility="{x:Bind ReadsAsWorking}"
+                                                   Style="{StaticResource TcCaptionTextStyle}"
+                                                   Foreground="{ThemeResource TcGreenTextBrush}"
+                                                   TextWrapping="Wrap" />
+                                        <!--
+                                            When a call last arrived, assembled
+                                            across the ABI and absent when
+                                            there is nothing to report, which
+                                            draws no line at all.
+                                        -->
+                                        <TextBlock Text="{x:Bind LastCallText}"
+                                                   Visibility="{x:Bind HasLastCallText}"
+                                                   Style="{StaticResource TcCaptionTextStyle}"
+                                                   TextWrapping="Wrap" />
+                                        <StackPanel Orientation="Horizontal" Spacing="8" Margin="0,4,0,0">
+                                            <Button Content="{x:Bind ConnectText}"
+                                                    Visibility="{x:Bind CanConnect}"
+                                                    Tag="{x:Bind Id}"
+                                                    Click="OnConnectHarness" />
+                                            <!--
+                                                Offered whenever the tool is
+                                                connected, installed or not:
+                                                uninstalling a coding tool does
+                                                not remove the line we put in
+                                                its file, and "remove only what
+                                                we put there" is worth nothing
+                                                if this control is hidden.
+                                            -->
+                                            <Button Content="{x:Bind DisconnectText}"
+                                                    Visibility="{x:Bind CanDisconnect}"
+                                                    Tag="{x:Bind Id}"
+                                                    Click="OnDisconnectHarness" />
+                                        </StackPanel>
+                                        <!--
+                                            The same thing done outside this
+                                            app, verbatim and selectable, for a
+                                            contributor who would rather not
+                                            have an app edit their files.
+                                        -->
+                                        <TextBlock Text="{x:Bind ConnectCommand}"
+                                                   Visibility="{x:Bind HasConnectCommand}"
+                                                   Style="{StaticResource TcMonoCodeTextStyle}"
+                                                   IsTextSelectionEnabled="True"
+                                                   TextWrapping="Wrap" />
+                                    </StackPanel>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                        <!--
+                            A tool holding an old setting in a process that is
+                            still running. Shown only once a write has actually
+                            happened, and in the plain colour: nothing went
+                            wrong here.
+                        -->
+                        <TextBlock Text="{x:Bind ViewModel.Restart, Mode=OneWay}"
+                                   Visibility="{x:Bind ViewModel.HasRestart, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   TextWrapping="Wrap" />
+                    </StackPanel>
+                </Border>
+
+                <Border Background="{ThemeResource TcSurfaceCardBrush}"
+                        BorderBrush="{ThemeResource TcHairlineBrush}"
+                        BorderThickness="1"
+                        CornerRadius="{StaticResource TcCardCornerRadius}"
+                        Padding="14,12"
+                        Visibility="{x:Bind ViewModel.Available, Mode=OneWay}">
+                    <StackPanel Spacing="10">
+                        <TextBlock Text="{x:Bind ViewModel.What, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   TextWrapping="Wrap" />
+                        <!--
+                            What turning it on exposes. Here as well as in the
+                            first run offer: a contributor who declined and
+                            came back later is making the same decision and is
+                            owed the same sentence.
+                        -->
+                        <TextBlock Text="{x:Bind ViewModel.Exposure, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   TextWrapping="Wrap" />
+                        <ToggleSwitch Header="{x:Bind ViewModel.ToggleText, Mode=OneWay}"
+                                      IsOn="{x:Bind ViewModel.Enabled, Mode=OneWay}"
+                                      IsEnabled="{x:Bind ViewModel.ControlsEnabled, Mode=OneWay}"
+                                      Toggled="OnToggled" />
+                        <!--
+                            One line per tone, chosen from the tone and never
+                            from the text: three of the sentences begin with
+                            the same two words, so a colour picked by reading
+                            the sentence would be picked by matching a prefix.
+                            Only the clear one is green.
+                        -->
+                        <TextBlock Text="{x:Bind ViewModel.StateText, Mode=OneWay}"
+                                   Visibility="{x:Bind ViewModel.StateIsNeutral, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   TextWrapping="Wrap" />
+                        <TextBlock Text="{x:Bind ViewModel.StateText, Mode=OneWay}"
+                                   Visibility="{x:Bind ViewModel.StateIsHeld, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   Foreground="{ThemeResource TcBlueBrandBrush}"
+                                   TextWrapping="Wrap" />
+                        <TextBlock Text="{x:Bind ViewModel.StateText, Mode=OneWay}"
+                                   Visibility="{x:Bind ViewModel.StateIsClear, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   Foreground="{ThemeResource TcGreenTextBrush}"
+                                   TextWrapping="Wrap" />
+                        <TextBlock Text="{x:Bind ViewModel.StateText, Mode=OneWay}"
+                                   Visibility="{x:Bind ViewModel.StateIsAttention, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   Foreground="{ThemeResource TcGoldTextBrush}"
+                                   TextWrapping="Wrap" />
+                        <TextBlock Text="{x:Bind ViewModel.StateText, Mode=OneWay}"
+                                   Visibility="{x:Bind ViewModel.StateIsRefused, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   Foreground="{ThemeResource TcCoralTextBrush}"
+                                   TextWrapping="Wrap" />
+                        <TextBlock Text="{x:Bind ViewModel.ServingText, Mode=OneWay}"
+                                   Visibility="{x:Bind ViewModel.HasServingText, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   TextWrapping="Wrap" />
+                        <TextBlock Text="{x:Bind ViewModel.AppliesAtOnce, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   TextWrapping="Wrap" />
+                        <!--
+                            A write the daemon did not confirm. The payload's
+                            sentence, and absent when there is nothing to say.
+                        -->
+                        <TextBlock Text="{x:Bind ViewModel.Notice, Mode=OneWay}"
+                                   Visibility="{x:Bind ViewModel.HasNotice, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   Foreground="{ThemeResource TcCoralTextBrush}"
+                                   TextWrapping="Wrap" />
+                    </StackPanel>
+                </Border>
+            </StackPanel>
+        </ScrollViewer>
+    </Grid>
+</UserControl>

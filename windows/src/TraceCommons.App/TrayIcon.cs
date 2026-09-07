@@ -53,6 +53,32 @@ public sealed class TrayIcon : IDisposable
 
     public event Action? SettingsRequested;
 
+    /// <summary>Raised when the contributor asks for the model-calls destination.</summary>
+    public event Action? PrivateInferenceRequested;
+
+    /// <summary>
+    /// Raised when the contributor stops answering model calls from the menu.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// One direction only. There is no event on this class that turns model
+    /// calls ON: while it is off the row raises
+    /// <see cref="PrivateInferenceRequested"/> instead and the window comes up
+    /// at the destination, where the sentence about what enabling it exposes
+    /// is on screen beside the switch. Turning it off only ever reduces what
+    /// this computer will answer, which is why that direction is safe from a
+    /// menu and the other is not.
+    /// </para>
+    /// <para>
+    /// A request, like <see cref="QuitRequested"/>, rather than a write. The
+    /// only place the daemon's answer to this is rendered is the destination
+    /// page, and a menu that changed what this machine answers without
+    /// showing that answer would be a change nobody could see the result of.
+    /// This class must not shortcut it.
+    /// </para>
+    /// </remarks>
+    public event Action? PrivateInferenceStopRequested;
+
     public event Action<PauseDuration>? PauseRequested;
 
     public event Action? ResumeRequested;
@@ -79,6 +105,8 @@ public sealed class TrayIcon : IDisposable
     private const int MenuIdPauseTomorrow = 11;
     private const int MenuIdPauseUntilResumed = 12;
     private const int MenuIdResume = 13;
+    private const int MenuIdPrivateInference = 14;
+    private const int MenuIdPrivateInferenceAction = 15;
 
     private readonly WndProc _wndProc;
     private readonly string _className;
@@ -92,6 +120,7 @@ public sealed class TrayIcon : IDisposable
         Array.Empty<QueueEntry>(),
         new HistoryRollup(),
         Array.Empty<ProjectSetting>());
+    private PrivateInferenceTrayEntry _privateInference;
     private bool _disposed;
 
     /// <summary>
@@ -178,6 +207,21 @@ public sealed class TrayIcon : IDisposable
         {
             DestroyIcon(previous);
         }
+    }
+
+    /// <summary>
+    /// Takes the model-calls entry as the window computed it from one
+    /// settings read.
+    /// </summary>
+    /// <remarks>
+    /// Whether anything here may be drawn as working is decided in
+    /// <see cref="PrivateInferenceTrayEntry"/>, off the daemon's reported
+    /// state and never off the switch. This class does not get to decide it,
+    /// and it is not a decision that can be tested on Windows only.
+    /// </remarks>
+    public void UpdatePrivateInference(PrivateInferenceTrayEntry entry)
+    {
+        _privateInference = entry;
     }
 
     /// <summary>
@@ -441,6 +485,40 @@ public sealed class TrayIcon : IDisposable
                 }
             }
 
+            // Model calls: the state sentence, then the destination, then the
+            // switch. Every word is the payload's; the check mark is the
+            // switch's own position, and the state sentence beside it is what
+            // actually happened. Nothing here is drawn from ReadsAsWorking
+            // except the tick on the state line, which is the one thing that
+            // may claim the listener is answering.
+            if (_privateInference.Available)
+            {
+                AppendMenu(menu, MF_SEPARATOR, IntPtr.Zero, null);
+                AppendMenu(
+                    menu,
+                    MF_STRING | MF_DISABLED | MF_GRAYED,
+                    IntPtr.Zero,
+                    (_privateInference.ReadsAsWorking ? "\u2713 " : "   ")
+                        + _privateInference.StateText);
+                AppendMenu(menu, MF_STRING, MenuIdPrivateInference, _privateInference.Label);
+
+                // An action row, not a checked switch. A check mark invites a
+                // press to clear it, and on this surface the press that
+                // enables answering is the one that must not exist here: it
+                // changes what everything else on this machine may send
+                // through, charged to the contributor's accounts, and the
+                // sentence saying so is on the destination screen. So the row
+                // says one of two things and does one of two things -- turn
+                // off, or open the screen -- and which is decided in
+                // PrivateInferenceTrayEntry where it can be tested.
+                AppendMenu(
+                    menu,
+                    MF_STRING,
+                    MenuIdPrivateInferenceAction,
+                    _privateInference.ActionText);
+                AppendMenu(menu, MF_SEPARATOR, IntPtr.Zero, null);
+            }
+
             AppendMenu(menu, MF_STRING, MenuIdOpen, "Open Trace Commons");
             AppendMenu(menu, MF_STRING, MenuIdSettings, "Settings");
 
@@ -473,6 +551,24 @@ public sealed class TrayIcon : IDisposable
 
                 case MenuIdSettings:
                     SettingsRequested?.Invoke();
+                    break;
+
+                case MenuIdPrivateInference:
+                    PrivateInferenceRequested?.Invoke();
+                    break;
+
+                case MenuIdPrivateInferenceAction:
+                    // Off writes nothing: it is the same request the
+                    // destination row above makes.
+                    if (_privateInference.ActionWrites)
+                    {
+                        PrivateInferenceStopRequested?.Invoke();
+                    }
+                    else
+                    {
+                        PrivateInferenceRequested?.Invoke();
+                    }
+
                     break;
 
                 case MenuIdPauseHour:

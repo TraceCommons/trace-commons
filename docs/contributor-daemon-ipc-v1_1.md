@@ -446,6 +446,9 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `queue_outcome_counts` | — | `reasons: {label: count}` | see "queue_outcome_counts" below; does **not** cover sessions never queued |
 | `probe_routing` | `port` (required), `token_dir` (optional absolute directory) | `outcome`, plus `token_path` or `port` | asks a declared IronWire proxy whether it is there; performs real loopback I/O and **never returns the token**; see "`probe_routing`" below |
 | `discover_routing` | — | `found`, plus `port` and optionally `token_path` when found | reads the pointer a running IronWire published, so the declaring flow can pre-fill instead of asking; no network I/O and **never returns the token**; see "`discover_routing`" below |
+| `harness_list` | — | `catalog_present`, `harnesses[]`, `activity`, `destination_port` | which coding tools this machine has and whether each sends its calls here; reads the filesystem on every call, never a cache; see "The harness list" below |
+| `harness_plan` | `id` (required), `action` (`connect` \| `disconnect`) | `id`, `action`, `outcome`, `plan_id`, `path`, `changes[]`, `occupied[]` | works out an edit and **writes nothing**; see "The harness list" below |
+| `harness_commit` | `plan_id` (required) | `id`, `action`, `committed: true`, `path`, `backup_path` | makes an edit that was already shown; takes a plan id and **nothing else**, so a shell cannot ask for a write it did not preview |
 | `quiesce` | `timeout_secs` (optional, default 60, max 300) | `quiesced: true`, `waited_ms` | parks uploads for an update swap; `busy` / `quiesce-timeout` if in-flight work does not finish in time |
 | `get_settings` | — | settings; credential and local paths reported as booleans only | |
 | `set_settings` | any of `quiescence_secs`, `digest_interval_secs`, `approval_hold_secs`, `local_notifications`, `claude_root`, `codex_root`, `claude_source`, `codex_source`, `gemini_source`, `cline_source`, `ironwire`, `ironwire_attested_bodies`, `private_inference`, `private_inference_offer_seen`, `max_uploads_per_day`, `max_bytes_per_day` | updated settings | see "`set_settings`" below |
@@ -1514,6 +1517,187 @@ service's data while the settings file and the probe both still agreed on
 the declared port. A missing or stale pointer costs at most one refused
 connection, which is what a daemon that never ran would cost.
 
+### The harness list
+
+Three methods, and there is deliberately **no fourth** that plans and commits
+in one call.
+
+These edit configuration files this application does not own -- Claude Code's
+`settings.json`, Codex's `config.toml`. That is acceptable only because of
+three rules, which come from `ironwire_agents` and which this surface carries
+end to end rather than reimplementing:
+
+- **Never rewrite a file we cannot parse.** A contributor's own syntax error
+  must not come back looking like ours.
+- **Fill an empty slot; leave a full one alone.** A value already in the key is
+  another destination or a deliberate choice. It is **reported, never
+  overwritten**.
+- **Remove only what we put there.** A disconnect leaves neighbouring keys
+  alone and needs no saved original.
+
+#### `harness_list`
+
+```json
+{
+  "catalog_present": false,
+  "destination_port": 8463,
+  "harnesses": [
+    {
+      "id": "claude",
+      "name": "Claude Code",
+      "installed": true,
+      "connected": true,
+      "config_path": "/Users/x/.claude/settings.json",
+      "connect_command": "ironwire connect claude",
+      "family": "anthropic",
+      "state": "answering",
+      "last_call_at": "2026-09-07T18:04:11+00:00",
+      "can_connect": false,
+      "can_disconnect": true
+    }
+  ],
+  "activity": {
+    "readable": true,
+    "window_hours": 24,
+    "last_call_at": "2026-09-07T18:04:11+00:00",
+    "families": [{ "family": "anthropic", "last_call_at": "...", "calls": 12 }]
+  }
+}
+```
+
+`installed` and `connected` are read from the filesystem on **every** call,
+never cached: a tool that rewrites its own config underneath us is a real
+thing, and a list read fresh corrects itself where a cached one lies.
+
+`config_path` is present always, not on demand. A tool nobody expected to be
+configured is a question about *which file*, every time. It is `null` only
+where this build could not work out where the tool keeps its config.
+
+`connect_command` is a command string, not prose. Show it verbatim, as the
+fallback for a contributor who would rather do it themselves; do not parse it
+and do not paraphrase it.
+
+`catalog_present` is a fact about **this build**, not about the machine. When
+it is `false` the list is the two tools IronWire ships knowing about, and a
+surface must say that the list is what this machine knows about rather than
+implying only two coding tools exist. A harness that is not installed is
+listed with `installed: false`, not omitted: hiding it makes the absence of a
+tool indistinguishable from the app never having heard of it.
+
+`destination_port` is the port a connect would write into a config file -- the
+hosted listener's port when it is up, else the port declared for a proxy the
+contributor runs themselves. It is `null` when nothing on this machine is
+answering model calls, and in that state `harness_plan` refuses a connect with
+`harness-no-destination` rather than writing a guess.
+
+#### `state`, and why there are five values and not two
+
+`connected` proves a config file has the right value in it. It does **not**
+prove a single call was ever answered. `state` is the three-valued answer the
+design asks for, plus two honest unknowns:
+
+| `state` | meaning |
+|---|---|
+| `not_connected` | its config does not send calls here |
+| `connected_no_calls` | config is right; no call has arrived yet |
+| `answering` | a call arrived, and only this tool could have made it. `last_call_at` says when |
+| `activity_shared` | a call arrived in this tool's protocol family, and another connected tool speaks that family too, so it cannot be attributed to either |
+| `unknown` | connected, and nothing here can say whether a call arrived -- no readable ledger, or a tool whose family this build does not know |
+
+**Attribution is approximate and must be described as such.** The proxy's
+ledger records a *facade* -- `anthropic`, `openai` -- not a tool id. Claude
+Code speaks Anthropic and Codex speaks OpenAI, so today a call separates them;
+two connected tools of the same family do not separate at all. `family` on a
+row is what makes attribution possible, and it is `null` for a
+catalog-described tool, whose facade nothing here knows.
+
+`last_call_at` on a **row** is present only for `answering` -- the case where
+the tool is nameable. The `activity` block is the same evidence with **no tool
+named**: `last_call_at` there answers "did a call arrive at all", and
+`families[]` answers it per protocol family. A surface that needs to say a
+call arrived without naming a tool reads that block. `readable: false` means
+no ledger answered, which is not evidence of no calls and must never be
+rendered as "nothing has arrived yet".
+
+Making this exact needs an upstream change -- a per-tool path chosen at connect
+time, which `plan_connect(id, port, catalog)` does not expose.
+
+#### `harness_plan`
+
+```json
+{
+  "id": "claude",
+  "action": "connect",
+  "outcome": "changes",
+  "plan_id": "6f1c...",
+  "path": "/Users/x/.claude/settings.json",
+  "changes": ["set env.ANTHROPIC_BASE_URL"],
+  "occupied": [{ "slot": "env.ANTHROPIC_BASE_URL", "current": "https://their-proxy.example" }]
+}
+```
+
+Writes nothing. `outcome` is one of:
+
+| `outcome` | meaning |
+|---|---|
+| `changes` | there is an edit to make; `changes[]` describes it and `plan_id` is minted |
+| `noop` | nothing to do. Say so rather than showing an empty confirmation |
+| `unparseable` | the file could not be parsed, so it was **refused rather than rewritten**. Distinct from `noop`: nothing was decided and the file needs a human. Name the file -- `path` carries it |
+| `not_installed` | the tool is not on this machine, so there is nothing to connect |
+| `entry_unusable` | the catalog entry describing this tool did not survive validation |
+| `no_config_path` | this build could not work out where the tool keeps its config |
+
+`plan_id` is minted for `changes` and for nothing else, so "there is a plan id"
+and "the outcome is committable" are one question answered once.
+
+**`occupied` is not an outcome.** A plan can carry changes *and* occupied slots
+at once -- the empty slots are filled and the full one is reported in the same
+pass -- so it rides alongside whatever `outcome` says, and must be rendered
+whatever `outcome` says. Each entry names the slot and shows the value already
+in it. Show the value, say it was left alone, and **do not offer to take it
+over**.
+
+Refusals that are call errors rather than facts about the machine come back as
+errors, not outcomes: `harness-unknown` for an id nothing knows,
+`harness-no-destination` for a connect while nothing is answering model calls,
+`action-invalid`, `id-required`.
+
+Parse-failure *detail* never crosses the socket. The underlying error quotes
+the offending line of the contributor's own file; only the label and the path
+are reported.
+
+#### `harness_commit`
+
+```json
+{
+  "id": "claude",
+  "action": "connect",
+  "committed": true,
+  "path": "/Users/x/.claude/settings.json",
+  "backup_path": "/Users/x/.claude/settings.json.ironwire-backup"
+}
+```
+
+Takes `plan_id` and **nothing else**. There is no argument here that could name
+a different tool, a different action or a different file from the one
+previewed, which is what makes the preview binding rather than advisory. The
+plan itself never crosses the socket -- the daemon holds it between the two
+calls -- so a shell cannot reconstruct one it was not given.
+
+A plan id is **single use** and expires after ten minutes. Refusals:
+
+| label | meaning |
+|---|---|
+| `harness-plan-unknown` | expired, already committed, or never minted. Plan again and show the contributor the result |
+| `harness-config-changed` | the file moved between the plan and the commit -- the tool rewrote its own config while the preview was on screen. The write is refused rather than reverting whatever the tool just wrote |
+| `harness-commit-failed` | the write itself failed |
+| `plan-id-invalid` | not a plan id at all |
+
+`backup_path` is where the file as it was before this edit was kept, when one
+was written. Only the **first** backup of a file is kept -- it is the only copy
+holding the file as it was before any of our edits -- so this is `null` on a
+second edit to the same file, and on a file that did not exist before.
+
 ### `set_settings`
 
 Takes a JSON object of settings to change. Every top-level key must be one
@@ -1669,18 +1853,51 @@ retained-shutdown producer confirms cleanup; a port alone is metadata, not
 proof that calls can be answered.
 
 The companion C ABI copy payload (`tc_private_inference_copy`, not a daemon
-settings key) supplies these 22 fixed string fields:
+settings key) supplies these 45 fixed string fields:
 
+- `destination`, `subtitle`;
 - `offer_title`, `offer_what`, `offer_exposure`, `offer_no_repoint`,
   `offer_accept`, `offer_decline`, `offer_asked_once`;
 - `settings_title`, `settings_toggle`, `settings_applies_at_once`;
 - `state_off`, `state_unreported`, `state_unknown`, `state_stopping`,
   `state_running`, `state_running_no_backends`, `state_running_elsewhere`,
   `state_port_in_use`, `state_start_failed`, `state_crashed`;
-- `quit_also_stops`, `write_unconfirmed`.
+- `quit_also_stops`, `write_unconfirmed`;
+- `settings_moved`, `tray_turn_off`, `tray_open_to_turn_on`;
+- `harnesses_title`, `harnesses_what`, `harnesses_none_found`;
+- `harness_not_connected`, `harness_connected_nothing_seen`,
+  `harness_answering`;
+- `harness_connect`, `harness_disconnect`;
+- `harness_preview_title`, `harness_preview_confirm`,
+  `harness_preview_cancel`;
+- `harness_slot_taken`, `harness_needs_restart`,
+  `harness_unreadable_config`;
+- `harness_not_installed`;
+- `harness_plan_nothing_to_change`, `harness_plan_entry_unusable`,
+  `harness_plan_no_config_path`.
 
-State sentences and tones are chosen by the shared Rust table rather than by
-shell-authored branching. Copy-field inventory parity is checked separately
+The three per-harness states are not two. `harness_connected_nothing_seen`
+says a tool's own settings send its calls here; `harness_answering` says a
+call actually arrived, and it is the only one of the three that means the
+tool works. `harness_slot_taken` reports a slot left exactly as the
+contributor had it and must never be rendered as a fault or paired with an
+action that takes it over.
+
+`harness_not_installed` is what a row whose tool is not on this computer
+shows INSTEAD of any state sentence. Such a tool is listed and disabled
+rather than hidden -- a tool left out cannot be told apart from one the app
+was never taught about -- and it must not also carry
+`harness_not_connected`, which claims a tool's own settings still send its
+calls wherever they went before.
+
+The four `harness_plan_*` sentences plus `harness_unreadable_config` are the
+answers of `tc_harness_outcome_line`, one per non-committable `harness_plan`
+outcome. `changes` answers the empty string, because a plan with changes in
+it shows them. Every other outcome writes nothing, and without a sentence its
+preview is a title, a path and a way out.
+
+State sentences, outcome sentences and tones are chosen by the shared Rust
+table rather than by shell-authored branching. Copy-field inventory parity is checked separately
 from successful decoding of required fields.
 
 The shared `tc_private_inference_write_confirmed` decision accepts optional
@@ -2202,6 +2419,13 @@ and `body-digest-required` (`bad_params`), `preview-body-changed`,
 `preview-failed` and `approved-envelope-unavailable` (`unavailable`) -- and
 adds one of its own, `preview-turn-index-failed` (`unavailable`), for a body
 that resolved but could not be indexed exactly.
+
+The harness methods add `id-required`, `action-invalid`, `harness-unknown`,
+`harness-no-destination` and `plan-id-invalid` (all `bad_params`), and
+`harness-plan-unknown`, `harness-config-changed` and `harness-commit-failed`
+(all `unavailable`). A refusal that is a fact about the machine rather than
+about the call -- an unparseable config, a tool that is not installed -- is
+**not** an error: it is a `harness_plan` `outcome`. See "The harness list".
 
 `not_authorized` is retained in the error taxonomy for forward
 compatibility but is no longer returned by any method in this version --

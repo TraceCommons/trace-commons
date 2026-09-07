@@ -252,6 +252,9 @@ pub const METHODS: &[&str] = &[
     "near_account_cancel",
     "get_public_profile",
     "get_settings",
+    "harness_commit",
+    "harness_list",
+    "harness_plan",
     "hello",
     "history_rollup",
     "list_audit",
@@ -467,6 +470,14 @@ pub struct DaemonShared {
     /// without racing a start that is halfway through. Reconciliation and
     /// the retained terminal cleanup task publish observed transitions here.
     private_inference_state: Arc<Mutex<super::private_inference::PrivateInferenceState>>,
+    /// Config edits that have been worked out and shown, and not yet made.
+    ///
+    /// Lives on the daemon rather than crossing the socket because
+    /// `ironwire_agents::Planned` keeps the file contents it would write in
+    /// private fields: a plan cannot be reconstructed from what a shell was
+    /// shown, which is exactly what stops a shell asking for a write it did
+    /// not preview. See `daemon::harness`.
+    pub(crate) harness_plans: super::harness::PlanStore,
 }
 
 /// `status.routing.state`: the contributor never declared a proxy.
@@ -595,6 +606,7 @@ impl DaemonShared {
             private_inference_state: Arc::new(Mutex::new(
                 super::private_inference::PrivateInferenceState::Off,
             )),
+            harness_plans: super::harness::PlanStore::default(),
         })
     }
 
@@ -886,6 +898,38 @@ impl DaemonShared {
             .expect("private inference state lock")
             .clone();
         serde_json::json!({ "state": state.label(), "port": state.port() })
+    }
+
+    /// The port a tool's config would be pointed at, or `None`.
+    ///
+    /// Two sources, in this order, and the order is the point:
+    ///
+    /// 1. the port this daemon's own hosted listener actually bound, when it
+    ///    is up. What is running beats what was asked for -- a config naming
+    ///    a port nothing bound sends a tool's calls into a closed socket.
+    /// 2. the port the contributor declared for a proxy they run themselves,
+    ///    which is the machine where this daemon hosts nothing and the answer
+    ///    still exists.
+    ///
+    /// `None` on a machine where nothing is answering and nothing was
+    /// declared. That is not a failure to report: it is the state where a
+    /// connect has no destination to write, and `harness_plan` refuses it by
+    /// name rather than writing a guess into somebody's config file.
+    pub(crate) fn destination_port(&self) -> Option<u16> {
+        if let Some(port) = self
+            .private_inference_state
+            .lock()
+            .expect("private inference state lock")
+            .port()
+        {
+            return Some(port);
+        }
+        self.settings
+            .lock()
+            .expect("settings lock")
+            .ironwire
+            .as_ref()
+            .and_then(super::settings::IronWireDeclaration::port)
     }
 
     /// Source roots with the daemon's live routing ledger attached.
@@ -1583,6 +1627,14 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         // synchronous path, and a shell can call it before it has anything
         // to declare.
         "discover_routing" => handle_discover_routing(req),
+        // Three methods, and there is deliberately no fourth that plans and
+        // commits in one call. A contributor sees the exact change to a file
+        // this application does not own before anything is written, and a
+        // shell has no way to skip that step -- `harness_commit` takes a plan
+        // id and nothing else. See `daemon::harness`.
+        "harness_list" => super::harness::handle_list(shared, req),
+        "harness_plan" => super::harness::handle_plan(shared, req),
+        "harness_commit" => super::harness::handle_commit(shared, req),
         "pause" => handle_pause(shared, req),
         "resume" => {
             shared.paused.store(false, Ordering::Relaxed);
@@ -8469,6 +8521,129 @@ mod tests {
         assert_eq!(PROBE_REACHABLE, "reachable");
         assert_eq!(PROBE_TOKEN_UNREADABLE, "token_unreadable");
         assert_eq!(PROBE_UNREACHABLE, "unreachable");
+    }
+
+    /// A shell has to be able to reach all three, and `hello` is where it
+    /// finds out they exist.
+    #[test]
+    fn the_three_harness_methods_are_advertised() {
+        for method in ["harness_list", "harness_plan", "harness_commit"] {
+            assert!(
+                METHODS.contains(&method),
+                "a method hello does not advertise is a method no shell will call: {method}"
+            );
+        }
+    }
+
+    /// Deliberately absent: there is no method that plans and commits in one
+    /// call. The preview is the safety property, and a convenience call would
+    /// be the way around it.
+    #[test]
+    fn there_is_no_one_call_connect() {
+        for method in METHODS {
+            assert!(
+                !matches!(*method, "harness_connect" | "harness_disconnect"),
+                "a one-call write would let a shell skip the preview: {method}"
+            );
+        }
+    }
+
+    /// The list answers on the synchronous dispatcher -- it reads the
+    /// filesystem and an in-memory snapshot, and nothing on it awaits.
+    #[test]
+    fn harness_list_answers_with_the_built_in_tools_and_an_activity_block() {
+        let shared = shared();
+        let req = Request {
+            id: 1,
+            method: "harness_list".to_string(),
+            params: serde_json::Value::Null,
+        };
+        let response = handle_request(&shared, &req);
+        assert!(response.error.is_none(), "{:?}", response.error);
+        let result = response.result.expect("a real answer");
+
+        let harnesses = result["harnesses"].as_array().expect("a list");
+        let ids: Vec<&str> = harnesses
+            .iter()
+            .map(|h| h["id"].as_str().expect("an id"))
+            .collect();
+        assert_eq!(ids, vec!["claude", "codex"]);
+        // Every row carries a state, and with no ledger no row may claim a
+        // call arrived.
+        for row in harnesses {
+            let state = row["state"].as_str().expect("a state");
+            assert!(
+                crate::harness_state::HarnessState::from_label(state).is_some(),
+                "a state label no build can read: {state}"
+            );
+            assert_ne!(state, "answering", "no ledger, no answering");
+        }
+        // The list says what it is a list OF, so a surface can say so too.
+        assert_eq!(result["catalog_present"], serde_json::json!(false));
+        // A call can be reported without a tool being named. Here there is
+        // no readable ledger, so nothing is claimed at all.
+        assert_eq!(result["activity"]["readable"], serde_json::json!(false));
+        assert!(result["activity"]["last_call_at"].is_null());
+    }
+
+    #[test]
+    fn harness_plan_refuses_an_unknown_tool_by_name() {
+        let shared = shared();
+        let req = Request {
+            id: 2,
+            method: "harness_plan".to_string(),
+            params: serde_json::json!({"id": "not-a-tool", "action": "connect"}),
+        };
+        let error = handle_request(&shared, &req)
+            .error
+            .expect("an unknown tool has no plan");
+        assert_eq!(error.code, ERR_BAD_PARAMS);
+        assert_eq!(error.message, crate::daemon::harness::ERR_UNKNOWN_HARNESS);
+    }
+
+    #[test]
+    fn harness_plan_refuses_an_action_it_does_not_have() {
+        let shared = shared();
+        let req = Request {
+            id: 3,
+            method: "harness_plan".to_string(),
+            params: serde_json::json!({"id": "claude", "action": "take-over"}),
+        };
+        let error = handle_request(&shared, &req).error.expect("refused");
+        assert_eq!(error.code, ERR_BAD_PARAMS);
+        assert_eq!(error.message, "action-invalid");
+    }
+
+    /// A commit takes a plan id and nothing else, so an id this daemon does
+    /// not hold cannot be turned into a write by supplying the rest.
+    #[test]
+    fn harness_commit_refuses_a_plan_it_never_minted() {
+        let shared = shared();
+        let req = Request {
+            id: 4,
+            method: "harness_commit".to_string(),
+            params: serde_json::json!({
+                "plan_id": Uuid::new_v4().to_string(),
+                "id": "claude",
+                "action": "connect",
+            }),
+        };
+        let error = handle_request(&shared, &req).error.expect("refused");
+        assert_eq!(error.code, ERR_UNAVAILABLE);
+        assert_eq!(error.message, crate::daemon::harness::ERR_PLAN_UNKNOWN);
+    }
+
+    #[test]
+    fn harness_commit_refuses_a_plan_id_that_is_not_one() {
+        let shared = shared();
+        let req = Request {
+            id: 5,
+            method: "harness_commit".to_string(),
+            params: serde_json::json!({"plan_id": "the-last-one"}),
+        };
+        let error = handle_request(&shared, &req).error.expect("refused");
+        assert_eq!(error.code, ERR_BAD_PARAMS);
+        assert_eq!(error.message, "plan-id-invalid");
     }
 
     #[test]

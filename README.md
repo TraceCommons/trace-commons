@@ -441,7 +441,7 @@ outbound one and what that means for you.
 
 Branch protection on `main` requires:
 
-- **Thirteen** required status checks green, and they must be green on a
+- **Fourteen** required status checks green, and they must be green on a
   branch that is up to date with `main`:
 
   | | |
@@ -452,10 +452,10 @@ Branch protection on `main` requires:
   | `cargo check (local-gpu-models, non-CUDA)` | `macOS app tests` |
   | `cargo check (permissive crates, standalone)` | `windows named-pipe ACL` |
   | `windows contributor app` | `windows contributor crate tests` |
-  | `linux-shell desktop integration (weston + portal)` | |
+  | `linux-shell desktop integration (weston + portal)` | `builds at the declared MSRV floor` |
 
   `.github/workflows/ci.yml` holds more jobs than this (twenty-one as of
-  2026-09-07); the other eight run on every PR but do not block the merge.
+  2026-09-07); the other seven run on every PR but do not block the merge.
   All three desktop shells and the standalone permissive-crate build are on
   the required list, so a change that only builds in the workspace's unified
   feature set will not merge.

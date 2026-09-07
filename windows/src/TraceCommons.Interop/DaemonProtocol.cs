@@ -110,6 +110,35 @@ public static class DaemonProtocol
         /// </remarks>
         public const string DiscoverRouting = "discover_routing";
 
+        /// <summary>
+        /// The coding tools on this machine, whether each one's settings send
+        /// its calls here, and whether a call has actually arrived.
+        /// </summary>
+        public const string HarnessList = "harness_list";
+
+        /// <summary>
+        /// Works out one tool's edit and WRITES NOTHING.
+        /// </summary>
+        /// <remarks>
+        /// Takes <c>{id, action}</c> and answers with the exact changes, the
+        /// file they would be made in, and any slot left alone. The pair with
+        /// <see cref="HarnessCommit"/> is the whole point of this surface: a
+        /// contributor sees the change to somebody else's config file before
+        /// it is written, so nothing here may plan and commit in one step.
+        /// </remarks>
+        public const string HarnessPlan = "harness_plan";
+
+        /// <summary>
+        /// Makes an edit that was already shown.
+        /// </summary>
+        /// <remarks>
+        /// Takes a <c>plan_id</c> the daemon minted, and NOTHING else. The
+        /// shell cannot assemble a write of its own, cannot commit anything a
+        /// contributor was not shown, and cannot replay one: a plan is
+        /// single-use and expires.
+        /// </remarks>
+        public const string HarnessCommit = "harness_commit";
+
         // History and withdrawal. Like the onboarding block above, every one
         // of these was already in the daemon's pinned METHODS array before
         // this app could call any of them -- the gap on Windows was never

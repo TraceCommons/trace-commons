@@ -229,6 +229,26 @@ public static class PrivateInferenceSurface
             _ => PrivateInferenceTone.Neutral,
         };
 
+    /// <summary>
+    /// Whether an indicator may paint this tone as working. <c>Clear</c>
+    /// alone.
+    /// </summary>
+    /// <remarks>
+    /// A rail badge and a tray glyph both invite a green dot, and painting a
+    /// refusal or a held listener as "on" is the fail-open this surface
+    /// exists to prevent. Every indicator in this shell asks this, and never
+    /// the settings boolean: the switch says what was ASKED FOR, this says
+    /// what is true, and the two disagree exactly when it matters.
+    ///
+    /// An extension method rather than a property on the enum because
+    /// <see cref="PrivateInferenceTone"/> is a plain enum crossing the ABI,
+    /// and the decision about what may be drawn as working belongs beside
+    /// <see cref="FromAbiTone"/> -- where the unknown-value rule it depends
+    /// on is written.
+    /// </remarks>
+    public static bool ReadsAsWorking(this PrivateInferenceTone tone) =>
+        tone == PrivateInferenceTone.Clear;
+
     private const int AbiToneHeld = 21;
     private const int AbiToneClear = 22;
     private const int AbiToneAttention = 23;

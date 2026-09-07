@@ -12,18 +12,38 @@ struct MainWindowView: View {
         case history = "History"
         case settings = "Settings"
         case compute = "compute"
+        // The raw value is an identity, not a label: this destination takes
+        // its words from the Rust copy payload, the way `compute` does.
+        case privateInference = "privateInference"
         var id: String { rawValue }
 
         /// The nav glyph, drawn from the design's own path data rather than
         /// taken from SF Symbols: these three are part of the mark's family
         /// and a system symbol brings its own weight and optical size.
-        fileprivate var glyph: MacGlyphs {
+        ///
+        /// `queue` and `compute` already share `.monitor`. A third reuse
+        /// would leave three of five rows with one glyph and make the
+        /// sidebar unreadable at a glance, so this destination gets its own.
+        var glyph: MacGlyphs {
             switch self {
             case .queue: return .monitor
             case .history: return .clock
             case .settings: return .gear
             case .compute: return .monitor
+            case .privateInference: return .exchange
             }
+        }
+
+        /// The in-app shortcut: Cmd-N for the Nth row of the sidebar, taken
+        /// from the row's own position so the shortcut and the sidebar can
+        /// never disagree about which is which.
+        ///
+        /// In-app only. A global, system-wide hotkey is deliberately out of
+        /// scope: it would need an accessibility grant this app does not
+        /// ask for, and it would fire while another app owned the keyboard.
+        var shortcut: Character? {
+            guard let index = Self.allCases.firstIndex(of: self), index < 9 else { return nil }
+            return Character("\(index + 1)")
         }
 
         /// What the section is for, in the window's subtitle. A person who
@@ -35,6 +55,9 @@ struct MainWindowView: View {
             case .history: return "What you have contributed, and what is still being reviewed."
             case .settings: return "What this machine watches, and what your traces are allowed to do."
             case .compute: return ""
+            // Like `compute`: the real subtitle is the Rust's, read through
+            // the copy payload in `subtitle(_:compute:privateInference:)`.
+            case .privateInference: return ""
             }
         }
     }
@@ -141,13 +164,47 @@ struct MainWindowView: View {
         switch section {
         case .queue: QueueView()
         case .history: HistoryView()
-        case .settings: SettingsView()
+        case .settings: SettingsView(navigation: navigation)
         case .compute: EmptyView()
+        case .privateInference: PrivateInferenceView()
         }
     }
 
     private func title(_ item: Section) -> String {
-        item == .compute ? (compute.copy?.destination ?? "") : item.rawValue
+        Self.title(item, compute: compute.copy, privateInference: model.privateInferenceCopy)
+    }
+
+    private func subtitle(_ item: Section) -> String {
+        Self.subtitle(item, compute: compute.copy, privateInference: model.privateInferenceCopy)
+    }
+
+    /// The nav label, from the Rust for the two destinations whose words the
+    /// Rust owns and from the raw value for the three whose words this shell
+    /// still authors.
+    ///
+    /// Static and copy-taking so a test can ask it what it would render
+    /// without standing up a window, and so the answer for a payload that
+    /// never arrived is no words at all -- never the raw value, which on
+    /// this destination is an identifier and not a label.
+    static func title(
+        _ item: Section, compute: ComputeCopy?, privateInference: PrivateInferenceCopy?
+    ) -> String {
+        switch item {
+        case .compute: return compute?.destination ?? ""
+        case .privateInference: return privateInference?.destination ?? ""
+        case .queue, .history, .settings: return item.rawValue
+        }
+    }
+
+    /// The line under the title, on the same terms as `title`.
+    static func subtitle(
+        _ item: Section, compute: ComputeCopy?, privateInference: PrivateInferenceCopy?
+    ) -> String {
+        switch item {
+        case .compute: return compute?.subtitle ?? ""
+        case .privateInference: return privateInference.map(\.subtitle) ?? ""
+        case .queue, .history, .settings: return item.subtitle
+        }
     }
 
     // MARK: - Sidebar
@@ -259,7 +316,7 @@ struct MainWindowView: View {
                 Text(title(section))
                     .font(TC.Font_.screenTitle)
                     .foregroundStyle(TC.inkPrimary)
-                Text(section == .compute ? (compute.copy?.subtitle ?? "") : section.subtitle)
+                Text(subtitle(section))
                     .font(TC.Font_.caption)
                     .foregroundStyle(TC.inkSecondary)
             }
@@ -356,6 +413,92 @@ struct MainWindowView: View {
     }
 }
 
+// MARK: - Keyboard
+
+/// The View menu's navigation commands, and the one shortcut that acts
+/// rather than navigates.
+///
+/// In-app only, by construction: these are menu items, so they fire when
+/// this app is frontmost and never while another app owns the keyboard. A
+/// global, system-wide hotkey would need a registration this app does not
+/// make and is deliberately out of scope.
+///
+/// It authors no wording. Every title is `MainWindowView.title` -- the raw
+/// value for the three destinations this shell still names, and the Rust's
+/// own words for the two it does not.
+struct MainWindowCommands: Commands {
+    @ObservedObject var model: AppModel
+    var compute: ComputeModel
+    var navigation: MainWindowNavigation
+
+    /// Cmd-N for the Nth destination.
+    static let destinationModifiers: EventModifiers = [.command]
+    /// Cmd-Shift-M for the switch. Shifted so it cannot be reached by the
+    /// same reflex that reaches a destination: this one changes what the
+    /// machine is doing, the other five only change what is on screen.
+    static let toggleModifiers: EventModifiers = [.command, .shift]
+    static let toggleKey: Character = "m"
+
+    var body: some Commands {
+        CommandGroup(after: .sidebar) {
+            ForEach(MainWindowView.Section.allCases) { item in
+                destination(item)
+            }
+            Divider()
+            toggle
+        }
+    }
+
+    @ViewBuilder
+    private func destination(_ item: MainWindowView.Section) -> some View {
+        let label = MainWindowView.title(
+            item, compute: compute.copy, privateInference: model.privateInferenceCopy)
+        // A destination whose words never arrived gets no menu item rather
+        // than a blank one.
+        if !label.isEmpty {
+            Button(label) {
+                navigation.section = item
+                OpenMainWindow.request()
+            }
+            .keyboardShortcut(
+                item.shortcut.map { KeyEquivalent($0) } ?? "0",
+                modifiers: Self.destinationModifiers)
+        }
+    }
+
+    /// The switch, under the same asymmetry the menu bar row follows.
+    ///
+    /// This is a menu, and a menu press must not enable answering: the on
+    /// direction raises the window at the destination, where
+    /// `offer_exposure` is, and writes nothing. It shares
+    /// `MenuBarContent.performPrivateInferenceTray` with the menu-bar row
+    /// rather than restating the rule, because two statements of one rule is
+    /// how this shortcut came to disagree with that row in the first place.
+    ///
+    /// The off direction *sets* false; it does not invert. An inverted press
+    /// against a stale switch position is an enable.
+    @ViewBuilder
+    private var toggle: some View {
+        if let copy = model.privateInferenceCopy {
+            let on = model.daemonSettings?.privateInferenceOn ?? false
+            Button(MenuBarContent.privateInferenceTrayLabel(on: on, copy: copy)) {
+                MenuBarContent.performPrivateInferenceTray(
+                    on: on,
+                    turnOff: { model.applyPrivateInference(false) },
+                    open: {
+                        navigation.section = .privateInference
+                        OpenMainWindow.request()
+                    })
+            }
+            .keyboardShortcut(KeyEquivalent(Self.toggleKey), modifiers: Self.toggleModifiers)
+            // Only the writing direction can be unavailable. Navigation stays
+            // reachable whatever the daemon is doing.
+            .disabled(
+                on && (model.privateInferenceBusy || model.daemonSettings?.privateInference == nil))
+        }
+    }
+}
+
 // MARK: - Glyphs
 
 /// One of the design's glyphs, stated on its own 16-unit grid and stroked at
@@ -400,7 +543,7 @@ fileprivate struct GlyphShape: Shape {
     }
 }
 
-fileprivate enum MacGlyphs {
+enum MacGlyphs: Equatable {
     case monitor
     case clock
     case gear
@@ -408,6 +551,7 @@ fileprivate enum MacGlyphs {
     case pauseBars
     case chevronDown
     case warningTriangle
+    case exchange
 
     func draw(into path: inout Path) {
         switch self {
@@ -418,6 +562,7 @@ fileprivate enum MacGlyphs {
         case .pauseBars: Self.pauseBars(&path)
         case .chevronDown: Self.chevronDown(&path)
         case .warningTriangle: Self.warningTriangle(&path)
+        case .exchange: Self.exchange(&path)
         }
     }
 
@@ -495,6 +640,26 @@ fileprivate enum MacGlyphs {
         path.addLine(to: CGPoint(x: 5.8, y: 12))
         path.move(to: CGPoint(x: 10.2, y: 4))
         path.addLine(to: CGPoint(x: 10.2, y: 12))
+    }
+
+    /// Two arrows, one out and one back, on the same 16-unit grid as the
+    /// rest: a call leaving and an answer returning.
+    ///
+    /// Not a lock and not a shield. Answering a model call on this computer
+    /// moves where the call is answered; it does not make the call private,
+    /// and a padlock in the sidebar would promise exactly the thing the
+    /// wording is careful not to.
+    static func exchange(_ path: inout Path) {
+        path.move(to: CGPoint(x: 2.5, y: 6))
+        path.addLine(to: CGPoint(x: 13.5, y: 6))
+        path.move(to: CGPoint(x: 11, y: 3.5))
+        path.addLine(to: CGPoint(x: 13.5, y: 6))
+        path.addLine(to: CGPoint(x: 11, y: 8.5))
+        path.move(to: CGPoint(x: 13.5, y: 10))
+        path.addLine(to: CGPoint(x: 2.5, y: 10))
+        path.move(to: CGPoint(x: 5, y: 7.5))
+        path.addLine(to: CGPoint(x: 2.5, y: 10))
+        path.addLine(to: CGPoint(x: 5, y: 12.5))
     }
 
     /// `m5 6.5 3 3 3-3` -- the split-button's chevron.

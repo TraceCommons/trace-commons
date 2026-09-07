@@ -288,7 +288,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     /// One field and a derived boolean per destination, rather than one
     /// boolean per destination kept in step by hand. Every pane binds its
     /// Visibility to one of these directly -- which is why they stay booleans
-    /// and the enum stays private -- and with three of them the invariant that
+    /// and the enum stays private -- and with four of them the invariant that
     /// exactly one is true is worth having the compiler hold rather than the
     /// setters. The queue is what opens, because the queue is what has
     /// something waiting on the contributor.
@@ -297,6 +297,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     {
         Queue,
         History,
+        PrivateInference,
         Settings,
     }
 
@@ -304,11 +305,15 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     public bool ShowingHistory => _pane == MainPane.History;
 
+    public bool ShowingPrivateInference => _pane == MainPane.PrivateInference;
+
     public bool ShowingSettings => _pane == MainPane.Settings;
 
     public void ShowQueue() => SetPane(MainPane.Queue);
 
     public void ShowHistory() => SetPane(MainPane.History);
+
+    public void ShowPrivateInference() => SetPane(MainPane.PrivateInference);
 
     public void ShowSettings() => SetPane(MainPane.Settings);
 
@@ -321,12 +326,13 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
         _pane = pane;
 
-        // All three are raised on every change rather than only the two that
+        // All four are raised on every change rather than only the two that
         // moved: the rail's selection bars and the panes both bind to these,
         // and a destination left un-raised is a rail row that stays lit for a
         // pane that is no longer on screen.
         Raise(nameof(ShowingQueue));
         Raise(nameof(ShowingHistory));
+        Raise(nameof(ShowingPrivateInference));
         Raise(nameof(ShowingSettings));
     }
 
@@ -458,6 +464,44 @@ public sealed class MainViewModel : INotifyPropertyChanged
         _privateInferenceCopy?.OfferDecline ?? string.Empty;
 
     /// <summary>
+    /// The rail label. The Rust's word, never this shell's: it is the one
+    /// word a contributor navigates by, and a shell that spelled it itself
+    /// would go on spelling the old one after a rename.
+    /// </summary>
+    public string PrivateInferenceDestination =>
+        _privateInferenceCopy?.Destination ?? string.Empty;
+
+    /// <summary>
+    /// Whether the rail badge may be lit.
+    ///
+    /// The reported state, and only the reported state. Reading the switch
+    /// here is the fail-open this surface exists to prevent: the switch says
+    /// what was asked for, and a contributor who turned it on over a port
+    /// that was already taken has it on with nothing answering.
+    /// </summary>
+    public bool PrivateInferenceIsWorking =>
+        PrivateInferenceSurface.Tone(_privateInferenceState).ReadsAsWorking();
+
+    /// <summary>
+    /// Something on this machine wants attention before a call can get
+    /// through, or the listener was asked for and refused. Distinct from the
+    /// working badge and from nothing at all, because those are three
+    /// different facts.
+    /// </summary>
+    public bool PrivateInferenceNeedsAttention =>
+        PrivateInferenceSurface.Tone(_privateInferenceState)
+            is PrivateInferenceTone.Attention or PrivateInferenceTone.Refused;
+
+    /// <summary>
+    /// Raised whenever the daemon reports the switch or the listener.
+    ///
+    /// The window forwards it to the destination page and to the tray, so
+    /// all three surfaces are drawn from one read rather than from three
+    /// that can disagree.
+    /// </summary>
+    public event Action<DaemonSettingsSnapshot?>? PrivateInferenceSettingsChanged;
+
+    /// <summary>
     /// Whether the switch is on, for the one sentence the quit confirmation
     /// gains while it is: quitting this app stops the listener with it.
     /// </summary>
@@ -496,6 +540,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
             _privateInferenceKnown = true;
             _privateInferenceState = PrivateInferenceState.From(settings.PrivateInferenceReport);
             Raise(nameof(PrivateInferenceQuitDetail));
+            Raise(nameof(PrivateInferenceIsWorking));
+            Raise(nameof(PrivateInferenceNeedsAttention));
+            PrivateInferenceSettingsChanged?.Invoke(settings);
         }
 
         if (answered == _privateInferenceAnswered && on == _privateInferenceOn)

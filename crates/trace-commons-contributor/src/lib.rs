@@ -13,6 +13,7 @@ pub mod consent;
 pub mod consent_copy;
 pub mod daemon;
 pub mod envelope;
+pub mod harness_state;
 pub mod identity;
 pub mod issuer_client;
 pub mod onboarding_copy;
