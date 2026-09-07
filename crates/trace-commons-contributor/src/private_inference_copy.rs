@@ -152,6 +152,41 @@ pub const STATE_STOPPING: &str =
 /// `running`.
 pub const STATE_RUNNING: &str = "On. Calls sent to this computer are being answered.";
 
+/// `running_answered_elsewhere`.
+///
+/// The sentence this whole surface was missing. Everything works: the
+/// listener is up, a tool is connected, calls are answered. They are just not
+/// answered by the destination the person believes, because the credentials
+/// their tools already had are the ones being used, and nothing here has one
+/// for DESTINATION.
+///
+/// Deliberately not phrased as a fault. For someone with no NEAR AI
+/// relationship this is the correct resting state, not a failure, and calling
+/// it an error would send them looking for something to repair. Its tone is
+/// [`PrivateInferenceTone::Attention`] and never
+/// [`PrivateInferenceTone::Clear`]: it is working, and it is not doing what
+/// the reader thinks.
+///
+/// May only be shown on a fresh affirmative reading. It accuses the product
+/// of not doing what a person expects, so a guess is worse here than silence
+/// -- see [`STATE_RUNNING_DESTINATION_UNKNOWN`].
+pub const STATE_RUNNING_ANSWERED_ELSEWHERE: &str = "On, and your calls are being answered using accounts already set up on \
+     this computer. Nothing is set up here for Private AI to answer them \
+     instead.";
+
+/// `running_destination_unknown`.
+///
+/// Not knowing is its own answer and gets its own sentence. The two facts
+/// this surface can report -- answered here, answered elsewhere -- are both
+/// claims about where a person's work goes, and neither may be made up. When
+/// the reading fails, this says the switch is on and stops there.
+///
+/// Its tone is [`PrivateInferenceTone::Attention`]. Painting it
+/// [`PrivateInferenceTone::Clear`] would be the exact failure this state
+/// exists to prevent: an unread destination shown as a working one.
+pub const STATE_RUNNING_DESTINATION_UNKNOWN: &str = "On. Calls sent to this computer are being answered. Which account is \
+     answering them could not be read just now.";
+
 /// `running_no_backends`.
 ///
 /// The state this vocabulary exists for. The listener is up and answers a
@@ -274,6 +309,8 @@ pub fn state_line(label: &str) -> &'static str {
         LABEL_STOPPING => STATE_STOPPING,
         LABEL_RUNNING => STATE_RUNNING,
         LABEL_RUNNING_NO_BACKENDS => STATE_RUNNING_NO_BACKENDS,
+        LABEL_RUNNING_ANSWERED_ELSEWHERE => STATE_RUNNING_ANSWERED_ELSEWHERE,
+        LABEL_RUNNING_DESTINATION_UNKNOWN => STATE_RUNNING_DESTINATION_UNKNOWN,
         LABEL_RUNNING_ELSEWHERE => STATE_RUNNING_ELSEWHERE,
         LABEL_PORT_IN_USE => STATE_PORT_IN_USE,
         LABEL_START_FAILED => STATE_START_FAILED,
@@ -296,7 +333,14 @@ pub fn state_line(label: &str) -> &'static str {
 pub fn state_tone(label: &str) -> PrivateInferenceTone {
     match label {
         LABEL_RUNNING => PrivateInferenceTone::Clear,
-        LABEL_RUNNING_NO_BACKENDS => PrivateInferenceTone::Attention,
+        LABEL_RUNNING_NO_BACKENDS
+        // Both are working states that are not doing what the reader
+        // believes, which is what `Attention` is for. Mapped explicitly
+        // rather than left to the `Neutral` default below: degrading to a
+        // tone that happens not to be `Clear` would be right by accident,
+        // and the accident stops holding the moment somebody reorders this.
+        | LABEL_RUNNING_ANSWERED_ELSEWHERE
+        | LABEL_RUNNING_DESTINATION_UNKNOWN => PrivateInferenceTone::Attention,
         LABEL_RUNNING_ELSEWHERE | LABEL_STOPPING => PrivateInferenceTone::Held,
         LABEL_PORT_IN_USE | LABEL_START_FAILED | LABEL_CRASHED => PrivateInferenceTone::Refused,
         _ => PrivateInferenceTone::Neutral,
@@ -401,6 +445,10 @@ pub struct PrivateInferenceCopy {
     pub state_stopping: &'static str,
     pub state_running: &'static str,
     pub state_running_no_backends: &'static str,
+    /// [`STATE_RUNNING_ANSWERED_ELSEWHERE`].
+    pub state_running_answered_elsewhere: &'static str,
+    /// [`STATE_RUNNING_DESTINATION_UNKNOWN`].
+    pub state_running_destination_unknown: &'static str,
     pub state_running_elsewhere: &'static str,
     pub state_port_in_use: &'static str,
     pub state_start_failed: &'static str,
@@ -801,6 +849,8 @@ pub fn private_inference_copy() -> PrivateInferenceCopy {
         state_stopping: STATE_STOPPING,
         state_running: STATE_RUNNING,
         state_running_no_backends: STATE_RUNNING_NO_BACKENDS,
+        state_running_answered_elsewhere: STATE_RUNNING_ANSWERED_ELSEWHERE,
+        state_running_destination_unknown: STATE_RUNNING_DESTINATION_UNKNOWN,
         state_running_elsewhere: STATE_RUNNING_ELSEWHERE,
         state_port_in_use: STATE_PORT_IN_USE,
         state_start_failed: STATE_START_FAILED,
@@ -841,13 +891,54 @@ pub fn private_inference_copy() -> PrivateInferenceCopy {
 /// have not disagreed yet, and the failure mode of a typo here is a state that
 /// silently renders as unavailable.
 pub use crate::daemon::private_inference::{
-    LABEL_CRASHED, LABEL_OFF, LABEL_PORT_IN_USE, LABEL_RUNNING, LABEL_RUNNING_ELSEWHERE,
-    LABEL_RUNNING_NO_BACKENDS, LABEL_START_FAILED, LABEL_STOPPING,
+    LABEL_CRASHED, LABEL_OFF, LABEL_PORT_IN_USE, LABEL_RUNNING, LABEL_RUNNING_ANSWERED_ELSEWHERE,
+    LABEL_RUNNING_DESTINATION_UNKNOWN, LABEL_RUNNING_ELSEWHERE, LABEL_RUNNING_NO_BACKENDS,
+    LABEL_START_FAILED, LABEL_STOPPING,
 };
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The failure this surface exists to prevent, pinned.
+    ///
+    /// If the destination could not be read, or was read and is not ours, the
+    /// shell must not paint a working light. `Clear` is the only tone that
+    /// paints one, so this is the whole safety property in one assertion.
+    #[test]
+    fn a_destination_that_is_not_ours_is_never_painted_as_working() {
+        for label in [
+            LABEL_RUNNING_ANSWERED_ELSEWHERE,
+            LABEL_RUNNING_DESTINATION_UNKNOWN,
+        ] {
+            assert_eq!(
+                state_tone(label),
+                PrivateInferenceTone::Attention,
+                "{label} must be Attention"
+            );
+            assert!(
+                !state_tone(label).reads_as_working(),
+                "{label} must never read as working"
+            );
+        }
+        assert!(state_tone(LABEL_RUNNING).reads_as_working());
+    }
+
+    /// Each new label has to reach its own sentence. Falling through to
+    /// `STATE_UNKNOWN` would lose the very thing being said.
+    #[test]
+    fn each_destination_label_reaches_its_own_sentence() {
+        assert_eq!(
+            state_line(LABEL_RUNNING_ANSWERED_ELSEWHERE),
+            STATE_RUNNING_ANSWERED_ELSEWHERE
+        );
+        assert_eq!(
+            state_line(LABEL_RUNNING_DESTINATION_UNKNOWN),
+            STATE_RUNNING_DESTINATION_UNKNOWN
+        );
+        assert_eq!(state_line(LABEL_RUNNING), STATE_RUNNING);
+        assert_ne!(state_line(LABEL_RUNNING_ANSWERED_ELSEWHERE), STATE_UNKNOWN);
+    }
 
     /// Only `Clear` may be painted as working. The GTK shell reads this
     /// predicate directly rather than through the ABI, so it is pinned here
@@ -1421,7 +1512,7 @@ mod tests {
         let fields = payload.as_object().expect("a JSON object");
         assert_eq!(
             fields.len(),
-            46,
+            48,
             "the payload's field count changed -- update the shells' decoders \
              and the tests that pin the set"
         );
