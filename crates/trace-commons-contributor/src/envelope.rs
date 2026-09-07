@@ -1617,6 +1617,48 @@ mod tests {
     /// it would re-introduce the over-declaration this fixes, since the
     /// recorded-trace path keeps tool names for structure even when it strips
     /// payloads for privacy.
+    #[tokio::test]
+    async fn opencode_text_only_and_real_tool_payload_consent_agree_on_both_sides() {
+        use trace_commons_protocol::trace_contribution::derive_envelope_content_presence;
+        let bytes = include_bytes!("../tests/fixtures/opencode/completed.json");
+        for tools in [false, true] {
+            let mut doc: Value = serde_json::from_slice(bytes).unwrap();
+            if !tools {
+                for message in doc["messages"].as_array_mut().unwrap() {
+                    message["parts"]
+                        .as_array_mut()
+                        .unwrap()
+                        .retain(|p| p["type"] == "text");
+                }
+                let mut marker = doc["messages"][1]["parts"][0].clone();
+                marker["id"] = "prt_step_marker".into();
+                marker["type"] = "step-finish".into();
+                doc["messages"][1]["parts"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(marker);
+            }
+            let mut t =
+                crate::source::opencode::parse_export(&serde_json::to_vec(&doc).unwrap()).unwrap();
+            let raw = build_raw_contribution(&t, &test_config(), Utc::now());
+            assert!(raw.consent.message_text_included);
+            assert_eq!(raw.consent.tool_payloads_included, tools);
+            let redactor = build_deterministic_preview_redactor(t.cwd.as_deref());
+            let envelope = redact_to_envelope(&redactor, raw).await.unwrap();
+            assert_eq!(
+                derive_envelope_content_presence(&envelope).tool_payloads,
+                tools
+            );
+            // No global exemption: arbitrary content under an ID-shaped key
+            // still requires payload consent on both client and server.
+            t.events[0].structured = serde_json::json!({"message_id":"untrusted readable content"});
+            let raw = build_raw_contribution(&t, &test_config(), Utc::now());
+            assert!(raw.consent.tool_payloads_included);
+            let envelope = redact_to_envelope(&redactor, raw).await.unwrap();
+            assert!(derive_envelope_content_presence(&envelope).tool_payloads);
+        }
+    }
+
     #[test]
     fn a_bare_tool_name_is_not_a_tool_payload() {
         let cfg = test_config();

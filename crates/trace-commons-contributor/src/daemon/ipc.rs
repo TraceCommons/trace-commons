@@ -3815,49 +3815,34 @@ fn redacted_settings(s: &DaemonSettings) -> serde_json::Value {
         // reporting it as configured would tell a settings screen to print
         // "sessions folder set" about an agent the contributor said they do
         // not use. The mode carries that distinction, and carries no path.
-        let mode_of = |d: &Option<crate::daemon::settings::SourceDeclaration>| match d {
-            Some(crate::daemon::settings::SourceDeclaration::Watch { .. }) => "watch",
-            Some(crate::daemon::settings::SourceDeclaration::Off) => "off",
-            None => "unset",
-        };
-        let claude_mode = mode_of(&s.claude_source);
-        let codex_mode = mode_of(&s.codex_source);
-        let gemini_mode = mode_of(&s.gemini_source);
-        let cline_mode = mode_of(&s.cline_source);
         obj.remove("claude_root");
         obj.remove("codex_root");
-        obj.remove("claude_source");
-        obj.remove("codex_source");
-        obj.remove("gemini_source");
-        obj.remove("cline_source");
-        obj.insert(
-            "claude_root_configured".to_string(),
-            serde_json::Value::Bool(claude_mode == "watch"),
-        );
-        obj.insert(
-            "codex_root_configured".to_string(),
-            serde_json::Value::Bool(codex_mode == "watch"),
-        );
-        obj.insert(
-            "claude_source_mode".to_string(),
-            serde_json::Value::String(claude_mode.to_string()),
-        );
-        obj.insert(
-            "codex_source_mode".to_string(),
-            serde_json::Value::String(codex_mode.to_string()),
-        );
-        // No `gemini_root_configured`: the `*_root_configured` pair exists
-        // for shells written before `*_source_mode` did, and none of them
-        // knows about this source. A new key would only be a second
-        // spelling of the mode.
-        obj.insert(
-            "gemini_source_mode".to_string(),
-            serde_json::Value::String(gemini_mode.to_string()),
-        );
-        obj.insert(
-            "cline_source_mode".to_string(),
-            serde_json::Value::String(cline_mode.to_string()),
-        );
+        for source in crate::source::registered_source_names() {
+            let Some(key) = crate::daemon::settings::source_settings_key(source) else {
+                continue;
+            };
+            let declaration = obj.remove(key);
+            let mode = match declaration
+                .as_ref()
+                .and_then(|v| v.get("mode"))
+                .and_then(serde_json::Value::as_str)
+            {
+                Some("watch") => "watch",
+                Some("off") => "off",
+                _ => "unset",
+            };
+            obj.insert(format!("{key}_mode"), mode.into());
+        }
+        // A future unmapped declaration must still never expose its path.
+        obj.retain(|key, _| !key.ends_with("_source"));
+        // Legacy presence aliases; new sources expose only their mode.
+        for source in ["claude", "codex"] {
+            let watched = obj
+                .get(&format!("{source}_source_mode"))
+                .and_then(serde_json::Value::as_str)
+                == Some("watch");
+            obj.insert(format!("{source}_root_configured"), watched.into());
+        }
     }
     v
 }
@@ -4989,27 +4974,29 @@ mod tests {
     /// without a matching removal here would put that path on the wire.
     #[test]
     fn the_settings_blob_reports_source_modes_and_never_a_source_path() {
-        let settings = DaemonSettings {
-            claude_source: Some(crate::daemon::settings::SourceDeclaration::Watch {
-                path: std::path::PathBuf::from("/declared/claude"),
-            }),
-            codex_source: Some(crate::daemon::settings::SourceDeclaration::Off),
-            gemini_source: Some(crate::daemon::settings::SourceDeclaration::Watch {
-                path: std::path::PathBuf::from("/declared/gemini"),
-            }),
-            ..Default::default()
-        };
-        let v = redacted_settings(&settings);
-        let rendered = v.to_string();
-        for path in ["/declared/claude", "/declared/gemini"] {
-            assert!(!rendered.contains(path), "a source path reached the wire");
+        for source in crate::source::registered_source_names() {
+            let key = crate::daemon::settings::source_settings_key(source)
+                .expect("every registered source has a settings key");
+            for (declaration, expected) in [
+                (
+                    serde_json::json!({"mode":"watch","path":"/private/source-path-sentinel"}),
+                    "watch",
+                ),
+                (serde_json::json!({"mode":"off"}), "off"),
+                (serde_json::Value::Null, "unset"),
+            ] {
+                let mut settings = DaemonSettings::default();
+                crate::daemon::settings::apply_settings_object(
+                    &mut settings,
+                    &serde_json::json!({key:declaration}),
+                )
+                .unwrap();
+                let v = redacted_settings(&settings);
+                assert!(!v.to_string().contains("source-path-sentinel"));
+                assert!(v.get(key).is_none(), "raw declaration leaked for {source}");
+                assert_eq!(v[format!("{key}_mode")], expected);
+            }
         }
-        assert_eq!(v["claude_source_mode"], "watch");
-        assert_eq!(v["codex_source_mode"], "off");
-        assert_eq!(v["gemini_source_mode"], "watch");
-        assert!(v.get("gemini_source").is_none());
-        assert_eq!(v["cline_source_mode"], "unset");
-        assert!(v.get("cline_source").is_none());
     }
 
     fn req(method: &str, params: serde_json::Value) -> Request {

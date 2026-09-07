@@ -519,7 +519,7 @@ struct SourceSpec {
     name: &'static str,
     /// The per-user store to use when the contributor has never been asked
     /// and the caller accepts conventional locations.
-    conventional_root: fn() -> PathBuf,
+    conventional_root: Option<fn() -> PathBuf>,
     build: fn(PathBuf) -> Box<dyn TraceSource>,
     undeclared: Undeclared,
 }
@@ -529,25 +529,25 @@ static NATIVE_SOURCES: &[SourceSpec] = &[
     SourceSpec {
         name: SOURCE_OPENCODE,
         // Export-only: this path is never used without a declaration.
-        conventional_root: PathBuf::new,
+        conventional_root: None,
         build: |path| Box::new(opencode::OpenCodeSource::new(path)),
         undeclared: Undeclared::Nothing,
     },
     SourceSpec {
         name: SOURCE_CLAUDE_CODE,
-        conventional_root: || home_dir().join(".claude/projects"),
+        conventional_root: Some(|| home_dir().join(".claude/projects")),
         build: |path| Box::new(claude_code::ClaudeCodeSource::new(path)),
         undeclared: Undeclared::Conventional,
     },
     SourceSpec {
         name: SOURCE_CODEX,
-        conventional_root: || home_dir().join(".codex/sessions"),
+        conventional_root: Some(|| home_dir().join(".codex/sessions")),
         build: |path| Box::new(codex::CodexSource::new(path)),
         undeclared: Undeclared::Conventional,
     },
     SourceSpec {
         name: SOURCE_GEMINI_CLI,
-        conventional_root: gemini_cli::conventional_root_this_machine,
+        conventional_root: Some(gemini_cli::conventional_root_this_machine),
         build: |path| Box::new(gemini_cli::GeminiCliSource::new(path)),
         // See `Undeclared`: every desktop client that has already shipped
         // declares claude and codex and carries no gemini field, so an
@@ -557,7 +557,7 @@ static NATIVE_SOURCES: &[SourceSpec] = &[
     },
     SourceSpec {
         name: SOURCE_CLINE,
-        conventional_root: cline::conventional_root_this_machine,
+        conventional_root: Some(cline::conventional_root_this_machine),
         build: |path| Box::new(cline::ClineSource::new(path)),
         // Same reasoning as Gemini: every shipped shell declares claude and
         // codex and carries no cline field, so an absent declaration must
@@ -566,6 +566,11 @@ static NATIVE_SOURCES: &[SourceSpec] = &[
         undeclared: Undeclared::Nothing,
     },
 ];
+
+/// Registered adapters, including sources with no conventional location.
+pub(crate) fn registered_source_names() -> impl Iterator<Item = &'static str> {
+    NATIVE_SOURCES.iter().map(|spec| spec.name)
+}
 
 /// The subdirectory of the contributor state directory that trajectory
 /// files may be staged in. Placing a file there IS the opt-in, which is why
@@ -721,14 +726,13 @@ impl SourceRoots {
     pub fn conventional() -> Self {
         let mut roots = Self::new();
         for spec in NATIVE_SOURCES {
-            // OpenCode exports have no conventional store or implicit opt-in.
-            if spec.name == SOURCE_OPENCODE {
+            let Some(conventional_root) = spec.conventional_root else {
                 continue;
-            }
+            };
             roots = roots.declare(
                 spec.name,
                 Some(SourceDeclaration::Watch {
-                    path: (spec.conventional_root)(),
+                    path: conventional_root(),
                 }),
             );
         }
@@ -785,7 +789,11 @@ pub fn all_sources(roots: &SourceRoots) -> Vec<Box<dyn TraceSource>> {
             Some(SourceDeclaration::Off) => {}
             Some(SourceDeclaration::Watch { path }) => sources.push((spec.build)(path.clone())),
             None => match spec.undeclared {
-                Undeclared::Conventional => sources.push((spec.build)((spec.conventional_root)())),
+                Undeclared::Conventional => {
+                    if let Some(root) = spec.conventional_root {
+                        sources.push((spec.build)(root()));
+                    }
+                }
                 Undeclared::Nothing => {}
             },
         }

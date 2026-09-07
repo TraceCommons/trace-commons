@@ -74,27 +74,39 @@ of historical sessions. The backend settings key is `opencode_source`, accepting
 object form (`{"mode":"watch","path":"/chosen/exports"}` or `{"mode":"off"}`).
 Absent/null constructs nothing, including old settings files. Native picker
 and shared-copy wiring are a separate coordinated workstream; this checkpoint
-is not that UI.
+is not that UI. IPC settings expose only `opencode_source_mode`
+(`unset`, `off`, or `watch`), never the selected path; registered source fields
+share the same redaction rule.
 
 The reader caps input at 16 MiB before JSON parsing and limits messages/parts to
-100,000. It hashes the exact imported bytes and uses the export's session ID,
+100,000. Discovery refuses directories exceeding 256 entries, counting non-JSON
+entries too. A bounded 64 KiB leading header supplies the original session time
+and directory for discovery and `--since`; export modification time is never
+substituted for session time. Missing or later headers leave these fields absent.
+It hashes the exact imported bytes and uses the export's session ID,
 message IDs, part IDs and tool call IDs. It rejects duplicate/cross-session IDs,
 missing parents, backward message timestamps, invalid roles/part types/tool
 states and malformed/truncated JSON. It preserves supplied order for equal
 timestamps. Its tested version allowlist currently accepts only
 `info.version == "1.18.29"`; this conservative check can refuse an older-created
 session even if exported by a newer compatible executable. Expand the allowlist
-only with fixtures and schema review, not a best-effort parse.
+only with fixtures and schema review, not a best-effort parse. Unsupported
+versions raise the standing `opencode-export-version-unsupported` health label;
+a complete successful discovery pass clears it after repair.
 
 Text/reasoning content and tool inputs/results enter the ordinary redaction
 pipeline. Completed/error tools preserve true/false; pending/running tools do
 not manufacture a result. File URLs, attachment bytes, snapshots and harness
-metadata are not opened or copied; recognized non-text part types become opaque
-type markers. IDs are retained in structured event metadata; selected assistant
-provider/model IDs are retained per supported content/tool event. Mixed models
-leave the transcript-wide model absent. Usage/pricing is left absent because
-the export does not establish the complete cache-duration accounting contract.
-The synthetic/ignored flags remain explicit when supplied.
+metadata are not opened or copied; recognized non-text part types become empty
+opaque events. Synthetic or ignored text is withheld as an empty opaque event.
+Message/part IDs are validated locally, while session and tool-call IDs retain
+their typed roles. Text events do not carry import-ID objects that would falsely
+declare tool-payload consent. Tool arguments contain the actual input object;
+tool results retain import identity and supplied model metadata. Arbitrary
+readable structured payloads still require consent on both client and server.
+Mixed models leave the transcript-wide model absent; per-text model metadata is
+not exported. Usage/pricing is left absent because the export does not establish
+the complete cache-duration accounting contract.
 
 Discovery/load checks path containment and rejects final symlinks. Shipped Unix
 opens use nonblocking/no-follow flags, then validate the same opened inode;
