@@ -53,13 +53,20 @@ public sealed class HarnessRowViewModel
 
     public bool HasConnectCommand => _row.ConnectCommand.Length > 0;
 
-    /// <summary>The sentence for whatever state the daemon reported.</summary>
+    /// <summary>The sentence this row shows, which is not always its state's.</summary>
     /// <remarks>
     /// The daemon's own label goes across the ABI and the sentence comes
     /// back. This shell does not choose between the payload's fields, and
     /// neither do the other two: it is one table, asked three times.
+    ///
+    /// A tool that is not on this machine is the exception, and it is not a
+    /// state at all -- it gets the missing-tool sentence instead. The row
+    /// stays listed, because a tool left out cannot be told apart from a tool
+    /// this app was never taught about, and it may not keep the not-connected
+    /// sentence, which claims a tool's own settings still send its calls
+    /// wherever they went before.
     /// </remarks>
-    public string StateText => HarnessSurface.StateSentence(_row.StateLabel);
+    public string StateText => HarnessSurface.RowSentence(_row, _copy);
 
     public bool HasStateText => StateText.Length > 0;
 

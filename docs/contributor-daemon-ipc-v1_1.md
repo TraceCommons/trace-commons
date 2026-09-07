@@ -1853,7 +1853,7 @@ retained-shutdown producer confirms cleanup; a port alone is metadata, not
 proof that calls can be answered.
 
 The companion C ABI copy payload (`tc_private_inference_copy`, not a daemon
-settings key) supplies these 41 fixed string fields:
+settings key) supplies these 45 fixed string fields:
 
 - `destination`, `subtitle`;
 - `offer_title`, `offer_what`, `offer_exposure`, `offer_no_repoint`,
@@ -1871,7 +1871,10 @@ settings key) supplies these 41 fixed string fields:
 - `harness_preview_title`, `harness_preview_confirm`,
   `harness_preview_cancel`;
 - `harness_slot_taken`, `harness_needs_restart`,
-  `harness_unreadable_config`.
+  `harness_unreadable_config`;
+- `harness_not_installed`;
+- `harness_plan_nothing_to_change`, `harness_plan_entry_unusable`,
+  `harness_plan_no_config_path`.
 
 The three per-harness states are not two. `harness_connected_nothing_seen`
 says a tool's own settings send its calls here; `harness_answering` says a
@@ -1880,8 +1883,21 @@ tool works. `harness_slot_taken` reports a slot left exactly as the
 contributor had it and must never be rendered as a fault or paired with an
 action that takes it over.
 
-State sentences and tones are chosen by the shared Rust table rather than by
-shell-authored branching. Copy-field inventory parity is checked separately
+`harness_not_installed` is what a row whose tool is not on this computer
+shows INSTEAD of any state sentence. Such a tool is listed and disabled
+rather than hidden -- a tool left out cannot be told apart from one the app
+was never taught about -- and it must not also carry
+`harness_not_connected`, which claims a tool's own settings still send its
+calls wherever they went before.
+
+The four `harness_plan_*` sentences plus `harness_unreadable_config` are the
+answers of `tc_harness_outcome_line`, one per non-committable `harness_plan`
+outcome. `changes` answers the empty string, because a plan with changes in
+it shows them. Every other outcome writes nothing, and without a sentence its
+preview is a title, a path and a way out.
+
+State sentences, outcome sentences and tones are chosen by the shared Rust
+table rather than by shell-authored branching. Copy-field inventory parity is checked separately
 from successful decoding of required fields.
 
 The shared `tc_private_inference_write_confirmed` decision accepts optional

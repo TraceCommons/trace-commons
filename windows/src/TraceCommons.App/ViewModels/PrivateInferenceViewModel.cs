@@ -385,7 +385,18 @@ public sealed class PrivateInferenceViewModel : INotifyPropertyChanged
     public bool HasRestart => _restart.Length > 0;
 
     /// <summary>A settings file that could not be read, and was therefore refused.</summary>
-    public string UnreadableConfig => _copy?.HarnessUnreadableConfig ?? string.Empty;
+    /// <summary>
+    /// The sentence a plan's outcome carries, from the shared table.
+    /// </summary>
+    /// <remarks>
+    /// Replaces an <c>UnreadableConfig</c> property this view model held and
+    /// the view's <c>== Unparseable</c> branch above it. That was one arm of a
+    /// table written three times, and the four other non-committable outcomes
+    /// had no arm at all -- their preview opened with a title, a path, no
+    /// changes and a way out.
+    /// </remarks>
+    public static string OutcomeSentence(string? outcomeLabel) =>
+        HarnessSurface.OutcomeSentence(outcomeLabel);
 
     /// <summary>
     /// Answers the exposure question with a yes and turns the destination on,

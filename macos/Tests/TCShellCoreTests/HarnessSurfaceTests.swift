@@ -28,7 +28,11 @@ final class HarnessSurfaceTests: XCTestCase {
          "harness_preview_title":"H-PREVIEW","harness_preview_confirm":"H-CONFIRM",
          "harness_preview_cancel":"H-CANCEL","harness_slot_taken":"H-TAKEN",
          "harness_needs_restart":"H-RESTART","harnesses_none_found":"H-NONE",
-         "harness_unreadable_config":"H-UNREADABLE"}
+         "harness_unreadable_config":"H-UNREADABLE",
+         "harness_not_installed":"H-NOT-INSTALLED",
+         "harness_plan_nothing_to_change":"H-NOTHING-TO-CHANGE",
+         "harness_plan_entry_unusable":"H-ENTRY-UNUSABLE",
+         "harness_plan_no_config_path":"H-NO-CONFIG-PATH"}
         """
 
     private func copy() -> PrivateInferenceCopy {
@@ -90,7 +94,8 @@ final class HarnessSurfaceTests: XCTestCase {
             planOutcomeCode: { _ in 40 },
             actionAvailable: { _, _, _ in false },
             stateLine: { _ in "" },
-            lastCallLine: { _ in "" })
+            lastCallLine: { _ in "" },
+            outcomeLine: { _ in "" })
         XCTAssertEqual(HarnessSurface.state("answering", calls: calls), .answering)
         XCTAssertEqual(seen.values, ["answering"])
     }
@@ -125,7 +130,8 @@ final class HarnessSurfaceTests: XCTestCase {
                 seen.record(label)
                 return label == "answering" ? "SHARED-ANSWERING" : ""
             },
-            lastCallLine: { _ in "" })
+            lastCallLine: { _ in "" },
+            outcomeLine: { _ in "" })
         XCTAssertEqual(
             HarnessSurface.stateSentence("answering", calls: calls), "SHARED-ANSWERING")
         XCTAssertEqual(seen.values, ["answering"])
@@ -153,7 +159,8 @@ final class HarnessSurfaceTests: XCTestCase {
                 default: return ""
                 }
             },
-            lastCallLine: { _ in "" })
+            lastCallLine: { _ in "" },
+            outcomeLine: { _ in "" })
 
         XCTAssertEqual(HarnessSurface.stateSentence("not_connected", calls: calls), "H-NOT-CONNECTED")
         XCTAssertEqual(HarnessSurface.stateSentence("connected_no_calls", calls: calls), nothingSeen)
@@ -183,7 +190,8 @@ final class HarnessSurfaceTests: XCTestCase {
             lastCallLine: { seconds in
                 seen.record(seconds)
                 return seconds < 0 ? "" : "SHARED-WHEN"
-            })
+            },
+            outcomeLine: { _ in "" })
 
         let withCall = Self.oneRow.replacingOccurrences(
             of: "\"last_call_at\":null,", with: "\"last_call_at\":\"2026-01-01T00:00:00Z\",")
@@ -238,7 +246,8 @@ final class HarnessSurfaceTests: XCTestCase {
                 seen.record(action)
                 return action == "disconnect"
             },
-            stateLine: { _ in "" }, lastCallLine: { _ in "" })
+            stateLine: { _ in "" }, lastCallLine: { _ in "" },
+            outcomeLine: { _ in "" })
         let row = HarnessSurface.list(fromJSON: Self.oneRow).harnesses[0]
         XCTAssertFalse(HarnessSurface.canConnect(row, calls: calls))
         XCTAssertTrue(HarnessSurface.canDisconnect(row, calls: calls))
@@ -255,7 +264,8 @@ final class HarnessSurfaceTests: XCTestCase {
             planOutcomeCode: { outcome in outcome == "changes" ? 41 : 42 },
             actionAvailable: { _, _, _ in true },
             stateLine: { _ in "" },
-            lastCallLine: { _ in "" })
+            lastCallLine: { _ in "" },
+            outcomeLine: { _ in "" })
         let changes = HarnessSurface.plan(
             fromJSON: #"""
                 {"id":"claude","action":"connect","outcome":"changes","plan_id":"c0ffee",
@@ -280,7 +290,8 @@ final class HarnessSurfaceTests: XCTestCase {
         let calls = HarnessCalls(
             stateCode: { _ in 31 }, planOutcomeCode: { _ in 41 },
             actionAvailable: { _, _, _ in true },
-            stateLine: { _ in "" }, lastCallLine: { _ in "" })
+            stateLine: { _ in "" }, lastCallLine: { _ in "" },
+            outcomeLine: { _ in "" })
         let plan = HarnessSurface.plan(
             fromJSON: #"""
                 {"id":"claude","action":"connect","outcome":"changes","plan_id":null,
@@ -289,31 +300,80 @@ final class HarnessSurfaceTests: XCTestCase {
         XCTAssertEqual(plan.map { HarnessSurface.canCommit($0, calls: calls) }, false)
     }
 
-    /// A file we refused to rewrite is not a file with nothing to change,
-    /// and collapsing the two tells a contributor with a broken config that
-    /// everything is fine.
-    func testARefusedFileIsNotAFileWithNothingToChange() {
+    /// Every outcome that writes nothing explains itself, and it is the
+    /// shared table that says how.
+    ///
+    /// The stub deliberately does NOT reproduce the Rust's mapping; it
+    /// echoes the label, so a shell that stopped asking and went back to
+    /// choosing between the payload's fields would fail here rather than
+    /// pass by agreeing with a literal typed in this file. Four of these
+    /// five outcomes had no sentence at all before, and their preview opened
+    /// with a title, a path, no changes and a way out.
+    func testEveryOutcomeThatChangesNothingSaysWhy() {
+        let seen = SpyBox()
         let calls = HarnessCalls(
             stateCode: { _ in 31 },
-            planOutcomeCode: { outcome in outcome == "unparseable" ? 43 : 42 },
+            planOutcomeCode: { _ in 42 },
             actionAvailable: { _, _, _ in true },
             stateLine: { _ in "" },
-            lastCallLine: { _ in "" })
-        let refused = HarnessSurface.plan(
+            lastCallLine: { _ in "" },
+            outcomeLine: { label in
+                seen.record(label)
+                return label == "changes" ? "" : "SHARED-\(label)"
+            })
+        for outcome in [
+            "noop", "unparseable", "not_installed", "entry_unusable", "no_config_path",
+        ] {
+            let plan = HarnessSurface.plan(
+                fromJSON: #"""
+                    {"id":"claude","action":"connect","outcome":"OUTCOME","plan_id":null,
+                     "path":"/p","changes":[],"occupied":[]}
+                    """#.replacingOccurrences(of: "OUTCOME", with: outcome))
+            XCTAssertEqual(
+                plan.map { HarnessSurface.outcomeSentence($0, calls: calls) },
+                "SHARED-\(outcome)",
+                "\(outcome) opens an empty preview")
+        }
+        XCTAssertEqual(
+            seen.values,
+            ["noop", "unparseable", "not_installed", "entry_unusable", "no_config_path"])
+
+        // A plan with changes shows them; a sentence above them would be this
+        // app narrating its own list.
+        let changes = HarnessSurface.plan(
             fromJSON: #"""
-                {"id":"claude","action":"connect","outcome":"unparseable","plan_id":null,
-                 "path":"/p","changes":[],"occupied":[]}
+                {"id":"claude","action":"connect","outcome":"changes","plan_id":"c0ffee",
+                 "path":"/p","changes":["set a thing"],"occupied":[]}
                 """#)
         XCTAssertEqual(
-            refused.map { HarnessSurface.outcomeSentence($0, copy: copy(), calls: calls) },
-            "H-UNREADABLE")
-        let noop = HarnessSurface.plan(
-            fromJSON: #"""
-                {"id":"claude","action":"connect","outcome":"noop","plan_id":null,
-                 "path":"/p","changes":[],"occupied":[]}
-                """#)
+            changes.map { HarnessSurface.outcomeSentence($0, calls: calls) }, .some(nil))
+    }
+
+    /// A tool that is not on this machine says so, and does not keep a
+    /// sentence about settings it does not have.
+    ///
+    /// Before this the two rendered identically -- same not-connected
+    /// sentence, connect button simply absent, nothing saying why.
+    func testAMissingToolSaysSoRatherThanBorrowingTheNotConnectedSentence() {
+        let calls = HarnessCalls(
+            stateCode: { _ in 31 },
+            planOutcomeCode: { _ in 42 },
+            actionAvailable: { _, _, _ in false },
+            stateLine: { _ in "H-NOT-CONNECTED" },
+            lastCallLine: { _ in "" },
+            outcomeLine: { _ in "" })
+        let present = HarnessSurface.list(fromJSON: Self.oneRow).harnesses[0]
         XCTAssertEqual(
-            noop.map { HarnessSurface.outcomeSentence($0, copy: copy(), calls: calls) }, .some(nil))
+            HarnessSurface.rowSentence(present, copy: copy(), calls: calls), "H-NOT-CONNECTED")
+
+        let missingJSON = Self.oneRow.replacingOccurrences(
+            of: "\"installed\":true", with: "\"installed\":false")
+        let missing = HarnessSurface.list(fromJSON: missingJSON).harnesses[0]
+        XCTAssertFalse(missing.installed, "the fixture must actually be uninstalled")
+        XCTAssertEqual(
+            HarnessSurface.rowSentence(missing, copy: copy(), calls: calls), "H-NOT-INSTALLED")
+        XCTAssertNotEqual(
+            HarnessSurface.rowSentence(missing, copy: copy(), calls: calls), "H-NOT-CONNECTED")
     }
 
     /// An occupied slot survives to the screen, never swallowed. This is the
@@ -336,7 +396,8 @@ final class HarnessSurfaceTests: XCTestCase {
         let calls = HarnessCalls(
             stateCode: { _ in 31 }, planOutcomeCode: { _ in 41 },
             actionAvailable: { _, _, _ in true },
-            stateLine: { _ in "" }, lastCallLine: { _ in "" })
+            stateLine: { _ in "" }, lastCallLine: { _ in "" },
+            outcomeLine: { _ in "" })
         let plan = HarnessSurface.plan(
             fromJSON: #"""
                 {"id":"claude","action":"connect","outcome":"changes","plan_id":"c0ffee","path":"/p",
@@ -346,7 +407,7 @@ final class HarnessSurfaceTests: XCTestCase {
         XCTAssertEqual(plan.map { HarnessSurface.canCommit($0, calls: calls) }, true)
         XCTAssertEqual(plan?.occupied.count, 1)
         XCTAssertEqual(
-            plan.map { HarnessSurface.outcomeSentence($0, copy: copy(), calls: calls) }, .some(nil))
+            plan.map { HarnessSurface.outcomeSentence($0, calls: calls) }, .some(nil))
     }
 
     /// The words for an occupied slot say it was left alone. They are the

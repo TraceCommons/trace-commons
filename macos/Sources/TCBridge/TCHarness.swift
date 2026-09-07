@@ -1,7 +1,7 @@
 import CTraceCommons
 import Foundation
 
-/// The harness list's branch tables and its two sentences, across the C ABI.
+/// The harness list's branch tables and its sentences, across the C ABI.
 ///
 /// Handle-free, like `TCPrivateInference`: none of these describes a running
 /// daemon. The list itself arrives over the daemon socket; what crosses here
@@ -48,6 +48,26 @@ public enum TCHarness {
     /// panic, which is drawn the same way.
     public static func stateLine(state: String) -> String {
         guard let raw = state.withCString({ tc_harness_state_line($0) }) else { return "" }
+        defer { tc_string_free(raw) }
+        return String(cString: raw)
+    }
+
+    /// The sentence one `harness_plan` outcome carries.
+    ///
+    /// THE SENTENCE CROSSES, NOT ONLY THE CODE, for the reason `stateLine`
+    /// gives. `unparseable` was the only outcome with a sentence anywhere,
+    /// and this shell held that arm itself in `outcomeSentence`; the other
+    /// four non-committable outcomes had none, so a preview for one of them
+    /// opened with a title, a path, no changes and a way out.
+    ///
+    /// An EMPTY STRING is the answer for `changes`, and it means draw no line
+    /// at all: the preview shows the changes, and a sentence above them
+    /// announcing that there are changes is this app narrating its own list.
+    /// An outcome this build has never heard of answers the empty string too,
+    /// rather than borrowing the nearest refusal. `nil` only on a caught
+    /// panic, which is drawn the same way.
+    public static func outcomeLine(outcome: String) -> String {
+        guard let raw = outcome.withCString({ tc_harness_outcome_line($0) }) else { return "" }
         defer { tc_string_free(raw) }
         return String(cString: raw)
     }

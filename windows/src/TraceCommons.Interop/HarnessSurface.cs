@@ -501,6 +501,46 @@ public static class HarnessSurface
         ?? string.Empty;
 
     /// <summary>
+    /// The sentence one row shows, which is not always its state's.
+    /// </summary>
+    /// <remarks>
+    /// A tool that is not on this machine gets the missing-tool sentence and
+    /// nothing else. Both halves matter. The row is LISTED rather than
+    /// hidden, because a tool left out cannot be told apart from a tool this
+    /// app was never taught about; and it may not keep
+    /// <see cref="PrivateInferenceCopy.HarnessNotConnected"/>, which says a
+    /// tool's own settings still send its calls wherever they went before --
+    /// a claim about the settings of something that is not here. Before this
+    /// the two rendered identically, with the connect button simply absent
+    /// and nothing saying why.
+    /// </remarks>
+    public static string RowSentence(HarnessRow row, PrivateInferenceCopy copy) =>
+        row.Installed ? StateSentence(row.StateLabel) : copy.HarnessNotInstalled;
+
+    /// <summary>
+    /// The sentence a plan's outcome carries, or the empty string -- drawn as
+    /// no line at all.
+    /// </summary>
+    /// <remarks>
+    /// ONE TABLE, ASKED. This used to be a
+    /// <c>== HarnessPlanOutcome.Unparseable</c> branch in the view picking one
+    /// of the payload's fields, and the macOS and GNOME shells each held the
+    /// same arm; the four other non-committable outcomes had no sentence at
+    /// all, so their preview held a title, a path, no changes, no explanation
+    /// and a way out. It takes the LABEL and not the decoded outcome, so an
+    /// outcome a later daemon grows never has to be spelled in C# before it
+    /// can be shown.
+    ///
+    /// <c>changes</c> answers the empty string, and the emptiness is the
+    /// point: the preview shows the changes themselves, and a sentence above
+    /// them announcing that there are changes is this app narrating its own
+    /// list.
+    /// </remarks>
+    public static string OutcomeSentence(string? outcomeLabel) =>
+        NativeMethods.TakeOwnedString(NativeMethods.tc_harness_outcome_line(outcomeLabel))
+        ?? string.Empty;
+
+    /// <summary>
     /// When the last call from this tool was answered here, or the empty
     /// string.
     /// </summary>

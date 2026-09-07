@@ -201,11 +201,15 @@ public sealed partial class PrivateInferenceView : UserControl
             }
         }
 
-        // A file that could not be read is a refusal that needs a human, not
-        // "nothing to change". The two must never be drawn the same way.
-        if (plan.Outcome == HarnessPlanOutcome.Unparseable)
+        // Every outcome that writes nothing says why. A file that could not be
+        // read is a refusal that needs a human, not "nothing to change"; so is
+        // a tool that is not here, and a path this build could not work out.
+        // The shared table keeps them apart, and this shell holds no arm of
+        // its own.
+        string outcomeSentence = PrivateInferenceViewModel.OutcomeSentence(plan.OutcomeLabel);
+        if (!string.IsNullOrEmpty(outcomeSentence))
         {
-            body.Children.Add(Paragraph(ViewModel.UnreadableConfig));
+            body.Children.Add(Paragraph(outcomeSentence));
         }
 
         var dialog = new ContentDialog

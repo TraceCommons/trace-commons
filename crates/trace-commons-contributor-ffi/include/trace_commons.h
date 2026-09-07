@@ -787,6 +787,31 @@ int32_t     tc_harness_action_available(const char* action, int32_t installed, i
  */
 char*       tc_harness_state_line(const char* state);
 
+/* The sentence one harness_plan outcome carries.
+ *
+ * outcome is the same label tc_harness_plan_outcome_code takes: changes,
+ * noop, unparseable, not_installed, entry_unusable or no_config_path.
+ *
+ * THE SENTENCE CROSSES, NOT ONLY THE CODE, for the reason
+ * tc_harness_state_line gives. Only unparseable had a sentence anywhere
+ * before this, and each shell wrote that one arm itself; the other four
+ * non-committable outcomes had none, so a preview opened holding a title, a
+ * path, no changes, no explanation and a way out.
+ *
+ * changes ANSWERS THE EMPTY STRING, and the emptiness is the point: a plan
+ * with changes in it shows them, and a sentence above them announcing that
+ * there are changes is the app narrating its own list. Draw an empty string
+ * as no line at all.
+ *
+ * The empty string is also the answer for a label this build has never heard
+ * of -- which may not borrow the nearest refusal -- for a NULL or non-UTF-8
+ * outcome, and on a caught panic.
+ *
+ * Returns an owned string; free it with tc_string_free. NULL only on a caught
+ * panic.
+ */
+char*       tc_harness_outcome_line(const char* outcome);
+
 /* When the last call from a connected tool was answered here, assembled.
  *
  * seconds_ago is how long ago the caller worked out that call arrived, from a

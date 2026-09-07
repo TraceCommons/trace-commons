@@ -35,8 +35,8 @@ use trace_commons_contributor_ffi::{
     tc_witness_state_line, tc_witness_state_tone, tc_witness_status_json, tc_witness_trust_state,
 };
 use trace_commons_contributor_ffi::{
-    tc_harness_action_available, tc_harness_last_call_line, tc_harness_plan_outcome_code,
-    tc_harness_state_code, tc_harness_state_line,
+    tc_harness_action_available, tc_harness_last_call_line, tc_harness_outcome_line,
+    tc_harness_plan_outcome_code, tc_harness_state_code, tc_harness_state_line,
 };
 
 fn cstr(p: &Path) -> CString {
@@ -3669,6 +3669,59 @@ fn the_harness_state_sentence_crosses_the_abi() {
     }
     assert_eq!(
         take_owned(unsafe { tc_harness_state_line(std::ptr::null()) }),
+        ""
+    );
+}
+
+/// The plan outcome's SENTENCE crosses the ABI too, not only the code.
+///
+/// Four non-committable outcomes had no sentence at all before this, so a
+/// preview for one of them opened with a title, a path, no changes and a way
+/// out. Every value here is checked against the payload rather than a
+/// literal, so this test cannot become the place a sentence is written.
+#[test]
+fn the_harness_plan_outcome_sentence_crosses_the_abi() {
+    use trace_commons_contributor::harness_state::PlanOutcome;
+    let line = |outcome: &str| {
+        let outcome = cstr_str(outcome);
+        take_owned(unsafe { tc_harness_outcome_line(outcome.as_ptr()) })
+    };
+    let copy = trace_commons_contributor::private_inference_copy::private_inference_copy();
+
+    assert_eq!(
+        line(PlanOutcome::Noop.label()),
+        copy.harness_plan_nothing_to_change
+    );
+    assert_eq!(
+        line(PlanOutcome::Unparseable.label()),
+        copy.harness_unreadable_config
+    );
+    assert_eq!(
+        line(PlanOutcome::NotInstalled.label()),
+        copy.harness_not_installed
+    );
+    assert_eq!(
+        line(PlanOutcome::EntryUnusable.label()),
+        copy.harness_plan_entry_unusable
+    );
+    assert_eq!(
+        line(PlanOutcome::NoConfigPath.label()),
+        copy.harness_plan_no_config_path
+    );
+
+    // A plan that has changes shows them; a sentence above them would be the
+    // app narrating its own list. And an outcome from a later daemon may not
+    // borrow the nearest refusal.
+    for silent in [
+        PlanOutcome::Changes.label(),
+        "an_outcome_from_a_later_daemon",
+        "NOOP",
+        "",
+    ] {
+        assert_eq!(line(silent), "", "{silent:?} grew a sentence");
+    }
+    assert_eq!(
+        take_owned(unsafe { tc_harness_outcome_line(std::ptr::null()) }),
         ""
     );
 }

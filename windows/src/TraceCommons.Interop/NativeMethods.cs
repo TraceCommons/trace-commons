@@ -377,6 +377,29 @@ internal static class NativeMethods
         [MarshalAs(UnmanagedType.LPUTF8Str)] string? state);
 
     /// <summary>
+    /// The sentence one <c>harness_plan</c> outcome carries.
+    ///
+    /// THE SENTENCE CROSSES, NOT ONLY THE CODE, for the reason
+    /// <see cref="tc_harness_state_line"/> gives. "unparseable" was the only
+    /// outcome with a sentence anywhere, and this shell held that arm itself;
+    /// the other four non-committable outcomes had none, so a preview for one
+    /// of them opened holding a title, a path, no changes, no explanation and
+    /// a way out.
+    ///
+    /// "changes" ANSWERS THE EMPTY STRING, and the emptiness is the point: the
+    /// preview shows the changes, and a sentence above them announcing that
+    /// there are changes is this app narrating its own list. An outcome this
+    /// build has never heard of answers the same way, rather than borrowing
+    /// the nearest refusal, as do a NULL one and a caught panic.
+    ///
+    /// Returns an owned string; free it with <see cref="tc_string_free"/>,
+    /// which <see cref="TakeOwnedString"/> does.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    internal static extern IntPtr tc_harness_outcome_line(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? outcome);
+
+    /// <summary>
     /// When the last call from a connected tool was answered here, assembled.
     ///
     /// ABSENCE IS AN OUT-OF-RANGE INTEGER, the convention
