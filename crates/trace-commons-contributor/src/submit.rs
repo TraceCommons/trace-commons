@@ -2964,19 +2964,11 @@ mod tests {
         assert!(envelope_has_residual_secret(&redactor, &envelope).unwrap());
     }
 
-    /// The `model` field (`IronclawTraceMetadata::model_name`) is copied
-    /// verbatim from the transcript into the envelope and is never routed
-    /// through the per-field redaction pass (only `content` and
-    /// `structured_payload` are). The whole-envelope residual-secret rescan
-    /// (`residual_secret_refusal`, called from both submit-path call sites)
-    /// is the only thing standing between a secret-shaped literal placed
-    /// there and delivery to ingest. This drives the *real* `submit_sessions`
-    /// entrypoint end to end with a fixture whose `model` field is a
-    /// recognized secret shape (`sk-ant-...`), so it fails if either call
-    /// site is ever deleted: without the guard, this session would upload
-    /// (`Submitted`, 1 delivery) instead of refusing.
+    /// Normal metadata redaction removes the model secret. An approved
+    /// envelope can still contain a residual (for example after a buggy
+    /// redactor); the real submit path must refuse those exact bytes.
     #[tokio::test]
-    async fn submit_sessions_refuses_session_with_secret_in_unredacted_model_field() {
+    async fn submit_refuses_approved_envelope_with_residual_model_secret() {
         let received = Arc::new(Mutex::new(Vec::new()));
         let issuer = spawn(stub_issuer()).await;
         let ingest = spawn(stub_ingest(received.clone())).await;
@@ -2989,8 +2981,8 @@ mod tests {
         };
 
         // A minimal transcript whose assistant message carries a
-        // detector-recognized secret shape in `model`, a field the per-field
-        // redaction pass never scans.
+        // detector-recognized secret shape in `model`, now covered by
+        // metadata redaction.
         let fixture_root = tempfile::tempdir().unwrap();
         let project_dir = fixture_root.path().join("-tmp-secret-model-proj");
         std::fs::create_dir_all(&project_dir).unwrap();
@@ -3019,9 +3011,20 @@ mod tests {
             session_ref,
         )];
 
-        let outcomes = submit_sessions(&store, &cfg, selection, &opts)
-            .await
-            .unwrap();
+        let (source, session_ref) = &selection[0];
+        let transcript = source.load(session_ref).unwrap();
+        let redactor = build_redactor_with(&cfg, transcript.cwd.as_deref(), None).unwrap();
+        let raw = build_raw_contribution_with_verdict(&transcript, &cfg, Utc::now(), None);
+        let mut approved = redact_to_envelope(&redactor, raw).await.unwrap();
+        assert!(
+            !serde_json::to_string(&approved)
+                .unwrap()
+                .contains("sk-ant-EXPOSEDsecret0123456789abcdefghij")
+        );
+        approved.ironclaw.model_name = Some("sk-ant-EXPOSEDsecret0123456789abcdefghij".into());
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        ctx.use_approved_envelope(Some(approved));
+        let outcomes = [ctx.submit_one(source.as_ref(), session_ref).await.unwrap()];
         match &outcomes[0] {
             SubmitOutcome::Refused { reason_label, .. } => {
                 assert_eq!(reason_label, "secret-leak-detected");

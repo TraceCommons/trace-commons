@@ -1225,27 +1225,32 @@ mod tests {
         (dir, src, r)
     }
 
-    /// End to end, from a session on disk through the real preview path: a
-    /// secret that survived redaction is reported as a SURVIVOR.
-    ///
-    /// This is the test the `residual_secret_at:*` handling in every shell
-    /// was missing. Those shells filter the family out of the "removed"
-    /// figure and render it separately, but nothing on the contributor's
-    /// machine had ever minted a label in it -- `redact_trace` sets
-    /// `redaction_counts` from the mutating pass only, and the server's two
-    /// residual scans feed risk and a log line without folding their
-    /// findings back. So the reporting was unreachable and a survivor was
-    /// silence.
-    ///
-    /// Deleting the merge in `build_preview_core` makes this fail.
+    /// Metadata is scrubbed during normal preview. Deliberately inject a
+    /// residual into the finished envelope to prove the shared summary still
+    /// distinguishes survivors from removals without relying on an old leak.
     #[tokio::test]
     async fn a_preview_reports_a_secret_that_survived_redaction_as_a_survivor() {
         let (_d, src, r) = session_with_secret_in_unredacted_model_field();
         let (_sd, store) = crate::config::tests_support::temp_store();
         let cfg = sample_cfg(&store);
-        let (summary, _body, envelope) = build_preview(&store, Some(&cfg), None, &src, &r)
-            .await
-            .unwrap();
+        let (clean_summary, _body, mut envelope) =
+            build_preview(&store, Some(&cfg), None, &src, &r)
+                .await
+                .unwrap();
+
+        assert!(
+            !serde_json::to_string(&envelope)
+                .unwrap()
+                .contains("sk-ant-EXPOSEDsecret0123456789abcdefghij")
+        );
+        envelope.ironclaw.model_name = Some("sk-ant-EXPOSEDsecret0123456789abcdefghij".into());
+        let transcript = src.load(&r).unwrap();
+        let redactor =
+            trace_commons_protocol::trace_contribution::DeterministicTraceRedactor::try_default()
+                .unwrap();
+        let summary =
+            summarize_envelope(&envelope, 0, &transcript, "fixture".into(), true, &redactor)
+                .unwrap();
 
         // Non-vacuity: the secret really is still in what would be sent, and
         // the pipeline really did not count it as something it removed.
@@ -1291,7 +1296,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            card.redactions, summary.redactions,
+            card.redactions, clean_summary.redactions,
             "card and sheet must agree on what survived"
         );
     }
