@@ -62,6 +62,17 @@
   </provides>
 
   <releases>
+    <release version="0.11.0" date="2026-09-07">
+      <description>
+        <p>Answering model calls on this computer now has its own screen, called Private AI, rather than a setting buried under Tools. It lists the coding tools on this computer and says, for each one, whether it is connected, whether anything has arrived from it, and whether it is actually answering. A settings file with the right value in it only proves a file has a value in it; until now there was no way to tell whether a single call had ever come through.</p>
+        <p>Connecting a tool is one decision at a time, behind a preview. The app shows the exact change it would make to that tool's own settings file and writes nothing until you say so. If you had already chosen something yourself, it says so and leaves it alone rather than replacing it.</p>
+        <p>The switch is also in the tray, the menu bar on macOS, and on a keyboard shortcut. Turning it off acts at once, because that only reduces what this computer will answer. Turning it on opens the screen first: while it is on, anything else running here can send calls through it, charged to the accounts you have set up, and that is worth deciding with the consequence in front of you.</p>
+        <p>The screen also says what the calls answered on this computer have cost. Only calls answered here are in that figure. Calls answered on another machine or in a browser are not, and neither is work a monthly plan has already paid for.</p>
+        <p>Two coding tools are supported, not four. One cannot be described because the app can write one of two request shapes and neither is that tool's; the other keeps no settings file that can be found. Saying so is better than implying more is on the way.</p>
+        <p>Despite the name, this screen promises no privacy of its own. Whatever confidentiality your calls have comes from wherever they are answered. What changes here is that the record is on your computer and the choice of who answers is yours.</p>
+        <p>The sidebar is now in the same order on Linux, macOS and Windows. Settings is last on all three; it used to sit in the middle on macOS, leaving two destinations below it.</p>
+      </description>
+    </release>
     <release version="0.10.0" date="2026-09-06">
       <description>
         <p>On first start the app now asks once whether to answer model calls on this computer. It says plainly what that costs before you answer: while it is on, anything else running on this computer can send calls through it as well, charged to the accounts you have set up here, and on a shared machine that is anyone who can log in. It is off until you say yes, declining is remembered rather than asked again, and the setting stays where you can find it afterwards.</p>

@@ -958,6 +958,21 @@ jobs:
           grep -q "apps/${icon_name}.svg" \
             crates/trace-commons-contributor-gtk/flatpak/ai.tracecommons.Contributor.yml \
             || { echo "the flatpak manifest installs no icon named ${icon_name}" >&2; exit 1; }
+          # The newest <release> must name the version the crate is at.
+          # Nothing else checks this: appstreamcli validates the document's
+          # shape and cannot know what the crate calls itself, so 0.10.0 was
+          # tagged with a metainfo still naming the previous release and was
+          # caught only by a person reading it before the tag. The version is
+          # not covered by the workspace either -- this crate carries its own.
+          crate_version="$(sed -n 's/^version = "\(.*\)"$/\1/p' \
+            crates/trace-commons-contributor-gtk/Cargo.toml | head -1)"
+          meta_version="$(sed -n 's/.*<release version="\([^"]*\)".*/\1/p' \
+            crates/trace-commons-contributor-gtk/flatpak/ai.tracecommons.Contributor.metainfo.xml \
+            | head -1)"
+          [ -n "$crate_version" ] && [ -n "$meta_version" ] \
+            || { echo "could not read one of the two versions" >&2; exit 1; }
+          [ "$crate_version" = "$meta_version" ] \
+            || { echo "metainfo newest release is ${meta_version}, crate is ${crate_version}" >&2; exit 1; }
       # trace-commons-contributor is a root-workspace crate; the shell links
       # it directly (see the crate's own Cargo.toml comment on why -- both
       # sides are Rust on Linux, no FFI boundary needed).
