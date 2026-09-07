@@ -1586,7 +1586,7 @@ pub struct RawTraceContribution {
     pub embedding_analysis: Option<EmbeddingAnalysisMetadata>,
     pub value: ValueMetadata,
     /// See [`TraceContributionEnvelope::conversation_id`]. Carried through
-    /// redaction unchanged -- it is metadata, not user content.
+    /// redaction after the same privacy checks as other contributed metadata.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation_id: Option<String>,
 }
@@ -1601,7 +1601,8 @@ pub struct RawTraceContribution {
 /// tree: the envelope modelled them, the conversion below hardcoded them
 /// empty, and no caller had anywhere to put them. That is what made the 86
 /// failed traces in the pilot corpus undiagnosable (issue #298). None of the
-/// four is user content, so none of them depends on a consent decision.
+/// four grants consent. String identifiers still receive privacy checks:
+/// imports can place contributor text in fields originally intended as metadata.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RawTraceContributionEvent {
     pub event_id: Uuid,
@@ -4029,13 +4030,15 @@ impl DeterministicTraceRedactor {
         Box<dyn std::future::Future<Output = Result<Value, TraceContributionError>> + Send + 'a>,
     > {
         Box::pin(async move {
-            if depth > STRUCTURED_PAYLOAD_MAX_DEPTH {
+            context.budget.nodes += 1;
+            if depth > STRUCTURED_PAYLOAD_MAX_DEPTH
+                || context.budget.nodes > STRUCTURED_PAYLOAD_MAX_NODES
+            {
                 return Err(TraceContributionError::RedactionFailed {
                     reason: "metadata-redaction-budget".into(),
                 });
             }
             let charge = |text: &str, budget: &mut StructuredPayloadBudget| {
-                budget.nodes += 1;
                 budget.aggregate_bytes = budget.aggregate_bytes.saturating_add(text.len());
                 if budget.nodes > STRUCTURED_PAYLOAD_MAX_NODES
                     || text.len() > STRUCTURED_PAYLOAD_MAX_FIELD_BYTES
@@ -4555,8 +4558,7 @@ impl TraceRedactor for DeterministicTraceRedactor {
             // The explicit field wins; the payload key stays a fallback so an
             // emitter that already wrote `{"tool_call_id": ...}` keeps working.
             let tool_call_id = raw_event.tool_call_id.clone().or_else(|| {
-                raw_event
-                    .structured_payload
+                structured_payload
                     .get("tool_call_id")
                     .and_then(Value::as_str)
                     .map(ToOwned::to_owned)

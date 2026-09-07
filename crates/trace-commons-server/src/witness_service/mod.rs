@@ -2101,6 +2101,9 @@ mod tests {
             .value
             .explanation
             .push(CLASSIFIER_ONLY_PII.into());
+        let event = request.raw_contribution.events.last_mut().unwrap();
+        event.tool_call_id = None;
+        event.structured_payload["tool_call_id"] = serde_json::json!(CLASSIFIER_ONLY_PII);
         let redactor = PipelineContributionRedaction::with_privacy_filter(
             Vec::new(),
             Arc::new(NameRemovingFilter),
@@ -2208,6 +2211,24 @@ mod tests {
             .await
             .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn structured_witness_counts_nontext_metadata_nodes_against_budget() {
+        for value in [serde_json::json!(0), serde_json::json!([])] {
+            let mut request = contribution_request(SURVIVOR);
+            request.raw_contribution.replay.expected_assertions = vec![value; 4_001];
+            assert!(
+                witness_contribution(
+                    request,
+                    &contribution_redactor(),
+                    &TestSigner::new("metadata-witness"),
+                    &TestEnclave
+                )
+                .await
+                .is_err()
+            );
+        }
     }
 
     #[tokio::test]

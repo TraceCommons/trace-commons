@@ -65,7 +65,7 @@ were performed. Native/adapter integration remains a subsequent checkpoint.
 - Reproduced baseline failures: uninvited ordinary ingest returned200 instead
   of403; a final-call receipt certified unrelated history; metadata retained a
   synthetic name removed from event content.
-- After fixes:121 witness tests,277 protocol privacy-filter tests,239 standalone
+- After fixes:122 witness tests,277 protocol privacy-filter tests,239 standalone
   protocol tests, the real PostgreSQL/RLS admission matrix, and4 license-boundary
   tests pass. Clippy passes with the repository's existing allow-list.
 - The matrix also proves an already accepted attestation does not permit a new
