@@ -16,7 +16,7 @@ final class HarnessSurfaceTests: XCTestCase {
          "offer_decline":"DECLINE","offer_asked_once":"ONCE",
          "settings_title":"S-TITLE","settings_toggle":"S-TOGGLE",
          "settings_applies_at_once":"S-AT-ONCE","state_off":"S-OFF","state_unknown":"S-UNKNOWN","state_unreported":"S-UNREPORTED","state_stopping":"S-STOPPING",
-         "state_running":"S-RUNNING","state_running_no_backends":"S-NO-BACKENDS",
+         "state_running":"S-RUNNING","state_running_no_backends":"S-NO-BACKENDS","state_running_answered_elsewhere":"S-ELSEWHERE","state_running_destination_unknown":"S-DEST-UNKNOWN",
          "state_running_elsewhere":"S-ELSEWHERE","state_port_in_use":"S-PORT",
          "state_start_failed":"S-FAILED","state_crashed":"S-CRASHED",
          "quit_also_stops":"QUIT","write_unconfirmed":"UNCONFIRMED","settings_moved":"MOVED","tray_turn_off":"TRAYOFF","tray_open_to_turn_on":"TRAYON",

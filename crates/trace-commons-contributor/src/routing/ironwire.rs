@@ -62,6 +62,25 @@ struct LogView {
 struct StatusView {
     #[serde(default)]
     balance: BalanceView,
+    /// One entry per registered backend. Absent on a proxy too old to send
+    /// it, which reaches "unknown" rather than "not authenticated" -- the
+    /// difference between a fact and the absence of one.
+    #[serde(default)]
+    backends: Option<Vec<BackendView>>,
+}
+
+/// A backend as the status object describes it, narrowed to the one question
+/// this client asks.
+///
+/// `detail` is deliberately not deserialized. It is upstream-authored prose
+/// explaining why a credential was not found, and this crate neither renders
+/// nor stores it: today it names an environment variable, which is harmless,
+/// but its future content is not ours and a surface that logged it would be
+/// promising something about text it does not control.
+#[derive(Debug, Deserialize)]
+struct BackendView {
+    id: String,
+    authenticated: bool,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -69,6 +88,40 @@ struct BalanceView {
     #[serde(default)]
     spend_today_usd: Option<f64>,
 }
+
+/// The spend figure a status object supports, or `None`.
+///
+/// Negative, infinite and NaN are not amounts of money. They reach absence
+/// rather than zero, for the same reason `null` does: a figure nobody can
+/// make sense of is one nobody measured.
+fn spend_micros(view: &StatusView) -> Option<u64> {
+    let usd = view.balance.spend_today_usd?;
+    if !usd.is_finite() || usd < 0.0 {
+        return None;
+    }
+    let micros = (usd * 1_000_000.0).round();
+    if micros > u64::MAX as f64 {
+        return None;
+    }
+    Some(micros as u64)
+}
+
+/// Whether the status object says NEAR AI has a credential.
+///
+/// `None` when the proxy sent no backend list, or sent one that does not
+/// mention NEAR AI at all. Both are "not known" rather than "no": this client
+/// does not own the id, and inferring absence from a list it may not
+/// understand is how a surface starts asserting things it did not observe.
+fn nearai_authenticated(view: &StatusView) -> Option<bool> {
+    view.backends
+        .as_ref()?
+        .iter()
+        .find(|backend| backend.id == NEARAI_BACKEND_ID)
+        .map(|backend| backend.authenticated)
+}
+
+/// The id upstream gives the NEAR AI backend in its status object.
+const NEARAI_BACKEND_ID: &str = "nearai";
 
 /// One page of the proxy's log, as this client read it.
 #[derive(Debug, Default)]
@@ -148,6 +201,10 @@ pub struct IronWireLedger {
     /// the proxy's own `null` for a figure it did not measure. A reader must
     /// render it as nothing at all, never as zero.
     spend_today_micros: Arc<RwLock<Option<u64>>>,
+    /// Whether the NEAR AI backend reports a credential. `None` is "not
+    /// known", which is distinct from `Some(false)`: one is a proxy that did
+    /// not answer, the other is a proxy that answered and said no.
+    nearai_authenticated: Arc<RwLock<Option<bool>>>,
 }
 
 impl std::fmt::Debug for IronWireLedger {
@@ -195,6 +252,7 @@ impl IronWireLedger {
             unreadable_rows: Arc::new(RwLock::new(0)),
             client: reqwest::Client::builder().build().ok(),
             spend_today_micros: Arc::new(RwLock::new(None)),
+            nearai_authenticated: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -304,14 +362,30 @@ impl IronWireLedger {
     /// promises, and "unknown" is the honest answer for a proxy that has
     /// stopped answering.
     async fn refresh_spend(&self, client: &reqwest::Client) {
-        let micros = self.fetch_spend(client).await;
+        // One request answers both questions. They are read off the same
+        // status object because they are the same observation of the same
+        // proxy at the same instant; two calls could disagree, and a surface
+        // that showed spend from one tick beside routing from another would
+        // be describing a machine that never existed.
+        let view = self.fetch_status(client).await;
         if let Ok(mut held) = self.spend_today_micros.write() {
-            *held = micros;
+            *held = view.as_ref().and_then(spend_micros);
+        }
+        if let Ok(mut held) = self.nearai_authenticated.write() {
+            *held = view.as_ref().and_then(nearai_authenticated);
         }
     }
 
-    /// The figure, or `None` for every way of not having one.
-    async fn fetch_spend(&self, client: &reqwest::Client) -> Option<u64> {
+    /// Whether NEAR AI reports a credential, as of the last status read.
+    ///
+    /// `None` for every way of not knowing -- no read yet, the proxy did not
+    /// answer, or it answered without a backend list. Never guessed.
+    pub fn nearai_authenticated(&self) -> Option<bool> {
+        self.nearai_authenticated.read().ok().and_then(|held| *held)
+    }
+
+    /// The status object, or `None` for every way of not having one.
+    async fn fetch_status(&self, client: &reqwest::Client) -> Option<StatusView> {
         let response = client
             .get(format!("http://127.0.0.1:{}/_ironwire/status", self.port))
             .timeout(REFRESH_TIMEOUT)
@@ -326,19 +400,7 @@ impl IronWireLedger {
         // The error is discarded rather than logged: the status object
         // carries model names and prices, and serde quotes what it choked
         // on.
-        let view = serde_json::from_slice::<StatusView>(&body).ok()?;
-        let usd = view.balance.spend_today_usd?;
-        // Negative, infinite and NaN are not amounts of money. They reach
-        // absence rather than zero, for the same reason `null` does: a
-        // figure nobody can make sense of is one nobody measured.
-        if !usd.is_finite() || usd < 0.0 {
-            return None;
-        }
-        let micros = (usd * 1_000_000.0).round();
-        if micros > u64::MAX as f64 {
-            return None;
-        }
-        Some(micros as u64)
+        serde_json::from_slice::<StatusView>(&body).ok()
     }
 
     /// What has been spent on this computer since local midnight, in
@@ -445,6 +507,89 @@ impl RoutingLedger for IronWireLedger {
 
 #[cfg(test)]
 mod tests {
+    fn status(json: serde_json::Value) -> StatusView {
+        serde_json::from_value(json).expect("status view")
+    }
+
+    /// The whole point of the surface: a proxy that is answering, with no
+    /// NEAR AI credential, must be distinguishable from one that has it.
+    #[test]
+    fn a_backend_list_answers_the_question_both_ways() {
+        let no = status(serde_json::json!({
+            "backends": [{"id": "nearai", "authenticated": false}]
+        }));
+        assert_eq!(nearai_authenticated(&no), Some(false));
+
+        let yes = status(serde_json::json!({
+            "backends": [{"id": "nearai", "authenticated": true}]
+        }));
+        assert_eq!(nearai_authenticated(&yes), Some(true));
+    }
+
+    /// Not knowing is not the same as no, and this is the distinction the
+    /// honest floor rests on: a sentence saying calls are answered elsewhere
+    /// must never be shown on the strength of a proxy that said nothing.
+    #[test]
+    fn every_way_of_not_knowing_reaches_none_rather_than_false() {
+        for (name, json) in [
+            ("no backends key at all", serde_json::json!({})),
+            ("an explicit null", serde_json::json!({"backends": null})),
+            (
+                "a list that does not mention it",
+                serde_json::json!({
+                    "backends": [{"id": "anthropic", "authenticated": true}]
+                }),
+            ),
+            ("an empty list", serde_json::json!({"backends": []})),
+        ] {
+            assert_eq!(nearai_authenticated(&status(json)), None, "{name}");
+        }
+    }
+
+    /// The two facts come off one object, so a caller cannot pair a spend
+    /// figure from one instant with a routing fact from another.
+    #[test]
+    fn one_status_object_answers_spend_and_routing_together() {
+        let view = status(serde_json::json!({
+            "balance": {"spend_today_usd": 1.5},
+            "backends": [{"id": "nearai", "authenticated": false}]
+        }));
+        assert_eq!(spend_micros(&view), Some(1_500_000));
+        assert_eq!(nearai_authenticated(&view), Some(false));
+    }
+
+    /// Neither answer may be invented from the other's absence.
+    #[test]
+    fn one_fact_missing_does_not_disturb_the_other() {
+        let spend_only = status(serde_json::json!({"balance": {"spend_today_usd": 2.0}}));
+        assert_eq!(spend_micros(&spend_only), Some(2_000_000));
+        assert_eq!(nearai_authenticated(&spend_only), None);
+
+        let routing_only = status(serde_json::json!({
+            "backends": [{"id": "nearai", "authenticated": true}]
+        }));
+        assert_eq!(spend_micros(&routing_only), None);
+        assert_eq!(nearai_authenticated(&routing_only), Some(true));
+    }
+
+    /// An unknown field must not make the object unreadable: upstream owns
+    /// this schema and adds to it, and a strict struct would turn their next
+    /// release into our outage.
+    #[test]
+    fn fields_this_client_does_not_know_are_ignored() {
+        let view = status(serde_json::json!({
+            "balance": {"spend_today_usd": 0.25, "invented": 1},
+            "backends": [{
+                "id": "nearai", "authenticated": false,
+                "kind": "credits", "consented": true,
+                "detail": "NEARAI_API_KEY is not set",
+                "headroom": {"kind": "unknown"}
+            }],
+            "something_added_later": {"nested": true}
+        }));
+        assert_eq!(nearai_authenticated(&view), Some(false));
+        assert_eq!(spend_micros(&view), Some(250_000));
+    }
     use super::*;
 
     /// A ledger whose client could not be built (the `Client::builder().build()`
@@ -463,6 +608,7 @@ mod tests {
             unreadable_rows: Arc::new(RwLock::new(0)),
             client: None,
             spend_today_micros: Arc::new(RwLock::new(None)),
+            nearai_authenticated: Arc::new(RwLock::new(None)),
         };
         ledger.refresh().await;
         assert!(

@@ -27,6 +27,8 @@ public struct PrivateInferenceCopy: Decodable, Equatable, Sendable {
     public let stateOff: String
     public let stateRunning: String
     public let stateRunningNoBackends: String
+    public let stateRunningAnsweredElsewhere: String
+    public let stateRunningDestinationUnknown: String
     public let stateRunningElsewhere: String
     public let statePortInUse: String
     public let stateStartFailed: String
@@ -92,6 +94,8 @@ public struct PrivateInferenceCopy: Decodable, Equatable, Sendable {
         case stateOff = "state_off"
         case stateRunning = "state_running"
         case stateRunningNoBackends = "state_running_no_backends"
+        case stateRunningAnsweredElsewhere = "state_running_answered_elsewhere"
+        case stateRunningDestinationUnknown = "state_running_destination_unknown"
         case stateRunningElsewhere = "state_running_elsewhere"
         case statePortInUse = "state_port_in_use"
         case stateStartFailed = "state_start_failed"

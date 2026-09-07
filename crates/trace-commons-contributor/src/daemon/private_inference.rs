@@ -51,6 +51,10 @@ pub const LABEL_STOPPING: &str = "stopping";
 pub const LABEL_RUNNING: &str = "running";
 /// This daemon owns a proxy whose backend registry is empty.
 pub const LABEL_RUNNING_NO_BACKENDS: &str = "running_no_backends";
+/// Running, and answered by credentials the contributor's tools already had.
+pub const LABEL_RUNNING_ANSWERED_ELSEWHERE: &str = "running_answered_elsewhere";
+/// Running, and which account answers could not be read.
+pub const LABEL_RUNNING_DESTINATION_UNKNOWN: &str = "running_destination_unknown";
 /// A pointer responds or the exclusive home lock is held; readiness is unproven.
 pub const LABEL_RUNNING_ELSEWHERE: &str = "running_elsewhere";
 /// Something that is not this daemon's proxy holds the port.
@@ -106,6 +110,31 @@ impl PrivateInferenceState {
             Self::RunningWithoutBackends { .. } => LABEL_RUNNING_NO_BACKENDS,
             Self::RunningElsewhere { .. } => LABEL_RUNNING_ELSEWHERE,
             Self::Failed { label } => label,
+        }
+    }
+
+    /// The label to render, given what is known about who answers.
+    ///
+    /// Only [`Self::Running`] splits. Every other state describes the proxy's
+    /// lifecycle, which the destination question does not bear on, so they
+    /// delegate to [`Self::label`] rather than multiplying a matrix of
+    /// lifecycle against routing.
+    ///
+    /// The three-way argument is the point. `Some(true)` is the plain running
+    /// sentence; `Some(false)` says the calls are answered by credentials the
+    /// contributor's tools already had; `None` says the question could not be
+    /// answered and claims nothing. A two-valued version of this would have to
+    /// pick a side when the read fails, and picking "answered here" is the
+    /// lie this whole surface exists to stop telling.
+    #[must_use]
+    pub fn label_for(&self, nearai_authenticated: Option<bool>) -> &'static str {
+        match self {
+            Self::Running { .. } => match nearai_authenticated {
+                Some(true) => LABEL_RUNNING,
+                Some(false) => LABEL_RUNNING_ANSWERED_ELSEWHERE,
+                None => LABEL_RUNNING_DESTINATION_UNKNOWN,
+            },
+            other => other.label(),
         }
     }
 
@@ -1444,6 +1473,40 @@ mod tests {
     /// nothing, so it must not be reported as `Running`. Sub-project C
     /// renders this state, and rendering it green is the failure this
     /// distinction exists to prevent.
+    /// Only the running state splits, and the unknown case must not borrow
+    /// the plain running label.
+    #[test]
+    fn the_destination_only_splits_the_running_state() {
+        let running = PrivateInferenceState::Running { port: 8463 };
+        assert_eq!(running.label_for(Some(true)), LABEL_RUNNING);
+        assert_eq!(
+            running.label_for(Some(false)),
+            LABEL_RUNNING_ANSWERED_ELSEWHERE
+        );
+        assert_eq!(
+            running.label_for(None),
+            LABEL_RUNNING_DESTINATION_UNKNOWN,
+            "an unread destination must not be reported as the plain running state"
+        );
+
+        // Every other state ignores the question entirely.
+        for state in [
+            PrivateInferenceState::Off,
+            PrivateInferenceState::Stopping { port: None },
+            PrivateInferenceState::RunningWithoutBackends { port: 1 },
+            PrivateInferenceState::RunningElsewhere { port: 1 },
+        ] {
+            for answer in [Some(true), Some(false), None] {
+                assert_eq!(
+                    state.label_for(answer),
+                    state.label(),
+                    "{:?} must not vary with the destination",
+                    state.label()
+                );
+            }
+        }
+    }
+
     #[test]
     fn a_proxy_with_no_backends_is_not_reported_as_running() {
         assert_eq!(

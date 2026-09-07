@@ -85,10 +85,19 @@ fn exercise_child(root: &Path) {
     for cycle in 0..2 {
         let enabled = call(&handle, "set_settings", r#"{"private_inference":true}"#);
         let observed = &enabled["private_inference_state"];
+        // Any of the running family. This test is about the C ABI keeping a
+        // proxy alive across calls and cycles, not about which account
+        // answers -- and the destination is legitimately unknown here,
+        // because nothing has read the proxy's status yet.
         assert!(
             matches!(
                 observed["state"].as_str(),
-                Some("running" | "running_no_backends")
+                Some(
+                    "running"
+                        | "running_no_backends"
+                        | "running_answered_elsewhere"
+                        | "running_destination_unknown"
+                )
             ),
             "{observed}"
         );

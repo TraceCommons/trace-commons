@@ -897,7 +897,20 @@ impl DaemonShared {
             .lock()
             .expect("private inference state lock")
             .clone();
-        serde_json::json!({ "state": state.label(), "port": state.port() })
+        // The label, not `state.label()`: while the proxy is running, which
+        // account answers is part of what a shell has to say, and the honest
+        // answer includes "not known". The ledger is absent whenever this
+        // daemon is not running a proxy it owns, and `nearai_authenticated`
+        // is `None` until a status read succeeds -- both reach the unknown
+        // label rather than the plain running one, which is the direction
+        // this has to fail in.
+        let destination = self
+            .routing_ledger()
+            .and_then(|ledger| ledger.nearai_authenticated());
+        serde_json::json!({
+            "state": state.label_for(destination),
+            "port": state.port(),
+        })
     }
 
     /// The port a tool's config would be pointed at, or `None`.
@@ -7638,8 +7651,19 @@ mod tests {
         assert!(r.error.is_none(), "{:?}", r.error);
         let reported = r.result.expect("set_settings answers")["private_inference_state"].clone();
         let label = reported["state"].as_str().unwrap_or_default().to_string();
+        // Any of the running family. This test is about whether the sync
+        // path started a proxy, not about which account answers -- and the
+        // destination is legitimately unknown here, because nothing has read
+        // the proxy's status yet. Pinning "running" alone would make this
+        // test fail for the honest answer.
         assert!(
-            label == "running" || label == "running_no_backends",
+            matches!(
+                label.as_str(),
+                "running"
+                    | "running_no_backends"
+                    | "running_answered_elsewhere"
+                    | "running_destination_unknown"
+            ),
             "the sync path must actually start the proxy, got {reported}"
         );
         let port = u16::try_from(reported["port"].as_u64().expect("a bound port")).expect("a port");
