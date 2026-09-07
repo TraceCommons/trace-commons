@@ -4065,6 +4065,15 @@ impl DeterministicTraceRedactor {
                     .await?,
                 ),
                 Value::Array(values) => {
+                    // Every child consumes at least one node. Refuse before
+                    // allocating an output buffer for an oversized import.
+                    if values.len()
+                        > STRUCTURED_PAYLOAD_MAX_NODES.saturating_sub(context.budget.nodes)
+                    {
+                        return Err(TraceContributionError::RedactionFailed {
+                            reason: "metadata-redaction-budget".into(),
+                        });
+                    }
                     let mut redacted = Vec::with_capacity(values.len());
                     for value in values {
                         redacted.push(
