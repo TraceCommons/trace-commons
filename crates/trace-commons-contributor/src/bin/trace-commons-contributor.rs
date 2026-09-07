@@ -25,6 +25,12 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Locally redact and preview a versioned explicit import; never uploads or grants admission
+    ImportPreview {
+        /// User-selected local evidence-import-v1 JSON file (no URL retrieval)
+        #[arg(long)]
+        file: PathBuf,
+    },
     /// Enroll this device, with an instance-signed grant or an invite link
     Login {
         /// Base64 enrollment grant minted by your instance; omit to print this device's key id
@@ -372,6 +378,12 @@ async fn main() -> std::process::ExitCode {
 }
 
 async fn run(cli: Cli) -> anyhow::Result<()> {
+    if let Command::ImportPreview { file } = &cli.command {
+        let prepared = trace_commons_contributor::evidence_import::read_import(file)?;
+        let preview = prepared.local_preview().await?;
+        println!("{}", serde_json::to_string_pretty(&preview)?);
+        return Ok(());
+    }
     let store = ConfigStore::resolve(cli.config_dir)?;
     match cli.command {
         Command::Login {
@@ -430,6 +442,9 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 invite: invite.as_deref(),
             };
             commands::submit(&store, &sel).await
+        }
+        Command::ImportPreview { .. } => {
+            unreachable!("local import was handled before opening state")
         }
         Command::ImportAntigravity { project, all } => {
             commands::import_antigravity(&store, project.as_deref(), all, cli.json).await
