@@ -68,7 +68,7 @@ pub(crate) fn admission_profile_for_request(
     }
 }
 
-fn witness_input_for_profile(
+pub(crate) fn witness_input_for_profile(
     raw: RawTraceContribution,
     cfg: &ContributorConfig,
     admission: bool,
@@ -2025,6 +2025,90 @@ mod tests {
             None,
         );
         (transcript, artifact)
+    }
+
+    #[tokio::test]
+    async fn admission_review_binds_exact_artifact_and_uploads_only_approved_bytes() {
+        let capture = Arc::new(Mutex::new(CapturedUpload::default()));
+        let issuer = spawn(stub_issuer()).await;
+        let ingest = spawn(stub_ingest_raw(capture.clone(), 200)).await;
+        let (_dir, store) = crate::config::tests_support::temp_store();
+        let device = DeviceIdentity::load_or_generate(&store).unwrap();
+        let mut cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
+        let anchor = "11".repeat(32);
+        cfg.tenant_id = format!("near-{anchor}");
+        let (transcript, original) = reviewed_fixture(&mut cfg).await;
+        cfg.witness.as_mut().unwrap().admission_evidence = true;
+        let response = crate::witness::transport::signed_admission_fixture(
+            original.response().envelope_bytes.clone(),
+            &anchor,
+        );
+        let fingerprint = crate::daemon::preview::input_fingerprint(&cfg, None, false);
+        let artifact = crate::daemon::approved_envelope::WitnessReviewArtifact::new(
+            response.clone(),
+            transcript.session_hash.clone(),
+            fingerprint.clone(),
+            None,
+            None,
+        );
+        artifact
+            .validate(&cfg, &transcript.session_hash, &fingerprint, None, None)
+            .unwrap();
+        let mut changed = response;
+        changed.envelope_bytes.push(b' '); // Same JSON value, different certified bytes.
+        let changed = crate::daemon::approved_envelope::WitnessReviewArtifact::new(
+            changed,
+            transcript.session_hash.clone(),
+            fingerprint.clone(),
+            None,
+            None,
+        );
+        assert_ne!(changed.digest().unwrap(), artifact.digest().unwrap());
+        assert!(
+            changed
+                .validate(&cfg, &transcript.session_hash, &fingerprint, None, None)
+                .is_err()
+        );
+        assert!(
+            artifact
+                .validate(
+                    &cfg,
+                    "sha256:another-contribution",
+                    &fingerprint,
+                    None,
+                    None
+                )
+                .is_err()
+        );
+        let entry = crate::daemon::queue::entry_id_for(&transcript.session_hash);
+        crate::daemon::approved_envelope::save_witnessed(&store, entry, &artifact).unwrap();
+        let restored = crate::daemon::approved_envelope::load_witnessed(&store, entry)
+            .unwrap()
+            .unwrap();
+        assert_eq!(restored.digest().unwrap(), artifact.digest().unwrap());
+        let opts = review_options();
+        let mut context = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        context
+            .use_approved_witness(restored.response().clone())
+            .unwrap();
+        assert!(matches!(
+            context.submit_loaded(transcript).await.unwrap(),
+            SubmitOutcome::Submitted { .. }
+        ));
+        let captured = capture.lock().unwrap();
+        assert_eq!(
+            captured.bodies.as_slice(),
+            &[artifact.response().envelope_bytes.clone()]
+        );
+        let admission = artifact.response().admission.as_ref().unwrap();
+        assert_eq!(
+            captured.headers[0][trace_commons_protocol::admission::EVIDENCE_HEADER],
+            admission.evidence_json
+        );
+        assert_eq!(
+            captured.headers[0][trace_commons_protocol::admission::SIGNATURE_HEADER],
+            admission.signature_hex
+        );
     }
 
     #[tokio::test]

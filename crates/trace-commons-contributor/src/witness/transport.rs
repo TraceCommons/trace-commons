@@ -857,6 +857,11 @@ pub(crate) fn signed_fixture(bytes: Vec<u8>) -> (WitnessedEnvelope, String) {
 }
 
 #[cfg(test)]
+pub(crate) fn signed_admission_fixture(bytes: Vec<u8>, account: &str) -> WitnessedEnvelope {
+    tests::signed_admission_fixture(bytes, account)
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use axum::Router;
@@ -1225,6 +1230,34 @@ mod tests {
             },
             address_of(&key),
         )
+    }
+
+    // Signature/approval fixture only: not provider or enclave qualification.
+    pub(crate) fn signed_admission_fixture(bytes: Vec<u8>, account: &str) -> WitnessedEnvelope {
+        use trace_commons_protocol::admission::{AdmissionEvidence, EVIDENCE_DOMAIN, hash_hex};
+        let (mut response, _) = signed_fixture(bytes);
+        let key = test_signer("witness-review-test-only");
+        let evidence = AdmissionEvidence {
+            profile: EVIDENCE_DOMAIN.into(),
+            account_anchor_sha256: account.into(),
+            challenge_sha256: "22".repeat(32),
+            provider_signer: "33".repeat(32),
+            model: "test-model".into(),
+            request_bytes: 1,
+            request_sha256: "44".repeat(32),
+            response_sha256: "55".repeat(32),
+            receipt_sha256: "66".repeat(32),
+            artifact_sha256: hash_hex(&response.envelope_bytes),
+            witness_measurement: "aa".repeat(48),
+            redaction_policy_version: "deterministic-v1".into(),
+            issued_at: 1,
+            expires_at: 2,
+        };
+        response.admission = Some(AdmissionHeaders {
+            evidence_json: serde_json::to_string(&evidence).unwrap(),
+            signature_hex: sign_eip191(&key, &evidence.signing_bytes().unwrap()),
+        });
+        response
     }
 
     #[test]
@@ -2176,6 +2209,80 @@ mod tests {
     /// mock on loopback cannot be fetched from, and a receipt is only
     /// verifiable against a signer this test does not have. It is shaped like
     /// one and carried like one, which is what the wire assertion needs.
+    #[tokio::test]
+    async fn admission_wire_contains_only_the_isolated_call_and_never_retries_ordinary() {
+        let (transcript, _dirs) = transcript_from_a_declared_proxy(true).await;
+        let captured = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
+        let seen = captured.clone();
+        let ordinary = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let ordinary_count = ordinary.clone();
+        let app = Router::new().route(
+            "/v1/witness/admission",
+            post(move |request: Request| {
+                let seen = seen.clone();
+                async move {
+                    let body = axum::body::to_bytes(request.into_body(), MAX_WITNESS_REQUEST_BYTES)
+                        .await
+                        .unwrap();
+                    seen.lock().unwrap().push(body.to_vec());
+                    StatusCode::BAD_REQUEST
+                }
+            }),
+        );
+        let app = app.route(
+            "/v1/witness",
+            post(move || {
+                let count = ordinary_count.clone();
+                async move {
+                    count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    StatusCode::OK
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let transport = transport_for(&url, permissive()).with_admission_evidence(true);
+        let key = test_signer("isolated-call");
+        let witness = crate::witness::verify::verified_witness_for_test(&url, &address_of(&key));
+        let cfg = crate::commands::unenrolled_preview_config();
+        let mut raw = raw_with_secret();
+        raw.outcome.human_correction = Some("UNBOUND-CORRECTION".into());
+        let isolated = crate::submit::witness_input_for_profile(raw, &cfg, true);
+        let receipt = offered_receipt();
+        let call = transcript.attested_call.as_deref().unwrap();
+        assert!(
+            witness_contribution(
+                &transport,
+                &witness,
+                isolated,
+                Some(AttestedInference {
+                    call,
+                    receipt: Some(&receipt)
+                }),
+                &granted()
+            )
+            .await
+            .is_err()
+        );
+        let bodies = captured.lock().unwrap();
+        assert_eq!(bodies.len(), 1);
+        assert_eq!(ordinary.load(std::sync::atomic::Ordering::SeqCst), 0);
+        let body: serde_json::Value = serde_json::from_slice(&bodies[0]).unwrap();
+        let events = body["raw_contribution"]["events"].as_array().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0]["structured_payload"]["request"]["body"],
+            CAPTURED_REQUEST
+        );
+        assert_eq!(events[0]["content"], CAPTURED_RESPONSE);
+        let serialized = String::from_utf8(bodies[0].clone()).unwrap();
+        assert!(!serialized.contains(SECRET));
+        assert!(!serialized.contains("UNBOUND-CORRECTION"));
+        assert_eq!(body["raw_contribution"]["replay"]["replayable"], false);
+        task.abort();
+    }
+
     #[tokio::test]
     async fn a_declared_bodies_directory_reaches_the_witness_through_the_daemon_source_roots() {
         let (transcript, _dirs) = transcript_from_a_declared_proxy(true).await;

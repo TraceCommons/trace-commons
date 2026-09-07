@@ -124,3 +124,15 @@ server admission/profile checks and exact certified-artifact approval remain
 required. This first projection promises neither full-session content nor full
 session attestation; deriving useful response content is a separate qualified
 witness change.
+
+### Existing native admission transport
+
+When the source-selected admission profile is active, contributor transport now
+rebuilds conservative metadata from authenticated configuration and omits every
+companion session event, outcome/correction, model, conversation and replay claim
+before appending the exact captured call. Submission identity is retained so the
+returned artifact remains bound to its review entry. Ordinary invited witness
+requests keep their complete trace unchanged. A server refusal does not retry
+through the ordinary profile. This does not yet wire authenticated import CLI
+submission; that next step must reuse the exact returned-artifact review and
+consent binding rather than treat local preview bytes as approved.
