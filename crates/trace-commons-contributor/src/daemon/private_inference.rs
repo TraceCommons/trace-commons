@@ -32,7 +32,9 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use ironwire_proxy::embed::{self, EmbedError, EmbeddedProxy, ExitError};
+use ironwire_proxy::embed::{
+    self, EmbedError, EmbedOptions, EmbeddedProxy, ExitError, StartupProbes, UpdateChecks,
+};
 
 /// How long a liveness probe of an existing instance may take.
 ///
@@ -313,79 +315,57 @@ pub(crate) fn effective_metadata_declaration(
         })
 }
 
-/// The file IronWire reads its own configuration out of, inside a home.
-const CONFIG_FILE: &str = "config.toml";
-
-/// The staging name the config write lands on before it is renamed into place.
-const CONFIG_STAGING_FILE: &str = ".config.toml.trace-commons";
-
-/// What this daemon writes into a home nobody has configured yet.
+/// Everything this daemon chooses about an embedded start, beyond the home
+/// and the port.
 ///
-/// `updates.check` defaults to on, and it governs two background jobs: the
-/// release check, which `embed::start` already suppresses by taking
-/// `UpdatePolicy::HostManaged`, and the provider-catalog refresh, which it
-/// does not. The refresh is the whole reason this file gets written.
-const UPDATES_OFF: &str = "\
-# Written by the Trace Commons contributor daemon, which hosts IronWire
-# in-process and does not ask it to make requests on its own behalf. Change
-# this line if you want those checks back; nothing here rewrites a file it
-# did not create.
-[updates]
-check = false
-";
-
-/// Switch off the checks IronWire would otherwise make on its own behalf,
-/// before this daemon takes ownership of `home`.
+/// **This replaces a workaround.** Until upstream #40 and #45 there was no API
+/// for either of these, so this module wrote `[updates]\ncheck = false` into
+/// `$IRONWIRE_HOME/config.toml` -- a file that may be a real contributor's,
+/// shared with the `ironwire` CLI -- and had no way at all to decline the
+/// startup probes. That write is gone, along with its staging file, its
+/// occupied-slot rule and its atomic rename: none of it is needed once the
+/// choice can be stated in code, and none of it could ever reach the probes.
 ///
-/// Left alone, a hosted proxy fetches a signed provider catalog sixty seconds
-/// after start and every six hours after that, for as long as the contributor
-/// leaves the switch on. Today that request cannot succeed and could not be
-/// used if it did: the host it names does not resolve, and the key the
-/// document would be checked against is an all-zero placeholder, so every
-/// document fails verification and the compiled-in defaults stay in force.
-/// What is left is a periodic outbound lookup from a contributor's machine
-/// that the contributor did not ask for and that buys them nothing, which is
-/// not a thing this client leaves switched on by default.
+/// Two separate choices, and they are not the same question:
 ///
-/// There is no API for this. `UpdatePolicy` governs the release check only --
-/// upstream says so in as many words -- so the configuration file is the only
-/// supported switch, and this is the narrowest use of it that works:
+/// - [`UpdateChecks::Off`] declines the two requests IronWire makes on its own
+///   behalf -- the release check, which `UpdatePolicy::HostManaged` already
+///   suppressed, and the signed provider-catalog refresh, which it did not.
+///   The refresh is the one the config file was written for: sixty seconds
+///   after start and every six hours after, for as long as the contributor
+///   leaves the switch on, and it cannot succeed and could not be used if it
+///   did -- the host it names does not resolve and the key it verifies against
+///   is an all-zero placeholder. A periodic outbound lookup from a
+///   contributor's machine that they did not ask for and that buys them
+///   nothing is not a thing this client leaves switched on.
 ///
-/// - A home that already holds a `config.toml` is somebody else's: the
-///   contributor's, or an `ironwire` CLI sharing this home. That slot is
-///   full, so it is left exactly as it is -- not parsed, not merged, not
-///   rewritten. A contributor who wants the catalog back deletes these lines,
-///   and nothing puts them back while the file exists.
-/// - A missing file is an empty slot, and this fills it with the one setting
-///   this daemon has an opinion about. Every other setting keeps its default.
+/// - [`StartupProbes::Configured`] narrows the startup catalogue discovery,
+///   which no configuration file this daemon could write would have touched.
+///   `build_registry` registers the Claude subscription, the Codex
+///   subscription and the API-key backends from credentials it finds in the
+///   environment with no entry naming them, and registers NEAR AI
+///   unconditionally -- so today every contributor who turns the switch on
+///   makes a `GET /models` to NEAR AI at startup, on behalf of a backend
+///   nobody named.
 ///
-/// The write is atomic, because a half-written `config.toml` does not parse
-/// and IronWire rightly refuses to start on a config it cannot read; a fix
-/// for a pointless network call must not become a reason the proxy will not
-/// come up. Every failure here is silent and harmless -- the worst case is
-/// the behaviour we have today.
+/// `Configured` rather than `Off` is deliberate. `Off` probes nothing ever,
+/// which would also drop the probe for a backend the contributor *did* declare
+/// in their own `config.toml` -- and a probe is real work, not just a request:
+/// it learns the model catalogue the provider actually serves and surfaces an
+/// expired credential at startup instead of at the first real call. Taking
+/// that away from someone who deliberately named a backend is a regression for
+/// them and buys no privacy, because they asked for it. `Configured` removes
+/// exactly the requests nobody asked for and keeps exactly the ones somebody
+/// did, which is the same rule this module already follows about the config
+/// file itself: never act on a slot the contributor owns.
 ///
-/// Called from the start path, after the pointer probe, so the common case of
-/// an IronWire already running in this home never reaches it.
-fn suppress_self_initiated_requests(home: &Path) {
-    let config = home.join(CONFIG_FILE);
-    if config.exists() {
-        return;
-    }
-    if std::fs::create_dir_all(home).is_err() {
-        return;
-    }
-    let staged = home.join(CONFIG_STAGING_FILE);
-    if std::fs::write(&staged, UPDATES_OFF).is_err() {
-        let _ = std::fs::remove_file(&staged);
-        return;
-    }
-    // Re-check what the rename would otherwise overwrite: this is the only
-    // window in which a file could have appeared since the check above, and
-    // replacing one is the single thing this function must never do.
-    if config.exists() || std::fs::rename(&staged, &config).is_err() {
-        let _ = std::fs::remove_file(&staged);
-    }
+/// It is not a network kill switch and must not be described as one. A
+/// contributor who declares a backend still gets one probe per declared
+/// backend at startup, by their own choice.
+fn embed_options() -> EmbedOptions {
+    EmbedOptions::default()
+        .with_update_checks(UpdateChecks::Off)
+        .with_startup_probes(StartupProbes::Configured)
 }
 
 /// One daemon's private-inference instance: at most one proxy, and the state
@@ -712,8 +692,9 @@ impl PrivateInference {
                 .unwrap_or_else(tokio::runtime::Handle::current);
             let home = self.home.clone();
             let port = self.port;
-            suppress_self_initiated_requests(&home);
-            self.starting = Some(runtime.spawn(async move { embed::start(&home, port).await }));
+            self.starting = Some(runtime.spawn(async move {
+                embed::start_with_options(&home, port, embed_options(), |_, _| {}).await
+            }));
         }
         // Await through the retained handle. Canceling a caller leaves the
         // startup owned so a stop can drain any eventual proxy it produces.
@@ -823,46 +804,39 @@ mod tests {
         fn exit(&self, _: &tracing::span::Id) {}
     }
 
+    /// The choices, stated once, so a later edit that quietly widens them
+    /// fails here rather than on a contributor's machine.
     #[test]
-    fn an_unconfigured_home_is_given_the_switch_and_a_configured_one_is_left_alone() {
-        // Empty slot: the file is created, and it says the one thing it is
-        // for.
-        let fresh = tempfile::tempdir().unwrap();
-        let home = fresh.path().join("ironwire");
-        suppress_self_initiated_requests(&home);
-        let written = std::fs::read_to_string(home.join(CONFIG_FILE)).unwrap();
-        assert!(written.contains("[updates]"), "{written}");
-        assert!(written.contains("check = false"), "{written}");
-        // Nothing is left behind for IronWire to trip over.
-        assert!(!home.join(CONFIG_STAGING_FILE).exists());
-        // Running again is not a rewrite: by then the slot is full.
-        suppress_self_initiated_requests(&home);
+    fn the_daemon_declines_both_kinds_of_request_it_never_asked_for() {
+        let options = embed_options();
         assert_eq!(
-            std::fs::read_to_string(home.join(CONFIG_FILE)).unwrap(),
-            written
+            options.update_checks,
+            UpdateChecks::Off,
+            "the release check and the catalog refresh are back on"
         );
-
-        // Full slot, including one that asks for exactly what we would turn
-        // off, and one no parser could read. Both are somebody else's file.
-        for existing in [
-            "[updates]\ncheck = true\n",
-            "# half a file that\nis not [toml at all\n",
-            "",
-        ] {
-            let occupied = tempfile::tempdir().unwrap();
-            let config = occupied.path().join(CONFIG_FILE);
-            std::fs::write(&config, existing).unwrap();
-            suppress_self_initiated_requests(occupied.path());
-            assert_eq!(std::fs::read_to_string(&config).unwrap(), existing);
-            assert!(!occupied.path().join(CONFIG_STAGING_FILE).exists());
-        }
+        assert_eq!(
+            options.startup_probes,
+            StartupProbes::Configured,
+            "startup probes are no longer limited to backends an entry names"
+        );
+        // Not narrowed to `Off`: a contributor who declared a backend asked
+        // for that probe, and it is what tells them at startup rather than at
+        // their first call that the credential expired.
+        assert_ne!(options.startup_probes, StartupProbes::Off);
+        // Unchanged from what `embed::start` gave us: this host ships and
+        // upgrades the library.
+        assert_eq!(
+            options.update_policy,
+            ironwire_proxy::embed::UpdatePolicy::HostManaged
+        );
     }
 
+    /// The workaround this replaced wrote `[updates] check = false` into the
+    /// home. Nothing does now, and a home the daemon started out of must come
+    /// back with no file this daemon put there -- including for a contributor
+    /// who has none of their own, which is the case the old code wrote into.
     #[tokio::test]
-    async fn the_written_switch_still_starts_a_proxy() {
-        // The file we write is one IronWire loads, parses and validates --
-        // writing it must not become a new way for the proxy to refuse to
-        // start.
+    async fn a_start_leaves_the_home_configuration_alone_and_still_runs() {
         let home = tempfile::tempdir().unwrap();
         let mut host = PrivateInference::with_port(home.path().to_path_buf(), 0);
         host.apply(true).await;
@@ -876,11 +850,42 @@ mod tests {
             host.state()
         );
         assert!(
-            std::fs::read_to_string(home.path().join(CONFIG_FILE))
-                .unwrap()
-                .contains("check = false")
+            !home.path().join("config.toml").exists(),
+            "the daemon wrote a configuration file into somebody's home again"
+        );
+        assert!(
+            !home.path().join(".config.toml.trace-commons").exists(),
+            "a staging file from the deleted workaround is still being written"
         );
         assert!(host.finish_stop().await);
+    }
+
+    /// IronWire's own account of the start, rather than our account of what we
+    /// asked for. A `config.toml` that asks for the checks is deliberately
+    /// present: this daemon's instance declines on its own behalf whatever the
+    /// file says, and the file is still not touched -- an `ironwire` CLI run
+    /// out of this same home is a different process and still gets what the
+    /// contributor wrote there.
+    #[tokio::test]
+    async fn ironwire_reports_the_checks_declined_and_the_file_untouched() {
+        let home = tempfile::tempdir().unwrap();
+        let config = home.path().join("config.toml");
+        std::fs::write(&config, "[updates]\ncheck = true\n").unwrap();
+
+        let proxy = embed::start_with_options(home.path(), Some(0), embed_options(), |_, _| {})
+            .await
+            .expect("start");
+        assert!(
+            !proxy.startup_report().update_checks,
+            "IronWire says it will make the requests we declined"
+        );
+        proxy.shutdown().await;
+
+        assert_eq!(
+            std::fs::read_to_string(&config).unwrap(),
+            "[updates]\ncheck = true\n",
+            "the contributor's own file was rewritten"
+        );
     }
 
     /// Watch for the call itself, rather than reading the code that makes it.
@@ -889,31 +894,40 @@ mod tests {
     /// is deliberately delayed sixty seconds so it never competes with a
     /// contributor's first request. Run it with
     /// `cargo test -p trace-commons-contributor --lib -- --ignored --exact \
-    ///  daemon::private_inference::tests::the_catalog_fetch_happens_by_default_and_stops_once_the_switch_is_written`.
+    ///  daemon::private_inference::tests::the_catalog_fetch_happens_by_default_and_not_under_our_options`.
+    ///
+    /// The first half is the positive control, and it is the reason this test
+    /// means anything: a watcher that never fires would let the second half
+    /// pass while the call was still being made every six hours.
     #[tokio::test(flavor = "multi_thread")]
     #[ignore = "waits out IronWire's sixty-second first-check delay twice"]
-    async fn the_catalog_fetch_happens_by_default_and_stops_once_the_switch_is_written() {
+    async fn the_catalog_fetch_happens_by_default_and_not_under_our_options() {
         const WATCH: Duration = Duration::from_secs(90);
         let seen = Arc::new(AtomicUsize::new(0));
         tracing::subscriber::set_global_default(CatalogWatch(seen.clone())).unwrap();
 
-        // A home that asks for the checks keeps them: the slot is full, we do
-        // not touch it, and the fetch is made.
+        // Default options on a home that asks for the checks: the call is
+        // made. This is what a caller that did nothing would get.
         let asked = tempfile::tempdir().unwrap();
-        let config = asked.path().join(CONFIG_FILE);
-        std::fs::write(&config, "[updates]\ncheck = true\n").unwrap();
-        let mut host = PrivateInference::with_port(asked.path().to_path_buf(), 0);
-        host.apply(true).await;
+        std::fs::write(
+            asked.path().join("config.toml"),
+            "[updates]\ncheck = true\n",
+        )
+        .unwrap();
+        let proxy = embed::start_with_options(
+            asked.path(),
+            Some(0),
+            ironwire_proxy::embed::EmbedOptions::default(),
+            |_, _| {},
+        )
+        .await
+        .expect("start");
         tokio::time::sleep(WATCH).await;
         let asked_for_it = seen.load(Ordering::SeqCst);
-        assert!(host.finish_stop().await);
-        assert_eq!(
-            std::fs::read_to_string(&config).unwrap(),
-            "[updates]\ncheck = true\n"
-        );
+        proxy.shutdown().await;
         assert!(asked_for_it > 0, "the default path never made the call");
 
-        // A home nobody configured does not.
+        // Our options, through the daemon, on a home nobody configured.
         seen.store(0, Ordering::SeqCst);
         let quiet = tempfile::tempdir().unwrap();
         let mut host = PrivateInference::with_port(quiet.path().to_path_buf(), 0);

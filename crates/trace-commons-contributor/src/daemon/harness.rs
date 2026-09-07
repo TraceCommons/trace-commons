@@ -470,21 +470,27 @@ pub fn plan(
         Ok(planned) => planned,
         Err(tools::Error::UnknownTool(_)) => return Err(ERR_UNKNOWN_HARNESS),
         Err(tools::Error::NoPath(_)) => return Ok(refuse(PlanOutcome::NoConfigPath)),
-        Err(tools::Error::Edit(detail)) => {
-            // `Error::Edit` flattens two upstream cases into one string, and
-            // the string quotes the file. Neither the string nor the file
-            // crosses this line: the prefix is matched to separate a catalog
-            // entry that did not validate from a file that would not parse,
-            // and everything else is dropped. For the two built-in tools the
-            // only possible cause is a parse failure, so the fallback is the
-            // right answer there by construction.
-            return Ok(refuse(
-                if detail.starts_with("the catalog entry is not usable") {
-                    PlanOutcome::EntryUnusable
-                } else {
-                    PlanOutcome::Unparseable
-                },
-            ));
+        // Upstream #39 split the former `Error::Edit(String)` into distinct
+        // variants, so the two answers this daemon needs are now carried by
+        // the type rather than recovered by matching on the front of a
+        // sentence. The prefix match that used to live here is gone: it read
+        // prose that upstream is free to reword, and rewording it would have
+        // silently turned every unusable catalog entry into "unparseable".
+        //
+        // Nothing from the variants crosses this line. Each one carries the
+        // file it read and the parser's own words, and neither is ours to
+        // publish: `PlanOutcome` is the whole vocabulary a shell gets, and the
+        // path is already reported separately as `PlanView::path`.
+        Err(tools::Error::UnusableEntry { .. }) => return Ok(refuse(PlanOutcome::EntryUnusable)),
+        // `Jsonc` is a file we refused to rewrite, which is exactly what
+        // `Unparseable` means to a contributor: nothing was decided and the
+        // file needs a person. Upstream distinguishes it because its
+        // remediation differs, and a distinct outcome would be worth having --
+        // but it would be a new label on the IPC wire, in the FFI enum, and in
+        // four shells' copy, which is a change to make deliberately and not as
+        // a side effect of advancing a pin.
+        Err(tools::Error::Unparseable { .. } | tools::Error::Jsonc { .. }) => {
+            return Ok(refuse(PlanOutcome::Unparseable));
         }
     };
 
@@ -555,7 +561,25 @@ pub fn commit(store: &PlanStore, plan_id: Uuid) -> Result<CommitView, &'static s
         return Err(ERR_CONFIG_CHANGED);
     }
 
-    let backup_path = tools::commit(&held.planned).map_err(|_| ERR_COMMIT_FAILED)?;
+    // Upstream #37's `commit_if_unchanged` reads the file again immediately
+    // before writing it, so the span between "we checked" and "we wrote" --
+    // which a second request or the agent itself can land in -- is closed
+    // upstream rather than merely narrowed here.
+    //
+    // The digest check above stays, and is not made redundant by it. The two
+    // ask different questions. `commit_if_unchanged` compares against
+    // `planned.existing`, which is `read_to_string(..).ok().unwrap_or_default()`
+    // upstream: a file that is absent and a file that exists but does not
+    // decode as UTF-8 are both the empty string to it. `config_digest` reads
+    // BYTES, so it tells those two apart -- which is the entire protection
+    // against a `settings.json` that turned into UTF-16LE between the preview
+    // and the commit being overwritten wholesale, with no backup, because
+    // `existing` was empty. Dropping our check to adopt theirs would trade a
+    // real defence for a narrower race.
+    let backup_path = tools::commit_if_unchanged(&held.planned).map_err(|error| match error {
+        tools::CommitError::Changed => ERR_CONFIG_CHANGED,
+        tools::CommitError::Io(_) => ERR_COMMIT_FAILED,
+    })?;
     Ok(CommitView {
         tool_id: held.tool_id,
         action: held.action,
@@ -1065,6 +1089,92 @@ mod tests {
         assert!(
             after.contains("https://their-own-choice.example"),
             "the contributor's own value was overwritten: {after}"
+        );
+    }
+
+    /// Serializes the tests that point Codex's config somewhere.
+    ///
+    /// `CODEX_HOME` is process-wide, exactly as `CLAUDE_CONFIG_DIR` is, and
+    /// the same pattern applies for the same reason.
+    static CODEX_HOME_LOCK: StdMutex<()> = StdMutex::new(());
+
+    struct CodexHomeAt {
+        _lock: MutexGuard<'static, ()>,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl CodexHomeAt {
+        fn at(dir: &Path) -> Self {
+            let lock = CODEX_HOME_LOCK
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            let previous = std::env::var_os("CODEX_HOME");
+            unsafe { std::env::set_var("CODEX_HOME", dir) };
+            Self {
+                _lock: lock,
+                previous,
+            }
+        }
+    }
+
+    impl Drop for CodexHomeAt {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(v) => unsafe { std::env::set_var("CODEX_HOME", v) },
+                None => unsafe { std::env::remove_var("CODEX_HOME") },
+            }
+        }
+    }
+
+    /// Codex's slot is occupied, reported, and left alone.
+    ///
+    /// This could not fire before. Upstream's `plan_connect` hard-coded
+    /// `occupied: Vec::new()` for the `codex` arm and its `connect` replaced a
+    /// `model_provider` the contributor had chosen, keeping the old value only
+    /// in a comment. So the daemon's occupied-slot path -- and the
+    /// `HARNESS_SLOT_TAKEN` sentence every shell draws from it -- was reachable
+    /// for Claude Code alone, and a Codex user pointed at another proxy had it
+    /// switched out from under them with no slot reported.
+    ///
+    /// Upstream #33 changed both halves: the provider is reported and left, and
+    /// a note above it records what it said so a later `disconnect` can still
+    /// put it back. This pins the daemon's side of that -- the value reaches
+    /// `occupied` and is still in the file after the rest of the edit commits.
+    #[test]
+    fn codex_reports_a_provider_the_contributor_chose_and_leaves_it_there() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "model_provider = \"their-own-proxy\"\n\n[model_providers.their-own-proxy]\nname = \"theirs\"\nbase_url = \"http://127.0.0.1:9999/v1\"\n",
+        )
+        .expect("write");
+        let _guard = CodexHomeAt::at(dir.path());
+
+        let store = PlanStore::default();
+        let view = plan(
+            &store,
+            &Catalog::default(),
+            "codex",
+            HarnessAction::Connect,
+            Some(8463),
+        )
+        .expect("codex is known");
+
+        assert!(
+            view.occupied
+                .iter()
+                .any(|(slot, current)| slot == "model_provider" && current == "their-own-proxy"),
+            "the occupied Codex slot was not reported: {view:?}"
+        );
+
+        if let Some(id) = view.plan_id {
+            commit(&store, id).expect("the rest of the edit still applies");
+        }
+        let after = std::fs::read_to_string(&path).expect("read");
+        assert!(
+            after.contains("model_provider = \"their-own-proxy\""),
+            "the contributor's own provider was switched out: {after}"
         );
     }
 
