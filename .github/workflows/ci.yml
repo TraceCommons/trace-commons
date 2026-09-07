@@ -103,37 +103,10 @@ jobs:
     # detectable without a Mac.
     steps:
       - uses: actions/checkout@v6
-      - name: The three pins agree
+      - name: Pins and empty catalog, with mutation regressions
         run: |
-          rs=$(sed -n 's/^pub const QUALIFIED_VERSION: &str = "\(.*\)";$/\1/p' \
-            crates/trace-commons-contributor/src/source/opencode.rs | head -1)
-          py=$(sed -n 's/.*!= "\([0-9][0-9.]*\)".*unqualified OpenCode version.*/\1/p' \
-            scripts/qualification/opencode-routing.py | head -1)
-          [ -n "$py" ] || py=$(grep -oE '"[0-9]+\.[0-9]+\.[0-9]+"' \
-            scripts/qualification/opencode-routing.py | head -1 | tr -d '"')
-          doc=$(grep -oE '[0-9]+\.[0-9]+\.[0-9]+' \
-            docs/superpowers/reports/2026-09-07-opencode-export-qualification.md | head -1)
-          echo "reader=$rs script=$py report=$doc"
-          for v in "$rs" "$py" "$doc"; do
-            [ -n "$v" ] || { echo "a pin could not be read; the guard is not proving anything" >&2; exit 1; }
-          done
-          [ "$rs" = "$py" ] && [ "$rs" = "$doc" ] || {
-            echo "opencode pins disagree: reader=$rs script=$py report=$doc" >&2
-            echo "re-run scripts/qualification/opencode-routing.py before moving any of them" >&2
-            exit 1
-          }
-      - name: The routing catalog is still empty
-        run: |
-          # The qualification's conclusion was REFUSED. That conclusion is only
-          # binding while nothing writes a provider block, so the guard checks
-          # the thing the decision was about rather than trusting the report.
-          grep -A3 'fn owned_agents' \
-            crates/trace-commons-contributor/src/daemon/harness.rs \
-            | grep -q 'Vec::new()' || {
-            echo "owned_agents() is no longer empty -- the routing catalog is being enabled." >&2
-            echo "Re-run the qualification for the OpenCode version you are targeting first." >&2
-            exit 1
-          }
+          python3 scripts/qualification/check-opencode-qualification.py
+          python3 scripts/qualification/test-opencode-qualification.py
 
   cargo-clippy:
     name: cargo clippy
