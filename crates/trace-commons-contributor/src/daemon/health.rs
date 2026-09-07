@@ -35,8 +35,7 @@ pub const LABEL_QUEUE_FULL: &str = "queue-full";
 /// At least one session on this machine is too large for its source to read,
 /// so it is not being offered and never will be.
 ///
-/// The only load failure that gets a standing label, and only because it is
-/// the only one that is a *verdict*: the size check is a stat against a
+/// A persistent load failure gets a standing label because it is a *verdict*: the size check is a stat against a
 /// constant, so it decides the same way on every poll forever. A session
 /// that failed to read for any other reason is very likely readable on the
 /// next one, and a flag a single IO blip pins on a healthy daemon is worse
@@ -49,6 +48,8 @@ pub const LABEL_QUEUE_FULL: &str = "queue-full";
 /// by three different surfaces at three different points -- reading the
 /// file, building the envelope, and a one-shot `submit` line.
 pub const LABEL_SESSION_TOO_LARGE: &str = "session-too-large";
+/// A declared export cannot be imported by this build's qualified reader.
+pub const LABEL_OPENCODE_EXPORT_VERSION_UNSUPPORTED: &str = "opencode-export-version-unsupported";
 
 /// Labels describing a condition the contributor cannot resolve by making a
 /// decision about a trace. While one of these is in force, pending entries do
@@ -82,7 +83,7 @@ pub fn precedence(label: &str) -> u8 {
         // whole pipeline, while this describes one file the contributor can
         // still work around by leaving it alone. It must never mask an
         // outage.
-        LABEL_SESSION_TOO_LARGE => 8,
+        LABEL_SESSION_TOO_LARGE | LABEL_OPENCODE_EXPORT_VERSION_UNSUPPORTED => 8,
         _ => 9,
     }
 }

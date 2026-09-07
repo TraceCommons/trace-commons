@@ -21,6 +21,57 @@ use std::{
 pub const QUALIFIED_VERSION: &str = "1.18.29";
 const BYTE_BUDGET: u64 = 16 * 1024 * 1024;
 const RECORD_BUDGET: usize = 100_000;
+const DISCOVERY_ENTRY_BUDGET: usize = 256;
+const HEADER_BYTE_BUDGET: u64 = 64 * 1024;
+
+#[derive(Debug, thiserror::Error)]
+#[error("opencode-export-version-unsupported")]
+pub(crate) struct UnsupportedExportVersion;
+
+#[derive(serde::Deserialize)]
+struct ExportHeader {
+    directory: String,
+    time: ExportTime,
+}
+#[derive(serde::Deserialize)]
+struct ExportTime {
+    created: i64,
+}
+
+// Read only the bounded leading info object. Upstream writes it before messages;
+// a missing/malformed/late header leaves metadata absent, never invents an mtime.
+fn export_header(path: &Path) -> Option<ExportHeader> {
+    use serde::de::{Deserializer, MapAccess, Visitor};
+    struct HeaderVisitor<'a>(&'a mut Option<ExportHeader>);
+    impl<'de> Visitor<'de> for HeaderVisitor<'_> {
+        type Value = ();
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("export header")
+        }
+        fn visit_map<M: MapAccess<'de>>(
+            self,
+            mut map: M,
+        ) -> std::result::Result<Self::Value, M::Error> {
+            while let Some(key) = map.next_key::<String>()? {
+                if key == "info" {
+                    *self.0 = Some(map.next_value()?);
+                    // Stop before the (potentially multi-megabyte) message
+                    // array. The full document is validated only by load.
+                    return Err(serde::de::Error::custom("header-complete"));
+                }
+                map.next_value::<serde::de::IgnoredAny>()?;
+            }
+            Err(serde::de::Error::custom("missing export header"))
+        }
+    }
+    let file = open_export(path)?;
+    let mut de = serde_json::Deserializer::from_reader(std::io::BufReader::new(
+        file.take(HEADER_BYTE_BUDGET),
+    ));
+    let mut header = None;
+    let _ = (&mut de).deserialize_map(HeaderVisitor(&mut header));
+    header
+}
 
 pub struct OpenCodeSource {
     root: PathBuf,
@@ -37,13 +88,24 @@ impl OpenCodeSource {
     fn reference(&self, path: &Path) -> Option<SessionRef> {
         let path = self.address(path)?;
         let size_bytes = std::fs::metadata(&path).ok()?.len();
+        let header = export_header(&path);
+        let started_at = header
+            .as_ref()
+            .and_then(|h| (h.time.created >= 0).then_some(h.time.created))
+            .and_then(DateTime::from_timestamp_millis);
+        let cwd = header.map(|h| h.directory);
+        let project = cwd
+            .as_deref()
+            .and_then(|c| Path::new(c).file_name())
+            .and_then(|n| n.to_str())
+            .map(str::to_owned);
         Some(SessionRef {
             source: SOURCE_OPENCODE,
             declared_source: None,
             path,
-            project: None,
-            cwd: None,
-            started_at: None,
+            project,
+            cwd,
+            started_at,
             size_bytes,
             group_modified_at: None,
             group_member_count: 0,
@@ -58,10 +120,15 @@ impl TraceSource for OpenCodeSource {
         let Ok(entries) = std::fs::read_dir(&self.root) else {
             return Ok(Vec::new());
         };
-        let mut refs: Vec<_> = entries
-            .filter_map(Result::ok)
-            .filter_map(|e| self.reference(&e.path()))
-            .collect();
+        let mut refs = Vec::new();
+        for (index, entry) in entries.enumerate() {
+            if index >= DISCOVERY_ENTRY_BUDGET {
+                bail!("opencode-discovery-entry-budget");
+            }
+            if let Some(reference) = entry.ok().and_then(|e| self.reference(&e.path())) {
+                refs.push(reference);
+            }
+        }
         refs.sort_by(|a, b| a.path.cmp(&b.path));
         Ok(refs)
     }
@@ -79,13 +146,6 @@ impl TraceSource for OpenCodeSource {
             .address(&r.path)
             .ok_or_else(|| anyhow!("opencode_outside_declared_root"))?;
         let file = open_export(&path).ok_or_else(|| anyhow!("opencode_unreadable_export"))?;
-        if !file
-            .metadata()
-            .map_err(|_| anyhow!("opencode_unreadable_export"))?
-            .is_file()
-        {
-            bail!("opencode_not_regular_file");
-        }
         let mut bytes = Vec::new();
         file.take(BYTE_BUDGET + 1)
             .read_to_end(&mut bytes)
@@ -177,6 +237,12 @@ fn timestamp(v: &Value) -> Result<DateTime<Utc>> {
 /// Convert qualified export bytes without assigning any attestation or routing.
 /// Unknown versions/roles/parts and ambiguous IDs fail closed with content-free labels.
 pub fn parse_export(bytes: &[u8]) -> Result<SessionTranscript> {
+    parse_export_with_record_budget(bytes, RECORD_BUDGET)
+}
+fn parse_export_with_record_budget(
+    bytes: &[u8],
+    record_budget: usize,
+) -> Result<SessionTranscript> {
     if bytes.len() as u64 > BYTE_BUDGET {
         return Err(SessionTooLarge {
             label: "opencode-export-too-large",
@@ -190,14 +256,14 @@ pub fn parse_export(bytes: &[u8]) -> Result<SessionTranscript> {
     let info = &doc["info"];
     let session_id = id(info, "id")?;
     if field(info, "version")? != QUALIFIED_VERSION {
-        bail!("opencode_unqualified_export_version");
+        return Err(UnsupportedExportVersion.into());
     }
     let cwd = field(info, "directory")?.to_owned();
     let started_at = timestamp(&info["time"]["created"])?;
     let messages = doc["messages"]
         .as_array()
         .ok_or_else(|| anyhow!("opencode_missing_messages"))?;
-    if messages.len() > RECORD_BUDGET {
+    if messages.len() > record_budget {
         bail!("opencode_record_budget");
     }
     let mut seen_messages = HashSet::new();
@@ -243,7 +309,7 @@ pub fn parse_export(bytes: &[u8]) -> Result<SessionTranscript> {
             {
                 bail!("opencode_ambiguous_part_id");
             }
-            if seen_parts.len() > RECORD_BUDGET {
+            if seen_parts.len() > record_budget {
                 bail!("opencode_record_budget");
             }
             let kind = field(part, "type")?;
@@ -265,6 +331,17 @@ pub fn parse_export(bytes: &[u8]) -> Result<SessionTranscript> {
                     if kind == "reasoning" && role != "assistant" {
                         bail!("opencode_invalid_role_part");
                     }
+                    let text = field(part, "text")?;
+                    if part.get("synthetic").and_then(Value::as_bool) == Some(true)
+                        || part.get("ignored").and_then(Value::as_bool) == Some(true)
+                    {
+                        events.push(SessionEvent {
+                            kind: SessionEventKind::Opaque,
+                            timestamp: Some(created),
+                            ..Default::default()
+                        });
+                        continue;
+                    }
                     let time = match part.get("time") {
                         Some(t) => Some(timestamp(&t["start"])?),
                         None => Some(created),
@@ -278,8 +355,10 @@ pub fn parse_export(bytes: &[u8]) -> Result<SessionTranscript> {
                             SessionEventKind::Assistant
                         },
                         timestamp: time,
-                        content: Some(field(part, "text")?.to_owned()),
-                        structured: marker,
+                        content: Some(text.to_owned()),
+                        // Identity/flag strings are not tool content. Keep them
+                        // in the validated export, not the submitted payload.
+                        structured: Value::Null,
                         ..Default::default()
                     });
                 }
@@ -309,11 +388,9 @@ pub fn parse_export(bytes: &[u8]) -> Result<SessionTranscript> {
                         timestamp: start,
                         tool_name: Some(field(part, "tool")?.to_owned()),
                         tool_call_id: Some(call.to_owned()),
-                        structured: {
-                            let mut data = marker.clone();
-                            data["input"] = Value::Object(input.clone());
-                            data
-                        },
+                        // raw_event_for wraps this as `arguments`; do not
+                        // mix import identity markers into executable inputs.
+                        structured: Value::Object(input.clone()),
                         ..Default::default()
                     });
                     if matches!(status, "completed" | "error") {
@@ -345,8 +422,9 @@ pub fn parse_export(bytes: &[u8]) -> Result<SessionTranscript> {
                 "file" | "snapshot" | "patch" | "step-start" | "step-finish" | "agent"
                 | "retry" | "compaction" | "subtask" => {
                     let mut event = SessionEvent::opaque(kind, Some(created));
-                    event.structured["message_id"] = message_id.into();
-                    event.structured["part_id"] = part_id.into();
+                    // No contributed body: do not manufacture a tool-payload
+                    // consent requirement from an export-only type/ID marker.
+                    event.structured = Value::Null;
                     events.push(event);
                 }
                 _ => bail!("opencode_unknown_part"),
@@ -408,7 +486,7 @@ mod tests {
         );
         assert_eq!(t.events[2].tool_call_id, t.events[3].tool_call_id);
         assert_eq!(t.events[3].success, Some(true));
-        assert_eq!(t.events[4].structured["message_id"], "msg_assistant");
+        assert!(t.events[4].structured.is_null());
         assert!(t.routing.is_empty() && t.attested_call.is_none());
         assert!(
             t.events
@@ -518,8 +596,8 @@ mod tests {
             v["messages"][1]["parts"][2]["url"] = "file:///synthetic/private".into();
         })
         .unwrap();
-        assert_eq!(t.events[0].structured["synthetic"], true);
-        assert_eq!(t.events[2].structured["model_id"], "model");
+        assert!(t.events[0].structured.is_null());
+        assert_eq!(t.events[2].structured["command"], "echo synthetic");
         let last = t.events.last().unwrap();
         assert_eq!(last.kind, SessionEventKind::Opaque);
         assert!(last.content.is_none());
@@ -545,6 +623,60 @@ mod tests {
         assert_eq!(
             source.load(&r).unwrap_err().to_string(),
             "opencode_outside_declared_root"
+        );
+    }
+
+    #[test]
+    fn discovery_metadata_uses_session_time_and_directory_not_export_mtime() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("export.json");
+        std::fs::write(&path, FIXTURE).unwrap();
+        let source = OpenCodeSource::new(tmp.path().to_owned());
+        let r = source.discover().unwrap().remove(0);
+        let t = source.load(&r).unwrap();
+        assert_eq!(r.started_at, t.started_at);
+        assert!(
+            r.started_at
+                .is_some_and(|t| t >= DateTime::from_timestamp_millis(1788739199999).unwrap())
+        );
+        assert_eq!(r.cwd.as_deref(), Some("/synthetic/project"));
+        assert_eq!(r.project.as_deref(), Some("project"));
+    }
+
+    #[test]
+    fn record_and_discovery_entry_limits_refuse_instead_of_truncating() {
+        assert!(parse_export_with_record_budget(FIXTURE, 4).is_ok());
+        assert_eq!(
+            parse_export_with_record_budget(FIXTURE, 3)
+                .unwrap_err()
+                .to_string(),
+            "opencode_record_budget"
+        );
+        let mut doc: Value = serde_json::from_slice(FIXTURE).unwrap();
+        doc["messages"] = serde_json::json!([null, null, null, null, null]);
+        assert_eq!(
+            parse_export_with_record_budget(&serde_json::to_vec(&doc).unwrap(), 4)
+                .unwrap_err()
+                .to_string(),
+            "opencode_record_budget"
+        );
+        doc["messages"] = Value::Array(vec![Value::Null; RECORD_BUDGET + 1]);
+        assert_eq!(
+            parse_export(&serde_json::to_vec(&doc).unwrap())
+                .unwrap_err()
+                .to_string(),
+            "opencode_record_budget"
+        );
+        let tmp = tempfile::tempdir().unwrap();
+        for i in 0..DISCOVERY_ENTRY_BUDGET {
+            std::fs::write(tmp.path().join(format!("{i}.txt")), b"").unwrap();
+        }
+        let source = OpenCodeSource::new(tmp.path().to_owned());
+        assert!(source.discover().unwrap().is_empty());
+        std::fs::write(tmp.path().join("over-budget.txt"), b"").unwrap();
+        assert_eq!(
+            source.discover().unwrap_err().to_string(),
+            "opencode-discovery-entry-budget"
         );
     }
 
