@@ -1652,22 +1652,36 @@ mod screen_tests {
 
     /// The label is read from the shared copy module, never retyped here.
     #[test]
-    fn the_model_calls_screen_takes_its_label_from_the_shared_copy() {
+    fn the_private_ai_screen_takes_its_label_from_the_shared_copy() {
         let (name, label, _) = SCREENS
             .into_iter()
             .find(|(name, _, _)| *name == PRIVATE_INFERENCE_SCREEN)
-            .expect("the model-calls screen is one of the switcher's items");
+            .expect("the Private AI screen is one of the switcher's items");
         assert_eq!(name, "private-inference");
         assert_eq!(label, copy::PRIVATE_INFERENCE_DESTINATION);
     }
 
-    /// Nothing a contributor reads in the switcher may call this private:
-    /// turning it on moves where a call is answered, it does not make the
-    /// call private. The stack's internal name is read by nobody.
+    /// No switcher label may PROMISE privacy.
+    ///
+    /// The product name is stripped first, the same way the shared sweep in
+    /// `private_inference_copy` strips it: the destination is called
+    /// "Private AI" deliberately -- the mental model is a VPN, where the word
+    /// has never meant the destination cannot see you -- while no sentence
+    /// may claim a call is private, because each one still goes on to
+    /// whoever was configured to answer it.
+    ///
+    /// This guard is a second statement of a rule that lives in the shared
+    /// crate, and it drifted from it the moment the name changed: the sweep
+    /// was narrowed and this was not, so the rename failed here alone. It is
+    /// kept because a shell hardcoding a label is a thing only a shell test
+    /// can catch -- but it now strips the same way, so the two cannot
+    /// disagree about what the rule is.
     #[test]
     fn no_switcher_label_promises_privacy() {
         for (_, label, _) in SCREENS {
-            let lowered = label.to_ascii_lowercase();
+            let lowered = label
+                .replace(copy::PRIVATE_INFERENCE_DESTINATION, "")
+                .to_ascii_lowercase();
             for forbidden in ["private", "secure", "proxy", "backend"] {
                 assert!(
                     !lowered.contains(forbidden),
