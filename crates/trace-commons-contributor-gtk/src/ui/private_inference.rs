@@ -853,7 +853,16 @@ mod tests {
             .split("\n        Self {")
             .next()
             .expect("the constructor ends by returning Self");
-        for literal in body.split('"').skip(1).step_by(2) {
+        // Comments stripped first: a comment quoting a sentence reads as a
+        // literal, and one with an odd number of quotes shifts the parity so
+        // every real literal lands in a skipped position and this passes
+        // having checked nothing. Same reason as `the_harness_rows_author_no_wording`.
+        let code_only: String = body
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for literal in code_only.split('"').skip(1).step_by(2) {
             assert!(
                 literal.starts_with("tc-"),
                 "{literal:?} is a sentence written in this view rather than read from copy"
@@ -1110,6 +1119,15 @@ mod tests {
             .split("\n}")
             .next()
             .expect("its body ends");
+        // Comments stripped first. This tripwire is what forces a sentence to
+        // be written the day two tools share a family, so a commented-out or
+        // merely discussed `Some("...")` must not be able to trip it, nor to
+        // hide a real one by shifting the quote parity.
+        let body: String = body
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
         let mut families: Vec<&str> = Vec::new();
         for arm in body.split("Some(").skip(1) {
             let family = arm
