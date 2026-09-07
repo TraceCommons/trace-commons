@@ -89,6 +89,23 @@ public enum TCHarness {
         return String(cString: raw)
     }
 
+    /// What the calls answered on this computer have cost today.
+    ///
+    /// `micros` is millionths of a dollar, from a `harness_list` answer's
+    /// `spend`. ABSENCE IS AN OUT-OF-RANGE INTEGER, the convention
+    /// `lastCallLine` above uses: pass a negative value when the answer says
+    /// the figure is not known, and the result is the empty string, drawn as
+    /// no line at all.
+    ///
+    /// NEVER PASS ZERO FOR A FIGURE NOBODY MEASURED. Zero is a measured day
+    /// with nothing on it, and it comes back saying so in words.
+    /// `HarnessSpend.abiValue` does this conversion once, correctly.
+    public static func spendLine(micros: Int64) -> String {
+        guard let raw = tc_harness_spend_line(micros) else { return "" }
+        defer { tc_string_free(raw) }
+        return String(cString: raw)
+    }
+
     /// Whether one action may be offered for a tool in this state.
     ///
     /// Answers false -- do not offer -- for an action this build does not

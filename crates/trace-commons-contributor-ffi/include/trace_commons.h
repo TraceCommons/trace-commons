@@ -832,6 +832,32 @@ char*       tc_harness_outcome_line(const char* outcome);
 char*       tc_harness_last_call_line(int64_t seconds_ago);
 
 
+/* What the calls answered on this computer have cost since midnight,
+ * assembled.
+ *
+ * micros is millionths of a dollar, from a harness_list answer's
+ * spend.micros. ABSENCE IS AN OUT-OF-RANGE INTEGER, the same convention
+ * tc_harness_last_call_line uses: ANY NEGATIVE VALUE -- which is what to pass
+ * when the answer's spend.known is false -- gives the EMPTY STRING. Draw
+ * nothing for it.
+ *
+ * NEVER RENDER AN UNKNOWN FIGURE AS ZERO. "Nobody could measure this" and
+ * "nothing was spent" are different facts; a measured zero arrives as micros
+ * 0 and says so in words. Collapsing the two would tell a contributor with no
+ * readable ledger that they spent nothing today.
+ *
+ * The rounding and the window are in the sentence, so no shell formats money
+ * itself. The scope the figure does NOT cover -- another computer, a browser,
+ * work a monthly plan already paid for -- is the payload's
+ * harnesses_spend_scope, drawn beside this sentence and only when this
+ * sentence is drawn at all.
+ *
+ * Returns an owned string; free it with tc_string_free. NULL only on a caught
+ * panic.
+ */
+char*       tc_harness_spend_line(int64_t micros);
+
+
 /* The settings screen's session-source row for one tool, assembled.
  *
  * tool is "claude", "codex", "gemini" or "cline". source_mode is get_settings's

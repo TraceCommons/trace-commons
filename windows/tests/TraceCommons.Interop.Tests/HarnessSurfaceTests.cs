@@ -414,6 +414,55 @@ public class HarnessSurfaceTests
     }
 
     /// <summary>
+    /// The amount is assembled on the far side, and an unmeasured figure
+    /// draws nothing rather than a zero.
+    /// </summary>
+    /// <remarks>
+    /// The assertion that carries the weight is the last one. A listing whose
+    /// <c>spend.known</c> is false must produce the empty string, and it must
+    /// NOT produce the sentence a measured zero gets: "nobody could tell" and
+    /// "nothing was spent" are different facts, and rendering the first as
+    /// $0.00 is the defect this whole block exists to prevent.
+    /// </remarks>
+    [Fact]
+    public void TheAmountIsAssembledOnTheFarSideAndUnknownDrawsNothing()
+    {
+        HarnessListing measured = HarnessSurface.ParseListing(
+            """
+            {"catalog_present":false,"harnesses":[],
+             "activity":{"readable":true,"window_hours":24,"last_call_at":null,"families":[]},
+             "spend":{"known":true,"micros":1230000}}
+            """);
+        Assert.True(measured.SpendKnown);
+        Assert.Equal(1_230_000UL, measured.SpendMicros);
+        Assert.Contains("$1.23", HarnessSurface.SpendSentence(measured), StringComparison.Ordinal);
+        Assert.Contains(
+            "since midnight", HarnessSurface.SpendSentence(measured), StringComparison.Ordinal);
+
+        HarnessListing zero = HarnessSurface.ParseListing(
+            """
+            {"catalog_present":false,"harnesses":[],
+             "activity":{"readable":true,"window_hours":24,"last_call_at":null,"families":[]},
+             "spend":{"known":true,"micros":0}}
+            """);
+        Assert.Contains("$0.00", HarnessSurface.SpendSentence(zero), StringComparison.Ordinal);
+
+        foreach (string body in new[]
+        {
+            """{"harnesses":[],"spend":{"known":false,"micros":null}}""",
+            """{"harnesses":[],"spend":{"known":true,"micros":null}}""",
+            """{"harnesses":[]}""",
+        })
+        {
+            HarnessListing unknown = HarnessSurface.ParseListing(body);
+            Assert.False(unknown.SpendKnown);
+            Assert.Equal(string.Empty, HarnessSurface.SpendSentence(unknown));
+        }
+
+        Assert.NotEqual(HarnessSurface.SpendSentence(zero), HarnessSurface.SpendSentence(HarnessListing.Empty));
+    }
+
+    /// <summary>
     /// Two states have no sentence on the payload, and neither may borrow one.
     /// </summary>
     /// <remarks>

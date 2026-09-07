@@ -21,6 +21,7 @@ final class PrivateInferenceSurfaceTests: XCTestCase {
          "state_start_failed":"S-FAILED","state_crashed":"S-CRASHED",
          "quit_also_stops":"QUIT","write_unconfirmed":"UNCONFIRMED","settings_moved":"MOVED","tray_turn_off":"TRAYOFF","tray_open_to_turn_on":"TRAYON",
          "harnesses_title":"H-TITLE","harnesses_what":"H-WHAT",
+         "harnesses_spend_scope":"H-SPEND-SCOPE",
          "harness_not_connected":"H-NOT-CONNECTED",
          "harness_connected_nothing_seen":"H-NOTHING-SEEN",
          "harness_answering":"H-ANSWERING","harness_connect":"H-CONNECT",
@@ -59,6 +60,17 @@ final class PrivateInferenceSurfaceTests: XCTestCase {
                 fromJSON: payload.replacingOccurrences(
                     of: "\"offer_exposure\":\"EXPOSURE\",", with: "")),
             "the sentence saying what the switch exposes is not optional")
+    }
+
+    /// The amount is worthless without the sentence saying what it covers,
+    /// so a payload without that sentence is refused rather than rendered as
+    /// a bare figure.
+    func testAPayloadMissingTheAmountsScopeIsRefused() {
+        XCTAssertNil(
+            PrivateInferenceCopy.decode(
+                fromJSON: payload.replacingOccurrences(
+                    of: "\"harnesses_spend_scope\":\"H-SPEND-SCOPE\",", with: "")),
+            "an amount without its scope is a lie of omission")
     }
 
     func testTheSentenceComesFromTheSharedTableAndNotFromThisShell() {

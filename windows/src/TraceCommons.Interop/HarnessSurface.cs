@@ -209,6 +209,33 @@ public sealed record HarnessListing
     /// drawn as it.
     /// </summary>
     public bool ActivityReadable { get; init; }
+
+    /// <summary>
+    /// Whether what the calls answered here cost today could be read at all.
+    /// </summary>
+    /// <remarks>
+    /// FALSE IS NOT ZERO. It means nobody could measure the figure -- no
+    /// ledger, a refresh that never landed, an answer this build could not
+    /// parse -- and a surface must draw no line for it. A day on which
+    /// nothing was spent has <see cref="SpendKnown"/> true and
+    /// <see cref="SpendMicros"/> zero, and says so in words.
+    /// </remarks>
+    public bool SpendKnown { get; init; }
+
+    /// <summary>
+    /// Millionths of a dollar, since the most recent midnight. Null whenever
+    /// <see cref="SpendKnown"/> is false.
+    /// </summary>
+    public ulong? SpendMicros { get; init; }
+
+    /// <summary>
+    /// The number to hand the shared sentence, in the convention that
+    /// sentence uses: ABSENCE IS OUT OF RANGE, never zero.
+    /// </summary>
+    public long SpendAbiValue =>
+        SpendKnown && SpendMicros is { } micros && micros <= long.MaxValue
+            ? (long)micros
+            : -1;
 }
 
 /// <summary>An edit that has been worked out and not made.</summary>
@@ -357,6 +384,11 @@ public static class HarnessSurface
                     root.TryGetProperty("activity", out JsonElement activity) &&
                     activity.ValueKind == JsonValueKind.Object &&
                     (ReadBool(activity, "readable") ?? false),
+                // A claimed figure with no number is a contradiction, and the
+                // safe reading of it is that nothing was measured -- which is
+                // why `known` alone does not set this.
+                SpendKnown = ReadSpendMicros(root) is not null,
+                SpendMicros = ReadSpendMicros(root),
             };
         }
         catch (JsonException)
@@ -573,6 +605,30 @@ public static class HarnessSurface
     }
 
     /// <summary>
+    /// What the calls answered on this computer cost today, or the empty
+    /// string.
+    /// </summary>
+    /// <remarks>
+    /// Assembled on the far side, like the state sentence and the when-line:
+    /// this shell hands over a number and renders whatever comes back. The
+    /// amount, its rounding and its window are all decided there, so three
+    /// shells cannot round money three ways.
+    ///
+    /// THE EMPTY STRING WHEN THE FIGURE IS NOT KNOWN, and it is drawn as no
+    /// line at all. <see cref="HarnessListing.SpendAbiValue"/> is what keeps
+    /// an unmeasured figure out of range on the way across; passing zero for
+    /// one would come back as $0.00 and tell a contributor something nothing
+    /// supports.
+    ///
+    /// The scope sentence -- <c>HarnessesSpendScope</c> -- is drawn beside
+    /// this one and only when this one is non-empty.
+    /// </remarks>
+    public static string SpendSentence(HarnessListing listing) =>
+        NativeMethods.TakeOwnedString(
+            NativeMethods.tc_harness_spend_line(listing.SpendAbiValue))
+        ?? string.Empty;
+
+    /// <summary>
     /// Whether a refused commit leaves anything to commit again. It never
     /// does.
     /// </summary>
@@ -671,6 +727,36 @@ public static class HarnessSurface
                 _ => null,
             }
             : null;
+
+    /// <summary>
+    /// What today's calls cost, in millionths of a dollar, or null for every
+    /// way of not knowing.
+    /// </summary>
+    /// <remarks>
+    /// A daemon older than the release that reports this has no
+    /// <c>spend</c> block at all, and that is one of the ways of not knowing
+    /// -- not a zero. Null is the only safe reading of an absent, malformed
+    /// or contradictory block.
+    /// </remarks>
+    private static ulong? ReadSpendMicros(JsonElement root)
+    {
+        if (!root.TryGetProperty("spend", out JsonElement spend) ||
+            spend.ValueKind != JsonValueKind.Object)
+        {
+            return null;
+        }
+
+        if ((ReadBool(spend, "known") ?? false) is false)
+        {
+            return null;
+        }
+
+        return spend.TryGetProperty("micros", out JsonElement micros) &&
+            micros.ValueKind == JsonValueKind.Number &&
+            micros.TryGetUInt64(out ulong value)
+                ? value
+                : null;
+    }
 
     private static ushort? ReadPort(JsonElement root) =>
         root.TryGetProperty("destination_port", out JsonElement value) &&

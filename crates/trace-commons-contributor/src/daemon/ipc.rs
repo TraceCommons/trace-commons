@@ -8586,6 +8586,30 @@ mod tests {
         assert!(result["activity"]["last_call_at"].is_null());
     }
 
+    /// With no ledger, the amount is UNKNOWN and not zero, and the wire says
+    /// so in a field a shell cannot mistake for a figure.
+    ///
+    /// The defect this pins is the one that makes the number worth nothing:
+    /// a `spend` block that answered `0` on a machine with no ledger would
+    /// tell every contributor without one that they had spent nothing today,
+    /// which is a claim nothing supports.
+    #[test]
+    fn harness_list_reports_an_unknown_amount_rather_than_zero() {
+        let shared = shared();
+        let req = Request {
+            id: 1,
+            method: "harness_list".to_string(),
+            params: serde_json::Value::Null,
+        };
+        let result = handle_request(&shared, &req).result.expect("an answer");
+        let spend = &result["spend"];
+        assert_eq!(spend["known"], serde_json::json!(false));
+        assert!(
+            spend["micros"].is_null(),
+            "an unmeasured amount must not carry a number: {spend}"
+        );
+    }
+
     #[test]
     fn harness_plan_refuses_an_unknown_tool_by_name() {
         let shared = shared();

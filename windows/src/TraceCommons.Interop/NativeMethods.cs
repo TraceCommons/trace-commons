@@ -414,6 +414,9 @@ internal static class NativeMethods
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr tc_harness_last_call_line(long secondsAgo);
 
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_harness_spend_line(long micros);
+
     /// <summary>
     /// Whether one action may be offered for a tool in this state. Non-zero to
     /// offer.

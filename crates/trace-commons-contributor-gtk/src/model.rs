@@ -674,6 +674,42 @@ pub struct HarnessList {
     pub destination_port: Option<u16>,
     #[serde(default)]
     pub harnesses: Vec<Harness>,
+    /// What the calls answered here have cost today, or the absence that
+    /// must never be drawn as zero.
+    ///
+    /// Defaulted, so a daemon older than the release that reports it leaves
+    /// the amount unknown rather than taking the whole tool list down with
+    /// it -- and unknown is the honest answer for a daemon that does not
+    /// report it.
+    #[serde(default)]
+    pub spend: HarnessSpend,
+}
+
+/// What today's calls cost, as the daemon reports it.
+///
+/// A block with a flag rather than a bare number, because the flag is the
+/// whole point: `known` false is "nobody could measure this", which is NOT a
+/// day on which nothing was spent. A bare number defaulting to zero would
+/// collapse the two, and the collapsed value is a confident figure nothing
+/// supports.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct HarnessSpend {
+    #[serde(default)]
+    pub known: bool,
+    /// Millionths of a dollar, since the most recent midnight.
+    #[serde(default)]
+    pub micros: Option<u64>,
+}
+
+impl HarnessSpend {
+    /// The figure, or `None` for every way of not having one.
+    ///
+    /// `known` true with no number is a contradiction, and the safe reading
+    /// of it is that nothing was measured -- never zero.
+    #[must_use]
+    pub fn micros(&self) -> Option<u64> {
+        if self.known { self.micros } else { None }
+    }
 }
 
 /// One row of `harness_list`.

@@ -68,6 +68,10 @@ type AfterWrite = Box<dyn FnOnce(&Rc<App>)>;
 /// switch under a contributor's finger would drop the press.
 pub struct PrivateInferenceView {
     pub root: gtk::Box,
+    /// What today's calls cost, and what that figure leaves out. Emptied
+    /// and refilled on every render for the same reason the list is: an
+    /// amount a later read could not measure must go, not linger.
+    spend: gtk::Box,
     /// The tools on this computer, one card each. Rebuilt on every render
     /// for the reason the status box is: the list is read each time it is
     /// shown, so a tool that rewrote its own settings file corrects itself
@@ -111,6 +115,8 @@ impl PrivateInferenceView {
         // The list first, and the switch below it. See the module note.
         content.append(&style::section(copy::HARNESSES_TITLE));
         style::append_body(&content, copy::HARNESSES_WHAT);
+        let spend = gtk::Box::new(gtk::Orientation::Vertical, space::S);
+        content.append(&spend);
         let harnesses = gtk::Box::new(gtk::Orientation::Vertical, space::M);
         content.append(&harnesses);
 
@@ -175,6 +181,7 @@ impl PrivateInferenceView {
 
         Self {
             root,
+            spend,
             harnesses,
             switch,
             status,
@@ -311,6 +318,18 @@ pub fn render_harnesses(app: &Rc<App>) {
         let view = &app.private_inference;
         while let Some(child) = view.harnesses.first_child() {
             view.harnesses.remove(&child);
+        }
+        while let Some(child) = view.spend.first_child() {
+            view.spend.remove(&child);
+        }
+        // Assembled on the shared side, and EMPTY WHEN THE FIGURE IS NOT
+        // KNOWN -- which draws no row at all rather than a zero. The scope
+        // sentence goes with it: on its own it would qualify a figure that
+        // is not on screen.
+        let spend = copy::harness_spend_line(list.spend.micros());
+        if !spend.is_empty() {
+            style::append_body(&view.spend, &spend);
+            style::append_meta(&view.spend, copy::HARNESSES_SPEND_SCOPE);
         }
         if list.harnesses.is_empty() {
             // An empty list that explains nothing cannot be told apart from
@@ -1465,5 +1484,51 @@ mod tests {
         assert_eq!(seconds_since(Some("")), None);
         assert_eq!(seconds_since(Some("last tuesday")), None);
         assert!(copy::harness_last_call_line(None).is_empty());
+    }
+
+    /// UNKNOWN AND NONE-SPENT ARE DIFFERENT FACTS all the way through the
+    /// decode, and only one of them draws a line.
+    ///
+    /// The shapes below are every way the daemon can decline to answer:
+    /// `known` false, no block at all -- which is what a daemon older than
+    /// the release that reports it sends -- and the contradiction of a
+    /// claimed figure with no number. All three must read as not known, and
+    /// none of them may draw the sentence a measured zero draws.
+    #[test]
+    fn an_unmeasured_amount_draws_nothing_and_a_measured_zero_draws_zero() {
+        let list = |spend: &str| {
+            serde_json::from_value::<crate::model::HarnessList>(
+                serde_json::from_str(&format!(
+                    r#"{{"catalog_present":false,"harnesses":[]{spend}}}"#
+                ))
+                .expect("the fixture is JSON"),
+            )
+            .expect("the list decodes")
+        };
+
+        for absent in [
+            "",
+            r#","spend":{"known":false,"micros":null}"#,
+            r#","spend":{"known":true,"micros":null}"#,
+        ] {
+            let spend = list(absent).spend.micros();
+            assert_eq!(spend, None, "{absent} claimed a figure");
+            assert!(
+                copy::harness_spend_line(spend).is_empty(),
+                "{absent} drew a line"
+            );
+        }
+
+        let zero = list(r#","spend":{"known":true,"micros":0}"#).spend.micros();
+        assert_eq!(zero, Some(0));
+        let zero_line = copy::harness_spend_line(zero);
+        assert!(zero_line.contains("$0.00"), "{zero_line}");
+        assert!(!zero_line.is_empty());
+
+        let some = list(r#","spend":{"known":true,"micros":1230000}"#)
+            .spend
+            .micros();
+        assert_eq!(some, Some(1_230_000));
+        assert!(copy::harness_spend_line(some).contains("$1.23"));
     }
 }

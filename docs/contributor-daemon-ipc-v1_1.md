@@ -446,7 +446,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `queue_outcome_counts` | — | `reasons: {label: count}` | see "queue_outcome_counts" below; does **not** cover sessions never queued |
 | `probe_routing` | `port` (required), `token_dir` (optional absolute directory) | `outcome`, plus `token_path` or `port` | asks a declared IronWire proxy whether it is there; performs real loopback I/O and **never returns the token**; see "`probe_routing`" below |
 | `discover_routing` | — | `found`, plus `port` and optionally `token_path` when found | reads the pointer a running IronWire published, so the declaring flow can pre-fill instead of asking; no network I/O and **never returns the token**; see "`discover_routing`" below |
-| `harness_list` | — | `catalog_present`, `harnesses[]`, `activity`, `destination_port` | which coding tools this machine has and whether each sends its calls here; reads the filesystem on every call, never a cache; see "The harness list" below |
+| `harness_list` | — | `catalog_present`, `harnesses[]`, `activity`, `spend`, `destination_port` | which coding tools this machine has and whether each sends its calls here; reads the filesystem on every call, never a cache; see "The harness list" below |
 | `harness_plan` | `id` (required), `action` (`connect` \| `disconnect`) | `id`, `action`, `outcome`, `plan_id`, `path`, `changes[]`, `occupied[]` | works out an edit and **writes nothing**; see "The harness list" below |
 | `harness_commit` | `plan_id` (required) | `id`, `action`, `committed: true`, `path`, `backup_path` | makes an edit that was already shown; takes a plan id and **nothing else**, so a shell cannot ask for a write it did not preview |
 | `quiesce` | `timeout_secs` (optional, default 60, max 300) | `quiesced: true`, `waited_ms` | parks uploads for an update swap; `busy` / `quiesce-timeout` if in-flight work does not finish in time |
@@ -1561,6 +1561,10 @@ end to end rather than reimplementing:
     "window_hours": 24,
     "last_call_at": "2026-09-07T18:04:11+00:00",
     "families": [{ "family": "anthropic", "last_call_at": "...", "calls": 12 }]
+  },
+  "spend": {
+    "known": true,
+    "micros": 1230000
   }
 }
 ```
@@ -1583,6 +1587,31 @@ surface must say that the list is what this machine knows about rather than
 implying only two coding tools exist. A harness that is not installed is
 listed with `installed: false`, not omitted: hiding it makes the absence of a
 tool indistinguishable from the app never having heard of it.
+
+`spend` is what the calls answered **on this computer** have cost since the
+most recent local midnight, in millionths of a dollar. It comes from the
+proxy's own status object, which is why it is metered-only: the ledger rows
+this daemon already reads price *every* exchange, including work a monthly
+plan has already paid for, and summing those would produce a figure for a day
+on which nothing was billed.
+
+`known` is `false` -- and `micros` `null` -- for **every way of not knowing**:
+no declared, readable proxy; a refresh that has not landed; an answer that did
+not come back or would not parse; and a figure the proxy itself declined to
+measure.
+
+**`known: false` IS NOT ZERO, and a surface must not render it as one.** A day
+on which nothing was spent is `known: true, micros: 0`, and it says so in
+words. A day nobody could measure draws no line at all. The amount is
+assembled by `tc_harness_spend_line`, whose absence convention is an
+out-of-range integer -- pass a negative value for `known: false` -- so no
+shell formats money, rounds it, or decides for itself what an unmeasured
+figure looks like. The sentence saying what the figure leaves out is the copy
+payload's `harnesses_spend_scope`, drawn beside the amount and only when the
+amount is drawn.
+
+A daemon older than the release that reports this sends no `spend` block at
+all, which is one of the ways of not knowing -- not a zero.
 
 `destination_port` is the port a connect would write into a config file -- the
 hosted listener's port when it is up, else the port declared for a proxy the
@@ -1853,7 +1882,7 @@ retained-shutdown producer confirms cleanup; a port alone is metadata, not
 proof that calls can be answered.
 
 The companion C ABI copy payload (`tc_private_inference_copy`, not a daemon
-settings key) supplies these 45 fixed string fields:
+settings key) supplies these 46 fixed string fields:
 
 - `destination`, `subtitle`;
 - `offer_title`, `offer_what`, `offer_exposure`, `offer_no_repoint`,
@@ -1864,7 +1893,8 @@ settings key) supplies these 45 fixed string fields:
   `state_port_in_use`, `state_start_failed`, `state_crashed`;
 - `quit_also_stops`, `write_unconfirmed`;
 - `settings_moved`, `tray_turn_off`, `tray_open_to_turn_on`;
-- `harnesses_title`, `harnesses_what`, `harnesses_none_found`;
+- `harnesses_title`, `harnesses_what`, `harnesses_spend_scope`,
+  `harnesses_none_found`;
 - `harness_not_connected`, `harness_connected_nothing_seen`,
   `harness_answering`;
 - `harness_connect`, `harness_disconnect`;
@@ -1889,6 +1919,16 @@ rather than hidden -- a tool left out cannot be told apart from one the app
 was never taught about -- and it must not also carry
 `harness_not_connected`, which claims a tool's own settings still send its
 calls wherever they went before.
+
+`harnesses_spend_scope` is the sentence that has to accompany the amount
+`tc_harness_spend_line` assembles: only calls answered on **this** computer
+are in the figure, and work a monthly plan has already paid for is not. A
+contributor signed in to the same account on a second machine, or in a
+browser, has spent more than the figure says, and the number without this
+sentence is a lie of omission. It is drawn beside the amount and only when
+the amount is drawn -- a scope line on its own qualifies a figure that is not
+on screen. Neither this sentence nor the amount may say anything about a
+balance: the amount is what went out, and nothing here is an account total.
 
 The four `harness_plan_*` sentences plus `harness_unreadable_config` are the
 answers of `tc_harness_outcome_line`, one per non-committable `harness_plan`

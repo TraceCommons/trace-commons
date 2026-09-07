@@ -23,6 +23,21 @@ struct HarnessListSection: View {
                 .font(TC.Font_.body)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+            // What today's calls cost, and -- inseparably -- what that
+            // figure leaves out. Both are drawn, or neither is: an amount
+            // nobody could read draws no line, and the scope sentence alone
+            // would qualify a number that is not on screen.
+            if let spend = HarnessSurface.spendSentence(
+                model.harnesses, calls: model.harnessCalls)
+            {
+                Text(spend)
+                    .font(TC.Font_.body)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text(copy.harnessesSpendScope)
+                    .font(TC.Font_.meta)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             if model.harnesses.harnesses.isEmpty {
                 Text(copy.harnessesNoneFound)
                     .font(TC.Font_.body)
