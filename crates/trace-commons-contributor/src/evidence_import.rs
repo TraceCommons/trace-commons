@@ -87,7 +87,7 @@ impl PreparedImport {
             session_hash: self.session_hash.clone(),
             ..Default::default()
         };
-        let mut raw = crate::envelope::build_preview_raw_contribution(
+        let raw = crate::envelope::build_preview_raw_contribution(
             &transcript,
             cfg,
             self.document
@@ -96,9 +96,7 @@ impl PreparedImport {
                 .expect("call requires inference")
                 .timestamp,
         );
-        raw.replay.replay_notes = vec![
-            "Final-call evidence only; session history and tool execution are not covered.".into(),
-        ];
+        let raw = crate::envelope::final_call_witness_input(raw, cfg);
         debug_assert!(raw.events.is_empty());
         Ok(raw)
     }

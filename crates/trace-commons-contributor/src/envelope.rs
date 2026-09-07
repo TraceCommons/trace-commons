@@ -550,6 +550,40 @@ pub(crate) fn build_import_preview_raw(
     preview
 }
 
+/// Isolate admission evidence from unsigned companion history. The caller must
+/// append the receipt-bound exchange last and review the returned certified
+/// artifact; this projection makes no claim about omitted session execution.
+/// Configuration supplies identity and consent, never imported metadata.
+pub(crate) fn final_call_witness_input(
+    raw: RawTraceContribution,
+    cfg: &ContributorConfig,
+) -> RawTraceContribution {
+    let transcript = SessionTranscript {
+        source: raw
+            .ironclaw
+            .feature_flags
+            .get("agent")
+            .cloned()
+            .unwrap_or_default()
+            .into(),
+        ..Default::default()
+    };
+    let mut isolated = build_raw_contribution_with_id(
+        &transcript,
+        cfg,
+        raw.created_at,
+        raw.submission_id,
+        None,
+        None,
+    );
+    isolated.trace_id = raw.trace_id;
+    isolated.replay.replay_notes = vec![
+        "Final-call evidence only; session history and tool execution are not covered.".into(),
+    ];
+    isolated
+}
+}
+
 fn build_raw_contribution_with_id(
     t: &SessionTranscript,
     cfg: &ContributorConfig,

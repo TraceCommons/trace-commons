@@ -43,8 +43,9 @@ use crate::witness::{WITNESS_EXPECTED_MEASUREMENT_CONTROL, witness_session};
 
 /// Select the witness profile from source bytes before receipt lookup or HTTP.
 /// The signup flag enables account-bound evidence, but existing unbound history
-/// still needs an ordinary signed review for the server-controlled window.
-/// A present marker (even malformed/expired) must never become a window retry.
+/// still uses ordinary signed review; the server independently requires invite
+/// eligibility for that path. A present marker (even malformed/expired) must
+/// never become an ordinary-profile retry.
 pub(crate) fn admission_profile_for_request(
     enabled: bool,
     request_body: Option<&str>,
@@ -64,6 +65,18 @@ pub(crate) fn admission_profile_for_request(
             Ok(metadata.contains_key(trace_commons_protocol::admission::REQUEST_METADATA_KEY))
         }
         Some(_) => Err("admission_request_malformed"),
+    }
+}
+
+fn witness_input_for_profile(
+    raw: RawTraceContribution,
+    cfg: &ContributorConfig,
+    admission: bool,
+) -> RawTraceContribution {
+    if admission {
+        crate::envelope::final_call_witness_input(raw, cfg)
+    } else {
+        raw
     }
 }
 
@@ -724,6 +737,9 @@ impl<'a> SubmitContext<'a> {
             receipt: receipt.as_ref(),
         });
 
+        // The admission receipt covers one call, never unsigned companion
+        // history or execution claims. Keep the ordinary invited profile intact.
+        let raw = witness_input_for_profile(raw, &self.effective_cfg, admission_profile);
         let (scopes, uses) = granted_consent_for(&self.effective_cfg, token);
         let response = witness_session(
             &transport,
@@ -1907,6 +1923,56 @@ mod tests {
     use crate::config::WitnessSettings;
     use axum::{Json, Router, routing::post};
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn admission_projection_omits_unsigned_history_but_preserves_submission_identity() {
+        let cfg = crate::commands::unenrolled_preview_config();
+        let (source, reference) = fixture_selection().remove(0);
+        let transcript = source.load(&reference).unwrap();
+        let mut raw = crate::envelope::build_raw_contribution_with_correction(
+            &transcript,
+            &cfg,
+            Utc::now(),
+            None,
+            Some("unsigned correction sentinel"),
+        );
+        assert!(!raw.events.is_empty());
+        raw.conversation_id = Some("unsigned conversation sentinel".into());
+        raw.ironclaw.model_name = Some("unsigned model sentinel".into());
+        raw.ironclaw
+            .feature_flags
+            .insert("unbound".into(), "unsigned flag sentinel".into());
+        raw.contributor.tenant_scope_ref = Some("unsigned tenant sentinel".into());
+        raw.replay
+            .expected_assertions
+            .push("unsigned assertion sentinel".into());
+        let ordinary = witness_input_for_profile(raw.clone(), &cfg, false);
+        assert_eq!(
+            ordinary, raw,
+            "invited ordinary review retains its complete trace"
+        );
+        let isolated = witness_input_for_profile(raw.clone(), &cfg, true);
+        assert_eq!(isolated.submission_id, raw.submission_id);
+        assert_eq!(isolated.trace_id, raw.trace_id);
+        assert_eq!(isolated.created_at, raw.created_at);
+        assert_eq!(
+            isolated.contributor.tenant_scope_ref.as_deref(),
+            Some(cfg.tenant_id.as_str())
+        );
+        assert!(isolated.events.is_empty());
+        assert!(!isolated.replay.replayable);
+        assert!(isolated.replay.required_tools.is_empty());
+        assert!(isolated.replay.expected_assertions.is_empty());
+        assert!(isolated.outcome.human_correction.is_none());
+        assert!(isolated.conversation_id.is_none());
+        assert!(isolated.ironclaw.model_name.is_none());
+        assert_eq!(isolated.value, Default::default());
+        assert!(
+            !serde_json::to_string(&isolated)
+                .unwrap()
+                .contains("unsigned")
+        );
+    }
 
     fn review_options() -> SubmitOptions {
         SubmitOptions {
