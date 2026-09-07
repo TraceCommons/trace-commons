@@ -106,6 +106,46 @@ public class PrivateInferenceTests
     }
 
     /// <summary>
+    /// <c>Sentences</c> holds every decoded sentence and no fewer.
+    ///
+    /// <see cref="EveryExportedFieldIsDecodedAndNoneIsInvented"/> pins the
+    /// record to the Rust, and <see cref="EverySentenceArrivesFinished"/>
+    /// pins the sentences to being finished -- but nothing tied the two
+    /// together, so a field added to the Rust, the record and the decoder
+    /// while being forgotten in this hand-written array would pass both and
+    /// never be checked for a template hole. The count is what has the
+    /// teeth: containment alone would accept a short array.
+    /// </summary>
+    [Fact]
+    public void EveryDecodedSentenceIsInTheCompletePayloadCheck()
+    {
+        PrivateInferenceCopy copy = Copy();
+        var decoded = new List<string>();
+        foreach (var property in typeof(PrivateInferenceCopy).GetProperties())
+        {
+            if (property.PropertyType != typeof(string))
+            {
+                continue;
+            }
+
+            if (property.GetCustomAttributes(
+                typeof(System.Text.Json.Serialization.JsonPropertyNameAttribute), false).Length == 0)
+            {
+                continue;
+            }
+
+            decoded.Add((string)property.GetValue(copy)!);
+        }
+
+        Assert.NotEmpty(decoded);
+        Assert.Equal(decoded.Count, copy.Sentences.Length);
+        foreach (string sentence in decoded)
+        {
+            Assert.Contains(sentence, copy.Sentences);
+        }
+    }
+
+    /// <summary>
     /// A payload missing the exposure sentence is refused whole, not rendered
     /// with a gap where it should be.
     /// </summary>
