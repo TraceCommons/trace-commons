@@ -117,15 +117,25 @@ impl PreparedImport {
         })
     }
 
-    pub async fn local_preview(&self) -> Result<ImportPreview> {
-        let redactor = crate::envelope::build_deterministic_preview_redactor(None);
-        crate::envelope::canary_self_test_async(&redactor).await?;
-        let envelope =
-            crate::envelope::redact_to_envelope(&redactor, self.document.trace.clone()).await?;
-        crate::envelope::envelope_size_ok(&envelope)?;
-        if crate::envelope::envelope_has_residual_secret(&redactor, &envelope)? {
-            return Err(anyhow!("import-preview-residual-secret"));
+    /// `cwd` is explicit redaction context from the originating machine. It is
+    /// not opened, canonicalized, discovered, or stored in the preview.
+    pub async fn local_preview(&self, cwd: &str) -> Result<ImportPreview> {
+        if cwd.trim().is_empty() || cwd.len() > 4096 || cwd.contains('\0') {
+            return Err(anyhow!("import-redaction-context-invalid"));
         }
+        let redactor = crate::envelope::build_deterministic_preview_redactor(Some(cwd));
+        self.preview_with_redactor(&redactor).await
+    }
+
+    async fn preview_with_redactor(
+        &self,
+        redactor: &trace_commons_protocol::trace_contribution::DeterministicTraceRedactor,
+    ) -> Result<ImportPreview> {
+        let raw =
+            crate::envelope::build_import_preview_raw(&self.document.trace, &self.session_hash);
+        let envelope = crate::submit::checked_local_redaction(redactor, raw, false)
+            .await
+            .map_err(anyhow::Error::msg)?;
         let artifact =
             serde_json::to_vec(&envelope).map_err(|_| anyhow!("import-preview-malformed"))?;
         Ok(ImportPreview {
@@ -137,7 +147,7 @@ impl PreparedImport {
                 "ordinary-trace-no-inference-evidence"
             },
             coverage: self.has_inference().then_some("final_call_only"),
-            artifact_sha256: hex::encode(Sha256::digest(&artifact)),
+            preview_sha256: hex::encode(Sha256::digest(&artifact)),
             envelope,
         })
     }
@@ -151,7 +161,7 @@ pub struct ImportPreview {
     pub admission_verified: bool,
     pub evidence: &'static str,
     pub coverage: Option<&'static str>,
-    pub artifact_sha256: String,
+    pub preview_sha256: String,
     pub envelope: TraceContributionEnvelope,
 }
 
@@ -195,6 +205,15 @@ fn open_import_file(path: &std::path::Path) -> Result<std::fs::File> {
     }
     #[cfg(windows)]
     {
+        use std::path::{Component, Prefix};
+        // Refuse device/pipe and network namespaces before CreateFile can
+        // connect or block. Ordinary drive paths (including verbatim disk
+        // paths) and relative local paths retain regular-file validation.
+        if let Some(Component::Prefix(prefix)) = path.components().next()
+            && !matches!(prefix.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_))
+        {
+            return Err(anyhow!("import-file-namespace-unsupported"));
+        }
         use std::os::windows::fs::OpenOptionsExt;
         options.custom_flags(0x00200000); // FILE_FLAG_OPEN_REPARSE_POINT
     }
@@ -281,7 +300,7 @@ mod tests {
         for source in ["opencode", "second-client"] {
             let parsed = PreparedImport::parse(&encoded(&fixture(source, false))).unwrap();
             assert!(!parsed.has_inference());
-            let preview = parsed.local_preview().await.unwrap();
+            let preview = parsed.local_preview("/foreign/work").await.unwrap();
             assert!(preview.preview_only);
             assert!(!preview.admission_verified);
             assert_eq!(preview.coverage, None);
@@ -306,7 +325,7 @@ mod tests {
                     .as_bytes(),
                 offered.call.request_body().as_bytes()
             );
-            let preview = parsed.local_preview().await.unwrap();
+            let preview = parsed.local_preview("/foreign/work").await.unwrap();
             assert!(!preview.admission_verified);
             assert_eq!(preview.coverage, Some("final_call_only"));
             assert!(
@@ -315,6 +334,152 @@ mod tests {
                     .contains("RAW-INFERENCE-SENTINEL")
             );
             assert!(!format!("{parsed:?}").contains("RAW-INFERENCE-SENTINEL"));
+        }
+    }
+
+    #[tokio::test]
+    async fn preview_redacts_credentials_and_foreign_paths_and_discards_imported_authority() {
+        let secret = "sk-ant-EXPOSEDsecret0123456789abcdefghij";
+        let cwd = "/Volumes/Work/acme-stealth-launch";
+        let mut document = fixture("second-client", false);
+        document.trace.events[0].content = Some(format!("Read {cwd}/src/main.rs using {secret}"));
+        document.trace.contributor.tenant_scope_ref = Some("forged-tenant".into());
+        document.trace.consent.scopes.clear();
+        document.trace.consent.policy_version = "forged-policy".into();
+        document.trace.consent.correction_included = true;
+        document.trace.outcome.human_correction = Some("forged-correction".into());
+        document.trace.ironclaw.model_name = Some("forged-model".into());
+        let prepared = PreparedImport::parse(&encoded(&document)).unwrap();
+        let preview = prepared.local_preview(cwd).await.unwrap();
+        let output = serde_json::to_string(&preview).unwrap();
+        for forbidden in [
+            secret,
+            cwd,
+            "forged-tenant",
+            "forged-policy",
+            "forged-correction",
+            "forged-model",
+        ] {
+            assert!(
+                !output.contains(forbidden),
+                "preview leaked an imported value"
+            );
+        }
+        let cfg = crate::commands::unenrolled_preview_config();
+        assert_eq!(
+            preview.envelope.contributor.tenant_scope_ref,
+            Some(cfg.tenant_id)
+        );
+        assert!(!preview.envelope.consent.correction_included);
+        assert!(preview.envelope.consent.message_text_included);
+        assert_eq!(
+            preview.preview_sha256,
+            hex::encode(Sha256::digest(
+                serde_json::to_vec(&preview.envelope).unwrap()
+            ))
+        );
+        assert!(prepared.local_preview("").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn preview_refuses_a_poisoned_redactor() {
+        use trace_commons_protocol::trace_contribution::{
+            NoopPrivacyFilterAdapter, PrivacyFilterBackendTag,
+        };
+        let prepared = PreparedImport::parse(&encoded(&fixture("opencode", false))).unwrap();
+        let poisoned = crate::envelope::build_deterministic_preview_redactor(Some("/foreign/work"))
+            .with_privacy_filter(
+                std::sync::Arc::new(NoopPrivacyFilterAdapter),
+                PrivacyFilterBackendTag::NearAi,
+            );
+        assert!(
+            prepared.preview_with_redactor(&poisoned).await.is_err(),
+            "a no-op backend must fail its canary"
+        );
+    }
+
+    #[tokio::test]
+    async fn preview_refuses_a_finished_residual_secret() {
+        let prepared = PreparedImport::parse(&encoded(&fixture("opencode", false))).unwrap();
+        let redactor = crate::envelope::build_deterministic_preview_redactor(Some("/foreign/work"));
+        let mut clean = prepared
+            .preview_with_redactor(&redactor)
+            .await
+            .unwrap()
+            .envelope;
+        crate::submit::validate_local_envelope(&redactor, &clean).unwrap();
+        // Inject a post-redaction survivor, as the established submit test does.
+        clean.events[0].redacted_content = Some("sk-ant-EXPOSEDsecret0123456789abcdefghij".into());
+        assert_eq!(
+            crate::submit::validate_local_envelope(&redactor, &clean),
+            Err("secret-leak-detected")
+        );
+    }
+
+    #[tokio::test]
+    async fn preview_refuses_a_backend_that_injects_a_secret_after_its_canary() {
+        use trace_commons_protocol::trace_contribution::*;
+        struct InjectAfterCanary;
+        #[async_trait::async_trait]
+        impl PrivacyFilterAdapter for InjectAfterCanary {
+            async fn redact_text(
+                &self,
+                text: &str,
+            ) -> std::result::Result<Option<SafePrivacyFilterRedaction>, TraceContributionError>
+            {
+                let canaries = synthetic_privacy_filter_canary_values();
+                let is_canary = canaries.iter().any(|v| text.contains(v.as_str()));
+                let mut rewritten = if is_canary {
+                    text.to_owned()
+                } else {
+                    "sk-ant-EXPOSEDsecret0123456789abcdefghij".into()
+                };
+                for value in &canaries {
+                    rewritten = rewritten.replace(value, "[REDACTED:unknown]");
+                }
+                Ok(Some(SafePrivacyFilterRedaction {
+                    redacted_text: rewritten,
+                    summary: SafePrivacyFilterSummary {
+                        schema_version: 1,
+                        output_mode: "redacted_text_only".into(),
+                        span_count: canaries.len() as u32,
+                        by_label: Default::default(),
+                        decoded_mismatch: false,
+                        classify_policy: None,
+                        events_examined: 0,
+                        events_skipped_by_policy: 0,
+                    },
+                    report: Default::default(),
+                }))
+            }
+        }
+        let prepared = PreparedImport::parse(&encoded(&fixture("opencode", false))).unwrap();
+        let redactor = crate::envelope::build_deterministic_preview_redactor(Some("/foreign/work"))
+            .with_privacy_filter(
+                std::sync::Arc::new(InjectAfterCanary),
+                PrivacyFilterBackendTag::NearAi,
+            );
+        crate::envelope::canary_self_test_async(&redactor)
+            .await
+            .unwrap();
+        let error = prepared
+            .preview_with_redactor(&redactor)
+            .await
+            .err()
+            .expect("injected survivor must refuse the actual preview path");
+        assert_eq!(error.to_string(), "secret-leak-detected");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_device_and_pipe_namespaces_are_refused_before_open() {
+        for path in [
+            r"\\.\pipe\trace-import-test",
+            r"\\?\GLOBALROOT\Device\NamedPipe\trace-import-test",
+            r"\\server\share\trace.json",
+        ] {
+            let error = read_import(std::path::Path::new(path)).unwrap_err();
+            assert_eq!(error.to_string(), "import-file-namespace-unsupported");
         }
     }
 
@@ -333,6 +498,12 @@ mod tests {
         let mut doc = fixture("second-client", true);
         doc.inference.as_mut().unwrap().receipt.signing_address = "00".repeat(32);
         assert!(PreparedImport::parse(&encoded(&doc)).is_err());
+        let mut doc = fixture("opencode", true);
+        doc.inference.as_mut().unwrap().receipt.signature = "00".repeat(64);
+        assert!(PreparedImport::parse(&encoded(&doc)).is_err());
+        let mut value = serde_json::to_value(fixture("opencode", true)).unwrap();
+        value["inference"]["request_body"] = serde_json::json!([0, 255]);
+        assert!(PreparedImport::parse(&serde_json::to_vec(&value).unwrap()).is_err());
     }
 
     #[test]

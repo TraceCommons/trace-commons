@@ -93,8 +93,14 @@ Witness-returned raw carriers or changed approved artifacts remain refused.
 With a development build containing this change:
 
 ```sh
-trace-commons-contributor import-preview --file ./contribution.import.json
+trace-commons-contributor import-preview --file ./contribution.import.json --cwd /original/project
 ```
+
+The required `--cwd` supplies the original machine's working-directory prefix for
+redaction; it is never opened or resolved. Imported identity, consent, correction
+and other metadata claims are rebuilt as conservative unenrolled-preview defaults.
+`preview_sha256` identifies only these local preview bytes, never a submit-ready or
+certified artifact. A later witness artifact requires a separate exact-byte review.
 
 This reads only the explicitly selected local file and prints the local redacted
 preview as JSON. It does not open/create enrollment state, queue a contribution,

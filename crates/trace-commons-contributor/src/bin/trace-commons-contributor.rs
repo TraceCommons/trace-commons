@@ -30,6 +30,9 @@ enum Command {
         /// User-selected local evidence-import-v1 JSON file (no URL retrieval)
         #[arg(long)]
         file: PathBuf,
+        /// Original working directory to redact, including a foreign-machine path; never opened
+        #[arg(long)]
+        cwd: String,
     },
     /// Enroll this device, with an instance-signed grant or an invite link
     Login {
@@ -378,9 +381,9 @@ async fn main() -> std::process::ExitCode {
 }
 
 async fn run(cli: Cli) -> anyhow::Result<()> {
-    if let Command::ImportPreview { file } = &cli.command {
+    if let Command::ImportPreview { file, cwd } = &cli.command {
         let prepared = trace_commons_contributor::evidence_import::read_import(file)?;
-        let preview = prepared.local_preview().await?;
+        let preview = prepared.local_preview(cwd).await?;
         println!("{}", serde_json::to_string_pretty(&preview)?);
         return Ok(());
     }
@@ -444,7 +447,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             commands::submit(&store, &sel).await
         }
         Command::ImportPreview { .. } => {
-            unreachable!("local import was handled before opening state")
+            anyhow::bail!("import-preview-dispatch-invalid")
         }
         Command::ImportAntigravity { project, all } => {
             commands::import_antigravity(&store, project.as_deref(), all, cli.json).await
