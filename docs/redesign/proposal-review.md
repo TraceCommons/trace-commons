@@ -16,8 +16,9 @@ novelty-utility credit, residual-risk derivation),
 ## 1. Summary
 
 The problem definition is well grounded. Each of the eight problems maps to
-code and to a filed issue. Two problems are missing: the privacy classifier
-and the credit scorecard. Both are classifiers with the same defect class.
+code and to a filed issue. Two problems are missing: the privacy observer
+and the credit scorecard. Both need versioned observation and policy
+boundaries.
 
 The direction is correct. Observation before policy, intent before effect,
 immutable evaluation, and explicit deployment selection are the right four
@@ -25,8 +26,8 @@ ideas. They match the processing and effect contracts in both contract
 documents.
 
 The proposal has more parts than the properties need. It has four JSONB
-documents, six hash kinds, five policies, and three fact families. Two
-documents, three hashes, and one action policy give the same properties.
+documents, six hash kinds, and three fact families. The agreed design uses
+two documents, three hashes, and one primary action policy per workflow.
 
 Remark: I aggree with this. We should simplify
 
@@ -74,13 +75,13 @@ Observer produces an Observation.
 Policy produces a Decision.
 ```
 
-**The privacy classifier is not in the model.** The residual-risk rule in
-`residual_risk()` in the protocol crate is a classifier. Its rubric changed
+**The privacy observer is not in the model.** The residual-risk rule in
+`residual_risk()` in the protocol crate produces a privacy observation. Its rubric changed
 five times behind unchanged wire values (#325). It decides the submission
 status today. It is the reason zero of ninety-nine real sessions reached
 acceptance (#219, #373). The proposal moves it out of scope as "a persisted
 privacy-review fact" that "the review workflow supplies". This is the
-classifier with the most policy drift and the largest user impact. It has the
+observer with the most policy drift and the largest user impact. It has the
 same defect class as novelty and substance. It belongs inside the versioned
 model.
 
@@ -109,7 +110,7 @@ Remark: Right. This issue should be handled by the "lab" crate. the ingest serve
 
 **The enclave boundary is not named.** The current `EnclaveGateOrchestrator`
 trait is the seam the Phase B migration depends on. The proposal does not say
-where classifiers run or how a remote scorer fits the job and lease model.
+where observers run or how a remote scorer fits the job and lease model.
 
 Remark: Right, this should be addressed. Actually we aare missing details about the crate architecture in general, including the introduction of the "lab" crate
 
@@ -119,7 +120,7 @@ Remark: Right, this should be addressed. Actually we aare missing details about 
 
 ### 3.1 What is right
 
-- **Observation without policy.** A classifier returns measurements. A policy
+- **Observation without policy.** An observer returns measurements. A policy
 returns a disposition. This is the fact-versus-label split the issues report
 asks for. It makes a threshold change a policy re-run over stored data.
 - **Intent before effect, receipt after.** The outbox pattern closes the
@@ -215,7 +216,7 @@ Numbered for reference in the recommendations.
     reference. Nothing defines which evaluation is effective for a trace
     revision after a reprocess. `PROC-004` in the sol contracts requires that
     rule.
-13. **Reprocess always re-runs classifiers.** The issues report's main payoff
+13. **Reprocess always re-runs observers.** The issues report's main payoff
   is "run the new policy over stored facts, in SQL, with no GPU". The
     proposal's reprocess mode goes through step 2, "produce observations",
     every time. There is no policy-only reprocess.
@@ -253,7 +254,7 @@ Evidence descriptors already live inside each observation in the pseudocode
 plus availability. Store:
 
 - `observations`: a list of observation records, each with `role`,
-`classifier_id`, `evidence` descriptor, `schema`, `payload` or
+`observer_id`, `evidence` descriptor, `schema`, `payload` or
 `unavailable { reason }`, and `observation_hash`.
 - `decisions`: a list of decision records, each with `policy_id`, `schema`,
 `input_refs` (observation and decision hashes), `disposition`,
@@ -270,43 +271,36 @@ Consent, envelope validity, the privacy assessment, and a human review are
 all inputs to a policy. Record each as an observation with a role and a
 producer:
 
-- `role: privacy`, producer: the residual-risk classifier, payload: scrub
+- `role: privacy`, producer: the residual-risk observer, payload: scrub
 outcome, finding counts, confidence.
-- `role: review`, producer: the review workflow, payload: reviewer decision
-and reason label, with the review id as evidence.
-- `role: consent`, producer: the envelope validator.
+- `role: review`, producer: the authorized reviewer, payload: reviewer
+  assessment and reason label, with the review id and procedure version as
+  evidence.
+- `role: consent`, producer: the signed envelope, validated by the Admission
+  workflow.
 
-This removes the bare booleans (inconsistency 3), gives the privacy classifier
-a version (missing problem 1), and gives a review a place to enter the chain
-(section 3.2). It also matches `PROC-003`: privacy observations remain facts
-or evidence.
+This removes the bare booleans (inconsistency 3), versions the privacy
+observer, and gives a human assessment a place in the chain. It also matches
+`PROC-003`: privacy observations remain facts or evidence.
 
-### 5.3 One action policy, not five
+### 5.3 One primary action policy per workflow
 
-Novelty and substance policies are thresholds over one observation each.
-Registration, credit, and index policies are small pure functions over the
-same inputs. Five policy refs, five fact types, and five decision records buy
-independent versioning of five tiny functions. One versioned action policy
-that returns one decision document with four dispositions gives the same
-audit trail:
+Use five independently triggered workflows: Admission, Review, Commons
+Qualification, Credit, and Settlement. Each workflow has one primary action
+policy and one decision with exact input references. A workflow can consume
+observations and decisions from earlier workflows.
 
-```text
-decision {
-  policy_id
-  input_refs
-  privacy:      accept | quarantine | reject
-  commons:      novel_and_substantive | duplicate | insufficient | review
-  credit:       eligible { basis } | withheld { reason }
-  index:        [ { namespace, action } ]
-  reason_codes
-}
-```
+This split follows actor, trigger, and timing boundaries. Admission owns the
+initial trace state and exact-duplicate checks. Review owns the consequence
+of a human assessment. Commons Qualification owns novelty, substance,
+similarity-based duplication, indexing dispositions, and requests for human
+review. The Review workflow owns the consequence of the resulting human
+assessment. Credit owns eligibility, amount, and basis. Settlement owns
+governance and ledger effects.
 
-Thresholds move into the policy's configuration document, which is versioned
-with it. A threshold change is a policy version and a policy-only reprocess.
-This resolves inconsistencies 4, 5, and 10. If the team wants per-role
-thresholds versioned with the classifier, put them in `ClassifierRef` as
-calibration parameters and let the action policy read them as inputs.
+Thresholds live in a policy configuration or in versioned observer
+calibration. A threshold change creates a policy version and can use the
+policy-only reprocess path.
 
 Remark: This is a big change and i'm not sure if it's an improvement.  My current thinking distinct delicions which require provenance:
 Ingest (Ingest, Quarentine), based on privacy
@@ -331,13 +325,16 @@ downstream consumer with its own design.
 
 ### 5.6 Smaller job model
 
-- Unique key `(tenant, trace_revision, bundle, mode)`. Store `deployment_id`
-as an attribute.
+- Add `workflow_kind`, a workflow-specific subject reference, and upstream
+  decision references. Use a workflow-scoped idempotency key. Do not include
+  `deployment_id` in that key.
+- Keep the workflow bundle unbound until the binding point from I-6. Store
+  the resolved bundle and deployment as job attributes.
 - Drop `required` on effects. Every effect from an active evaluation is
 required. A shadow evaluation has none, and the job completes at commit.
 - Add `based_on_evaluation_id` to jobs and evaluations for reprocess.
-- Add a job mode `policy_reprocess` that reads the observations of
-`based_on_evaluation_id` and runs only the policy.
+- Add a job mode `policy_reprocess` that reads compatible inputs declared by
+  the new policy manifest and runs only that workflow policy.
 
 
 
@@ -345,9 +342,9 @@ required. A shadow evaluation has none, and the job completes at commit.
 
 - Keep the outbox and receipts as separate tables. They cross a failure
 boundary and the separation is the point.
-- Keep the observation cache if the substance scorer stays remote. Give it a
-table keyed by `(classifier_id, input_hash, evidence_id)`. It is a
-checkpoint, not a cache, and the crash table should list it.
+- Preserve a checkpoint seam for expensive observers. A future checkpoint
+  table uses `(observer_id, input_hash, evidence_id)`. I-7a defers that
+  table.
 - Keep deployment assignments as a table with history. Do not replace them
 with "latest bundle wins".
 
@@ -357,13 +354,11 @@ with "latest bundle wins".
 
 In priority order.
 
-**R1. Bring privacy into the model and fix the timing.** Make residual risk a
-classifier role with a versioned rubric. Run the privacy observation and the
-privacy disposition at receipt, in the same transaction that stores the trace
-revision, so quarantine stays immediate. Run the commons classifiers in the
-job. Make a human review an appended `review` observation that triggers a
-policy-only reprocess. Define which evaluation is effective for a revision:
-the newest committed active evaluation, and say so in the read model.
+**R1. Bring privacy into Admission and fix the timing.** Make residual risk a
+versioned observer role. Run the privacy and exact-duplicate observations
+with the Admission policy at receipt, so quarantine stays immediate. Run
+Commons observers in their own workflow. A human assessment is a Review
+observation consumed by the Review policy.
 
 Remark: Agreed. It feels like this is part of the ingest decision pipeline
 
@@ -373,26 +368,24 @@ and `facts_hash`. Keep the typed fact structs in code.
 
 Remark: I think this makes sense, i would need to see it to confirm
 
-**R3. Use one action policy per bundle.** One decision document with privacy,
-commons, credit, and index dispositions. Thresholds live in the policy
-configuration or in the classifier's calibration parameters, both versioned.
+**R3. Use one primary action policy per workflow.** Admission, Review,
+Commons Qualification, Credit, and Settlement each produce a separate
+decision. Each decision records its policy version and exact inputs.
 
 Remark: I'm ensure about this. At a high level it makes sense, i'm just a bit stuck in my thinking that we are making granual decisions but i think simplfiication would be helpful
 
-**R4. Add policy-only reprocess.** A job mode that reuses stored observations
-and re-runs the policy. Record `based_on_evaluation_id`. This is the cheap
-path the issues report exists to enable.
+**R4. Add workflow-scoped policy reprocess.** Each policy declares an input
+manifest. The planner reuses compatible observations and upstream decisions.
+It schedules only missing observers or prerequisite workflows. Record
+`based_on_evaluation_id`.
 
 Remark: But how do we guarentee that different policies will not require different observations?
 The current schema where we model that observations can be missing (or i guess they used to be caleld facts). supports this, but in practice THe re-evaluation may be limited to the availability of re-usable facts between policy changes.
 
-**R5. Keep governance out of the evaluation.** The credit disposition says
-eligible or withheld with a basis, computed from the trace, the bundle, and
-the evidence. The issuer allowlist, caps, holds, and settlement stay in the
-ledger path, where they are today. Define what `IssueCredit` carries: the
-event type, the basis, and the decision hash. Say whether the pending
-estimate is produced by this policy or stays in the wire crate. Recommended:
-move it here.
+**R5. Split Credit from Settlement.** Credit decides eligibility, amount, and
+basis from recorded inputs. Settlement consumes eligible Credit decisions,
+applies the issuer allowlist, caps, holds, and other governance, and writes
+ledger records through effects.
 
 Remark: Yeah we didn't specify this very clearly. Probably because i don't think credit issuing is imeplemented completelty.  Directionally, issuing credit is a decision which should be the function of some policy and some state.
 
@@ -402,22 +395,21 @@ ranking features from this document.
 
 Remark: the distinction makes sense. I don't understand what ranking features are here (nth closest neighbour maybe?) Yeah i would say storing closest neightbours in the database is probably not that helpful
 
-**R7. Decide assignment binding.** Recommended: resolve the assignment at
-claim time and pin it on the job then, so a rollback reaches the backlog. If
-receipt-time binding is wanted, say why.
+**R7. Bind each workflow independently.** Admission binds at receipt. Review
+binds when it processes the assessment. Commons Qualification and Credit
+bind at claim. Settlement binds before source-list approval.
 
 Remark: Yes i had the same intuition, late binding makes sense
 
-**R8. Give the checkpoint a table.** `observation_checkpoints` keyed by
-`(classifier_id, input_hash, evidence_id)`, written after each expensive
-observation, read before recompute. Add a row to the crash table for "after
-a checkpoint, before evaluation commit".
+**R8. Preserve checkpoint and evidence boundaries.** Defer the checkpoint
+table, but keep observations individually addressable. Novelty uses sealed
+epochs. Online deduplication uses a generation and can see recent inserts.
 
 Remark: not sure about this. I suspect this about vector indexing and i'm not sure how we should model this. My intuition wrapping this in evidence abstraction directionally makes sense, but how we handle evolving evidence i'm not sure.
 
-**R9. Define the contributor projection.** A table from job state and effect
-state to submission status and explanation label. `TerminalFailure` is
-visible, fail-closed, and not credited. A pending job shows as pending.
+**R9. Define the contributor projection.** One read model maps all workflow
+and effect states to submission status and explanation labels.
+`TerminalFailure` is visible, fail-closed, and not credited.
 
 Remark: Agreed this makes sense
 
@@ -427,12 +419,11 @@ The existing `trace_gate_driver` role is read-only and is the template.
 
 Remark: Not sure i understand this
 
-**R11. Clean the document.** One bundle name. Define or remove
+**R11. Clean the document.** Use `workflow bundle` consistently. Define or remove
 `executor_bundle_id`. Remove the author remark. Make the two provenance paths
 equal. Reconcile the hash policy with the HTML version. Move `schema` to
-per-item. Add `ScheduleReview` back to the effect kinds or explain why review
-is not an effect. State the scope boundary with the evaluation harness and
-link to it.
+per-item. Add `ScheduleReview` to the effect kinds. Keep the Review workflow
+separate from that effect. State the scope boundary with the lab crate.
 
 **R12. Keep the incremental path.** The six steps in the issues report still
 apply. Steps 1 and 2 (stamp what exists, golden traces in CI) cost nothing
@@ -443,7 +434,7 @@ decision) is where this proposal starts.
 
 - The durability principle: persist results and irreversible boundaries,
 recompute pure work, send execution detail to telemetry.
-- The classifier restriction: a classifier can query an index but cannot
+- The observer restriction: an observer can query an index but cannot
 insert into one.
 - Invariant 16: missing required evidence causes a closed decision or a
 processing error, never a favorable default.
@@ -456,29 +447,28 @@ the document. Extend it; do not remove it.
 ## 8. Issues worklist
 
 This section collects the remarks in sections 1 through 6 into issues. Each
-issue has a stable id, a status, the remarks it came from, what is at stake,
-the options, and a decision line to fill in. Work through them in order. The
-order follows dependency, not importance.
+issue has a stable id, a status, its source remarks, analysis, and a decision.
+The order follows dependency, not importance.
 
-Status values: `agreed` means the remark and the review say the same thing
-and only the proposal text needs the change. `open` means a decision is
-needed. `deferred` means the decision can wait but the design must not block
-it.
+Status values: `agreed` means that the issue has a decision. `open` means
+that a decision is needed. `needs spec` means that the architecture is
+decided but implementation details remain. `deferred` means that the design
+must support a later decision.
 
 
 | Id   | Title                                                | Status                  | Depends on |
 | ---- | ---------------------------------------------------- | ----------------------- | ---------- |
-| I-1  | Names: observer, classifier, scorer                  | open                    |            |
-| I-2  | Privacy in the ingest decision                       | agreed, needs spec      | I-1        |
+| I-1  | Names: observer, classifier, scorer                  | agreed                  |            |
+| I-2  | Privacy in the Admission decision                    | agreed, needs spec      | I-1        |
 | I-3  | Decision structure: granular decisions or one policy | agreed                  | I-2        |
-| I-4  | Credit as a scorer plus a policy                     | open                    | I-3        |
-| I-5  | Policy-only reprocess and observation compatibility  | open                    | I-3        |
-| I-6  | Late binding and the migration plan                  | open                    | I-3        |
-| I-7  | Checkpoints and evolving evidence                    | deferred, split         | I-6        |
-| I-8  | Vector namespaces and ranking features               | agreed, one question    |            |
-| I-9  | Lab crate and crate architecture                     | open                    |            |
-| I-10 | Cross-tenant job claim under forced RLS              | open, needs explanation | I-6        |
-| I-11 | Review is an effect                                  | agreed                  | I-3        |
+| I-4  | Credit observer and policy                           | agreed, needs spec      | I-3        |
+| I-5  | Policy-only reprocess and observation compatibility  | agreed                  | I-3        |
+| I-6  | Late binding and the migration plan                  | agreed                  | I-3        |
+| I-7  | Checkpoints and evolving evidence                    | split, partly deferred  | I-6        |
+| I-8  | Vector namespaces and ranking features               | agreed                  |            |
+| I-9  | Lab crate and crate architecture                     | agreed, needs spec      | I-1, I-3  |
+| I-10 | Cross-tenant job claim under forced RLS              | agreed                  | I-6        |
+| I-11 | Scheduling review is an effect                       | agreed                  | I-3        |
 | I-12 | Small consistency fixes                              | agreed                  | I-1, I-3   |
 | I-13 | Contributor-visible projection                       | agreed                  | I-3        |
 
@@ -487,7 +477,7 @@ it.
 
 ### I-1. Names: observer, classifier, scorer
 
-Status: open.
+Status: agreed.
 
 Source: the inserted paragraph in section 2.2, and the remark on the credit
 scorecard ("just have a Scorer").
@@ -514,9 +504,12 @@ Review position. Option 1. One noun for the measuring unit. A scorer is an
 observer with role `credit_score`. The credit amount then comes from a policy
 that reads that observation and the state it needs. See I-4.
 
-Decision: Option 1
+Decision. Use `Observer` for each versioned unit that derives an
+`Observation`. An externally attested observation identifies its actor and
+procedure instead. Use `Policy` for every unit that produces a `Decision`.
+A scorer is an observer role, not a separate domain type.
 
-### I-2. Privacy in the ingest decision
+### I-2. Privacy in the Admission decision
 
 Status: agreed, needs a specification.
 
@@ -525,7 +518,8 @@ Source: remarks at "We should specify how privacy should be handled",
 decision pipeline").
 
 What the remarks say. Residual risk is an observer with a versioned rubric.
-The privacy decision belongs in the ingest pipeline, not in the later job.
+The privacy decision belongs in Admission, not in the later Commons
+Qualification job.
 
 What is at stake. Quarantine must stay immediate. The rubric changed five
 times with no version. Zero of ninety-nine real sessions reached acceptance
@@ -534,28 +528,26 @@ because of it. A human review must have a place to enter the chain.
 Proposed shape.
 
 1. At receipt, in one transaction: store the trace revision, run the
-  `PrivacyObserver`, run the ingest policy, write the ingest evaluation,
+  `PrivacyObserver`, run the Admission policy, write the Admission evaluation,
    write the effect intents (`RegisterTrace` or `QuarantineTrace`, and
    `ScheduleReview` when quarantined), and create the commons job.
-2. The ingest evaluation is an evaluation like any other: immutable, hashed,
+2. The Admission evaluation is an evaluation like any other: immutable, hashed,
   with the observer version and the policy version.
-3. A human review is an appended observation with role `review`, producer
-  `review_workflow`, evidence the review id. It triggers a policy-only
-   reprocess of the ingest decision. See I-5.
+3. A human assessment is an observation in the Review workflow. The Review
+   policy maps that observation to a Review decision and its effects.
 4. The privacy observation payload records scrub outcome, finding counts by
   detector, and assessment confidence as separate fields. The rubric that
    maps them to a tier is the policy, not the observer. This is the #325
    split.
 
-Open question. Does the PII backstop (the remote prose-PII pass) run as a
-second privacy observer inside the same ingest evaluation, or as a later
-job? Today it is a later hold state. Recommended: a second observer role
-`privacy_backstop` in a later job, with the ingest policy treating it as
-`Unavailable` until it exists, and a reprocess when it lands.
+Resolved question. The PII backstop (the remote prose-PII pass) runs as a
+later observer job in the Admission workflow. Today it is a later hold
+state.
 
-Decision:
-
-Recommendation. A second observer role.
+Decision. Use a second observer role, `privacy_backstop`, in the Admission
+workflow. Its later job records the observation and triggers an Admission
+policy re-evaluation. The Review workflow remains separate and begins only
+when an action policy requests human review.
 
 ### I-3. Decision structure: granular decisions or one policy
 
@@ -575,31 +567,10 @@ What is at stake. The number of policy artifacts, fact types, and decision
 records in the bundle. Also the audit question: can a reader see one
 decision per disposition that matters, with its own inputs.
 
-Analysis of the three-decision shape. It is close to right, and it maps to
-real workflow boundaries. Two things are missing from it:
-
-1. The novelty and substance outcome has no home. Today both gates must pass
-  for `novelty_utility` credit and for index insertion. In the three-decision
-   shape they can be inputs to Credit with a reason code. But index
-   insertion also depends on them, and "review" as a commons outcome (a
-   borderline trace) has no place.
-2. "Review: accept | reject" is a human act today, not a policy. In the
-  model the human produces an observation. The policy that reads it is the
-   ingest decision run again. So Review is not a separate policy. It is a
-   reprocess of Ingest with one more observation.
-
-Options.
-
-1. Three decisions as remarked: Ingest, Review, Credit. Novelty and substance
-  are inputs to Credit. Index insertion is a side output of Credit or of
-   Ingest. Weak point: index insertion has no decision of its own, and a
-   human review is modelled as a policy.
-2. Three decisions by workflow boundary: Ingest (privacy, at receipt),
-  Commons (novelty and substance, in the job: `register | duplicate |  insufficient | review`, plus index actions), Credit (eligibility and
-   amount, from Commons and state). Human review is an observation that
-   re-runs Ingest. Each decision has its own policy version and its own
-   provenance.
-3. One action policy with four dispositions (the review's 5.3).
+Decision rationale. Three decisions leave novelty, substance, indexing, and
+settlement without clear owners. One action policy couples processes that
+have different actors, triggers, and timing. A workflow provides the durable
+orchestration boundary. Its policy remains a pure, versioned decision rule.
 
 Decision. Use one primary action policy for each independently triggered
 workflow. A workflow coordinates actors, observations, retries, decisions,
@@ -608,18 +579,18 @@ and effects. Its policy maps recorded inputs to a decision.
 The five workflows are:
 
 - Admission: evaluate privacy and accept, quarantine, or reject the trace.
-- Review: record an authorized assessment and decide its system consequence.
-- Commons qualification: evaluate novelty, substance, and duplication, then
-request indexing when appropriate.
+- Review: evaluate an authorized assessment and decide its system consequence.
+- Commons Qualification: evaluate novelty, substance, and duplication, then
+  request indexing or review when appropriate.
 - Credit: determine credit eligibility, amount, and basis.
 - Settlement: apply governance to eligible credit and request ledger effects.
 
 Each decision records its policy version and exact inputs. A workflow can
 consume observations and decisions from earlier workflows.
 
-### I-4. Credit as a scorer plus a policy
+### I-4. Credit observer and policy
 
-Status: open.
+Status: agreed, needs a specification.
 
 Source: remarks on the credit scorecard ("just have a Scorer") and on R5
 ("issuing credit is a decision which should be the function of some policy
@@ -638,27 +609,28 @@ Proposed shape.
 - One observer with role `credit_score` produces a breakdown: quality,
 novelty basis, duplicate penalty, coverage, and so on. It reads the trace
 and the commons observations. It has a version.
-- One credit policy reads that observation, the commons decision, and the
-state it needs (consent, retention class, contributor cap epoch), and
-returns `eligible { event_type, amount, basis } | withheld { reason }`.
-- The `IssueCredit` effect carries the event type, the amount, the basis,
-and the decision hash. The ledger path applies governance as today:
-issuer allowlist, caps, holds, settlement. Governance is not an input to
-the evaluation. See inconsistency 14.
-- The pending estimate on the submit receipt is the credit observer's
-number. It moves out of the wire crate.
+- One Credit policy reads that observation, the Commons Qualification
+  decision, and recorded consent and retention observations. It returns
+  `eligible { event_type, amount, basis } | withheld { reason }`.
+- Settlement applies the issuer allowlist, caps, holds, and other governance.
+  It consumes eligible Credit decisions. Its effects write settlement
+  records and any external ledger transaction.
+- The contributor read model can show the Credit decision amount before
+  Settlement is complete.
 
-Open question. Which "state" may the credit policy read? Recommended rule: only
-state that is recorded as an observation with a source and a snapshot
-reference, so two runs with the same inputs give the same decision.
+Resolved rule. The Credit policy can read only state recorded as an
+observation with a source and snapshot reference. Two runs with the same
+inputs therefore produce the same decision.
 
-Decision:
-
-Agreed: only state that is recorded as an observation with a source and a snapshot reference, so two runs with the same inputs give the same decision.
+Decision. Use a `credit_score` observer and one Credit policy. The policy can
+read only state recorded as an observation with a source and snapshot
+reference. Credit owns eligibility, amount, and basis. Settlement owns
+governance and ledger effects. The observation schema and estimate timing
+need an implementation specification.
 
 ### I-5. Policy-only reprocess and observation compatibility
 
-Status: open.
+Status: agreed.
 
 Source: remark on R4 ("how do we guarantee that different policies will not
 require different observations?").
@@ -672,15 +644,15 @@ is a real path or a hope.
 
 Proposed rule.
 
-1. Each policy version declares its input manifest: the observation roles
-  and schema versions it reads, and for each whether it is required or
-   optional.
+1. Each policy version declares its input manifest. The manifest lists
+   observation roles, upstream decision types, compatible schema versions,
+   and whether each input is required or optional.
 2. A policy-only reprocess is admissible when every required input exists in
-  the base evaluation with a compatible schema. The job planner checks this
-   before it creates the job.
+   the base evaluation or its referenced upstream decisions. The job planner
+   checks compatibility before it creates the job.
 3. When a required input is missing, the planner creates a partial reprocess:
-  run only the observers whose roles are missing, reuse the rest, then run
-   the policy. This is the checkpoint idea from R8 in another form.
+   run only the missing observers or prerequisite workflows, reuse compatible
+   inputs, and then run the policy.
 4. When a required input exists but with an older schema, the schema
   registry says whether an upcast exists. No upcast means the observer
    runs again.
@@ -691,19 +663,20 @@ This makes the answer to the remark: the guarantee is a declared manifest
 plus a planner that reads it. Reprocess cost is then known before the job
 runs.
 
-Decision:
-
-Agreed
+Decision. Adopt the declared input manifest and planner rules. Reprocessing
+is scoped to one workflow and can reuse compatible observations and upstream
+decisions.
 
 ### I-6. Late binding and the migration plan
 
-Status: open, revised for I-3.
+Status: agreed.
 
 Source: remarks on assignment binding time and on R7.
 
-What the remarks say. Each workflow must bind its bundle when execution
-starts. A later workflow must not inherit the bundle of an earlier workflow.
-A migration plan must drain each workflow queue before its old worker retires.
+What the remarks say. Each workflow must bind its workflow bundle at its
+binding point. A later workflow must not inherit the bundle of an earlier
+workflow. A migration plan must drain each queue before its old worker
+retires.
 
 What is at stake. Whether a rollback reaches queued work, whether workflows
 can evolve independently, and whether migration can continue while admission
@@ -711,15 +684,16 @@ stays open.
 
 Proposed rules.
 
-1. Admission binds its active assignment when the trace arrives because it
-  runs immediately.
+1. The initial Admission run binds its active assignment when the trace
+   arrives because it runs immediately. A later Admission re-evaluation is
+   a new run and binds when that run starts.
 2. Review binds its assignment when the authorized assessment is processed.
 3. Commons Qualification and Credit bind their active assignments when their
   jobs are claimed.
 4. Settlement binds its assignment before approval of the source list. The
   approval covers that policy version and source-list hash.
-5. Each workflow run records its workflow kind, bundle id, deployment id,
-  mode, and upstream decision references.
+5. Each workflow run records its workflow kind, workflow bundle id,
+   deployment id, mode, and upstream decision references.
 6. A queued workflow remains unbound until its binding point. A rollback can
   therefore reach work that has not started.
 7. Each observer names its projection. The workflow projects from the stored
@@ -729,18 +703,15 @@ Proposed rules.
 9. Old decisions remain immutable. An operator can request reprocessing under
   a new workflow bundle.
 
-Open question. Does anything still need a projection at receipt? The
-canonical summary hash for exact-duplicate detection does. Recommended:
-treat that hash as an observation with its own role and version, computed at
-receipt.
-
-Decision:
-
-I don't thinkk we need to add the trace as an observation
+Decision. Admission computes the versioned exact-duplicate projection at
+receipt. The trace revision remains an input, not an observation. The
+duplicate-check result is an observation used by the Admission policy.
+All other projections run at their workflow binding points.
 
 ### I-7. Checkpoints and evolving evidence
 
-Status: deferred, split into two sub-issues.
+Status: split. I-7a is deferred. I-7b is agreed, with implementation details
+deferred.
 
 Source: remarks on recompute versus checkpoint ("can probably be added
 later; the architecture must support it") and on R8 ("I suspect this is
@@ -748,30 +719,24 @@ about vector indexing").
 
 Clarification. R8 and the vector index are two different things.
 
-- I-7a. Checkpoint of an expensive observation. The substance observer calls
-a remote 27B model once per chunk. A crash mid-trace repeats the calls. A
-checkpoint stores a finished observation keyed by observer id, input hash,
-and evidence id, so a retry reuses it. This is about cost, not about
-vectors. Deferred is acceptable. The architecture supports it if
-observations are individually addressable, which I-3 option 2 and I-5
-give.
-- I-7b. Evolving evidence. The novelty observer compares against an index
-that changes. The observation must record what it compared against. The
-proposal's answer is an index epoch for the reference index and a
-generation watermark for the online index. That is the evidence
-abstraction the remark points at. What remains undecided is who seals an
-epoch, how often, and whether a trace inserted after epoch N is visible to
-a trace evaluated under epoch N. Recommended: not visible; online dedup is
-the only path that sees recent inserts; novelty is measured against sealed
-epochs only.
+I-7a covers checkpoints for expensive observations. The substance observer
+calls a remote 27B model once per chunk. A checkpoint stores a completed
+observation by observer id, input hash, and evidence id. The workflow model
+and I-5 keep observations individually addressable.
 
-Decision on I-7a:
+Decision on I-7a. Defer checkpoint persistence. The architecture must permit
+it without changing observation identity or policy inputs.
 
-Decision on I-7b:
+I-7b covers evolving evidence. A novelty observation records the index epoch
+or online generation that it used.
+
+Decision on I-7b. Novelty uses sealed epochs and cannot see later inserts.
+Online deduplication can see recent inserts. The vector-index specification
+will define who seals epochs and how often.
 
 ### I-8. Vector namespaces and ranking features
 
-Status: agreed, one question.
+Status: agreed.
 
 Source: remark on R6.
 
@@ -789,23 +754,23 @@ stores `nearest_neighbor_hash`, a hash over the neighbour list, so a replay
 can prove it saw the same list. The proposal keeps that as
 `neighbor_evidence_hash` on the observation. That is correct and small.
 
-Decision:
-
-leave this out of scope for now
+Decision. Keep the immutable novelty epoch and online deduplication
+namespaces. Keep only a hash of the neighbor evidence in the observation.
+Drop the ranking-feature namespace from this design.
 
 ### I-9. Lab crate and crate architecture
 
-Status: open.
+Status: agreed, needs a specification.
 
 Source: remarks on the cost of measurement ("handled by the lab crate; the
 ingest server attributes the result to whatever training run the lab
 produces") and on the enclave boundary ("we are missing details about the
 crate architecture").
 
-What the remarks say. Calibration, bake-off, and evaluation belong in a
-separate `lab` crate. The ingest server consumes bundles and attributes each
-result to the lab run that produced the bundle. The proposal must describe
-the crate layout, where observers run, and the enclave seam.
+What the remarks say. Calibration and bake-off belong in a separate `lab`
+crate. Workflow evaluations reference their workflow bundles. Model-backed
+observations also reference the lab artifacts and reports that produced
+their observer versions.
 
 Proposed shape.
 
@@ -816,23 +781,22 @@ implementations.
 scoring boundary: substance, novelty embedding, dedup. Exposes one remote-
 capable interface so Phase B can move it out of process.
 - `trace-commons-lab`: calibration corpora, bake-off, operating-point
-reports, golden traces, and bundle assembly. Produces a bundle manifest
-with a lab run id and a report digest. Never runs in the ingest process.
-- `trace-commons-server`: the job runner, the effect runner, the policies,
-the registry tables, and the read models. Consumes bundles by id.
+  reports, golden traces, and observer artifact manifests. Each manifest
+  carries a lab run id and report digest. The lab never runs in the server.
+- `trace-commons-server`: workflow and effect runners, policy
+  implementations, registry tables, deployment assignments, and read
+  models. It consumes workflow bundles by id.
 
-Bundle provenance. The bundle manifest carries `lab_run_id` and
-`report_digest`. Every evaluation carries the bundle id. That is the
-attribution the remark asks for. The ingest server does not judge whether a
-bundle is fit for production. The operator's assignment does.
+Bundle provenance. Every evaluation records its workflow bundle id. Each
+lab-produced observer reference records its lab run id and report digest.
+Other observer artifacts do not claim lab provenance.
 
-Decision:
-
-Good enough
+Decision. Adopt this crate boundary and provenance split. The implementation
+specification must define the remote observer interface and manifest schemas.
 
 ### I-10. Cross-tenant job claim under forced RLS
 
-Status: open, needs an explanation first.
+Status: agreed.
 
 Source: remark on R10 ("not sure I understand this").
 
@@ -860,22 +824,23 @@ Options.
 Review position. Option 1. It matches the existing pattern and keeps one
 queue. The policy must bound the columns the role can write.
 
-Decision:
+Decision. Use option 1. A narrow `trace_job_claimer` role can select jobs and
+update only lease columns. All workflow evaluation uses a tenant-scoped
+connection.
 
-Yup that makes sense
-
-### I-11. Review is an effect
+### I-11. Scheduling review is an effect
 
 Status: agreed.
 
 Source: remark on inconsistency 4 ("yes review should be an effect").
 
-Change to the proposal. Add `ScheduleReview` to the effect kinds. The ingest
-decision requests it when the disposition is `quarantine`. The review
-workflow produces a `review` observation when a human decides. See I-2 and
-I-3.
+Change to the proposal. Add `ScheduleReview` to the effect kinds. Admission
+can request it after quarantine. Commons Qualification can request it for a
+borderline result. The Review workflow records the human assessment as an
+observation. Its policy produces the Review decision and any later effects.
 
-Decision:
+Decision. Scheduling review is an effect. Human review is a separate
+workflow, not an effect and not an Admission policy reprocess.
 
 ### I-12. Small consistency fixes
 
@@ -885,7 +850,8 @@ Source: decisions on inconsistencies 1 and 2, and R11.
 
 Checklist for the proposal text.
 
-- One bundle name throughout.
+- Use `workflow bundle` throughout. Use `observer artifact` for a
+  lab-produced observer version.
 - Define or remove `executor_bundle_id` on receipts.
 - Section 3 lists four immutable concepts, not five. Effect is an intent and
 a receipt, as in section 5.
@@ -898,9 +864,12 @@ carries it.
 - Define shadow completion: a shadow job completes at commit.
 - Add `based_on_evaluation_id` to jobs and evaluations.
 - Remove `deployment_id` from the job unique key; keep it as an attribute.
+- Add the workflow kind and upstream decision references to jobs and
+  evaluations.
+- Replace the old `ingest decision` term with `Admission decision`.
 - State the scope boundary with the lab crate and link to it.
 
-Decision:
+Decision. Apply this checklist when the proposal is rewritten.
 
 ### I-13. Contributor-visible projection
 
@@ -911,7 +880,9 @@ Source: remark on R9.
 Change to the proposal. Add a read-model table that maps job state and effect
 state to the submission status and an explanation label. A pending job shows
 as pending. A terminal failure shows as not credited with a stable reason
-label. The ingest decision sets `accepted` or `quarantined` at receipt, as
-today.
+label. The Admission decision sets the initial accepted, quarantined, or
+rejected state. Later states come from Review, Commons Qualification, Credit,
+Settlement, and their effects.
 
-Decision:
+Decision. Add one contributor-facing read model across all five workflows.
+The immutable evaluations remain the audit source.
