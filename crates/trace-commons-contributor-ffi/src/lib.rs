@@ -2427,8 +2427,21 @@ pub extern "C" fn tc_harness_last_call_line(seconds_ago: i64) -> *mut c_char {
 /// file, and "remove only what we put there" is worth nothing if a shell
 /// hides the control that does the removing.
 ///
-/// The daemon also answers this per row, as `can_connect` / `can_disconnect`.
-/// The two come from the same function, so a shell may read either.
+/// The daemon also answers this per row, as `can_connect` / `can_disconnect`,
+/// and **a shell must read the row's answer rather than asking here.** They do
+/// not agree, deliberately.
+///
+/// This function takes `connected`, which on the wire is narrowed to "names
+/// OUR destination port". The daemon derives both row flags from the broader
+/// `wired` -- "names any local proxy" -- which is not on the wire, because
+/// that is the value `plan` itself gates on, so the row never offers an action
+/// the plan would refuse. A config left naming a stale or foreign port is
+/// `wired && !connected`: the daemon offers only a disconnect, and asking this
+/// function instead answers the reverse, stranding the row behind a connect
+/// that comes back as a no-op.
+///
+/// It remains the right question for a caller that has no row -- the CLI, or a
+/// test -- and it is what the daemon itself calls.
 ///
 /// Answers `0` -- do not offer -- for an action this build does not know, for
 /// a NULL or non-UTF-8 `action`, and on a caught panic. Not offering an

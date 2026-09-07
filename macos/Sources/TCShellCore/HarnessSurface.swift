@@ -415,16 +415,24 @@ public enum HarnessSurface {
 
     // MARK: - The actions offered on a row
 
-    /// Asked of the shared table rather than derived from `installed`. The
-    /// rule that matters is the disconnect one: a tool that is connected can
-    /// always be disconnected, installed or not, because uninstalling a tool
-    /// does not remove the line we put in its file.
+    /// The daemon's own answer, not this shell's re-derivation.
+    ///
+    /// It must be the daemon's, because the two questions differ. `connected`
+    /// on the row is narrowed to "names OUR destination port"; the daemon
+    /// computes `can_disconnect` from the broader `wired` -- "names any local
+    /// proxy" -- precisely so a line pointing at a stale or foreign port
+    /// still has a control that removes it. `wired` is not on the wire, so
+    /// re-deriving from `connected` here silently answers false for exactly
+    /// those rows: the button becomes Connect, the daemon refuses it as a
+    /// no-op, and the contributor is told their file "already says what this
+    /// would have written" about a file naming somebody else's port, with no
+    /// route to the disconnect that would fix it.
     public static func canConnect(_ row: HarnessRow, calls: HarnessCalls) -> Bool {
-        calls.actionAvailable(HarnessAction.connect.rawValue, row.installed, row.connected)
+        row.canConnect
     }
 
     public static func canDisconnect(_ row: HarnessRow, calls: HarnessCalls) -> Bool {
-        calls.actionAvailable(HarnessAction.disconnect.rawValue, row.installed, row.connected)
+        row.canDisconnect
     }
 
     /// The action a row's one button would take, or nothing to offer.

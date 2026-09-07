@@ -708,6 +708,38 @@ fn path_value(path: Option<&Path>) -> serde_json::Value {
     })
 }
 
+/// Whether the wire offers a connect for this row.
+///
+/// Keyed on `wired`, the same value [`plan`] gates on, so the wire never
+/// offers an action the plan will refuse. Keying it on the narrowed
+/// `connected` instead made the daemon self-contradicting: a config naming a
+/// stale or foreign port has `connected == false`, so a connect was offered,
+/// and `plan` then answered `Noop` -- "already says what this would have
+/// written" -- about a file naming somebody else's port.
+///
+/// The row is not stranded by this, because [`offers_disconnect`] is keyed on
+/// the same value and is true for exactly those rows: the contributor removes
+/// the stale line, and the connect becomes available once it is gone.
+fn offers_connect(row: &HarnessRow) -> bool {
+    harness_state::action_available(HarnessAction::Connect, row.installed, row.wired)
+}
+
+/// Whether the wire offers a disconnect for this row.
+///
+/// Deliberately `wired`, not `connected`: a line naming a stale or foreign
+/// port is still a line this app can remove, and hiding the control would
+/// strand it.
+///
+/// These two are functions rather than expressions inlined into the JSON so a
+/// test can assert the value a shell actually receives. The first version of
+/// that test asked `action_available` directly, which is the layer the daemon
+/// computes at -- and it passed while two shells re-derived the same answer
+/// from the narrowed `connected` and stranded the row anyway. A guard has to
+/// sit where the consumer reads.
+fn offers_disconnect(row: &HarnessRow) -> bool {
+    harness_state::action_available(HarnessAction::Disconnect, row.installed, row.wired)
+}
+
 /// `harness_list`: every tool this machine knows about, and its state.
 pub fn handle_list(shared: &DaemonShared, req: &Request) -> Response {
     let catalog = catalog();
@@ -738,15 +770,8 @@ pub fn handle_list(shared: &DaemonShared, req: &Request) -> Response {
                         .map(|at| at.to_rfc3339()),
                     _ => None,
                 },
-                "can_connect": harness_state::action_available(
-                    HarnessAction::Connect, row.installed, row.connected,
-                ),
-                // Deliberately `wired`, not `connected`: a line naming a
-                // stale or foreign port is still a line this app can remove,
-                // and hiding the control would strand it.
-                "can_disconnect": harness_state::action_available(
-                    HarnessAction::Disconnect, row.installed, row.wired,
-                ),
+                "can_connect": offers_connect(row),
+                "can_disconnect": offers_disconnect(row),
             })
         })
         .collect();
@@ -1185,13 +1210,20 @@ mod tests {
             claude.wired,
             "upstream still recognises the line, which is what keeps disconnect offered"
         );
+        // Asserted on the WIRE, not on the shared table.
+        //
+        // The first version of this asked `action_available(.., claude.wired)`
+        // directly, which is the layer the daemon computes at -- and so it
+        // passed while two shells were re-deriving the same answer from the
+        // narrowed `connected` and stranding the row. A guard has to sit where
+        // the consumer reads, or it certifies a value nobody uses.
         assert!(
-            harness_state::action_available(
-                HarnessAction::Disconnect,
-                claude.installed,
-                claude.wired
-            ),
-            "the contributor must still have a way to remove the stale line"
+            offers_disconnect(claude),
+            "the wire must offer the removal of a stale line"
+        );
+        assert!(
+            !offers_connect(claude),
+            "and must not offer a connect the daemon would refuse as a no-op"
         );
 
         // The same file IS ours once the port matches.

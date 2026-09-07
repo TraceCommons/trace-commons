@@ -234,24 +234,45 @@ final class HarnessSurfaceTests: XCTestCase {
 
     // MARK: - The actions offered on a row
 
-    /// Whether a button appears is the shared table's decision, and a shell
-    /// that answered it from `installed` alone would hide the control that
-    /// removes what we put in an uninstalled tool's file.
-    func testTheActionsOfferedComeFromTheSharedTable() {
+    /// The row's actions are the daemon's answer, never re-derived here.
+    ///
+    /// They cannot be re-derived, and that is the point. The shared table
+    /// takes `connected`, which is narrowed to "names OUR destination port".
+    /// The daemon computes `can_disconnect` from the broader `wired` -- "names
+    /// any local proxy" -- which is not on the wire. Asking the table here
+    /// answered false for a config naming a stale or foreign port, so the row
+    /// offered Connect, the daemon refused it as a no-op, and the contributor
+    /// was told their file "already says what this would have written" with no
+    /// route to the disconnect that would fix it.
+    ///
+    /// The spy therefore asserts a NEGATIVE: the shared table is not consulted
+    /// for these two questions at all.
+    func testTheActionsOfferedAreTheDaemonsAnswerAndNotReDerived() {
         let seen = SpyBox()
         let calls = HarnessCalls(
             stateCode: { _ in 31 },
             planOutcomeCode: { _ in 40 },
             actionAvailable: { action, _, _ in
                 seen.record(action)
+                // Deliberately the opposite of what the row reports, so a
+                // shell that consults this instead of the row fails loudly.
                 return action == "disconnect"
             },
             stateLine: { _ in "" }, lastCallLine: { _ in "" },
             outcomeLine: { _ in "" })
         let row = HarnessSurface.list(fromJSON: Self.oneRow).harnesses[0]
-        XCTAssertFalse(HarnessSurface.canConnect(row, calls: calls))
-        XCTAssertTrue(HarnessSurface.canDisconnect(row, calls: calls))
-        XCTAssertEqual(seen.values, ["connect", "disconnect"])
+
+        // The fixture reports can_connect true, can_disconnect false. The spy
+        // would answer the reverse.
+        XCTAssertTrue(
+            HarnessSurface.canConnect(row, calls: calls),
+            "the row's own answer must win")
+        XCTAssertFalse(
+            HarnessSurface.canDisconnect(row, calls: calls),
+            "the row's own answer must win")
+        XCTAssertEqual(
+            seen.values, [],
+            "the shared table must not be consulted: it cannot see `wired`")
     }
 
     // MARK: - The plan

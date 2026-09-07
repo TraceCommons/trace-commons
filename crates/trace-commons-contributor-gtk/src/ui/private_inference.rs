@@ -409,7 +409,16 @@ fn harness_card(app: &Rc<App>, row: &crate::model::Harness) -> gtk::Box {
         card.append(&command);
     }
 
-    let connecting = !row.connected;
+    // Chosen from the daemon's answer, not from `connected`.
+    //
+    // `connected` is narrowed to "names OUR destination port"; the daemon
+    // derives `can_disconnect` from the broader "names any local proxy", so a
+    // line pointing at a stale or foreign port keeps the control that removes
+    // it. Picking the action from `!row.connected` handed such a row a Connect
+    // button, which the daemon refuses as a no-op -- telling the contributor
+    // the file "already says what this would have written" when it names
+    // somebody else's port, and offering no way to fix it.
+    let connecting = !row.can_disconnect;
     let action = if connecting {
         HarnessAction::Connect
     } else {
