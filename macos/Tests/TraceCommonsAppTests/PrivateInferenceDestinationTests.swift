@@ -85,20 +85,36 @@ final class PrivateInferenceDestinationTests: XCTestCase {
 
 extension PrivateInferenceCalls {
     /// A daemon that answers every state the way the shared table does, with
-    /// no dylib behind it. `port_in_use` is `Refused` (ABI 24).
+    /// no dylib behind it.
+    ///
+    /// Both branch tables are transcribed from `private_inference_copy.rs`
+    /// -- `state_tone` and `quit_needs_notice` -- because a double that
+    /// disagrees with the real table leaves every test reasoning about
+    /// held-vs-attention or the quit notice reasoning against a table no
+    /// contributor will ever meet. `port_in_use` is `Refused` (ABI 24);
+    /// `running_elsewhere` is `Held` (21) and not attention, because foreign
+    /// ownership is not this app's work to draw attention to -- and for the
+    /// same reason it needs no quit notice, while `running` and `stopping`
+    /// need one whatever the switch says.
     static let testing = PrivateInferenceCalls(
         stateLine: { $0.isEmpty ? nil : $0 },
         stateTone: { label in
             switch label {
             case "running": return 22
-            case "stopping": return 21
-            case "running_no_backends", "running_elsewhere": return 23
+            case "running_no_backends": return 23
+            case "running_elsewhere", "stopping": return 21
             case "port_in_use", "start_failed", "crashed": return 24
-            default: return 0
+            default: return 20
             }
         },
         servingLine: { _ in nil },
         shouldOffer: { answered, on in !answered && !on },
-        quitNeedsNotice: { on, _ in on }
+        quitNeedsNotice: { on, label in
+            switch label {
+            case "off", "running_elsewhere": return false
+            case "running", "running_no_backends", "stopping": return true
+            default: return on
+            }
+        }
     )
 }
