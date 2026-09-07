@@ -554,6 +554,7 @@ pub fn commit(store: &PlanStore, plan_id: Uuid) -> Result<CommitView, &'static s
     if config_digest(&held.planned.path) != held.digest {
         return Err(ERR_CONFIG_CHANGED);
     }
+
     let backup_path = tools::commit(&held.planned).map_err(|_| ERR_COMMIT_FAILED)?;
     Ok(CommitView {
         tool_id: held.tool_id,
@@ -940,6 +941,51 @@ mod tests {
 
     fn plan_claude(store: &PlanStore, action: HarnessAction) -> PlanView {
         plan(store, &Catalog::default(), "claude", action, Some(8463)).expect("claude is known")
+    }
+
+    /// A file appearing between the plan and the commit is refused.
+    ///
+    /// Raised in review as a data-loss window: the plan-time readability
+    /// refusal passes vacuously when the file is ABSENT, so an undecodable one
+    /// appearing before the commit would reach the write unchecked.
+    ///
+    /// It is not reachable, and this pins why. `config_digest` reads BYTES, so
+    /// an absent file digests as `None` while an undecodable one digests as
+    /// `Some(..)` -- a mismatch, refused as `harness-config-changed` before
+    /// readability is ever in question. The protection is the digest, not a
+    /// second readability check; a check added at commit for this case could
+    /// never fire, and a test for it could never fail.
+    ///
+    /// Kept because the reasoning is not obvious from either site: the plan's
+    /// refusal and the commit's digest cover different halves of the same
+    /// hazard, and only together.
+    #[test]
+    fn a_file_that_appears_unreadable_before_the_commit_is_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("settings.json");
+        let _guard = ClaudeConfigAt::at(dir.path());
+
+        // Planned against no file at all.
+        let store = PlanStore::default();
+        let view = plan_claude(&store, HarnessAction::Connect);
+        let id = view
+            .plan_id
+            .expect("a connect against an absent file plans");
+
+        // A file that will not decode appears before the commit.
+        let mut bytes = vec![0xFF, 0xFE];
+        for unit in r#"{"env":{"MY_KEY":"keep me"}}"#.encode_utf16() {
+            bytes.extend_from_slice(&unit.to_le_bytes());
+        }
+        std::fs::write(&path, &bytes).expect("write");
+
+        let refused = commit(&store, id).expect_err("an unreadable file must not be written over");
+        assert_eq!(refused, ERR_CONFIG_CHANGED);
+        assert_eq!(
+            std::fs::read(&path).expect("read back"),
+            bytes,
+            "the bytes that appeared must be exactly as they were"
+        );
     }
 
     /// A settings file that is not valid UTF-8 is refused, not replaced.

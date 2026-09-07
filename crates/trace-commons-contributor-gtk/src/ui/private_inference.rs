@@ -926,7 +926,18 @@ mod tests {
             .filter(|line| !line.trim_start().starts_with("//"))
             .collect::<Vec<_>>()
             .join("\n");
-        for literal in code_only.split('"').skip(1).step_by(2) {
+        let found: Vec<&str> = code_only.split('"').skip(1).step_by(2).collect();
+        // A floor, because a scan that examines nothing passes. If the
+        // constructor is renamed, or the split markers stop matching, the
+        // extraction silently yields an empty body and every assertion below
+        // runs zero times -- a guard that certifies nothing while looking
+        // green. The constructor sets CSS classes, so it always has literals.
+        assert!(
+            !found.is_empty(),
+            "the scan found no literals at all -- did the constructor move or \
+             the split markers stop matching?"
+        );
+        for literal in found {
             assert!(
                 literal.starts_with("tc-"),
                 "{literal:?} is a sentence written in this view rather than read from copy"
@@ -1064,7 +1075,17 @@ mod tests {
                 .filter(|line| !line.trim_start().starts_with("//"))
                 .collect::<Vec<_>>()
                 .join("\n");
-            for literal in code_only.split('"').skip(1).step_by(2) {
+            let found: Vec<&str> = code_only.split('"').skip(1).step_by(2).collect();
+            // Per-function floor, for the same reason: an extraction that
+            // yields an empty body passes without examining anything. Each of
+            // these functions sets at least one CSS class, so zero literals
+            // means the scan lost the function, not that the function is
+            // clean.
+            assert!(
+                !found.is_empty(),
+                "{opening} yielded no literals -- the scan has lost it"
+            );
+            for literal in found {
                 assert!(
                     !literal.contains(' ') || literal.starts_with("tc-"),
                     "{literal:?} is a sentence written in {opening} rather than read from copy"

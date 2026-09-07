@@ -90,8 +90,19 @@ pub const OFFER_DECLINE: &str = "Not now";
 /// congratulated on the next launch either. Saying so here is what makes "Not
 /// now" an honest button: it is not a deferral, it is an answer, and the way
 /// back is the switch this sentence names.
-pub const OFFER_ASKED_ONCE: &str = "Either way, this is the only time you will be asked. The switch stays in \
-     Settings.";
+///
+/// It named Settings until the switch moved out of Settings to its own
+/// destination, at which point the second clause was simply false -- pointing
+/// a contributor who had just declined at a place the control is no longer in.
+/// The first clause stays true here and only here: this is the first-run
+/// offer, and the harness gate asks again on purpose, which is why that
+/// surface does not show this sentence at all.
+///
+/// The destination is named as a literal because a payload sentence may not
+/// interpolate, and `the_way_back_names_the_destination_it_is_in` pins it
+/// against [`DESTINATION`] so the two cannot drift apart again.
+pub const OFFER_ASKED_ONCE: &str = "Either way, this is the only time you will be asked. The switch is on the \
+     Model calls screen.";
 
 /// The settings section's heading.
 pub const SETTINGS_TITLE: &str = "Model calls on this computer";
@@ -790,6 +801,24 @@ mod tests {
 
     /// The nav wording exists, because a top-level destination needs a label
     /// in the switcher and a line under its title.
+    /// The way back names the place the switch is actually in.
+    ///
+    /// This sentence said "The switch stays in Settings" until the switch
+    /// moved to its own destination, and nothing failed -- no test pinned the
+    /// copy, so a sentence that had become false went on being shown to every
+    /// contributor at first run. Found in review.
+    #[test]
+    fn the_way_back_names_the_destination_it_is_in() {
+        assert!(
+            OFFER_ASKED_ONCE.contains(DESTINATION),
+            "the offer must name the destination the switch is in, not a stale one: {OFFER_ASKED_ONCE}"
+        );
+        assert!(
+            !OFFER_ASKED_ONCE.contains("Settings"),
+            "the switch is no longer in Settings, which holds only a pointer"
+        );
+    }
+
     #[test]
     fn the_copy_carries_nav_wording_for_a_top_level_destination() {
         let copy = private_inference_copy();
