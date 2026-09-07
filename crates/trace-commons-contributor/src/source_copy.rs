@@ -168,6 +168,10 @@ pub fn source_check_line(tool: SourceTool, source_mode: &str) -> String {
     }
 }
 
+/// Export-only importer refusal, shared by all native health surfaces.
+pub const OPENCODE_VERSION_TITLE: &str = "This OpenCode export version isn't supported.";
+pub const OPENCODE_VERSION_DETAIL: &str = "This importer supports sessions created with OpenCode 1.18.29. For other versions, wait for an importer update. Choose the folder containing opencode export SESSION_ID JSON files; the live session store is not read.";
+
 /// Shared copy and source-policy metadata for editable native settings rows.
 #[derive(serde::Serialize)]
 pub struct SourceSettingsCopy {
@@ -181,6 +185,8 @@ pub struct SourceSettingsCopy {
     pub watch_candidate: &'static str,
     pub choose_folder: &'static str,
     pub retry: &'static str,
+    pub opencode_version_title: &'static str,
+    pub opencode_version_detail: &'static str,
     pub tools: std::collections::BTreeMap<&'static str, SourceSettingsToolCopy>,
 }
 
@@ -212,6 +218,8 @@ pub fn source_settings_copy() -> SourceSettingsCopy {
     })
     .collect();
     SourceSettingsCopy {
+        opencode_version_title: OPENCODE_VERSION_TITLE,
+        opencode_version_detail: OPENCODE_VERSION_DETAIL,
         heading: "Watched folders",
         explanation: "Source settings control future discovery. Turning a source off does not remove sessions already queued.",
         save_failed: "Couldn't confirm that folder change. The last available settings are shown; retry to check the current state.",
@@ -229,6 +237,15 @@ pub fn source_settings_copy() -> SourceSettingsCopy {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn export_refusal_payload_preserves_supported_version_and_scope() {
+        let payload = serde_json::to_value(source_settings_copy()).unwrap();
+        assert_eq!(payload["opencode_version_title"], OPENCODE_VERSION_TITLE);
+        assert_eq!(payload["opencode_version_detail"], OPENCODE_VERSION_DETAIL);
+        assert!(OPENCODE_VERSION_DETAIL.contains("sessions created with OpenCode 1.18.29"));
+        assert!(OPENCODE_VERSION_DETAIL.contains("live session store is not read"));
+    }
 
     #[test]
     fn settings_metadata_uses_adapter_policy_and_retains_queue_effects() {
