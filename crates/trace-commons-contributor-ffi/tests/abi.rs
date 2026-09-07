@@ -36,7 +36,8 @@ use trace_commons_contributor_ffi::{
 };
 use trace_commons_contributor_ffi::{
     tc_harness_action_available, tc_harness_last_call_line, tc_harness_outcome_line,
-    tc_harness_plan_outcome_code, tc_harness_state_code, tc_harness_state_line,
+    tc_harness_plan_outcome_code, tc_harness_spend_line, tc_harness_state_code,
+    tc_harness_state_line,
 };
 
 fn cstr(p: &Path) -> CString {
@@ -3761,6 +3762,43 @@ fn the_harness_last_call_sentence_crosses_the_abi() {
             trace_commons_contributor::private_inference_copy::harness_last_call_line(Some(
                 seconds
             ))
+        );
+    }
+}
+
+/// The amount sentence crosses the ABI, and NOT-KNOWN stays not-known.
+///
+/// The one assertion here that is worth more than the rest is the last one:
+/// a negative `micros` -- the value a shell passes when the daemon said the
+/// figure was unmeasured -- comes back as the empty string, which is drawn
+/// as no line at all. If it ever came back as `$0.00` the surface would be
+/// telling every contributor with no readable ledger that they had spent
+/// nothing today.
+#[test]
+fn the_harness_spend_sentence_crosses_the_abi() {
+    assert!(take_owned(tc_harness_spend_line(1_230_000)).contains("$1.23"));
+    assert!(take_owned(tc_harness_spend_line(0)).contains("$0.00"));
+    assert!(take_owned(tc_harness_spend_line(1)).contains("less than $0.01"));
+    // The window is in the sentence, not left to a shell to add.
+    assert!(take_owned(tc_harness_spend_line(0)).contains("since midnight"));
+
+    // Not known is out of range, and draws no line. Never a zero.
+    for absent in [-1, -2, i64::MIN] {
+        let line = take_owned(tc_harness_spend_line(absent));
+        assert_eq!(line, "", "{absent} rendered a figure: {line}");
+        assert!(!line.contains("$"), "{absent} rendered money: {line}");
+    }
+    assert_ne!(
+        take_owned(tc_harness_spend_line(0)),
+        take_owned(tc_harness_spend_line(-1)),
+        "a measured zero and an unmeasured figure render the same"
+    );
+
+    // Whatever a shell holds, it is the shared sentence.
+    for micros in [0_u64, 1, 4_999, 5_000, 1_230_000, 999_999_999] {
+        assert_eq!(
+            take_owned(tc_harness_spend_line(i64::try_from(micros).expect("fits"))),
+            trace_commons_contributor::private_inference_copy::harness_spend_line(Some(micros))
         );
     }
 }

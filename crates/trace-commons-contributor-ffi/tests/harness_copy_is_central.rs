@@ -76,6 +76,27 @@ const SENTENCE_FIELDS: &[&str] = &[
     "HARNESS_ANSWERING",
 ];
 
+/// The way a shell would spell a money amount if it were formatting one
+/// itself.
+///
+/// The amount is not chosen between fields, it is ASSEMBLED, so the failure
+/// this catches is a different shape from a local table: a shell that
+/// formatted its own dollars would round in its own way, put the currency in
+/// its own place, and -- the part that matters -- decide for itself what an
+/// absent figure looks like. That last decision is the one that turns
+/// "nobody could measure this" into "$0.00", which is the defect this whole
+/// surface is built to avoid. Ask `tc_harness_spend_line`.
+const AMOUNT_FORMATTERS: &[&str] = &[
+    // Swift
+    ".currency(",
+    "NumberFormatter",
+    // C#
+    "ToString(\"C",
+    "\"C2\"",
+    // Rust
+    "${:.2}",
+];
+
 /// One shell's harness surface: where it decides, and what reaching the
 /// shared table looks like from there.
 struct Shell {
@@ -91,7 +112,7 @@ struct Shell {
 const SHELLS: &[Shell] = &[
     Shell {
         path: "macos/Sources/TCShellCore/HarnessSurface.swift",
-        must_reach: &["stateLine", "lastCallLine", "outcomeLine"],
+        must_reach: &["stateLine", "lastCallLine", "outcomeLine", "spendLine"],
     },
     Shell {
         path: "macos/Sources/TCBridge/TCHarness.swift",
@@ -99,11 +120,12 @@ const SHELLS: &[Shell] = &[
             "tc_harness_state_line",
             "tc_harness_last_call_line",
             "tc_harness_outcome_line",
+            "tc_harness_spend_line",
         ],
     },
     Shell {
         path: "macos/Sources/TraceCommonsApp/AppModel.swift",
-        must_reach: &["stateLine:", "lastCallLine:", "outcomeLine:"],
+        must_reach: &["stateLine:", "lastCallLine:", "outcomeLine:", "spendLine:"],
     },
     Shell {
         path: "windows/src/TraceCommons.Interop/HarnessSurface.cs",
@@ -111,6 +133,7 @@ const SHELLS: &[Shell] = &[
             "NativeMethods.tc_harness_state_line",
             "NativeMethods.tc_harness_last_call_line",
             "NativeMethods.tc_harness_outcome_line",
+            "NativeMethods.tc_harness_spend_line",
         ],
     },
     Shell {
@@ -119,6 +142,7 @@ const SHELLS: &[Shell] = &[
             "tc_harness_state_line",
             "tc_harness_last_call_line",
             "tc_harness_outcome_line",
+            "tc_harness_spend_line",
         ],
     },
     Shell {
@@ -127,6 +151,7 @@ const SHELLS: &[Shell] = &[
             "harness_state_line",
             "harness_last_call_line",
             "harness_outcome_line",
+            "harness_spend_line",
         ],
     },
 ];
@@ -248,5 +273,30 @@ fn both_header_copies_declare_the_sentence_calls() {
             text.contains("char*       tc_harness_outcome_line(const char* outcome);"),
             "{header} does not declare tc_harness_outcome_line"
         );
+        assert!(
+            text.contains("char*       tc_harness_spend_line(int64_t micros);"),
+            "{header} does not declare tc_harness_spend_line"
+        );
+    }
+}
+
+/// No shell formats a money amount of its own.
+#[test]
+fn no_shell_assembles_an_amount_itself() {
+    let root = repo_root();
+    for shell in SHELLS {
+        let code = read(&root, shell.path);
+        for marker in AMOUNT_FORMATTERS {
+            assert!(
+                !code.contains(marker),
+                "{} formats money itself (`{marker}`). The amount, its \
+                 rounding, its window and -- above all -- what an UNKNOWN \
+                 figure looks like are decided once, in \
+                 `private_inference_copy::harness_spend_line`, and reached \
+                 through `tc_harness_spend_line`. A shell that formats its \
+                 own is a shell that will one day render not-known as zero.",
+                shell.path
+            );
+        }
     }
 }

@@ -85,6 +85,43 @@ public struct HarnessActivity: Decodable, Equatable, Sendable {
     }
 }
 
+/// What the calls answered on this computer have cost today.
+///
+/// `known` false is "nobody could measure this", which is NOT a day with
+/// nothing on it. The two must never be drawn the same way, which is why
+/// this is a block with a flag rather than a bare number defaulting to zero.
+public struct HarnessSpend: Decodable, Equatable, Sendable {
+    public let known: Bool
+    /// Millionths of a dollar. Absent whenever `known` is false, and
+    /// treated as absent even when it is not: a claimed figure with no
+    /// number is a contradiction, and the safe reading of it is that
+    /// nothing was measured.
+    public let micros: UInt64?
+
+    public enum CodingKeys: String, CodingKey, CaseIterable {
+        case known, micros
+    }
+
+    /// What a payload with no spend block says: nothing.
+    public static let none = HarnessSpend(known: false, micros: nil)
+
+    public init(known: Bool, micros: UInt64?) {
+        self.known = known
+        self.micros = micros
+    }
+
+    /// The number to hand the shared sentence, in the convention that
+    /// sentence uses.
+    ///
+    /// ABSENCE IS OUT OF RANGE, never zero. A shell that passed `0` for a
+    /// figure nobody measured would get back `$0.00`, which is the one
+    /// rendering this whole block exists to prevent.
+    public var abiValue: Int64 {
+        guard known, let micros, let value = Int64(exactly: micros) else { return -1 }
+        return value
+    }
+}
+
 /// The whole `harness_list` answer.
 public struct HarnessList: Decodable, Equatable, Sendable {
     /// A fact about this build, not about the machine. False means the list
@@ -93,28 +130,47 @@ public struct HarnessList: Decodable, Equatable, Sendable {
     public let catalogPresent: Bool
     public let harnesses: [HarnessRow]
     public let activity: HarnessActivity
+    /// What today's calls cost, or the absence that must not read as zero.
+    ///
+    /// Defaulted rather than required, so a daemon older than the release
+    /// that reports it leaves the amount unknown instead of taking the whole
+    /// tool list down with it -- the same reasoning `HarnessActivity.none`
+    /// carries, and the safe direction here as well.
+    public let spend: HarnessSpend
     /// The port a connect would write. Nil when nothing here answers model
     /// calls, which is what the daemon refuses a connect with.
     public let destinationPort: UInt16?
 
     public enum CodingKeys: String, CodingKey, CaseIterable {
-        case harnesses, activity
+        case harnesses, activity, spend
         case catalogPresent = "catalog_present"
         case destinationPort = "destination_port"
     }
 
     /// What a payload this build cannot read says: nothing about any tool.
     public static let none = HarnessList(
-        catalogPresent: false, harnesses: [], activity: .none, destinationPort: nil)
+        catalogPresent: false, harnesses: [], activity: .none, spend: .none,
+        destinationPort: nil)
 
     public init(
         catalogPresent: Bool, harnesses: [HarnessRow], activity: HarnessActivity,
+        spend: HarnessSpend = .none,
         destinationPort: UInt16?
     ) {
         self.catalogPresent = catalogPresent
         self.harnesses = harnesses
         self.activity = activity
+        self.spend = spend
         self.destinationPort = destinationPort
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        catalogPresent = try c.decode(Bool.self, forKey: .catalogPresent)
+        harnesses = try c.decode([HarnessRow].self, forKey: .harnesses)
+        activity = try c.decode(HarnessActivity.self, forKey: .activity)
+        spend = (try? c.decode(HarnessSpend.self, forKey: .spend)) ?? .none
+        destinationPort = try c.decodeIfPresent(UInt16.self, forKey: .destinationPort)
     }
 }
 
@@ -247,6 +303,10 @@ public struct HarnessCalls: Sendable {
     /// The sentence a plan's outcome carries, or the empty string for
     /// `changes`, whose changes are shown instead.
     public let outcomeLine: @Sendable (String) -> String
+    /// The amount sentence, for a number of millionths of a dollar.
+    /// Negative means not known, and answers the empty string -- never a
+    /// zero.
+    public let spendLine: @Sendable (Int64) -> String
 
     public init(
         stateCode: @escaping @Sendable (String) -> Int32,
@@ -254,7 +314,8 @@ public struct HarnessCalls: Sendable {
         actionAvailable: @escaping @Sendable (String, Bool, Bool) -> Bool,
         stateLine: @escaping @Sendable (String) -> String,
         lastCallLine: @escaping @Sendable (Int64) -> String,
-        outcomeLine: @escaping @Sendable (String) -> String
+        outcomeLine: @escaping @Sendable (String) -> String,
+        spendLine: @escaping @Sendable (Int64) -> String
     ) {
         self.stateCode = stateCode
         self.planOutcomeCode = planOutcomeCode
@@ -262,6 +323,7 @@ public struct HarnessCalls: Sendable {
         self.stateLine = stateLine
         self.lastCallLine = lastCallLine
         self.outcomeLine = outcomeLine
+        self.spendLine = spendLine
     }
 }
 
@@ -384,6 +446,22 @@ public enum HarnessSurface {
         let elapsed = now.timeIntervalSince(at)
         guard elapsed >= 0, elapsed.isFinite, elapsed < Double(Int64.max) else { return nil }
         let sentence = calls.lastCallLine(Int64(elapsed))
+        return sentence.isEmpty ? nil : sentence
+    }
+
+    /// What the calls answered on this computer cost today, or nothing.
+    ///
+    /// Assembled on the far side, like the state sentence and the when-line:
+    /// this shell hands over a number and renders whatever comes back. The
+    /// amount, its rounding and its window are all decided there.
+    ///
+    /// NIL WHEN THE FIGURE IS NOT KNOWN, and nil draws no line at all --
+    /// which is the whole point. A day nobody could measure and a day with
+    /// nothing on it are different facts, and the second says so in words.
+    /// `HarnessSpend.abiValue` is what keeps the first out of range on the
+    /// way across.
+    public static func spendSentence(_ list: HarnessList, calls: HarnessCalls) -> String? {
+        let sentence = calls.spendLine(list.spend.abiValue)
         return sentence.isEmpty ? nil : sentence
     }
 

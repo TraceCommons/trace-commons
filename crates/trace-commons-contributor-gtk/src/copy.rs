@@ -2099,6 +2099,15 @@ pub use trace_commons_contributor::routing_copy::{
 // `harness_last_call_line` is assembled on the shared side rather than
 // exported as a template with a hole in it, the same rule `serving_line`
 // follows: a shell handed a pattern is a fourth place the wording drifts.
+//
+// `harness_spend_line` is assembled there for that reason and for a sharper
+// one: it decides what an amount NOBODY COULD MEASURE looks like. A shell
+// formatting its own dollars has to make that decision itself, and the
+// answer it reaches for is zero -- which would tell a contributor with no
+// readable figure that they had spent nothing today. `HARNESSES_SPEND_SCOPE`
+// IS re-exported, because it is a fixed sentence and not a branch: it says
+// what the amount leaves out, and it is drawn beside the amount and only
+// when the amount is drawn.
 pub use trace_commons_contributor::private_inference_copy::{
     DESTINATION as PRIVATE_INFERENCE_DESTINATION, OFFER_ACCEPT as PRIVATE_INFERENCE_OFFER_ACCEPT,
     OFFER_ASKED_ONCE as PRIVATE_INFERENCE_OFFER_ASKED_ONCE,
@@ -2138,8 +2147,8 @@ pub use trace_commons_contributor::private_inference_copy::{
 pub use trace_commons_contributor::private_inference_copy::{
     HARNESS_CONNECT, HARNESS_DISCONNECT, HARNESS_NEEDS_RESTART, HARNESS_NOT_INSTALLED,
     HARNESS_PREVIEW_CANCEL, HARNESS_PREVIEW_CONFIRM, HARNESS_PREVIEW_TITLE, HARNESS_SLOT_TAKEN,
-    HARNESSES_NONE_FOUND, HARNESSES_TITLE, HARNESSES_WHAT, harness_last_call_line,
-    harness_outcome_line, harness_state_line,
+    HARNESSES_NONE_FOUND, HARNESSES_SPEND_SCOPE, HARNESSES_TITLE, HARNESSES_WHAT,
+    harness_last_call_line, harness_outcome_line, harness_spend_line, harness_state_line,
 };
 
 // --- The redaction witness ---------------------------------------------

@@ -40,6 +40,9 @@ public struct PrivateInferenceCopy: Decodable, Equatable, Sendable {
     public let harnessesTitle: String
     /// The line under that heading, qualifying what the list is.
     public let harnessesWhat: String
+    /// What the amount `HarnessSurface.spendSentence` names does and does
+    /// not cover. Drawn beside that sentence and only when it is drawn.
+    public let harnessesSpendScope: String
     public let harnessNotConnected: String
     public let harnessConnectedNothingSeen: String
     /// The only per-harness state that means a call was answered.
@@ -100,6 +103,7 @@ public struct PrivateInferenceCopy: Decodable, Equatable, Sendable {
         case trayOpenToTurnOn = "tray_open_to_turn_on"
         case harnessesTitle = "harnesses_title"
         case harnessesWhat = "harnesses_what"
+        case harnessesSpendScope = "harnesses_spend_scope"
         case harnessNotConnected = "harness_not_connected"
         case harnessConnectedNothingSeen = "harness_connected_nothing_seen"
         case harnessAnswering = "harness_answering"

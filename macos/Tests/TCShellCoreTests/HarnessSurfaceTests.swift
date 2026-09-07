@@ -21,6 +21,7 @@ final class HarnessSurfaceTests: XCTestCase {
          "state_start_failed":"S-FAILED","state_crashed":"S-CRASHED",
          "quit_also_stops":"QUIT","write_unconfirmed":"UNCONFIRMED","settings_moved":"MOVED","tray_turn_off":"TRAYOFF","tray_open_to_turn_on":"TRAYON",
          "harnesses_title":"H-TITLE","harnesses_what":"H-WHAT",
+         "harnesses_spend_scope":"H-SPEND-SCOPE",
          "harness_not_connected":"H-NOT-CONNECTED",
          "harness_connected_nothing_seen":"H-NOTHING-SEEN",
          "harness_answering":"H-ANSWERING","harness_connect":"H-CONNECT",
@@ -95,7 +96,8 @@ final class HarnessSurfaceTests: XCTestCase {
             actionAvailable: { _, _, _ in false },
             stateLine: { _ in "" },
             lastCallLine: { _ in "" },
-            outcomeLine: { _ in "" })
+            outcomeLine: { _ in "" },
+            spendLine: { _ in "" })
         XCTAssertEqual(HarnessSurface.state("answering", calls: calls), .answering)
         XCTAssertEqual(seen.values, ["answering"])
     }
@@ -131,7 +133,8 @@ final class HarnessSurfaceTests: XCTestCase {
                 return label == "answering" ? "SHARED-ANSWERING" : ""
             },
             lastCallLine: { _ in "" },
-            outcomeLine: { _ in "" })
+            outcomeLine: { _ in "" },
+            spendLine: { _ in "" })
         XCTAssertEqual(
             HarnessSurface.stateSentence("answering", calls: calls), "SHARED-ANSWERING")
         XCTAssertEqual(seen.values, ["answering"])
@@ -160,7 +163,8 @@ final class HarnessSurfaceTests: XCTestCase {
                 }
             },
             lastCallLine: { _ in "" },
-            outcomeLine: { _ in "" })
+            outcomeLine: { _ in "" },
+            spendLine: { _ in "" })
 
         XCTAssertEqual(HarnessSurface.stateSentence("not_connected", calls: calls), "H-NOT-CONNECTED")
         XCTAssertEqual(HarnessSurface.stateSentence("connected_no_calls", calls: calls), nothingSeen)
@@ -191,7 +195,8 @@ final class HarnessSurfaceTests: XCTestCase {
                 seen.record(seconds)
                 return seconds < 0 ? "" : "SHARED-WHEN"
             },
-            outcomeLine: { _ in "" })
+            outcomeLine: { _ in "" },
+            spendLine: { _ in "" })
 
         let withCall = Self.oneRow.replacingOccurrences(
             of: "\"last_call_at\":null,", with: "\"last_call_at\":\"2026-01-01T00:00:00Z\",")
@@ -205,6 +210,80 @@ final class HarnessSurfaceTests: XCTestCase {
         let none = HarnessSurface.list(fromJSON: Self.oneRow).harnesses[0]
         XCTAssertNil(HarnessSurface.lastCallSentence(none, now: now, calls: calls))
         XCTAssertEqual(seen.values, [120])
+    }
+
+    /// The amount is assembled on the far side, and UNKNOWN draws no line.
+    ///
+    /// The assertion that carries the weight is the second one: a list whose
+    /// `spend.known` is false must produce nil, not a sentence -- and the
+    /// number this shell hands over for it must be out of range, so the far
+    /// side cannot mistake it for a measured zero.
+    func testTheAmountIsAssembledOnTheFarSideAndUnknownDrawsNothing() {
+        let seen = SecondsBox()
+        let calls = HarnessCalls(
+            stateCode: { _ in 31 },
+            planOutcomeCode: { _ in 40 },
+            actionAvailable: { _, _, _ in false },
+            stateLine: { _ in "" },
+            lastCallLine: { _ in "" },
+            outcomeLine: { _ in "" },
+            spendLine: { micros in
+                seen.record(micros)
+                return micros < 0 ? "" : "SHARED-AMOUNT"
+            })
+
+        let known = Self.oneRow.replacingOccurrences(
+            of: "\"catalog_present\":false,",
+            with: "\"catalog_present\":false,\"spend\":{\"known\":true,\"micros\":1230000},")
+        XCTAssertEqual(
+            HarnessSurface.spendSentence(
+                HarnessSurface.list(fromJSON: known), calls: calls),
+            "SHARED-AMOUNT")
+        XCTAssertEqual(seen.values, [1_230_000])
+
+        // A measured zero is a figure, and reaches the far side as one.
+        let zero = Self.oneRow.replacingOccurrences(
+            of: "\"catalog_present\":false,",
+            with: "\"catalog_present\":false,\"spend\":{\"known\":true,\"micros\":0},")
+        XCTAssertEqual(
+            HarnessSurface.spendSentence(
+                HarnessSurface.list(fromJSON: zero), calls: calls),
+            "SHARED-AMOUNT")
+        XCTAssertEqual(seen.values, [1_230_000, 0])
+
+        // Not known draws no line, and crosses as the out-of-range value --
+        // never as zero.
+        let unknown = Self.oneRow.replacingOccurrences(
+            of: "\"catalog_present\":false,",
+            with: "\"catalog_present\":false,\"spend\":{\"known\":false,\"micros\":null},")
+        XCTAssertNil(
+            HarnessSurface.spendSentence(
+                HarnessSurface.list(fromJSON: unknown), calls: calls))
+        XCTAssertEqual(seen.values.last, -1)
+
+        // A payload with no spend block at all is not known either.
+        XCTAssertNil(
+            HarnessSurface.spendSentence(
+                HarnessSurface.list(fromJSON: Self.oneRow), calls: calls))
+    }
+
+    /// `known` true with no number is a contradiction, and the safe reading
+    /// of it is "not known" -- never zero.
+    func testAClaimedFigureWithNoNumberIsNotKnown() {
+        let calls = HarnessCalls(
+            stateCode: { _ in 31 },
+            planOutcomeCode: { _ in 40 },
+            actionAvailable: { _, _, _ in false },
+            stateLine: { _ in "" },
+            lastCallLine: { _ in "" },
+            outcomeLine: { _ in "" },
+            spendLine: { micros in micros < 0 ? "" : "SHARED-AMOUNT" })
+        let contradictory = Self.oneRow.replacingOccurrences(
+            of: "\"catalog_present\":false,",
+            with: "\"catalog_present\":false,\"spend\":{\"known\":true,\"micros\":null},")
+        XCTAssertNil(
+            HarnessSurface.spendSentence(
+                HarnessSurface.list(fromJSON: contradictory), calls: calls))
     }
 
     /// The running copy of a tool read its settings when it started. The
@@ -259,7 +338,8 @@ final class HarnessSurfaceTests: XCTestCase {
                 return action == "disconnect"
             },
             stateLine: { _ in "" }, lastCallLine: { _ in "" },
-            outcomeLine: { _ in "" })
+            outcomeLine: { _ in "" },
+            spendLine: { _ in "" })
         let row = HarnessSurface.list(fromJSON: Self.oneRow).harnesses[0]
 
         // The fixture reports can_connect true, can_disconnect false. The spy
@@ -286,7 +366,8 @@ final class HarnessSurfaceTests: XCTestCase {
             actionAvailable: { _, _, _ in true },
             stateLine: { _ in "" },
             lastCallLine: { _ in "" },
-            outcomeLine: { _ in "" })
+            outcomeLine: { _ in "" },
+            spendLine: { _ in "" })
         let changes = HarnessSurface.plan(
             fromJSON: #"""
                 {"id":"claude","action":"connect","outcome":"changes","plan_id":"c0ffee",
@@ -312,7 +393,8 @@ final class HarnessSurfaceTests: XCTestCase {
             stateCode: { _ in 31 }, planOutcomeCode: { _ in 41 },
             actionAvailable: { _, _, _ in true },
             stateLine: { _ in "" }, lastCallLine: { _ in "" },
-            outcomeLine: { _ in "" })
+            outcomeLine: { _ in "" },
+            spendLine: { _ in "" })
         let plan = HarnessSurface.plan(
             fromJSON: #"""
                 {"id":"claude","action":"connect","outcome":"changes","plan_id":null,
@@ -341,7 +423,8 @@ final class HarnessSurfaceTests: XCTestCase {
             outcomeLine: { label in
                 seen.record(label)
                 return label == "changes" ? "" : "SHARED-\(label)"
-            })
+            },
+            spendLine: { _ in "" })
         for outcome in [
             "noop", "unparseable", "not_installed", "entry_unusable", "no_config_path",
         ] {
@@ -382,7 +465,8 @@ final class HarnessSurfaceTests: XCTestCase {
             actionAvailable: { _, _, _ in false },
             stateLine: { _ in "H-NOT-CONNECTED" },
             lastCallLine: { _ in "" },
-            outcomeLine: { _ in "" })
+            outcomeLine: { _ in "" },
+            spendLine: { _ in "" })
         let present = HarnessSurface.list(fromJSON: Self.oneRow).harnesses[0]
         XCTAssertEqual(
             HarnessSurface.rowSentence(present, copy: copy(), calls: calls), "H-NOT-CONNECTED")
@@ -418,7 +502,8 @@ final class HarnessSurfaceTests: XCTestCase {
             stateCode: { _ in 31 }, planOutcomeCode: { _ in 41 },
             actionAvailable: { _, _, _ in true },
             stateLine: { _ in "" }, lastCallLine: { _ in "" },
-            outcomeLine: { _ in "" })
+            outcomeLine: { _ in "" },
+            spendLine: { _ in "" })
         let plan = HarnessSurface.plan(
             fromJSON: #"""
                 {"id":"claude","action":"connect","outcome":"changes","plan_id":"c0ffee","path":"/p",

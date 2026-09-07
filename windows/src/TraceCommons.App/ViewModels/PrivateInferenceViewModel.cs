@@ -274,6 +274,24 @@ public sealed class PrivateInferenceViewModel : INotifyPropertyChanged
     public string HarnessesWhat => _copy?.HarnessesWhat ?? string.Empty;
 
     /// <summary>
+    /// What today's calls cost, assembled on the far side, or the empty
+    /// string when nobody could measure it.
+    /// </summary>
+    /// <remarks>
+    /// Empty is drawn as no line at all, and the scope sentence below is
+    /// hidden with it: a qualification of a figure that is not on screen
+    /// reads as a qualification of the list.
+    /// </remarks>
+    public string HarnessesSpend => _harnessSpend;
+
+    /// <summary>What that figure leaves out. Drawn only beside the figure.</summary>
+    public string HarnessesSpendScope => _copy?.HarnessesSpendScope ?? string.Empty;
+
+    public bool HasHarnessesSpend => _harnessSpend.Length > 0;
+
+    private string _harnessSpend = string.Empty;
+
+    /// <summary>
     /// Said in terms of what was looked for, never in terms of which tools
     /// exist. The catalog channel is inert in this build, so this list is what
     /// this app knows how to look for and not a claim about the machine.
@@ -314,9 +332,15 @@ public sealed class PrivateInferenceViewModel : INotifyPropertyChanged
                 Harnesses.Add(new HarnessRowViewModel(row, _copy));
             }
 
+            // Read from the listing, never held over from the last one: an
+            // amount a later read could not measure must go, not linger.
+            _harnessSpend = HarnessSurface.SpendSentence(listing);
+
             _harnessesRead = true;
             Raise(nameof(HasHarnesses));
             Raise(nameof(HasNoHarnesses));
+            Raise(nameof(HarnessesSpend));
+            Raise(nameof(HasHarnessesSpend));
         }
         catch
         {

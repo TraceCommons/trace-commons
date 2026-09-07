@@ -2415,6 +2415,44 @@ pub extern "C" fn tc_harness_last_call_line(seconds_ago: i64) -> *mut c_char {
     })
 }
 
+/// What the calls answered on this computer have cost since midnight,
+/// assembled.
+///
+/// `micros` is millionths of a dollar, from a `harness_list` answer's
+/// `spend.micros`. ABSENCE IS AN OUT-OF-RANGE INTEGER, the convention
+/// [`tc_harness_last_call_line`] and [`tc_private_inference_serving_line`]
+/// already use: any negative value -- which is what a shell passes for
+/// `spend.known == false` -- gives the empty string, drawn as no line at
+/// all.
+///
+/// THAT ENCODING IS THE POINT OF THIS EXPORT. "Nobody could measure this"
+/// and "nothing was spent" are different facts, and a shell that formatted
+/// its own amount would have to decide for itself what the first one looks
+/// like. Every shell that has ever had to make that decision has eventually
+/// rendered it as zero, which puts a confident figure in front of a
+/// contributor that nothing supports -- the same class of defect as painting
+/// a state this build has no words for as working.
+///
+/// The rounding is here for the smaller half of the same reason: three
+/// shells rounding money three ways is three answers to one question.
+///
+/// The scope the figure does not cover -- another computer, a browser, work
+/// a monthly plan already paid for -- is the payload's
+/// `harnesses_spend_scope`, drawn beside this sentence and only when this
+/// sentence is drawn at all.
+///
+/// Returns an owned string; free it with [`tc_string_free`]. NULL only on a
+/// caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_harness_spend_line(micros: i64) -> *mut c_char {
+    guarded_string_no_err(|| {
+        let micros = u64::try_from(micros).ok();
+        Ok(to_owned_cstring(
+            &trace_commons_contributor::private_inference_copy::harness_spend_line(micros),
+        ))
+    })
+}
+
 /// Whether one action may be offered for a tool in this state.
 ///
 /// `action` is `connect` or `disconnect`; `installed` and `connected` are the
