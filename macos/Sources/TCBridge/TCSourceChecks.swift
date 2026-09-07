@@ -68,6 +68,7 @@ public struct SourceSettingsCopy: Decodable, Sendable {
     public let tools: [String: Tool]
     public struct Tool: Decodable, Sendable {
         public let key, decline: String
+        public let explanation, chooseFolder: String?
         public let unsetScansConventional: Bool
     }
 }

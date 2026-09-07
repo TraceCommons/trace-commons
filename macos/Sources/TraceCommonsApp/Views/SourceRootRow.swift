@@ -31,6 +31,10 @@ struct SourceRootRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: TC.Space.xs) {
             Text(kind.displayName).font(TC.Font_.body.weight(.semibold))
+            if let explanation = Self.copy?.tools[kind.rawValue]?.explanation {
+                Text(explanation).font(TC.Font_.meta).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             VStack(alignment: .leading, spacing: TC.Space.s) {
                 answerLine
                 choiceButtons
@@ -79,7 +83,7 @@ struct SourceRootRow: View {
             Text(candidate.path).font(TC.Font_.ledger).foregroundStyle(.secondary)
                 .lineLimit(1).truncationMode(.head)
             Text(candidate.evidence(now: Date())).font(TC.Font_.body).foregroundStyle(.secondary)
-        } else {
+        } else if copy.tools[kind.rawValue]?.explanation == nil {
             Text(copy.noCandidate).font(TC.Font_.body).foregroundStyle(.secondary)
         }
     }
@@ -92,7 +96,7 @@ struct SourceRootRow: View {
                     Button(copy.watchCandidate) { onWatchCandidate(candidate) }
                         .disabled(choice == .watch(path: candidate.path))
                 }
-                Button(copy.chooseFolder) {
+                Button(tool.chooseFolder ?? copy.chooseFolder) {
                     if let path = Self.chooseFolder() { onChoose(path) }
                 }
                 Button(tool.decline) { onDecline() }.disabled(choice == .off)
