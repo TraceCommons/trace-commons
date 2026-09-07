@@ -989,13 +989,22 @@ public sealed partial class MainWindow : Window
     }
 
     /// <summary>
-    /// Flips the switch from the keyboard, and shows the page while doing it.
+    /// Stops answering from the keyboard, or opens the destination.
     /// </summary>
     /// <remarks>
-    /// The page comes up rather than the switch flipping silently, because
-    /// the answer to "did that work" is a sentence the daemon has not sent
-    /// yet: a chord that toggled without showing the state line would be a
-    /// change nobody could see the result of.
+    /// Asymmetric, and it asks <see cref="PrivateInferenceTrayEntry.ActionFor"/>
+    /// rather than deciding here -- the same table the tray row asks.
+    ///
+    /// This chord fires with nothing on screen. Turning answering OFF only
+    /// reduces what this computer will answer, so it may act. Turning it ON
+    /// opens a listener to everything running on this machine, charged to the
+    /// contributor's accounts, and that must not happen with
+    /// <c>offer_exposure</c> unread. Showing the page in the same breath as
+    /// the write puts the sentence on screen simultaneously with the change,
+    /// not before it, which is not consent.
+    ///
+    /// It also SETS rather than inverts. An inverted press against a stale
+    /// cached position is an enable.
     /// </remarks>
     private async void OnTogglePrivateInferenceAccelerator(
         KeyboardAccelerator sender,
@@ -1003,9 +1012,11 @@ public sealed partial class MainWindow : Window
     {
         args.Handled = true;
         ShowPrivateInferencePane();
-        if (PrivateInferencePane.Content is PrivateInferenceView page)
+        if (PrivateInferencePane.Content is PrivateInferenceView page
+            && PrivateInferenceTrayEntry.ActionFor(page.IsAnswering)
+                == PrivateInferenceTrayAction.StopAnswering)
         {
-            await page.ToggleAsync();
+            await page.TurnOffAsync();
         }
     }
 

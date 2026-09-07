@@ -63,6 +63,12 @@ public sealed partial class PrivateInferenceView : UserControl
     public Task TurnOffAsync() => ViewModel.SetAsync(false);
 
     /// <summary>
+    /// The switch's position, so a caller can ask the shared table what a
+    /// press may do rather than deciding for itself.
+    /// </summary>
+    public bool IsAnswering => ViewModel.Enabled;
+
+    /// <summary>
     /// "Send this tool's calls here", for one row.
     /// </summary>
     /// <remarks>

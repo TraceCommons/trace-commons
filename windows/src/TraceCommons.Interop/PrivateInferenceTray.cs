@@ -69,8 +69,21 @@ public readonly record struct PrivateInferenceTrayEntry
     /// What a press on the action row does. Off it opens the destination and
     /// writes nothing; on it stops answering.
     /// </summary>
-    public PrivateInferenceTrayAction Action =>
-        On ? PrivateInferenceTrayAction.StopAnswering : PrivateInferenceTrayAction.OpenDestination;
+    public PrivateInferenceTrayAction Action => ActionFor(On);
+
+    /// <summary>
+    /// The same rule, for a caller that has no entry -- the keyboard chord.
+    /// </summary>
+    /// <remarks>
+    /// It is here rather than restated at the call site because the chord is
+    /// the surface where getting it wrong is worst: it fires with nothing on
+    /// screen, so a chord that flipped the switch could open a listener to
+    /// everything on this machine without the exposure sentence ever being
+    /// shown. Off, it opens the destination and writes nothing; on, it stops
+    /// answering. One table, asked twice.
+    /// </remarks>
+    public static PrivateInferenceTrayAction ActionFor(bool on) =>
+        on ? PrivateInferenceTrayAction.StopAnswering : PrivateInferenceTrayAction.OpenDestination;
 
     /// <summary>
     /// Whether pressing the action row writes a setting at all. False

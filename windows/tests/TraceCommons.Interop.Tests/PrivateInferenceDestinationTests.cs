@@ -553,4 +553,40 @@ public class PrivateInferenceDestinationTests
         Assert.True(end > start, $"{signature} does not close");
         return source[start..end];
     }
+    /// <summary>
+    /// The keyboard chord may stop answering and may never start it.
+    /// </summary>
+    /// <remarks>
+    /// Asserted on the shared rule and on the handler's source together,
+    /// because the rule alone proves nothing about what the chord does with
+    /// it: the previous handler called ToggleAsync, which inverts the switch
+    /// and writes straight through, so a single keypress could open a
+    /// listener to everything on this machine with the exposure sentence
+    /// unread.
+    /// </remarks>
+    [Fact]
+    public void TheKeyboardChordCanStopAnsweringAndCanNeverStartIt()
+    {
+        Assert.Equal(
+            PrivateInferenceTrayAction.StopAnswering,
+            PrivateInferenceTrayEntry.ActionFor(on: true));
+        Assert.Equal(
+            PrivateInferenceTrayAction.OpenDestination,
+            PrivateInferenceTrayEntry.ActionFor(on: false));
+
+        string handler = ShellSource("TraceCommons.App/MainWindow.xaml.cs");
+        int at = handler.IndexOf("OnTogglePrivateInferenceAccelerator", StringComparison.Ordinal);
+        Assert.True(at >= 0, "the accelerator handler is in this shell");
+        string body = handler[at..];
+        int end = body.IndexOf("\n    private ", StringComparison.Ordinal);
+        if (end > 0)
+        {
+            body = body[..end];
+        }
+
+        Assert.DoesNotContain("ToggleAsync", body);
+        Assert.Contains("ActionFor", body);
+        Assert.Contains("TurnOffAsync", body);
+    }
+
 }
