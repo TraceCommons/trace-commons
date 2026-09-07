@@ -278,7 +278,7 @@ impl WitnessService {
 
     pub async fn witness_admission_contribution(
         &self,
-        request: WitnessContributionRequest,
+        mut request: WitnessContributionRequest,
     ) -> Result<
         (
             WitnessContributionResponse,
@@ -303,6 +303,7 @@ impl WitnessService {
             chrono::Utc::now().timestamp(),
             self.inference_policy.max_body_bytes(),
         )?;
+        call.restrict_contribution(&mut request.raw_contribution)?;
         let response = self
             .witness_contribution(request)
             .await

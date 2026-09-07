@@ -89,6 +89,12 @@ pub fn verify_admission_call(
     now: i64,
     max_body_bytes: usize,
 ) -> Result<VerifiedAdmissionCall, AdmissionEvidenceError> {
+    // This receipt profile binds exactly one exchange. Companion events are
+    // not evidence-covered, even if their source claims they are the same
+    // session. Ordinary invited contributions do not use this boundary.
+    if raw.events.len() != 1 {
+        return Err(AdmissionEvidenceError);
+    }
     let event = raw
         .events
         .iter()
@@ -110,6 +116,8 @@ pub fn verify_admission_call(
         .and_then(|v| v.as_str())
         .unwrap_or_default();
     if receipt.signing_algo != ReceiptAlgo::Ed25519
+        || receipt.signature_kind
+            == crate::near_attestation::receipt::ReceiptSignatureKind::Unrecognised
         || !trust.accepts_request(model, request.len() as u64)
     {
         return Err(AdmissionEvidenceError);
@@ -140,6 +148,54 @@ pub fn verify_admission_call(
 }
 
 impl VerifiedAdmissionCall {
+    /// A receipt does not certify the importer's tool outcomes, replay claims,
+    /// cost estimates or companion metadata. Retain only the verified exchange
+    /// and source provenance before redaction and contributor review.
+    pub(crate) fn restrict_contribution(
+        &self,
+        raw: &mut RawTraceContribution,
+    ) -> Result<(), AdmissionEvidenceError> {
+        if raw.events.len() != 1 {
+            return Err(AdmissionEvidenceError);
+        }
+        let (request, response) =
+            crate::witness_service::inference::exchange_bodies(&raw.events[0])
+                .ok_or(AdmissionEvidenceError)?;
+        if hash_hex(request.as_bytes()) != self.request_hash
+            || hash_hex(response.as_bytes()) != self.response_hash
+        {
+            return Err(AdmissionEvidenceError);
+        }
+        let response = response.to_owned();
+        let payload = serde_json::json!({"request": {"body": request}, "response": {}});
+        raw.outcome = Default::default();
+        raw.value = Default::default();
+        raw.embedding_analysis = None;
+        raw.conversation_id = None;
+        raw.replay = trace_commons_protocol::trace_contribution::ReplayMetadata {
+            replayable: false,
+            required_tools: Vec::new(),
+            tool_manifest_hashes: Default::default(),
+            expected_assertions: Vec::new(),
+            replay_notes: Vec::new(),
+        };
+        raw.ironclaw.feature_flags.retain(|key, _| key == "agent");
+        raw.ironclaw.model_name = Some(self.model.clone());
+        raw.ironclaw.engine_version = None;
+        let event = &mut raw.events[0]; // verify_admission_call required exactly one.
+        event.structured_payload = payload;
+        event.content = Some(response);
+        event.parent_event_id = None;
+        event.tool_name = None;
+        event.tool_call_id = None;
+        event.latency_ms = None;
+        event.token_counts = None;
+        event.cost_usd = None;
+        event.success = None;
+        event.failure_modes.clear();
+        Ok(())
+    }
+
     /// Called only after the redactor has produced the immutable returned envelope.
     pub fn certify(
         self,

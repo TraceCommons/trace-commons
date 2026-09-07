@@ -205,7 +205,10 @@ pub(super) async fn reserve(
             Some(evidence.challenge_sha256),
         )
     } else {
-        (None, None)
+        // NEAR account bootstrap establishes identity, not invitation authority.
+        // Every new contribution on this path needs receipt-bound evidence;
+        // the historical trial-window budget must not authorize ordinary data.
+        return Err(denied());
     };
     let reservation = AdmissionReservation {
         tenant_id: tenant.tenant_id().to_string(),

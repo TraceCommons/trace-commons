@@ -850,7 +850,7 @@ impl ContributionRedactor for PipelineContributionRedaction {
 ///
 /// [`CorrespondenceProof`]: crate::redaction_witness::correspondence::CorrespondenceProof
 pub async fn witness_contribution(
-    request: WitnessContributionRequest,
+    mut request: WitnessContributionRequest,
     policy: &InferenceAttestationPolicy,
     redactor: &dyn ContributionRedactor,
     signer: &dyn Signer,
@@ -864,6 +864,7 @@ pub async fn witness_contribution(
         &WitnessedSession::Contribution(&request.raw_contribution),
     )?;
 
+    inference::strip_raw_inference_bodies(&mut request.raw_contribution);
     let RedactedContribution {
         mut envelope,
         policy_version,
@@ -896,6 +897,16 @@ pub async fn witness_contribution(
     // every path that does return one goes through here, so there is no way
     // out of this function that carries a body.
     strip_inference_bodies(&mut envelope);
+    // A classifier can echo a secret back. Scan the final contributed leaves
+    // and dynamic keys, and refuse an incomplete scan rather than certifying it.
+    let residual = trace_commons_protocol::trace_contribution::residual_secret_labels(
+        &DeterministicTraceRedactor::deterministic_only(Vec::new()),
+        &envelope,
+    )
+    .map_err(|_| WitnessError::RedactionFailed)?;
+    if !residual.is_empty() {
+        return Err(WitnessError::RedactionFailed);
+    }
 
     // The single serialisation on this path. `serde_json::to_string` rather
     // than `to_vec` so the same allocation can be handed to
@@ -2072,6 +2083,134 @@ mod tests {
         assert!(!artifact.contains(RESPONSE_BODY_MARKER));
     }
     #[tokio::test]
+    async fn structured_witness_removes_pii_from_contributed_metadata() {
+        let mut request = contribution_request(SURVIVOR);
+        request.raw_contribution.conversation_id = Some(CLASSIFIER_ONLY_PII.into());
+        request
+            .raw_contribution
+            .ironclaw
+            .feature_flags
+            .insert("imported-provenance".into(), CLASSIFIER_ONLY_PII.into());
+        request
+            .raw_contribution
+            .replay
+            .replay_notes
+            .push(CLASSIFIER_ONLY_PII.into());
+        request
+            .raw_contribution
+            .value
+            .explanation
+            .push(CLASSIFIER_ONLY_PII.into());
+        let redactor = PipelineContributionRedaction::with_privacy_filter(
+            Vec::new(),
+            Arc::new(NameRemovingFilter),
+            PrivacyFilterBackendTag::SelfHosted,
+        );
+        let response = witness_contribution(
+            request,
+            &redactor,
+            &TestSigner::new("metadata-witness"),
+            &TestEnclave,
+        )
+        .await
+        .unwrap();
+        let artifact = String::from_utf8(response.envelope_bytes).unwrap();
+        assert!(
+            !artifact.contains(CLASSIFIER_ONLY_PII),
+            "certified metadata must not retain the planted name"
+        );
+        assert!(artifact.contains(SURVIVOR), "positive content control");
+    }
+
+    #[tokio::test]
+    async fn structured_witness_refuses_secret_echoed_by_classifier() {
+        struct EchoSecret;
+        #[async_trait]
+        impl PrivacyFilterAdapter for EchoSecret {
+            async fn redact_text(
+                &self,
+                text: &str,
+            ) -> Result<
+                Option<trace_commons_protocol::trace_contribution::SafePrivacyFilterRedaction>,
+                trace_commons_protocol::trace_contribution::TraceContributionError,
+            > {
+                Ok(Some(
+                    trace_commons_protocol::trace_contribution::SafePrivacyFilterRedaction {
+                        redacted_text: if text == SURVIVOR {
+                            SECRET.into()
+                        } else {
+                            text.into()
+                        },
+                        summary: Default::default(),
+                        report: Default::default(),
+                    },
+                ))
+            }
+        }
+        let redactor = PipelineContributionRedaction::with_privacy_filter(
+            Vec::new(),
+            Arc::new(EchoSecret),
+            PrivacyFilterBackendTag::SelfHosted,
+        );
+        assert!(
+            witness_contribution(
+                contribution_request(SURVIVOR),
+                &redactor,
+                &TestSigner::new("metadata-witness"),
+                &TestEnclave
+            )
+            .await
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn structured_witness_refuses_colliding_redacted_metadata_keys() {
+        let mut request = contribution_request(SURVIVOR);
+        request
+            .raw_contribution
+            .ironclaw
+            .feature_flags
+            .insert(CLASSIFIER_ONLY_PII.into(), "first".into());
+        request
+            .raw_contribution
+            .ironclaw
+            .feature_flags
+            .insert("<PROSE_NAME>".into(), "second".into());
+        let redactor = PipelineContributionRedaction::with_privacy_filter(
+            Vec::new(),
+            Arc::new(NameRemovingFilter),
+            PrivacyFilterBackendTag::SelfHosted,
+        );
+        assert!(
+            witness_contribution(
+                request,
+                &redactor,
+                &TestSigner::new("metadata-witness"),
+                &TestEnclave
+            )
+            .await
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn structured_witness_refuses_metadata_beyond_classifier_budget() {
+        let mut request = contribution_request(SURVIVOR);
+        request.raw_contribution.conversation_id = Some("x".repeat(32_001));
+        assert!(
+            witness_contribution(
+                request,
+                &contribution_redactor(),
+                &TestSigner::new("metadata-witness"),
+                &TestEnclave
+            )
+            .await
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
     async fn admission_evidence_binds_trusted_final_call_account_and_witness_artifact() {
         use crate::admission_evidence::{AdmissionProviderTrust, verify_admission_evidence};
         use ring::signature::KeyPair as _;
@@ -2130,10 +2269,41 @@ mod tests {
         event.structured_payload = serde_json::json!({"request":{"method":"POST","body":request_body},"response":{"status":200}});
         event.content = Some(response_body.into());
         request.offered_receipt = Some(receipt);
+        // A valid receipt for the final exchange does not cover companion
+        // history supplied by an arbitrary importer.
+        assert!(
+            service
+                .witness_admission_contribution(request.clone())
+                .await
+                .is_err(),
+            "unbound companion history must not acquire admission authority"
+        );
+        let last = request.raw_contribution.events.pop().unwrap();
+        request.raw_contribution.events = vec![last];
         let (response, evidence, signature) = service
             .witness_admission_contribution(request.clone())
             .await
             .unwrap();
+        // Gateway and provider-TEE signatures retain distinct receipt kinds.
+        let mut gateway_request = request.clone();
+        let gateway_text = format!(
+            "{}:{}",
+            hash_hex(request_body.as_bytes()),
+            hash_hex(response_body.as_bytes())
+        );
+        gateway_request.offered_receipt = Some(ReceiptPayload {
+            signature: hex::encode(provider.sign(gateway_text.as_bytes()).as_ref()),
+            signing_address: provider_key.clone(),
+            signing_algo: crate::near_attestation::receipt::ReceiptAlgo::Ed25519,
+            signature_kind: crate::near_attestation::receipt::ReceiptSignatureKind::Gateway,
+            text: gateway_text,
+        });
+        assert!(
+            service
+                .witness_admission_contribution(gateway_request)
+                .await
+                .is_ok()
+        );
         assert_eq!(evidence.model, "fixture-model");
         assert_eq!(evidence.request_bytes, request_body.len() as u64);
         for restricted in [
@@ -2156,6 +2326,18 @@ mod tests {
                 .is_err()
             );
         }
+        let mut missing_kind = request.clone();
+        missing_kind
+            .offered_receipt
+            .as_mut()
+            .unwrap()
+            .signature_kind = crate::near_attestation::receipt::ReceiptSignatureKind::Unrecognised;
+        assert!(
+            service
+                .witness_admission_contribution(missing_kind)
+                .await
+                .is_err()
+        );
         let mut wrong_algo = request.offered_receipt.clone().unwrap();
         wrong_algo.signing_algo = crate::near_attestation::receipt::ReceiptAlgo::Ecdsa;
         assert!(

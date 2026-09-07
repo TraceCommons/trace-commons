@@ -963,6 +963,32 @@ pub fn strip_inference_bodies(envelope: &mut TraceContributionEnvelope) {
     }
 }
 
+/// Verification consumes the raw carriers first. Remove them before the
+/// classifier because none of these bytes belongs in the contributed artifact.
+/// This also keeps a bounded model-call body from consuming metadata scan budget.
+pub(super) fn strip_raw_inference_bodies(raw: &mut RawTraceContribution) {
+    for event in &mut raw.events {
+        if event.event_type != TraceContributionEventType::HttpExchange {
+            continue;
+        }
+        event.content = None;
+        for side in ["request", "response"] {
+            if let Some(part) = event
+                .structured_payload
+                .get_mut(side)
+                .and_then(Value::as_object_mut)
+            {
+                part.remove("body");
+                part.remove("headers");
+            }
+        }
+        if let Some(payload) = event.structured_payload.as_object_mut() {
+            payload.remove("body");
+            payload.remove("headers");
+        }
+    }
+}
+
 /// The flag a capture sets on an exchange whose stream was restarted.
 ///
 /// Read at `structured_payload["response"][STREAM_RESTARTED_MARKER]`, as a

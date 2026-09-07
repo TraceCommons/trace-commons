@@ -4017,6 +4017,98 @@ impl DeterministicTraceRedactor {
             .await
     }
 
+    // Metadata is also contributor input. Share the exact text pipeline and
+    // report state; never label an event-only scan as whole-artifact coverage.
+    fn redact_metadata_value<'a>(
+        &'a self,
+        value: Value,
+        redact_keys: bool,
+        depth: usize,
+        context: &'a mut MetadataRedactionContext<'_>,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Value, TraceContributionError>> + Send + 'a>,
+    > {
+        Box::pin(async move {
+            if depth > STRUCTURED_PAYLOAD_MAX_DEPTH {
+                return Err(TraceContributionError::RedactionFailed {
+                    reason: "metadata-redaction-budget".into(),
+                });
+            }
+            let charge = |text: &str, budget: &mut StructuredPayloadBudget| {
+                budget.nodes += 1;
+                budget.aggregate_bytes = budget.aggregate_bytes.saturating_add(text.len());
+                if budget.nodes > STRUCTURED_PAYLOAD_MAX_NODES
+                    || text.len() > STRUCTURED_PAYLOAD_MAX_FIELD_BYTES
+                    || budget.aggregate_bytes > STRUCTURED_PAYLOAD_MAX_AGGREGATE_BYTES
+                {
+                    Err(TraceContributionError::RedactionFailed {
+                        reason: "metadata-redaction-budget".into(),
+                    })
+                } else {
+                    Ok(())
+                }
+            };
+            if let Value::String(text) = &value {
+                charge(text, context.budget)?;
+            }
+            Ok(match value {
+                Value::String(text) => Value::String(
+                    self.redact_text_with_state_through_prose_filter(
+                        &text,
+                        context.state,
+                        context.report,
+                        context.summary,
+                    )
+                    .await?,
+                ),
+                Value::Array(values) => {
+                    let mut redacted = Vec::with_capacity(values.len());
+                    for value in values {
+                        redacted.push(
+                            self.redact_metadata_value(value, redact_keys, depth + 1, context)
+                                .await?,
+                        );
+                    }
+                    Value::Array(redacted)
+                }
+                Value::Object(values) => {
+                    let mut redacted = serde_json::Map::new();
+                    for (key, value) in values {
+                        // Serialized struct field names are fixed schema, not
+                        // contributor prose. Dynamic maps/payloads include keys.
+                        let child_keys = redact_keys
+                            || matches!(
+                                key.as_str(),
+                                "feature_flags" | "tool_manifest_hashes" | "expected_assertions"
+                            );
+                        let key = if redact_keys {
+                            charge(&key, context.budget)?;
+                            self.redact_text_with_state_through_prose_filter(
+                                &key,
+                                context.state,
+                                context.report,
+                                context.summary,
+                            )
+                            .await?
+                        } else {
+                            key
+                        };
+                        let value = self
+                            .redact_metadata_value(value, child_keys, depth + 1, context)
+                            .await?;
+                        if redacted.insert(key, value).is_some() {
+                            return Err(TraceContributionError::RedactionFailed {
+                                reason: "metadata-redaction-key-collision".into(),
+                            });
+                        }
+                    }
+                    Value::Object(redacted)
+                }
+                other => other,
+            })
+        })
+    }
+
     pub fn with_known_path_prefixes(
         prefixes: impl IntoIterator<Item = PathBuf>,
     ) -> Result<Self, PrivacyFilterConfigError> {
@@ -4359,12 +4451,68 @@ impl TraceRedactor for DeterministicTraceRedactor {
         let mut report = RedactionReport::default();
         let mut state = RedactionState::default();
         let mut privacy_filter_summary = None;
+        let mut metadata_budget = StructuredPayloadBudget::default();
+        // Preserve the correction's deliberate S5 refusal path below. It must
+        // not be rewritten into an apparently safe correction.
+        let mut trace = trace;
+        let correction = trace.outcome.human_correction.take();
+        let raw_events = std::mem::take(&mut trace.events);
+        let metadata =
+            serde_json::to_value(&trace).map_err(|_| TraceContributionError::RedactionFailed {
+                reason: "metadata-redaction-shape".into(),
+            })?;
+        let metadata = self
+            .redact_metadata_value(
+                metadata,
+                false,
+                0,
+                &mut MetadataRedactionContext {
+                    budget: &mut metadata_budget,
+                    state: &mut state,
+                    report: &mut report,
+                    summary: &mut privacy_filter_summary,
+                },
+            )
+            .await?;
+        let mut trace: RawTraceContribution = serde_json::from_value(metadata).map_err(|_| {
+            TraceContributionError::RedactionFailed {
+                reason: "metadata-redaction-shape".into(),
+            }
+        })?;
+        trace.events = raw_events;
+        trace.outcome.human_correction = correction;
         let mut events = Vec::with_capacity(trace.events.len());
         let trace_card_scopes = trace.consent.scopes.clone();
         let trace_card_channel = trace.ironclaw.channel;
         let trace_card_revocation_handle = trace.contributor.revocation_handle;
 
-        for raw_event in trace.events {
+        for mut raw_event in trace.events {
+            let content = raw_event.content.take();
+            let payload = std::mem::take(&mut raw_event.structured_payload);
+            let metadata = serde_json::to_value(&raw_event).map_err(|_| {
+                TraceContributionError::RedactionFailed {
+                    reason: "event-metadata-redaction-shape".into(),
+                }
+            })?;
+            let metadata = self
+                .redact_metadata_value(
+                    metadata,
+                    false,
+                    0,
+                    &mut MetadataRedactionContext {
+                        budget: &mut metadata_budget,
+                        state: &mut state,
+                        report: &mut report,
+                        summary: &mut privacy_filter_summary,
+                    },
+                )
+                .await?;
+            let mut raw_event: RawTraceContributionEvent = serde_json::from_value(metadata)
+                .map_err(|_| TraceContributionError::RedactionFailed {
+                    reason: "event-metadata-redaction-shape".into(),
+                })?;
+            raw_event.content = content;
+            raw_event.structured_payload = payload;
             let redacted_content = match raw_event.content {
                 Some(content) => {
                     // Same two stages, same order, as
@@ -4390,6 +4538,19 @@ impl TraceRedactor for DeterministicTraceRedactor {
                 &mut state,
             );
             report.merge(payload_report);
+            let structured_payload = self
+                .redact_metadata_value(
+                    structured_payload,
+                    true,
+                    0,
+                    &mut MetadataRedactionContext {
+                        budget: &mut metadata_budget,
+                        state: &mut state,
+                        report: &mut report,
+                        summary: &mut privacy_filter_summary,
+                    },
+                )
+                .await?;
 
             // The explicit field wins; the payload key stays a fallback so an
             // emitter that already wrote `{"tool_call_id": ...}` keeps working.
@@ -4653,6 +4814,13 @@ const STRUCTURED_PAYLOAD_MAX_DEPTH: usize = 24;
 struct StructuredPayloadBudget {
     aggregate_bytes: usize,
     nodes: usize,
+}
+
+struct MetadataRedactionContext<'a> {
+    budget: &'a mut StructuredPayloadBudget,
+    state: &'a mut RedactionState,
+    report: &'a mut RedactionReport,
+    summary: &'a mut Option<SafePrivacyFilterSummary>,
 }
 
 /// Recursively classify every string leaf and object key inside a
