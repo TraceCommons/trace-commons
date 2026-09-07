@@ -2307,6 +2307,74 @@ pub unsafe extern "C" fn tc_harness_plan_outcome_code(outcome: *const c_char) ->
     .unwrap_or(TC_HARNESS_PLAN_UNKNOWN)
 }
 
+/// The sentence for one `harness_list` row's `state`.
+///
+/// `state` is the same label [`tc_harness_state_code`] takes:
+/// `not_connected`, `connected_no_calls`, `answering`, `activity_shared` or
+/// `unknown`.
+///
+/// THE SENTENCE CROSSES, NOT ONLY THE CODE. Exporting the code alone left
+/// each shell to write its own map from a state onto one of the payload's
+/// sentences -- Swift, C# and Rust, three copies of one decision, agreeing
+/// today and drifting in silence tomorrow. This is that decision.
+///
+/// TWO STATES ANSWER THE EMPTY STRING, AND THE EMPTINESS IS THE POINT.
+/// `activity_shared` and `unknown` have no sentence and may not borrow one:
+/// the answering sentence says a call from *it* reached this computer, and
+/// the pronoun names the row's own tool, which is exactly what
+/// `activity_shared` says cannot be worked out. Render an empty string as no
+/// line at all, and never as the working light.
+///
+/// The empty string is also the answer for a label this build has never
+/// heard of, for a NULL or non-UTF-8 `state`, and on a caught panic.
+///
+/// Returns an owned string; free it with [`tc_string_free`]. NULL only on a
+/// caught panic.
+///
+/// # Safety
+/// `state`, if non-null, must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_harness_state_line(state: *const c_char) -> *mut c_char {
+    guarded_string_no_err(|| {
+        let state = if state.is_null() {
+            ""
+        } else {
+            unsafe { borrow_str(state) }.unwrap_or("")
+        };
+        Ok(to_owned_cstring(
+            trace_commons_contributor::private_inference_copy::harness_state_line(state),
+        ))
+    })
+}
+
+/// When the last call from a connected tool was answered here, assembled.
+///
+/// `seconds_ago` is how long ago the caller worked out that call arrived,
+/// from a `harness_list` row's `last_call_at`. ABSENCE IS AN OUT-OF-RANGE
+/// INTEGER, the convention [`tc_private_inference_serving_line`] already
+/// uses: any negative value -- including the one a shell passes for an
+/// absent or unparseable timestamp -- gives the empty string rather than a
+/// sentence about a call nobody saw. A shell draws nothing for it, because
+/// the state line above has already said the part that is true.
+///
+/// Assembled here rather than exported as a template with a hole in it, for
+/// the reason on [`tc_routing_token_line`]: a shell handed a pattern is a
+/// fourth place the wording drifts. Before this existed the sentence was
+/// reachable only by the one shell that links this crate natively, and the
+/// other two rendered nothing at all for the same state.
+///
+/// Returns an owned string; free it with [`tc_string_free`]. NULL only on a
+/// caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_harness_last_call_line(seconds_ago: i64) -> *mut c_char {
+    guarded_string_no_err(|| {
+        let seconds = u64::try_from(seconds_ago).ok();
+        Ok(to_owned_cstring(
+            &trace_commons_contributor::private_inference_copy::harness_last_call_line(seconds),
+        ))
+    })
+}
+
 /// Whether one action may be offered for a tool in this state.
 ///
 /// `action` is `connect` or `disconnect`; `installed` and `connected` are the

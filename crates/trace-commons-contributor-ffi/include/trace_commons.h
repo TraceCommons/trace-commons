@@ -662,8 +662,9 @@ int32_t     tc_private_inference_write_confirmed(int32_t requested_on, int32_t e
  * The data comes over the daemon socket (harness_list / harness_plan /
  * harness_commit). What is exported here is the branch tables over it, because
  * a branch written three times in three languages agrees today and drifts in
- * silence tomorrow. No sentence is here; the words are in
- * tc_private_inference_copy.
+ * silence tomorrow. The fixed words are in tc_private_inference_copy; the two
+ * calls that pick between them -- tc_harness_state_line and
+ * tc_harness_last_call_line -- are here for the same reason the tables are.
  * -------------------------------------------------------------------------*/
 
 /* The per-tool states of the harness list.
@@ -759,6 +760,51 @@ int32_t     tc_harness_plan_outcome_code(const char* outcome);
  * NULL or non-UTF-8 action, and on a caught panic.
  */
 int32_t     tc_harness_action_available(const char* action, int32_t installed, int32_t connected);
+
+/* The sentence for one harness_list row's state field.
+ *
+ * state is the same label tc_harness_state_code takes: "not_connected",
+ * "connected_no_calls", "answering", "activity_shared" or "unknown".
+ *
+ * THE SENTENCE CROSSES, NOT ONLY THE CODE. With the code alone each shell
+ * wrote its own map from a state onto one of tc_private_inference_copy's
+ * sentences -- three copies of one decision, agreeing today and drifting in
+ * silence tomorrow. Do not write a fourth.
+ *
+ * TWO STATES ANSWER THE EMPTY STRING, AND THE EMPTINESS IS THE POINT.
+ * "activity_shared" and "unknown" have no sentence and MAY NOT BORROW ONE.
+ * The answering sentence says a call from IT reached this computer, and the
+ * pronoun names the row's own tool -- which is exactly what activity_shared
+ * says cannot be worked out. The connected sentence would be flatly false:
+ * something did arrive. Render an empty string as no line at all, never as
+ * the working light.
+ *
+ * The empty string is also the answer for a label this build has never heard
+ * of, for a NULL or non-UTF-8 state, and on a caught panic.
+ *
+ * Returns an owned string; free it with tc_string_free. NULL only on a caught
+ * panic.
+ */
+char*       tc_harness_state_line(const char* state);
+
+/* When the last call from a connected tool was answered here, assembled.
+ *
+ * seconds_ago is how long ago the caller worked out that call arrived, from a
+ * harness_list row's last_call_at. ABSENCE IS AN OUT-OF-RANGE INTEGER, the
+ * convention tc_private_inference_serving_line already uses: ANY NEGATIVE
+ * VALUE -- including the one to pass for an absent or unparseable timestamp --
+ * gives the EMPTY STRING rather than a sentence about a call nobody saw. Draw
+ * nothing for it; the state line above has already said what is true.
+ *
+ * Assembled on the Rust side rather than handed over as a template with a hole
+ * in it, for the reason on tc_routing_token_line. The buckets are coarse on
+ * purpose: this settles whether anything has ever come through, and is not a
+ * live count of calls.
+ *
+ * Returns an owned string; free it with tc_string_free. NULL only on a caught
+ * panic.
+ */
+char*       tc_harness_last_call_line(int64_t seconds_ago);
 
 
 /* The settings screen's session-source row for one tool, assembled.

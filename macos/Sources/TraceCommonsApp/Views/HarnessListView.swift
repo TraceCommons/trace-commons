@@ -79,7 +79,7 @@ private struct HarnessRowView: View {
             // The one state that means a call arrived is the only one drawn
             // as working, and the two that cannot be attributed say nothing
             // rather than borrow a claim.
-            if let sentence = HarnessSurface.stateSentence(state, copy: copy) {
+            if let sentence = HarnessSurface.stateSentence(row, calls: model.harnessCalls) {
                 Label(sentence, systemImage: tone.symbol)
                     .font(TC.Font_.body)
                     .foregroundStyle(tone.textColor)
@@ -87,6 +87,14 @@ private struct HarnessRowView: View {
             }
             if let restart = HarnessSurface.restartSentence(row, state: state, copy: copy) {
                 Text(restart)
+                    .font(TC.Font_.meta)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            // When a call last arrived, assembled on the far side and empty
+            // when there is nothing to report -- which draws no line at all.
+            if let lastCall = HarnessSurface.lastCallSentence(row, calls: model.harnessCalls) {
+                Text(lastCall)
                     .font(TC.Font_.meta)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)

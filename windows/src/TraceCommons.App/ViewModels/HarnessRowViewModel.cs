@@ -54,9 +54,28 @@ public sealed class HarnessRowViewModel
     public bool HasConnectCommand => _row.ConnectCommand.Length > 0;
 
     /// <summary>The sentence for whatever state the daemon reported.</summary>
-    public string StateText => HarnessSurface.StateSentence(_row.State, _copy);
+    /// <remarks>
+    /// The daemon's own label goes across the ABI and the sentence comes
+    /// back. This shell does not choose between the payload's fields, and
+    /// neither do the other two: it is one table, asked three times.
+    /// </remarks>
+    public string StateText => HarnessSurface.StateSentence(_row.StateLabel);
 
     public bool HasStateText => StateText.Length > 0;
+
+    /// <summary>
+    /// When a call from this tool was last answered here, or the empty
+    /// string -- drawn as no line at all.
+    /// </summary>
+    /// <remarks>
+    /// Assembled across the ABI from a number of seconds this shell works
+    /// out. Read at draw time rather than latched, so a row that sat on
+    /// screen does not keep claiming a call arrived a minute ago.
+    /// </remarks>
+    public string LastCallText =>
+        HarnessSurface.LastCallSentence(_row.LastCallAt, DateTimeOffset.UtcNow);
+
+    public bool HasLastCallText => LastCallText.Length > 0;
 
     /// <summary>
     /// Whether this row may be painted as working. The state, and only the

@@ -284,27 +284,67 @@ public class HarnessSurfaceTests
     }
 
     /// <summary>
-    /// Every sentence a harness row shows comes off the payload. Nothing here
-    /// composes one, so an unknown state shows no sentence rather than a
-    /// guessed one.
+    /// Every sentence a harness row shows comes off the payload, through the
+    /// one shared table. Nothing here composes one, so an unknown state shows
+    /// no sentence rather than a guessed one.
     /// </summary>
+    /// <remarks>
+    /// The expected values are read off <see cref="PrivateInferenceCopy"/>
+    /// rather than typed here, so this test cannot become the place a
+    /// sentence is written. What it proves is that
+    /// <c>tc_harness_state_line</c> -- the same call the macOS and GNOME
+    /// shells make -- answers the payload's own field for each state.
+    /// </remarks>
     [Fact]
     public void EveryStateSentenceComesFromThePayload()
     {
         PrivateInferenceCopy? copy = PrivateInferenceSurface.Copy();
         Assert.NotNull(copy);
 
-        var expected = new Dictionary<HarnessState, string>
+        var expected = new Dictionary<string, string>
         {
-            [HarnessState.NotConnected] = copy!.HarnessNotConnected,
-            [HarnessState.ConnectedNoCalls] = copy.HarnessConnectedNothingSeen,
-            [HarnessState.Answering] = copy.HarnessAnswering,
+            ["not_connected"] = copy!.HarnessNotConnected,
+            ["connected_no_calls"] = copy.HarnessConnectedNothingSeen,
+            ["answering"] = copy.HarnessAnswering,
         };
 
-        foreach (KeyValuePair<HarnessState, string> pair in expected)
+        foreach (KeyValuePair<string, string> pair in expected)
         {
-            Assert.Equal(pair.Value, HarnessSurface.StateSentence(pair.Key, copy));
+            Assert.Equal(pair.Value, HarnessSurface.StateSentence(pair.Key));
         }
+    }
+
+    /// <summary>
+    /// The when-line crosses the ABI, so this shell draws it at all.
+    /// </summary>
+    /// <remarks>
+    /// It used to exist in Rust and stop there: the GNOME shell links the
+    /// crate and rendered it, and this one rendered nothing for the same row.
+    /// An absent or unparseable timestamp crosses as a negative number, which
+    /// is the shared "nothing to report" and comes back empty.
+    /// </remarks>
+    [Fact]
+    public void TheWhenLineIsAssembledOnTheFarSide()
+    {
+        var now = new DateTimeOffset(2026, 1, 1, 0, 2, 0, TimeSpan.Zero);
+        Assert.Contains(
+            "2 minutes ago",
+            HarnessSurface.LastCallSentence("2026-01-01T00:00:00Z", now),
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "just now",
+            HarnessSurface.LastCallSentence("2026-01-01T00:01:30Z", now),
+            StringComparison.Ordinal);
+
+        foreach (string? absent in new[] { null, string.Empty, "not a timestamp" })
+        {
+            Assert.Equal(string.Empty, HarnessSurface.LastCallSentence(absent, now));
+        }
+
+        // A timestamp in the future is nothing to report, not a call at time
+        // zero: a clock that ran backwards must not read as "just now".
+        Assert.Equal(
+            string.Empty, HarnessSurface.LastCallSentence("2027-01-01T00:00:00Z", now));
     }
 
     /// <summary>
@@ -325,13 +365,15 @@ public class HarnessSurfaceTests
         PrivateInferenceCopy? copy = PrivateInferenceSurface.Copy();
         Assert.NotNull(copy);
 
-        foreach (HarnessState state in new[] { HarnessState.ActivityShared, HarnessState.Unknown })
+        // A label from a later daemon is the same shape, and must not fall
+        // through to the nearest sentence either.
+        foreach (string label in new[] { "activity_shared", "unknown", "a_state_from_a_later_daemon" })
         {
-            string sentence = HarnessSurface.StateSentence(state, copy!);
+            string sentence = HarnessSurface.StateSentence(label);
             Assert.Equal(string.Empty, sentence);
             Assert.NotEqual(copy!.HarnessAnswering, sentence);
             Assert.NotEqual(copy.HarnessConnectedNothingSeen, sentence);
-            Assert.False(HarnessSurface.ReadsAsWorking(state));
+            Assert.False(HarnessSurface.ReadsAsWorking(HarnessSurface.State(label)));
         }
     }
 

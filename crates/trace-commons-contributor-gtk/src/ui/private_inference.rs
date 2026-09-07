@@ -225,29 +225,22 @@ fn indicator_tone(tone: copy::PrivateInferenceTone) -> Tone {
 /// A pair with [`harness_tone`], used as one: recovering a tone by reading
 /// the sentence would be matching on text.
 ///
-/// **`ActivityShared` borrows the shared "state unavailable" sentence, and
-/// that is a placeholder.** The state means a call did arrive and we know it
-/// did; what cannot be said is which of two tools made it, and the borrowed
-/// sentence understates that. It is acceptable only because the branch
-/// cannot be taken: reaching it needs two connected tools speaking one
-/// protocol family, and the tools that exist speak different ones.
-/// `no_two_connectable_tools_share_a_protocol_family` fails the day that
-/// stops being true, which is the day the real sentence has to be written in
-/// `private_inference_copy`.
+/// **ONE TABLE, ASKED -- NOT A COPY OF IT.** This used to be a `match` here,
+/// and Swift and C# each held their own; three copies of one decision. The
+/// decision now lives in `private_inference_copy::harness_state_line`, which
+/// the other two shells reach as `tc_harness_state_line`. This shell links
+/// the crate, so it calls the same function directly. Do not put the arms
+/// back.
 ///
-/// `Unknown` is not a placeholder. It is produced when nothing here can tell
-/// whether a call arrived -- an unreadable ledger, or a tool whose family
-/// this build does not know -- and "the current state is unavailable" is
-/// exactly what is true then.
+/// `ActivityShared` and `Unknown` answer the EMPTY STRING, which this view
+/// draws as no line at all. `ActivityShared` may not borrow the answering
+/// sentence -- that sentence says a call from *it* reached this computer,
+/// and the pronoun names the row's own tool, which is the one thing this
+/// state says is unknown -- and may not borrow the connected one, which
+/// would be false. A row that claims nothing is the honest answer to a
+/// question the ledger cannot settle.
 pub fn harness_line(state: &str) -> &'static str {
-    match HarnessState::from_label(state) {
-        Some(HarnessState::NotConnected) => copy::HARNESS_NOT_CONNECTED,
-        Some(HarnessState::ConnectedNoCalls) => copy::HARNESS_CONNECTED_NOTHING_SEEN,
-        Some(HarnessState::Answering) => copy::HARNESS_ANSWERING,
-        Some(HarnessState::ActivityShared | HarnessState::Unknown) | None => {
-            copy::PRIVATE_INFERENCE_STATE_UNKNOWN
-        }
-    }
+    copy::harness_state_line(state)
 }
 
 /// The tone [`harness_line`]'s sentence is painted in.
@@ -343,10 +336,13 @@ fn harness_card(app: &Rc<App>, row: &crate::model::Harness) -> gtk::Box {
     name.add_css_class("tc-card-title");
     card.append(&name);
 
-    card.append(&tone_row(
-        harness_line(&row.state),
-        harness_tone(&row.state),
-    ));
+    // Three of the five states have a sentence and two deliberately do not.
+    // An empty sentence is drawn as no row at all, never as a blank one at
+    // the working colour.
+    let state_line = harness_line(&row.state);
+    if !state_line.is_empty() {
+        card.append(&tone_row(state_line, harness_tone(&row.state)));
+    }
     // A tool that was already running holds the old setting until it is
     // started again. Said while nothing has arrived, and dropped the moment
     // something has -- at which point it is answered by events.
@@ -1016,22 +1012,29 @@ mod tests {
         }
     }
 
-    /// Every state has a sentence, and connected is not the sentence
-    /// answering is.
+    /// Three states have a sentence, two have none, and connected is not the
+    /// sentence answering is.
     ///
     /// A settings file with the right value in it is not evidence that a
     /// single call was ever answered. A surface that showed those two the
     /// same way would tell a contributor their tool was working while it
     /// sent every call somewhere else.
+    ///
+    /// `activity_shared` and `unknown` draw no line at all, and in
+    /// particular `activity_shared` does not borrow the answering sentence:
+    /// that sentence's pronoun names the row's own tool, which is exactly
+    /// what the state says cannot be worked out. The values are asserted
+    /// against the shared table rather than against literals, so this shell
+    /// cannot become the second place they are written.
     #[test]
     fn a_connected_harness_and_an_answering_one_read_differently() {
         use trace_commons_contributor::harness_state::HarnessState;
+        use trace_commons_contributor::private_inference_copy::private_inference_copy;
+        let shared = private_inference_copy();
         for state in [
             HarnessState::NotConnected,
             HarnessState::ConnectedNoCalls,
             HarnessState::Answering,
-            HarnessState::ActivityShared,
-            HarnessState::Unknown,
         ] {
             assert!(
                 !harness_line(state.label()).trim().is_empty(),
@@ -1039,14 +1042,23 @@ mod tests {
                 state.label()
             );
         }
+        assert_eq!(
+            harness_line(HarnessState::Answering.label()),
+            shared.harness_answering
+        );
         assert_ne!(
             harness_line(HarnessState::ConnectedNoCalls.label()),
             harness_line(HarnessState::Answering.label())
         );
-        assert_ne!(
-            harness_line(HarnessState::ActivityShared.label()),
-            harness_line(HarnessState::Answering.label())
-        );
+        for silent in [
+            HarnessState::ActivityShared.label(),
+            HarnessState::Unknown.label(),
+            "a_state_from_a_later_daemon",
+        ] {
+            assert_eq!(harness_line(silent), "", "{silent} grew a sentence");
+            assert_ne!(harness_line(silent), shared.harness_answering);
+            assert_ne!(harness_line(silent), shared.harness_connected_nothing_seen);
+        }
     }
 
     /// `activity_shared` cannot happen yet, and the day it can, this fails.

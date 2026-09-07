@@ -88,7 +88,9 @@ final class HarnessSurfaceTests: XCTestCase {
         let calls = HarnessCalls(
             stateCode: { seen.record($0); return 33 },
             planOutcomeCode: { _ in 40 },
-            actionAvailable: { _, _, _ in false })
+            actionAvailable: { _, _, _ in false },
+            stateLine: { _ in "" },
+            lastCallLine: { _ in "" })
         XCTAssertEqual(HarnessSurface.state("answering", calls: calls), .answering)
         XCTAssertEqual(seen.values, ["answering"])
     }
@@ -107,16 +109,94 @@ final class HarnessSurfaceTests: XCTestCase {
         }
     }
 
+    /// The sentence is asked of the shared table, never chosen here.
+    ///
+    /// The label goes across untouched -- including one this build has never
+    /// heard of -- and whatever comes back is what is drawn. A stub stands in
+    /// for the Rust so this runs without the dylib; `harness_copy_is_central`
+    /// is what stops a `switch` over the payload's fields growing back.
+    func testTheStateSentenceIsAskedOfTheSharedTable() {
+        let seen = SpyBox()
+        let calls = HarnessCalls(
+            stateCode: { _ in 33 },
+            planOutcomeCode: { _ in 40 },
+            actionAvailable: { _, _, _ in false },
+            stateLine: { label in
+                seen.record(label)
+                return label == "answering" ? "SHARED-ANSWERING" : ""
+            },
+            lastCallLine: { _ in "" })
+        XCTAssertEqual(
+            HarnessSurface.stateSentence("answering", calls: calls), "SHARED-ANSWERING")
+        XCTAssertEqual(seen.values, ["answering"])
+        XCTAssertNil(HarnessSurface.stateSentence("a_state_from_a_later_daemon", calls: calls))
+    }
+
     /// "One of these two answered" is not "this one is answering", so the
     /// shared-activity state borrows neither the answering sentence nor the
     /// nothing-seen one -- it says nothing, which is all it can honestly say.
+    ///
+    /// Checked against the sentences the table itself would return, so this
+    /// cannot pass by having the stub agree with a literal typed here.
     func testTheUnattributableStatesClaimNothing() {
-        XCTAssertEqual(HarnessSurface.stateSentence(.notConnected, copy: copy()), "H-NOT-CONNECTED")
+        let answering = "H-ANSWERING"
+        let nothingSeen = "H-NOTHING-SEEN"
+        let calls = HarnessCalls(
+            stateCode: { _ in 33 },
+            planOutcomeCode: { _ in 40 },
+            actionAvailable: { _, _, _ in false },
+            stateLine: { label in
+                switch label {
+                case "not_connected": return "H-NOT-CONNECTED"
+                case "connected_no_calls": return nothingSeen
+                case "answering": return answering
+                default: return ""
+                }
+            },
+            lastCallLine: { _ in "" })
+
+        XCTAssertEqual(HarnessSurface.stateSentence("not_connected", calls: calls), "H-NOT-CONNECTED")
+        XCTAssertEqual(HarnessSurface.stateSentence("connected_no_calls", calls: calls), nothingSeen)
+        XCTAssertEqual(HarnessSurface.stateSentence("answering", calls: calls), answering)
+
+        for silent in ["activity_shared", "unknown"] {
+            let sentence = HarnessSurface.stateSentence(silent, calls: calls)
+            XCTAssertNil(sentence, "\(silent) grew a sentence")
+            XCTAssertNotEqual(sentence, answering)
+            XCTAssertNotEqual(sentence, nothingSeen)
+            XCTAssertFalse(HarnessSurface.tone(HarnessState.fromABI(34)).readsAsWorking)
+        }
+    }
+
+    /// The when-line crosses the ABI, so this shell draws it at all.
+    ///
+    /// It used to exist in Rust and stop there, and this app rendered
+    /// nothing where the GNOME one rendered a line. An absent timestamp
+    /// crosses as a negative number, the shared "nothing to report".
+    func testTheWhenLineIsAssembledOnTheFarSide() {
+        let seen = SecondsBox()
+        let calls = HarnessCalls(
+            stateCode: { _ in 33 },
+            planOutcomeCode: { _ in 40 },
+            actionAvailable: { _, _, _ in false },
+            stateLine: { _ in "" },
+            lastCallLine: { seconds in
+                seen.record(seconds)
+                return seconds < 0 ? "" : "SHARED-WHEN"
+            })
+
+        let withCall = Self.oneRow.replacingOccurrences(
+            of: "\"last_call_at\":null,", with: "\"last_call_at\":\"2026-01-01T00:00:00Z\",")
+        let row = HarnessSurface.list(fromJSON: withCall).harnesses[0]
+        let now = Date(timeIntervalSince1970: 1_767_225_600 + 120)
         XCTAssertEqual(
-            HarnessSurface.stateSentence(.connectedNoCalls, copy: copy()), "H-NOTHING-SEEN")
-        XCTAssertEqual(HarnessSurface.stateSentence(.answering, copy: copy()), "H-ANSWERING")
-        XCTAssertNil(HarnessSurface.stateSentence(.activityShared, copy: copy()))
-        XCTAssertNil(HarnessSurface.stateSentence(.unknown, copy: copy()))
+            HarnessSurface.lastCallSentence(row, now: now, calls: calls), "SHARED-WHEN")
+        XCTAssertEqual(seen.values, [120])
+
+        // No timestamp is nothing to report, and never a call at time zero.
+        let none = HarnessSurface.list(fromJSON: Self.oneRow).harnesses[0]
+        XCTAssertNil(HarnessSurface.lastCallSentence(none, now: now, calls: calls))
+        XCTAssertEqual(seen.values, [120])
     }
 
     /// The running copy of a tool read its settings when it started. The
@@ -157,7 +237,8 @@ final class HarnessSurfaceTests: XCTestCase {
             actionAvailable: { action, _, _ in
                 seen.record(action)
                 return action == "disconnect"
-            })
+            },
+            stateLine: { _ in "" }, lastCallLine: { _ in "" })
         let row = HarnessSurface.list(fromJSON: Self.oneRow).harnesses[0]
         XCTAssertFalse(HarnessSurface.canConnect(row, calls: calls))
         XCTAssertTrue(HarnessSurface.canDisconnect(row, calls: calls))
@@ -172,7 +253,9 @@ final class HarnessSurfaceTests: XCTestCase {
         let calls = HarnessCalls(
             stateCode: { _ in 31 },
             planOutcomeCode: { outcome in outcome == "changes" ? 41 : 42 },
-            actionAvailable: { _, _, _ in true })
+            actionAvailable: { _, _, _ in true },
+            stateLine: { _ in "" },
+            lastCallLine: { _ in "" })
         let changes = HarnessSurface.plan(
             fromJSON: #"""
                 {"id":"claude","action":"connect","outcome":"changes","plan_id":"c0ffee",
@@ -196,7 +279,8 @@ final class HarnessSurfaceTests: XCTestCase {
     func testAChangesPlanWithoutAnIdIsNotCommittable() {
         let calls = HarnessCalls(
             stateCode: { _ in 31 }, planOutcomeCode: { _ in 41 },
-            actionAvailable: { _, _, _ in true })
+            actionAvailable: { _, _, _ in true },
+            stateLine: { _ in "" }, lastCallLine: { _ in "" })
         let plan = HarnessSurface.plan(
             fromJSON: #"""
                 {"id":"claude","action":"connect","outcome":"changes","plan_id":null,
@@ -212,7 +296,9 @@ final class HarnessSurfaceTests: XCTestCase {
         let calls = HarnessCalls(
             stateCode: { _ in 31 },
             planOutcomeCode: { outcome in outcome == "unparseable" ? 43 : 42 },
-            actionAvailable: { _, _, _ in true })
+            actionAvailable: { _, _, _ in true },
+            stateLine: { _ in "" },
+            lastCallLine: { _ in "" })
         let refused = HarnessSurface.plan(
             fromJSON: #"""
                 {"id":"claude","action":"connect","outcome":"unparseable","plan_id":null,
@@ -249,7 +335,8 @@ final class HarnessSurfaceTests: XCTestCase {
     func testAnOccupiedSlotRidesAlongsideAPlanThatStillHasChanges() {
         let calls = HarnessCalls(
             stateCode: { _ in 31 }, planOutcomeCode: { _ in 41 },
-            actionAvailable: { _, _, _ in true })
+            actionAvailable: { _, _, _ in true },
+            stateLine: { _ in "" }, lastCallLine: { _ in "" })
         let plan = HarnessSurface.plan(
             fromJSON: #"""
                 {"id":"claude","action":"connect","outcome":"changes","plan_id":"c0ffee","path":"/p",
@@ -346,6 +433,23 @@ final class HarnessSurfaceTests: XCTestCase {
 }
 
 /// A tiny recorder, so a stub can also be a spy.
+/// The same, for the seconds handed to the when-line. A separate box rather
+/// than stringifying: the number is the thing under test.
+private final class SecondsBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var seen: [Int64] = []
+    func record(_ value: Int64) {
+        lock.lock()
+        defer { lock.unlock() }
+        seen.append(value)
+    }
+    var values: [Int64] {
+        lock.lock()
+        defer { lock.unlock() }
+        return seen
+    }
+}
+
 private final class SpyBox: @unchecked Sendable {
     private let lock = NSLock()
     private var seen: [String] = []

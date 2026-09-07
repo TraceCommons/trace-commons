@@ -35,7 +35,8 @@ use trace_commons_contributor_ffi::{
     tc_witness_state_line, tc_witness_state_tone, tc_witness_status_json, tc_witness_trust_state,
 };
 use trace_commons_contributor_ffi::{
-    tc_harness_action_available, tc_harness_plan_outcome_code, tc_harness_state_code,
+    tc_harness_action_available, tc_harness_last_call_line, tc_harness_plan_outcome_code,
+    tc_harness_state_code, tc_harness_state_line,
 };
 
 fn cstr(p: &Path) -> CString {
@@ -3621,6 +3622,94 @@ fn the_harness_state_table_crosses_the_abi() {
         unsafe { tc_harness_state_code(std::ptr::null()) },
         TC_HARNESS_STATE_UNKNOWN
     );
+}
+
+/// The harness state SENTENCE crosses the ABI too, not only the code.
+///
+/// Without this call each shell keeps its own map from a state onto one of
+/// the payload's sentences -- Swift, C# and Rust, three copies of one
+/// decision. Every value here is checked against the payload rather than a
+/// literal, so this test cannot become the place a sentence is written.
+#[test]
+fn the_harness_state_sentence_crosses_the_abi() {
+    use trace_commons_contributor::harness_state::HarnessState;
+    let line = |state: &str| {
+        let state = cstr_str(state);
+        take_owned(unsafe { tc_harness_state_line(state.as_ptr()) })
+    };
+    let copy = trace_commons_contributor::private_inference_copy::private_inference_copy();
+
+    assert_eq!(
+        line(HarnessState::NotConnected.label()),
+        copy.harness_not_connected
+    );
+    assert_eq!(
+        line(HarnessState::ConnectedNoCalls.label()),
+        copy.harness_connected_nothing_seen
+    );
+    assert_eq!(
+        line(HarnessState::Answering.label()),
+        copy.harness_answering
+    );
+
+    // The two that must claim nothing, and must borrow nothing to do it.
+    // `activity_shared` taking the answering sentence would say a call from
+    // *this tool* arrived, which is the one thing the state denies knowing.
+    for silent in [
+        HarnessState::ActivityShared.label(),
+        HarnessState::Unknown.label(),
+        "a_state_from_a_later_daemon",
+        "ANSWERING",
+        "",
+    ] {
+        let sentence = line(silent);
+        assert_eq!(sentence, "", "{silent:?} grew a sentence");
+        assert_ne!(sentence, copy.harness_answering, "{silent:?}");
+        assert_ne!(sentence, copy.harness_connected_nothing_seen, "{silent:?}");
+    }
+    assert_eq!(
+        take_owned(unsafe { tc_harness_state_line(std::ptr::null()) }),
+        ""
+    );
+}
+
+/// The when-line crosses the ABI, so all three shells can draw it.
+///
+/// It used to exist in Rust and stop there: the GTK shell links the crate
+/// and rendered it, and macOS and Windows drew nothing. Absence is encoded
+/// the way `tc_private_inference_serving_line` encodes it -- an
+/// out-of-range integer is the empty string, drawn as no line at all --
+/// rather than as a second convention.
+#[test]
+fn the_harness_last_call_sentence_crosses_the_abi() {
+    assert!(take_owned(tc_harness_last_call_line(0)).contains("just now"));
+    assert!(take_owned(tc_harness_last_call_line(59)).contains("just now"));
+    assert!(take_owned(tc_harness_last_call_line(60)).contains("1 minute ago"));
+    assert!(take_owned(tc_harness_last_call_line(120)).contains("2 minutes ago"));
+    assert!(take_owned(tc_harness_last_call_line(3_600)).contains("1 hour ago"));
+    assert!(take_owned(tc_harness_last_call_line(86_400)).contains("1 day ago"));
+    assert!(take_owned(tc_harness_last_call_line(172_800)).contains("2 days ago"));
+
+    // Nothing to report is out of range, and draws no line.
+    for absent in [-1, -2, i64::MIN] {
+        assert_eq!(
+            take_owned(tc_harness_last_call_line(absent)),
+            "",
+            "{absent}"
+        );
+    }
+
+    // Whatever a shell computes, it is the shared sentence.
+    for seconds in [0_u64, 30, 90, 7_200, 900_000] {
+        assert_eq!(
+            take_owned(tc_harness_last_call_line(
+                i64::try_from(seconds).expect("fits")
+            )),
+            trace_commons_contributor::private_inference_copy::harness_last_call_line(Some(
+                seconds
+            ))
+        );
+    }
 }
 
 /// The plan-outcome mapper crosses the ABI, and keeps the refusal that needs
