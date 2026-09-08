@@ -1940,8 +1940,14 @@ settings key) supplies these 62 fixed string fields:
 
 ### Contribution eligibility
 
-Queue entries (`list_pending`, the `snapshot` event, and the `entry` object
-`preview` and `approve` return) carry two additive fields:
+Queue entries carry two additive fields. They appear on **every** surface that
+hands a client an entry object -- `list_pending`, the `snapshot` event, and
+the `entry` object both `preview` responses carry (the async-dispatch one and
+the built card) -- and on no other, because `entry_value` is the only thing
+that serialises a queue entry and those are all of its callers. `approve` and
+the `preview_ready` event do not carry an entry object at all; they carry an
+`entry_id`. A client MUST NOT reconstruct eligibility from an entry it cached
+from some other path.
 
 | Field | Meaning |
 |---|---|
@@ -1996,6 +2002,15 @@ explain -- and is one of these otherwise. Render each through
 `tc_contribution_eligibility_reason_line`, which answers the **empty string**
 for a label this build does not know; render nothing for an empty string
 rather than guessing.
+
+The two unknown-handling rules are deliberately different, and the difference
+is not an inconsistency. An unrecognised **state** degrades to a sentence
+because the row still has to say something -- it is on screen, a contributor
+is reading it, and silence there would leave them to infer a state from an
+empty space. An unrecognised **reason** has nothing honest to say: the state
+sentence beside it has already carried the fact, and a sentence invented for a
+label this build does not know would add a detail nobody established. Silence
+beats a guess exactly where something true has already been said.
 
 | `eligibility_reason` | Sentence | Usually seen with |
 |---|---|---|
