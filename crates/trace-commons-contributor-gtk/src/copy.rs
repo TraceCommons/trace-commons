@@ -2208,7 +2208,7 @@ pub use trace_commons_contributor::private_inference_copy::{
 // screen.
 pub use trace_commons_contributor::private_inference_copy::{
     ContributionControl, eligibility_control, eligibility_reason_line, eligibility_state_line,
-    eligibility_state_tone, group_withheld_line,
+    eligibility_state_tone, group_control, group_withheld_line,
 };
 
 // --- The redaction witness ---------------------------------------------

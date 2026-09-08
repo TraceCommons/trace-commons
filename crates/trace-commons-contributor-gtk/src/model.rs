@@ -389,6 +389,24 @@ pub struct ApproveResult {
     /// contributor.
     #[serde(default)]
     pub skipped: Vec<SkippedEntry>,
+    /// How many pending entries a GROUP selector left out for being
+    /// ineligible.
+    ///
+    /// **Absent, not zero**, on a single-`entry_id` call and for an invited
+    /// contributor -- in both cases no filter ran, and zero would read as
+    /// "nothing was left out", a claim about something that did not happen.
+    /// Present-and-zero is a different and meaningful answer: the filter ran
+    /// and took everything.
+    ///
+    /// Excluded entries are NEVER in [`Self::skipped`]. They were never
+    /// selected; `skipped` stays the account of what the call was asked to
+    /// act on.
+    ///
+    /// Rendered through `copy::group_withheld_line`, which answers the empty
+    /// string for zero -- so the absent case and the took-everything case
+    /// both draw nothing without this shell branching on the count.
+    #[serde(default)]
+    pub excluded_ineligible: Option<u64>,
 }
 
 /// One entry `approve` could not send, from the `skipped` list in its

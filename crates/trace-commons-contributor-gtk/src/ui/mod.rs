@@ -1080,7 +1080,25 @@ impl App {
             approve.flagged,
             &skipped,
         );
-        self.toast(&rendered.line);
+        // What a group selector left out for being ineligible, said after
+        // the press as the folder said it before.
+        //
+        // NOT branched on. `group_withheld_line` answers the empty string
+        // for zero, and an absent `excluded_ineligible` -- a single-entry
+        // call, or an invited contributor, where no filter ran at all --
+        // reads as zero here and draws nothing for the same reason. Reading
+        // the absence as a real zero would be claiming "nothing was left
+        // out" about a filter that never ran; drawing nothing claims
+        // nothing either way.
+        //
+        // Appended to the toast rather than given a second one: a
+        // contributor pressed one button and gets one answer.
+        let withheld = crate::copy::group_withheld_line(approve.excluded_ineligible.unwrap_or(0));
+        if withheld.is_empty() {
+            self.toast(&rendered.line);
+        } else {
+            self.toast(&format!("{} {withheld}", rendered.line));
+        }
         // `ApproveResult::offers_undo` is the single source of truth for
         // this decision -- see its doc comment for the defect it fixes --
         // so this checks it directly rather than re-deriving `rendered`'s

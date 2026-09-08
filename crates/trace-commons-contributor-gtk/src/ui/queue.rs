@@ -1197,8 +1197,15 @@ fn manifest_block(
 pub(super) struct GroupSubmit {
     /// The entries a group-level submit may send, oldest first.
     pub eligible: Vec<String>,
-    /// How many pending rows in this group the daemon says cannot be sent.
-    pub ineligible: usize,
+    /// How many of this group's pending rows are contributable, or `None`
+    /// when the question does not apply to this contributor at all.
+    ///
+    /// **`None` is not zero.** It is the wire's absent `contributable_count`
+    /// -- an invited contributor, whose every pending session is sendable
+    /// and who has no "3 of 7" to be told about. Read as zero it would take
+    /// the group control away from somebody with nothing wrong. The same
+    /// distinction the `eligibility` field itself carries, one level up.
+    pub contributable: Option<u64>,
 }
 
 /// Split one project's pending rows on eligibility.
@@ -1210,18 +1217,23 @@ pub(super) fn group_submit(app: &Rc<App>, project_id: &str) -> GroupSubmit {
     let pending = entries
         .iter()
         .filter(|e| e.state == "pending" && e.project_id == project_id);
-    let mut group = GroupSubmit {
-        eligible: Vec::new(),
-        ineligible: 0,
-    };
+    let mut eligible = Vec::new();
+    // Whether the question applies here at all, taken from the rows
+    // themselves: the daemon writes an `eligibility` key on every row when
+    // the evidence flag is on and on none of them when it is off, which is
+    // exactly the condition under which it sends `contributable_count`.
+    let mut applies = false;
     for entry in pending {
+        applies |= entry.eligibility.is_some();
         if crate::eligibility::offers_send(entry) {
-            group.eligible.push(entry.entry_id.clone());
-        } else {
-            group.ineligible += 1;
+            eligible.push(entry.entry_id.clone());
         }
     }
-    group
+    let contributable = applies.then_some(eligible.len() as u64);
+    GroupSubmit {
+        eligible,
+        contributable,
+    }
 }
 
 /// Send a whole project group, meaning **all eligible and never all**.
@@ -1381,8 +1393,11 @@ fn folder_row(app: &Rc<App>, folder: &crate::queue_folders::Folder) -> gtk::Widg
     // today -- the eligible set is a subset of the members -- and if it ever
     // did, the honest answer is the one zero already gives: say nothing.
     let withheld = copy::group_withheld_line(
-        (folder.members.len() as u64)
-            .saturating_sub(group_submit(app, project_id).eligible.len() as u64),
+        (waiting as u64).saturating_sub(
+            group_submit(app, project_id)
+                .contributable
+                .unwrap_or(waiting as u64),
+        ),
     );
     if !withheld.is_empty() {
         let line = style::caveat(&withheld);
@@ -1449,8 +1464,16 @@ fn folder_row(app: &Rc<App>, folder: &crate::queue_folders::Folder) -> gtk::Widg
         // `contributable_in_a_group` both admit `eligible` alone, and both
         // admit everything when the evidence flag is off, which is the
         // absent-field case.
+        // **Asked, not decided.** Whether a group offers a send control is
+        // the same branch table the row control comes from, and the arm it
+        // would get wrong is the absent one: a shell passing `0` for a
+        // missing `contributable_count` would refuse the control to an
+        // invited contributor whose sessions are all perfectly sendable.
+        // `None` carries the absence, exactly as a negative does across the
+        // C ABI that macOS and Windows reach this through.
         let group = group_submit(app, project_id);
-        let sendable = !group.eligible.is_empty();
+        let sendable = copy::group_control(waiting as u64, group.contributable)
+            == copy::ContributionControl::Contribute;
         if sendable {
             bar.append(&submit_all);
         }

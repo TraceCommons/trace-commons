@@ -786,13 +786,98 @@ mod tests {
                 "{control} is drawn and disabled; it should not be drawn at all"
             );
         }
-        // Both read ONE computed answer. Two computations are two chances
-        // to disagree.
+        // ONE computed answer, and it is the shared table's -- not a local
+        // emptiness test. The arm a local test gets wrong is the absent
+        // one: `contributable` is `None` for an invited contributor, and
+        // reading that as zero would take the control away from somebody
+        // whose sessions are all sendable.
+        assert!(
+            row.contains("copy::group_control(waitingasu64,group.contributable)"),
+            "the group control is decided here instead of asked for"
+        );
         assert_eq!(
-            row.matches("letsendable=!group.eligible.is_empty()")
-                .count(),
+            row.matches("letsendable=copy::group_control(").count(),
             1,
             "the two controls do not share one computed answer"
+        );
+        assert!(
+            !row.contains("!group.eligible.is_empty()"),
+            "the group control is re-derived from an emptiness test"
+        );
+    }
+
+    /// **An absent `contributable_count` is not zero**, and this is the arm
+    /// a shell gets wrong.
+    ///
+    /// An invited contributor's rows carry no `eligibility` key, so the
+    /// question does not apply and `contributable` is `None`. Read as zero
+    /// it would take the group control away from somebody whose every
+    /// session is perfectly sendable.
+    #[test]
+    fn an_absent_contributable_count_still_offers_the_control() {
+        assert_eq!(
+            copy::group_control(7, None),
+            copy::ContributionControl::Contribute,
+            "an invited contributor's group must still offer its control"
+        );
+        assert_eq!(
+            copy::group_control(7, Some(0)),
+            copy::ContributionControl::None,
+            "a group with nothing contributable must offer nothing"
+        );
+        // Zero pending is an empty group either way.
+        assert_eq!(
+            copy::group_control(0, None),
+            copy::ContributionControl::None
+        );
+        // Nothing withheld in the absent case, so no line is drawn.
+        assert_eq!(copy::group_withheld_line(0), "");
+
+        // And the shell derives `contributable` from the rows: absent when
+        // no row carries the key, present when they do.
+        let invited = wire(serde_json::json!({}));
+        assert!(invited.eligibility.is_none());
+        let admitted = wire(serde_json::json!({ "eligibility": "ineligible_permanent" }));
+        assert!(admitted.eligibility.is_some());
+    }
+
+    /// The post-press count is rendered without branching on it.
+    ///
+    /// `excluded_ineligible` is ABSENT on a single-entry call and for an
+    /// invited contributor -- no filter ran -- and present-and-zero when the
+    /// filter ran and took everything. Both draw nothing, because
+    /// `group_withheld_line(0)` is empty; neither is claimed as the other.
+    #[test]
+    fn the_toast_reports_what_a_group_call_left_out() {
+        let shell = squashed(
+            include_str!("ui/mod.rs")
+                .split("#[cfg(test)]")
+                .next()
+                .expect("production code above the tests"),
+        );
+        assert!(
+            shell.contains(
+                "crate::copy::group_withheld_line(approve.excluded_ineligible.unwrap_or(0))"
+            ),
+            "the toast does not report what a group call left out"
+        );
+        assert_eq!(copy::group_withheld_line(0), "");
+        assert!(!copy::group_withheld_line(4).is_empty());
+
+        // The field is an Option, so absence survives deserialization.
+        let absent: crate::model::ApproveResult =
+            serde_json::from_value(serde_json::json!({ "approved": 1 })).expect("decodes");
+        assert!(
+            absent.excluded_ineligible.is_none(),
+            "an absent excluded_ineligible must not decode as zero"
+        );
+        let ran: crate::model::ApproveResult =
+            serde_json::from_value(serde_json::json!({ "approved": 1, "excluded_ineligible": 0 }))
+                .expect("decodes");
+        assert_eq!(
+            ran.excluded_ineligible,
+            Some(0),
+            "a filter that ran and took everything is not the same as no filter"
         );
     }
 
