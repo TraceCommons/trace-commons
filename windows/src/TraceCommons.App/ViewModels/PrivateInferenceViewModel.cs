@@ -454,7 +454,20 @@ public sealed class PrivateInferenceViewModel : INotifyPropertyChanged
     public bool HasCredentialAction =>
         OfferedAction != CredentialAction.None && _copy is not null;
 
-    public bool CredentialControlsEnabled => !_credentialBusy && _copy is not null;
+    /// <summary>
+    /// Whether the credential control may be pressed.
+    /// </summary>
+    /// <remarks>
+    /// Not only busy and words-arrived. A Cancel this shell cannot address --
+    /// the app started after the ceremony did, so it never saw the attempt id
+    /// the daemon requires -- is drawn and disabled rather than drawn live and
+    /// silently doing nothing. The state sentence above it is still true and
+    /// still says a sign-in is under way.
+    /// </remarks>
+    public bool CredentialControlsEnabled =>
+        !_credentialBusy
+        && _copy is not null
+        && NearAiCredentialSurface.CanAddress(OfferedAction, _attemptId);
 
     /// <summary>
     /// Presses whatever the shared table offers for the state this machine is
@@ -691,6 +704,7 @@ public sealed class PrivateInferenceViewModel : INotifyPropertyChanged
         Raise(nameof(CredentialActionPreamble));
         Raise(nameof(HasCredentialActionPreamble));
         Raise(nameof(HasCredentialAction));
+        Raise(nameof(CredentialControlsEnabled));
     }
 
     private const int CredentialPollLimit = 150;

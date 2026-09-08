@@ -228,6 +228,28 @@ public static class NearAiCredentialSurface
             : EmptyParams;
 
     /// <summary>
+    /// Whether this shell can actually address the offered action to the
+    /// daemon.
+    /// </summary>
+    /// <remarks>
+    /// FALSE IS AN ORDINARY CASE, NOT AN EDGE ONE. `near_ai_credential_status`
+    /// resolves `obtaining` from the ceremony on disk with no attempt id, so a
+    /// shell that started after the ceremony did -- an app restarted while the
+    /// daemon kept running -- reads `obtaining` and is offered Cancel. But
+    /// `near_ai_credential_cancel` REQUIRES the attempt id, and this shell
+    /// does not have one to give.
+    ///
+    /// <para>
+    /// A control that is drawn live and silently does nothing is the worst of
+    /// the three answers, so a shell asks this and refuses to enable what it
+    /// cannot send. The honest fix is daemon-side: `_cancel` would have to
+    /// accept the current attempt without being told its id. See #728.
+    /// </para>
+    /// </remarks>
+    public static bool CanAddress(CredentialAction action, string? attemptId) =>
+        action != CredentialAction.Cancel || attemptId is { Length: > 0 };
+
+    /// <summary>
     /// Whether the poll should keep going: the ceremony is still in flight.
     /// </summary>
     /// <remarks>
