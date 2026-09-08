@@ -28,8 +28,33 @@ fn postgres_test_config() -> Option<DatabaseConfig> {
     })
 }
 
-const TEST_HASH_A: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-const TEST_HASH_B: &str = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+// Every test in this file runs against the same database, and cargo runs the
+// suite in parallel by default. Fixed subject hashes and a shared
+// `policy_label` therefore let the tests destroy each other's fixtures:
+// `cleanup_test_invites` deletes by `policy_label`, so a test starting up
+// wiped rows a test already running had just inserted, and two tests inserting
+// the same subject hash collided on the primary key. Each test now mints its
+// own hashes and its own policy label, so isolation is a property of the
+// fixtures rather than of scheduling luck. Every assertion is unchanged -- each
+// still asserts about exactly the rows its own test wrote.
+static NEXT_FIXTURE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn fixture_nonce() -> u128 {
+    let n = NEXT_FIXTURE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    (u128::from(std::process::id()) << 64) | u128::from(n)
+}
+
+/// A canonical `sha256:<64 lowercase hex>` value distinct from every other
+/// value this process mints.
+fn unique_hash() -> String {
+    format!("sha256:{:064x}", fixture_nonce())
+}
+
+/// A `policy_label` distinct from every other label this process mints, so a
+/// per-label cleanup can only ever touch the calling test's own rows.
+fn unique_label(prefix: &str) -> String {
+    format!("{prefix}-{:032x}", fixture_nonce())
+}
 
 /// Insert two rows, then read them back as a NON-superuser role with the
 /// invite_lookup policy in force. Without the GUC set the role must see
@@ -42,6 +67,10 @@ async fn invite_lookup_policy_confines_reads_to_the_presented_hash() {
     };
     let backend = PgBackend::new(&config).await.expect("backend");
     backend.run_migrations().await.expect("migrations");
+
+    let hash_a = unique_hash();
+    let hash_b = unique_hash();
+    let policy_label = unique_label("test-pool");
 
     let pool = backend.trace_pool_for_test();
     let mut client = pool.get().await.expect("client");
@@ -86,14 +115,14 @@ async fn invite_lookup_policy_confines_reads_to_the_presented_hash() {
     seed.batch_execute("SET LOCAL ROLE trace_invite_registry")
         .await
         .expect("set role");
-    for hash in [TEST_HASH_A, TEST_HASH_B] {
+    for hash in [&hash_a, &hash_b] {
         seed.execute(
             "INSERT INTO onboarding_invite_grants (
                      invite_subject_hash, policy_label, tenant_mode,
                      tenant_template_id, policy_version, issuance_source
-                 ) VALUES ($1, 'test-pool', 'derived', 'tmpl-1', 'v1', 'operator')
+                 ) VALUES ($1, $2, 'derived', 'tmpl-1', 'v1', 'operator')
                  ON CONFLICT (invite_subject_hash) DO NOTHING",
-            &[&hash],
+            &[hash, &policy_label],
         )
         .await
         .expect("seed");
@@ -123,7 +152,7 @@ async fn invite_lookup_policy_confines_reads_to_the_presented_hash() {
     // GUC set to A: exactly one row, and it is A.
     tx.execute(
         "SELECT set_config('trace_commons.invite_subject', $1, true)",
-        &[&TEST_HASH_A],
+        &[&hash_a],
     )
     .await
     .expect("set guc");
@@ -135,7 +164,7 @@ async fn invite_lookup_policy_confines_reads_to_the_presented_hash() {
         .await
         .expect("query");
     assert_eq!(rows.len(), 1, "exactly the presented invite is visible");
-    assert_eq!(rows[0].get::<_, String>(0), TEST_HASH_A);
+    assert_eq!(rows[0].get::<_, String>(0), hash_a);
 
     tx.rollback().await.expect("rollback");
 }
@@ -151,6 +180,10 @@ async fn registry_role_sees_all_invites() {
     let backend = PgBackend::new(&config).await.expect("backend");
     backend.run_migrations().await.expect("migrations");
 
+    let hash_a = unique_hash();
+    let hash_b = unique_hash();
+    let policy_label = unique_label("test-pool");
+
     let pool = backend.trace_pool_for_test();
     let mut client = pool.get().await.expect("client");
     // Seed through the registry role, not the connection's own user.
@@ -158,14 +191,14 @@ async fn registry_role_sees_all_invites() {
     seed.batch_execute("SET LOCAL ROLE trace_invite_registry")
         .await
         .expect("set role");
-    for hash in [TEST_HASH_A, TEST_HASH_B] {
+    for hash in [&hash_a, &hash_b] {
         seed.execute(
             "INSERT INTO onboarding_invite_grants (
                      invite_subject_hash, policy_label, tenant_mode,
                      tenant_template_id, policy_version, issuance_source
-                 ) VALUES ($1, 'test-pool', 'derived', 'tmpl-1', 'v1', 'operator')
+                 ) VALUES ($1, $2, 'derived', 'tmpl-1', 'v1', 'operator')
                  ON CONFLICT (invite_subject_hash) DO NOTHING",
-            &[&hash],
+            &[hash, &policy_label],
         )
         .await
         .expect("seed");
@@ -180,7 +213,7 @@ async fn registry_role_sees_all_invites() {
         .query(
             "SELECT invite_subject_hash FROM onboarding_invite_grants
               WHERE invite_subject_hash IN ($1, $2)",
-            &[&TEST_HASH_A, &TEST_HASH_B],
+            &[&hash_a, &hash_b],
         )
         .await
         .expect("query");
@@ -197,6 +230,8 @@ async fn tenant_mode_pairing_constraint_rejects_mismatches() {
     };
     let backend = PgBackend::new(&config).await.expect("backend");
     backend.run_migrations().await.expect("migrations");
+    let hash_a = unique_hash();
+    let hash_b = unique_hash();
     let pool = backend.trace_pool_for_test();
     let mut client = pool.get().await.expect("client");
     let client = client.transaction().await.expect("tx");
@@ -212,7 +247,7 @@ async fn tenant_mode_pairing_constraint_rejects_mismatches() {
                  invite_subject_hash, policy_label, tenant_mode,
                  policy_version, issuance_source
              ) VALUES ($1, 'p', 'fixed', 'v1', 'operator')",
-            &[&TEST_HASH_A],
+            &[&hash_a],
         )
         .await;
     assert!(err.is_err(), "fixed mode requires fixed_tenant_id");
@@ -224,7 +259,7 @@ async fn tenant_mode_pairing_constraint_rejects_mismatches() {
                  invite_subject_hash, policy_label, tenant_mode,
                  tenant_template_id, fixed_tenant_id, policy_version, issuance_source
              ) VALUES ($1, 'p', 'derived', 'tmpl', 'tenant-x', 'v1', 'operator')",
-            &[&TEST_HASH_B],
+            &[&hash_b],
         )
         .await;
     assert!(err.is_err(), "derived mode must not carry fixed_tenant_id");
@@ -232,10 +267,6 @@ async fn tenant_mode_pairing_constraint_rejects_mismatches() {
 
 use trace_commons_server::db::{InviteGrantInsertOutcome, InviteGrantWrite};
 use trace_commons_server::trace_invite_registry::InviteTenantMode;
-
-const TEST_HASH_C: &str = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
-const TEST_HASH_D: &str = "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
-const TEST_CRED: &str = "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
 
 fn registry_test_config() -> Option<DatabaseConfig> {
     let mut config = postgres_test_config()?;
@@ -267,10 +298,10 @@ async fn cleanup_test_invites(backend: &PgBackend, policy_label: &str) {
         .expect("cleanup");
 }
 
-fn derived_write(hash: &str) -> InviteGrantWrite {
+fn derived_write(hash: &str, policy_label: &str) -> InviteGrantWrite {
     InviteGrantWrite {
         invite_subject_hash: hash.to_string(),
-        policy_label: "test-pool".to_string(),
+        policy_label: policy_label.to_string(),
         tenant_mode: InviteTenantMode::Derived,
         fixed_tenant_id: None,
         tenant_template_id: Some("tmpl-1".to_string()),
@@ -293,10 +324,10 @@ fn derived_write(hash: &str) -> InviteGrantWrite {
 /// or the row mapper -- would fail the round-trip instead of passing
 /// silently. `expires_at` and `credential_binding_hash` are set to non-None
 /// values so both are actually exercised by the assertions.
-fn round_trip_fixture(hash: &str) -> InviteGrantWrite {
+fn round_trip_fixture(hash: &str, policy_label: &str, credential: &str) -> InviteGrantWrite {
     InviteGrantWrite {
         invite_subject_hash: hash.to_string(),
-        policy_label: "test-pool".to_string(),
+        policy_label: policy_label.to_string(),
         tenant_mode: InviteTenantMode::Derived,
         fixed_tenant_id: None,
         tenant_template_id: Some("tmpl-round-trip".to_string()),
@@ -315,7 +346,7 @@ fn round_trip_fixture(hash: &str) -> InviteGrantWrite {
         ),
         issuance_source: "issuance-source-round-trip".to_string(),
         issued_by_label: Some("issued-by-round-trip".to_string()),
-        credential_binding_hash: Some(TEST_CRED.to_string()),
+        credential_binding_hash: Some(credential.to_string()),
         note_label: Some("note-label-round-trip".to_string()),
     }
 }
@@ -328,9 +359,12 @@ async fn insert_then_list_round_trips_every_field() {
     };
     let backend = PgBackend::new(&config).await.expect("backend");
     backend.run_migrations().await.expect("migrations");
-    cleanup_test_invites(&backend, "test-pool").await;
+    let policy_label = unique_label("test-pool");
+    let hash_c = unique_hash();
+    let credential = unique_hash();
+    cleanup_test_invites(&backend, &policy_label).await;
 
-    let fixture = round_trip_fixture(TEST_HASH_C);
+    let fixture = round_trip_fixture(&hash_c, &policy_label, &credential);
     let expected_expires_at = fixture.expires_at.expect("fixture sets expires_at");
     let outcome = backend.insert_invite_grant(fixture).await.expect("insert");
     assert!(matches!(outcome, InviteGrantInsertOutcome::Inserted));
@@ -338,10 +372,10 @@ async fn insert_then_list_round_trips_every_field() {
     let all = backend.list_invite_grants().await.expect("list");
     let found = all
         .iter()
-        .find(|e| e.invite_subject_hash == TEST_HASH_C)
+        .find(|e| e.invite_subject_hash == hash_c)
         .expect("inserted invite present in listing");
-    assert_eq!(found.invite_subject_hash, TEST_HASH_C);
-    assert_eq!(found.policy_label, "test-pool");
+    assert_eq!(found.invite_subject_hash, hash_c);
+    assert_eq!(found.policy_label, policy_label);
     assert_eq!(found.tenant_mode, InviteTenantMode::Derived);
     assert_eq!(found.tenant_template_id.as_deref(), Some("tmpl-round-trip"));
     assert_eq!(found.fixed_tenant_id, None);
@@ -355,7 +389,10 @@ async fn insert_then_list_round_trips_every_field() {
         found.issued_by_label.as_deref(),
         Some("issued-by-round-trip")
     );
-    assert_eq!(found.credential_binding_hash.as_deref(), Some(TEST_CRED));
+    assert_eq!(
+        found.credential_binding_hash.as_deref(),
+        Some(credential.as_str())
+    );
     assert_eq!(found.note_label.as_deref(), Some("note-label-round-trip"));
     assert!(found.revoked_at.is_none());
 }
@@ -368,17 +405,21 @@ async fn a_second_live_invite_for_one_credential_is_refused() {
     };
     let backend = PgBackend::new(&config).await.expect("backend");
     backend.run_migrations().await.expect("migrations");
-    cleanup_test_invites(&backend, "test-pool").await;
+    let policy_label = unique_label("test-pool");
+    let hash_c = unique_hash();
+    let hash_d = unique_hash();
+    let credential = unique_hash();
+    cleanup_test_invites(&backend, &policy_label).await;
 
-    let mut first = derived_write(TEST_HASH_C);
-    first.credential_binding_hash = Some(TEST_CRED.to_string());
+    let mut first = derived_write(&hash_c, &policy_label);
+    first.credential_binding_hash = Some(credential.clone());
     let _ = backend
         .insert_invite_grant(first)
         .await
         .expect("first insert");
 
-    let mut second = derived_write(TEST_HASH_D);
-    second.credential_binding_hash = Some(TEST_CRED.to_string());
+    let mut second = derived_write(&hash_d, &policy_label);
+    second.credential_binding_hash = Some(credential.clone());
     let outcome = backend
         .insert_invite_grant(second)
         .await
@@ -397,26 +438,27 @@ async fn revoking_frees_the_credential_binding_for_reissue() {
     };
     let backend = PgBackend::new(&config).await.expect("backend");
     backend.run_migrations().await.expect("migrations");
-    cleanup_test_invites(&backend, "test-pool").await;
+    let policy_label = unique_label("test-pool");
+    let hash_c = unique_hash();
+    let hash_d = unique_hash();
+    let credential = unique_hash();
+    cleanup_test_invites(&backend, &policy_label).await;
 
-    let mut first = derived_write(TEST_HASH_C);
-    first.credential_binding_hash = Some(TEST_CRED.to_string());
+    let mut first = derived_write(&hash_c, &policy_label);
+    first.credential_binding_hash = Some(credential.clone());
     let _ = backend.insert_invite_grant(first).await.expect("insert");
 
-    let revoked = backend
-        .revoke_invite_grant(TEST_HASH_C)
-        .await
-        .expect("revoke");
+    let revoked = backend.revoke_invite_grant(&hash_c).await.expect("revoke");
     assert!(revoked, "revoking a live invite reports true");
 
-    let mut second = derived_write(TEST_HASH_D);
-    second.credential_binding_hash = Some(TEST_CRED.to_string());
+    let mut second = derived_write(&hash_d, &policy_label);
+    second.credential_binding_hash = Some(credential.clone());
     let outcome = backend.insert_invite_grant(second).await.expect("reissue");
     assert!(matches!(outcome, InviteGrantInsertOutcome::Inserted));
 
     // Revoking an already-revoked invite is a no-op, not an error.
     let again = backend
-        .revoke_invite_grant(TEST_HASH_C)
+        .revoke_invite_grant(&hash_c)
         .await
         .expect("second revoke");
     assert!(!again);
@@ -430,20 +472,19 @@ async fn listing_excludes_revoked_invites() {
     };
     let backend = PgBackend::new(&config).await.expect("backend");
     backend.run_migrations().await.expect("migrations");
-    cleanup_test_invites(&backend, "test-pool").await;
+    let policy_label = unique_label("test-pool");
+    let hash_c = unique_hash();
+    cleanup_test_invites(&backend, &policy_label).await;
 
     let _ = backend
-        .insert_invite_grant(derived_write(TEST_HASH_C))
+        .insert_invite_grant(derived_write(&hash_c, &policy_label))
         .await
         .expect("insert");
-    let _ = backend
-        .revoke_invite_grant(TEST_HASH_C)
-        .await
-        .expect("revoke");
+    let _ = backend.revoke_invite_grant(&hash_c).await.expect("revoke");
 
     let all = backend.list_invite_grants().await.expect("list");
     assert!(
-        !all.iter().any(|e| e.invite_subject_hash == TEST_HASH_C),
+        !all.iter().any(|e| e.invite_subject_hash == hash_c),
         "cache refresh must not load revoked invites"
     );
 }
@@ -462,9 +503,11 @@ async fn listing_excludes_expired_invites() {
     };
     let backend = PgBackend::new(&config).await.expect("backend");
     backend.run_migrations().await.expect("migrations");
-    cleanup_test_invites(&backend, "test-pool").await;
+    let policy_label = unique_label("test-pool");
+    let hash_c = unique_hash();
+    cleanup_test_invites(&backend, &policy_label).await;
 
-    let mut expired = derived_write(TEST_HASH_C);
+    let mut expired = derived_write(&hash_c, &policy_label);
     expired.expires_at = Some(
         chrono::DateTime::parse_from_rfc3339("2020-01-01T00:00:00Z")
             .expect("parse fixture expires_at")
@@ -478,7 +521,7 @@ async fn listing_excludes_expired_invites() {
 
     let all = backend.list_invite_grants().await.expect("list");
     assert!(
-        !all.iter().any(|e| e.invite_subject_hash == TEST_HASH_C),
+        !all.iter().any(|e| e.invite_subject_hash == hash_c),
         "cache refresh must not load expired invites"
     );
 }
@@ -493,15 +536,17 @@ async fn a_derived_mode_invite_provisions_the_derived_tenant() {
     };
     let backend = PgBackend::new(&config).await.expect("backend");
     backend.run_migrations().await.expect("migrations");
-    cleanup_test_invites(&backend, "test-pool").await;
+    let policy_label = unique_label("test-pool");
+    let hash_c = unique_hash();
+    cleanup_test_invites(&backend, &policy_label).await;
 
     let _ = backend
-        .insert_invite_grant(derived_write(TEST_HASH_C))
+        .insert_invite_grant(derived_write(&hash_c, &policy_label))
         .await
         .expect("insert");
 
     let outcome = backend
-        .redeem_invite_grant(TEST_HASH_C, "user-subject-1")
+        .redeem_invite_grant(&hash_c, "user-subject-1")
         .await
         .expect("no database error")
         .expect("invite is redeemable");
@@ -524,16 +569,18 @@ async fn a_fixed_mode_invite_uses_its_tenant_verbatim() {
     };
     let backend = PgBackend::new(&config).await.expect("backend");
     backend.run_migrations().await.expect("migrations");
-    cleanup_test_invites(&backend, "test-pool").await;
+    let policy_label = unique_label("test-pool");
+    let hash_c = unique_hash();
+    cleanup_test_invites(&backend, &policy_label).await;
 
-    let mut write = derived_write(TEST_HASH_C);
+    let mut write = derived_write(&hash_c, &policy_label);
     write.tenant_mode = InviteTenantMode::Fixed;
     write.tenant_template_id = None;
     write.fixed_tenant_id = Some("tenant-zaki-pilot".to_string());
     let _ = backend.insert_invite_grant(write).await.expect("insert");
 
     let outcome = backend
-        .redeem_invite_grant(TEST_HASH_C, "user-subject-1")
+        .redeem_invite_grant(&hash_c, "user-subject-1")
         .await
         .expect("no database error")
         .expect("invite is redeemable");
@@ -548,21 +595,20 @@ async fn a_revoked_invite_cannot_be_redeemed_even_from_a_warm_cache() {
     };
     let backend = PgBackend::new(&config).await.expect("backend");
     backend.run_migrations().await.expect("migrations");
-    cleanup_test_invites(&backend, "test-pool").await;
+    let policy_label = unique_label("test-pool");
+    let hash_c = unique_hash();
+    cleanup_test_invites(&backend, &policy_label).await;
 
     let _ = backend
-        .insert_invite_grant(derived_write(TEST_HASH_C))
+        .insert_invite_grant(derived_write(&hash_c, &policy_label))
         .await
         .expect("insert");
-    let _ = backend
-        .revoke_invite_grant(TEST_HASH_C)
-        .await
-        .expect("revoke");
+    let _ = backend.revoke_invite_grant(&hash_c).await.expect("revoke");
 
     // The cache is deliberately bypassed here: this asserts the database, not
     // the cache, is what refuses a revoked invite.
     let result = backend
-        .redeem_invite_grant(TEST_HASH_C, "user-subject-1")
+        .redeem_invite_grant(&hash_c, "user-subject-1")
         .await
         .expect("a revoked invite is not a database error");
     assert!(
@@ -573,6 +619,18 @@ async fn a_revoked_invite_cannot_be_redeemed_even_from_a_warm_cache() {
 
 use trace_commons_server::trace_invite_registry::import_file_invites;
 
+/// Substitutes the calling test's own policy label and subject hashes into an
+/// allowlist fixture. The literals in these fixtures are placeholders for that
+/// reason: two import tests running concurrently would otherwise write the same
+/// primary key under the same label and delete each other's rows.
+fn allowlist_fixture(template: &str, policy_label: &str, hashes: &[&str]) -> String {
+    let mut rendered = template.replace("POLICY_LABEL", policy_label);
+    for (index, hash) in hashes.iter().enumerate() {
+        rendered = rendered.replace(&format!("SUBJECT_HASH_{}", index + 1), hash);
+    }
+    rendered
+}
+
 #[tokio::test]
 async fn importing_the_same_file_twice_is_idempotent() {
     let Some(config) = registry_test_config() else {
@@ -581,7 +639,9 @@ async fn importing_the_same_file_twice_is_idempotent() {
     };
     let backend = PgBackend::new(&config).await.expect("backend");
     backend.run_migrations().await.expect("migrations");
-    cleanup_test_invites(&backend, "import-test").await;
+    let policy_label = unique_label("import-test");
+    let hash_1 = unique_hash();
+    cleanup_test_invites(&backend, &policy_label).await;
     let pool = backend.trace_pool_for_test();
     let client = pool.get().await.expect("client");
 
@@ -589,12 +649,13 @@ async fn importing_the_same_file_twice_is_idempotent() {
     let path = dir.path().join("allowlist.json");
     std::fs::write(
         &path,
-        r#"{
+        allowlist_fixture(
+            r#"{
             "version": 1,
             "generated_at": "2026-05-17T18:00:00Z",
-            "policy_label": "import-test",
+            "policy_label": "POLICY_LABEL",
             "entries": [
-                {"subject_hash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+                {"subject_hash": "SUBJECT_HASH_1",
                  "tenant_id": "tenant-zaki-pilot", "note_label": "batch-1", "max_uses": 3},
                 {"kind": "instance", "instance_id": "inst-1",
                  "instance_public_key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
@@ -603,10 +664,13 @@ async fn importing_the_same_file_twice_is_idempotent() {
                                      "allowed_consent_scopes": [], "allowed_uses": []}}
             ]
         }"#,
+            &policy_label,
+            &[&hash_1],
+        ),
     )
     .expect("write file");
 
-    let first = import_file_invites(&backend, &path, "import-test")
+    let first = import_file_invites(&backend, &path, &policy_label)
         .await
         .expect("first import");
     assert_eq!(first.imported, 1);
@@ -618,14 +682,14 @@ async fn importing_the_same_file_twice_is_idempotent() {
 
     let created_at: chrono::DateTime<chrono::Utc> = client
         .query_one(
-            "SELECT created_at FROM onboarding_invite_grants WHERE policy_label = 'import-test'",
-            &[],
+            "SELECT created_at FROM onboarding_invite_grants WHERE policy_label = $1",
+            &[&policy_label],
         )
         .await
         .expect("row")
         .get(0);
 
-    let second = import_file_invites(&backend, &path, "import-test")
+    let second = import_file_invites(&backend, &path, &policy_label)
         .await
         .expect("second import");
     assert_eq!(second.imported, 0);
@@ -633,8 +697,8 @@ async fn importing_the_same_file_twice_is_idempotent() {
 
     let created_at_after: chrono::DateTime<chrono::Utc> = client
         .query_one(
-            "SELECT created_at FROM onboarding_invite_grants WHERE policy_label = 'import-test'",
-            &[],
+            "SELECT created_at FROM onboarding_invite_grants WHERE policy_label = $1",
+            &[&policy_label],
         )
         .await
         .expect("row")
@@ -653,26 +717,32 @@ async fn imported_invites_are_fixed_mode_and_keep_their_tenant() {
     };
     let backend = PgBackend::new(&config).await.expect("backend");
     backend.run_migrations().await.expect("migrations");
-    cleanup_test_invites(&backend, "import-test").await;
+    let policy_label = unique_label("import-test");
+    let hash_1 = unique_hash();
+    cleanup_test_invites(&backend, &policy_label).await;
 
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("allowlist.json");
     std::fs::write(
         &path,
-        r#"{"version":1,"generated_at":"2026-05-17T18:00:00Z","policy_label":"import-test",
-            "entries":[{"subject_hash":"sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        allowlist_fixture(
+            r#"{"version":1,"generated_at":"2026-05-17T18:00:00Z","policy_label":"POLICY_LABEL",
+            "entries":[{"subject_hash":"SUBJECT_HASH_1",
             "tenant_id":"tenant-zaki-pilot","note_label":"batch-1","max_uses":3}]}"#,
+            &policy_label,
+            &[&hash_1],
+        ),
     )
     .expect("write file");
 
-    let _ = import_file_invites(&backend, &path, "import-test")
+    let _ = import_file_invites(&backend, &path, &policy_label)
         .await
         .expect("import");
 
     let all = backend.list_invite_grants().await.expect("list");
     let found = all
         .iter()
-        .find(|e| e.policy_label == "import-test")
+        .find(|e| e.policy_label == policy_label)
         .expect("imported invite present");
     assert_eq!(found.tenant_mode, InviteTenantMode::Fixed);
     assert_eq!(found.fixed_tenant_id.as_deref(), Some("tenant-zaki-pilot"));
@@ -689,12 +759,13 @@ async fn import_fails_when_the_file_does_not_exist() {
     };
     let backend = PgBackend::new(&config).await.expect("backend");
     backend.run_migrations().await.expect("migrations");
-    cleanup_test_invites(&backend, "import-test").await;
+    let policy_label = unique_label("import-test");
+    cleanup_test_invites(&backend, &policy_label).await;
 
     let dir = tempfile::tempdir().expect("tempdir");
     let missing = dir.path().join("does-not-exist.json");
 
-    let err = import_file_invites(&backend, &missing, "import-test")
+    let err = import_file_invites(&backend, &missing, &policy_label)
         .await
         .expect_err("missing file must fail");
     assert!(
@@ -704,7 +775,7 @@ async fn import_fails_when_the_file_does_not_exist() {
 
     let all = backend.list_invite_grants().await.expect("list");
     assert!(
-        !all.iter().any(|e| e.policy_label == "import-test"),
+        !all.iter().any(|e| e.policy_label == policy_label),
         "a failure before any read must leave zero rows behind"
     );
 }
@@ -717,13 +788,14 @@ async fn import_fails_on_invalid_json() {
     };
     let backend = PgBackend::new(&config).await.expect("backend");
     backend.run_migrations().await.expect("migrations");
-    cleanup_test_invites(&backend, "import-test").await;
+    let policy_label = unique_label("import-test");
+    cleanup_test_invites(&backend, &policy_label).await;
 
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("allowlist.json");
     std::fs::write(&path, "this is not json").expect("write file");
 
-    let err = import_file_invites(&backend, &path, "import-test")
+    let err = import_file_invites(&backend, &path, &policy_label)
         .await
         .expect_err("invalid JSON must fail");
     assert!(
@@ -733,7 +805,7 @@ async fn import_fails_on_invalid_json() {
 
     let all = backend.list_invite_grants().await.expect("list");
     assert!(
-        !all.iter().any(|e| e.policy_label == "import-test"),
+        !all.iter().any(|e| e.policy_label == policy_label),
         "a failure before any write must leave zero rows behind"
     );
 }
@@ -746,23 +818,24 @@ async fn import_fails_on_unsupported_version() {
     };
     let backend = PgBackend::new(&config).await.expect("backend");
     backend.run_migrations().await.expect("migrations");
-    cleanup_test_invites(&backend, "import-test").await;
+    let policy_label = unique_label("import-test");
+    cleanup_test_invites(&backend, &policy_label).await;
 
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("allowlist.json");
     std::fs::write(
         &path,
-        r#"{"version":2,"generated_at":"2026-05-17T18:00:00Z","policy_label":"import-test","entries":[]}"#,
+        allowlist_fixture(r#"{"version":2,"generated_at":"2026-05-17T18:00:00Z","policy_label":"POLICY_LABEL","entries":[]}"#, &policy_label, &[]),
     )
     .expect("write file");
 
-    let err = import_file_invites(&backend, &path, "import-test")
+    let err = import_file_invites(&backend, &path, &policy_label)
         .await
         .expect_err("unsupported version must fail");
     assert!(err.to_string().contains("PilotAllowlistMalformed"));
 
     let all = backend.list_invite_grants().await.expect("list");
-    assert!(!all.iter().any(|e| e.policy_label == "import-test"));
+    assert!(!all.iter().any(|e| e.policy_label == policy_label));
 }
 
 #[tokio::test]
@@ -773,25 +846,30 @@ async fn import_fails_when_an_invite_entry_is_missing_subject_hash() {
     };
     let backend = PgBackend::new(&config).await.expect("backend");
     backend.run_migrations().await.expect("migrations");
-    cleanup_test_invites(&backend, "import-test").await;
+    let policy_label = unique_label("import-test");
+    cleanup_test_invites(&backend, &policy_label).await;
 
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("allowlist.json");
     std::fs::write(
         &path,
-        r#"{"version":1,"generated_at":"2026-05-17T18:00:00Z","policy_label":"import-test",
+        allowlist_fixture(
+            r#"{"version":1,"generated_at":"2026-05-17T18:00:00Z","policy_label":"POLICY_LABEL",
             "entries":[{"tenant_id":"tenant-zaki-pilot","note_label":"batch-1","max_uses":3}]}"#,
+            &policy_label,
+            &[],
+        ),
     )
     .expect("write file");
 
-    let err = import_file_invites(&backend, &path, "import-test")
+    let err = import_file_invites(&backend, &path, &policy_label)
         .await
         .expect_err("missing subject_hash must fail");
     assert!(err.to_string().contains("missing subject_hash"), "{err}");
     assert!(err.to_string().contains("entry 1"), "{err}");
 
     let all = backend.list_invite_grants().await.expect("list");
-    assert!(!all.iter().any(|e| e.policy_label == "import-test"));
+    assert!(!all.iter().any(|e| e.policy_label == policy_label));
 }
 
 #[tokio::test]
@@ -802,25 +880,31 @@ async fn import_fails_when_an_invite_entry_is_missing_tenant_id() {
     };
     let backend = PgBackend::new(&config).await.expect("backend");
     backend.run_migrations().await.expect("migrations");
-    cleanup_test_invites(&backend, "import-test").await;
+    let policy_label = unique_label("import-test");
+    let hash_1 = unique_hash();
+    cleanup_test_invites(&backend, &policy_label).await;
 
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("allowlist.json");
     std::fs::write(
         &path,
-        r#"{"version":1,"generated_at":"2026-05-17T18:00:00Z","policy_label":"import-test",
-            "entries":[{"subject_hash":"sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        allowlist_fixture(
+            r#"{"version":1,"generated_at":"2026-05-17T18:00:00Z","policy_label":"POLICY_LABEL",
+            "entries":[{"subject_hash":"SUBJECT_HASH_1",
             "note_label":"batch-1","max_uses":3}]}"#,
+            &policy_label,
+            &[&hash_1],
+        ),
     )
     .expect("write file");
 
-    let err = import_file_invites(&backend, &path, "import-test")
+    let err = import_file_invites(&backend, &path, &policy_label)
         .await
         .expect_err("missing tenant_id must fail");
     assert!(err.to_string().contains("missing tenant_id"), "{err}");
 
     let all = backend.list_invite_grants().await.expect("list");
-    assert!(!all.iter().any(|e| e.policy_label == "import-test"));
+    assert!(!all.iter().any(|e| e.policy_label == policy_label));
 }
 
 #[tokio::test]
@@ -831,18 +915,19 @@ async fn import_fails_on_a_malformed_subject_hash_shape() {
     };
     let backend = PgBackend::new(&config).await.expect("backend");
     backend.run_migrations().await.expect("migrations");
-    cleanup_test_invites(&backend, "import-test").await;
+    let policy_label = unique_label("import-test");
+    cleanup_test_invites(&backend, &policy_label).await;
 
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("allowlist.json");
     std::fs::write(
         &path,
-        r#"{"version":1,"generated_at":"2026-05-17T18:00:00Z","policy_label":"import-test",
-            "entries":[{"subject_hash":"not-a-sha256","tenant_id":"tenant-zaki-pilot","max_uses":3}]}"#,
+        allowlist_fixture(r#"{"version":1,"generated_at":"2026-05-17T18:00:00Z","policy_label":"POLICY_LABEL",
+            "entries":[{"subject_hash":"not-a-sha256","tenant_id":"tenant-zaki-pilot","max_uses":3}]}"#, &policy_label, &[]),
     )
     .expect("write file");
 
-    let err = import_file_invites(&backend, &path, "import-test")
+    let err = import_file_invites(&backend, &path, &policy_label)
         .await
         .expect_err("malformed subject_hash must fail");
     // Must name the entry position, never echo the offending hash value.
@@ -853,7 +938,7 @@ async fn import_fails_on_a_malformed_subject_hash_shape() {
     );
 
     let all = backend.list_invite_grants().await.expect("list");
-    assert!(!all.iter().any(|e| e.policy_label == "import-test"));
+    assert!(!all.iter().any(|e| e.policy_label == policy_label));
 }
 
 #[tokio::test]
@@ -864,7 +949,10 @@ async fn a_mid_import_failure_reports_the_partial_summary() {
     };
     let backend = PgBackend::new(&config).await.expect("backend");
     backend.run_migrations().await.expect("migrations");
-    cleanup_test_invites(&backend, "import-test").await;
+    let policy_label = unique_label("import-test");
+    let hash_1 = unique_hash();
+    let hash_2 = unique_hash();
+    cleanup_test_invites(&backend, &policy_label).await;
 
     // Two good invites, one instance entry, then a bad invite at entry 4:
     // the good entries must land before the failure and be reflected in the
@@ -873,14 +961,15 @@ async fn a_mid_import_failure_reports_the_partial_summary() {
     let path = dir.path().join("allowlist.json");
     std::fs::write(
         &path,
-        r#"{
+        allowlist_fixture(
+            r#"{
             "version": 1,
             "generated_at": "2026-05-17T18:00:00Z",
-            "policy_label": "import-test",
+            "policy_label": "POLICY_LABEL",
             "entries": [
-                {"subject_hash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+                {"subject_hash": "SUBJECT_HASH_1",
                  "tenant_id": "tenant-zaki-pilot", "max_uses": 3},
-                {"subject_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                {"subject_hash": "SUBJECT_HASH_2",
                  "tenant_id": "tenant-zaki-pilot", "max_uses": 3},
                 {"kind": "instance", "instance_id": "inst-1",
                  "instance_public_key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
@@ -890,10 +979,13 @@ async fn a_mid_import_failure_reports_the_partial_summary() {
                 {"subject_hash": "not-a-sha256", "tenant_id": "tenant-zaki-pilot", "max_uses": 3}
             ]
         }"#,
+            &policy_label,
+            &[&hash_1, &hash_2],
+        ),
     )
     .expect("write file");
 
-    let err = import_file_invites(&backend, &path, "import-test")
+    let err = import_file_invites(&backend, &path, &policy_label)
         .await
         .expect_err("the fourth entry is malformed and must fail the whole import");
     let message = err.to_string();
@@ -913,7 +1005,7 @@ async fn a_mid_import_failure_reports_the_partial_summary() {
     let all = backend.list_invite_grants().await.expect("list");
     let count = all
         .iter()
-        .filter(|e| e.policy_label == "import-test")
+        .filter(|e| e.policy_label == policy_label)
         .count();
     assert_eq!(
         count, 2,
@@ -929,14 +1021,16 @@ async fn an_expired_invite_cannot_be_redeemed() {
     };
     let backend = PgBackend::new(&config).await.expect("backend");
     backend.run_migrations().await.expect("migrations");
-    cleanup_test_invites(&backend, "test-pool").await;
+    let policy_label = unique_label("test-pool");
+    let hash_c = unique_hash();
+    cleanup_test_invites(&backend, &policy_label).await;
 
-    let mut write = derived_write(TEST_HASH_C);
+    let mut write = derived_write(&hash_c, &policy_label);
     write.expires_at = Some(chrono::Utc::now() - chrono::Duration::seconds(1));
     let _ = backend.insert_invite_grant(write).await.expect("insert");
 
     let result = backend
-        .redeem_invite_grant(TEST_HASH_C, "user-subject-1")
+        .redeem_invite_grant(&hash_c, "user-subject-1")
         .await
         .expect("an expired invite is not a database error");
     assert!(result.is_none(), "an expired invite must not redeem");
