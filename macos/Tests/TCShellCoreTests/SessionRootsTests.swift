@@ -297,4 +297,18 @@ final class SessionRootsTests: XCTestCase {
         XCTAssertEqual(roots.codex, .undecided)
         XCTAssertEqual(roots.gemini, .undecided)
     }
+    func testOpenCodeExportsRequireAnExplicitFolderChoice() throws {
+        var roots = SessionRoots(claude: .off, codex: .off)
+        XCTAssertTrue(roots.isComplete)
+        XCTAssertNil(try decode(try XCTUnwrap(roots.settingsJSON()))["opencode_source"])
+        roots[.opencode] = .watch(path: "/Users/someone/exports")
+        XCTAssertEqual(try declaration(decode(XCTUnwrap(roots.settingsJSON())), "opencode_source"),
+                       ["mode": "watch", "path": "/Users/someone/exports"])
+        XCTAssertEqual(roots.claude, .off)
+        XCTAssertEqual(roots.codex, .off)
+        roots[.opencode] = .off
+        XCTAssertEqual(try declaration(decode(XCTUnwrap(roots.settingsJSON())), "opencode_source"),
+                       ["mode": "off"])
+    }
+
 }

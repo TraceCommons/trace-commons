@@ -127,6 +127,7 @@ struct QueueEntry: Decodable, Identifiable, Hashable {
         case "codex": return "Codex"
         case "gemini-cli", "gemini_cli": return "Gemini CLI"
         case "cline": return "Cline"
+        case "opencode": return "OpenCode"
         case "antigravity": return "Antigravity"
         case "trajectory", "letta_trajectory": return "Letta trajectory"
         default:
@@ -544,6 +545,7 @@ struct DaemonSettingsView: Decodable, Equatable {
     let codexSourceMode: String?
     let geminiSourceMode: String?
     let clineSourceMode: String?
+    var opencodeSourceMode: String? = nil
     /// The local-proxy declaration this daemon is holding, or nil for none.
     /// Nil means off, with no fallback: connecting to a loopback port
     /// because nobody said otherwise would probe a service the contributor
@@ -592,6 +594,7 @@ struct DaemonSettingsView: Decodable, Equatable {
         case codexSourceMode = "codex_source_mode"
         case geminiSourceMode = "gemini_source_mode"
         case clineSourceMode = "cline_source_mode"
+        case opencodeSourceMode = "opencode_source_mode"
         case ironwire
         case admissionEvidenceRequired = "admission_evidence_required"
         case ironwireAttestedBodies = "ironwire_attested_bodies"

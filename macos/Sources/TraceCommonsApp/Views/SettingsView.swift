@@ -895,6 +895,7 @@ struct SettingsContent: View {
         case .codex: return modes.codex
         case .geminiCli: return modes.gemini
         case .cline: return modes.cline
+        case .opencode: return model.daemonSettings?.opencodeSourceMode ?? ""
         }
     }
 
