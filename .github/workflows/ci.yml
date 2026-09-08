@@ -86,6 +86,12 @@ jobs:
     #   trace_corpus_pg_store    31 failing
     #   trace_corpus_pg_rls      25 failing
     #
+    # Those counts are from before #750 and are almost certainly stale now: the
+    # migration race it fixes was most of what these three were failing on, so
+    # measure before assuming the debt is still that size. `trace_corpus_pg_store`
+    # in particular has one failure left that is NOT the race and is not stale
+    # test debt either -- see #751, which records what was ruled out.
+    #
     # `trace_invite_registry_pg` was a fourth, at 20 failing, and runs below.
     # Its twenty failures were one defect and it was in the code, not the
     # fixtures: the migration runner took no lock, so the parallel tests --
