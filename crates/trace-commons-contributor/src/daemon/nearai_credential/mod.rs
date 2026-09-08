@@ -237,8 +237,21 @@ pub fn handle_forget(shared: &DaemonShared, req: &Request) -> Response {
     match ceremony::forget(&shared.store) {
         Ok(removed) => {
             {
+                // The session only. NOT `near_ai_inference`, and the
+                // difference is load-bearing: #718's
+                // `absorb_near_ai_credential_change` detects a credential
+                // change by COMPARING this in-memory copy against the file,
+                // and advances the generation that stops and restarts the
+                // proxy only when they differ. Clearing the key here makes
+                // both sides `None`, the comparison finds nothing, the
+                // generation never advances -- and the running proxy goes on
+                // answering with the key the contributor just withdrew.
+                //
+                // `reconcile_private_inference`, which `handle_forget_async`
+                // calls, is what clears the key from this document and from
+                // the proxy together. Nothing absorbs the session, so it is
+                // cleared here.
                 let mut settings = shared.settings.lock().expect("settings lock");
-                settings.near_ai_inference = None;
                 settings.near_ai_session = None;
             }
             // Any balance this directory had cached was read with the session

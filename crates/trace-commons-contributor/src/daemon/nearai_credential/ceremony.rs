@@ -290,7 +290,7 @@ pub(crate) fn persist(
         refresh_token_expires_at: None,
         stored_at: Utc::now(),
     });
-    
+
     settings.save(&store)?;
     record_change(dir);
     Ok(())

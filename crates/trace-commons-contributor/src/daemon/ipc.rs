@@ -6837,8 +6837,15 @@ mod tests {
     /// contributor believes they revoked this machine's access to their NEAR
     /// AI account, and the daemon is left holding the wider of the two
     /// credentials -- one that can mint further API keys and read the account.
-    #[test]
-    fn forgetting_the_credential_takes_the_session_with_it() {
+    ///
+    /// Exercised through `handle_request_async`, which is the path the daemon
+    /// actually dispatches this method on, and the only one that reaches
+    /// `reconcile_private_inference`. The sync handler clears the session; the
+    /// reconcile clears the key and takes it back out of the running proxy.
+    /// Asserting against the sync handler alone would pass while the proxy
+    /// went on answering with a withdrawn key.
+    #[tokio::test]
+    async fn forgetting_the_credential_takes_the_session_with_it() {
         let s = shared();
         {
             let mut settings = s.settings.lock().unwrap();
@@ -6858,7 +6865,8 @@ mod tests {
             settings.save(&s.store).unwrap();
         }
 
-        let r = handle_request(&s, &req("near_ai_credential_forget", serde_json::json!({})));
+        let r = handle_request_async(&s, &req("near_ai_credential_forget", serde_json::json!({})))
+            .await;
         assert_eq!(r.result.unwrap()["removed"], true);
 
         let on_disk = DaemonSettings::load(&s.store).unwrap();
@@ -7979,6 +7987,11 @@ mod tests {
                 organization_id: "org-1".into(),
                 workspace_id: "ws-1".into(),
             },
+            // The ceremony now stores a session beside the key, so this
+            // stands in for the refresh token its last leg carries. The
+            // coupling under test is the key reaching a running proxy; the
+            // session is written alongside and is not what reconcile reads.
+            "refresh-token-for-the-reconcile-test".to_string(),
         )
         .unwrap();
 
