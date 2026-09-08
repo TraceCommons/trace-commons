@@ -320,6 +320,50 @@ final class DaemonClient {
                 "harness_commit", params: HarnessSurface.commitParams(planID: planID)))
     }
 
+    // MARK: - The key this destination answers with
+
+    /// What this machine holds, and -- when this shell can name the attempt
+    /// -- how that attempt is going.
+    ///
+    /// Always ok by contract, so an unreadable answer degrades to the
+    /// unreported state rather than throwing: a shell that turned a failed
+    /// poll into a refusal would have to say something about what is kept
+    /// here, and it does not know.
+    func nearAiCredentialStatus(attemptID: String?) throws -> CredentialStatus {
+        CredentialStatus.parse(
+            fromJSON: try rawResultJSON(
+                CredentialSurface.statusMethod,
+                params: CredentialSurface.statusParams(attemptID: attemptID)))
+    }
+
+    /// Begins the ceremony and hands back where to open the browser.
+    ///
+    /// The URL is served ONCE, here. Nothing re-serves it, so a caller that
+    /// drops the returned attempt has to begin again -- which is why this
+    /// returns the whole thing rather than just the id.
+    func nearAiCredentialStart() throws -> CredentialAttempt? {
+        CredentialAttempt.parse(
+            fromJSON: try rawResultJSON(CredentialSurface.startMethod))
+    }
+
+    /// Stops waiting on the browser. Requires the attempt id: an attempt this
+    /// shell cannot name is one it did not start.
+    func nearAiCredentialCancel(attemptID: String) throws {
+        _ = try rawResultJSON(
+            CredentialSurface.cancelMethod,
+            params: CredentialSurface.cancelParams(attemptID: attemptID))
+    }
+
+    /// Removes the stored key from this machine.
+    ///
+    /// The answer's `revoked` is always `false` and is deliberately not
+    /// surfaced as a flag: forgetting is local, the key stays valid at the
+    /// service, and that fact is a SENTENCE beside the button rather than
+    /// something a view could forget to draw.
+    func nearAiCredentialForget() throws {
+        _ = try rawResultJSON(CredentialSurface.forgetMethod)
+    }
+
     /// Shape-checks a settings object, refusing rather than returning one
     /// that cannot honestly be sent.
     ///

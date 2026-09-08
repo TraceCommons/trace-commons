@@ -395,6 +395,119 @@ final class AppModel: ObservableObject {
         lastActionError = privateInferenceCopy?.writeUnconfirmed
     }
 
+    // MARK: - The key this destination answers with
+
+    /// The three branch tables the credential card turns on, all decided in
+    /// the Rust. This shell owns no `switch` on this surface either.
+    let credentialCalls = CredentialCalls(
+        stateLine: { TCNearAiCredential.stateLine(state: $0) },
+        stateTone: { TCNearAiCredential.stateTone(state: $0) },
+        action: { TCNearAiCredential.action(state: $0) },
+        harnessNotice: { TCNearAiCredential.harnessNotice(credentialed: $0) ?? "" }
+    )
+
+    /// What this machine holds, from the daemon's own report.
+    ///
+    /// Seeded as unreported rather than absent: before the first poll
+    /// answers, this shell has read nothing, and "no key is kept here" is a
+    /// claim about the machine that would invite a second sign-in.
+    @Published private(set) var credentialStatus: CredentialStatus = .unreported
+
+    /// The ceremony this shell started, while it is still going.
+    ///
+    /// Kept because `browser_url` is served ONCE, by start, and no poll
+    /// re-serves it -- and because cancel requires the attempt id, which is
+    /// also only ever handed over here. Dropped when the ceremony leaves the
+    /// state that has something to cancel.
+    @Published private(set) var credentialAttempt: CredentialAttempt?
+
+    @Published private(set) var credentialBusy = false
+
+    /// Re-read on every settings refresh, and again while a ceremony is in
+    /// flight: the ceremony finishes in a browser this app does not own, so
+    /// nothing here is told when it does.
+    func refreshNearAiCredential() {
+        let attempt = credentialAttempt?.attemptID
+        perform(
+            CredentialSurface.statusMethod,
+            work: { try $0.nearAiCredentialStatus(attemptID: attempt) }
+        ) { status in
+            self.publishIfChanged(\.credentialStatus, status)
+            // The attempt is let go the moment the shared table stops
+            // offering a cancel for it. Holding a finished attempt's id
+            // would keep polling a ceremony nobody is waiting on.
+            if CredentialSurface.action(status, calls: self.credentialCalls) != .cancel {
+                self.credentialAttempt = nil
+            }
+        }
+    }
+
+    /// Begins the ceremony and hands back the one URL that was served.
+    ///
+    /// The URL is returned rather than opened here: opening a browser is the
+    /// view's `openURL` environment, and this model has no window. A `nil`
+    /// means the ceremony did not begin in a way this shell can carry
+    /// through, and nothing is left half-started -- the daemon's own attempt
+    /// times out on the browser.
+    func startNearAiCredential() async -> URL? {
+        guard let client, !credentialBusy else { return nil }
+        credentialBusy = true
+        let outcome = await Task.detached(priority: .userInitiated) {
+            Result { try client.nearAiCredentialStart() }
+        }.value
+        credentialBusy = false
+        guard case .success(let attempt) = outcome, let attempt else {
+            lastActionError = privateInferenceCopy?.writeUnconfirmed
+            return nil
+        }
+        credentialAttempt = attempt
+        refreshNearAiCredential()
+        return URL(string: attempt.browserURL)
+    }
+
+    /// Stops waiting on the browser. Does nothing without an attempt id --
+    /// there is no cancel-whatever-is-running.
+    func cancelNearAiCredential() {
+        guard let attemptID = credentialAttempt?.attemptID else { return }
+        submitNearAiCredential { try $0.nearAiCredentialCancel(attemptID: attemptID) }
+    }
+
+    /// Removes the stored key from this machine.
+    func forgetNearAiCredential() {
+        submitNearAiCredential { try $0.nearAiCredentialForget() }
+    }
+
+    /// One write, then a re-read of everything the key is behind.
+    ///
+    /// The listener and the tool list are re-read as well as the card: the
+    /// key is what this destination answers with, so forgetting it moves the
+    /// sentence under the switch and the connect controls too, and a card
+    /// that updated alone would leave both claiming otherwise.
+    ///
+    /// The busy flag is cleared on BOTH outcomes. `perform` runs its
+    /// continuation on success only, which would leave a failed cancel with
+    /// the button disabled and no way back.
+    private func submitNearAiCredential(_ work: @escaping (DaemonClient) throws -> Void) {
+        guard !credentialBusy else { return }
+        guard let client else {
+            lastActionError = privateInferenceCopy?.writeUnconfirmed
+            return
+        }
+        credentialBusy = true
+        Task.detached(priority: .userInitiated) {
+            let outcome = Result { try work(client) }
+            await MainActor.run {
+                self.credentialBusy = false
+                if case .failure = outcome {
+                    self.lastActionError = self.privateInferenceCopy?.writeUnconfirmed
+                }
+                self.refreshNearAiCredential()
+                self.refreshSettings()
+                self.refreshHarnesses()
+            }
+        }
+    }
+
     // MARK: - The redaction witness
 
     /// The witness surface's fixed words, decoded once from the Rust.
@@ -876,6 +989,7 @@ final class AppModel: ObservableObject {
         refreshAudit()
         refreshPublicProfile()
         refreshHarnesses()
+        refreshNearAiCredential()
     }
 
     /// The local change log. Refreshed alongside everything else at launch,
