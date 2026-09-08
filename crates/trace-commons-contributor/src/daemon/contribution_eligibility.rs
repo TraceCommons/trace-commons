@@ -60,8 +60,9 @@
 //! from the set below; none of them carries a path, a digest, an identifier
 //! or anything a contributor wrote.
 
+use super::attestation_mark::{self, Mark};
 use crate::routing::RoutedExchange;
-use crate::routing::attested::{AttestedCall, Unattestable, ledger_only_final_call};
+use crate::routing::attested::{AttestedCall, Unattestable};
 
 /// The cheap checks pass, a faithful pair was carried, and its request
 /// carries the admission marker.
@@ -73,42 +74,23 @@ pub const STATE_INELIGIBLE_CONFIGURATION: &str = "ineligible_configuration";
 /// Not evaluated. Never a silent default -- see the module docs.
 pub const STATE_UNKNOWN: &str = "unknown";
 
-/// [`Unattestable::NoCall`]: the session joined no inference hops.
-pub const REASON_NO_CALL: &str = "no_inference_call";
-/// [`Unattestable::CaptureOff`]: the final hop recorded no bodies.
-pub const REASON_CAPTURE_OFF: &str = "capture_off";
-/// [`Unattestable::DigestAbsent`]: a restarted, cancelled or truncated stream.
-pub const REASON_DIGEST_ABSENT: &str = "digest_absent";
-/// [`Unattestable::UpstreamIdAbsent`]: no provider identifier, so no receipt.
-pub const REASON_UPSTREAM_ID_ABSENT: &str = "upstream_id_absent";
-/// [`Unattestable::DigestMismatch`]: the bytes disagree with the record.
-pub const REASON_DIGEST_MISMATCH: &str = "digest_mismatch";
-/// [`Unattestable::ReferenceMalformed`]: the stored reference is not one the
-/// store could have written.
-pub const REASON_REFERENCE_MALFORMED: &str = "reference_malformed";
-/// [`Unattestable::BodiesUnreadable`]: named by the record, not readable.
-pub const REASON_BODIES_UNREADABLE: &str = "bodies_unreadable";
-/// [`Unattestable::BodyNotUtf8`]: no faithful representation in the carrier.
-pub const REASON_BODY_NOT_UTF8: &str = "body_not_utf8";
-/// [`Unattestable::BodyTooLarge`]: past the carried-body bound.
-pub const REASON_BODY_TOO_LARGE: &str = "body_too_large";
-/// No verbatim body store is configured, so no session on this machine can
-/// carry the evidence. A setting, and the only reason that is about the
-/// machine rather than about this session.
-pub const REASON_EVIDENCE_CAPTURE_OFF: &str = "evidence_capture_off";
-/// The call was carried whole and its request does not carry the marker the
-/// server admits on. Recorded before the marker existed, or made by a tool
-/// that does not add it.
-pub const REASON_MARKER_ABSENT: &str = "marker_absent";
-/// The call carries the marker, and the receipt that has to accompany it
-/// could not be obtained. Not a fact about this session: the receipt is
-/// fetched from elsewhere and elsewhere can be down, which is why it answers
-/// [`STATE_UNKNOWN`] rather than an ineligibility.
-pub const REASON_RECEIPT_UNAVAILABLE: &str = "receipt_unavailable";
-/// The request could not be read as the shape the marker lives in. Refused
-/// rather than retried as an ordinary submission -- the same rule
-/// `submit::admission_profile_for_request` follows.
-pub const REASON_REQUEST_MALFORMED: &str = "request_malformed";
+/// The thirteen reason labels, owned by [`attestation_mark`] and re-exported
+/// here unchanged.
+///
+/// They are not split between the two questions, because they were never
+/// answers to either one. Each names a property of the recorded session --
+/// no call was made, the kept copy is incomplete, the digest disagrees -- and
+/// that property is the same property whichever question is asked of it. One
+/// set, one rename, and no way for the two surfaces to come to mean different
+/// things by `digest_mismatch`.
+///
+/// Their *sentences* are separate. See `private_inference_copy`.
+pub use attestation_mark::{
+    ALL_REASONS, REASON_BODIES_UNREADABLE, REASON_BODY_NOT_UTF8, REASON_BODY_TOO_LARGE,
+    REASON_CAPTURE_OFF, REASON_DIGEST_ABSENT, REASON_DIGEST_MISMATCH, REASON_EVIDENCE_CAPTURE_OFF,
+    REASON_MARKER_ABSENT, REASON_NO_CALL, REASON_RECEIPT_UNAVAILABLE, REASON_REFERENCE_MALFORMED,
+    REASON_REQUEST_MALFORMED, REASON_UPSTREAM_ID_ABSENT,
+};
 
 /// One entry's answer: a state label and, unless it is eligible, why.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -118,36 +100,6 @@ pub struct Verdict {
     /// One of the `REASON_*` labels. `None` for [`STATE_ELIGIBLE`], which has
     /// nothing to explain.
     pub reason: Option<&'static str>,
-}
-
-impl Verdict {
-    fn eligible() -> Self {
-        Self {
-            state: STATE_ELIGIBLE,
-            reason: None,
-        }
-    }
-
-    fn permanent(reason: &'static str) -> Self {
-        Self {
-            state: STATE_INELIGIBLE_PERMANENT,
-            reason: Some(reason),
-        }
-    }
-
-    fn configuration(reason: &'static str) -> Self {
-        Self {
-            state: STATE_INELIGIBLE_CONFIGURATION,
-            reason: Some(reason),
-        }
-    }
-
-    fn unknown(reason: &'static str) -> Self {
-        Self {
-            state: STATE_UNKNOWN,
-            reason: Some(reason),
-        }
-    }
 }
 
 /// What a refused submission proved about the entry it was sent for.
@@ -172,11 +124,7 @@ impl Verdict {
 /// produces [`STATE_UNKNOWN`], and it is why the label ships in the contract.
 #[must_use]
 pub fn writeback_for(reason_label: &str) -> Option<Verdict> {
-    match reason_label {
-        "admission_request_malformed" => Some(Verdict::permanent(REASON_REQUEST_MALFORMED)),
-        "admission_receipt_unavailable" => Some(Verdict::unknown(REASON_RECEIPT_UNAVAILABLE)),
-        _ => None,
-    }
+    attestation_mark::writeback_for(reason_label).map(verdict_for_mark)
 }
 
 /// Whether the eligibility question applies to this contributor at all.
@@ -243,48 +191,37 @@ pub fn evaluate(
     if !admission_evidence {
         return None;
     }
-    // The cheap group first, and from the rows rather than from `refusal`.
-    // These four are the answers that stay available if the expensive half is
-    // ever made lazy, and they contain the case that actually matters --
-    // `NoCall`, the session that predates attested inference entirely.
-    if let Err(cheap) = ledger_only_final_call(rows) {
-        return Some(verdict_for(cheap));
-    }
-    if let Some(refusal) = refusal {
-        return Some(verdict_for(refusal));
-    }
-    let Some(call) = attested else {
-        // The row is usable and nothing refused it, so nothing ran: this
-        // machine keeps no verbatim bodies. Configuration, and the sentence
-        // may name the setting.
-        return Some(Verdict::configuration(REASON_EVIDENCE_CAPTURE_OFF));
-    };
-    // The same call the submit path makes, over the same bytes. Divergence
-    // here is the defect this surface exists to remove.
-    match crate::submit::admission_profile_for_request(true, Some(call.request_body())) {
-        Ok(true) => Some(Verdict::eligible()),
-        Ok(false) => Some(Verdict::permanent(REASON_MARKER_ABSENT)),
-        Err(_) => Some(Verdict::permanent(REASON_REQUEST_MALFORMED)),
-    }
+    Some(verdict_for_mark(attestation_mark::evaluate(
+        rows, attested, refusal,
+    )))
 }
 
-/// The state and reason for one refusal.
+/// Read one attestation mark as a permission answer.
 ///
-/// [`Unattestable::CaptureOff`] is the single configuration case: the record
-/// exists and holds no bodies, which is a setting on the thing that wrote it.
-/// Every other variant is a fact about bytes that were already sent, or about
-/// bytes already on disk, and no setting reaches back into either.
-fn verdict_for(refusal: Unattestable) -> Verdict {
-    match refusal {
-        Unattestable::CaptureOff => Verdict::configuration(REASON_CAPTURE_OFF),
-        Unattestable::NoCall => Verdict::permanent(REASON_NO_CALL),
-        Unattestable::DigestAbsent => Verdict::permanent(REASON_DIGEST_ABSENT),
-        Unattestable::UpstreamIdAbsent => Verdict::permanent(REASON_UPSTREAM_ID_ABSENT),
-        Unattestable::DigestMismatch => Verdict::permanent(REASON_DIGEST_MISMATCH),
-        Unattestable::ReferenceMalformed => Verdict::permanent(REASON_REFERENCE_MALFORMED),
-        Unattestable::BodiesUnreadable => Verdict::permanent(REASON_BODIES_UNREADABLE),
-        Unattestable::BodyNotUtf8 => Verdict::permanent(REASON_BODY_NOT_UTF8),
-        Unattestable::BodyTooLarge => Verdict::permanent(REASON_BODY_TOO_LARGE),
+/// **The whole of the difference between the two questions lives here**, and
+/// it is a rename of four labels. The classification is
+/// [`attestation_mark::evaluate`]'s and only its; running it a second time
+/// under this framing is how the two would come to disagree about one
+/// session, and a queue that says a trace carries proof while refusing to
+/// send it for want of that proof is worse than either answer alone.
+///
+/// The reason travels through untouched: it names a fact about the session,
+/// and the fact does not change with the question being asked of it.
+///
+/// A mark this build does not recognise reads as [`STATE_UNKNOWN`] rather
+/// than as an ineligibility, for the reason the whole tri-state exists --
+/// "could not tell" turned into "no" invites a contributor to conclude
+/// something false about their own work.
+fn verdict_for_mark(mark: Mark) -> Verdict {
+    let state = match mark.state {
+        attestation_mark::MARK_ATTESTED => STATE_ELIGIBLE,
+        attestation_mark::MARK_UNATTESTED_PERMANENT => STATE_INELIGIBLE_PERMANENT,
+        attestation_mark::MARK_UNATTESTED_CONFIGURATION => STATE_INELIGIBLE_CONFIGURATION,
+        _ => STATE_UNKNOWN,
+    };
+    Verdict {
+        state,
+        reason: mark.reason,
     }
 }
 
@@ -294,23 +231,6 @@ pub const ALL_STATES: [&str; 4] = [
     STATE_INELIGIBLE_PERMANENT,
     STATE_INELIGIBLE_CONFIGURATION,
     STATE_UNKNOWN,
-];
-
-/// Every reason label this module can produce, for tests that pin the set.
-pub const ALL_REASONS: [&str; 13] = [
-    REASON_NO_CALL,
-    REASON_CAPTURE_OFF,
-    REASON_DIGEST_ABSENT,
-    REASON_UPSTREAM_ID_ABSENT,
-    REASON_DIGEST_MISMATCH,
-    REASON_REFERENCE_MALFORMED,
-    REASON_BODIES_UNREADABLE,
-    REASON_BODY_NOT_UTF8,
-    REASON_BODY_TOO_LARGE,
-    REASON_EVIDENCE_CAPTURE_OFF,
-    REASON_MARKER_ABSENT,
-    REASON_REQUEST_MALFORMED,
-    REASON_RECEIPT_UNAVAILABLE,
 ];
 
 #[cfg(test)]

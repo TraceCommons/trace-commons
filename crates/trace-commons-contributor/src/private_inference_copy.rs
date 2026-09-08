@@ -534,6 +534,32 @@ pub struct PrivateInferenceCopy {
     pub eligibility_reason_marker_absent: &'static str,
     pub eligibility_reason_request_malformed: &'static str,
     pub eligibility_reason_receipt_unavailable: &'static str,
+    /// The four `attestation` marks a queue entry can carry, and the thirteen
+    /// `attestation_reason` sentences. Rendered through
+    /// [`attestation_state_line`] and [`attestation_reason_line`]; carried
+    /// here as well so a test on the far side can pin the set it was built
+    /// against.
+    ///
+    /// Separate sentences from the `eligibility_*` fields above over the same
+    /// thirteen reason labels, and deliberately: see
+    /// [`attestation_reason_line`].
+    pub attestation_attested: &'static str,
+    pub attestation_unattested_permanent: &'static str,
+    pub attestation_unattested_configuration: &'static str,
+    pub attestation_unknown: &'static str,
+    pub attestation_reason_no_call: &'static str,
+    pub attestation_reason_capture_off: &'static str,
+    pub attestation_reason_digest_absent: &'static str,
+    pub attestation_reason_upstream_id_absent: &'static str,
+    pub attestation_reason_digest_mismatch: &'static str,
+    pub attestation_reason_reference_malformed: &'static str,
+    pub attestation_reason_bodies_unreadable: &'static str,
+    pub attestation_reason_body_not_utf8: &'static str,
+    pub attestation_reason_body_too_large: &'static str,
+    pub attestation_reason_evidence_capture_off: &'static str,
+    pub attestation_reason_marker_absent: &'static str,
+    pub attestation_reason_request_malformed: &'static str,
+    pub attestation_reason_receipt_unavailable: &'static str,
 }
 
 /// The sentence the settings card shows once the control has moved out of it.
@@ -1482,6 +1508,212 @@ pub fn private_inference_copy() -> PrivateInferenceCopy {
         eligibility_reason_marker_absent: ELIGIBILITY_REASON_MARKER_ABSENT,
         eligibility_reason_request_malformed: ELIGIBILITY_REASON_REQUEST_MALFORMED,
         eligibility_reason_receipt_unavailable: ELIGIBILITY_REASON_RECEIPT_UNAVAILABLE,
+        attestation_attested: ATTESTATION_ATTESTED,
+        attestation_unattested_permanent: ATTESTATION_UNATTESTED_PERMANENT,
+        attestation_unattested_configuration: ATTESTATION_UNATTESTED_CONFIGURATION,
+        attestation_unknown: ATTESTATION_UNKNOWN,
+        attestation_reason_no_call: ATTESTATION_REASON_NO_CALL,
+        attestation_reason_capture_off: ATTESTATION_REASON_CAPTURE_OFF,
+        attestation_reason_digest_absent: ATTESTATION_REASON_DIGEST_ABSENT,
+        attestation_reason_upstream_id_absent: ATTESTATION_REASON_UPSTREAM_ID_ABSENT,
+        attestation_reason_digest_mismatch: ATTESTATION_REASON_DIGEST_MISMATCH,
+        attestation_reason_reference_malformed: ATTESTATION_REASON_REFERENCE_MALFORMED,
+        attestation_reason_bodies_unreadable: ATTESTATION_REASON_BODIES_UNREADABLE,
+        attestation_reason_body_not_utf8: ATTESTATION_REASON_BODY_NOT_UTF8,
+        attestation_reason_body_too_large: ATTESTATION_REASON_BODY_TOO_LARGE,
+        attestation_reason_evidence_capture_off: ATTESTATION_REASON_EVIDENCE_CAPTURE_OFF,
+        attestation_reason_marker_absent: ATTESTATION_REASON_MARKER_ABSENT,
+        attestation_reason_request_malformed: ATTESTATION_REASON_REQUEST_MALFORMED,
+        attestation_reason_receipt_unavailable: ATTESTATION_REASON_RECEIPT_UNAVAILABLE,
+    }
+}
+
+/// `attested`.
+///
+/// **The positive case, said out loud.** The eligibility surface next door
+/// only ever spoke up to explain a refusal, because for the contributor it
+/// was written for there was nothing good to report -- an eligible session is
+/// just an ordinary one. This mark is different: carrying the call is the
+/// exceptional thing, it is about to count for something, and a surface that
+/// only ever names the sessions that lack it teaches a contributor that the
+/// mark means bad news.
+///
+/// States the fact and stops. No promise about what it is worth: that is
+/// decided elsewhere and can change, and a sentence anticipating it would be
+/// read as a commitment on the day it does.
+pub const ATTESTATION_ATTESTED: &str =
+    "This session carries a checkable copy of the model call it came from.";
+
+/// `unattested_permanent`.
+///
+/// **Not a refusal, and it must not read as one.** Most of a contributor's
+/// history lands here, and all it means is that the work was done before any
+/// of this existed. Says the second half out loud for the reason its
+/// eligibility twin does -- somebody told only "there is no copy" tries to
+/// make one -- without the eligibility sentence's "cannot be sent", which is
+/// simply untrue for an invited contributor.
+pub const ATTESTATION_UNATTESTED_PERMANENT: &str = "This session carries no copy of the model call it came from, and \
+     nothing you change now will add one to work already finished.";
+
+/// `unattested_configuration`.
+///
+/// **The only mark whose sentence names a setting**, because it is the only
+/// one where changing something helps. The row stays about its own session:
+/// what the setting changes is the sessions recorded from now on.
+pub const ATTESTATION_UNATTESTED_CONFIGURATION: &str = "This session carries no copy of the model call it came from. A setting \
+     decides whether the ones you record from now on will.";
+
+/// `unknown`, and any mark label this build has never heard of.
+///
+/// **Must not degrade to "no copy".** The same tri-state rule
+/// [`ELIGIBILITY_UNKNOWN`] and [`CREDENTIAL_UNKNOWN`] follow: an unread fact
+/// gets its own sentence rather than borrowing a known one, because a
+/// contributor told "no copy" about a session that has one will stop offering
+/// work that is fine.
+pub const ATTESTATION_UNKNOWN: &str = "Whether this session carries a copy of the model call it came from has \
+     not been worked out. That is not the same as a no.";
+
+/// `no_inference_call`.
+///
+/// The commonest answer by far, and the one the mark exists to say kindly:
+/// everything recorded before the contributor started having their model
+/// calls answered here.
+pub const ATTESTATION_REASON_NO_CALL: &str = "No model call was answered on this computer while this session ran, so \
+     there is nothing to attach to it.";
+
+/// `capture_off`.
+pub const ATTESTATION_REASON_CAPTURE_OFF: &str = "The last model call in this session was answered without keeping a copy \
+     of it. Whether copies are kept is a setting, and it decides the sessions \
+     you record from now on.";
+
+/// `digest_absent`.
+pub const ATTESTATION_REASON_DIGEST_ABSENT: &str = "The last model call in this session did not finish cleanly, so what was \
+     kept of it is incomplete.";
+
+/// `upstream_id_absent`.
+pub const ATTESTATION_REASON_UPSTREAM_ID_ABSENT: &str = "Nothing was written down for the last model call in this session that \
+     would let anyone check it afterwards.";
+
+/// `digest_mismatch`.
+pub const ATTESTATION_REASON_DIGEST_MISMATCH: &str = "What was kept of the last model call in this session does not match what \
+     was written down about it, so nothing can be checked against it.";
+
+/// `reference_malformed`.
+pub const ATTESTATION_REASON_REFERENCE_MALFORMED: &str = "The note saying where this session's kept copy lives is not one this \
+     computer could have written.";
+
+/// `bodies_unreadable`.
+pub const ATTESTATION_REASON_BODIES_UNREADABLE: &str = "The kept copy of this session's last model call could not be read back \
+     from this computer.";
+
+/// `body_not_utf8`.
+pub const ATTESTATION_REASON_BODY_NOT_UTF8: &str = "The kept copy of this session's last model call is not text this app can \
+     carry without changing it, and changing it would make it worthless.";
+
+/// `body_too_large`.
+///
+/// "Larger than this app will carry", not "too large to send": the session
+/// itself sends perfectly well, and only the copy of the call is left behind.
+pub const ATTESTATION_REASON_BODY_TOO_LARGE: &str = "The kept copy of this session's last model call is larger than this app \
+     will carry.";
+
+/// `evidence_capture_off`.
+///
+/// The one reason about the machine rather than about this session, and it
+/// names the setting for the same reason `capture_off` does.
+pub const ATTESTATION_REASON_EVIDENCE_CAPTURE_OFF: &str = "This computer keeps no copy of the model calls it answers, so no session \
+     recorded here has one to carry. That is a setting you can change.";
+
+/// `marker_absent`.
+///
+/// Names both ways it happens, because they land on different people: work
+/// finished before the mark existed, and work done through a tool that does
+/// not add it. Neither is a mistake the contributor made.
+pub const ATTESTATION_REASON_MARKER_ABSENT: &str = "The last model call in this session went out without the mark a kept \
+     copy is checked against. It was made before that was set up, or by a \
+     tool that does not add it.";
+
+/// `request_malformed`.
+pub const ATTESTATION_REASON_REQUEST_MALFORMED: &str = "The last model call in this session was not written down in a shape this \
+     app can read, so the mark cannot be found in it.";
+
+/// `receipt_unavailable`.
+///
+/// The one reason about right now rather than about this session, which is
+/// why the mark beside it is `unknown` and why this is the only sentence here
+/// that suggests trying later.
+pub const ATTESTATION_REASON_RECEIPT_UNAVAILABLE: &str = "The proof that goes with this session's last model call could not be \
+     fetched just now. It may work later.";
+
+/// The sentence for one queue entry's `attestation` label.
+///
+/// **Every shell calls this for every row**, unlike
+/// [`eligibility_state_line`], which is called only when the wire carried an
+/// `eligibility` field. The mark is always present, so there is no
+/// absent-field rule to get wrong.
+///
+/// An unfamiliar or empty label answers [`ATTESTATION_UNKNOWN`]. IT MUST NOT
+/// DEGRADE TO AN UNATTESTED MARK: a label this build cannot read is not
+/// evidence about a contributor's session.
+#[must_use]
+pub fn attestation_state_line(label: &str) -> &'static str {
+    match label {
+        ATTESTATION_MARK_ATTESTED => ATTESTATION_ATTESTED,
+        ATTESTATION_MARK_UNATTESTED_PERMANENT => ATTESTATION_UNATTESTED_PERMANENT,
+        ATTESTATION_MARK_UNATTESTED_CONFIGURATION => ATTESTATION_UNATTESTED_CONFIGURATION,
+        _ => ATTESTATION_UNKNOWN,
+    }
+}
+
+/// How firmly [`attestation_state_line`]'s sentence reads.
+///
+/// `attested` is `Clear` and `unattested_configuration` is `Attention` -- the
+/// one mark with something to do about it. Everything else is `Neutral`.
+///
+/// **A permanently unattested session is NOT `Refused`**, and this is the
+/// tone decision that matters. Nothing was refused and nothing went wrong:
+/// the contributor did ordinary work at a time when nothing was keeping
+/// copies. Painting most of somebody's history as a failure, on a surface
+/// they cannot act on, is a judgement this has no business making.
+#[must_use]
+pub fn attestation_state_tone(label: &str) -> PrivateInferenceTone {
+    match label {
+        ATTESTATION_MARK_ATTESTED => PrivateInferenceTone::Clear,
+        ATTESTATION_MARK_UNATTESTED_CONFIGURATION => PrivateInferenceTone::Attention,
+        _ => PrivateInferenceTone::Neutral,
+    }
+}
+
+/// The sentence for one queue entry's `attestation_reason` label.
+///
+/// **The empty string for an unfamiliar or absent reason**, and a shell
+/// renders nothing for it -- the same rule [`eligibility_reason_line`]
+/// follows, and not the tri-state hedge the mark line makes. An `attested`
+/// row has no reason at all: there is nothing to explain.
+///
+/// **The labels are shared with eligibility and the sentences are not.** The
+/// reason names a fact about the session, and one fact deserves one label.
+/// But the eligibility sentences say "cannot be sent", which is true for the
+/// contributor that surface was written for and false for an invited one,
+/// whose session sends perfectly well and merely arrives without a copy of
+/// its call. Two tables, one label set.
+#[must_use]
+pub fn attestation_reason_line(label: &str) -> &'static str {
+    match label {
+        REASON_NO_CALL => ATTESTATION_REASON_NO_CALL,
+        REASON_CAPTURE_OFF => ATTESTATION_REASON_CAPTURE_OFF,
+        REASON_DIGEST_ABSENT => ATTESTATION_REASON_DIGEST_ABSENT,
+        REASON_UPSTREAM_ID_ABSENT => ATTESTATION_REASON_UPSTREAM_ID_ABSENT,
+        REASON_DIGEST_MISMATCH => ATTESTATION_REASON_DIGEST_MISMATCH,
+        REASON_REFERENCE_MALFORMED => ATTESTATION_REASON_REFERENCE_MALFORMED,
+        REASON_BODIES_UNREADABLE => ATTESTATION_REASON_BODIES_UNREADABLE,
+        REASON_BODY_NOT_UTF8 => ATTESTATION_REASON_BODY_NOT_UTF8,
+        REASON_BODY_TOO_LARGE => ATTESTATION_REASON_BODY_TOO_LARGE,
+        REASON_EVIDENCE_CAPTURE_OFF => ATTESTATION_REASON_EVIDENCE_CAPTURE_OFF,
+        REASON_MARKER_ABSENT => ATTESTATION_REASON_MARKER_ABSENT,
+        REASON_REQUEST_MALFORMED => ATTESTATION_REASON_REQUEST_MALFORMED,
+        REASON_RECEIPT_UNAVAILABLE => ATTESTATION_REASON_RECEIPT_UNAVAILABLE,
+        _ => "",
     }
 }
 
@@ -1513,6 +1745,21 @@ pub use crate::daemon::contribution_eligibility::{
     // import away from each other, is a collision waiting to be resolved the
     // wrong way round; the prefix says which surface each belongs to.
     STATE_UNKNOWN as ELIGIBILITY_STATE_UNKNOWN,
+};
+
+/// The four attestation mark labels, re-exported from the daemon module that
+/// produces them. The thirteen reason labels are the eligibility ones and are
+/// already imported above -- one label set for one fact.
+///
+/// Prefixed, all four, for the reason the eligibility labels are: this module
+/// already has a `STATE_UNKNOWN` (the listener's) and an
+/// `ELIGIBILITY_STATE_UNKNOWN`, and three unknowns one import apart is a
+/// collision waiting to be resolved the wrong way round.
+pub use crate::daemon::attestation_mark::{
+    MARK_ATTESTED as ATTESTATION_MARK_ATTESTED,
+    MARK_UNATTESTED_CONFIGURATION as ATTESTATION_MARK_UNATTESTED_CONFIGURATION,
+    MARK_UNATTESTED_PERMANENT as ATTESTATION_MARK_UNATTESTED_PERMANENT,
+    MARK_UNKNOWN as ATTESTATION_MARK_UNKNOWN,
 };
 /// The state labels this surface has words for, re-exported from the daemon
 /// module that produces them.
@@ -2472,6 +2719,154 @@ mod tests {
         }
     }
 
+    /// Every mark and every reason reaches a sentence of its own, and the
+    /// mark sentences do not repeat each other.
+    #[test]
+    fn every_attestation_label_reaches_its_own_sentence() {
+        use crate::daemon::attestation_mark::{ALL_MARKS, ALL_REASONS};
+        let mut seen: Vec<&str> = Vec::new();
+        for mark in ALL_MARKS {
+            let line = attestation_state_line(mark);
+            assert!(!line.trim().is_empty(), "{mark} has no sentence");
+            assert!(
+                !seen.contains(&line),
+                "{mark} borrows another mark's sentence"
+            );
+            seen.push(line);
+        }
+        for reason in ALL_REASONS {
+            let line = attestation_reason_line(reason);
+            assert!(!line.trim().is_empty(), "{reason} has no sentence");
+        }
+    }
+
+    /// **The two tables share thirteen labels; five of the sentences had to
+    /// be rewritten and eight did not.** That split is the whole argument for
+    /// two tables.
+    ///
+    /// A reason label names a fact about a session, and most of those facts
+    /// read the same whichever question is being asked -- "the stream did not
+    /// finish cleanly" is not a refusal of anything. Five were: they end in
+    /// *cannot be sent*, *nothing to send with it*, *too large to send*. For
+    /// the contributor the eligibility surface was written for that is true.
+    /// For an invited one it is simply false: their session sends perfectly
+    /// well and merely arrives without a copy of its call.
+    ///
+    /// So the tables stay separate even where they agree, and this test
+    /// enforces the thing that actually matters -- **no attestation sentence
+    /// may talk about whether the session can be sent** -- rather than
+    /// demanding thirteen gratuitous rewordings.
+    #[test]
+    fn no_attestation_sentence_speaks_about_sending() {
+        use crate::daemon::attestation_mark::{ALL_MARKS, ALL_REASONS};
+        let sentences = ALL_MARKS
+            .iter()
+            .map(|m| attestation_state_line(m))
+            .chain(ALL_REASONS.iter().map(|r| attestation_reason_line(r)));
+        for sentence in sentences {
+            let lowered = sentence.to_lowercase();
+            for phrase in ["to send", "be sent", "sending", "cannot be sent"] {
+                assert!(
+                    !lowered.contains(phrase),
+                    "{phrase:?} appears in an attestation sentence: {sentence}"
+                );
+            }
+        }
+    }
+
+    /// The five that were reworded, named, so a copy edit cannot quietly
+    /// point one table at the other's strings and put the falsehood back.
+    #[test]
+    fn the_refusal_framed_reasons_were_rewritten() {
+        for reason in [
+            REASON_NO_CALL,
+            REASON_DIGEST_MISMATCH,
+            REASON_BODY_TOO_LARGE,
+            REASON_EVIDENCE_CAPTURE_OFF,
+            REASON_MARKER_ABSENT,
+        ] {
+            assert_ne!(
+                attestation_reason_line(reason),
+                eligibility_reason_line(reason),
+                "{reason} still reads as a refusal"
+            );
+        }
+        // And no mark sentence is a verdict sentence: the four states are
+        // where the two framings differ by construction.
+        for mark in crate::daemon::attestation_mark::ALL_MARKS {
+            for state in crate::daemon::contribution_eligibility::ALL_STATES {
+                assert_ne!(
+                    attestation_state_line(mark),
+                    eligibility_state_line(state),
+                    "{mark} reads exactly like the {state} verdict"
+                );
+            }
+        }
+    }
+
+    /// An unrecognised mark reads as unevaluated and NEVER as "no copy":
+    /// telling a contributor their attested session carries nothing is the
+    /// one wrong answer this table can give.
+    #[test]
+    fn an_unrecognised_attestation_mark_borrows_nothing() {
+        for unknown in ["", "a_mark_from_a_later_daemon", "ATTESTED", "attested "] {
+            assert_eq!(
+                attestation_state_line(unknown),
+                ATTESTATION_UNKNOWN,
+                "{unknown:?} must read as unevaluated"
+            );
+            for known in [
+                ATTESTATION_ATTESTED,
+                ATTESTATION_UNATTESTED_PERMANENT,
+                ATTESTATION_UNATTESTED_CONFIGURATION,
+            ] {
+                assert_ne!(
+                    attestation_state_line(unknown),
+                    known,
+                    "{unknown:?} borrowed a known mark's sentence"
+                );
+            }
+            assert_eq!(
+                attestation_state_tone(unknown),
+                PrivateInferenceTone::Neutral
+            );
+        }
+    }
+
+    /// An unrecognised reason says nothing at all, rather than guessing.
+    #[test]
+    fn an_unrecognised_attestation_reason_says_nothing() {
+        for unknown in ["", "a_reason_from_a_later_daemon", "NO_CALL"] {
+            assert_eq!(attestation_reason_line(unknown), "");
+        }
+    }
+
+    /// The tone table, pinned. `attested` is the good news and reads as one;
+    /// the configuration mark is the only one with something to do; and a
+    /// permanently unattested session is deliberately NOT `Refused` --
+    /// nothing was refused, and most of a contributor's history lands there.
+    #[test]
+    fn the_attestation_tone_table_is_pinned() {
+        assert_eq!(
+            attestation_state_tone(ATTESTATION_MARK_ATTESTED),
+            PrivateInferenceTone::Clear
+        );
+        assert_eq!(
+            attestation_state_tone(ATTESTATION_MARK_UNATTESTED_CONFIGURATION),
+            PrivateInferenceTone::Attention
+        );
+        for mark in [
+            ATTESTATION_MARK_UNATTESTED_PERMANENT,
+            ATTESTATION_MARK_UNKNOWN,
+        ] {
+            assert_eq!(
+                attestation_state_tone(mark),
+                PrivateInferenceTone::Neutral,
+                "{mark}"
+            );
+        }
+    }
+
     /// Every state and every reason the daemon can produce has a sentence,
     /// and no two states share one.
     ///
@@ -2600,7 +2995,7 @@ mod tests {
         let fields = payload.as_object().expect("a JSON object");
         assert_eq!(
             fields.len(),
-            80,
+            97,
             "the payload's field count changed -- update the shells' decoders \
              and the tests that pin the set"
         );
@@ -2715,6 +3110,23 @@ mod tests {
             .chain(["", "a_reason_from_a_later_daemon"])
         {
             strings.push(eligibility_reason_line(label).to_string());
+        }
+        for label in [
+            ATTESTATION_MARK_ATTESTED,
+            ATTESTATION_MARK_UNATTESTED_PERMANENT,
+            ATTESTATION_MARK_UNATTESTED_CONFIGURATION,
+            ATTESTATION_MARK_UNKNOWN,
+            "",
+            "a_mark_from_a_later_daemon",
+        ] {
+            strings.push(attestation_state_line(label).to_string());
+        }
+        for label in crate::daemon::attestation_mark::ALL_REASONS
+            .iter()
+            .copied()
+            .chain(["", "a_reason_from_a_later_daemon"])
+        {
+            strings.push(attestation_reason_line(label).to_string());
         }
         for outcome in [
             "changes",

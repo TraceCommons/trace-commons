@@ -593,6 +593,15 @@ fn visit_session(
         && !from_staging
         && armed_settle_elapsed(obs.modified_at, ctx.now);
 
+    // Two questions off one transcript load. The mark is answered for every
+    // contributor; the eligibility verdict is a derivation from it that stays
+    // silent unless the signup flag applies. Both are free here and nowhere
+    // else -- see `QueueEntry::attestation`.
+    let attestation = super::attestation_mark::evaluate(
+        &transcript.routing,
+        transcript.attested_call.as_deref(),
+        transcript.attested_refusal,
+    );
     let eligibility = super::contribution_eligibility::evaluate(
         ctx.admission_evidence,
         &transcript.routing,
@@ -658,6 +667,8 @@ fn visit_session(
         // queue, every time anything called it.
         eligibility: eligibility.map(|v| v.state.to_string()),
         eligibility_reason: eligibility.and_then(|v| v.reason).map(str::to_string),
+        attestation: Some(attestation.state.to_string()),
+        attestation_reason: attestation.reason.map(str::to_string),
     };
     let entry_id = entry.entry_id;
 

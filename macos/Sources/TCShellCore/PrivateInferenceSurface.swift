@@ -140,6 +140,33 @@ public struct PrivateInferenceCopy: Decodable, Equatable, Sendable {
     public let eligibilityReasonRequestMalformed: String
     public let eligibilityReasonReceiptUnavailable: String
 
+    /// The four `attestation` marks a queue entry can carry, and the thirteen
+    /// `attestation_reason` sentences.
+    ///
+    /// Separate sentences from the `eligibility*` fields above over the SAME
+    /// thirteen reason labels. Five of the eligibility sentences say the
+    /// session cannot be sent, which is true for an evidence-admitted
+    /// contributor and false for an invited one, whose session sends
+    /// perfectly well and merely arrives without a copy of its call. Do not
+    /// render one where the other belongs.
+    public let attestationAttested: String
+    public let attestationUnattestedPermanent: String
+    public let attestationUnattestedConfiguration: String
+    public let attestationUnknown: String
+    public let attestationReasonNoCall: String
+    public let attestationReasonCaptureOff: String
+    public let attestationReasonDigestAbsent: String
+    public let attestationReasonUpstreamIdAbsent: String
+    public let attestationReasonDigestMismatch: String
+    public let attestationReasonReferenceMalformed: String
+    public let attestationReasonBodiesUnreadable: String
+    public let attestationReasonBodyNotUtf8: String
+    public let attestationReasonBodyTooLarge: String
+    public let attestationReasonEvidenceCaptureOff: String
+    public let attestationReasonMarkerAbsent: String
+    public let attestationReasonRequestMalformed: String
+    public let attestationReasonReceiptUnavailable: String
+
     /// `CaseIterable` so a test on the far side can compare the exported
     /// field set against the declared one in BOTH directions -- a field the
     /// Rust grows and this struct drops would sail past a test that only
@@ -225,6 +252,23 @@ public struct PrivateInferenceCopy: Decodable, Equatable, Sendable {
         case eligibilityReasonMarkerAbsent = "eligibility_reason_marker_absent"
         case eligibilityReasonRequestMalformed = "eligibility_reason_request_malformed"
         case eligibilityReasonReceiptUnavailable = "eligibility_reason_receipt_unavailable"
+        case attestationAttested = "attestation_attested"
+        case attestationUnattestedPermanent = "attestation_unattested_permanent"
+        case attestationUnattestedConfiguration = "attestation_unattested_configuration"
+        case attestationUnknown = "attestation_unknown"
+        case attestationReasonNoCall = "attestation_reason_no_call"
+        case attestationReasonCaptureOff = "attestation_reason_capture_off"
+        case attestationReasonDigestAbsent = "attestation_reason_digest_absent"
+        case attestationReasonUpstreamIdAbsent = "attestation_reason_upstream_id_absent"
+        case attestationReasonDigestMismatch = "attestation_reason_digest_mismatch"
+        case attestationReasonReferenceMalformed = "attestation_reason_reference_malformed"
+        case attestationReasonBodiesUnreadable = "attestation_reason_bodies_unreadable"
+        case attestationReasonBodyNotUtf8 = "attestation_reason_body_not_utf8"
+        case attestationReasonBodyTooLarge = "attestation_reason_body_too_large"
+        case attestationReasonEvidenceCaptureOff = "attestation_reason_evidence_capture_off"
+        case attestationReasonMarkerAbsent = "attestation_reason_marker_absent"
+        case attestationReasonRequestMalformed = "attestation_reason_request_malformed"
+        case attestationReasonReceiptUnavailable = "attestation_reason_receipt_unavailable"
     }
 
     /// All or nothing, for the reason on the type.
