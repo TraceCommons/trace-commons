@@ -1233,6 +1233,18 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "near_account_anchor_salting",
         include_str!("../../../../migrations/V61__near_account_anchor_salting.sql"),
     ),
+    // V62 finishes what V61 only appeared to do. V61 looked for V58's
+    // tenant/anchor CHECK by its rendered definition, matching `substring`
+    // where Postgres prints `SUBSTRING`, so it dropped nothing and still
+    // reported success -- leaving the tenant id derived from the anchor, which
+    // is the whole defect V61 exists to remove. V62 finds the constraint by the
+    // columns it constrains rather than by how the server prints it, and then
+    // re-reads the catalogue and refuses if it is still there.
+    (
+        62,
+        "near_account_anchor_tenant_binding_drop",
+        include_str!("../../../../migrations/V62__near_account_anchor_tenant_binding_drop.sql"),
+    ),
 ];
 
 #[async_trait]

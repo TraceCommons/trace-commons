@@ -33,14 +33,35 @@ fn identity() -> NearAccountIdentity {
 }
 
 fn config(url: String) -> DatabaseConfig {
+    config_with_resolver(url.clone(), url)
+}
+
+/// The runtime pool and the resolver pool, as two roles rather than one.
+///
+/// They must not be the same connection, and the difference is not cosmetic.
+/// V61 gives the resolver a permissive `USING (true)` SELECT policy scoped
+/// `TO trace_login_resolver`, which is what lets a session holding no tenant
+/// context resolve a blind index at all. A pool connecting as any other
+/// non-superuser role is left with `trace_corpus_tenant_isolation` alone,
+/// whose predicate compares `tenant_id` against a `trace_current_tenant_id()`
+/// that is NULL here -- so it matches nothing, and `near_anchor_tenant`
+/// returns `None` for an anchor that is present and committed.
+///
+/// This fixture used to pass one URL for both. Every returning contributor
+/// then looked new, which is not a visible failure so much as a second tenant
+/// minted quietly for someone who already had one. `config.rs` states the
+/// requirement (the resolver user MUST be `trace_login_resolver`) and
+/// `postgres.rs` states that it is never aliased to the runtime pool; nothing
+/// enforces either, so the fixture has to model it correctly on purpose.
+fn config_with_resolver(url: String, resolver_url: String) -> DatabaseConfig {
     DatabaseConfig {
-        url: SecretString::from(url.clone()),
+        url: SecretString::from(url),
         pool_size: 8,
         ssl_mode: SslMode::Prefer,
         // The anchor is a blind index and the tenant is random, so a returning
         // contributor can only be found by resolving the index with no tenant
         // context -- the same narrow resolver role V30 introduced for redeem.
-        login_resolver_url: Some(SecretString::from(url)),
+        login_resolver_url: Some(SecretString::from(resolver_url)),
         gate_driver_url: None,
         pii_backstop_driver_url: None,
         invite_registry_url: None,
@@ -89,9 +110,19 @@ async fn durable_provisioning_is_atomic_replay_safe_and_tenant_scoped() {
         .await
         .unwrap();
     admin_client.batch_execute("DO $$ BEGIN IF NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='tc_near_runtime') THEN CREATE ROLE tc_near_runtime LOGIN NOSUPERUSER NOBYPASSRLS; END IF; END $$; GRANT USAGE ON SCHEMA public TO tc_near_runtime; GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA public TO tc_near_runtime; GRANT USAGE,SELECT ON ALL SEQUENCES IN SCHEMA public TO tc_near_runtime;").await.unwrap();
+    // V30 creates `trace_login_resolver` NOLOGIN, so a test that wants to
+    // connect as it has to grant LOGIN. Granting only SELECT on the two
+    // columns V61 exposes keeps the fixture honest about what this role may
+    // read: it must never see `sealed_account_name`, which is the only stored
+    // copy of the contributor's account name.
+    admin_client.batch_execute("ALTER ROLE trace_login_resolver LOGIN; GRANT USAGE ON SCHEMA public TO trace_login_resolver; GRANT SELECT (tenant_id, anchor_hash) ON trace_near_account_anchors TO trace_login_resolver;").await.unwrap();
     let mut parsed = reqwest::Url::parse(&url).unwrap();
     parsed.set_username("tc_near_runtime").unwrap();
-    let db = PgBackend::new(&config(parsed.into())).await.unwrap();
+    let mut resolver = reqwest::Url::parse(&url).unwrap();
+    resolver.set_username("trace_login_resolver").unwrap();
+    let db = PgBackend::new(&config_with_resolver(parsed.into(), resolver.into()))
+        .await
+        .unwrap();
     let wallet = Ed25519KeyPair::from_pkcs8(
         Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new())
             .unwrap()
@@ -142,11 +173,23 @@ async fn durable_provisioning_is_atomic_replay_safe_and_tenant_scoped() {
     .await
     .unwrap();
     // A fresh backend proves this is not an in-process ceremony store.
-    let db2 = PgBackend::new(&config({
-        let mut u = reqwest::Url::parse(&url).unwrap();
-        u.set_username("tc_near_runtime").unwrap();
-        u.into()
-    }))
+    // The second backend stands in for a second machine racing the first, so
+    // it needs the same two-role split. Handing it one URL for both pools is
+    // what made the concurrent case unwinnable: its resolver saw no anchors at
+    // all, so the racer it models could never recognise a contributor the
+    // other had just provisioned.
+    let db2 = PgBackend::new(&config_with_resolver(
+        {
+            let mut u = reqwest::Url::parse(&url).unwrap();
+            u.set_username("tc_near_runtime").unwrap();
+            u.into()
+        },
+        {
+            let mut u = reqwest::Url::parse(&url).unwrap();
+            u.set_username("trace_login_resolver").unwrap();
+            u.into()
+        },
+    ))
     .await
     .unwrap();
     assert!(
