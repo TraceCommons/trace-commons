@@ -1606,12 +1606,29 @@ public sealed class MainViewModel : INotifyPropertyChanged
         //
         // Pending is an ObservableCollection, and MainWindow.OpenPreview
         // subscribes an open preview sheet to its CollectionChanged so the
-        // sheet re-reads its gate when the queue is replaced. That re-read
-        // goes through LiveEntry, which reads _rowsByEntryId. So every Clear
-        // and every Add here runs a handler that resolves against whatever
-        // that field holds AT THAT MOMENT -- and if the field is still the
-        // previous snapshot, the sheet's "live" resolution answers from the
-        // rows it exists to stop reading.
+        // sheet re-reads its gate when the queue is replaced. The sheet's
+        // QueueChanged raises five properties that all resolve through
+        // LiveEntry, which reads the _rowsByEntryId FIELD.
+        //
+        // So the sheet's only notification arrives from Clear and from Add,
+        // and nothing raises a collection change after the refill. Publish
+        // the field last and the sheet is notified ONLY while the map still
+        // holds the previous snapshot, every time -- a deterministic
+        // ordering, not a race.
+        //
+        // Whether a contributor could SEE that is a separate question and an
+        // open one: it turns on whether x:Bind pulls synchronously on
+        // PropertyChanged (the sheet would render one snapshot behind until
+        // the next refresh) or defers the read to the dispatcher queue (it
+        // would land after this method returns, and there would be no visible
+        // defect at all). That cannot be settled from source, and is not the
+        // reason to hold the order -- the resolution being fed the snapshot
+        // it exists to replace is.
+        //
+        // Nothing incorrect is ever SENT either way: ContributeAsync
+        // re-tests the gate at the press, long after this returns, so the
+        // press reads the fresh map and refuses. The worst case is a control
+        // that looks armed and disarms when pressed.
         //
         // Nothing below the publication line may be moved above it, and
         // nothing above it may be made observable.

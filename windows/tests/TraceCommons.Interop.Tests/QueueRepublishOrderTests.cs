@@ -16,11 +16,23 @@ namespace TraceCommons.Interop.Tests;
 /// <c>MainWindow.OpenPreview</c> subscribes an open preview sheet to its
 /// <c>CollectionChanged</c> precisely so the sheet re-reads its gate when the
 /// queue is replaced. That re-read runs through <c>MainViewModel.LiveEntry</c>,
-/// which reads the <c>_rowsByEntryId</c> FIELD. So a <c>Clear</c> or an
-/// <c>Add</c> performed while that field still holds the previous snapshot
-/// runs the sheet's live resolution against exactly the stale rows the live
-/// resolution exists to stop reading -- and the sheet's gate is the thing
-/// standing between a downgraded session and a Contribute button.
+/// which reads the <c>_rowsByEntryId</c> FIELD. The sheet's only notification
+/// arrives from the <c>Clear</c> and the <c>Add</c>s, and nothing raises a
+/// collection change afterwards -- so publishing the field last means the
+/// sheet is notified only while the map holds the previous snapshot, every
+/// time. Deterministic, not a race.
+/// </para>
+///
+/// <para>
+/// WHAT THIS FILE DOES NOT CLAIM. Whether that was ever visible to a
+/// contributor depends on whether <c>x:Bind</c> pulls synchronously on
+/// <c>PropertyChanged</c> or defers to the dispatcher queue, which cannot be
+/// determined from source and needs a Windows toolchain to settle. If it
+/// defers, the read lands after the method returns and there is no observable
+/// defect. These tests deliberately do not rest on that question: the
+/// ordering is wrong either way, and the order is what they assert. Nothing
+/// incorrect is ever sent in either case -- <c>ContributeAsync</c> re-tests
+/// the gate at the press, against the fresh map.
 /// </para>
 ///
 /// <para>
@@ -68,8 +80,8 @@ public class QueueRepublishOrderTests
             Assert.True(
                 at < firstRaise,
                 $"`{publication}` is assigned AFTER the first observable mutation, at offset "
-                + $"{at} against {firstRaise}. A handler reached by that raise -- the open "
-                + "preview sheet's QueueChanged -- reads the previous snapshot.");
+                + $"{at} against {firstRaise}. The open preview sheet is notified by that "
+                + "raise, and LiveEntry would resolve against the previous snapshot.");
         }
     }
 
