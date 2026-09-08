@@ -172,6 +172,12 @@ public sealed class PrivateInferenceViewModel : INotifyPropertyChanged
         // pressed the moment the list appears is planned with the exposure
         // question already settled either way.
         await LoadHarnessesAsync().ConfigureAwait(true);
+
+        // And what this computer answers calls with. Read last because it is
+        // the one thing on the page that no settings snapshot carries: the
+        // window pushes the switch and the listener state, and nothing pushes
+        // this.
+        await LoadCredentialAsync().ConfigureAwait(true);
     }
 
     /// <summary>
@@ -347,6 +353,327 @@ public sealed class PrivateInferenceViewModel : INotifyPropertyChanged
             System.Diagnostics.Trace.TraceWarning(nameof(LoadHarnessesAsync));
         }
     }
+
+    // ---------------------------------------------------------------------
+    // The credential this computer answers calls with.
+    //
+    // A key minted at NEAR AI and kept on this machine. NOTHING HERE RENDERS
+    // ONE: no property carries a key, a prefix, an id or an account name,
+    // and the payload has no hole for one.
+    //
+    // The sentence, the tone and the action all come from the shared table
+    // across the ABI. This page picks none of the three: the button in
+    // question opens a browser and mints a key at a third party, and a shell
+    // that decided for itself which button belongs beside which state is a
+    // shell that will one day offer a second sign-in to somebody who already
+    // has a key.
+    // ---------------------------------------------------------------------
+
+    private NearAiCredentialStatus _credential = NearAiCredentialStatus.Unreported;
+
+    /// <summary>
+    /// The attempt this page started, or null. Held so a cancel can name it
+    /// and a poll can ask for its lifecycle word; cleared once the ceremony
+    /// is no longer in flight.
+    /// </summary>
+    private string? _attemptId;
+
+    private bool _credentialBusy;
+
+    public string CredentialTitle => _copy?.CredentialTitle ?? string.Empty;
+
+    public string CredentialWhat => _copy?.CredentialWhat ?? string.Empty;
+
+    /// <summary>The sentence for whatever the daemon last reported.</summary>
+    public string CredentialStateText => _copy is null
+        ? string.Empty
+        : NearAiCredentialSurface.StateLine(_credential, _copy);
+
+    private PrivateInferenceTone CredentialTone => NearAiCredentialSurface.Tone(_credential);
+
+    // One flag per tone, for the reason the listener row has them: the tone
+    // is what picks the colour, and a colour picked by reading the sentence
+    // back would be picked by matching a prefix.
+
+    public bool CredentialIsNeutral => CredentialTone == PrivateInferenceTone.Neutral;
+
+    public bool CredentialIsHeld => CredentialTone == PrivateInferenceTone.Held;
+
+    public bool CredentialIsClear => CredentialTone == PrivateInferenceTone.Clear;
+
+    public bool CredentialIsRefused => CredentialTone == PrivateInferenceTone.Refused;
+
+    /// <summary>The one action the shared table allows for this state.</summary>
+    private CredentialAction OfferedAction => NearAiCredentialSurface.Action(_credential);
+
+    /// <summary>The words on that action's button, or the empty string.</summary>
+    public string CredentialActionText =>
+        NearAiCredentialSurface.ActionLabel(OfferedAction, _copy) ?? string.Empty;
+
+    /// <summary>
+    /// The consequence sentence that belongs beside that button, or the
+    /// empty string where the action has none to state.
+    /// </summary>
+    /// <remarks>
+    /// Drawn from the same call that decides the button, so the two cannot
+    /// come apart: the cost of obtaining one is on screen wherever obtaining
+    /// is offered, and what forgetting does not do is on screen wherever
+    /// forgetting is.
+    /// </remarks>
+    public string CredentialActionPreamble =>
+        NearAiCredentialSurface.ActionPreamble(OfferedAction, _copy) ?? string.Empty;
+
+    public bool HasCredentialActionPreamble => CredentialActionPreamble.Length > 0;
+
+    /// <summary>
+    /// Whether there is an action to draw at all. A state this build could
+    /// not read offers nothing.
+    /// </summary>
+    public bool HasCredentialAction =>
+        OfferedAction != CredentialAction.None && _copy is not null;
+
+    public bool CredentialControlsEnabled => !_credentialBusy && _copy is not null;
+
+    /// <summary>
+    /// Presses whatever the shared table offers for the state this machine is
+    /// in, and hands back a started ceremony for the caller to open a browser
+    /// on. Null for every other action.
+    /// </summary>
+    /// <remarks>
+    /// THE BRANCH IS HERE AND NOT IN THE VIEW. Which of the three a press
+    /// performs follows from the ABI's action for the reported state, so the
+    /// markup cannot come to hold an arm of its own -- and the one arm that
+    /// mints a key at a third party cannot be reached from a state this build
+    /// could not read.
+    /// </remarks>
+    public async Task<NearAiCredentialAttempt?> PressCredentialAsync()
+    {
+        switch (OfferedAction)
+        {
+            case CredentialAction.Obtain:
+                return await StartCredentialAsync().ConfigureAwait(true);
+            case CredentialAction.Cancel:
+                await CancelCredentialAsync().ConfigureAwait(true);
+                return null;
+            case CredentialAction.Forget:
+                await ForgetCredentialAsync().ConfigureAwait(true);
+                return null;
+            default:
+                return null;
+        }
+    }
+
+    /// <summary>
+    /// Reads what this machine holds. Names the attempt when this page
+    /// started one, which is what buys back the ceremony's own lifecycle
+    /// word; the resting state comes back either way.
+    /// </summary>
+    public async Task LoadCredentialAsync()
+    {
+        if (_copy is null)
+        {
+            return;
+        }
+
+        try
+        {
+            DaemonResponse response = await _host
+                .CallAsync(
+                    DaemonProtocol.Methods.NearAiCredentialStatus,
+                    NearAiCredentialSurface.SerializeStatus(_attemptId))
+                .ConfigureAwait(true);
+
+            // A call that failed is UNREPORTED, never absent: one says this
+            // daemon did not answer, the other claims nothing is stored here,
+            // and reaching the second from a failed call is how a contributor
+            // is invited to sign in over a key they already have.
+            _credential = response.IsError || response.Result is null
+                ? NearAiCredentialStatus.Unreported
+                : NearAiCredentialSurface.ParseStatus(response.Result.Value.GetRawText());
+        }
+        catch
+        {
+            System.Diagnostics.Trace.TraceWarning(nameof(LoadCredentialAsync));
+            _credential = NearAiCredentialStatus.Unreported;
+        }
+
+        if (!NearAiCredentialSurface.AwaitingBrowser(_credential))
+        {
+            _attemptId = null;
+        }
+
+        RaiseCredential();
+    }
+
+    /// <summary>
+    /// Begins the ceremony and hands back where to open the browser, or null
+    /// when the daemon refused.
+    /// </summary>
+    /// <remarks>
+    /// THE URL COMES ONCE. It is returned to the caller rather than held on
+    /// this page, so nothing here can re-serve a stale one, and a poll never
+    /// answers with it: getting another means starting a second ceremony,
+    /// which is a second browser tab in front of somebody already looking at
+    /// one.
+    /// </remarks>
+    public async Task<NearAiCredentialAttempt?> StartCredentialAsync()
+    {
+        if (_copy is null || _credentialBusy)
+        {
+            return null;
+        }
+
+        _credentialBusy = true;
+        Raise(nameof(CredentialControlsEnabled));
+        try
+        {
+            DaemonResponse response = await _host
+                .CallAsync(DaemonProtocol.Methods.NearAiCredentialStart)
+                .ConfigureAwait(true);
+            if (response.IsError || response.Result is null)
+            {
+                Notice = _copy.WriteUnconfirmed;
+                return null;
+            }
+
+            NearAiCredentialAttempt? attempt =
+                NearAiCredentialSurface.ParseStart(response.Result.Value.GetRawText());
+            if (attempt is null)
+            {
+                Notice = _copy.WriteUnconfirmed;
+                return null;
+            }
+
+            Notice = string.Empty;
+            _attemptId = attempt.Value.AttemptId;
+            return attempt;
+        }
+        catch
+        {
+            System.Diagnostics.Trace.TraceWarning(nameof(StartCredentialAsync));
+            Notice = _copy.WriteUnconfirmed;
+            return null;
+        }
+        finally
+        {
+            _credentialBusy = false;
+            Raise(nameof(CredentialControlsEnabled));
+        }
+    }
+
+    /// <summary>
+    /// Stops waiting on the browser. Does nothing when this page cannot name
+    /// the attempt: the daemon refuses an unnamed cancel, so nothing here can
+    /// stop a ceremony some other shell started.
+    /// </summary>
+    public async Task CancelCredentialAsync()
+    {
+        if (_copy is null || _attemptId is not { Length: > 0 } attempt)
+        {
+            return;
+        }
+
+        await CallThenRefreshAsync(
+                DaemonProtocol.Methods.NearAiCredentialCancel,
+                NearAiCredentialSurface.SerializeCancel(attempt))
+            .ConfigureAwait(true);
+    }
+
+    /// <summary>
+    /// Removes the stored key from this machine.
+    /// </summary>
+    /// <remarks>
+    /// Local, and the page says so beside the button:
+    /// <see cref="CredentialActionPreamble"/> is the sentence saying the key
+    /// stays valid at the service until the contributor removes it in their
+    /// own account. This shell cannot do that for them and does not claim to.
+    /// </remarks>
+    public async Task ForgetCredentialAsync()
+    {
+        if (_copy is null)
+        {
+            return;
+        }
+
+        await CallThenRefreshAsync(DaemonProtocol.Methods.NearAiCredentialForget)
+            .ConfigureAwait(true);
+    }
+
+    /// <summary>
+    /// Waits for a ceremony that is under way to finish, re-reading the state
+    /// until it stops being in flight.
+    /// </summary>
+    /// <remarks>
+    /// The state is a fact about this machine that a browser tab changes, so
+    /// nothing arrives here unasked. The loop stops on the first read that is
+    /// no longer waiting on the browser -- including a cancel or a failure --
+    /// and gives up after the cap rather than polling a socket forever behind
+    /// a page nobody is looking at.
+    /// </remarks>
+    public async Task AwaitCredentialAsync()
+    {
+        for (int poll = 0; poll < CredentialPollLimit; poll++)
+        {
+            if (!NearAiCredentialSurface.AwaitingBrowser(_credential))
+            {
+                return;
+            }
+
+            await Task.Delay(CredentialPollInterval).ConfigureAwait(true);
+            await LoadCredentialAsync().ConfigureAwait(true);
+        }
+    }
+
+    /// <summary>
+    /// One credential write, then a re-read. The state is never inferred from
+    /// the reply: what this machine holds afterwards is a question only the
+    /// next status answers.
+    /// </summary>
+    private async Task CallThenRefreshAsync(string method, string? parameters = null)
+    {
+        _credentialBusy = true;
+        Raise(nameof(CredentialControlsEnabled));
+        try
+        {
+            DaemonResponse response = await (parameters is null
+                    ? _host.CallAsync(method)
+                    : _host.CallAsync(method, parameters))
+                .ConfigureAwait(true);
+            Notice = response.IsError && _copy is not null ? _copy.WriteUnconfirmed : string.Empty;
+        }
+        catch
+        {
+            System.Diagnostics.Trace.TraceWarning(nameof(CallThenRefreshAsync));
+            if (_copy is not null)
+            {
+                Notice = _copy.WriteUnconfirmed;
+            }
+        }
+        finally
+        {
+            _credentialBusy = false;
+            Raise(nameof(CredentialControlsEnabled));
+        }
+
+        await LoadCredentialAsync().ConfigureAwait(true);
+    }
+
+    private void RaiseCredential()
+    {
+        Raise(nameof(CredentialStateText));
+        Raise(nameof(CredentialIsNeutral));
+        Raise(nameof(CredentialIsHeld));
+        Raise(nameof(CredentialIsClear));
+        Raise(nameof(CredentialIsRefused));
+        Raise(nameof(CredentialActionText));
+        Raise(nameof(CredentialActionPreamble));
+        Raise(nameof(HasCredentialActionPreamble));
+        Raise(nameof(HasCredentialAction));
+    }
+
+    private const int CredentialPollLimit = 150;
+
+    private static readonly TimeSpan CredentialPollInterval = TimeSpan.FromSeconds(2);
 
     /// <summary>
     /// Whether a connect has to put the exposure question first.
