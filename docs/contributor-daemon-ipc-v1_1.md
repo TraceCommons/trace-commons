@@ -649,7 +649,9 @@ No port, token, or row content appears here.
 ```
 
 `subagent_count` and `subagents_dropped` also appear on every queue entry
-(`list_pending`, the `snapshot` event). Both are additive; the schema version
+(`list_pending`, the `snapshot` event), as do `eligibility` and
+`eligibility_reason` -- see "Contribution eligibility" below. Both are
+additive; the schema version
 stays `trace_commons.daemon.v1_1`, and a client that ignores them behaves
 exactly as before.
 
@@ -1935,6 +1937,95 @@ settings key) supplies these 62 fixed string fields:
 - `credential_absent`, `credential_obtaining`, `credential_failed`,
   `credential_cancelled`, `credential_present`, `credential_unknown`,
   `credential_unreported`.
+
+### Contribution eligibility
+
+Queue entries (`list_pending`, the `snapshot` event, and the `entry` object
+`preview` and `approve` return) carry two additive fields:
+
+| Field | Meaning |
+|---|---|
+| `eligibility` | `eligible` \| `ineligible_permanent` \| `ineligible_configuration` \| `unknown` |
+| `eligibility_reason` | a stable label naming why, or absent |
+
+**`eligibility` is ABSENT -- not `unknown`, not null -- whenever the
+contributor is admitted on an invite** rather than on evidence, i.e. whenever
+`admission_evidence_required` is false or could not be read. An invited
+contributor has no eligibility question: everything in their queue is
+contributable, which is why this whole surface stayed invisible for so long.
+A field answering a question they do not have would put three shells to work
+rendering a caveat on work that carries none. A client MUST test for the key,
+never read a missing key as a state.
+
+Show every session. Offer only the eligible ones. Hiding a contributor's own
+work is its own dishonesty and makes the app look as though it had not
+noticed files the contributor knows it can see. An ineligible row is present,
+not offered, and carries its reason.
+
+| `eligibility` | Means | Sentence | Control a shell may offer |
+|---|---|---|---|
+| `eligible` | the cheap checks pass and the marked call is here | `eligibility_eligible` | contribute |
+| `ineligible_permanent` | nothing the contributor changes will alter this | `eligibility_ineligible_permanent` | **none** |
+| `ineligible_configuration` | this session stays ineligible; a setting decides future ones | `eligibility_ineligible_configuration` | **none** |
+| `unknown` | not evaluated | `eligibility_unknown` | **none** |
+| anything else | the state could not be read | `eligibility_unknown` | **none** |
+
+The sentence, the tone and the control come from the shared Rust tables --
+`tc_contribution_eligibility_line`, `tc_contribution_eligibility_tone` and
+`tc_contribution_eligibility_control` -- never from shell-authored branching
+on a variant name, and a shell must not recover any of the three by reading
+another. `TC_CONTRIBUTION_CONTROL_NONE` (50) and
+`TC_CONTRIBUTION_CONTROL_CONTRIBUTE` (51) are the control values.
+
+**An unrecognised state must not borrow an ineligibility sentence.** A state
+this build cannot read is not evidence about a contributor's session, and
+saying it is would stop them offering work that is fine. Every shell carries
+a test for this.
+
+`eligible` is a well-founded expectation and not a guarantee. The cheap
+checks -- the ones a list may run -- are answered here; the expensive ones,
+which need every captured body read back and hashed, still run at submit. The
+server decides admission either way, and if this answer and the server's
+decision disagree, **the server is right**. When a submission is refused for
+an admission reason the daemon writes the refusal back into the row, so a row
+that was `eligible` stops saying so. A list that changes while it is being
+read is the cost of that, and it is also just what happened.
+
+`eligibility_reason` is absent on an `eligible` entry -- there is nothing to
+explain -- and is one of these otherwise. Render each through
+`tc_contribution_eligibility_reason_line`, which answers the **empty string**
+for a label this build does not know; render nothing for an empty string
+rather than guessing.
+
+| `eligibility_reason` | Sentence | Usually seen with |
+|---|---|---|
+| `no_inference_call` | `eligibility_reason_no_call` | `ineligible_permanent` |
+| `capture_off` | `eligibility_reason_capture_off` | `ineligible_configuration` |
+| `digest_absent` | `eligibility_reason_digest_absent` | `ineligible_permanent` |
+| `upstream_id_absent` | `eligibility_reason_upstream_id_absent` | `ineligible_permanent` |
+| `digest_mismatch` | `eligibility_reason_digest_mismatch` | `ineligible_permanent` |
+| `reference_malformed` | `eligibility_reason_reference_malformed` | `ineligible_permanent` |
+| `bodies_unreadable` | `eligibility_reason_bodies_unreadable` | `ineligible_permanent` |
+| `body_not_utf8` | `eligibility_reason_body_not_utf8` | `ineligible_permanent` |
+| `body_too_large` | `eligibility_reason_body_too_large` | `ineligible_permanent` |
+| `evidence_capture_off` | `eligibility_reason_evidence_capture_off` | `ineligible_configuration` |
+| `marker_absent` | `eligibility_reason_marker_absent` | `ineligible_permanent` |
+| `request_malformed` | `eligibility_reason_request_malformed` | `ineligible_permanent` |
+| `receipt_unavailable` | `eligibility_reason_receipt_unavailable` | `unknown` |
+
+Only `ineligible_configuration` names a setting, and it is the only state
+painted `TC_PRIVATE_INFERENCE_TONE_ATTENTION`. `no_inference_call` has no
+actionable answer for the session the row is about, and advice about the
+*next* session is guidance rather than status -- rows stay about their own
+session. A permanent ineligibility is `_NEUTRAL` and never `_REFUSED`:
+nothing was refused and nothing went wrong.
+
+Both fields are additive; the schema version stays
+`trace_commons.daemon.v1_1`, and a client that ignores them behaves exactly
+as before.
+
+The seventeen sentences named above are fields of the `private_inference_copy`
+payload (`tc_private_inference_copy`), which now carries **80** fields.
 
 ### The credential state
 
