@@ -407,7 +407,8 @@ public class NearAiCredentialTests
     }
 
     /// <summary>
-    /// A cancel names its attempt; a status may or may not.
+    /// A cancel names its attempt when there is one; neither call ever sends
+    /// an empty id.
     /// </summary>
     [Fact]
     public void ACancelNamesTheAttemptAndAStatusNeedNot()
@@ -513,57 +514,68 @@ public class NearAiCredentialTests
     }
 
     /// <summary>
-    /// A Cancel this shell cannot address is never live.
+    /// A Cancel with no attempt to name is offered, and is sent.
     /// </summary>
     /// <remarks>
     /// The ordinary case, not an edge one: <c>near_ai_credential_status</c>
     /// resolves <c>obtaining</c> from the ceremony on disk with no attempt id,
     /// so an app restarted while the daemon kept running reads <c>obtaining</c>
-    /// and is offered Cancel -- while <c>near_ai_credential_cancel</c> requires
-    /// the id this shell never saw. A control drawn live that silently does
-    /// nothing is the one answer nobody can defend.
+    /// and is offered Cancel with no id to give. The daemon accepts an unnamed
+    /// cancel and stops whatever it is running, so the call goes out with the
+    /// field OMITTED -- never sent empty, which names no running attempt and
+    /// would be refused.
     /// </remarks>
     [Fact]
-    public void ACancelWithNoAttemptToNameIsNotAddressable()
+    public void ACancelWithNoAttemptToNameIsStillSent()
     {
-        Assert.False(NearAiCredentialSurface.CanAddress(CredentialAction.Cancel, null));
-        Assert.False(NearAiCredentialSurface.CanAddress(CredentialAction.Cancel, string.Empty));
-        Assert.True(NearAiCredentialSurface.CanAddress(CredentialAction.Cancel, "a1"));
-
-        // Every other action stands on its own. Obtain and Forget name no
-        // attempt, so an absent id says nothing about them.
-        foreach (CredentialAction action in new[]
+        foreach (string? none in new[] { null, string.Empty })
         {
-            CredentialAction.None, CredentialAction.Obtain, CredentialAction.Forget,
-        })
-        {
-            Assert.True(NearAiCredentialSurface.CanAddress(action, null));
-            Assert.True(NearAiCredentialSurface.CanAddress(action, "a1"));
+            using JsonDocument anonymous = JsonDocument.Parse(
+                NearAiCredentialSurface.SerializeCancel(none));
+            Assert.Empty(anonymous.RootElement.EnumerateObject());
         }
+
+        // And it is a Cancel the state table really does offer: `obtaining`
+        // reached this shell without an attempt id in the first place.
+        NearAiCredentialStatus obtaining = Status("obtaining");
+        Assert.Null(obtaining.AttemptId);
+        Assert.Equal(CredentialAction.Cancel, NearAiCredentialSurface.Action(obtaining));
     }
 
     /// <summary>
-    /// The card asks that question before enabling its control, and the
-    /// browser failing to open cancels the ceremony rather than leaving it to
-    /// time out.
+    /// The card sends the press it holds no id for, and the browser failing to
+    /// open cancels the ceremony rather than leaving it to time out.
     /// </summary>
     [Fact]
-    public void TheCardRefusesToEnableWhatItCannotSendAndCleansUpAFailedLaunch()
+    public void TheCardSendsACancelItCannotNameAndCleansUpAFailedLaunch()
     {
         string viewModel = ShellSource("TraceCommons.App/ViewModels/PrivateInferenceViewModel.cs");
+
+        // No id-shaped guard stands between the press and the call: the whole
+        // body between the method and its send must not re-read `_attemptId`
+        // as a condition.
+        int cancelAt = viewModel.IndexOf(
+            "public async Task CancelCredentialAsync()", StringComparison.Ordinal);
+        Assert.True(cancelAt >= 0, "the cancel is gone from the view model");
+        string body = viewModel[cancelAt..(cancelAt + 500)];
+        Assert.DoesNotContain("_attemptId is not", body, StringComparison.Ordinal);
         Assert.Contains(
-            "NearAiCredentialSurface.CanAddress(OfferedAction, _attemptId)",
+            "NearAiCredentialSurface.SerializeCancel(_attemptId)", body, StringComparison.Ordinal);
+
+        // Nor does one stand between the state and the control being live.
+        Assert.Contains(
+            "public bool CredentialControlsEnabled => !_credentialBusy && _copy is not null;",
             viewModel,
             StringComparison.Ordinal);
 
-        // The state sentence is unaffected: a Cancel that cannot be sent does
-        // not make the ceremony untrue, and the card still says one is under
-        // way.
+        // The state sentence is unaffected: what the call can carry does not
+        // make the ceremony more or less true, and the card still says one is
+        // under way.
         int stateAt = viewModel.IndexOf(
             "public string CredentialStateText =>", StringComparison.Ordinal);
         Assert.True(stateAt >= 0, "the state sentence is gone from the view model");
         Assert.DoesNotContain(
-            "CanAddress",
+            "_attemptId",
             viewModel[stateAt..(stateAt + 300)],
             StringComparison.Ordinal);
 

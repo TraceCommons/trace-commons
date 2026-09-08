@@ -458,16 +458,12 @@ public sealed class PrivateInferenceViewModel : INotifyPropertyChanged
     /// Whether the credential control may be pressed.
     /// </summary>
     /// <remarks>
-    /// Not only busy and words-arrived. A Cancel this shell cannot address --
-    /// the app started after the ceremony did, so it never saw the attempt id
-    /// the daemon requires -- is drawn and disabled rather than drawn live and
-    /// silently doing nothing. The state sentence above it is still true and
-    /// still says a sign-in is under way.
+    /// Busy and words-arrived, and nothing else. A Cancel this shell cannot
+    /// name is still live: the daemon accepts an unnamed cancel and stops the
+    /// sign-in it is holding, so an app restarted while the daemon kept
+    /// running can stop the ceremony it never started.
     /// </remarks>
-    public bool CredentialControlsEnabled =>
-        !_credentialBusy
-        && _copy is not null
-        && NearAiCredentialSurface.CanAddress(OfferedAction, _attemptId);
+    public bool CredentialControlsEnabled => !_credentialBusy && _copy is not null;
 
     /// <summary>
     /// Presses whatever the shared table offers for the state this machine is
@@ -597,20 +593,20 @@ public sealed class PrivateInferenceViewModel : INotifyPropertyChanged
     }
 
     /// <summary>
-    /// Stops waiting on the browser. Does nothing when this page cannot name
-    /// the attempt: the daemon refuses an unnamed cancel, so nothing here can
-    /// stop a ceremony some other shell started.
+    /// Stops waiting on the browser. Sent with no attempt id when this page
+    /// holds none: the daemon cancels whatever sign-in it is running, so a
+    /// ceremony this shell did not start can still be stopped from here.
     /// </summary>
     public async Task CancelCredentialAsync()
     {
-        if (_copy is null || _attemptId is not { Length: > 0 } attempt)
+        if (_copy is null)
         {
             return;
         }
 
         await CallThenRefreshAsync(
                 DaemonProtocol.Methods.NearAiCredentialCancel,
-                NearAiCredentialSurface.SerializeCancel(attempt))
+                NearAiCredentialSurface.SerializeCancel(_attemptId))
             .ConfigureAwait(true);
     }
 
