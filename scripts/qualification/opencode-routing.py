@@ -14,9 +14,30 @@ import pathlib
 import re
 import signal
 import subprocess
+import sys
 import tempfile
 import threading
 import time
+
+
+def kill_process_group(proc, sig):
+    """Signal proc's process group, falling back to the process alone.
+
+    The child is launched with start_new_session=True so it leads its own
+    group, but sandbox-exec or a sandbox-restricted signaling policy can
+    still make killpg raise EPERM. A teardown failure here must never lose
+    an already-completed run, so fall back rather than propagate.
+    """
+    try:
+        os.killpg(proc.pid, sig)
+    except (PermissionError, ProcessLookupError) as exc:
+        print(f"killpg({proc.pid}, {sig!r}) failed ({exc}); "
+              "signaling the process directly", file=sys.stderr)
+        try:
+            proc.send_signal(sig)
+        except ProcessLookupError:
+            pass
+
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--opencode", required=True, type=pathlib.Path)
@@ -108,6 +129,7 @@ try:
                                      "--pure", "--print-logs", "run", "--format", "json", "Return the synthetic word."],
                                     cwd=work, env=env, stdout=output, stderr=output, start_new_session=True)
             found = None
+            record = None
             try:
                 deadline = time.monotonic() + 15
                 while time.monotonic() < deadline:
@@ -118,18 +140,23 @@ try:
                         break
                     time.sleep(0.1)
             finally:
+                # Build the result before tearing down the child: teardown
+                # failing must never discard an observation this run already
+                # made.
+                if found:
+                    record = {"case": name, "primary_model": "/".join(found.groups()),
+                              "mock_models": sorted(set(observed[start:])),
+                              "config_unchanged": before == config_path.read_bytes()}
                 if proc.poll() is None:
-                    os.killpg(proc.pid, signal.SIGTERM)
+                    kill_process_group(proc, signal.SIGTERM)
                     try:
                         proc.wait(timeout=3)
                     except subprocess.TimeoutExpired:
-                        os.killpg(proc.pid, signal.SIGKILL)
+                        kill_process_group(proc, signal.SIGKILL)
                         proc.wait()
-        if not found:
+        if record is None:
             raise SystemExit(f"model selection not observed: {name}; logs {root}")
-        results.append({"case": name, "primary_model": "/".join(found.groups()),
-                        "mock_models": sorted(set(observed[start:])),
-                        "config_unchanged": before == config_path.read_bytes()})
+        results.append(record)
     by_name = {r["case"]: r for r in results}
     assert by_name["fresh-before"]["primary_model"] != by_name["fresh-after"]["primary_model"]
     assert by_name["fresh-after"]["primary_model"] == "trace-test/trace-model"
