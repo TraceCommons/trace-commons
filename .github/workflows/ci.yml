@@ -76,8 +76,8 @@ jobs:
     # Each would have failed at the commit that introduced it if this job had
     # existed.
     #
-    # FOUR SUITES ARE DELIBERATELY NOT RUN HERE. They already fail against a
-    # real database on main -- 84 tests between them, all pre-existing. Adding
+    # THREE SUITES ARE DELIBERATELY NOT RUN HERE. They already fail against a
+    # real database on main -- 64 tests between them, all pre-existing. Adding
     # them would make this job red on its first run, and a permanently red job
     # is one nobody reads, which is how the others got into this state. They are
     # named so the debt is visible rather than implied:
@@ -85,7 +85,12 @@ jobs:
     #   account_merge_pg          8 failing
     #   trace_corpus_pg_store    31 failing
     #   trace_corpus_pg_rls      25 failing
-    #   trace_invite_registry_pg 20 failing
+    #
+    # `trace_invite_registry_pg` was a fourth, at 20 failing, and runs below.
+    # Its twenty failures were one defect and it was in the code, not the
+    # fixtures: the migration runner took no lock, so the parallel tests --
+    # which each migrate -- raced each other into a system-catalog duplicate-key
+    # error. Two processes booting at once hit the same thing.
     #
     # And one that is excluded for a different and more interesting reason:
     #
@@ -143,7 +148,7 @@ jobs:
       - name: Create one database per suite
         run: |
           set -euo pipefail
-          for db in onboarding ledger migration ingest; do
+          for db in onboarding ledger migration ingest invite; do
             PGPASSWORD=trace createdb -h 127.0.0.1 -U trace "admission_test_$db"
           done
       # Each step carries only the variables its own suite reads, NOT a job-wide
@@ -159,6 +164,10 @@ jobs:
         run: cargo test -p trace-commons-server --test migration_atomicity_pg
         env:
           TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_migration
+      - name: trace_invite_registry_pg
+        run: cargo test -p trace-commons-server --test trace_invite_registry_pg
+        env:
+          TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_invite
       # `--ignored` is not optional for these three. Without it they report
       # `ignored`, the step passes having run nothing, and this job becomes the
       # thing it was built to replace.
@@ -184,7 +193,7 @@ jobs:
         run: |
           set -euo pipefail
           fail=0
-          for db in onboarding ledger migration ingest; do
+          for db in onboarding ledger migration ingest invite; do
             n=$(PGPASSWORD=trace psql -qtA -h 127.0.0.1 -U trace postgres \
                   -c "SELECT xact_commit FROM pg_stat_database WHERE datname='admission_test_$db';")
             echo "admission_test_$db committed ${n:-0} transactions"
