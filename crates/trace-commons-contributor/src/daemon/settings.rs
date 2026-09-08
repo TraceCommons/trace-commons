@@ -1076,8 +1076,10 @@ mod tests {
     #[test]
     fn the_credential_round_trips_and_an_older_settings_file_still_loads() {
         let (_dir, store) = temp_store();
-        let mut settings = DaemonSettings::default();
-        settings.near_ai_inference = Some(credential());
+        let settings = DaemonSettings {
+            near_ai_inference: Some(credential()),
+            ..Default::default()
+        };
         settings.save(&store).unwrap();
         assert_eq!(
             DaemonSettings::load(&store).unwrap().near_ai_inference,

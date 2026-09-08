@@ -1643,6 +1643,9 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         }
         "near_account_status" => super::account_onboarding::handle_status(shared, req),
         "near_account_cancel" => super::account_onboarding::handle_cancel(shared, req),
+        "near_ai_credential_status" => super::nearai_credential::handle_status(shared, req),
+        "near_ai_credential_cancel" => super::nearai_credential::handle_cancel(shared, req),
+        "near_ai_credential_forget" => super::nearai_credential::handle_forget(shared, req),
 
         // Unlike the probe, discovery opens no connection: it reads one
         // small file the proxy left on disk. So it answers here, on the
@@ -2279,6 +2282,7 @@ pub async fn handle_request_async(shared: &DaemonShared, req: &Request) -> Respo
             chrono::Utc::now().timestamp(),
         ),
         "near_account_start" => super::account_onboarding::handle_start(shared, req).await,
+        "near_ai_credential_start" => super::nearai_credential::handle_start(shared, req).await,
         "near_account_capabilities" => {
             super::account_onboarding::handle_capabilities(shared, req).await
         }
@@ -6485,6 +6489,51 @@ mod tests {
         let body = serde_json::to_string(&r.result.unwrap()).unwrap();
         assert!(!body.contains("super-secret-key"), "{body}");
         assert!(body.contains("near_ai_configured"));
+    }
+
+    /// The ceremony is reachable over the socket, and forgetting says what it
+    /// actually did rather than implying a revocation it cannot perform.
+    #[test]
+    fn the_credential_ceremony_is_dispatched_and_forgetting_claims_nothing_extra() {
+        let s = shared();
+        // An attempt nobody started is unknown, not an empty success.
+        let r = handle_request(&s, &req("near_ai_credential_status", serde_json::json!({})));
+        assert_eq!(r.error.unwrap().message, "near_ai_credential_unknown");
+        let r = handle_request(
+            &s,
+            &req(
+                "near_ai_credential_cancel",
+                serde_json::json!({"attempt_id": "never-began"}),
+            ),
+        );
+        assert_eq!(r.error.unwrap().message, "near_ai_credential_unknown");
+
+        s.settings.lock().unwrap().near_ai_inference =
+            Some(crate::daemon::settings::NearAiInferenceCredential {
+                key: "sk-super-secret-key".into(),
+                key_id: "key-1".into(),
+                key_prefix: "sk-min".into(),
+                organization_id: "org-1".into(),
+                workspace_id: "ws-1".into(),
+                minted_at: chrono::Utc::now(),
+            });
+        s.settings.lock().unwrap().save(&s.store).unwrap();
+        let r = handle_request(&s, &req("near_ai_credential_forget", serde_json::json!({})));
+        let body = r.result.unwrap();
+        assert_eq!(body["removed"], true);
+        // Local only. Revoking needs a session, and the session was discarded
+        // the moment the key was minted.
+        assert_eq!(body["revoked"], false);
+        assert!(
+            DaemonSettings::load(&s.store)
+                .unwrap()
+                .near_ai_inference
+                .is_none()
+        );
+        assert!(
+            !serde_json::to_string(&body).unwrap().contains("sk-super"),
+            "{body}"
+        );
     }
 
     /// A second credential in the same document as the privacy-filter one,
