@@ -336,6 +336,38 @@ pub struct QueueEntry {
     pub eligibility: Option<String>,
     #[serde(default)]
     pub eligibility_reason: Option<String>,
+    /// Whether this session carries proof of the model call that produced
+    /// it, and why not when it does not: one of `attestation_mark`'s `MARK_*`
+    /// labels and one of its `REASON_*` labels.
+    ///
+    /// **Recorded for every contributor, not only the evidence-admitted
+    /// ones.** `eligibility` above answers a permission question, and an
+    /// invited contributor does not have one -- which is why it is absent
+    /// from their queue and must stay absent. This answers a question about
+    /// the trace, which every contributor has: the credit scoring function is
+    /// expected to weight attestations, and a contributor who cannot see
+    /// which of their sessions carry one cannot act on it.
+    ///
+    /// Recorded from the same transcript load and at the same moment as
+    /// `eligibility`, for the same reason: it is free there and costs a full
+    /// re-read and re-hash of every captured body anywhere else.
+    ///
+    /// `None` only on an entry written before these fields existed. It
+    /// renders as `unknown` rather than as an absent field -- unlike
+    /// `eligibility`, this question is never inapplicable, so the only thing
+    /// silence could mean is that nobody worked the answer out.
+    ///
+    /// **A submission that fails for an admission reason writes back here**,
+    /// exactly as it does for `eligibility`. A row still claiming its session
+    /// carries proof, after a send of that session was turned away for want
+    /// of that proof, reproduces the defect this surface removes.
+    ///
+    /// Fixed labels, both. Neither ever carries a path, a digest, an
+    /// identifier or anything a contributor wrote.
+    #[serde(default)]
+    pub attestation: Option<String>,
+    #[serde(default)]
+    pub attestation_reason: Option<String>,
 }
 
 impl QueueEntry {
@@ -461,6 +493,8 @@ fn reoffered_from(old: QueueEntry) -> QueueEntry {
         // entry that was.
         eligibility: None,
         eligibility_reason: None,
+        attestation: None,
+        attestation_reason: None,
         ..old
     }
 }
@@ -901,6 +935,29 @@ impl Queue {
         };
         e.eligibility = Some(state.to_string());
         e.eligibility_reason = reason.map(str::to_string);
+        true
+    }
+
+    /// Record what a submission proved about this entry's attestation.
+    ///
+    /// The mirror of [`Queue::record_eligibility`], and it runs for every
+    /// contributor rather than only the evidence-admitted ones: the row is
+    /// making a claim about the trace, the send just disproved it, and who
+    /// was invited has nothing to do with that.
+    ///
+    /// `state` and `reason` are `attestation_mark` labels. Returns whether an
+    /// entry was found.
+    pub fn record_attestation(
+        &mut self,
+        entry_id: Uuid,
+        state: &str,
+        reason: Option<&str>,
+    ) -> bool {
+        let Some(e) = self.entries.iter_mut().find(|e| e.entry_id == entry_id) else {
+            return false;
+        };
+        e.attestation = Some(state.to_string());
+        e.attestation_reason = reason.map(str::to_string);
         true
     }
 

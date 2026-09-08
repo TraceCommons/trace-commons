@@ -755,6 +755,13 @@ async fn drain_approved(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<U
                 if let Some(verdict) = contribution_eligibility::writeback_for(&reason_label) {
                     q.record_eligibility(entry.entry_id, verdict.state, verdict.reason);
                 }
+                // The same retraction on the mark, which every contributor
+                // sees. A row still saying its session carries proof, after
+                // a send of that session was turned away for want of that
+                // proof, is the defect one layer up.
+                if let Some(mark) = attestation_mark::writeback_for(&reason_label) {
+                    q.record_attestation(entry.entry_id, mark.state, mark.reason);
+                }
                 q.set_state(
                     entry.entry_id,
                     queue::QueueState::Refused,
@@ -786,6 +793,9 @@ async fn drain_approved(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<U
                 // narrower reproduction.
                 if let Some(verdict) = contribution_eligibility::writeback_for(&reason_label) {
                     q.record_eligibility(entry.entry_id, verdict.state, verdict.reason);
+                }
+                if let Some(mark) = attestation_mark::writeback_for(&reason_label) {
+                    q.record_attestation(entry.entry_id, mark.state, mark.reason);
                 }
                 q.record_attempt(entry.entry_id, None);
                 q.set_state(
