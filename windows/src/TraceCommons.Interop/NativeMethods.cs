@@ -329,6 +329,55 @@ internal static class NativeMethods
     internal static extern int tc_private_inference_quit_needs_notice(int requestedOn, [MarshalAs(UnmanagedType.LPUTF8Str)] string state);
 
     /// <summary>
+    /// Why a connect control is not on offer, or the EMPTY STRING.
+    ///
+    /// <paramref name="credentialed"/> is <c>harness_list</c>'s
+    /// <c>destination_credentialed</c> as a tri-state: negative for an absent
+    /// field, 0 false, 1 true. AN ABSENT FIELD IS NOT A REFUSED CONNECT -- a
+    /// daemon that predates the gate answers the empty string, because telling
+    /// somebody to sign in before connecting a tool they can connect right now
+    /// would be false.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_harness_credential_notice(int credentialed);
+
+    /// <summary>
+    /// The sentence for one <c>near_ai_credential_status</c> state label.
+    ///
+    /// An empty, NULL or non-UTF-8 label reports that this daemon does not
+    /// answer the question; an unfamiliar one reports that the state could
+    /// not be read. NEITHER SAYS THAT NO KEY IS KEPT HERE -- that is a claim
+    /// about the machine, and a shell that made it up would invite a second
+    /// sign-in. NULL only on a caught panic.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    internal static extern IntPtr tc_near_ai_credential_state_line(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? state);
+
+    /// <summary>
+    /// How that sentence is painted, as a raw
+    /// <c>TC_PRIVATE_INFERENCE_TONE_*</c> value -- the same five the listener
+    /// row uses, deliberately, so this shell keeps one mapping onto colours
+    /// rather than two that must agree.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    internal static extern int tc_near_ai_credential_state_tone(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? state);
+
+    /// <summary>
+    /// The one action a shell may offer for a credential state, as a raw
+    /// <c>TC_CREDENTIAL_ACTION_*</c> value.
+    ///
+    /// THE BRANCH TABLE CROSSES, NOT ONLY THE WORDS. The button in question
+    /// opens a browser and mints a key at a third party, and the safe
+    /// direction is NONE: drawing obtain beside a state nobody could read is
+    /// how a contributor ends up holding a second key.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    internal static extern int tc_near_ai_credential_action(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? state);
+
+    /// <summary>
     /// One <c>harness_list</c> row's state, as a TC_HARNESS_STATE_* code.
     ///
     /// THE BRANCH TABLE CROSSES. "answering" is the only value meaning a call

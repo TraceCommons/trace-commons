@@ -1,3 +1,4 @@
+using System;
 using System.Threading.Tasks;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -67,6 +68,40 @@ public sealed partial class PrivateInferenceView : UserControl
     /// press may do rather than deciding for itself.
     /// </summary>
     public bool IsAnswering => ViewModel.Enabled;
+
+    /// <summary>
+    /// The credential card's one button.
+    /// </summary>
+    /// <remarks>
+    /// Which of the three actions a press performs is the view model's
+    /// question, answered from the shared table. This opens a browser only on
+    /// a ceremony that was actually started, at the URL the daemon handed
+    /// back with it -- start is the only thing that serves one, and no poll
+    /// re-serves it -- and then waits for the ceremony to settle so the card
+    /// stops saying a sign-in is under way once it is not.
+    /// </remarks>
+    private async void OnCredentialAction(object sender, RoutedEventArgs e)
+    {
+        NearAiCredentialAttempt? attempt = await ViewModel.PressCredentialAsync();
+        if (attempt is not { BrowserUrl.Length: > 0 } started)
+        {
+            return;
+        }
+
+        try
+        {
+            await Windows.System.Launcher.LaunchUriAsync(new Uri(started.BrowserUrl));
+        }
+        catch (UriFormatException)
+        {
+            // A URL this shell cannot parse is not a sign-in it can open. The
+            // ceremony is still running and the card still offers the cancel,
+            // so nothing here invents a sentence about it.
+            System.Diagnostics.Trace.TraceWarning(nameof(OnCredentialAction));
+        }
+
+        await ViewModel.AwaitCredentialAsync();
+    }
 
     /// <summary>
     /// "Send this tool's calls here", for one row.
