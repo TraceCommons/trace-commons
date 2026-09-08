@@ -22,6 +22,7 @@
 
 use super::loopback::{CALLBACK_PATH, SessionTokens};
 use anyhow::{Result, anyhow, bail};
+use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use std::time::Duration;
 
@@ -64,6 +65,64 @@ struct ApiKey {
     key: Option<String>,
     key_prefix: String,
     workspace_id: String,
+}
+
+/// What `POST /v1/users/me/access-tokens` hands back.
+///
+/// All three fields are `required` in the service's own schema. The refresh
+/// token in the response is a **new** one: the exchange rotates, and the value
+/// that authenticated the call stops working.
+#[derive(Deserialize)]
+struct AccessAndRefreshToken {
+    access_token: String,
+    refresh_token: String,
+    refresh_token_expiration: DateTime<Utc>,
+}
+
+/// A rotated session, as returned by an exchange.
+///
+/// Deliberately not [`SessionTokens`]: that type is what the browser hand-off
+/// produces and carries no expiry, and conflating the two would lose the one
+/// piece of information an exchange adds.
+pub struct RefreshedSession {
+    pub session: SessionTokens,
+    pub refresh_token_expires_at: DateTime<Utc>,
+}
+
+impl std::fmt::Debug for RefreshedSession {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RefreshedSession")
+            .field("session", &self.session)
+            .field("refresh_token_expires_at", &self.refresh_token_expires_at)
+            .finish()
+    }
+}
+
+/// An organization's balance, in the service's own units.
+///
+/// The service documents these as fixed scale 9 -- nano-dollars -- and USD.
+/// The scale is not converted here and not rounded here: a client that wants
+/// dollars can divide, and a daemon that pre-rounded would be deciding how
+/// much precision a shell is allowed to show.
+///
+/// `remaining` and `spend_limit` are **nullable in the schema**, and that null
+/// is a real state rather than a gap: an organization with no credit limit
+/// configured has no remaining balance to report. It is `Option` all the way
+/// out to the socket for that reason, and rendering it as zero would tell a
+/// contributor they are out of credit when the truth is that nobody set a
+/// ceiling.
+#[derive(Debug, Clone, Copy, Deserialize)]
+pub struct OrganizationBalance {
+    /// Total spent, in nano-dollars.
+    pub total_spent: i64,
+    /// What is left, in nano-dollars, or `None` when the service reports none.
+    #[serde(default)]
+    pub remaining: Option<i64>,
+    /// The configured ceiling, in nano-dollars, or `None` when unset.
+    #[serde(default)]
+    pub spend_limit: Option<i64>,
+    pub total_requests: i64,
+    pub total_tokens: i64,
 }
 
 /// A minted inference credential, and enough context to say where it came from
@@ -191,12 +250,31 @@ impl CloudApi {
         session: &SessionTokens,
         body: Option<&serde_json::Value>,
     ) -> Result<T> {
+        // Every management route is session-only; an sk- key is refused
+        // here exactly as a session is refused on inference.
+        self.call_with_bearer(method, path, &session.access_token, body)
+            .await
+    }
+
+    /// One call carrying whichever bearer the route actually accepts.
+    ///
+    /// The bearer is a parameter rather than always the access token because
+    /// cloud-api's token-exchange route is not session-authenticated: its
+    /// declared security is `refresh_token`, meaning the `rt_` value goes in
+    /// the `Authorization` header itself. Passing an access token there is a
+    /// 401, and passing a refresh token anywhere else is a 401 too -- so which
+    /// credential a route wants has to be stated at the call site.
+    async fn call_with_bearer<T: serde::de::DeserializeOwned>(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        bearer: &str,
+        body: Option<&serde_json::Value>,
+    ) -> Result<T> {
         let mut request = self
             .http
             .request(method, self.url(path)?)
-            // Every management route is session-only; an sk- key is refused
-            // here exactly as a session is refused on inference.
-            .bearer_auth(&session.access_token);
+            .bearer_auth(bearer);
         if let Some(body) = body {
             request = request.json(body);
         }
@@ -216,6 +294,16 @@ impl CloudApi {
             // The body is never relayed. It is the service's prose about a
             // request that carried a session bearer, and this crate's rule is
             // that operational surfaces are label-only.
+            //
+            // 401 is split out from every other refusal because it is the one
+            // a contributor can act on: on the exchange route it means the
+            // refresh token is spent or revoked, and the answer is to run the
+            // ceremony again. Collapsing it into the generic label would show
+            // "unavailable" to someone whose only problem is a seven-day-old
+            // session, and they would wait for a service that is fine.
+            if status == reqwest::StatusCode::UNAUTHORIZED {
+                bail!("near_ai_credential_session_expired")
+            }
             bail!("near_ai_credential_refused")
         }
         serde_json::from_slice(&bytes).map_err(|_| anyhow!("near_ai_credential_unexpected"))
@@ -286,6 +374,98 @@ impl CloudApi {
             organization_id: organization.id,
             workspace_id: minted.workspace_id,
         })
+    }
+
+    /// Trade a refresh token for a fresh access token, and a fresh refresh
+    /// token.
+    ///
+    /// The refresh token is the bearer here, not the access token -- the
+    /// route's declared security is `refresh_token`. That is what makes the
+    /// stored session self-sufficient: nothing about this needs an access
+    /// token to already exist, so a daemon that has been stopped for a week
+    /// can read a balance without sending anyone back to a browser.
+    ///
+    /// The caller must persist the returned refresh token **before** using the
+    /// access token for anything. The old one is dead the moment this returns,
+    /// so a rotation that is used and then lost leaves the contributor with a
+    /// stored token the service no longer honours.
+    ///
+    /// A 401 here arrives as `near_ai_credential_session_expired`, which is
+    /// the recoverable state: re-running the ceremony fixes it, and nothing
+    /// this function does clears the stored token on its own.
+    pub async fn refresh_session(&self, refresh_token: &str) -> Result<RefreshedSession> {
+        if refresh_token.is_empty() {
+            bail!("near_ai_credential_session_missing")
+        }
+        let refreshed: AccessAndRefreshToken = self
+            .call_with_bearer(
+                reqwest::Method::POST,
+                "/v1/users/me/access-tokens",
+                refresh_token,
+                None,
+            )
+            .await?;
+        if refreshed.access_token.is_empty() || refreshed.refresh_token.is_empty() {
+            bail!("near_ai_credential_unexpected")
+        }
+        Ok(RefreshedSession {
+            session: SessionTokens {
+                access_token: refreshed.access_token,
+                refresh_token: refreshed.refresh_token,
+            },
+            refresh_token_expires_at: refreshed.refresh_token_expiration,
+        })
+    }
+
+    /// The first active organization this session can see.
+    ///
+    /// Split out of `mint_inference_key` so the balance read resolves the
+    /// organization by exactly the rule the ceremony used, rather than a
+    /// second rule that could pick a different one. `get_or_create_oauth_user`
+    /// creates an organization and a workspace **best effort** -- each failure
+    /// only logs and does not fail the signup -- so an account with none is
+    /// real, and it gets a name here rather than a request to
+    /// `/v1/organizations//usage/balance`.
+    pub async fn first_active_organization(&self, session: &SessionTokens) -> Result<String> {
+        let organizations: Organizations = self
+            .call(reqwest::Method::GET, "/v1/organizations", session, None)
+            .await?;
+        organizations
+            .organizations
+            .into_iter()
+            .find(|o| o.is_active && !o.id.is_empty())
+            .map(|o| o.id)
+            .ok_or_else(|| anyhow!("near_ai_credential_no_organization"))
+    }
+
+    /// Read one organization's balance.
+    ///
+    /// Session-authenticated, like every other management route: an `sk-` key
+    /// is a 401 here, which is the whole reason a session is retained at all.
+    pub async fn organization_balance(
+        &self,
+        session: &SessionTokens,
+        organization_id: &str,
+    ) -> Result<OrganizationBalance> {
+        if organization_id.is_empty() {
+            bail!("near_ai_credential_no_organization")
+        }
+        // The id came from this same service a moment ago, but it is about to
+        // become a path segment: a value carrying a slash or a `..` would
+        // address a different route entirely.
+        if !organization_id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        {
+            bail!("near_ai_credential_unexpected")
+        }
+        self.call(
+            reqwest::Method::GET,
+            &format!("/v1/organizations/{organization_id}/usage/balance"),
+            session,
+            None,
+        )
+        .await
     }
 }
 
@@ -506,7 +686,9 @@ mod tests {
             .await
             .unwrap_err()
             .to_string();
-        assert_eq!(error, "near_ai_credential_refused");
+        // 401 has its own label: it is the one refusal a contributor can act
+        // on, and on the exchange route it means the session is spent.
+        assert_eq!(error, "near_ai_credential_session_expired");
         assert!(!error.contains("session-jwt"), "{error}");
     }
 
