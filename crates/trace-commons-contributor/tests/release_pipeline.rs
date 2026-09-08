@@ -389,10 +389,14 @@ fn the_app_release_checks_its_own_credentials_before_it_signs_anything() {
     // pre-flight job without the environment reads them as empty and refuses
     // every release. This is the single line that keeps the pre-flight from
     // being a permanent outage rather than a guard.
-    let config_start = apps
+    //
+    // Sliced out of apps_code, not apps: the job's own comment quotes
+    // `environment: release` while explaining why it is there, so the same
+    // assertion over the raw file would hold with the declaration deleted.
+    let config_start = apps_code
         .find("  release-config:")
         .expect("release-apps.yml must have a release-config job");
-    let config_job = &apps[config_start..];
+    let config_job = &apps_code[config_start..];
     let config_job = &config_job[..config_job.find("\n  version:").unwrap_or(config_job.len())];
     assert!(
         config_job.contains("environment: release"),
@@ -407,10 +411,10 @@ fn the_app_release_checks_its_own_credentials_before_it_signs_anything() {
         "  windows-app:",
         "  linux-flatpak:",
     ] {
-        let start = apps
+        let start = apps_code
             .find(job)
             .unwrap_or_else(|| panic!("missing job {job}"));
-        let body = &apps[start..];
+        let body = &apps_code[start..];
         let needs_line = body
             .lines()
             .find(|line| line.trim_start().starts_with("needs:"))
