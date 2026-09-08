@@ -446,7 +446,7 @@ mod tests {
                     async move {
                         let offered = bearer(&request);
                         let mut held = tokens.lock().unwrap();
-                        if !held.iter().any(|t| *t == offered) {
+                        if !held.contains(&offered) {
                             return (
                                 axum::http::StatusCode::UNAUTHORIZED,
                                 Json(serde_json::json!({"error": {"message": "spent"}})),
@@ -739,7 +739,7 @@ mod tests {
                     async move {
                         let offered = bearer(&request);
                         let mut live = held.lock().unwrap();
-                        if !live.iter().any(|t| *t == offered) {
+                        if !live.contains(&offered) {
                             return (
                                 axum::http::StatusCode::UNAUTHORIZED,
                                 Json(serde_json::json!({})),
