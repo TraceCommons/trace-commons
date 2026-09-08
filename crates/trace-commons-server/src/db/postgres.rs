@@ -815,6 +815,14 @@ const INVITE_GRANT_COLUMNS: &str = "invite_subject_hash, policy_label, tenant_mo
     allowed_uses, max_uses, expires_at, issuance_source, issued_by_label,
     credential_binding_hash, note_label, revoked_at";
 
+/// Serialises `run_migrations` across processes sharing one database.
+///
+/// The value is arbitrary but must never change: it is the identity of the lock
+/// itself, and two builds disagreeing about it do not exclude each other. The
+/// advisory-lock space is per database and shared with anything else that takes
+/// one, so this is deliberately not a small number.
+const MIGRATION_ADVISORY_LOCK_KEY: i64 = 0x7472_6163_655f_6d67;
+
 /// Applies one migration and records it in `_trace_commons_migrations` as a
 /// single transaction.
 ///
@@ -1401,27 +1409,61 @@ impl Database for PgBackend {
             .get()
             .await
             .map_err(|e| DatabaseError::Pool(e.to_string()))?;
+        // One migration run at a time per database. Nothing below is atomic
+        // against a second caller: `CREATE TABLE IF NOT EXISTS` is not atomic
+        // against a concurrent `CREATE TABLE` in PostgreSQL, and neither is the
+        // applied/not-applied check -- two callers both read a migration as
+        // unapplied, both run its DDL, and the loser dies on a system-catalog
+        // unique index with `duplicate key value violates unique constraint
+        // "pg_type_typname_nsp_index"`, which names nothing a reader can act on.
+        // A rolling restart reaches that, and so does an operator running an
+        // issuer subcommand (they migrate at boot) beside a starting service.
+        //
+        // The lock is session-scoped, not transaction-scoped, because each
+        // migration commits in its own transaction; it therefore has to be
+        // released by hand before the connection goes back to the pool, on the
+        // failure path as much as the success one.
         client
-            .batch_execute(
-                "CREATE TABLE IF NOT EXISTS _trace_commons_migrations (
+            .execute(
+                "SELECT pg_advisory_lock($1)",
+                &[&MIGRATION_ADVISORY_LOCK_KEY],
+            )
+            .await?;
+        let applied = async {
+            client
+                .batch_execute(
+                    "CREATE TABLE IF NOT EXISTS _trace_commons_migrations (
                     version INTEGER PRIMARY KEY,
                     name TEXT NOT NULL,
                     applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 );",
-            )
-            .await?;
-        for (version, name, sql) in MIGRATIONS {
-            let already_applied = client
-                .query_opt(
-                    "SELECT 1 FROM _trace_commons_migrations WHERE version = $1",
-                    &[version],
                 )
-                .await?
-                .is_some();
-            if !already_applied {
-                apply_and_record_migration(&mut client, *version, name, sql).await?;
+                .await?;
+            for (version, name, sql) in MIGRATIONS {
+                let already_applied = client
+                    .query_opt(
+                        "SELECT 1 FROM _trace_commons_migrations WHERE version = $1",
+                        &[version],
+                    )
+                    .await?
+                    .is_some();
+                if !already_applied {
+                    apply_and_record_migration(&mut client, *version, name, sql).await?;
+                }
             }
+            Ok::<(), DatabaseError>(())
         }
+        .await;
+        let released = client
+            .execute(
+                "SELECT pg_advisory_unlock($1)",
+                &[&MIGRATION_ADVISORY_LOCK_KEY],
+            )
+            .await;
+        // The migration failure is the one worth reporting; a failure to
+        // release only matters when the run itself was clean.
+        applied?;
+        released?;
         Ok(())
     }
 
@@ -6087,6 +6129,15 @@ mod tests {
             "run_migrations must apply each migration through \
              apply_and_record_migration, not inline the apply and the record as two \
              statements again"
+        );
+        assert!(
+            body.contains("SELECT pg_advisory_lock($1)")
+                && body.contains("SELECT pg_advisory_unlock($1)"),
+            "run_migrations must hold an advisory lock across the whole run and \
+             release it again: without one, two callers both read a migration as \
+             unapplied and both run its DDL, and the loser dies on a system-catalog \
+             unique index. Requires a real database to observe, so this is the only \
+             check that runs everywhere"
         );
     }
 

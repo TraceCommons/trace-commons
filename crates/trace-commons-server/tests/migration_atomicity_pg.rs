@@ -19,7 +19,11 @@
 //! Everything here lives in a scratch schema of its own and is dropped again,
 //! so the shared test database keeps whatever migration state it already had.
 
-use trace_commons_server::db::postgres::apply_and_record_migration;
+use secrecy::SecretString;
+use trace_commons_server::config::{DatabaseConfig, SslMode};
+use trace_commons_server::db::{
+    Database, postgres::PgBackend, postgres::apply_and_record_migration,
+};
 
 /// Connects and puts the session in a private scratch schema holding its own
 /// `_trace_commons_migrations`. Returns `None` when no database is configured.
@@ -158,4 +162,113 @@ async fn a_migration_that_records_cleanly_keeps_both_halves() {
     );
 
     drop_scratch(&client, schema).await;
+}
+
+/// Splits the database name off a connection URL and puts a different one back,
+/// so a test can reach a second database on the server it was pointed at.
+fn with_database(url: &str, database: &str) -> String {
+    let (head, query) = match url.split_once('?') {
+        Some((head, query)) => (head, Some(query)),
+        None => (url, None),
+    };
+    let (base, _) = head
+        .rsplit_once('/')
+        .expect("a connection URL ending in /<database>");
+    match query {
+        Some(query) => format!("{base}/{database}?{query}"),
+        None => format!("{base}/{database}"),
+    }
+}
+
+async fn connect(url: &str) -> tokio_postgres::Client {
+    let (client, connection) = tokio_postgres::connect(url, tokio_postgres::NoTls)
+        .await
+        .unwrap_or_else(|error| panic!("connect to {url}: {error}"));
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    client
+}
+
+/// Nothing serialised the migration runner. `CREATE TABLE IF NOT EXISTS` is not
+/// atomic against a concurrent `CREATE TABLE` in PostgreSQL, and neither is the
+/// applied/not-applied check the runner makes per migration: two callers both
+/// read a migration as unapplied and both run its DDL, and the loser dies on a
+/// system-catalog unique index with `duplicate key value violates unique
+/// constraint "pg_type_typname_nsp_index"`.
+///
+/// That is reachable in production -- a rolling restart, or an operator running
+/// `trace-commons-upload-claim-issuer import-invites` (which migrates at boot)
+/// beside a starting service. It is also why `trace_invite_registry_pg` failed
+/// twenty of its twenty-one tests: every one of them migrates, and libtest runs
+/// them in parallel.
+///
+/// A virgin database is essential. Against one that is already migrated the
+/// runner applies nothing, races over nothing, and this test passes without
+/// having exercised the path at all.
+#[tokio::test]
+async fn concurrent_migration_runs_do_not_race_on_a_virgin_database() {
+    let Some(url) = std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL")
+        .or_else(|_| std::env::var("DATABASE_URL"))
+        .ok()
+    else {
+        eprintln!("skipping: TRACE_COMMONS_PG_TEST_DATABASE_URL or DATABASE_URL not configured");
+        return;
+    };
+
+    // A database of its own, created and dropped here: the point is to start
+    // from nothing, which the shared test database cannot offer twice.
+    const PROBE_DB: &str = "trace_migration_concurrency_probe";
+    let admin = connect(&with_database(&url, "postgres")).await;
+    // Separate statements on purpose. `batch_execute` wraps a multi-statement
+    // string in an implicit transaction, and DROP/CREATE DATABASE cannot run
+    // inside one.
+    admin
+        .execute(&format!("DROP DATABASE IF EXISTS {PROBE_DB}"), &[])
+        .await
+        .expect("drop any probe database left by an earlier run");
+    admin
+        .execute(&format!("CREATE DATABASE {PROBE_DB}"), &[])
+        .await
+        .expect("create the probe database");
+
+    let probe_url = with_database(&url, PROBE_DB);
+    let mut runs = Vec::new();
+    for _ in 0..4 {
+        let probe_url = probe_url.clone();
+        runs.push(tokio::spawn(async move {
+            let config = DatabaseConfig {
+                url: SecretString::from(probe_url),
+                pool_size: 4,
+                ssl_mode: SslMode::Prefer,
+                login_resolver_url: DatabaseConfig::login_resolver_url_from_env(),
+                gate_driver_url: DatabaseConfig::gate_driver_url_from_env(),
+                pii_backstop_driver_url: DatabaseConfig::pii_backstop_driver_url_from_env(),
+                invite_registry_url: DatabaseConfig::invite_registry_url_from_env(),
+            };
+            let backend = PgBackend::new(&config).await.expect("backend");
+            backend.run_migrations().await
+        }));
+    }
+
+    let mut failures = Vec::new();
+    for run in runs {
+        if let Err(error) = run.await.expect("migration task must not panic") {
+            failures.push(error.to_string());
+        }
+    }
+
+    let dropped = admin
+        .execute(
+            &format!("DROP DATABASE IF EXISTS {PROBE_DB} WITH (FORCE)"),
+            &[],
+        )
+        .await;
+
+    assert!(
+        failures.is_empty(),
+        "every concurrent migration run must succeed; {} of 4 failed: {failures:#?}",
+        failures.len()
+    );
+    dropped.expect("drop the probe database");
 }
