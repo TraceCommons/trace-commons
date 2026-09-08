@@ -71,12 +71,22 @@ struct CredentialSection: View {
     /// `.none` draws nothing rather than a disabled control: there is
     /// nothing to enable, and a greyed-out sign-in beside a state nobody
     /// could read still tells a contributor a sign-in is the thing to do.
+    ///
+    /// Enabled only when this shell can actually send it. A Cancel it cannot
+    /// address -- the app started after the ceremony did, so it never saw the
+    /// attempt id the daemon requires -- is drawn and disabled rather than
+    /// drawn live and silently doing nothing. The decision is
+    /// `CredentialSurface.canAddress`, asked rather than rewritten here, so
+    /// it is tested off-platform instead of resting on this modifier.
     @ViewBuilder
     private func actionButton(_ action: CredentialAction) -> some View {
         if let label = CredentialSurface.actionLabel(action, copy: copy) {
             Button(label) { run(action) }
                 .buttonStyle(.bordered)
-                .disabled(model.credentialBusy)
+                .disabled(
+                    model.credentialBusy
+                        || !CredentialSurface.canAddress(
+                            action, attemptID: model.credentialAttempt?.attemptID))
         }
     }
 
