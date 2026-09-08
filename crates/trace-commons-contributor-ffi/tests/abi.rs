@@ -47,6 +47,11 @@ use trace_commons_contributor_ffi::{
     tc_harness_plan_outcome_code, tc_harness_spend_line, tc_harness_state_code,
     tc_harness_state_line,
 };
+use trace_commons_contributor_ffi::{
+    tc_near_ai_balance_action, tc_near_ai_balance_amount, tc_near_ai_balance_limit_line,
+    tc_near_ai_balance_observed_line, tc_near_ai_balance_remaining_line,
+    tc_near_ai_balance_spent_line, tc_near_ai_balance_state_line, tc_near_ai_balance_state_tone,
+};
 
 fn cstr(p: &Path) -> CString {
     CString::new(p.to_str().unwrap()).unwrap()
@@ -4289,4 +4294,178 @@ fn the_harness_codes_do_not_collide_with_the_other_ranges() {
     seen.sort_unstable();
     seen.dedup();
     assert_eq!(seen.len(), harness.len(), "two harness codes share a value");
+}
+
+/// The scale crosses the ABI and is READ, not assumed.
+///
+/// The trap this pins: three shells dividing by a constant of their own.
+/// `scale` is on the wire because a daemon may change it, and the same
+/// integer at three scales has to give three answers on the far side of the
+/// ABI as well as on this one.
+#[test]
+fn the_balance_scale_crosses_the_abi_and_is_read() {
+    assert_eq!(
+        take_owned(tc_near_ai_balance_amount(1, 8_500_000_000, 9)),
+        "$8.50"
+    );
+    assert_eq!(
+        take_owned(tc_near_ai_balance_amount(1, 8_500_000_000, 6)),
+        "$8500.00"
+    );
+    assert_eq!(take_owned(tc_near_ai_balance_amount(1, 850, 2)), "$8.50");
+    // Rounding is down, so a figure crossing the ABI is never larger than
+    // the figure that arrived.
+    assert_eq!(
+        take_owned(tc_near_ai_balance_amount(1, 9_996_000_000, 9)),
+        "$9.99"
+    );
+}
+
+/// A null remaining figure does not cross the ABI as `$0.00`.
+///
+/// `remaining_nanos` is nullable even in the `known` state -- the ordinary
+/// case for an account nobody capped -- and zero is a real balance meaning
+/// the money is gone. The two must never render alike.
+#[test]
+fn a_null_remaining_balance_never_crosses_as_zero() {
+    let absent = take_owned(tc_near_ai_balance_remaining_line(0, 0, 9));
+    assert!(
+        !absent.is_empty(),
+        "a null remaining figure needs a sentence"
+    );
+    assert!(!absent.contains('$'), "a null carried an amount: {absent}");
+    assert!(
+        !absent.contains("0.00"),
+        "a null rendered as zero: {absent}"
+    );
+
+    let zero = take_owned(tc_near_ai_balance_remaining_line(1, 0, 9));
+    assert!(
+        zero.contains("$0.00"),
+        "a real zero must still show: {zero}"
+    );
+    assert_ne!(absent, zero, "a null and a zero render the same");
+
+    // The bare amount accessor answers the empty string for a null, and an
+    // empty string is drawn as no figure -- never as zero.
+    let bare = take_owned(tc_near_ai_balance_amount(0, 0, 9));
+    assert_eq!(bare, "");
+    assert_ne!(bare, take_owned(tc_near_ai_balance_amount(1, 0, 9)));
+
+    // A negative figure is a real overdrawn balance, not an absence: the
+    // reason `present` is its own argument rather than an out-of-range
+    // integer.
+    let overdrawn = take_owned(tc_near_ai_balance_remaining_line(1, -1_000_000_000, 9));
+    assert!(
+        overdrawn.contains("-$1.00"),
+        "an overdrawn account was lost: {overdrawn}"
+    );
+
+    // The other two figures use the empty-string convention, and a zero is
+    // still not an absence there either.
+    assert_eq!(take_owned(tc_near_ai_balance_limit_line(0, 0, 9)), "");
+    assert_eq!(take_owned(tc_near_ai_balance_spent_line(0, 0, 9)), "");
+    assert!(take_owned(tc_near_ai_balance_spent_line(1, 0, 9)).contains("$0.00"));
+}
+
+/// A state this build has never heard of borrows nobody's sentence, and is
+/// offered no button.
+///
+/// The button is the one that opens a browser and mints a key. Offering it
+/// for a state nobody read is how a contributor ends up with a second key.
+#[test]
+fn an_unrecognised_balance_state_borrows_nothing_across_the_abi() {
+    let known: Vec<String> = [
+        "no_session",
+        "session_expired",
+        "no_organization",
+        "unavailable",
+    ]
+    .into_iter()
+    .map(|s| {
+        let c = cstr_str(s);
+        take_owned(unsafe { tc_near_ai_balance_state_line(c.as_ptr()) })
+    })
+    .collect();
+    let later = cstr_str("a_balance_state_from_a_later_daemon");
+    let unknown = take_owned(unsafe { tc_near_ai_balance_state_line(later.as_ptr()) });
+    assert!(!unknown.is_empty());
+    for sentence in &known {
+        assert_ne!(&unknown, sentence, "an unknown state borrowed: {unknown}");
+    }
+    // A NULL pointer is a missing state, and gets the "does not report"
+    // sentence rather than any of the above.
+    let missing = take_owned(unsafe { tc_near_ai_balance_state_line(std::ptr::null()) });
+    assert!(!missing.is_empty());
+    assert_ne!(missing, unknown);
+    for sentence in &known {
+        assert_ne!(&missing, sentence);
+    }
+
+    for state in [
+        "a_balance_state_from_a_later_daemon",
+        "known",
+        "unavailable",
+        "no_organization",
+    ] {
+        let c = cstr_str(state);
+        assert_eq!(
+            unsafe { tc_near_ai_balance_action(c.as_ptr()) },
+            TC_CREDENTIAL_ACTION_NONE,
+            "{state} was offered an action"
+        );
+    }
+    // `known` is the one state that reads as settled, and it means the READ
+    // succeeded -- nothing here judges the amount.
+    for state in [
+        "a_balance_state_from_a_later_daemon",
+        "unavailable",
+        "no_organization",
+        "no_session",
+    ] {
+        let c = cstr_str(state);
+        assert_ne!(
+            unsafe { tc_near_ai_balance_state_tone(c.as_ptr()) },
+            TC_PRIVATE_INFERENCE_TONE_CLEAR,
+            "{state} read as settled",
+        );
+    }
+    assert_eq!(
+        unsafe { tc_near_ai_balance_action(std::ptr::null()) },
+        TC_CREDENTIAL_ACTION_NONE
+    );
+    for state in ["no_session", "session_expired"] {
+        let c = cstr_str(state);
+        assert_eq!(
+            unsafe { tc_near_ai_balance_action(c.as_ptr()) },
+            TC_CREDENTIAL_ACTION_OBTAIN,
+            "{state} must offer the sign-in"
+        );
+    }
+    let known_state = cstr_str("known");
+    assert_eq!(
+        unsafe { tc_near_ai_balance_state_tone(known_state.as_ptr()) },
+        TC_PRIVATE_INFERENCE_TONE_CLEAR
+    );
+    // "known" is the state whose row is figures, so it carries no sentence.
+    assert_eq!(
+        take_owned(unsafe { tc_near_ai_balance_state_line(known_state.as_ptr()) }),
+        ""
+    );
+}
+
+/// The age says when THIS COMPUTER asked, and absence draws nothing.
+#[test]
+fn the_balance_age_crosses_the_abi() {
+    assert_eq!(
+        take_owned(tc_near_ai_balance_observed_line(0)),
+        "Asked for just now."
+    );
+    assert_eq!(
+        take_owned(tc_near_ai_balance_observed_line(120)),
+        "Asked for 2 minutes ago."
+    );
+    for absent in [-1, i64::MIN] {
+        assert_eq!(take_owned(tc_near_ai_balance_observed_line(absent)), "");
+    }
 }

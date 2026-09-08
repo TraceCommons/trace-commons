@@ -70,6 +70,23 @@ const ACCESS_TOKEN_REUSE: Duration = Duration::from_secs(300);
 const BALANCE_CURRENCY: &str = "USD";
 const BALANCE_SCALE: u8 = 9;
 
+/// The `state` labels this module puts on the wire.
+///
+/// Declared once and returned by [`BalanceReport::state`], so the copy module
+/// that renders a sentence per state can import them rather than respell
+/// them. A label spelled twice is two labels that have not disagreed yet, and
+/// the failure mode of a typo on this particular set is a real balance
+/// rendering as "could not be read".
+pub const LABEL_BALANCE_NO_SESSION: &str = "no_session";
+/// [`BalanceReport::SessionExpired`].
+pub const LABEL_BALANCE_SESSION_EXPIRED: &str = "session_expired";
+/// [`BalanceReport::NoOrganization`].
+pub const LABEL_BALANCE_NO_ORGANIZATION: &str = "no_organization";
+/// [`BalanceReport::Unavailable`].
+pub const LABEL_BALANCE_UNAVAILABLE: &str = "unavailable";
+/// [`BalanceReport::Known`].
+pub const LABEL_BALANCE_KNOWN: &str = "known";
+
 /// One balance, and when it was observed.
 #[derive(Debug, Clone, Copy, Serialize)]
 pub struct BalanceReading {
@@ -123,11 +140,11 @@ impl BalanceReport {
     #[must_use]
     pub fn state(&self) -> &'static str {
         match self {
-            Self::NoSession => "no_session",
-            Self::SessionExpired => "session_expired",
-            Self::NoOrganization => "no_organization",
-            Self::Unavailable => "unavailable",
-            Self::Known(_) => "known",
+            Self::NoSession => LABEL_BALANCE_NO_SESSION,
+            Self::SessionExpired => LABEL_BALANCE_SESSION_EXPIRED,
+            Self::NoOrganization => LABEL_BALANCE_NO_ORGANIZATION,
+            Self::Unavailable => LABEL_BALANCE_UNAVAILABLE,
+            Self::Known(_) => LABEL_BALANCE_KNOWN,
         }
     }
 
