@@ -674,6 +674,18 @@ pub struct HarnessList {
     pub destination_port: Option<u16>,
     #[serde(default)]
     pub harnesses: Vec<Harness>,
+    /// Whether the destination this app hosts can answer anything, which is
+    /// what gates a connect.
+    ///
+    /// THREE ANSWERS, NOT TWO, and the `Option` is carrying the third. A
+    /// daemon older than the gate does not send the field at all, and that is
+    /// not the same fact as a daemon reporting no key: the first connects
+    /// tools without a sign-in and the second cannot. Defaulting it to `false`
+    /// would tell a contributor on the older build to go and get a key nothing
+    /// wants. `harness_credential_notice` is where the three are separated;
+    /// nothing here reads this as a boolean.
+    #[serde(default)]
+    pub destination_credentialed: Option<bool>,
     /// What the calls answered here have cost today, or the absence that
     /// must never be drawn as zero.
     ///
