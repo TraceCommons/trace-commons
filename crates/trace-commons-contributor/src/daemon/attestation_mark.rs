@@ -259,3 +259,323 @@ pub const ALL_REASONS: [&str; 13] = [
     REASON_REQUEST_MALFORMED,
     REASON_RECEIPT_UNAVAILABLE,
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::daemon::contribution_eligibility as ce;
+    use chrono::{TimeZone, Utc};
+
+    /// A request carrying the marker, built through the protocol constant
+    /// rather than spelled out, so a rename moves both sides at once.
+    fn marked_request() -> String {
+        serde_json::json!({
+            "model": "a-model",
+            "metadata": {
+                trace_commons_protocol::admission::REQUEST_METADATA_KEY: "opaque",
+            },
+        })
+        .to_string()
+    }
+
+    fn unmarked_request() -> String {
+        serde_json::json!({"model": "a-model"}).to_string()
+    }
+
+    fn row() -> RoutedExchange {
+        RoutedExchange {
+            id: Some(1),
+            started_at: Utc.with_ymd_and_hms(2026, 9, 8, 12, 0, 0).unwrap(),
+            client_session_id: Some("session".to_string()),
+            total_ms: Some(10),
+            facade: "openai".to_string(),
+            backend: "nearai".to_string(),
+            requested_model: Some("a-model".to_string()),
+            served_model: Some("a-model".to_string()),
+            upstream_id: Some("chatcmpl-1".to_string()),
+            request_sha256: Some("00".repeat(32)),
+            response_sha256: Some("11".repeat(32)),
+            body_ref: Some("00000000000000000001-000000".to_string()),
+            rung: "full".to_string(),
+            attempts: 1,
+            input_tokens: Some(1),
+            cache_read_tokens: None,
+            cache_write_tokens: None,
+            output_tokens: Some(1),
+            cost_usd: Some(0.0),
+            status: 200,
+        }
+    }
+
+    /// Builds a real [`AttestedCall`] over `request`, through the same
+    /// function the submit path uses.
+    fn call_with(request: &str) -> (AttestedCall, tempfile::TempDir) {
+        use sha2::{Digest as _, Sha256};
+        let response = "data: [DONE]\n\n";
+        let mut row = row();
+        let reference = row.body_ref.clone().expect("a reference");
+        row.request_sha256 = Some(format!("{:x}", Sha256::digest(request.as_bytes())));
+        row.response_sha256 = Some(format!("{:x}", Sha256::digest(response.as_bytes())));
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join(format!("{reference}.req")), request).expect("req");
+        std::fs::write(dir.path().join(format!("{reference}.res")), response).expect("res");
+        let call = crate::routing::attested::attested_final_call(&[row], dir.path())
+            .expect("the fixture is attestable");
+        (call, dir)
+    }
+
+    /// Every input this module classifies, once, so the tests below and the
+    /// cross-check against eligibility run over the same matrix rather than
+    /// two hand-kept lists that could drift apart.
+    fn every_input() -> Vec<(Vec<RoutedExchange>, Option<Unattestable>, Option<String>)> {
+        let mut no_body = row();
+        no_body.body_ref = None;
+        let mut cases: Vec<(Vec<RoutedExchange>, Option<Unattestable>, Option<String>)> = vec![
+            (vec![row()], None, Some(marked_request())),
+            (vec![row()], None, Some(unmarked_request())),
+            (vec![row()], None, Some("{".to_string())),
+            (vec![], None, None),
+            (vec![no_body], None, None),
+            (vec![row()], None, None),
+        ];
+        for refusal in [
+            Unattestable::NoCall,
+            Unattestable::CaptureOff,
+            Unattestable::DigestAbsent,
+            Unattestable::UpstreamIdAbsent,
+            Unattestable::DigestMismatch,
+            Unattestable::ReferenceMalformed,
+            Unattestable::BodiesUnreadable,
+            Unattestable::BodyNotUtf8,
+            Unattestable::BodyTooLarge,
+        ] {
+            cases.push((vec![row()], Some(refusal), None));
+        }
+        cases
+    }
+
+    /// Runs one case of [`every_input`] through both entry points, holding
+    /// the built call alive for the length of the call.
+    fn both_answers(
+        case: &(Vec<RoutedExchange>, Option<Unattestable>, Option<String>),
+        admission_evidence: bool,
+    ) -> (Mark, Option<ce::Verdict>) {
+        let (rows, refusal, request) = case;
+        let held = request.as_deref().map(call_with);
+        let call = held.as_ref().map(|(c, _dir)| c);
+        (
+            evaluate(rows, call, *refusal),
+            ce::evaluate(admission_evidence, rows, call, *refusal),
+        )
+    }
+
+    /// The whole point. An invited contributor's queue answers nothing about
+    /// eligibility -- and still answers this, for every input.
+    #[test]
+    fn the_mark_is_answered_with_the_signup_flag_off() {
+        for case in every_input() {
+            let (mark, verdict) = both_answers(&case, false);
+            assert_eq!(verdict, None, "eligibility spoke with the flag off");
+            assert!(
+                ALL_MARKS.contains(&mark.state),
+                "{} is not a pinned mark",
+                mark.state
+            );
+        }
+    }
+
+    /// A session that carries its call says so, rather than only failing to
+    /// complain. The positive case is the one that matters here, and it is
+    /// the case the eligibility surface never had to render.
+    #[test]
+    fn a_marked_final_call_is_attested() {
+        let (call, _dir) = call_with(&marked_request());
+        assert_eq!(
+            evaluate(&[row()], Some(&call), None),
+            Mark {
+                state: MARK_ATTESTED,
+                reason: None,
+            }
+        );
+    }
+
+    /// The case the surface exists for, and the commonest one: history
+    /// recorded before the contributor routed anything through attested
+    /// inference at all. It is a description, not a refusal.
+    #[test]
+    fn a_session_with_no_inference_hops_is_permanently_unattested() {
+        assert_eq!(
+            evaluate(&[], None, None),
+            Mark {
+                state: MARK_UNATTESTED_PERMANENT,
+                reason: Some(REASON_NO_CALL),
+            }
+        );
+    }
+
+    /// The two configuration answers: one about the record, one about the
+    /// machine. Both name something a contributor can change for future
+    /// sessions, which is why they are not permanent.
+    #[test]
+    fn the_two_configuration_answers_keep_their_own_reasons() {
+        let mut no_body = row();
+        no_body.body_ref = None;
+        assert_eq!(
+            evaluate(&[no_body], None, None),
+            Mark {
+                state: MARK_UNATTESTED_CONFIGURATION,
+                reason: Some(REASON_CAPTURE_OFF),
+            }
+        );
+        assert_eq!(
+            evaluate(&[row()], None, None),
+            Mark {
+                state: MARK_UNATTESTED_CONFIGURATION,
+                reason: Some(REASON_EVIDENCE_CAPTURE_OFF),
+            }
+        );
+    }
+
+    /// A call carried whole whose request never carried the marker. The
+    /// marker is what selects the profile that carries these bodies to a
+    /// witness at all, so without it nothing could attest the call.
+    #[test]
+    fn an_unmarked_final_call_is_permanently_unattested() {
+        let (call, _dir) = call_with(&unmarked_request());
+        assert_eq!(
+            evaluate(&[row()], Some(&call), None),
+            Mark {
+                state: MARK_UNATTESTED_PERMANENT,
+                reason: Some(REASON_MARKER_ABSENT),
+            }
+        );
+    }
+
+    /// Every refusal keeps its own name rather than collapsing into one
+    /// "could not carry it". A contributor does something different about
+    /// each, and the reason label is the only place the distinction survives.
+    #[test]
+    fn every_refusal_keeps_its_own_reason() {
+        let cases = [
+            (Unattestable::DigestMismatch, REASON_DIGEST_MISMATCH),
+            (Unattestable::ReferenceMalformed, REASON_REFERENCE_MALFORMED),
+            (Unattestable::BodiesUnreadable, REASON_BODIES_UNREADABLE),
+            (Unattestable::BodyNotUtf8, REASON_BODY_NOT_UTF8),
+            (Unattestable::BodyTooLarge, REASON_BODY_TOO_LARGE),
+        ];
+        for (refusal, reason) in cases {
+            assert_eq!(
+                evaluate(&[row()], None, Some(refusal)),
+                Mark {
+                    state: MARK_UNATTESTED_PERMANENT,
+                    reason: Some(reason),
+                },
+                "{refusal:?} lost its reason"
+            );
+        }
+    }
+
+    /// The cheap group outranks a recorded refusal, so the answer a list can
+    /// always produce is the one it produces.
+    #[test]
+    fn the_cheap_group_is_consulted_first() {
+        assert_eq!(
+            evaluate(&[], None, Some(Unattestable::BodyTooLarge)),
+            Mark {
+                state: MARK_UNATTESTED_PERMANENT,
+                reason: Some(REASON_NO_CALL),
+            }
+        );
+    }
+
+    /// **The mutation proof for the refactor.** Eligibility is now derived
+    /// from the mark rather than classified separately, and this pins that
+    /// the derivation is a rename of four labels and nothing else: same
+    /// partition, same reason, for every input, in both framings.
+    ///
+    /// A change that made eligibility decide anything differently -- for
+    /// anyone, on any input -- has to break this or the literal expectations
+    /// in `contribution_eligibility`'s own tests.
+    #[test]
+    fn eligibility_is_this_answer_renamed_and_nothing_else() {
+        for case in every_input() {
+            let (mark, verdict) = both_answers(&case, true);
+            let verdict = verdict.expect("eligibility answers while the flag is on");
+            let expected_state = match mark.state {
+                MARK_ATTESTED => ce::STATE_ELIGIBLE,
+                MARK_UNATTESTED_PERMANENT => ce::STATE_INELIGIBLE_PERMANENT,
+                MARK_UNATTESTED_CONFIGURATION => ce::STATE_INELIGIBLE_CONFIGURATION,
+                _ => ce::STATE_UNKNOWN,
+            };
+            assert_eq!(
+                verdict.state, expected_state,
+                "{} renamed wrong",
+                mark.state
+            );
+            assert_eq!(verdict.reason, mark.reason, "the reason did not travel");
+        }
+    }
+
+    /// The same rule on the write-back side: a submission turned away for
+    /// want of the proof leaves the row unable to claim it carries any.
+    #[test]
+    fn an_admission_refusal_retracts_the_mark() {
+        assert_eq!(
+            writeback_for("admission_request_malformed"),
+            Some(Mark {
+                state: MARK_UNATTESTED_PERMANENT,
+                reason: Some(REASON_REQUEST_MALFORMED),
+            })
+        );
+        assert_eq!(
+            writeback_for("admission_receipt_unavailable"),
+            Some(Mark {
+                state: MARK_UNKNOWN,
+                reason: Some(REASON_RECEIPT_UNAVAILABLE),
+            })
+        );
+        for label in [
+            "upload-failed",
+            "claim-mint-failed",
+            "pii-filter-unavailable",
+            "witness-review-stale",
+            "parse-failed",
+            "",
+        ] {
+            assert_eq!(writeback_for(label), None, "{label} rewrote the row");
+        }
+    }
+
+    /// Nothing this module produces is outside the pinned sets. The copy
+    /// tables and the wire contract are both written against them.
+    #[test]
+    fn every_mark_uses_a_pinned_label() {
+        for case in every_input() {
+            let (mark, _) = both_answers(&case, true);
+            assert!(
+                ALL_MARKS.contains(&mark.state),
+                "{} is not a pinned mark",
+                mark.state
+            );
+            if let Some(reason) = mark.reason {
+                assert!(
+                    ALL_REASONS.contains(&reason),
+                    "{reason} is not a pinned reason"
+                );
+            }
+        }
+    }
+
+    /// `unknown` ships in the contract without this slice producing it from
+    /// a classification, exactly as its eligibility twin does: lazy
+    /// evaluation is the obvious later optimisation, and a shell that has
+    /// never seen the label will render it wrong on the day it first
+    /// arrives.
+    #[test]
+    fn nothing_this_slice_classifies_answers_unknown() {
+        for case in every_input() {
+            let (mark, _) = both_answers(&case, true);
+            assert_ne!(mark.state, MARK_UNKNOWN);
+        }
+    }
+}
