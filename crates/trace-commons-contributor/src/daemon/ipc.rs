@@ -954,6 +954,39 @@ impl DaemonShared {
             .and_then(super::settings::IronWireDeclaration::port)
     }
 
+    /// Whether the destination a connect would name can answer anything.
+    ///
+    /// Presence of the inference credential, never the key: the boolean is all
+    /// that leaves this function, the same treatment `redacted_settings` gives
+    /// the same record.
+    ///
+    /// Only asked of a destination this daemon hosts. A proxy the contributor
+    /// declared and runs themselves answers from an account whose credential
+    /// was never handed to us, so demanding ours would refuse a connect that
+    /// is perfectly good and leave no way to make it work. `destination_port`
+    /// prefers the hosted listener in exactly the same order, so the two
+    /// agree about which destination is being described.
+    ///
+    /// True when nothing is hosted and nothing is declared. That case is
+    /// already refused as having no destination at all, and answering it
+    /// "uncredentialed" would put the wrong name on it.
+    pub(crate) fn destination_credentialed(&self) -> bool {
+        if self
+            .private_inference_state
+            .lock()
+            .expect("private inference state lock")
+            .port()
+            .is_none()
+        {
+            return true;
+        }
+        self.settings
+            .lock()
+            .expect("settings lock")
+            .near_ai_inference
+            .is_some()
+    }
+
     /// Source roots with the daemon's live routing ledger attached.
     ///
     /// Settings describe the declaration; the daemon owns the instance.
@@ -6534,6 +6567,88 @@ mod tests {
             !serde_json::to_string(&body).unwrap().contains("sk-super"),
             "{body}"
         );
+    }
+
+    /// The credential gate on a connect asks about the destination this
+    /// daemon hosts, and about nothing else.
+    ///
+    /// Three states, and the third is the one worth pinning: a proxy the
+    /// contributor declared and runs themselves answers from an account whose
+    /// key was never handed to us, so demanding ours would refuse a connect
+    /// that works and leave no way to make it work.
+    #[test]
+    fn only_a_destination_we_host_is_gated_on_our_credential() {
+        let s = shared();
+
+        // Nothing hosted and nothing declared. Already refused for having no
+        // destination at all; naming it "uncredentialed" would be wrong.
+        assert!(s.destination_credentialed());
+
+        *s.private_inference_state.lock().unwrap() =
+            crate::daemon::private_inference::PrivateInferenceState::Running { port: 8463 };
+        assert!(
+            !s.destination_credentialed(),
+            "a listener of ours with no credential behind it cannot answer"
+        );
+
+        s.settings.lock().unwrap().near_ai_inference =
+            Some(crate::daemon::settings::NearAiInferenceCredential {
+                key: "sk-super-secret-key".into(),
+                key_id: "key-1".into(),
+                key_prefix: "sk-sup".into(),
+                organization_id: "org-1".into(),
+                workspace_id: "ws-1".into(),
+                minted_at: chrono::Utc::now(),
+            });
+        assert!(s.destination_credentialed());
+
+        // A proxy the contributor runs themselves, and our credential gone.
+        s.settings.lock().unwrap().near_ai_inference = None;
+        *s.private_inference_state.lock().unwrap() =
+            crate::daemon::private_inference::PrivateInferenceState::Off;
+        s.settings.lock().unwrap().ironwire =
+            Some(crate::daemon::settings::IronWireDeclaration::Watch {
+                port: 9999,
+                token_dir: None,
+            });
+        assert_eq!(s.destination_port(), Some(9999));
+        assert!(
+            s.destination_credentialed(),
+            "their proxy answers from their account, which is not ours to ask about"
+        );
+    }
+
+    /// The list says why it is offering no connect, and never says it with a
+    /// credential.
+    #[test]
+    fn the_harness_list_reports_an_uncredentialed_destination() {
+        let s = shared();
+        *s.private_inference_state.lock().unwrap() =
+            crate::daemon::private_inference::PrivateInferenceState::Running { port: 8463 };
+
+        let r = handle_request(&s, &req("harness_list", serde_json::json!({})));
+        let body = r.result.expect("harness_list answers");
+        assert_eq!(body["destination_credentialed"], false);
+        for row in body["harnesses"].as_array().expect("rows") {
+            assert_eq!(
+                row["can_connect"], false,
+                "no row may offer a connect the plan refuses: {row}"
+            );
+        }
+
+        s.settings.lock().unwrap().near_ai_inference =
+            Some(crate::daemon::settings::NearAiInferenceCredential {
+                key: "sk-super-secret-key".into(),
+                key_id: "key-1".into(),
+                key_prefix: "sk-sup".into(),
+                organization_id: "org-1".into(),
+                workspace_id: "ws-1".into(),
+                minted_at: chrono::Utc::now(),
+            });
+        let r = handle_request(&s, &req("harness_list", serde_json::json!({})));
+        let body = serde_json::to_string(&r.result.expect("harness_list answers")).unwrap();
+        assert!(body.contains("\"destination_credentialed\":true"), "{body}");
+        assert!(!body.contains("sk-super-secret-key"), "{body}");
     }
 
     /// A second credential in the same document as the privacy-filter one,
