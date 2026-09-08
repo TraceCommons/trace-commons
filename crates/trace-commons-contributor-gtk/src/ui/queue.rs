@@ -1518,6 +1518,25 @@ fn folder_row(app: &Rc<App>, folder: &crate::queue_folders::Folder) -> gtk::Widg
         submit_all.set_tooltip_text(Some(copy::SUBMIT_ALL_TOOLTIP));
         bar.append(&submit_all);
 
+        // Both group controls take the gate, or neither should.
+        //
+        // A group with nothing sendable in it must not offer a control that
+        // sends nothing: a press with no visible consequence is the same
+        // defect as a press that is refused, minus the error message. The
+        // verdict menu is the trap -- it is a SECOND ROUTE TO THE SAME CALL,
+        // and a live one sitting beside a disabled button is worse than
+        // either alone, because the disabled button is what tells a
+        // contributor the group cannot be sent.
+        //
+        // Disabled rather than removed. A group header is not a queue row:
+        // the group still holds sessions, and a folder offering no way to
+        // act on it at all reads as broken rather than as finished. The row
+        // rule -- build no control -- applies where the control would
+        // otherwise appear from nothing; here it would disappear from a
+        // header that has one on every other folder.
+        let sendable = !group_submit(app, project_id).eligible.is_empty();
+        submit_all.set_sensitive(sendable);
+
         let app_for_submit = Rc::clone(app);
         let project_id_for_submit = project_id.to_string();
         let project_label_for_submit = project_label.to_string();
@@ -1582,6 +1601,7 @@ fn folder_row(app: &Rc<App>, folder: &crate::queue_folders::Folder) -> gtk::Widg
         }
         let verdict_popover = gtk::Popover::builder().child(&verdict_popover_box).build();
         submit_all_as.set_popover(Some(&verdict_popover));
+        submit_all_as.set_sensitive(sendable);
         bar.append(&submit_all_as);
     }
 

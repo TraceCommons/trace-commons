@@ -814,6 +814,45 @@ impl Sheet {
         self.pending.get(*self.index.borrow())
     }
 
+    /// The entry now showing, resolved against the LIVE queue by id.
+    ///
+    /// **`self.pending` is a copy, taken when the sheet opened.** That is
+    /// right for everything the sheet displays -- a transcript must not
+    /// rearrange itself under somebody reading it -- and wrong for exactly
+    /// one thing: whether this session may still be sent.
+    ///
+    /// A submit-time failure writes its reason back into the row (Decision 1
+    /// of the eligibility design), so a row CAN be downgraded to
+    /// `ineligible_permanent` while a sheet sits open on it. Nothing undoes
+    /// the gate in that case; the gate goes on reading a copy that stopped
+    /// being true, and offers `Contribute` for a session the server will
+    /// refuse. Recomputing faithfully from a stale snapshot recomputes the
+    /// same wrong answer forever.
+    ///
+    /// Only the gate and its sentence read this. What an approval actually
+    /// covers still goes through the pinned entry -- the same id either way
+    /// -- so nothing a contributor started moves under them mid-read.
+    ///
+    /// It reads the queue rather than assuming the worst: an entry that has
+    /// become eligible arms the control, the same as one that stopped being
+    /// eligible disarms it.
+    ///
+    /// Falls back to the held copy when the id is not in the live queue at
+    /// all. That is not staleness -- there is no newer answer to read -- and
+    /// inventing an ineligibility from an absence would disarm a control on
+    /// no evidence.
+    fn current_live(&self) -> Option<crate::model::QueueEntry> {
+        let held = self.current()?;
+        let live = self
+            .app
+            .entries
+            .borrow()
+            .iter()
+            .find(|e| e.entry_id == held.entry_id)
+            .cloned();
+        Some(live.unwrap_or_else(|| held.clone()))
+    }
+
     /// Fetch the preview for the entry now showing.
     ///
     /// Deliberately re-previewed rather than read from the row cache: a
@@ -1034,7 +1073,13 @@ impl Sheet {
     /// and the server still refuses. An entry with no eligibility field
     /// answers `true` and nothing changes for it.
     fn sync_contribute(&self) {
-        let view = self.current().and_then(crate::eligibility::view);
+        // The LIVE row, not the copy this sheet opened with -- see
+        // `current_live`. A gate computed once from a snapshot recomputes
+        // the same stale answer for as long as the sheet stays open.
+        let view = self
+            .current_live()
+            .as_ref()
+            .and_then(crate::eligibility::view);
         let sendable =
             view.is_none_or(|view| view.control == crate::copy::ContributionControl::Contribute);
         self.contribute.set_sensitive(self.pinned.get() && sendable);
@@ -1489,6 +1534,27 @@ impl Sheet {
         let Some(entry) = self.current() else { return };
         let entry_id = entry.entry_id.clone();
         let project_label = entry.project_label.clone();
+        // Checked again HERE, against the live queue, and not only when the
+        // button was drawn.
+        //
+        // Nothing tells this sheet the queue changed -- it holds no
+        // subscription -- so `sync_contribute` runs only at the moments
+        // listed beside it. Between two of them a row can be downgraded
+        // under an armed button, and the press is what would send it. The
+        // gate at draw time decides what is OFFERED; this decides what is
+        // SENT, and only the second one is load-bearing.
+        //
+        // Repaints on the way out, so a contributor who presses a button
+        // that has stopped being valid sees it disarm and reads why, rather
+        // than pressing something that silently does nothing.
+        if !self
+            .current_live()
+            .as_ref()
+            .is_none_or(crate::eligibility::offers_send)
+        {
+            self.sync_contribute();
+            return;
+        }
         self.contribute.set_sensitive(false);
         let sheet = Rc::clone(self);
         // No selection is a valid, expected answer -- `approve_params`

@@ -620,6 +620,174 @@ mod tests {
         );
     }
 
+    /// Source with every run of whitespace removed.
+    ///
+    /// A sweep that matches raw source is a sweep rustfmt can break by
+    /// wrapping an expression across lines -- which it did to
+    /// `self.app.entries.borrow()` the first time this test was written.
+    /// What these assertions are about is which calls the code makes, and
+    /// that survives reformatting; the line breaks do not.
+    fn squashed(source: &str) -> String {
+        source.chars().filter(|c| !c.is_whitespace()).collect()
+    }
+
+    // -- staleness ------------------------------------------------------
+
+    /// **The sheet's gate reads the live queue, not the copy it opened
+    /// with.**
+    ///
+    /// `Sheet::pending` is cloned when the sheet opens. That is right for
+    /// the transcript and wrong for the gate: a submit-time failure writes
+    /// its reason back into the row (Decision 1), so a row can be
+    /// downgraded while a sheet sits open on it. Nothing undoes the gate --
+    /// the gate goes on reading a copy that stopped being true, and
+    /// recomputing from it faithfully recomputes the same wrong answer
+    /// forever. This is the defect macOS hit; GTK had it too.
+    #[test]
+    fn the_sheets_gate_reads_the_live_queue_not_its_snapshot() {
+        let sheet = PREVIEW_SOURCE
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production code above the tests");
+
+        // The resolver exists and looks the entry up by id.
+        let resolver = sheet
+            .find("fn current_live(&self)")
+            .expect("the sheet resolves its entry against the live queue");
+        let resolver_end = sheet[resolver..].find("\n    }").expect("it closes") + resolver;
+        let body = &sheet[resolver..resolver_end];
+        let squashed_body = squashed(body);
+        assert!(
+            squashed_body.contains("self.app.entries.borrow()"),
+            "current_live does not read the live queue: {body}"
+        );
+        assert!(
+            squashed_body.contains("e.entry_id==held.entry_id"),
+            "current_live does not resolve by id: {body}"
+        );
+
+        // The gate uses it, and does NOT use the snapshot.
+        let sync = sheet
+            .find("fn sync_contribute(&self)")
+            .expect("the gate exists");
+        let sync_end = sheet[sync..].find("\n    }").expect("it closes") + sync;
+        let gate = &sheet[sync..sync_end];
+        let squashed_gate = squashed(gate);
+        assert!(
+            squashed_gate.contains("self.current_live()"),
+            "the gate reads the sheet's snapshot: {gate}"
+        );
+        assert!(
+            !squashed_gate.contains("self.current()."),
+            "the gate still reads the snapshot beside the live row: {gate}"
+        );
+    }
+
+    /// And the PRESS is guarded, not only the draw.
+    ///
+    /// Nothing tells the sheet the queue changed -- it holds no
+    /// subscription -- so the gate runs only at the moments listed beside
+    /// it. Between two of them a row can be downgraded under an armed
+    /// button. What is offered is decided at draw time; what is SENT is
+    /// decided here, and only the second is load-bearing.
+    #[test]
+    fn the_press_is_checked_against_the_live_queue_too() {
+        let sheet = PREVIEW_SOURCE
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production code above the tests");
+        let approve = sheet
+            .find("fn approve_current(self: &Rc<Self>)")
+            .expect("the approval exists");
+        let approve_end = sheet[approve..].find("\n    }").expect("it closes") + approve;
+        let body = &sheet[approve..approve_end];
+        let squashed_body = squashed(body);
+        assert!(
+            squashed_body.contains("self.current_live()"),
+            "the press is not re-checked against the live queue: {body}"
+        );
+        assert!(
+            squashed_body.contains("crate::eligibility::offers_send"),
+            "the press does not consult the shared answer: {body}"
+        );
+        // The guard precedes the call it guards.
+        let guard = squashed_body
+            .find("self.current_live()")
+            .expect("the guard is present");
+        let call = squashed_body
+            .find("self.app.call(")
+            .expect("the approve call is present");
+        assert!(
+            guard < call,
+            "the guard runs after the call it is meant to prevent"
+        );
+    }
+
+    /// The resolver reads the queue rather than assuming the worst: a row
+    /// that has BECOME eligible arms the control, the same as one that
+    /// stopped being eligible disarms it.
+    ///
+    /// Both directions matter. A resolver that only ever downgraded would
+    /// be a different bug -- a contributor whose session became sendable
+    /// would be told forever that it was not.
+    #[test]
+    fn the_resolver_moves_in_both_directions() {
+        let downgraded = wire(serde_json::json!({ "eligibility": "ineligible_permanent" }));
+        let upgraded = wire(serde_json::json!({ "eligibility": "eligible" }));
+        assert!(!offers_send(&downgraded));
+        assert!(offers_send(&upgraded));
+
+        let sheet = PREVIEW_SOURCE
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production code above the tests");
+        let resolver = sheet
+            .find("fn current_live(&self)")
+            .expect("the resolver exists");
+        let resolver_end = sheet[resolver..].find("\n    }").expect("it closes") + resolver;
+        let body = &sheet[resolver..resolver_end];
+        // No eligibility reasoning in the resolver at all: it returns a row
+        // and the shared table judges it. A resolver that took the worst of
+        // the two rows would be deciding.
+        let squashed_body = squashed(body);
+        assert!(
+            !squashed_body.contains("offers_send") && !squashed_body.contains("eligibility"),
+            "the resolver judges the row instead of returning it: {body}"
+        );
+    }
+
+    // -- both group controls, or neither --------------------------------
+
+    /// **A second live route to a call whose button is disabled is worse
+    /// than either alone.**
+    ///
+    /// The `Submit all as...` verdict menu reaches the same `approve` the
+    /// plain `Submit all` button does. Disabling one and leaving the other
+    /// live tells a contributor the group cannot be sent and then lets them
+    /// send it.
+    #[test]
+    fn both_group_controls_take_the_gate_or_neither_does() {
+        let row = QUEUE_SOURCE
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production code above the tests");
+        for control in ["submit_all", "submit_all_as"] {
+            assert!(
+                squashed(row).contains(&format!("{control}.set_sensitive(sendable)")),
+                "{control} does not take the zero-submittable gate"
+            );
+        }
+        // Both read the SAME answer, computed once. Two computations are
+        // two chances to disagree.
+        assert_eq!(
+            squashed(row)
+                .matches("letsendable=!group_submit(app,project_id)")
+                .count(),
+            1,
+            "the two controls do not share one computed answer"
+        );
+    }
+
     // -- the group header, one layer up -------------------------------
 
     /// **A group-level submit means "all eligible", never "all".**
