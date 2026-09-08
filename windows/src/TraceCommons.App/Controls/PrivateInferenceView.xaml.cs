@@ -1,3 +1,4 @@
+using System;
 using System.Threading.Tasks;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -89,9 +90,9 @@ public sealed partial class PrivateInferenceView : UserControl
 
         try
         {
-            await Windows.System.Launcher.LaunchUriAsync(new System.Uri(started.BrowserUrl));
+            await Windows.System.Launcher.LaunchUriAsync(new Uri(started.BrowserUrl));
         }
-        catch (System.UriFormatException)
+        catch (UriFormatException)
         {
             // A URL this shell cannot parse is not a sign-in it can open. The
             // ceremony is still running and the card still offers the cancel,
