@@ -1476,7 +1476,14 @@ final class AppModel: ObservableObject {
     /// in the first place: `QueueRow.onAppear` drives `requestPreview(for:)`
     /// for whatever the viewport actually realizes, so this stays
     /// proportional to what is on screen.
-    private func applyPendingUpdate(_ entries: [QueueEntry]) {
+    ///
+    /// Internal rather than private so a test can land a snapshot and watch
+    /// what a view holding this model would see. `pending` is
+    /// `@Published private(set)` and there is no other way in; the
+    /// eligibility gate on an open preview sheet reads `awaitingDecision`,
+    /// which only a snapshot moves, so a test that cannot deliver one
+    /// cannot prove the sheet re-reads it.
+    func applyPendingUpdate(_ entries: [QueueEntry]) {
         let previousIDs = Set(pending.map(\.entryID))
         publishIfChanged(\.pending, entries)
         let currentIDs = Set(entries.map(\.entryID))
