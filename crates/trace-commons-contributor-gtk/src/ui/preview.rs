@@ -1053,17 +1053,16 @@ impl Sheet {
                 format!("{} {}", view.state_line, view.reason_line)
             };
             self.eligibility_note.set_label(&text);
-            for class in [
-                "tc-neutral",
-                "tc-clear",
-                "tc-attention",
-                "tc-held",
-                "tc-refused",
-            ] {
-                self.eligibility_note.remove_css_class(class);
-            }
-            self.eligibility_note
-                .add_css_class(super::private_inference::indicator_tone(view.tone).css());
+            // The whole class set is REPLACED rather than the previous tone
+            // removed by name. A hand-written list of tones to strip is a
+            // second enumeration of `Tone`, and the arm it gets wrong is the
+            // one added after it was written: a tone this code has never
+            // heard of would be left stacked on top of the last one. Setting
+            // the set is exhaustive by construction.
+            self.eligibility_note.set_css_classes(&[
+                "tc-caveat",
+                super::private_inference::indicator_tone(view.tone).css(),
+            ]);
         }
     }
 

@@ -393,6 +393,139 @@ mod tests {
         }
     }
 
+    // -- the group header, one layer up -------------------------------
+
+    /// **A group-level submit means "all eligible", never "all".**
+    ///
+    /// The header's button sends by `project_id`, which the daemon reads as
+    /// every pending row in the project -- so a group holding one ineligible
+    /// session had one button that sent it, while the row right below it
+    /// correctly offered nothing. Both bulk controls now go through
+    /// `submit_group`, and neither reaches `ApproveTarget::Project` on its
+    /// own.
+    #[test]
+    fn a_group_submit_never_sends_by_project_id_directly() {
+        let production = QUEUE_SOURCE
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production code above the tests");
+        // The one place the project-wide call may be built is inside
+        // `submit_group`, which reaches it only when the group holds no
+        // ineligible row.
+        let group = production
+            .find("fn submit_group(")
+            .expect("the group submit exists");
+        let group_end = production[group..]
+            .find("\n/// What the fan-out")
+            .expect("submit_group ends")
+            + group;
+        let inside = &production[group..group_end];
+        assert!(
+            inside.contains("ApproveTarget::Project"),
+            "submit_group no longer builds the project-wide call"
+        );
+        assert!(
+            inside.contains("group.ineligible == 0"),
+            "submit_group does not gate the project-wide call on the group being wholly eligible"
+        );
+
+        // Everything but `submit_group` and `approve_params`. The latter is
+        // the enum's serializer -- it TRANSLATES the variant it is handed
+        // and chooses nothing -- so its arm is not a call site.
+        let serializer = production
+            .find("pub(crate) fn approve_params(")
+            .expect("the serializer exists");
+        let mut outside = production[..group].to_string() + &production[group_end..];
+        let serializer_arm = "ApproveTarget::Project(key) => serde_json::json!";
+        assert!(
+            production[serializer..].contains(serializer_arm),
+            "the serializer no longer holds the project arm; this exclusion is now hiding \
+             a real call site"
+        );
+        outside = outside.replace(serializer_arm, "");
+        assert!(
+            !outside.contains("ApproveTarget::Project"),
+            "a bulk control builds the project-wide call outside submit_group, which sends \
+             every pending row whatever its eligibility"
+        );
+        // And both bulk handlers reach the rule.
+        assert_eq!(
+            production.matches("submit_group(").count(),
+            3,
+            "expected the definition plus both bulk handlers to reach submit_group"
+        );
+    }
+
+    /// The empty-eligible group sends nothing rather than falling back to
+    /// the project-wide call, which would send exactly the rows that must
+    /// not go.
+    #[test]
+    fn a_group_with_nothing_eligible_sends_nothing() {
+        let production = QUEUE_SOURCE
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production code above the tests");
+        let group = production
+            .find("fn submit_group(")
+            .expect("the group submit exists");
+        let inside = &production[group..];
+        let empty = inside
+            .find("if group.eligible.is_empty() {")
+            .expect("the empty-eligible arm exists");
+        let arm_end = inside[empty..].find("\n    }").expect("the arm closes") + empty;
+        let arm = &inside[empty..arm_end];
+        assert!(
+            !arm.contains("submit_and_toast") && !arm.contains("submit_each_and_toast"),
+            "the empty-eligible arm submits something: {arm}"
+        );
+        // The gate is reached BEFORE the fan-out, not after it.
+        assert!(
+            empty
+                < inside
+                    .find("submit_each_and_toast(")
+                    .expect("the fan-out is called"),
+            "the empty-eligible check must precede the fan-out"
+        );
+    }
+
+    /// The split itself: eligible rows are collected, ineligible ones are
+    /// counted, and rows from another project are neither.
+    ///
+    /// Exercised through the same deserializer the daemon feeds, so an
+    /// entry with no eligibility field counts as sendable -- the invited
+    /// contributor's group takes the unchanged one-call arm.
+    #[test]
+    fn a_group_splits_its_rows_on_what_may_be_sent() {
+        let rows = [
+            (Some("eligible"), "p1", true),
+            (Some("ineligible_permanent"), "p1", false),
+            (Some("ineligible_configuration"), "p1", false),
+            (Some("unknown"), "p1", false),
+            (Some("a_state_from_a_later_daemon"), "p1", false),
+            (None, "p1", true),
+        ];
+        let mut eligible = 0;
+        let mut ineligible = 0;
+        for (state, project, expected) in rows {
+            let mut json = serde_json::json!({
+                "entry_id": "e",
+                "state": "pending",
+                "project_id": project,
+            });
+            if let Some(state) = state {
+                json["eligibility"] = serde_json::Value::from(state);
+            }
+            let entry = entry_from_wire(json);
+            assert_eq!(offers_send(&entry), expected, "{state:?}");
+            if expected {
+                eligible += 1;
+            } else {
+                ineligible += 1;
+            }
+        }
+        assert_eq!((eligible, ineligible), (2, 4));
+    }
+
     // -- the rendering rule ---------------------------------------------
 
     /// **Every session is shown; only the eligible ones are offered.**

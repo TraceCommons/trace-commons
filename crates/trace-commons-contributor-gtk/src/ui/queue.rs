@@ -1189,6 +1189,185 @@ fn manifest_block(
     block
 }
 
+/// A project group's pending rows, split by whether they may be sent.
+///
+/// `ineligible` is a count and not a list because nothing renders it: it
+/// decides only WHICH CALL a group-level submit makes, and the rows
+/// themselves already carry their own sentences.
+pub(super) struct GroupSubmit {
+    /// The entries a group-level submit may send, oldest first.
+    pub eligible: Vec<String>,
+    /// How many pending rows in this group the daemon says cannot be sent.
+    pub ineligible: usize,
+}
+
+/// Split one project's pending rows on eligibility.
+///
+/// Read fresh at click time, never off what `render` captured: the queue can
+/// change between a render and a click.
+pub(super) fn group_submit(app: &Rc<App>, project_id: &str) -> GroupSubmit {
+    let entries = app.entries.borrow();
+    let pending = entries
+        .iter()
+        .filter(|e| e.state == "pending" && e.project_id == project_id);
+    let mut group = GroupSubmit {
+        eligible: Vec::new(),
+        ineligible: 0,
+    };
+    for entry in pending {
+        if crate::eligibility::offers_send(entry) {
+            group.eligible.push(entry.entry_id.clone());
+        } else {
+            group.ineligible += 1;
+        }
+    }
+    group
+}
+
+/// Send a whole project group, meaning **all eligible and never all**.
+///
+/// A group header offering one button that sends sessions the server will
+/// refuse is the defect this surface exists to remove, one layer up: the
+/// rows below it are each correctly unoffered, and the button above them
+/// sends them anyway.
+///
+/// The daemon has no "approve exactly these" call -- `approve` takes one of
+/// `entry_id`, `project_id` or `all`, and `project_id` means every pending
+/// row in the project. So:
+///
+/// - **No ineligible row in the group**: the single `project_id` call, byte
+///   for byte the request this made before. An invited contributor's queue
+///   carries no eligibility field at all, so every group takes this arm and
+///   nothing about their experience changes.
+/// - **Otherwise**: one `approve` per eligible entry, aggregated into a
+///   single toast. More calls, but it is the only shape that expresses the
+///   subset, and it is the uncommon arm.
+///
+/// An empty eligible set sends nothing at all rather than falling back to
+/// the project call, which would send exactly the rows that must not go.
+fn submit_group(
+    app: &Rc<App>,
+    project_id: &str,
+    project_label: &str,
+    verdict: Option<&'static str>,
+) {
+    let group = group_submit(app, project_id);
+    if group.ineligible == 0 {
+        submit_and_toast(
+            app,
+            approve_params(
+                ApproveTarget::Project(project_id.to_string()),
+                verdict,
+                None,
+            ),
+            project_label.to_string(),
+            group.eligible,
+        );
+        return;
+    }
+    if group.eligible.is_empty() {
+        // Nothing in this group may be sent. Refreshing re-renders the
+        // header against the queue as it now stands rather than leaving a
+        // press with no visible consequence.
+        app.refresh();
+        return;
+    }
+    submit_each_and_toast(app, group.eligible, verdict, project_label.to_string());
+}
+
+/// What the fan-out has learned so far, folded into one `ApproveResult`.
+///
+/// The toast a contributor reads describes ONE submission, because that is
+/// what they performed: they pressed one button. Rendering a toast per
+/// entry would turn a group submit into a stack of them.
+#[derive(Default)]
+struct FanOut {
+    outstanding: usize,
+    result: ApproveResult,
+    sent: Vec<String>,
+    /// Set when any call failed at the transport. Reported plainly rather
+    /// than folded into the toast's skip clause -- nothing about those
+    /// requests was honoured, so no clause describes them.
+    refused: bool,
+}
+
+/// One `approve` per entry, aggregated into a single submit response.
+///
+/// `hold_secs` and `hold_until` take the LONGEST of the replies, never the
+/// first or the shortest: the undo bar has to outlast every entry it offers
+/// to undo, and a countdown that expires while one of them is still held
+/// would take the undo away while it still worked.
+fn submit_each_and_toast(
+    app: &Rc<App>,
+    entry_ids: Vec<String>,
+    verdict: Option<&'static str>,
+    project_label: String,
+) {
+    let state = Rc::new(RefCell::new(FanOut {
+        outstanding: entry_ids.len(),
+        ..FanOut::default()
+    }));
+    for entry_id in entry_ids {
+        let state = Rc::clone(&state);
+        let project_label = project_label.clone();
+        let id = entry_id.clone();
+        app.call(
+            "approve",
+            approve_params(ApproveTarget::Entry(entry_id), verdict, None),
+            move |app, result| {
+                let finished = {
+                    let mut state = state.borrow_mut();
+                    match result.and_then(|value| {
+                        serde_json::from_value::<ApproveResult>(value).map_err(|e| e.to_string())
+                    }) {
+                        Ok(one) => {
+                            let skipped = one.skipped.iter().any(|s| s.entry_id == id);
+                            state.result.approved += one.approved;
+                            state.result.flagged += one.flagged;
+                            for (category, count) in &one.redactions {
+                                *state.result.redactions.entry(category.clone()).or_default() +=
+                                    count;
+                            }
+                            state.result.skipped.extend(one.skipped);
+                            if one.hold_secs > state.result.hold_secs {
+                                state.result.hold_secs = one.hold_secs;
+                            }
+                            if one.hold_until > state.result.hold_until {
+                                state.result.hold_until = one.hold_until;
+                            }
+                            if !skipped {
+                                state.sent.push(id);
+                            }
+                        }
+                        Err(_) => state.refused = true,
+                    }
+                    state.outstanding -= 1;
+                    if state.outstanding > 0 {
+                        return;
+                    }
+                    // Last reply in: the whole group is accounted for, so
+                    // the one toast this submission earns can be drawn.
+                    // Taken out of the cell rather than read through it,
+                    // because rendering calls back into the app and must
+                    // not do so with this borrow still open.
+                    (
+                        std::mem::take(&mut state.result),
+                        std::mem::take(&mut state.sent),
+                        state.refused,
+                    )
+                };
+                let (result, sent, refused) = finished;
+                if refused && result.approved == 0 {
+                    app.toast(copy::SUBMIT_FAILED);
+                } else {
+                    app.render_submit_response(&result, sent, &project_label);
+                }
+                app.refresh();
+            },
+        );
+    }
+}
+
 /// The head of a folder's sessions: the way back, and which folder this is.
 ///
 /// The back control is a flat button rather than a header-bar arrow because
@@ -1320,29 +1499,16 @@ fn folder_row(app: &Rc<App>, folder: &crate::queue_folders::Folder) -> gtk::Widg
         let project_id_for_submit = project_id.to_string();
         let project_label_for_submit = project_label.to_string();
         submit_all.connect_clicked(move |_| {
-            // Read fresh at click time rather than off what `render` captured
-            // when the header was drawn: the queue can change between a
-            // render and a click, and this is only ever the CANDIDATE set
-            // for the undo bar -- see `submit_and_toast` -- never what tells
-            // the daemon what to approve. `project_id` alone does that.
-            let candidates: Vec<String> = app_for_submit
-                .entries
-                .borrow()
-                .iter()
-                .filter(|e| e.state == "pending" && e.project_id == project_id_for_submit)
-                .map(|e| e.entry_id.clone())
-                .collect();
-            // `Submit all` never asked the verdict question either -- so
-            // this call always omits `outcome` too.
-            submit_and_toast(
+            // `Submit all` means ALL ELIGIBLE, never all -- see
+            // `submit_group`, which reads the queue fresh at click time and
+            // decides between the one `project_id` call and a per-entry
+            // fan-out. It never asked the verdict question, so no `outcome`
+            // goes with it.
+            submit_group(
                 &app_for_submit,
-                approve_params(
-                    ApproveTarget::Project(project_id_for_submit.clone()),
-                    None,
-                    None,
-                ),
-                project_label_for_submit.clone(),
-                candidates,
+                &project_id_for_submit,
+                &project_label_for_submit,
+                None,
             );
         });
 
@@ -1375,31 +1541,19 @@ fn folder_row(app: &Rc<App>, folder: &crate::queue_folders::Folder) -> gtk::Widg
             let project_label_for_item = project_label.to_string();
             let submit_all_as_for_item = submit_all_as.clone();
             item.connect_clicked(move |_| {
-                // Read fresh at click time, independently of the plain
-                // `Submit all` handler above -- see that handler's comment
-                // for why: the queue can change between a render and a
-                // click, and each handler needs its own fresh read.
-                let candidates: Vec<String> = app_for_item
-                    .entries
-                    .borrow()
-                    .iter()
-                    .filter(|e| e.state == "pending" && e.project_id == project_id_for_item)
-                    .map(|e| e.entry_id.clone())
-                    .collect();
                 submit_all_as_for_item.popdown();
-                submit_and_toast(
+                // The same rule as the plain `Submit all` above, through the
+                // same function: a verdict answered once for a group must
+                // not become a way to send the rows that button correctly
+                // withheld. A bulk verdict never carries a correction --
+                // one written for a group would describe sessions it was
+                // not written about, and the daemon refuses the combination
+                // outright -- and `submit_group` sends none.
+                submit_group(
                     &app_for_item,
-                    approve_params(
-                        ApproveTarget::Project(project_id_for_item.clone()),
-                        Some(verdict),
-                        // A bulk verdict never carries a correction: one
-                        // written for a group would describe sessions it was
-                        // not written about, and the daemon refuses the
-                        // combination outright.
-                        None,
-                    ),
-                    project_label_for_item.clone(),
-                    candidates,
+                    &project_id_for_item,
+                    &project_label_for_item,
+                    Some(verdict),
                 );
             });
         }
