@@ -450,8 +450,8 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `harness_plan` | `id` (required), `action` (`connect` \| `disconnect`) | `id`, `action`, `outcome`, `plan_id`, `path`, `changes[]`, `occupied[]` | works out an edit and **writes nothing**; see "The harness list" below |
 | `harness_commit` | `plan_id` (required) | `id`, `action`, `committed: true`, `path`, `backup_path` | makes an edit that was already shown; takes a plan id and **nothing else**, so a shell cannot ask for a write it did not preview |
 | `quiesce` | `timeout_secs` (optional, default 60, max 300) | `quiesced: true`, `waited_ms` | parks uploads for an update swap; `busy` / `quiesce-timeout` if in-flight work does not finish in time |
-| `get_settings` | — | settings; credential and local paths reported as booleans only | |
-| `set_settings` | any of `quiescence_secs`, `digest_interval_secs`, `approval_hold_secs`, `local_notifications`, `claude_root`, `codex_root`, `claude_source`, `codex_source`, `gemini_source`, `cline_source`, `ironwire`, `ironwire_attested_bodies`, `private_inference`, `private_inference_offer_seen`, `max_uploads_per_day`, `max_bytes_per_day` | updated settings | see "`set_settings`" below |
+| `get_settings` | — | settings; credential presence as booleans, source declarations as `*_source_mode` (`unset`/`off`/`watch`), never local paths | |
+| `set_settings` | any of `quiescence_secs`, `digest_interval_secs`, `approval_hold_secs`, `local_notifications`, `claude_root`, `codex_root`, `claude_source`, `codex_source`, `gemini_source`, `cline_source`, `opencode_source`, `ironwire`, `ironwire_attested_bodies`, `private_inference`, `private_inference_offer_seen`, `max_uploads_per_day`, `max_bytes_per_day` | updated settings | see "`set_settings`" below |
 | `consent_options` | — | `scopes[]` of `{name, description, always_on, grants_data_use}` | |
 | `set_consent_scopes` | `scopes[]` (wire-name strings; omitted means floor scope only) | `consent_scopes[]` | requires an existing enrollment |
 | `enroll` | `grant` xor `invite`, `scopes[]` (optional) | `enrolled: bool`, and on success `tenant_id`, `device_key_id`, `consent_scopes[]` | performs real network I/O |
@@ -1732,7 +1732,7 @@ second edit to the same file, and on a file that did not exist before.
 Takes a JSON object of settings to change. Every top-level key must be one
 of `quiescence_secs`, `digest_interval_secs`, `approval_hold_secs`,
 `local_notifications`, `claude_root`, `codex_root`, `claude_source`,
-`codex_source`, `gemini_source`, `cline_source`, `ironwire`,
+`codex_source`, `gemini_source`, `cline_source`, `opencode_source`, `ironwire`,
 `ironwire_attested_bodies`, `private_inference`,
 `private_inference_offer_seen`, `max_uploads_per_day`,
 `max_bytes_per_day` --
@@ -1744,6 +1744,14 @@ a daemon that quietly kept the old value. A recognized key holding the
 wrong JSON type is refused the same way (`bad_params` /
 `settings-invalid-value`). An object with no keys at all is refused
 (`bad_params` / `no-known-setting-supplied`).
+
+`opencode_source` takes `{"mode":"watch","path":"/chosen/export-directory"}`,
+`{"mode":"off"}`, or `null`. Absent/null and Off construct no adapter, including
+when loading older settings. Watch reads direct `.json` children exported with
+`opencode export SESSION_ID`; it does not scan OpenCode's database. Export
+version support and routing limits are recorded in
+[the qualification report](superpowers/reports/2026-09-07-opencode-export-qualification.md).
+This source declaration does not enable body capture or remote submission.
 
 `approval_hold_secs` takes a non-negative integer: how long an approval is
 held before the uploader will touch it, i.e. how long the contributor's undo

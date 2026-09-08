@@ -12,6 +12,17 @@ namespace TraceCommons.Interop.Tests;
 /// </summary>
 public class HealthCopyTests
 {
+    [Fact]
+    public void UnsupportedOpenCodeVersionUsesSharedRecoveryCopy()
+    {
+        var shared = Assert.IsType<SourceChecks.SettingsCopy>(SourceChecks.ReadSettingsCopy());
+        var health = Assert.IsType<HealthCopy>(HealthCopy.ForLabel("opencode-export-version-unsupported"));
+        Assert.Equal(shared.OpenCodeVersionTitle, health.Title);
+        Assert.Equal(shared.OpenCodeVersionDetail, health.Detail);
+        Assert.Contains("sessions created with OpenCode 1.18.29", health.Detail);
+        Assert.Null(health.ActionLabel);
+    }
+
     /// <summary>
     /// Every label in the design's failure-state table, and the fallback.
     /// </summary>

@@ -1,5 +1,6 @@
 import Foundation
 import TCShellCore
+import TCBridge
 
 /// The health sentences, verbatim from the shared design's failure-state
 /// table. Two rules hold across every one of them: never name the mechanism
@@ -99,6 +100,11 @@ struct HealthCopy: Equatable {
                 severity: .waiting,
                 actionTitle: nil
             )
+        case "opencode-export-version-unsupported":
+            guard let copy = TCSourceChecks.settingsCopy(),
+                  let title = copy.opencodeVersionTitle,
+                  let detail = copy.opencodeVersionDetail else { return forLabel("") }
+            return HealthCopy(title: title, detail: detail, severity: .actionable, actionTitle: nil)
         case "queue-full":
             return HealthCopy(
                 title: "Trace Commons has stopped queuing new sessions",

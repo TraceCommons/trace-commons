@@ -558,6 +558,9 @@ internal static class NativeMethods
         [MarshalAs(UnmanagedType.LPUTF8Str)] string? tool,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string? sourceMode);
 
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_source_settings_copy();
+
     // --- The redaction witness ------------------------------------------
     //
     // THERE IS NO BOOLEAN IN THIS BLOCK AND THERE MUST NEVER BE ONE. "Is a

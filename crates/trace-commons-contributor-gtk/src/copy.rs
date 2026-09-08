@@ -1371,6 +1371,9 @@ pub const FLATPAK_SESSION_ROOTS_EXPLANATION: &str = concat!(
 /// this is a lookup, not a decision.
 pub fn health_sentence(label: &str) -> &'static str {
     match label {
+        "opencode-export-version-unsupported" => {
+            trace_commons_contributor::source_copy::OPENCODE_VERSION_DETAIL
+        }
         "not-logged-in" => {
             "Not connected. Sessions are being queued, but nothing can be sent until you \
              reconnect. Nothing has been lost."
@@ -2193,6 +2196,13 @@ pub fn ironwire_last_checked(at: Option<chrono::DateTime<chrono::Utc>>) -> Optio
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn unsupported_export_uses_shared_recovery_sentence() {
+        assert_eq!(
+            super::health_sentence("opencode-export-version-unsupported"),
+            trace_commons_contributor::source_copy::OPENCODE_VERSION_DETAIL
+        );
+    }
 
     /// The caption names a token shape as an example, so that shape has to
     /// be one the scrubber can actually produce. Only `local_path` and

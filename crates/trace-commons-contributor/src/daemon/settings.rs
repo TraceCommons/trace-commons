@@ -144,6 +144,10 @@ pub struct DaemonSettings {
     /// [`gemini_source`]: DaemonSettings::gemini_source
     #[serde(default)]
     pub cline_source: Option<SourceDeclaration>,
+    /// Explicit OpenCode export directory. Absent/null and Off construct no
+    /// adapter; there is no conventional native database or export location.
+    #[serde(default)]
+    pub opencode_source: Option<SourceDeclaration>,
 
     /// An explicit local proxy declaration. Off refuses metadata; Watch
     /// keeps its endpoint. Absent permits the daemon to derive metadata only
@@ -578,6 +582,7 @@ impl Default for DaemonSettings {
             codex_source: None,
             gemini_source: None,
             cline_source: None,
+            opencode_source: None,
             ironwire: None,
             ironwire_attested_bodies: false,
             private_inference: false,
@@ -669,6 +674,7 @@ impl DaemonSettings {
             .declare(crate::source::SOURCE_CODEX, self.codex_source.clone())
             .declare(crate::source::SOURCE_GEMINI_CLI, self.gemini_source.clone())
             .declare(crate::source::SOURCE_CLINE, self.cline_source.clone())
+            .declare(crate::source::SOURCE_OPENCODE, self.opencode_source.clone())
             .with_trajectory(crate::source::TrajectorySelection::Auto {
                 working_dir: None,
                 staging_dir: Some(store.dir().join(crate::source::TRAJECTORY_STAGING_SUBDIR)),
@@ -712,6 +718,7 @@ pub fn source_settings_key(source: &str) -> Option<&'static str> {
         crate::source::SOURCE_CODEX => Some("codex_source"),
         crate::source::SOURCE_GEMINI_CLI => Some("gemini_source"),
         crate::source::SOURCE_CLINE => Some("cline_source"),
+        crate::source::SOURCE_OPENCODE => Some("opencode_source"),
         _ => None,
     }
 }
@@ -862,6 +869,9 @@ pub fn apply_settings_object(
             }
             "cline_source" => {
                 settings.cline_source = parse_source_declaration(value)?;
+            }
+            "opencode_source" => {
+                settings.opencode_source = parse_source_declaration(value)?;
             }
             // Unlike the source roots above, `null` here means **off**, not
             // "never asked" -- see `IronWireDeclaration`'s doc comment for
@@ -1685,6 +1695,60 @@ mod tests {
             "a bare string is the legacy *_root spelling, which this key \
              never had"
         );
+    }
+
+    #[test]
+    fn opencode_export_declaration_is_explicit_and_old_settings_stay_off() {
+        let (_dir, store) = temp_store();
+        let mut value = serde_json::to_value(DaemonSettings::default()).unwrap();
+        value.as_object_mut().unwrap().remove("opencode_source");
+        store
+            .write_daemon_file(DAEMON_SETTINGS_FILE, value.to_string().as_bytes())
+            .unwrap();
+        let mut settings = DaemonSettings::load(&store).unwrap();
+        let enabled = |s: &DaemonSettings| {
+            crate::source::all_sources(&s.source_roots(&store))
+                .iter()
+                .any(|source| source.name() == crate::source::SOURCE_OPENCODE)
+        };
+        assert!(!enabled(&settings));
+        assert_eq!(
+            source_settings_key(crate::source::SOURCE_OPENCODE),
+            Some("opencode_source")
+        );
+        assert_eq!(
+            apply_settings_object(
+                &mut settings,
+                &serde_json::json!({"opencode_source":{"mode":"watch","path":"/synthetic/exports"}})
+            ),
+            Ok(true)
+        );
+        assert!(enabled(&settings));
+        settings.save(&store).unwrap();
+        assert_eq!(
+            DaemonSettings::load(&store).unwrap().opencode_source,
+            settings.opencode_source
+        );
+        assert_eq!(
+            apply_settings_object(
+                &mut settings,
+                &serde_json::json!({"opencode_source":"/bare/path"})
+            ),
+            Err(ERR_SETTINGS_INVALID_VALUE)
+        );
+        assert_eq!(
+            apply_settings_object(
+                &mut settings,
+                &serde_json::json!({"opencode_source":{"mode":"off"}})
+            ),
+            Ok(true)
+        );
+        assert!(!enabled(&settings));
+        assert_eq!(
+            apply_settings_object(&mut settings, &serde_json::json!({"opencode_source":null})),
+            Ok(true)
+        );
+        assert!(!enabled(&settings));
     }
 
     #[test]

@@ -1,0 +1,115 @@
+{
+  "info": {
+    "id": "ses_synthetic",
+    "slug": "synthetic",
+    "projectID": "synthetic",
+    "directory": "/synthetic/project",
+    "title": "Synthetic export",
+    "version": "1.18.29",
+    "time": {
+      "created": 1788739200000,
+      "updated": 1788739202000
+    }
+  },
+  "messages": [
+    {
+      "info": {
+        "id": "msg_user",
+        "sessionID": "ses_synthetic",
+        "role": "user",
+        "agent": "build",
+        "model": {
+          "providerID": "fixture",
+          "modelID": "model"
+        },
+        "time": {
+          "created": 1788739200000
+        }
+      },
+      "parts": [
+        {
+          "id": "prt_question",
+          "sessionID": "ses_synthetic",
+          "messageID": "msg_user",
+          "type": "text",
+          "text": "Run the synthetic check."
+        }
+      ]
+    },
+    {
+      "info": {
+        "id": "msg_assistant",
+        "sessionID": "ses_synthetic",
+        "role": "assistant",
+        "parentID": "msg_user",
+        "modelID": "model",
+        "providerID": "fixture",
+        "mode": "build",
+        "agent": "build",
+        "path": {
+          "cwd": "/synthetic/project",
+          "root": "/synthetic/project"
+        },
+        "cost": 0,
+        "tokens": {
+          "input": 4,
+          "output": 3,
+          "reasoning": 0,
+          "cache": {
+            "read": 0,
+            "write": 0
+          }
+        },
+        "time": {
+          "created": 1788739200001,
+          "completed": 1788739202000
+        }
+      },
+      "parts": [
+        {
+          "id": "prt_reason",
+          "sessionID": "ses_synthetic",
+          "messageID": "msg_assistant",
+          "type": "reasoning",
+          "text": "Check the fixture.",
+          "time": {
+            "start": 1788739200001,
+            "end": 1788739200002
+          }
+        },
+        {
+          "id": "prt_tool",
+          "sessionID": "ses_synthetic",
+          "messageID": "msg_assistant",
+          "type": "tool",
+          "callID": "call_synthetic",
+          "tool": "bash",
+          "state": {
+            "status": "completed",
+            "input": {
+              "command": "echo synthetic"
+            },
+            "output": "synthetic",
+            "title": "Synthetic check",
+            "metadata": {},
+            "time": {
+              "start": 1788739200002,
+              "end": 1788739200003
+            }
+          }
+        },
+        {
+          "id": "prt_answer",
+          "sessionID": "ses_synthetic",
+          "messageID": "msg_assistant",
+          "type": "text",
+          "text": "Synthetic check completed.",
+          "time": {
+            "start": 1788739200004,
+            "end": 1788739200005
+          }
+        }
+      ]
+    }
+  ]
+}

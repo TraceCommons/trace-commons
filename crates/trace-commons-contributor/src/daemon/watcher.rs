@@ -304,6 +304,7 @@ struct PassOutcome {
     /// Separate from `report.too_large` only so the epilogue reads as the
     /// condition it is testing rather than as a count.
     too_large: bool,
+    unsupported_export_version: bool,
 }
 
 /// Everything one session costs: observe, evaluate, ask the queue, and load
@@ -500,27 +501,11 @@ fn visit_session(
     // shell could ever tell the contributor why a conversation they
     // finished simply does not exist as far as the tool is concerned.
     //
-    // The two failures are not the same failure, so they are not treated
-    // the same:
-    //
-    // - A `SessionTooLarge` is a verdict. The check is a stat against a
-    //   constant compiled into this binary, so it decides identically on
-    //   every poll from now until the file changes; a contributor who is
-    //   never told will wait forever. It raises a standing health label,
-    //   which `status` already reports and every shell already renders.
-    // - Anything else is an IO error -- a file deleted between `discover`
-    //   and here, a directory momentarily unreadable, a read interrupted.
-    //   Every one of those is very likely to succeed on the next poll
-    //   sixty seconds later, and a standing flag pinned on a healthy
-    //   daemon by one blip is worse than no flag: it trains the
-    //   contributor to ignore the surface that has to work when something
-    //   real breaks. Counted, so nothing is discarded unseen, and nothing
-    //   more.
-    //
-    // Neither branch logs the path or any part of the file. The byte
-    // counts on the refusal are the contributor's own file's, measured
-    // against a constant, and `source::codex` says explicitly that stating
-    // them is safe.
+    // Stable size and unsupported-export-version refusals raise standing
+    // health labels. Other load errors increment the error count without
+    // pinning a transient IO or parse failure on daemon health. A complete
+    // pass clears a refusal label only when it observes no such refusal.
+    // Neither path logs file paths or imported content.
     let transcript = match source.load(session_ref) {
         Ok(t) => t,
         Err(err) => {
@@ -536,6 +521,16 @@ fn visit_session(
                 );
                 let mut health = shared.health.lock().expect("health lock");
                 health.fail(health::LABEL_SESSION_TOO_LARGE, ctx.now);
+            } else if err
+                .downcast_ref::<crate::source::opencode::UnsupportedExportVersion>()
+                .is_some()
+            {
+                out.unsupported_export_version = true;
+                shared
+                    .health
+                    .lock()
+                    .expect("health lock")
+                    .fail(health::LABEL_OPENCODE_EXPORT_VERSION_UNSUPPORTED, ctx.now);
             } else {
                 // No `err` in the field set: an IO error's `Display` is
                 // free to carry the path it failed on, and a log line is
@@ -728,6 +723,7 @@ fn finish_pass(shared: &DaemonShared, out: PassOutcome, exhaustive: bool) -> Res
         report,
         mut changed,
         too_large,
+        unsupported_export_version,
     } = out;
 
     // Retract the unreadable-session flag only from a pass that asked every
@@ -742,6 +738,14 @@ fn finish_pass(shared: &DaemonShared, out: PassOutcome, exhaustive: bool) -> Res
     if exhaustive && !too_large {
         let mut health = shared.health.lock().expect("health lock");
         health.resolve(health::LABEL_SESSION_TOO_LARGE);
+    }
+
+    if exhaustive && !unsupported_export_version {
+        shared
+            .health
+            .lock()
+            .expect("health lock")
+            .resolve(health::LABEL_OPENCODE_EXPORT_VERSION_UNSUPPORTED);
     }
 
     // Relabel pass: `Queue::upsert` never rewrites an existing entry, so a
@@ -2204,6 +2208,22 @@ mod tests {
             None,
             "one failed read must not flag the daemon"
         );
+    }
+
+    #[tokio::test]
+    async fn unsupported_export_version_is_visible_and_resolves_after_repair() {
+        let f = WatcherFixture::new();
+        f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        let now = at("2030-01-01T00:00:00Z");
+        let refusal = || crate::source::opencode::UnsupportedExportVersion.into();
+        f.tick_refusing(now, refusal);
+        f.tick_refusing(now, refusal);
+        assert_eq!(
+            f.health_label().as_deref(),
+            Some(health::LABEL_OPENCODE_EXPORT_VERSION_UNSUPPORTED)
+        );
+        f.settle(at("2030-01-02T00:00:00Z")).await;
+        assert_eq!(f.health_label(), None);
     }
 
     #[tokio::test]

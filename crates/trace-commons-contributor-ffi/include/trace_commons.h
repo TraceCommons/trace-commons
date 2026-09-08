@@ -926,7 +926,9 @@ char*       tc_consent_copy(void);
  */
 char*       tc_consent_gate_help(int32_t pinned);
 
-/* Shared settings copy JSON; caller frees with tc_string_free. */
+/* Shared settings copy JSON; caller frees with tc_string_free.
+ * Includes additive opencode_version_title/opencode_version_detail strings for
+ * the opencode-export-version-unsupported health label. No daemon handle needed. */
 char*       tc_source_settings_copy(void);
 
 /* The names of the secret detectors the scrubber runs, so a shell can tell a

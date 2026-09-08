@@ -77,6 +77,14 @@ public sealed class HealthCopy : IEquatable<HealthCopy>
             return null;
         }
 
+        if (label == "opencode-export-version-unsupported")
+        {
+            var copy = SourceChecks.ReadSettingsCopy();
+            if (copy?.OpenCodeVersionTitle is string title &&
+                copy.OpenCodeVersionDetail is string detail)
+                return new HealthCopy(title, detail, null);
+        }
+
         return label switch
         {
             "not-logged-in" => new HealthCopy(

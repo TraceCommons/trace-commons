@@ -1,4 +1,6 @@
 using System;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace TraceCommons.Interop;
 
@@ -12,6 +14,23 @@ namespace TraceCommons.Interop;
 /// </summary>
 public static class SourceChecks
 {
+    public sealed class SettingsCopy
+    {
+        [JsonPropertyName("opencode_version_title")]
+        public string? OpenCodeVersionTitle { get; init; }
+        [JsonPropertyName("opencode_version_detail")]
+        public string? OpenCodeVersionDetail { get; init; }
+    }
+
+    public static SettingsCopy? ReadSettingsCopy()
+    {
+        var json = NativeMethods.TakeOwnedString(NativeMethods.tc_source_settings_copy());
+        if (json is null) return null;
+        try { return JsonSerializer.Deserialize<SettingsCopy>(json,
+            new JsonSerializerOptions { PropertyNameCaseInsensitive = true }); }
+        catch (JsonException) { return null; }
+    }
+
     /// <summary>The wire key for Claude Code's session source.</summary>
     public const string Claude = "claude";
 

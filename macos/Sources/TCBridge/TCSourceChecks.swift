@@ -62,6 +62,7 @@ public enum TCSourceChecks {
 }
 
 public struct SourceSettingsCopy: Decodable, Sendable {
+    public let opencodeVersionTitle, opencodeVersionDetail: String?
     public let heading, explanation, saveFailed, consentSaveFailed, unavailable: String
     public let selectedFolder, noCandidate, watchCandidate, chooseFolder, retry: String
     public let tools: [String: Tool]
