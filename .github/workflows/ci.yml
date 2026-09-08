@@ -76,27 +76,26 @@ jobs:
     # Each would have failed at the commit that introduced it if this job had
     # existed.
     #
-    # THREE SUITES ARE DELIBERATELY NOT RUN HERE. They already fail against a
-    # real database on main -- 64 tests between them, all pre-existing. Adding
-    # them would make this job red on its first run, and a permanently red job
-    # is one nobody reads, which is how the others got into this state. They are
-    # named so the debt is visible rather than implied:
+    # ONE SUITE IS DELIBERATELY NOT RUN HERE, and it is now down to one test:
     #
-    #   account_merge_pg          8 failing
-    #   trace_corpus_pg_store    31 failing
-    #   trace_corpus_pg_rls      25 failing
+    #   trace_corpus_pg_store     1 failing
     #
-    # Those counts are from before #750 and are almost certainly stale now: the
-    # migration race it fixes was most of what these three were failing on, so
-    # measure before assuming the debt is still that size. `trace_corpus_pg_store`
-    # in particular has one failure left that is NOT the race and is not stale
-    # test debt either -- see #751, which records what was ruled out.
+    # That one is `pg_store_list_dedup_signals_round_trips_the_stamp`, which
+    # wants a gate-driver role the fixtures do not provision. It is NOT the
+    # migration race, and pointing TRACE_COMMONS_GATE_DRIVER_DATABASE_URL at the
+    # same database does not satisfy it -- see #751. Fix that and the suite can
+    # join the four below and this comment can go.
     #
-    # `trace_invite_registry_pg` was a fourth, at 20 failing, and runs below.
-    # Its twenty failures were one defect and it was in the code, not the
-    # fixtures: the migration runner took no lock, so the parallel tests --
-    # which each migrate -- raced each other into a system-catalog duplicate-key
-    # error. Two processes booting at once hit the same thing.
+    # Four suites used to be excluded here, at 84 failing between them, recorded
+    # as pre-existing debt. Eighty-three of those 84 were a single defect in the
+    # code, not stale fixtures: the migration runner took no lock, and every one
+    # of these suites migrates in each test while libtest runs them in parallel,
+    # so they raced each other into a system-catalog duplicate-key error. #750
+    # fixed the runner and none of the four suites needed editing.
+    #
+    # The lesson worth keeping: a suite failing N ways with ONE error message is
+    # one bug, however long it has been failing. `--test-threads=1` is the cheap
+    # confirmation -- if the failures vanish, they were never N failures.
     #
     # And one that is excluded for a different and more interesting reason:
     #
@@ -154,7 +153,7 @@ jobs:
       - name: Create one database per suite
         run: |
           set -euo pipefail
-          for db in onboarding ledger migration ingest invite; do
+          for db in onboarding ledger migration ingest invite merge rls; do
             PGPASSWORD=trace createdb -h 127.0.0.1 -U trace "admission_test_$db"
           done
       # Each step carries only the variables its own suite reads, NOT a job-wide
@@ -174,6 +173,20 @@ jobs:
         run: cargo test -p trace-commons-server --test trace_invite_registry_pg
         env:
           TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_invite
+      - name: account_merge_pg
+        run: cargo test -p trace-commons-server --test account_merge_pg
+        env:
+          TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_merge
+      # This suite has a skip inside its tests, not just around them: the raw
+      # SQL RLS assertion returns early when the connecting role bypasses RLS,
+      # and `trace` here is the container superuser, so it does return early.
+      # The tests around it still assert through the runtime roles. Narrowing
+      # that gap means giving this job a non-superuser role to connect as; it is
+      # pre-existing and not what #750 was about.
+      - name: trace_corpus_pg_rls
+        run: cargo test -p trace-commons-server --test trace_corpus_pg_rls
+        env:
+          TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_rls
       # `--ignored` is not optional for these three. Without it they report
       # `ignored`, the step passes having run nothing, and this job becomes the
       # thing it was built to replace.
@@ -199,7 +212,7 @@ jobs:
         run: |
           set -euo pipefail
           fail=0
-          for db in onboarding ledger migration ingest invite; do
+          for db in onboarding ledger migration ingest invite merge rls; do
             n=$(PGPASSWORD=trace psql -qtA -h 127.0.0.1 -U trace postgres \
                   -c "SELECT xact_commit FROM pg_stat_database WHERE datname='admission_test_$db';")
             echo "admission_test_$db committed ${n:-0} transactions"
