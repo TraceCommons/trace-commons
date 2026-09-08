@@ -194,6 +194,7 @@ struct QueueContent: View {
                 ForEach(model.waitingByProject) { group in
                     QueueFolderRow(
                         group: group,
+                        eligibilityCalls: model.eligibilityCalls,
                         onOpen: { location = .project(group.id) },
                         onSubmitAll: { model.submitProject(id: group.id) },
                         onSubmitAllAs: { model.submitProject(id: group.id, verdict: $0) },

@@ -1658,10 +1658,41 @@ final class AppModel: ObservableObject {
     /// `verdict` applies to every entry the approval covers. The plain
     /// `Submit all` passes none; `Submit all as...` is the opt-in path that
     /// passes one.
+    ///
+    /// **A GROUP-LEVEL SUBMIT MEANS "ALL ELIGIBLE", NEVER "ALL".** The
+    /// daemon's `project_id` form approves everything in the project and
+    /// cannot be told to hold anything back, so a folder carrying an
+    /// ineligible session is submitted as one `entry_id` call per eligible
+    /// session instead, merged into a single response
+    /// (`ApproveResponse.merged`): to the contributor it was one press, and
+    /// the toast, the skip list and the undo window have to read that way.
+    /// A folder with nothing withheld keeps the single project call it
+    /// always made -- one round trip, and the daemon's own view of the
+    /// folder rather than this shell's snapshot of it.
+    ///
+    /// Ruled 2026-09-08, after the same defect was found on the Windows
+    /// shell's group header: one button sending sessions the server will
+    /// refuse is this surface's own defect, one layer up, and worse there
+    /// because the contributor never saw them.
     func submitProject(id projectID: String, verdict: ContributorVerdict? = nil) {
-        let attempted = awaitingDecision.filter { $0.projectID == projectID }.map(\.entryID)
-        perform("approve", work: {
-            try $0.approve(projectID: projectID, verdict: verdict)
+        let inProject = awaitingDecision.filter { $0.projectID == projectID }
+        let eligible = EligibilitySurface.contributable(
+            inProject, eligibility: { $0.contributionEligibility }, calls: eligibilityCalls)
+        let attempted = eligible.map(\.entryID)
+        guard eligible.count < inProject.count else {
+            perform("approve", work: {
+                try $0.approve(projectID: projectID, verdict: verdict)
+            }) { response in
+                self.refreshQueue()
+                self.showToast(for: response, attempted: attempted)
+            }
+            return
+        }
+        // Nothing to send is not an error and not a silent no-op: the merged
+        // empty response renders the toast that says nothing was approved.
+        perform("approve", work: { client in
+            ApproveResponse.merged(
+                try attempted.map { try client.approve(entryID: $0, verdict: verdict) })
         }) { response in
             self.refreshQueue()
             self.showToast(for: response, attempted: attempted)

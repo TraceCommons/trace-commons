@@ -22,6 +22,9 @@ import TCShellCore
 /// expired with the layout it was written for.
 struct QueueFolderRow: View {
     let group: QueueGroup<QueueEntry>
+    /// The eligibility branch tables, so this row's `Submit all` counts what
+    /// it will actually send. See `submittableCount`.
+    let eligibilityCalls: EligibilityCalls
     let onOpen: () -> Void
     let onSubmitAll: () -> Void
     /// The opt-in bulk path: the same approval, carrying one verdict for
@@ -36,6 +39,42 @@ struct QueueFolderRow: View {
     /// Display only, and empty against a daemon that predates the field --
     /// in which case the row shows its label alone rather than a blank line.
     private var path: String { group.entries.first?.projectPath ?? "" }
+
+    /// How many of this folder's sessions `Submit all` would send.
+    ///
+    /// **A GROUP-LEVEL SUBMIT MEANS "ALL ELIGIBLE", NEVER "ALL"** -- ruled
+    /// 2026-09-08. The count on the button is the count that will leave, not
+    /// `group.count`: a button promising more than it sends is the same
+    /// press-then-discover shape the card's `Submit` was fixed for, and it
+    /// is worse here because the contributor never saw the sessions.
+    ///
+    /// Equal to `group.count` for a folder with no eligibility question at
+    /// all, so an invited contributor's row is unchanged.
+    private var submittableCount: Int {
+        EligibilitySurface.contributable(
+            group.entries, eligibility: { $0.contributionEligibility }, calls: eligibilityCalls
+        ).count
+    }
+
+    /// How many this button will leave behind, or zero.
+    private var withheldCount: Int { group.count - submittableCount }
+
+    /// What the button leaves out, or nothing.
+    ///
+    /// A COUNT AND NO REASON. Why a session cannot be sent is that row's own
+    /// sentence one level in, drawn from the shared table; restating it here
+    /// would be this shell authoring an eligibility claim about sessions it
+    /// is not even showing.
+    ///
+    /// This sentence IS authored here, and it should not stay that way: the
+    /// other two shells need the same line and a rename in the Rust will not
+    /// reach this one. It belongs in the shared payload beside the four
+    /// state sentences. `ShellWordingTests`' baseline for this file records
+    /// the cost until it moves.
+    private var withheldNote: String? {
+        guard withheldCount > 0 else { return nil }
+        return "^[\(withheldCount) session](inflect: true) here cannot be sent."
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: TC.Space.sm) {
@@ -72,12 +111,16 @@ struct QueueFolderRow: View {
                 // says Submit is availability, not a recommendation, and
                 // the accent on this row belongs to opening the folder --
                 // see `Open` at the trailing edge.
-                Button("Submit all (\(group.count))", action: onSubmitAll)
+                //
+                // The count is `submittableCount`, never `group.count`: this
+                // button sends what it says and nothing more.
+                Button("Submit all (\(submittableCount))", action: onSubmitAll)
                     .tint(.primary)
+                    .disabled(submittableCount == 0)
                     .help("""
-                    Submits every session waiting in \(group.label). Each is scrubbed \
-                    the same way a single Submit would be, and flagged sessions are \
-                    included, not held back.
+                    Submits every session in \(group.label) that can be sent. Each is \
+                    scrubbed the same way a single Submit would be, and flagged \
+                    sessions are included, not held back.
                     """)
                 // Beside `Submit all`, never in front of it: answering the
                 // outcome question for a whole folder is a choice a
@@ -105,6 +148,17 @@ struct QueueFolderRow: View {
                 Button("Open", action: onOpen)
                     .tcPrimaryAction()
                     .help("Opens \(group.label) to look at each session before deciding.")
+            }
+
+            // Drawn WHEREVER the button's count is short of the folder's,
+            // and never separated from it: a button that says fewer
+            // sessions than the row does, with nothing explaining the gap,
+            // is its own small dishonesty.
+            if let withheldNote {
+                Text(withheldNote)
+                    .font(TC.Font_.footnote)
+                    .foregroundStyle(TC.inkSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .padding(TC.Space.l)

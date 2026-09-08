@@ -159,4 +159,53 @@ final class ApproveResponseTests: XCTestCase {
             SubmitToast.render(approved: 0, redactions: 0, flagged: 0, skipped: ["some-future-reason"])
         )
     }
+    // MARK: - Several calls, one press
+
+    /// A group submit that must leave some sessions behind sends one
+    /// `entry_id` call per eligible session, and the contributor saw one
+    /// press. The toast, the skip list and the undo window have to read
+    /// that way.
+    func testSeveralApprovalsMergeIntoOneResponse() {
+        let first = ApproveResponse(
+            approved: 2, flagged: 1, redactions: ["local_path": 4, "email": 1],
+            skipped: [], holdSecs: 8, holdUntil: "2026-09-08T00:00:08Z")
+        let second = ApproveResponse(
+            approved: 1, flagged: 0, redactions: ["local_path": 3],
+            skipped: [ApproveSkip(entryID: "e9", reasonLabel: "too_large")],
+            holdSecs: 12, holdUntil: "2026-09-08T00:00:20Z")
+        let merged = ApproveResponse.merged([first, second])
+        XCTAssertEqual(merged.approved, 3)
+        XCTAssertEqual(merged.flagged, 1)
+        XCTAssertEqual(merged.redactions, ["local_path": 7, "email": 1])
+        XCTAssertEqual(merged.skipped.map(\.entryID), ["e9"])
+        // The LONGEST window, not the shortest: taking the shortest would
+        // retire Undo while something it covers is still recoverable.
+        XCTAssertEqual(merged.holdSecs, 12)
+        XCTAssertEqual(merged.holdUntil, "2026-09-08T00:00:20Z")
+    }
+
+    /// A group with nothing eligible in it merges to a response that
+    /// approved nothing -- the honest rendering, not an error.
+    func testMergingNothingApprovesNothing() {
+        let merged = ApproveResponse.merged([])
+        XCTAssertEqual(merged.approved, 0)
+        XCTAssertEqual(merged.holdSecs, 0)
+        XCTAssertNil(merged.holdUntil)
+        XCTAssertTrue(merged.skipped.isEmpty)
+    }
+
+    /// Skips keep the order they were collected in, which is the order the
+    /// folder showed the sessions.
+    func testMergedSkipsKeepTheirOrder() {
+        let make = { (id: String) in
+            ApproveResponse(
+                approved: 0, flagged: 0, redactions: [:],
+                skipped: [ApproveSkip(entryID: id, reasonLabel: "too_large")],
+                holdSecs: 0, holdUntil: nil)
+        }
+        XCTAssertEqual(
+            ApproveResponse.merged([make("a"), make("b"), make("c")]).skipped.map(\.entryID),
+            ["a", "b", "c"])
+    }
+
 }

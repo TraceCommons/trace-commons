@@ -296,6 +296,119 @@ final class EligibilitySurfaceTests: XCTestCase {
         }
     }
 
+    // MARK: - A group-level submit means "all eligible"
+
+    /// The ruling, at the seam a folder header uses.
+    ///
+    /// One button approving a whole folder by project id is this surface's
+    /// own defect one layer up, and worse there: a contributor who pressed
+    /// it never saw the sessions it sent.
+    func testAGroupLevelSubmitCoversTheEligibleOnly() {
+        let table = calls(control: { $0 == "eligible" ? 51 : 50 })
+        let group: [ContributionEligibility?] = [
+            ContributionEligibility(state: "eligible"),
+            ContributionEligibility(state: "ineligible_permanent", reason: "no_inference_call"),
+            ContributionEligibility(state: "eligible"),
+            ContributionEligibility(state: "unknown"),
+            ContributionEligibility(state: "ineligible_configuration", reason: "capture_off"),
+        ]
+        let sendable = EligibilitySurface.contributable(
+            group, eligibility: { $0 }, calls: table)
+        XCTAssertEqual(sendable.count, 2)
+        XCTAssertTrue(sendable.allSatisfy { $0?.state == "eligible" })
+        XCTAssertEqual(
+            EligibilitySurface.withheldCount(group, eligibility: { $0 }, calls: table), 3)
+    }
+
+    /// Order survives, so a caller can report what it sent in the order the
+    /// folder showed it.
+    func testAGroupLevelSubmitKeepsTheFoldersOrder() {
+        let table = calls(control: { $0 == "eligible" ? 51 : 50 })
+        let group = [
+            ContributionEligibility(state: "ineligible_permanent"),
+            ContributionEligibility(state: "eligible", reason: nil),
+            ContributionEligibility(state: "unknown"),
+            ContributionEligibility(state: "eligible", reason: nil),
+        ]
+        let sendable = EligibilitySurface.contributable(
+            group.enumerated().map { ($0.offset, $0.element) },
+            eligibility: { $0.1 }, calls: table)
+        XCTAssertEqual(sendable.map(\.0), [1, 3])
+    }
+
+    /// An invited contributor's folder is untouched: every entry carries no
+    /// key, every entry is still sent, and nothing is withheld.
+    func testAFolderWithNoEligibilityQuestionSubmitsWhole() {
+        let refusesEverything = calls(control: { _ in 50 })
+        let group: [ContributionEligibility?] = [nil, nil, nil]
+        XCTAssertEqual(
+            EligibilitySurface.contributable(
+                group, eligibility: { $0 }, calls: refusesEverything
+            ).count, 3)
+        XCTAssertEqual(
+            EligibilitySurface.withheldCount(
+                group, eligibility: { $0 }, calls: refusesEverything), 0)
+    }
+
+    /// A folder with nothing eligible in it sends nothing. Not an error --
+    /// the rows are all still shown, one level in, each with its sentence.
+    func testAFolderWithNothingEligibleSendsNothing() {
+        let table = calls(control: { $0 == "eligible" ? 51 : 50 })
+        let group = [
+            ContributionEligibility(state: "ineligible_permanent"),
+            ContributionEligibility(state: "unknown"),
+        ]
+        XCTAssertTrue(
+            EligibilitySurface.contributable(group, eligibility: { $0 }, calls: table).isEmpty)
+    }
+
+    /// Which entries a group submit covers is the TABLE's decision, not a
+    /// Swift filter on the state string.
+    ///
+    /// The fake inverts the real table exactly, so a surface that had
+    /// reimplemented "eligible means sendable" would answer the other two.
+    func testWhichEntriesAGroupSubmitCoversIsTheTablesDecision() {
+        let inverted = calls(control: { $0 == "eligible" ? 50 : 51 })
+        let group = [
+            ContributionEligibility(state: "eligible"),
+            ContributionEligibility(state: "ineligible_permanent"),
+        ]
+        let sendable = EligibilitySurface.contributable(
+            group, eligibility: { $0 }, calls: inverted)
+        XCTAssertEqual(sendable.map(\.state), ["ineligible_permanent"])
+    }
+
+    // MARK: - An unanticipated tone still says something
+
+    /// A tone this build has never seen must not silence the row.
+    ///
+    /// The sentence is drawn on the presence of the SENTENCE, never on the
+    /// tone being one of the two the surface anticipates. A `_HELD` or
+    /// `_REFUSED` from a later daemon therefore still draws its sentence,
+    /// in the tone the shared mapper gives it. A shell that renders nothing
+    /// for an unanticipated tone is the same silent dead end this whole
+    /// surface exists to remove.
+    func testAnUnanticipatedToneStillDrawsTheSentence() {
+        for code: Int32 in [21, 24, 0, 99, -1] {
+            let line = EligibilitySurface.stateLine(
+                ContributionEligibility(state: "eligible"),
+                copy: words(),
+                calls: calls(tone: { _ in code }))
+            XCTAssertNotNil(line, "tone \(code) must not silence the row")
+            XCTAssertFalse(line?.isEmpty ?? true, "tone \(code)")
+        }
+        // And the tone itself is carried through rather than flattened to
+        // one of the two arms this surface anticipates.
+        XCTAssertEqual(
+            EligibilitySurface.tone(
+                ContributionEligibility(state: "eligible"), calls: calls(tone: { _ in 21 })),
+            .held)
+        XCTAssertEqual(
+            EligibilitySurface.tone(
+                ContributionEligibility(state: "eligible"), calls: calls(tone: { _ in 24 })),
+            .refused)
+    }
+
     // MARK: - The reason
 
     /// The reason sentence is the table's, and an empty answer renders

@@ -177,6 +177,44 @@ public enum EligibilitySurface {
         control(eligibility, calls: calls) == .contribute
     }
 
+    // MARK: - A group-level submit
+
+    /// Which of a group's entries a group-level submit may actually send.
+    ///
+    /// **A GROUP-LEVEL SUBMIT MEANS "ALL ELIGIBLE", NEVER "ALL".** One
+    /// button that approves a whole folder by project id, without asking
+    /// this, is the defect this surface exists to remove reproduced one
+    /// layer up -- and worse there than on a card, because a contributor who
+    /// pressed it never saw the sessions it sent. Ruled 2026-09-08.
+    ///
+    /// Entries with no `eligibility` key are kept, on the same rule
+    /// `control` follows: an invited contributor's folder is entirely
+    /// contributable and this must not quietly empty it.
+    ///
+    /// Order is preserved, so the caller can report what it sent in the
+    /// order the folder showed it.
+    public static func contributable<Entry>(
+        _ entries: [Entry],
+        eligibility: (Entry) -> ContributionEligibility?,
+        calls: EligibilityCalls
+    ) -> [Entry] {
+        entries.filter { offersContribute(eligibility($0), calls: calls) }
+    }
+
+    /// How many of a group's entries a group-level submit would leave
+    /// behind.
+    ///
+    /// Drawn beside the button so the count on it is not the only thing that
+    /// changed. A folder whose button says fewer sessions than the folder
+    /// says, with nothing explaining the gap, is its own small dishonesty.
+    public static func withheldCount<Entry>(
+        _ entries: [Entry],
+        eligibility: (Entry) -> ContributionEligibility?,
+        calls: EligibilityCalls
+    ) -> Int {
+        entries.count - contributable(entries, eligibility: eligibility, calls: calls).count
+    }
+
     // MARK: - The reason
 
     /// The second sentence, naming why, or none.
