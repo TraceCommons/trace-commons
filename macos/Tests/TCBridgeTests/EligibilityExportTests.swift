@@ -261,12 +261,12 @@ final class EligibilityExportTests: XCTestCase {
         XCTAssertEqual(offer.count, 3)
         XCTAssertTrue(offer.offersContribute)
         XCTAssertEqual(offer.withheldLine, TCContributionEligibility.withheldLine(withheld: 4))
-        // Zero draws a control and disables it -- the ratified deviation
-        // from the queue row, verified against the real table.
+        // Zero offers no control and says why instead, against the real
+        // table.
         let empty = EligibilitySurface.groupSubmit(
             pendingCount: 5, contributableCount: 0, fallbackPending: 5, calls: calls())
-        XCTAssertEqual(empty.count, 0)
         XCTAssertFalse(empty.offersContribute)
+        XCTAssertEqual(empty.withheldLine, TCContributionEligibility.withheldLine(withheld: 5))
         // Absent draws no line at all, and a full folder draws none either.
         XCTAssertNil(
             EligibilitySurface.groupSubmit(

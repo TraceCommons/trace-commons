@@ -119,10 +119,13 @@ public struct EligibilityCalls: Sendable {
 /// `offersContribute` is whether it may be pressed, and it comes from the
 /// shared table -- never from this shell comparing `count` to zero.
 ///
-/// **At zero the header's control is DISABLED, NOT REMOVED** -- a ratified
-/// deviation from the queue row, where the control is simply not drawn. A
-/// group header is not a row: the group still holds sessions, and a folder
-/// offering no way to act on it reads as broken rather than finished.
+/// **At zero the header's control is REMOVED, like a queue row's.** Disabling
+/// it was ratified and then reversed: the case for a dead button -- that a
+/// folder with no control reads as broken rather than finished -- was made
+/// before the shared withheld line existed. The folder now says in words that
+/// nothing here can be sent, so a dead button has nothing left to
+/// communicate, and an inert control with its own explanation beside it is
+/// the #728 shape with the proof of its redundancy attached.
 ///
 /// `withheldLine` is the shared sentence saying how many the button leaves
 /// behind, and `nil` when there is no gap to explain. It never says why --

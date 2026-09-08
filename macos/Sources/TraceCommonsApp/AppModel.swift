@@ -1712,7 +1712,11 @@ final class AppModel: ObservableObject {
             // empty string for zero and for the absence, so a filter that
             // ran and took everything, and one that never ran, both draw
             // nothing without this code knowing which it was.
-            let withheld = Int64(response.excludedIneligible ?? 0)
+            // `clamping`, not `Int64(...)`: the field is unsigned on the
+            // wire and a plain conversion TRAPS above `Int64.max` rather
+            // than wrapping. No honest daemon sends that, which is exactly
+            // why it would be a crash nobody had thought about.
+            let withheld = Int64(clamping: response.excludedIneligible ?? 0)
             let sentence = self.eligibilityCalls.withheldLine(withheld) ?? ""
             self.lastActionNotice = sentence.isEmpty ? nil : sentence
         }

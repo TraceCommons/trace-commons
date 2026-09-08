@@ -452,18 +452,49 @@ final class EligibilitySurfaceTests: XCTestCase {
         XCTAssertNil(offer.withheldLine)
     }
 
-    /// **RATIFIED: at zero the header's control is DISABLED, NOT REMOVED.**
+    /// **At zero the header offers no control, and says why instead.**
     ///
-    /// A group header is not a row. The group still holds sessions, and a
-    /// folder offering no way to act on it reads as broken rather than
-    /// finished -- so the offer still carries a count to draw, and only
-    /// `offersContribute` goes false.
-    func testAFolderWithNothingContributableStillDrawsADisabledControl() {
+    /// Disabling was ratified and reversed: the withheld line now answers
+    /// what a dead button was there to communicate, and an inert control
+    /// with its own explanation beside it is worse than none.
+    ///
+    /// The sentence is the load-bearing half, so it is asserted here rather
+    /// than left to the control test: removing the button WITHOUT it would
+    /// leave the folder silent about five sessions it is showing.
+    func testAFolderWithNothingContributableOffersNoControlAndSaysWhy() {
         let offer = EligibilitySurface.groupSubmit(
             pendingCount: 5, contributableCount: 0, fallbackPending: 5, calls: calls())
-        XCTAssertEqual(offer.count, 0, "the header still draws a control")
-        XCTAssertFalse(offer.offersContribute, "and it cannot be pressed")
-        XCTAssertEqual(offer.withheldLine, "WITHHELD:5")
+        XCTAssertFalse(offer.offersContribute, "nothing here can be sent")
+        XCTAssertEqual(
+            offer.withheldLine, "WITHHELD:5",
+            "and the folder must still say so -- the sentence is what replaces the button")
+    }
+
+    /// The three cases the contract turns on, stated together so the
+    /// absent/zero distinction cannot drift apart across tests.
+    ///
+    /// | contributable | count | control |
+    /// | absent  | pending | offered  |
+    /// | 0       | 0       | withheld |
+    /// | 3 of 7  | 3       | offered  |
+    func testAbsentZeroAndPositiveAreThreeDifferentAnswers() {
+        let absent = EligibilitySurface.groupSubmit(
+            pendingCount: 7, contributableCount: nil, fallbackPending: 7, calls: calls())
+        XCTAssertEqual(absent.count, 7)
+        XCTAssertTrue(absent.offersContribute)
+        XCTAssertNil(absent.withheldLine)
+
+        let zero = EligibilitySurface.groupSubmit(
+            pendingCount: 7, contributableCount: 0, fallbackPending: 7, calls: calls())
+        XCTAssertEqual(zero.count, 0)
+        XCTAssertFalse(zero.offersContribute)
+        XCTAssertEqual(zero.withheldLine, "WITHHELD:7")
+
+        let positive = EligibilitySurface.groupSubmit(
+            pendingCount: 7, contributableCount: 3, fallbackPending: 7, calls: calls())
+        XCTAssertEqual(positive.count, 3)
+        XCTAssertTrue(positive.offersContribute)
+        XCTAssertEqual(positive.withheldLine, "WITHHELD:4")
     }
 
     /// Whether the control may be pressed is the TABLE's answer, never a
