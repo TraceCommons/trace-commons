@@ -1137,6 +1137,15 @@ apply would draw "Submit all (0)" and offer nothing to an invited contributor
 whose sessions are all perfectly sendable. When the key is missing, count the
 button off `pending_count` and render no withheld line.
 
+**`contributable_count: 0` means the group's submit control is not offered.**
+A header offering "Submit all" where nothing is eligible is a press with no
+visible consequence -- the row-level rule ("shown, not offered") one level up.
+The group still renders, with its rows and their sentences; only the control
+goes. Decide it through `tc_contribution_group_control(pending,
+contributable)`, passing **any negative value** for an absent
+`contributable_count`, so the absent-versus-zero distinction is made once
+rather than in three shells.
+
 It is a count and not a promise. Entries can move between this call and the
 approve, and the expensive checks still run at submit -- see "Contribution
 eligibility" below.

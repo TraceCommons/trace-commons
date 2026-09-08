@@ -170,6 +170,33 @@ none for the session the row is about, and advice about the *next* session is
 guidance rather than status — it does not belong on a row describing this one.
 Rows stay about their own session.
 
+**4. The daemon reports eligibility on a row and enforces it only where a
+shell cannot.**
+
+Ruled after the Windows shell found the hole. A group-level submit --
+`approve {project_id}`, and `approve {all}`, which is simply the largest group
+there is -- means **all eligible**, never all. The per-row gate cannot reach
+it: a per-project approve has no row to check, so three shells would each have
+to enumerate and classify rows themselves, which is three implementations of
+one filter and exactly what produced #728.
+
+A single `entry_id` is **not** filtered. Naming one entry is an explicit act
+about a session the contributor is looking at, the shell's per-row gate
+already covers it, and the server decides admission either way. A daemon that
+refused a named entry would be enforcing an expectation as though it were the
+answer.
+
+That is the boundary, and it is written here because it is the kind of line
+somebody later tidies up by filtering everywhere: **the daemon reports
+eligibility on a row and enforces it only where a shell cannot.**
+
+The same rule applies to the group's own control. A header offering "Submit
+all" on a group where nothing is eligible is a press with no visible
+consequence -- the row-level rule ("shown, not offered") one level up -- so
+the group control is offered only when something in the group can be sent.
+`list_projects` carries the subtotal beside the total so a shell can answer
+that before the press rather than after it.
+
 ## Not in scope
 
 Changing what the server admits. This surface reports the existing rule

@@ -1290,6 +1290,32 @@ pub enum ContributionControl {
     Contribute,
 }
 
+/// Whether a group's submit control may be offered at all.
+///
+/// **A header offering "Submit all" on a group where nothing is eligible is a
+/// press with no visible consequence** -- a small version of the same defect
+/// this surface exists to remove. The row-level rule is that an ineligible
+/// row is shown and not offered; the group-level rule is the same one, and it
+/// lives here rather than in three shells for the reason
+/// [`eligibility_control`] does.
+///
+/// `pending` is the group's `pending_count` and `contributable` its
+/// `contributable_count`. `None` means the field was ABSENT -- an invited
+/// contributor, for whom every pending session is sendable and the control is
+/// offered on `pending` alone. It must never be confused with `Some(0)`,
+/// which means the question applies and the answer is none: a shell that read
+/// an absent count as zero would refuse to offer a control to somebody whose
+/// sessions are all perfectly sendable.
+#[must_use]
+pub fn group_control(pending: u64, contributable: Option<u64>) -> ContributionControl {
+    let offerable = contributable.unwrap_or(pending);
+    if offerable == 0 {
+        ContributionControl::None
+    } else {
+        ContributionControl::Contribute
+    }
+}
+
 /// The sentence for one queue entry's `eligibility` label.
 ///
 /// An unfamiliar or empty label answers [`ELIGIBILITY_UNKNOWN`]. IT MUST NOT
@@ -2396,6 +2422,23 @@ mod tests {
             "",
             "an absent field is not a refused connect"
         );
+    }
+
+    /// A group with nothing sendable offers no control -- the same rule an
+    /// ineligible row follows, one level up. And an ABSENT count is not a
+    /// zero: an invited contributor's group is offered on its pending count,
+    /// which is the trap this pairing exists to close.
+    #[test]
+    fn a_group_with_nothing_sendable_is_not_offered() {
+        // The question applies.
+        assert_eq!(group_control(5, Some(0)), ContributionControl::None);
+        assert_eq!(group_control(5, Some(1)), ContributionControl::Contribute);
+        assert_eq!(group_control(5, Some(5)), ContributionControl::Contribute);
+        // The question does not apply: every pending session is sendable.
+        assert_eq!(group_control(5, None), ContributionControl::Contribute);
+        // An empty group is an empty group either way.
+        assert_eq!(group_control(0, None), ContributionControl::None);
+        assert_eq!(group_control(0, Some(0)), ContributionControl::None);
     }
 
     /// The withheld line counts and says nothing else.

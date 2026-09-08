@@ -758,6 +758,27 @@ int32_t     tc_contribution_eligibility_control(const char* state);
  */
 char*       tc_contribution_eligibility_reason_line(const char* reason);
 
+/* Whether a group's submit control may be offered: one of the
+ * TC_CONTRIBUTION_CONTROL_* values.
+ *
+ * pending is a list_projects row's pending_count. contributable is its
+ * contributable_count, or ANY NEGATIVE VALUE when that key was ABSENT -- an
+ * invited contributor, for whom every pending session is sendable.
+ *
+ * ABSENT IS NOT ZERO, and this is the distinction most likely to be got wrong.
+ * contributable = 0 means the question applies and nothing in this group can
+ * be sent, so nothing is offered. A negative contributable means the question
+ * does not apply, and the control is offered on pending alone. A shell that
+ * passed 0 for an absent field would refuse a control to somebody whose
+ * sessions are all perfectly sendable.
+ *
+ * A header offering "Submit all" on a group where nothing is eligible is a
+ * press with no visible consequence -- the row-level rule ("shown, not
+ * offered") applied one level up, and it crosses this ABI for the reason
+ * tc_contribution_eligibility_control does.
+ */
+int32_t     tc_contribution_group_control(int64_t pending, int64_t contributable);
+
 /* How many sessions a group submit is leaving behind, as a sentence.
  *
  * withheld is approve's excluded_ineligible, or the difference between a

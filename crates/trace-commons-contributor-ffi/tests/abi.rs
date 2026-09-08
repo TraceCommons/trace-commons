@@ -24,9 +24,9 @@ use trace_commons_contributor_ffi::{
     TC_WITNESS_TONE_HELD, TC_WITNESS_TONE_NEUTRAL, TC_WITNESS_TONE_REFUSED, tc_call,
     tc_consent_copy, tc_consent_gate_help, tc_contribution_eligibility_control,
     tc_contribution_eligibility_line, tc_contribution_eligibility_reason_line,
-    tc_contribution_eligibility_tone, tc_contribution_withheld_line, tc_daemon_start,
-    tc_daemon_start_with_settings, tc_daemon_stop, tc_discover_sources, tc_handle, tc_handle_free,
-    tc_invite_issuer_host, tc_last_error, tc_near_ai_credential_action,
+    tc_contribution_eligibility_tone, tc_contribution_group_control, tc_contribution_withheld_line,
+    tc_daemon_start, tc_daemon_start_with_settings, tc_daemon_stop, tc_discover_sources, tc_handle,
+    tc_handle_free, tc_invite_issuer_host, tc_last_error, tc_near_ai_credential_action,
     tc_near_ai_credential_state_line, tc_near_ai_credential_state_tone, tc_preview,
     tc_preview_body, tc_preview_open, tc_preview_search, tc_preview_summary_json,
     tc_preview_turns_json, tc_private_inference_copy, tc_private_inference_quit_needs_notice,
@@ -3669,6 +3669,30 @@ fn the_eligibility_state_crosses_with_its_tone_its_control_and_its_reason() {
         take_owned(unsafe { tc_contribution_eligibility_reason_line(std::ptr::null()) }),
         ""
     );
+}
+
+/// The group control crosses, and an absent count is not a zero.
+///
+/// The trap this pins: a shell passing `0` for an absent `contributable_count`
+/// would refuse a submit control to an invited contributor whose sessions are
+/// all perfectly sendable.
+#[test]
+fn a_group_control_tells_an_absent_count_from_a_zero() {
+    let control = tc_contribution_group_control;
+
+    // The question applies.
+    assert_eq!(control(5, 0), TC_CONTRIBUTION_CONTROL_NONE);
+    assert_eq!(control(5, 1), TC_CONTRIBUTION_CONTROL_CONTRIBUTE);
+    assert_eq!(control(5, 5), TC_CONTRIBUTION_CONTROL_CONTRIBUTE);
+    // Absent, spelled as any negative value.
+    for absent in [-1i64, -7, i64::MIN] {
+        assert_eq!(
+            control(5, absent),
+            TC_CONTRIBUTION_CONTROL_CONTRIBUTE,
+            "absent must not read as zero ({absent})"
+        );
+        assert_eq!(control(0, absent), TC_CONTRIBUTION_CONTROL_NONE);
+    }
 }
 
 /// The withheld-count line crosses, counts, and stays silent at zero.
