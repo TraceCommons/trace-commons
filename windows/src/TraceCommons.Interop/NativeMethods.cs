@@ -378,6 +378,65 @@ internal static class NativeMethods
         [MarshalAs(UnmanagedType.LPUTF8Str)] string? state);
 
     /// <summary>
+    /// The sentence for one queue entry's <c>eligibility</c> label.
+    ///
+    /// A ROW THAT CARRIED NO <c>eligibility</c> FIELD MUST NOT REACH HERE. An
+    /// absent field means the contributor was invited and has no eligibility
+    /// question, and answering one they do not have puts a caveat on work
+    /// that carries none. Absent is not "unknown".
+    ///
+    /// An empty, NULL or unfamiliar state reports that the answer has not
+    /// been worked out. IT NEVER REPORTS AN INELIGIBILITY: a state this build
+    /// cannot read is not evidence about a contributor's session. NULL only
+    /// on a caught panic.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    internal static extern IntPtr tc_contribution_eligibility_line(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? state);
+
+    /// <summary>
+    /// How that sentence is painted, as a raw
+    /// <c>TC_PRIVATE_INFERENCE_TONE_*</c> value -- the same five the listener
+    /// row uses, so this shell keeps one mapping onto colours.
+    ///
+    /// A permanent ineligibility is deliberately NOT <c>_REFUSED</c>: nothing
+    /// was refused and nothing went wrong, and painting a contributor's
+    /// ordinary older work as a failure is a judgement this surface has no
+    /// business making.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    internal static extern int tc_contribution_eligibility_tone(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? state);
+
+    /// <summary>
+    /// The one control a shell may offer for an eligibility state, as a raw
+    /// <c>TC_CONTRIBUTION_CONTROL_*</c> value.
+    ///
+    /// THE BRANCH TABLE CROSSES, NOT ONLY THE WORDS. Three shells each
+    /// deciding which rows get a send button is three chances to offer one
+    /// beside a session the server will refuse -- the defect this surface
+    /// exists to remove, and worse than an inert button: pressing it sends a
+    /// contributor's work and has it turned away.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    internal static extern int tc_contribution_eligibility_control(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? state);
+
+    /// <summary>
+    /// The sentence for one queue entry's <c>eligibility_reason</c> label, or
+    /// THE EMPTY STRING for an absent, NULL or unfamiliar reason -- for which
+    /// a shell renders nothing.
+    ///
+    /// Deliberately not the hedge the state line makes: the state sentence
+    /// has already said what is true, and a second sentence guessing at a
+    /// reason this build does not know would add a detail nobody
+    /// established. NULL only on a caught panic.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    internal static extern IntPtr tc_contribution_eligibility_reason_line(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? reason);
+
+    /// <summary>
     /// One <c>harness_list</c> row's state, as a TC_HARNESS_STATE_* code.
     ///
     /// THE BRANCH TABLE CROSSES. "answering" is the only value meaning a call
