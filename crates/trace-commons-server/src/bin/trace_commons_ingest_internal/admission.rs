@@ -309,6 +309,57 @@ pub(super) async fn reserve(
     }))
 }
 
+pub(super) async fn challenge_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> ApiResult<axum::response::Response> {
+    use rand::RngCore as _;
+    let tenant = authenticate_ctx(&state, &headers)?;
+    let key = submit_principal_rate_limit_key(
+        tenant.tenant_id(),
+        tenant.safe_auth_method(),
+        tenant.principal_ref(),
+    );
+    if !ACCOUNT_RATE_LIMITER.check(&format!("admission-challenge:{key}"), 10) {
+        return Err(api_error(StatusCode::TOO_MANY_REQUESTS, "rate limited"));
+    }
+    let config = state.admission.as_ref().ok_or_else(denied)?;
+    let anchor = anchor(&state, &tenant).await?.ok_or_else(denied)?;
+    let mut nonce = [0u8; 32];
+    rand::rngs::OsRng
+        .try_fill_bytes(&mut nonce)
+        .map_err(|_| denied())?;
+    // The native proxy's deliberately bounded ephemeral binding is at most 15m.
+    let expires = Utc::now() + Duration::seconds(config.limits.challenge_ttl_seconds.min(900));
+    let binding = AdmissionBinding {
+        account_anchor_sha256: anchor.clone(),
+        nonce_hex: hex::encode(nonce),
+        expires_at: expires.timestamp(),
+    };
+    state
+        .db_mirror
+        .as_ref()
+        .ok_or_else(denied)?
+        .issue_admission_challenge(
+            tenant.tenant_id(),
+            &anchor,
+            &binding.digest().map_err(|_| denied())?,
+            expires,
+        )
+        .await
+        .map_err(|_| denied())?;
+    let mut response = Json(serde_json::json!({"binding":binding.encode().map_err(|_| denied())?,"expires_at":expires.timestamp()})).into_response();
+    response.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store"),
+    );
+    response.headers_mut().insert(
+        axum::http::header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
+    Ok(response)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -370,55 +421,4 @@ mod tests {
             "positive control: verified evidence does bind"
         );
     }
-}
-
-pub(super) async fn challenge_handler(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-) -> ApiResult<axum::response::Response> {
-    use rand::RngCore as _;
-    let tenant = authenticate_ctx(&state, &headers)?;
-    let key = submit_principal_rate_limit_key(
-        tenant.tenant_id(),
-        tenant.safe_auth_method(),
-        tenant.principal_ref(),
-    );
-    if !ACCOUNT_RATE_LIMITER.check(&format!("admission-challenge:{key}"), 10) {
-        return Err(api_error(StatusCode::TOO_MANY_REQUESTS, "rate limited"));
-    }
-    let config = state.admission.as_ref().ok_or_else(denied)?;
-    let anchor = anchor(&state, &tenant).await?.ok_or_else(denied)?;
-    let mut nonce = [0u8; 32];
-    rand::rngs::OsRng
-        .try_fill_bytes(&mut nonce)
-        .map_err(|_| denied())?;
-    // The native proxy's deliberately bounded ephemeral binding is at most 15m.
-    let expires = Utc::now() + Duration::seconds(config.limits.challenge_ttl_seconds.min(900));
-    let binding = AdmissionBinding {
-        account_anchor_sha256: anchor.clone(),
-        nonce_hex: hex::encode(nonce),
-        expires_at: expires.timestamp(),
-    };
-    state
-        .db_mirror
-        .as_ref()
-        .ok_or_else(denied)?
-        .issue_admission_challenge(
-            tenant.tenant_id(),
-            &anchor,
-            &binding.digest().map_err(|_| denied())?,
-            expires,
-        )
-        .await
-        .map_err(|_| denied())?;
-    let mut response = Json(serde_json::json!({"binding":binding.encode().map_err(|_| denied())?,"expires_at":expires.timestamp()})).into_response();
-    response.headers_mut().insert(
-        axum::http::header::CACHE_CONTROL,
-        HeaderValue::from_static("no-store"),
-    );
-    response.headers_mut().insert(
-        axum::http::header::REFERRER_POLICY,
-        HeaderValue::from_static("no-referrer"),
-    );
-    Ok(response)
 }
