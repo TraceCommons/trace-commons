@@ -77,6 +77,33 @@ impl std::fmt::Debug for EvidenceImport {
     }
 }
 
+/// A `std::io::Write` sink that counts serialized bytes without keeping them,
+/// refusing as soon as the trace budget is passed. Used only to size a value
+/// that is already in memory; it never touches the filesystem.
+struct TraceByteBudget {
+    remaining: usize,
+    exceeded: bool,
+}
+
+impl std::io::Write for TraceByteBudget {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match self.remaining.checked_sub(buf.len()) {
+            Some(remaining) => {
+                self.remaining = remaining;
+                Ok(buf.len())
+            }
+            None => {
+                self.exceeded = true;
+                Err(std::io::Error::other("trace-over-budget"))
+            }
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 impl EvidenceImport {
     pub fn parse(bytes: &[u8]) -> Result<Self, ImportError> {
         if bytes.len() > MAX_IMPORT_BYTES {
@@ -91,12 +118,25 @@ impl EvidenceImport {
         if self.schema_version != 1 {
             return Err(ImportError::Version);
         }
-        if serde_json::to_vec(&self.trace)
-            .map_err(|_| ImportError::Malformed)?
-            .len()
-            > MAX_IMPORT_TRACE_BYTES
-        {
-            return Err(ImportError::TooLarge);
+        // Measured through a counting sink rather than `to_vec`. The trace can
+        // be the whole 16 MiB budget, and a buffer allocated purely to read its
+        // `len()` would roughly double peak memory on every import, including
+        // the common small one. The sink also stops the serializer the moment
+        // the budget is passed, so a hostile document does not get to make us
+        // walk all of it.
+        let mut measured = TraceByteBudget {
+            remaining: MAX_IMPORT_TRACE_BYTES,
+            exceeded: false,
+        };
+        if let Err(error) = serde_json::to_writer(&mut measured, &self.trace) {
+            // `exceeded` distinguishes our own early stop from a genuine
+            // serialization failure; only the latter is malformed input.
+            return Err(if measured.exceeded {
+                ImportError::TooLarge
+            } else {
+                let _ = error;
+                ImportError::Malformed
+            });
         }
         let source = self
             .trace
@@ -220,6 +260,28 @@ mod tests {
             EvidenceImport::parse(&bytes),
             Err(ImportError::TooLarge)
         ));
+    }
+    #[test]
+    fn exact_trace_byte_budget_is_accepted_and_one_more_is_refused() {
+        // The budget is measured through a counting sink rather than a second
+        // buffer, so the boundary is worth pinning: an off-by-one in the sink
+        // would silently move the limit, and nothing else measures the trace.
+        let mut doc = ordinary();
+        // Measure with the field already a string, so padding is the only
+        // thing that changes size afterwards.
+        doc.trace.events[0].content = Some(String::new());
+        let baseline = serde_json::to_vec(&doc.trace).unwrap().len();
+        let pad = MAX_IMPORT_TRACE_BYTES - baseline;
+        doc.trace.events[0].content = Some("a".repeat(pad));
+        // ASCII padding inside an existing JSON string costs exactly one byte
+        // per character, so the serialized trace is now exactly the budget.
+        assert_eq!(
+            serde_json::to_vec(&doc.trace).unwrap().len(),
+            MAX_IMPORT_TRACE_BYTES
+        );
+        assert_eq!(doc.validate(), Ok(()));
+        doc.trace.events[0].content = Some("a".repeat(pad + 1));
+        assert_eq!(doc.validate(), Err(ImportError::TooLarge));
     }
     #[test]
     fn future_version_and_forward_parent_reference_are_refused() {

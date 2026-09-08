@@ -192,6 +192,16 @@ fn open_import_file(path: &std::path::Path) -> Result<std::fs::File> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
+        // O_NONBLOCK | O_NOFOLLOW, spelled per-ABI rather than through `libc`,
+        // which is not a direct dependency of this permissive crate and is not
+        // worth becoming one for two constants. The consequence is deliberate
+        // and is the safe direction: a target whose ABI is not enumerated here
+        // gets no open at all, not an open with the wrong flags. Adding a
+        // target means adding its pair, and the symlink and FIFO tests below
+        // are what prove a pair is right. Today that leaves Linux on 32-bit
+        // arm, riscv64 and s390x, and every non-Linux non-macOS unix, without
+        // local import; they refuse by name rather than silently losing the
+        // confinement the flags provide.
         let flags = if cfg!(target_os = "macos") {
             0x4 | 0x100
         } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
