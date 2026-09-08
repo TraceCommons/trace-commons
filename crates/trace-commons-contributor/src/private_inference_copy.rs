@@ -512,6 +512,28 @@ pub struct PrivateInferenceCopy {
     /// [`harness_credential_notice`], never on a shell's own reading of a
     /// boolean.
     pub harness_needs_credential: &'static str,
+    /// The four `eligibility` states a queue entry can carry, and the
+    /// thirteen `eligibility_reason` labels. Rendered through
+    /// [`eligibility_state_line`] and [`eligibility_reason_line`]; carried
+    /// here as well so a test on the far side can pin the set it was built
+    /// against.
+    pub eligibility_eligible: &'static str,
+    pub eligibility_ineligible_permanent: &'static str,
+    pub eligibility_ineligible_configuration: &'static str,
+    pub eligibility_unknown: &'static str,
+    pub eligibility_reason_no_call: &'static str,
+    pub eligibility_reason_capture_off: &'static str,
+    pub eligibility_reason_digest_absent: &'static str,
+    pub eligibility_reason_upstream_id_absent: &'static str,
+    pub eligibility_reason_digest_mismatch: &'static str,
+    pub eligibility_reason_reference_malformed: &'static str,
+    pub eligibility_reason_bodies_unreadable: &'static str,
+    pub eligibility_reason_body_not_utf8: &'static str,
+    pub eligibility_reason_body_too_large: &'static str,
+    pub eligibility_reason_evidence_capture_off: &'static str,
+    pub eligibility_reason_marker_absent: &'static str,
+    pub eligibility_reason_request_malformed: &'static str,
+    pub eligibility_reason_receipt_unavailable: &'static str,
 }
 
 /// The sentence the settings card shows once the control has moved out of it.
@@ -1113,6 +1135,269 @@ pub fn credential_action(label: &str) -> CredentialAction {
     }
 }
 
+/// `eligible`.
+///
+/// **States an expectation and stops.** The cheap checks passed and the
+/// marked call is here; the expensive ones still run when the contribution is
+/// sent, and the server decides. A sentence promising acceptance would be
+/// making a claim this side is not in a position to make, and would be read
+/// as one on the day the server says no.
+pub const ELIGIBILITY_ELIGIBLE: &str = "This session has what a contribution needs. The last checks happen when \
+     you send it.";
+
+/// `ineligible_permanent`.
+///
+/// Says the second half out loud. Somebody who is told only "this cannot be
+/// sent" tries again, and again, and the surface owes them the fact that
+/// trying is wasted work on their own finished session.
+pub const ELIGIBILITY_INELIGIBLE_PERMANENT: &str = "This session cannot be sent, and nothing you change will alter that. \
+     Trying again will not help.";
+
+/// `ineligible_configuration`.
+///
+/// **The only state whose sentence names a setting**, because it is the only
+/// one where changing something helps. The row stays about its own session:
+/// what the setting changes is the sessions recorded from now on, and the
+/// sentence says exactly that rather than implying this one can be rescued.
+pub const ELIGIBILITY_INELIGIBLE_CONFIGURATION: &str = "This session cannot be sent. A setting decides whether the ones you \
+     record from now on can be.";
+
+/// `unknown`, and any state label this build has never heard of.
+///
+/// **Must not degrade to an ineligibility.** "Could not tell" turned into
+/// "no" invites a contributor to conclude something false about their own
+/// work and to stop offering it. The same tri-state rule
+/// [`CREDENTIAL_UNKNOWN`] follows, and for the same reason: an unread fact
+/// gets its own sentence rather than borrowing a known one.
+pub const ELIGIBILITY_UNKNOWN: &str = "Whether this session can be sent has not been worked out. That is not \
+     the same as a no.";
+
+/// `no_inference_call`.
+///
+/// The case the whole surface exists for: everything a contributor recorded
+/// before they started having their model calls answered here.
+pub const ELIGIBILITY_REASON_NO_CALL: &str = "No model call was answered on this computer while this session ran, so \
+     there is nothing recorded to send with it.";
+
+/// `capture_off`.
+pub const ELIGIBILITY_REASON_CAPTURE_OFF: &str = "The last model call in this session was answered without keeping a copy \
+     of it. Whether copies are kept is a setting, and it decides the sessions \
+     you record from now on.";
+
+/// `digest_absent`.
+pub const ELIGIBILITY_REASON_DIGEST_ABSENT: &str = "The last model call in this session did not finish cleanly, so what was \
+     kept of it is incomplete.";
+
+/// `upstream_id_absent`.
+pub const ELIGIBILITY_REASON_UPSTREAM_ID_ABSENT: &str = "Nothing was written down for the last model call in this session that \
+     would let anyone check it afterwards.";
+
+/// `digest_mismatch`.
+pub const ELIGIBILITY_REASON_DIGEST_MISMATCH: &str = "What was kept of the last model call in this session does not match what \
+     was written down about it, so it cannot be sent as it stands.";
+
+/// `reference_malformed`.
+pub const ELIGIBILITY_REASON_REFERENCE_MALFORMED: &str = "The note saying where this session's kept copy lives is not one this \
+     computer could have written.";
+
+/// `bodies_unreadable`.
+pub const ELIGIBILITY_REASON_BODIES_UNREADABLE: &str = "The kept copy of this session's last model call could not be read back \
+     from this computer.";
+
+/// `body_not_utf8`.
+pub const ELIGIBILITY_REASON_BODY_NOT_UTF8: &str = "The kept copy of this session's last model call is not text this app can \
+     carry without changing it, and changing it would make it worthless.";
+
+/// `body_too_large`.
+pub const ELIGIBILITY_REASON_BODY_TOO_LARGE: &str =
+    "The kept copy of this session's last model call is too large to send.";
+
+/// `evidence_capture_off`.
+///
+/// The one reason that is about the machine rather than about this session,
+/// and it names the setting for the same reason `capture_off` does.
+pub const ELIGIBILITY_REASON_EVIDENCE_CAPTURE_OFF: &str = "This computer keeps no copy of the model calls it answers, so no session \
+     recorded here has one to send. That is a setting you can change.";
+
+/// `marker_absent`.
+///
+/// Names both ways it happens, because they land on different people: work
+/// finished before the mark existed, and work done through a tool that does
+/// not add it. Neither is a mistake the contributor made.
+pub const ELIGIBILITY_REASON_MARKER_ABSENT: &str = "The last model call in this session went out without the mark a \
+     contribution is accepted on. It was made before that was set up, or by \
+     a tool that does not add it.";
+
+/// `request_malformed`.
+pub const ELIGIBILITY_REASON_REQUEST_MALFORMED: &str = "The last model call in this session was not written down in a shape this \
+     app can read, so the mark cannot be found in it.";
+
+/// `receipt_unavailable`.
+///
+/// The one reason that is about right now rather than about this session,
+/// which is why the state beside it is `unknown` and why this sentence is
+/// the only one here that suggests trying later.
+pub const ELIGIBILITY_REASON_RECEIPT_UNAVAILABLE: &str = "The proof that goes with this session's last model call could not be \
+     fetched just now. It may work later.";
+
+/// How many sessions a group submit is leaving behind.
+///
+/// **A button reading "Submit all (2)" above a folder showing five rows, with
+/// nothing explaining the gap, is the same small dishonesty the rest of this
+/// surface removes.** The group control now sends only what can be sent, and
+/// the contributor can count the rows it did not take. This is the line that
+/// says so.
+///
+/// **It says how many and not why, deliberately.** The reason a particular
+/// session cannot be sent is that row's own sentence, one level in. A summary
+/// here would be a summary of up to thirteen different reasons and would say
+/// nothing true about any of them.
+///
+/// The empty string for zero, and a shell renders nothing: there is no gap to
+/// explain, and a line reading "0 sessions are not being sent" invents a
+/// caveat where none exists. Assembled here rather than in three shells, for
+/// the reason every other assembled line on this surface is -- three versions
+/// of one sentence is three chances for one of them to name a reason.
+///
+/// "here" rather than "in this folder": the same line serves a folder's
+/// submit and a whole-queue one, and only one of those is a folder.
+#[must_use]
+pub fn group_withheld_line(withheld: u64) -> String {
+    match withheld {
+        0 => String::new(),
+        1 => "1 session here cannot be sent, so it is not included.".to_string(),
+        n => format!("{n} sessions here cannot be sent, so they are not included."),
+    }
+}
+
+/// What a shell may offer for one eligibility state.
+///
+/// ONE TABLE, NOT THREE -- the rule [`CredentialAction`] states, applied to
+/// the control that sends a contributor's work. Three shells each deciding
+/// which rows get a send button is three chances to offer one beside a
+/// session the server will refuse, which is the defect this whole surface
+/// exists to remove.
+///
+/// [`Self::None`] is not "hide the row". Every session is shown; hiding a
+/// contributor's own work is its own dishonesty, and makes the app look as
+/// though it had not noticed files the contributor knows it can see. The row
+/// is present, unoffered, and carries its reason.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ContributionControl {
+    /// Draw no send control. The row still renders, with its sentence.
+    None,
+    /// Offer to send this session.
+    Contribute,
+}
+
+/// Whether a group's submit control may be offered at all.
+///
+/// **A header offering "Submit all" on a group where nothing is eligible is a
+/// press with no visible consequence** -- a small version of the same defect
+/// this surface exists to remove. The row-level rule is that an ineligible
+/// row is shown and not offered; the group-level rule is the same one, and it
+/// lives here rather than in three shells for the reason
+/// [`eligibility_control`] does.
+///
+/// `pending` is the group's `pending_count` and `contributable` its
+/// `contributable_count`. `None` means the field was ABSENT -- an invited
+/// contributor, for whom every pending session is sendable and the control is
+/// offered on `pending` alone. It must never be confused with `Some(0)`,
+/// which means the question applies and the answer is none: a shell that read
+/// an absent count as zero would refuse to offer a control to somebody whose
+/// sessions are all perfectly sendable.
+#[must_use]
+pub fn group_control(pending: u64, contributable: Option<u64>) -> ContributionControl {
+    let offerable = contributable.unwrap_or(pending);
+    if offerable == 0 {
+        ContributionControl::None
+    } else {
+        ContributionControl::Contribute
+    }
+}
+
+/// The sentence for one queue entry's `eligibility` label.
+///
+/// An unfamiliar or empty label answers [`ELIGIBILITY_UNKNOWN`]. IT MUST NOT
+/// BORROW AN INELIGIBILITY SENTENCE: a state this build cannot read is not
+/// evidence that a contributor's session is unsendable, and saying it is
+/// would stop them offering work that is fine.
+///
+/// A shell that received no `eligibility` field at all should call none of
+/// this: an absent field means the contributor was invited and has no
+/// eligibility question. See `daemon::contribution_eligibility`.
+#[must_use]
+pub fn eligibility_state_line(label: &str) -> &'static str {
+    match label {
+        ELIGIBILITY_STATE_ELIGIBLE => ELIGIBILITY_ELIGIBLE,
+        ELIGIBILITY_STATE_INELIGIBLE_PERMANENT => ELIGIBILITY_INELIGIBLE_PERMANENT,
+        ELIGIBILITY_STATE_INELIGIBLE_CONFIGURATION => ELIGIBILITY_INELIGIBLE_CONFIGURATION,
+        _ => ELIGIBILITY_UNKNOWN,
+    }
+}
+
+/// How firmly [`eligibility_state_line`]'s sentence reads.
+///
+/// Takes what the sentence takes, so the two stay in step by construction.
+///
+/// [`PrivateInferenceTone::Attention`] is `ineligible_configuration` alone --
+/// the one state where there is something to do. A permanent ineligibility is
+/// [`PrivateInferenceTone::Neutral`] and deliberately not
+/// [`PrivateInferenceTone::Refused`]: nothing was refused, nothing went
+/// wrong, and painting a contributor's ordinary older work as a failure is a
+/// judgement on it that this surface has no business making. An unread state
+/// is Neutral for the reason it is everywhere else here: the dangerous value
+/// is the one that reads as settled.
+#[must_use]
+pub fn eligibility_state_tone(label: &str) -> PrivateInferenceTone {
+    match label {
+        ELIGIBILITY_STATE_ELIGIBLE => PrivateInferenceTone::Clear,
+        ELIGIBILITY_STATE_INELIGIBLE_CONFIGURATION => PrivateInferenceTone::Attention,
+        _ => PrivateInferenceTone::Neutral,
+    }
+}
+
+/// The one control a shell may offer for an eligibility state.
+///
+/// `eligible` alone. Every other state -- including one this build has never
+/// heard of -- offers nothing, because the alternative is a send button on a
+/// session that cannot be sent, discovered on the press.
+#[must_use]
+pub fn eligibility_control(label: &str) -> ContributionControl {
+    match label {
+        ELIGIBILITY_STATE_ELIGIBLE => ContributionControl::Contribute,
+        _ => ContributionControl::None,
+    }
+}
+
+/// The sentence for one queue entry's `eligibility_reason` label.
+///
+/// **The empty string for an unfamiliar or absent reason**, and a shell
+/// renders nothing for it. That is not the tri-state hedge the state line
+/// makes: the state sentence beside it has already said what is true, and a
+/// second sentence guessing at a reason this build does not know would be
+/// adding a detail nobody established. An `eligible` row has no reason at
+/// all, for the same reason -- there is nothing to explain.
+#[must_use]
+pub fn eligibility_reason_line(label: &str) -> &'static str {
+    match label {
+        REASON_NO_CALL => ELIGIBILITY_REASON_NO_CALL,
+        REASON_CAPTURE_OFF => ELIGIBILITY_REASON_CAPTURE_OFF,
+        REASON_DIGEST_ABSENT => ELIGIBILITY_REASON_DIGEST_ABSENT,
+        REASON_UPSTREAM_ID_ABSENT => ELIGIBILITY_REASON_UPSTREAM_ID_ABSENT,
+        REASON_DIGEST_MISMATCH => ELIGIBILITY_REASON_DIGEST_MISMATCH,
+        REASON_REFERENCE_MALFORMED => ELIGIBILITY_REASON_REFERENCE_MALFORMED,
+        REASON_BODIES_UNREADABLE => ELIGIBILITY_REASON_BODIES_UNREADABLE,
+        REASON_BODY_NOT_UTF8 => ELIGIBILITY_REASON_BODY_NOT_UTF8,
+        REASON_BODY_TOO_LARGE => ELIGIBILITY_REASON_BODY_TOO_LARGE,
+        REASON_EVIDENCE_CAPTURE_OFF => ELIGIBILITY_REASON_EVIDENCE_CAPTURE_OFF,
+        REASON_MARKER_ABSENT => ELIGIBILITY_REASON_MARKER_ABSENT,
+        REASON_REQUEST_MALFORMED => ELIGIBILITY_REASON_REQUEST_MALFORMED,
+        REASON_RECEIPT_UNAVAILABLE => ELIGIBILITY_REASON_RECEIPT_UNAVAILABLE,
+        _ => "",
+    }
+}
+
 /// The payload, built from the constants above.
 #[must_use]
 pub fn private_inference_copy() -> PrivateInferenceCopy {
@@ -1180,11 +1465,55 @@ pub fn private_inference_copy() -> PrivateInferenceCopy {
         credential_unknown: CREDENTIAL_UNKNOWN,
         credential_unreported: CREDENTIAL_UNREPORTED,
         harness_needs_credential: HARNESS_NEEDS_CREDENTIAL,
+        eligibility_eligible: ELIGIBILITY_ELIGIBLE,
+        eligibility_ineligible_permanent: ELIGIBILITY_INELIGIBLE_PERMANENT,
+        eligibility_ineligible_configuration: ELIGIBILITY_INELIGIBLE_CONFIGURATION,
+        eligibility_unknown: ELIGIBILITY_UNKNOWN,
+        eligibility_reason_no_call: ELIGIBILITY_REASON_NO_CALL,
+        eligibility_reason_capture_off: ELIGIBILITY_REASON_CAPTURE_OFF,
+        eligibility_reason_digest_absent: ELIGIBILITY_REASON_DIGEST_ABSENT,
+        eligibility_reason_upstream_id_absent: ELIGIBILITY_REASON_UPSTREAM_ID_ABSENT,
+        eligibility_reason_digest_mismatch: ELIGIBILITY_REASON_DIGEST_MISMATCH,
+        eligibility_reason_reference_malformed: ELIGIBILITY_REASON_REFERENCE_MALFORMED,
+        eligibility_reason_bodies_unreadable: ELIGIBILITY_REASON_BODIES_UNREADABLE,
+        eligibility_reason_body_not_utf8: ELIGIBILITY_REASON_BODY_NOT_UTF8,
+        eligibility_reason_body_too_large: ELIGIBILITY_REASON_BODY_TOO_LARGE,
+        eligibility_reason_evidence_capture_off: ELIGIBILITY_REASON_EVIDENCE_CAPTURE_OFF,
+        eligibility_reason_marker_absent: ELIGIBILITY_REASON_MARKER_ABSENT,
+        eligibility_reason_request_malformed: ELIGIBILITY_REASON_REQUEST_MALFORMED,
+        eligibility_reason_receipt_unavailable: ELIGIBILITY_REASON_RECEIPT_UNAVAILABLE,
     }
 }
 
 // PRIVATE-INFERENCE-SURFACE-END
 
+/// The eligibility state and reason labels, re-exported from the daemon
+/// module that produces them -- the same rule the credential labels above
+/// follow, and for the same reason: a label spelled twice is two labels that
+/// have not disagreed yet.
+pub use crate::daemon::contribution_eligibility::{
+    REASON_BODIES_UNREADABLE,
+    REASON_BODY_NOT_UTF8,
+    REASON_BODY_TOO_LARGE,
+    REASON_CAPTURE_OFF,
+    REASON_DIGEST_ABSENT,
+    REASON_DIGEST_MISMATCH,
+    REASON_EVIDENCE_CAPTURE_OFF,
+    REASON_MARKER_ABSENT,
+    REASON_NO_CALL,
+    REASON_RECEIPT_UNAVAILABLE,
+    REASON_REFERENCE_MALFORMED,
+    REASON_REQUEST_MALFORMED,
+    REASON_UPSTREAM_ID_ABSENT,
+    STATE_ELIGIBLE as ELIGIBILITY_STATE_ELIGIBLE,
+    STATE_INELIGIBLE_CONFIGURATION as ELIGIBILITY_STATE_INELIGIBLE_CONFIGURATION,
+    STATE_INELIGIBLE_PERMANENT as ELIGIBILITY_STATE_INELIGIBLE_PERMANENT,
+    // Aliased, all four, because this module already has a `STATE_UNKNOWN`:
+    // the listener's. Two constants named for two different unknowns, one
+    // import away from each other, is a collision waiting to be resolved the
+    // wrong way round; the prefix says which surface each belongs to.
+    STATE_UNKNOWN as ELIGIBILITY_STATE_UNKNOWN,
+};
 /// The state labels this surface has words for, re-exported from the daemon
 /// module that produces them.
 ///
@@ -2095,6 +2424,173 @@ mod tests {
         );
     }
 
+    /// A group with nothing sendable offers no control -- the same rule an
+    /// ineligible row follows, one level up. And an ABSENT count is not a
+    /// zero: an invited contributor's group is offered on its pending count,
+    /// which is the trap this pairing exists to close.
+    #[test]
+    fn a_group_with_nothing_sendable_is_not_offered() {
+        // The question applies.
+        assert_eq!(group_control(5, Some(0)), ContributionControl::None);
+        assert_eq!(group_control(5, Some(1)), ContributionControl::Contribute);
+        assert_eq!(group_control(5, Some(5)), ContributionControl::Contribute);
+        // The question does not apply: every pending session is sendable.
+        assert_eq!(group_control(5, None), ContributionControl::Contribute);
+        // An empty group is an empty group either way.
+        assert_eq!(group_control(0, None), ContributionControl::None);
+        assert_eq!(group_control(0, Some(0)), ContributionControl::None);
+    }
+
+    /// The withheld line counts and says nothing else.
+    ///
+    /// Zero renders nothing -- there is no gap to explain -- and the sentence
+    /// must never name a reason, because it would be standing for up to
+    /// thirteen different ones.
+    #[test]
+    fn the_withheld_line_counts_without_explaining() {
+        assert_eq!(group_withheld_line(0), "");
+        assert!(group_withheld_line(1).starts_with("1 session "));
+        assert!(group_withheld_line(2).starts_with("2 sessions "));
+        assert!(group_withheld_line(114).starts_with("114 sessions "));
+
+        // Not one reason label's sentence, nor any word from one. The line
+        // stands for a set, and a set has no reason.
+        for withheld in [1, 2, 13] {
+            let line = group_withheld_line(withheld).to_lowercase();
+            for reason in crate::daemon::contribution_eligibility::ALL_REASONS {
+                assert_ne!(
+                    group_withheld_line(withheld),
+                    eligibility_reason_line(reason)
+                );
+            }
+            for word in ["setting", "model call", "copy", "mark", "digest", "proof"] {
+                assert!(
+                    !line.contains(word),
+                    "the withheld line reaches for a reason: {line}"
+                );
+            }
+        }
+    }
+
+    /// Every state and every reason the daemon can produce has a sentence,
+    /// and no two states share one.
+    ///
+    /// The set is read from the daemon's own pinned arrays rather than typed
+    /// again here: a reason added there with no sentence would otherwise
+    /// render as nothing at all, which is the failure this catches.
+    #[test]
+    fn every_eligibility_label_reaches_its_own_sentence() {
+        use crate::daemon::contribution_eligibility::{ALL_REASONS, ALL_STATES};
+        let mut seen: Vec<&str> = Vec::new();
+        for state in ALL_STATES {
+            let line = eligibility_state_line(state);
+            assert!(!line.trim().is_empty(), "{state} has no sentence");
+            assert!(
+                !seen.contains(&line),
+                "{state} borrows another state's sentence"
+            );
+            seen.push(line);
+        }
+        for reason in ALL_REASONS {
+            let line = eligibility_reason_line(reason);
+            assert!(!line.trim().is_empty(), "{reason} has no sentence");
+        }
+    }
+
+    /// **The tri-state rule, on this surface.** A state this build has never
+    /// heard of, or an empty one, must not borrow any known state's
+    /// sentence -- least of all an ineligibility, which would tell a
+    /// contributor their session is unsendable on no evidence at all -- and
+    /// must offer no send control.
+    #[test]
+    fn an_unrecognised_eligibility_state_borrows_nothing() {
+        for unknown in ["", "a_state_from_a_later_daemon", "ELIGIBLE", "eligible "] {
+            assert_eq!(
+                eligibility_state_line(unknown),
+                ELIGIBILITY_UNKNOWN,
+                "{unknown:?} must read as unevaluated"
+            );
+            for known in [
+                ELIGIBILITY_ELIGIBLE,
+                ELIGIBILITY_INELIGIBLE_PERMANENT,
+                ELIGIBILITY_INELIGIBLE_CONFIGURATION,
+            ] {
+                assert_ne!(
+                    eligibility_state_line(unknown),
+                    known,
+                    "{unknown:?} borrowed a known state's sentence"
+                );
+            }
+            assert_eq!(eligibility_control(unknown), ContributionControl::None);
+            assert_eq!(
+                eligibility_state_tone(unknown),
+                PrivateInferenceTone::Neutral
+            );
+            assert!(!eligibility_state_tone(unknown).reads_as_working());
+        }
+    }
+
+    /// An unfamiliar reason renders as nothing rather than as a guess. The
+    /// state sentence beside it has already said what is true.
+    #[test]
+    fn an_unrecognised_eligibility_reason_says_nothing() {
+        for unknown in ["", "a_reason_from_a_later_daemon", "NO_CALL"] {
+            assert_eq!(eligibility_reason_line(unknown), "");
+        }
+    }
+
+    /// The send control is offered for `eligible` and for nothing else. This
+    /// is the safety property of the surface in one assertion: a control on
+    /// any other row is an action the transport cannot perform, discovered
+    /// on the press.
+    #[test]
+    fn only_an_eligible_session_is_offered() {
+        use crate::daemon::contribution_eligibility::ALL_STATES;
+        for state in ALL_STATES {
+            let expected = if state == ELIGIBILITY_STATE_ELIGIBLE {
+                ContributionControl::Contribute
+            } else {
+                ContributionControl::None
+            };
+            assert_eq!(eligibility_control(state), expected, "{state}");
+        }
+    }
+
+    /// Only the configuration state may name a setting, and it is the only
+    /// one painted as actionable.
+    #[test]
+    fn only_the_configuration_state_reads_as_actionable() {
+        use crate::daemon::contribution_eligibility::ALL_STATES;
+        for state in ALL_STATES {
+            let tone = eligibility_state_tone(state);
+            if state == ELIGIBILITY_STATE_INELIGIBLE_CONFIGURATION {
+                assert_eq!(tone, PrivateInferenceTone::Attention, "{state}");
+            } else {
+                assert_ne!(tone, PrivateInferenceTone::Attention, "{state}");
+            }
+        }
+        // And a permanent ineligibility never reads as a working state.
+        assert!(!eligibility_state_tone(ELIGIBILITY_STATE_INELIGIBLE_PERMANENT).reads_as_working());
+    }
+
+    /// `eligible` promises an expectation, never an outcome. The server
+    /// decides, and a sentence that said otherwise would be read as a promise
+    /// on the day the server says no.
+    #[test]
+    fn the_eligible_sentence_promises_nothing() {
+        let text = ELIGIBILITY_ELIGIBLE.to_lowercase();
+        for claim in ["will be accepted", "guarantee", "accepted"] {
+            assert!(
+                !text.contains(claim),
+                "the eligible sentence claims {claim}"
+            );
+        }
+        assert!(
+            text.contains("when you send it"),
+            "the eligible sentence must say the last checks are still to come"
+        );
+    }
+
     /// Every field of the payload carries a finished sentence: no empties,
     /// and no template markers a shell would have to fill in.
     #[test]
@@ -2104,7 +2600,7 @@ mod tests {
         let fields = payload.as_object().expect("a JSON object");
         assert_eq!(
             fields.len(),
-            63,
+            80,
             "the payload's field count changed -- update the shells' decoders \
              and the tests that pin the set"
         );
@@ -2171,6 +2667,9 @@ mod tests {
             strings.len()
         );
         strings.push(serving_line(Some(8463)));
+        for withheld in [0, 1, 2, 13, 114] {
+            strings.push(group_withheld_line(withheld));
+        }
         for seconds in [None, Some(0), Some(1), Some(60), Some(3_600), Some(86_400)] {
             strings.push(harness_last_call_line(seconds));
         }
@@ -2199,6 +2698,23 @@ mod tests {
             "a_credential_state_from_a_later_daemon",
         ] {
             strings.push(credential_state_line(label).to_string());
+        }
+        for label in [
+            ELIGIBILITY_STATE_ELIGIBLE,
+            ELIGIBILITY_STATE_INELIGIBLE_PERMANENT,
+            ELIGIBILITY_STATE_INELIGIBLE_CONFIGURATION,
+            ELIGIBILITY_STATE_UNKNOWN,
+            "",
+            "an_eligibility_state_from_a_later_daemon",
+        ] {
+            strings.push(eligibility_state_line(label).to_string());
+        }
+        for label in crate::daemon::contribution_eligibility::ALL_REASONS
+            .iter()
+            .copied()
+            .chain(["", "a_reason_from_a_later_daemon"])
+        {
+            strings.push(eligibility_reason_line(label).to_string());
         }
         for outcome in [
             "changes",

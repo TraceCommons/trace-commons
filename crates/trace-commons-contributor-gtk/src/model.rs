@@ -170,6 +170,28 @@ pub struct QueueEntry {
     pub subagent_count: u32,
     #[serde(default)]
     pub subagents_dropped: u32,
+    /// Whether this session can be contributed, as the daemon worked it out
+    /// from the cheap checks it can run without reading bodies off disk.
+    ///
+    /// `None` IS NOT `unknown`. The field is absent from the wire entirely
+    /// when the contributor was invited rather than admitted on evidence, or
+    /// when the config could not be read -- they have no eligibility
+    /// question, and a row that answered one they do not have would put a
+    /// sentence about admissibility on every card an invited contributor
+    /// owns. `unknown` is a real state that arrives as a string and gets its
+    /// own sentence. The same tri-state discipline
+    /// `Settings::destination_credentialed` follows, and `#[serde(default)]`
+    /// on an `Option` is the mechanism that keeps the two apart.
+    ///
+    /// Never matched on in this shell: it is handed to
+    /// [`crate::eligibility`], which asks the shared crate.
+    #[serde(default)]
+    pub eligibility: Option<String>,
+    /// Which `Unattestable` variant decided [`Self::eligibility`], as a
+    /// stable label. Absent on every `eligible` row, and on a daemon that
+    /// predates the field.
+    #[serde(default)]
+    pub eligibility_reason: Option<String>,
 }
 
 impl QueueEntry {
@@ -367,6 +389,24 @@ pub struct ApproveResult {
     /// contributor.
     #[serde(default)]
     pub skipped: Vec<SkippedEntry>,
+    /// How many pending entries a GROUP selector left out for being
+    /// ineligible.
+    ///
+    /// **Absent, not zero**, on a single-`entry_id` call and for an invited
+    /// contributor -- in both cases no filter ran, and zero would read as
+    /// "nothing was left out", a claim about something that did not happen.
+    /// Present-and-zero is a different and meaningful answer: the filter ran
+    /// and took everything.
+    ///
+    /// Excluded entries are NEVER in [`Self::skipped`]. They were never
+    /// selected; `skipped` stays the account of what the call was asked to
+    /// act on.
+    ///
+    /// Rendered through `copy::group_withheld_line`, which answers the empty
+    /// string for zero -- so the absent case and the took-everything case
+    /// both draw nothing without this shell branching on the count.
+    #[serde(default)]
+    pub excluded_ineligible: Option<u64>,
 }
 
 /// One entry `approve` could not send, from the `skipped` list in its
@@ -484,6 +524,24 @@ pub struct Project {
     /// contributor should read.
     #[serde(default)]
     pub is_unresolved_bucket: bool,
+    /// How many of this project's sessions are waiting. Always present.
+    #[serde(default)]
+    pub pending_count: u64,
+    /// How many of those a group-level submit would actually send.
+    ///
+    /// **Absent when eligibility does not apply**, which is an invited
+    /// contributor -- they have no "3 of 7" to be told about, and
+    /// [`Self::pending_count`] alone is their answer. Never null, and never
+    /// zero standing in for absence: zero means the daemon's filter RAN and
+    /// took nothing, which is a different and offerable-nothing answer.
+    ///
+    /// This is the daemon's own count, not one this shell re-derives. The
+    /// filter that produces it is the filter a project-wide `approve`
+    /// applies, so the button and the call cannot disagree about what
+    /// "all eligible" means -- and if that rule ever changes an arm, this
+    /// follows it without anything here being edited.
+    #[serde(default)]
+    pub contributable_count: Option<u64>,
 }
 
 /// `list_history`.

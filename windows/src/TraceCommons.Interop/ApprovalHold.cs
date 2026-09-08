@@ -55,6 +55,33 @@ public sealed class ApprovalHold
     [JsonPropertyName("skipped")]
     public List<SubmitSkip> Skipped { get; set; } = new();
 
+    /// <summary>
+    /// How many sessions a group approve left out because they could not be
+    /// contributed.
+    /// </summary>
+    /// <remarks>
+    /// <b>NULL MEANS THE KEY WAS ABSENT, AND ABSENT IS NOT ZERO.</b> The
+    /// daemon sends it only for a group selector (<c>project_id</c> or
+    /// <c>all</c>) from a contributor admitted on evidence. It is absent for
+    /// an invited contributor and for every single-entry approve, because
+    /// zero there would read as "nothing was left out" -- a claim about a
+    /// filter that did not run. Present-and-zero is a different, meaningful
+    /// answer: the filter ran and took everything.
+    ///
+    /// <para>
+    /// Rendered through <c>tc_contribution_withheld_line</c>, which answers
+    /// the empty string for zero, so nothing needs to branch on the count.
+    /// </para>
+    ///
+    /// <para>
+    /// Excluded entries never appear in <see cref="Skipped"/>: they were
+    /// never selected, and that list stays the account of what the call was
+    /// asked to act on.
+    /// </para>
+    /// </remarks>
+    [JsonPropertyName("excluded_ineligible")]
+    public long? ExcludedIneligible { get; set; }
+
     [JsonPropertyName("hold_secs")]
     public long HoldSecs { get; set; }
 

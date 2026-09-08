@@ -263,6 +263,56 @@ impl AttestedCall {
     }
 }
 
+/// The half of [`attested_final_call`] that costs nothing: which hop is the
+/// final call, and whether its ledger row alone already refuses.
+///
+/// **The cost split this exists for.** [`Unattestable`] has nine variants and
+/// they fall either side of a line: [`Unattestable::NoCall`],
+/// [`Unattestable::CaptureOff`], [`Unattestable::DigestAbsent`] and
+/// [`Unattestable::UpstreamIdAbsent`] are all answerable from four `Option`
+/// fields on a row already in memory, while the rest need every captured body
+/// read off disk and hashed. A list of pending sessions may run the first
+/// group and may not run the second: hashing every body of every session on
+/// every list is a cost the daemon may not put on a contributor's machine.
+///
+/// So this is the prefix, lifted out verbatim rather than reimplemented.
+/// A second copy of "which row is final, and is it usable" would be a copy
+/// that disagrees eventually, and what it would disagree about is whether a
+/// contributor is told their session can be sent.
+/// `the_cheap_prefix_agrees_with_the_full_check` pins the agreement on every
+/// refusal in the first group.
+///
+/// Returns the final call's row when none of the cheap refusals apply. That
+/// is **not** a claim the call is attestable -- the expensive group has not
+/// run.
+///
+/// # Errors
+///
+/// Only the four ledger-answerable variants. Never the five that need bytes.
+pub fn ledger_only_final_call(rows: &[RoutedExchange]) -> Result<&RoutedExchange, Unattestable> {
+    let final_call = rows
+        .iter()
+        // `max_by_key` on a tie keeps the last element, which is what we
+        // want: the ledger's own insertion order breaks a timestamp tie, and
+        // `exchanges_since` yields oldest first.
+        .max_by_key(|row| (row.started_at, row.id))
+        .ok_or(Unattestable::NoCall)?;
+
+    if final_call.body_ref.is_none() {
+        return Err(Unattestable::CaptureOff);
+    }
+    // A missing response digest is the restarted/truncated-stream case.
+    // Named as an absent digest rather than as a restart, because that is
+    // what was actually observed: the proxy records no marker.
+    if final_call.request_sha256.is_none() || final_call.response_sha256.is_none() {
+        return Err(Unattestable::DigestAbsent);
+    }
+    if final_call.upstream_id.is_none() {
+        return Err(Unattestable::UpstreamIdAbsent);
+    }
+    Ok(final_call)
+}
+
 /// Read the final inference call's verbatim bodies out of the proxy's body
 /// store.
 ///
@@ -279,14 +329,11 @@ pub fn attested_final_call(
     rows: &[RoutedExchange],
     bodies_dir: &Path,
 ) -> Result<AttestedCall, Unattestable> {
-    let final_call = rows
-        .iter()
-        // `max_by_key` on a tie keeps the last element, which is what we
-        // want: the ledger's own insertion order breaks a timestamp tie, and
-        // `exchanges_since` yields oldest first.
-        .max_by_key(|row| (row.started_at, row.id))
-        .ok_or(Unattestable::NoCall)?;
-
+    let final_call = ledger_only_final_call(rows)?;
+    // Re-borrowed rather than returned by `ledger_only_final_call`: that
+    // function answers a question about the row, and handing back the three
+    // fields it proved present would make its signature about this caller.
+    // Every one of these is `Some` because the check above passed.
     let body_ref = final_call
         .body_ref
         .as_deref()
@@ -296,9 +343,6 @@ pub fn attested_final_call(
         final_call.response_sha256.as_deref(),
     ) {
         (Some(request), Some(response)) => (request, response),
-        // A missing response digest is the restarted/truncated-stream case.
-        // Named as an absent digest rather than as a restart, because that is
-        // what was actually observed: the proxy records no marker.
         _ => return Err(Unattestable::DigestAbsent),
     };
     let upstream_id = final_call
@@ -683,6 +727,129 @@ mod tests {
         assert_eq!(
             attested_final_call(&[], dir.path()).unwrap_err(),
             Unattestable::NoCall
+        );
+    }
+
+    /// The prefix and the full check agree on every refusal the prefix can
+    /// reach, and the prefix names the same final row.
+    ///
+    /// This is the load-bearing test of the split. A list surface reports what
+    /// `ledger_only_final_call` says; a submission is decided by
+    /// `attested_final_call`. If they can disagree about a cheap refusal, the
+    /// list tells a contributor something the submit path will contradict --
+    /// which is the exact defect the eligibility surface exists to remove,
+    /// reproduced inside the client.
+    ///
+    /// Every case here has real bodies on disk hashing to the recorded
+    /// digests, so nothing in the expensive group can fire and shadow a
+    /// disagreement in the cheap one.
+    #[test]
+    fn the_cheap_prefix_agrees_with_the_full_check() {
+        let base = row();
+        let dir = store_with(
+            AWKWARD_REQUEST.as_bytes(),
+            AWKWARD_RESPONSE.as_bytes(),
+            base.body_ref.as_deref().unwrap(),
+        );
+
+        // Every way a row can trip a ledger-answerable refusal, plus the
+        // empty session and the row that trips none.
+        let mut no_body = row();
+        no_body.body_ref = None;
+        let mut no_request_digest = row();
+        no_request_digest.request_sha256 = None;
+        let mut no_response_digest = row();
+        no_response_digest.response_sha256 = None;
+        let mut no_digests = row();
+        no_digests.request_sha256 = None;
+        no_digests.response_sha256 = None;
+        let mut no_upstream = row();
+        no_upstream.upstream_id = None;
+
+        let cases: Vec<(&str, Vec<RoutedExchange>, Option<Unattestable>)> = vec![
+            ("no hops", vec![], Some(Unattestable::NoCall)),
+            ("no body ref", vec![no_body], Some(Unattestable::CaptureOff)),
+            (
+                "no request digest",
+                vec![no_request_digest],
+                Some(Unattestable::DigestAbsent),
+            ),
+            (
+                "no response digest",
+                vec![no_response_digest],
+                Some(Unattestable::DigestAbsent),
+            ),
+            (
+                "neither digest",
+                vec![no_digests],
+                Some(Unattestable::DigestAbsent),
+            ),
+            (
+                "no provider identifier",
+                vec![no_upstream],
+                Some(Unattestable::UpstreamIdAbsent),
+            ),
+            ("a usable row", vec![row()], None),
+        ];
+
+        for (name, rows, expected) in cases {
+            let cheap = ledger_only_final_call(&rows).err();
+            assert_eq!(cheap, expected, "{name}: the prefix's own answer moved");
+            let full = attested_final_call(&rows, dir.path()).err();
+            assert_eq!(
+                cheap, full,
+                "{name}: the prefix and the full check disagree"
+            );
+        }
+    }
+
+    /// The prefix picks the same hop the full check attests: the last one by
+    /// `(started_at, id)`, not the first and not the one the vector happens
+    /// to end with.
+    #[test]
+    fn the_prefix_names_the_same_final_hop() {
+        let mut earlier = row();
+        earlier.id = Some(1);
+        earlier.started_at = chrono::Utc.with_ymd_and_hms(2026, 9, 3, 11, 0, 0).unwrap();
+        earlier.upstream_id = Some("chatcmpl-earlier".to_string());
+        let later = row();
+        // Deliberately out of order, so a prefix that took `rows.last()`
+        // would fail here.
+        let rows = vec![later.clone(), earlier];
+        let dir = store_with(
+            AWKWARD_REQUEST.as_bytes(),
+            AWKWARD_RESPONSE.as_bytes(),
+            later.body_ref.as_deref().unwrap(),
+        );
+
+        assert_eq!(
+            ledger_only_final_call(&rows)
+                .expect("a usable final row")
+                .upstream_id
+                .as_deref(),
+            Some("chatcmpl-abc123")
+        );
+        assert_eq!(
+            attested_final_call(&rows, dir.path())
+                .expect("attestable")
+                .upstream_id(),
+            "chatcmpl-abc123"
+        );
+    }
+
+    /// The prefix never reports a refusal it cannot have run the work for.
+    /// Bodies that are absent from disk are the full check's
+    /// `BodiesUnreadable`; the prefix must still say the row is usable,
+    /// because it did not look.
+    #[test]
+    fn the_prefix_refuses_nothing_from_the_expensive_group() {
+        let empty = tempfile::tempdir().expect("tempdir");
+        let rows = vec![row()];
+
+        assert!(ledger_only_final_call(&rows).is_ok());
+        assert_eq!(
+            attested_final_call(&rows, empty.path()).unwrap_err(),
+            Unattestable::BodiesUnreadable
         );
     }
 

@@ -399,6 +399,18 @@ final class AppModel: ObservableObject {
 
     /// The three branch tables the credential card turns on, all decided in
     /// the Rust. This shell owns no `switch` on this surface either.
+    /// The four branch tables the queue's eligibility rows turn on, all
+    /// decided in the Rust. This shell owns no `switch` on this surface
+    /// either -- see `EligibilitySurface`.
+    let eligibilityCalls = EligibilityCalls(
+        stateLine: { TCContributionEligibility.stateLine(state: $0) },
+        stateTone: { TCContributionEligibility.stateTone(state: $0) },
+        control: { TCContributionEligibility.control(state: $0) },
+        reasonLine: { TCContributionEligibility.reasonLine(reason: $0) },
+        withheldLine: { TCContributionEligibility.withheldLine(withheld: $0) },
+        groupControl: { TCContributionEligibility.groupControl(pending: $0, contributable: $1) }
+    )
+
     let credentialCalls = CredentialCalls(
         stateLine: { TCNearAiCredential.stateLine(state: $0) },
         stateTone: { TCNearAiCredential.stateTone(state: $0) },
@@ -1469,7 +1481,14 @@ final class AppModel: ObservableObject {
     /// in the first place: `QueueRow.onAppear` drives `requestPreview(for:)`
     /// for whatever the viewport actually realizes, so this stays
     /// proportional to what is on screen.
-    private func applyPendingUpdate(_ entries: [QueueEntry]) {
+    ///
+    /// Internal rather than private so a test can land a snapshot and watch
+    /// what a view holding this model would see. `pending` is
+    /// `@Published private(set)` and there is no other way in; the
+    /// eligibility gate on an open preview sheet reads `awaitingDecision`,
+    /// which only a snapshot moves, so a test that cannot deliver one
+    /// cannot prove the sheet re-reads it.
+    func applyPendingUpdate(_ entries: [QueueEntry]) {
         let previousIDs = Set(pending.map(\.entryID))
         publishIfChanged(\.pending, entries)
         let currentIDs = Set(entries.map(\.entryID))
@@ -1628,6 +1647,23 @@ final class AppModel: ObservableObject {
         correction: String? = nil,
         completion: ((Bool) -> Void)? = nil
     ) {
+        // THE PRESS DECIDES WHAT IS SENT. The queue card draws its Submit
+        // only for a row the shared table offers one for, and its rows come
+        // from `awaitingDecision` so they are never stale -- but the tap
+        // still lands after the render that drew the button, and a snapshot
+        // can arrive in between. Asked here rather than in the view so
+        // every route to a single approval goes through it.
+        //
+        // A refusal is silent on purpose: the row is about to repaint
+        // without its button and with the sentence saying why, which is the
+        // answer. An error banner would name a failure that did not happen.
+        guard EligibilitySurface.mayProceed(
+            entry, in: awaitingDecision, id: \.entryID,
+            eligibility: { $0.contributionEligibility }, calls: eligibilityCalls)
+        else {
+            completion?(false)
+            return
+        }
         perform("approve", work: {
             try $0.approve(entryID: entry.entryID, verdict: verdict, correction: correction)
         }) { response in
@@ -1651,13 +1687,41 @@ final class AppModel: ObservableObject {
     /// `verdict` applies to every entry the approval covers. The plain
     /// `Submit all` passes none; `Submit all as...` is the opt-in path that
     /// passes one.
+    ///
+    /// **A GROUP-LEVEL SUBMIT MEANS "ALL ELIGIBLE", NEVER "ALL", AND THE
+    /// DAEMON ENFORCES THAT.** Both group selectors act only on entries whose
+    /// eligibility is `eligible`, and report how many they left out as
+    /// `excluded_ineligible`. This shell used to fan the call out into one
+    /// `entry_id` approval per eligible entry and merge the responses; it
+    /// does not any more, because a per-project approve has no row to check
+    /// and no shell can close that gap from outside. One call, one approval
+    /// instant, one hold that covers every entry it took.
     func submitProject(id projectID: String, verdict: ContributorVerdict? = nil) {
-        let attempted = awaitingDecision.filter { $0.projectID == projectID }.map(\.entryID)
+        // The ids this shell believes the call covers, for the undo path
+        // only. The daemon decides what it actually takes, and its
+        // `excluded_ineligible` says how many it did not -- neither is
+        // recovered by filtering here.
+        let attempted = EligibilitySurface.contributable(
+            awaitingDecision.filter { $0.projectID == projectID },
+            eligibility: { $0.contributionEligibility }, calls: eligibilityCalls
+        ).map(\.entryID)
         perform("approve", work: {
             try $0.approve(projectID: projectID, verdict: verdict)
         }) { response in
             self.refreshQueue()
             self.showToast(for: response, attempted: attempted)
+            // What became of the rest, from the daemon's own count and the
+            // shared sentence. NEVER BRANCHED ON HERE: the table answers the
+            // empty string for zero and for the absence, so a filter that
+            // ran and took everything, and one that never ran, both draw
+            // nothing without this code knowing which it was.
+            // `clamping`, not `Int64(...)`: the field is unsigned on the
+            // wire and a plain conversion TRAPS above `Int64.max` rather
+            // than wrapping. No honest daemon sends that, which is exactly
+            // why it would be a crash nobody had thought about.
+            let withheld = Int64(clamping: response.excludedIneligible ?? 0)
+            let sentence = self.eligibilityCalls.withheldLine(withheld) ?? ""
+            self.lastActionNotice = sentence.isEmpty ? nil : sentence
         }
     }
 
@@ -2021,7 +2085,12 @@ final class AppModel: ObservableObject {
             // dropped, so the card's extent line is absent and the capture
             // shows exactly what it showed before these fields existed.
             subagentCount: 0,
-            subagentsDropped: 0
+            subagentsDropped: 0,
+            // The screenshot fixture stands for an invited contributor: no
+            // eligibility field, so the capture shows the card exactly as it
+            // looked before this surface existed.
+            eligibility: nil,
+            eligibilityReason: nil
         )
         var offsets: [Int] = []
         if !needle.isEmpty {

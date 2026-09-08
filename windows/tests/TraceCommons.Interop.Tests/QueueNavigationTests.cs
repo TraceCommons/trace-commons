@@ -12,11 +12,23 @@ namespace TraceCommons.Interop.Tests;
 /// </summary>
 public class QueueNavigationTests
 {
+
+    /// <summary>
+    /// This test is not about eligibility counts.
+    /// </summary>
+    /// <remarks>
+    /// Spelled out at every call site rather than defaulted, because a group
+    /// built with no counts offers everything it holds -- which is correct
+    /// for an invited contributor and is the over-offer bug for anyone else.
+    /// Saying so is what keeps forgetting distinguishable from choosing.
+    /// </remarks>
+    private static readonly IReadOnlyDictionary<string, int>? NoCounts = null;
+
     private static IReadOnlyList<ProjectQueueGroup> Groups(params string[] projectIds)
         => QueueGrouping.ByProject(
             Array.ConvertAll(
                 projectIds,
-                id => QueueEntries.Entry("e-" + id, id, id)));
+                id => QueueEntries.Entry("e-" + id, id, id)), NoCounts);
 
     [Fact]
     public void RootStaysRoot()
@@ -59,7 +71,7 @@ public class QueueNavigationTests
         {
             QueueEntries.Entry("e1", "proj_1", "api"),
             QueueEntries.Entry("e2", "proj_2", "api"),
-        });
+        }, NoCounts);
 
         Assert.Equal(
             new QueueLocation.Project("proj_2"),
@@ -78,7 +90,7 @@ public class QueueNavigationTests
     public void TheUnnamedProjectBucketIsAFolderLikeAnyOther()
     {
         IReadOnlyList<ProjectQueueGroup> groups =
-            QueueGrouping.ByProject(new[] { QueueEntries.Entry("e1") });
+            QueueGrouping.ByProject(new[] { QueueEntries.Entry("e1") }, NoCounts);
 
         Assert.Equal(
             new QueueLocation.Project(""),

@@ -38,6 +38,71 @@ final class DaemonFieldDecodingTests: XCTestCase {
         XCTAssertNil(entry.sessionPath)
     }
 
+    // MARK: - Eligibility: an absent key is not a state
+
+    /// The distinction the eligibility contract turns on, at the decoder.
+    ///
+    /// An entry with no `eligibility` key belongs to a contributor who was
+    /// invited rather than admitted on evidence, or came from a daemon
+    /// predating the field. Neither has an eligibility question, and reading
+    /// the absence as `unknown` would put a caveat on work that carries none.
+    func testAQueueEntryWithNoEligibilityKeyCarriesNoEligibility() throws {
+        let entry = try decode(QueueEntry.self, """
+        {"entry_id":"e1","session_hash":"sha256:a","source":"claude_code",
+         "project_id":"proj_abc","project_label":"repo",
+         "size_bytes":12,"discovered_at":"2026-09-03T00:00:00Z",
+         "state":"pending","attempts":0}
+        """)
+        XCTAssertNil(entry.eligibility)
+        XCTAssertNil(entry.eligibilityReason)
+        XCTAssertNil(entry.contributionEligibility)
+    }
+
+    /// `unknown` really arrives on the wire -- a row this build never
+    /// evaluated, or one whose submission failed transiently -- and it must
+    /// survive the decoder as a state rather than collapsing into silence.
+    func testUnknownOnTheWireSurvivesAsAState() throws {
+        let entry = try decode(QueueEntry.self, """
+        {"entry_id":"e1","session_hash":"sha256:a","source":"claude_code",
+         "project_id":"proj_abc","project_label":"repo",
+         "size_bytes":12,"discovered_at":"2026-09-03T00:00:00Z",
+         "state":"pending","attempts":0,"eligibility":"unknown",
+         "eligibility_reason":"receipt_unavailable"}
+        """)
+        XCTAssertEqual(entry.eligibility, "unknown")
+        XCTAssertEqual(entry.contributionEligibility?.state, "unknown")
+        XCTAssertEqual(entry.contributionEligibility?.reason, "receipt_unavailable")
+    }
+
+    /// An ineligible row still decodes whole. Nothing is filtered here: the
+    /// queue shows every session on the contributor's computer and offers
+    /// only the eligible ones.
+    func testAnIneligibleEntryDecodesWithItsReason() throws {
+        let entry = try decode(QueueEntry.self, """
+        {"entry_id":"e1","session_hash":"sha256:a","source":"claude_code",
+         "project_id":"proj_abc","project_label":"repo",
+         "size_bytes":12,"discovered_at":"2026-09-03T00:00:00Z",
+         "state":"pending","attempts":0,
+         "eligibility":"ineligible_permanent",
+         "eligibility_reason":"no_inference_call"}
+        """)
+        XCTAssertEqual(entry.contributionEligibility?.state, "ineligible_permanent")
+        XCTAssertEqual(entry.contributionEligibility?.reason, "no_inference_call")
+    }
+
+    /// An `eligible` row carries no reason, and that is not a decoding
+    /// failure -- there is nothing to explain.
+    func testAnEligibleEntryCarriesNoReason() throws {
+        let entry = try decode(QueueEntry.self, """
+        {"entry_id":"e1","session_hash":"sha256:a","source":"claude_code",
+         "project_id":"proj_abc","project_label":"repo",
+         "size_bytes":12,"discovered_at":"2026-09-03T00:00:00Z",
+         "state":"pending","attempts":0,"eligibility":"eligible"}
+        """)
+        XCTAssertEqual(entry.contributionEligibility?.state, "eligible")
+        XCTAssertNil(entry.contributionEligibility?.reason)
+    }
+
     func testPreviewSummaryDecodesDistinctCounts() throws {
         let summary = try decode(PreviewSummary.self, """
         {"would_send_bytes":10,"raw_session_bytes":20,"event_count":3,

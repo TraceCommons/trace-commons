@@ -299,6 +299,25 @@ pub struct SessionTranscript {
     /// them per queue entry would multiply the daemon's peak by the queue
     /// depth.
     pub attested_call: Option<Arc<crate::routing::attested::AttestedCall>>,
+    /// Why [`Self::attested_call`] is `None`, when something actually
+    /// refused.
+    ///
+    /// The refusal used to be discarded the instant it was produced -- the
+    /// overlay wrote `attested_final_call(..).ok()` -- and with it went the
+    /// only place the expensive checks are ever paid for. A surface that
+    /// wants to tell a contributor *why* a session cannot be sent would
+    /// otherwise have to re-read and re-hash every captured body to find out,
+    /// which is exactly the cost the cheap/expensive split exists to avoid.
+    /// Keeping the answer that was already computed costs one `Option`.
+    ///
+    /// `None` beside a `None` [`Self::attested_call`] means nothing refused,
+    /// because nothing ran: no body store is configured, or this transcript
+    /// never went through the overlay at all. That is a different fact from a
+    /// refusal and must not be read as one.
+    ///
+    /// Label-only, like the variant itself: it carries no path, digest or
+    /// identifier. See [`crate::routing::attested::Unattestable`].
+    pub attested_refusal: Option<crate::routing::attested::Unattestable>,
 }
 
 /// `Send + Sync` because the background daemon holds source adapters across

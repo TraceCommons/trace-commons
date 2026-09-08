@@ -710,6 +710,33 @@
                 </Border>
             </StackPanel>
 
+            <!--
+                Whether this session can be contributed at all, above the
+                buttons that act on it.
+
+                Contribute is DISABLED rather than hidden here, unlike on the
+                queue row: on the row the button's absence is read against its
+                siblings, but this is the sheet a contributor opened on
+                purpose to reach that one control, and a control that is gone
+                from the place it was expected reads as a broken window. The
+                sentences below say why it will not press.
+
+                Absent entirely for an invited contributor, who has no
+                eligibility question. Every binding OneWay: a submit-time
+                failure writes its reason back into the entry.
+            -->
+            <StackPanel Spacing="2"
+                        Visibility="{x:Bind ViewModel.HasEligibilityText, Mode=OneWay}">
+                <TextBlock Text="{x:Bind ViewModel.EligibilityText, Mode=OneWay}"
+                           Style="{StaticResource TcCaptionTextStyle}"
+                           TextWrapping="Wrap" />
+                <TextBlock Text="{x:Bind ViewModel.EligibilityReasonText, Mode=OneWay}"
+                           Visibility="{x:Bind ViewModel.HasEligibilityReason, Mode=OneWay}"
+                           Style="{StaticResource TcCaptionSmallTextStyle}"
+                           Foreground="{ThemeResource TcInkSecondaryBrush}"
+                           TextWrapping="Wrap" />
+            </StackPanel>
+
             <Grid ColumnDefinitions="Auto,*,Auto,Auto" ColumnSpacing="8">
                 <!-- Outlined like Close, never filled: it must not read as a
                      second way to approve. -->

@@ -185,10 +185,24 @@ public sealed class PreviewSheetViewModel : INotifyPropertyChanged, IDisposable
     private bool _correctionRefused;
     private PreviewTab _tab = PreviewTab.Search;
 
-    public PreviewSheetViewModel(DaemonHost host, QueueEntryViewModel entry)
+    /// <remarks>
+    /// <paramref name="liveEntry"/> is REQUIRED AND HAS NO DEFAULT. Making it
+    /// optional would mean a caller that forgot it silently got the stale
+    /// behaviour back -- the exact defect this parameter exists to remove,
+    /// re-armed as a default, with no test failure and no warning to whoever
+    /// added the call site. Required, it fails at compile time where the
+    /// mistake is. A caller that genuinely has no queue to resolve against
+    /// passes <c>liveEntry: null</c> and says why, so choosing it is visible
+    /// in the code and indistinguishable from nothing.
+    /// </remarks>
+    public PreviewSheetViewModel(
+        DaemonHost host,
+        QueueEntryViewModel entry,
+        Func<string, QueueEntryViewModel?>? liveEntry)
     {
         _host = host ?? throw new ArgumentNullException(nameof(host));
         Entry = entry ?? throw new ArgumentNullException(nameof(entry));
+        _liveEntry = liveEntry;
 
         // Every gate transition re-raises the properties the footer binds to,
         // so there is no path that changes a condition without the button
@@ -210,6 +224,68 @@ public sealed class PreviewSheetViewModel : INotifyPropertyChanged, IDisposable
     public event Action<PreviewDecision>? Decided;
 
     public QueueEntryViewModel Entry { get; }
+
+    /// <summary>
+    /// Looks this session up in the queue as it stands NOW, by entry id.
+    /// </summary>
+    /// <remarks>
+    /// Null when the sheet was opened without a queue to resolve against, in
+    /// which case <see cref="LiveEntry"/> falls back to the pinned copy --
+    /// the honest answer for a sheet that has no live queue, and the same
+    /// answer this sheet gave before.
+    /// </remarks>
+    private readonly Func<string, QueueEntryViewModel?>? _liveEntry;
+
+    /// <summary>
+    /// This session as the queue describes it now, falling back to the copy
+    /// the sheet opened with.
+    /// </summary>
+    /// <remarks>
+    /// <b><see cref="Entry"/> IS THE COPY THIS SHEET OPENED WITH, AND IT CAN
+    /// GO STALE.</b> The queue rebuilds every row object on refresh
+    /// (<c>MainViewModel.ReplacePending</c> clears and refills rather than
+    /// diffing), so an open sheet keeps an entry nobody updates. A
+    /// submit-time failure writes its reason back into the row -- Decision 1
+    /// of the design -- so a session can be downgraded to
+    /// <c>ineligible_permanent</c> while its sheet is on screen, and a gate
+    /// computed from the opening copy would go on offering Contribute
+    /// indefinitely. No write undoes the gate; the gate simply reads a copy
+    /// that has stopped being true.
+    ///
+    /// <para>
+    /// ONLY THE GATE AND ITS SENTENCES READ THIS. What the sheet actually
+    /// approves still goes through <see cref="Entry"/>: the entry id is
+    /// identical either way, so nothing a contributor started moves under
+    /// them mid-read, and the preview they are looking at stays the one they
+    /// opened.
+    /// </para>
+    ///
+    /// <para>
+    /// It reads the queue rather than assuming the worst, so an entry the
+    /// daemon UPGRADES becomes offerable without closing the sheet.
+    /// </para>
+    /// </remarks>
+    private QueueEntryViewModel LiveEntry =>
+        (_liveEntry is null ? null : _liveEntry(Entry.EntryId)) ?? Entry;
+
+    /// <summary>
+    /// The queue changed underneath this sheet: re-read everything derived
+    /// from the entry.
+    /// </summary>
+    /// <remarks>
+    /// Resolving live is only half of it. These properties are pull-bound, so
+    /// without a raise the footer keeps drawing the answer it last read --
+    /// which for an entry downgraded while the sheet is open is an armed
+    /// Contribute that stays armed for as long as the sheet is up.
+    /// </remarks>
+    public void QueueChanged()
+    {
+        Raise(nameof(CanContribute));
+        Raise(nameof(HasEligibilityText));
+        Raise(nameof(EligibilityText));
+        Raise(nameof(HasEligibilityReason));
+        Raise(nameof(EligibilityReasonText));
+    }
 
     /// <summary>The consent invariant. See <see cref="ReadGate"/>.</summary>
     public ReadGate Gate { get; } = new();
@@ -451,11 +527,41 @@ public sealed class PreviewSheetViewModel : INotifyPropertyChanged, IDisposable
 
     /// <summary>
     /// Armed only with a pinned preview, the sentences that explain the
-    /// button, and no decision already in flight. See
-    /// <see cref="ReadGate.CanArm"/>: a build that cannot read the claim
-    /// must not take an approval against it.
+    /// button, no decision already in flight, and a session the shared crate
+    /// says may be offered at all. See <see cref="ReadGate.CanArm"/>: a build
+    /// that cannot read the claim must not take an approval against it.
     /// </summary>
-    public bool CanContribute => ReadGate.CanArm(_consent, Gate.CanContribute) && !_deciding;
+    /// <remarks>
+    /// The eligibility half is the same rule the queue row follows, and it
+    /// has to be here too: "Look inside" is a second route to the send, and a
+    /// button the row withheld would otherwise be waiting one click behind
+    /// it. <see cref="QueueEntryViewModel.CanContribute"/> is true for a row
+    /// the daemon never asked the question of, so an invited contributor's
+    /// sheet is unchanged.
+    ///
+    /// <para>
+    /// The sentence saying why is drawn beside the button by
+    /// <see cref="EligibilityText"/>, so this is never a control that
+    /// vanished without explanation.
+    /// </para>
+    /// </remarks>
+    public bool CanContribute =>
+        ReadGate.CanArm(_consent, Gate.CanContribute) && !_deciding && LiveEntry.CanContribute;
+
+    /// <summary>
+    /// Whether this session carries a sentence about whether it can be
+    /// contributed. See <see cref="QueueEntryViewModel.HasEligibilityText"/>.
+    /// </summary>
+    public bool HasEligibilityText => LiveEntry.HasEligibilityText;
+
+    /// <summary>That sentence, from the shared crate.</summary>
+    public string EligibilityText => LiveEntry.EligibilityText;
+
+    /// <summary>Whether a reason worth naming came with it.</summary>
+    public bool HasEligibilityReason => LiveEntry.HasEligibilityReason;
+
+    /// <summary>That reason, from the shared crate.</summary>
+    public string EligibilityReasonText => LiveEntry.EligibilityReasonText;
 
     public bool CanDecide => !_deciding;
 
@@ -852,8 +958,19 @@ public sealed class PreviewSheetViewModel : INotifyPropertyChanged, IDisposable
         // Re-checked here rather than trusted from the button's enabled state.
         // The gate is the invariant; a disabled control is only how it is
         // usually expressed.
+        //
+        // Draw time decides what is offered; the press decides what is sent,
+        // and only the second is load-bearing. CanContribute resolves the
+        // entry against the live queue, so this asks the queue as it stands
+        // NOW -- a session downgraded between the last redraw and this click
+        // is refused here rather than sent and turned away.
+        //
+        // Refuses and redraws rather than sending: QueueChanged re-reads
+        // everything the footer draws, so the button disables itself and the
+        // sentence beside it says why. Not a throw, and not a silent no-op.
         if (!CanContribute)
         {
+            QueueChanged();
             return;
         }
 

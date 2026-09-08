@@ -257,6 +257,10 @@ struct PassContext {
     max_queue_entries: usize,
     consent_scopes: Vec<String>,
     approval_inputs: Option<String>,
+    /// The signup flag, read once per pass with everything else. Off for an
+    /// invited contributor, whose entries carry no eligibility at all -- see
+    /// `QueueEntry::eligibility`.
+    admission_evidence: bool,
 }
 
 impl PassContext {
@@ -284,11 +288,16 @@ impl PassContext {
             };
             crate::daemon::preview::input_fingerprint(c, near_ai.as_ref(), attested_bodies)
         });
+        let admission_evidence = cfg
+            .as_ref()
+            .and_then(|c| c.witness.as_ref())
+            .is_some_and(|w| w.admission_evidence);
         Self {
             now,
             max_queue_entries,
             consent_scopes,
             approval_inputs,
+            admission_evidence,
         }
     }
 }
@@ -584,6 +593,13 @@ fn visit_session(
         && !from_staging
         && armed_settle_elapsed(obs.modified_at, ctx.now);
 
+    let eligibility = super::contribution_eligibility::evaluate(
+        ctx.admission_evidence,
+        &transcript.routing,
+        transcript.attested_call.as_deref(),
+        transcript.attested_refusal,
+    );
+
     let entry = QueueEntry {
         entry_id: entry_id_for(&transcript.session_hash),
         session_hash: transcript.session_hash.clone(),
@@ -634,6 +650,14 @@ fn visit_session(
         // can recognize it without reading the group again. See
         // `QueueEntry::observed_modified_at`.
         observed_modified_at: Some(obs.modified_at),
+        // Free here and nowhere else. The load above already joined this
+        // session's ledger hops and, where a body store is configured,
+        // already ran the full attested check; recording what they said
+        // costs two labels. A list that asked the question instead would
+        // pay for a re-read and re-hash of every captured body in the
+        // queue, every time anything called it.
+        eligibility: eligibility.map(|v| v.state.to_string()),
+        eligibility_reason: eligibility.and_then(|v| v.reason).map(str::to_string),
     };
     let entry_id = entry.entry_id;
 
@@ -1042,6 +1066,30 @@ mod tests {
             };
             let resp = super::super::ipc::handle_request(&self.shared, &req);
             assert!(resp.error.is_none(), "{:?}", resp.error);
+        }
+
+        /// Turn the signup flag on, which is what makes a queue entry
+        /// carry an eligibility at all.
+        fn admitted_on_evidence(&self) {
+            let cfg: crate::config::ContributorConfig = serde_json::from_value(serde_json::json!({
+                "schema_version": crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION,
+                "issuer_url": "https://issuer.example",
+                "ingest_url": "https://ingest.example",
+                "audience": "upload",
+                "tenant_id": format!("near-{}", "ab".repeat(32)),
+                "instance_id": "",
+                "user_subject": "device",
+                "device_key_id": "device",
+                "consent_scopes": ["debugging_evaluation"],
+                "witness": {
+                    "url": "https://witness.example",
+                    "signing_address": format!("0x{}", "ab".repeat(20)),
+                    "expected_measurements": [format!("mrtd={}", "ab".repeat(48))],
+                    "admission_evidence": true,
+                },
+            }))
+            .unwrap();
+            self.shared.store.save_config(&cfg).unwrap();
         }
 
         fn queue_len(&self) -> usize {
@@ -2785,5 +2833,48 @@ mod tests {
             state_sentinel_survived(&f),
             "an empty batch moved nothing and must not rewrite the state file"
         );
+    }
+
+    /// The entry records its eligibility at the one moment the answer is
+    /// free -- the load the watcher had already paid for -- rather than
+    /// leaving a list to ask for it later.
+    ///
+    /// A session with no inference hops is the case the whole surface exists
+    /// for: everything a contributor recorded before they started having
+    /// their model calls answered here. It is permanent, and the entry says
+    /// so before anybody presses anything.
+    #[tokio::test]
+    async fn a_queued_session_with_no_hops_records_a_permanent_ineligibility() {
+        use crate::daemon::contribution_eligibility as ce;
+        let f = WatcherFixture::new();
+        f.admitted_on_evidence();
+        f.write_session("repo", "11111111-1111-1111-1111-111111111111", 0);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+
+        let queue = f.shared.queue.lock().unwrap();
+        let entry = queue.all().first().expect("one entry").clone();
+        assert_eq!(
+            entry.eligibility.as_deref(),
+            Some(ce::STATE_INELIGIBLE_PERMANENT)
+        );
+        assert_eq!(
+            entry.eligibility_reason.as_deref(),
+            Some(ce::REASON_NO_CALL)
+        );
+    }
+
+    /// And an invited contributor's entry records nothing at all, so the
+    /// wire has nothing to render. The queue is the same queue; the only
+    /// difference is that nobody is being asked a question they do not have.
+    #[tokio::test]
+    async fn an_invited_contributors_entry_records_no_eligibility() {
+        let f = WatcherFixture::new();
+        f.write_session("repo", "11111111-1111-1111-1111-111111111111", 0);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+
+        let queue = f.shared.queue.lock().unwrap();
+        let entry = queue.all().first().expect("one entry").clone();
+        assert_eq!(entry.eligibility, None);
+        assert_eq!(entry.eligibility_reason, None);
     }
 }

@@ -2823,6 +2823,215 @@ pub unsafe extern "C" fn tc_near_ai_credential_action(state: *const c_char) -> i
     .unwrap_or(TC_CREDENTIAL_ACTION_NONE)
 }
 
+/// What a shell may offer for one queue entry's eligibility state.
+///
+/// Distinct from the `TC_CREDENTIAL_ACTION_*` block above it despite both
+/// having a "nothing" member: these govern different controls, and one
+/// numbering shared between them is one renumbering away from drawing a
+/// sign-in button on a queue row.
+pub const TC_CONTRIBUTION_CONTROL_NONE: i32 = 50;
+pub const TC_CONTRIBUTION_CONTROL_CONTRIBUTE: i32 = 51;
+
+/// The sentence for one queue entry's `eligibility` label.
+///
+/// `state` is that field from a `list_pending` entry: `eligible`,
+/// `ineligible_permanent`, `ineligible_configuration` or `unknown`.
+///
+/// **A shell that received NO `eligibility` field must not call this.** An
+/// absent field means the contributor was invited and has no eligibility
+/// question; answering one they do not have puts a caveat on work that
+/// carries none. Absent is not `unknown`.
+///
+/// An empty, NULL, non-UTF-8 or unfamiliar `state` reports that the answer
+/// has not been worked out. IT NEVER REPORTS AN INELIGIBILITY: a state this
+/// build cannot read is not evidence about a contributor's session, and
+/// saying it is would stop them offering work that is fine.
+///
+/// Returns an owned string; free it with [`tc_string_free`]. NULL only on a
+/// caught panic.
+///
+/// # Safety
+/// `state`, if non-null, must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_contribution_eligibility_line(state: *const c_char) -> *mut c_char {
+    guarded_string_no_err(|| {
+        let state = if state.is_null() {
+            ""
+        } else {
+            unsafe { borrow_str(state) }.unwrap_or("")
+        };
+        Ok(to_owned_cstring(
+            trace_commons_contributor::private_inference_copy::eligibility_state_line(state),
+        ))
+    })
+}
+
+/// How firmly the sentence [`tc_contribution_eligibility_line`] returned
+/// reads: one of the `TC_PRIVATE_INFERENCE_TONE_*` values.
+///
+/// `eligible` is `_CLEAR` and `ineligible_configuration` is `_ATTENTION` --
+/// the one state with something to do about it. Everything else, including a
+/// state this build has never heard of, a NULL or non-UTF-8 `state` and a
+/// caught panic, is `TC_PRIVATE_INFERENCE_TONE_NEUTRAL`. A permanent
+/// ineligibility is deliberately NOT `_REFUSED`: nothing was refused and
+/// nothing went wrong, and painting a contributor's ordinary older work as a
+/// failure is a judgement this surface has no business making.
+///
+/// # Safety
+/// `state`, if non-null, must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_contribution_eligibility_tone(state: *const c_char) -> i32 {
+    use trace_commons_contributor::private_inference_copy::PrivateInferenceTone;
+    guard(|| {
+        let state = if state.is_null() {
+            ""
+        } else {
+            unsafe { borrow_str(state) }.unwrap_or("")
+        };
+        Ok(
+            match trace_commons_contributor::private_inference_copy::eligibility_state_tone(state) {
+                PrivateInferenceTone::Neutral => TC_PRIVATE_INFERENCE_TONE_NEUTRAL,
+                PrivateInferenceTone::Held => TC_PRIVATE_INFERENCE_TONE_HELD,
+                PrivateInferenceTone::Clear => TC_PRIVATE_INFERENCE_TONE_CLEAR,
+                PrivateInferenceTone::Attention => TC_PRIVATE_INFERENCE_TONE_ATTENTION,
+                PrivateInferenceTone::Refused => TC_PRIVATE_INFERENCE_TONE_REFUSED,
+            },
+        )
+    })
+    .unwrap_or(TC_PRIVATE_INFERENCE_TONE_NEUTRAL)
+}
+
+/// The one control a shell may offer for an eligibility state: one of the
+/// `TC_CONTRIBUTION_CONTROL_*` values.
+///
+/// THE BRANCH TABLE CROSSES, NOT ONLY THE WORDS. Three shells each deciding
+/// which rows get a send button is three chances to offer one beside a
+/// session the server will refuse -- which is the defect this whole surface
+/// exists to remove, and it is worse than an inert button: pressing it sends
+/// a contributor's work and has it turned away.
+///
+/// `TC_CONTRIBUTION_CONTROL_NONE` is not "hide the row". Every session is
+/// shown, because hiding a contributor's own work is its own dishonesty. The
+/// row is present, unoffered, and carries its sentence.
+///
+/// # Safety
+/// `state`, if non-null, must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_contribution_eligibility_control(state: *const c_char) -> i32 {
+    use trace_commons_contributor::private_inference_copy::ContributionControl;
+    guard(|| {
+        let state = if state.is_null() {
+            ""
+        } else {
+            unsafe { borrow_str(state) }.unwrap_or("")
+        };
+        Ok(
+            match trace_commons_contributor::private_inference_copy::eligibility_control(state) {
+                ContributionControl::None => TC_CONTRIBUTION_CONTROL_NONE,
+                ContributionControl::Contribute => TC_CONTRIBUTION_CONTROL_CONTRIBUTE,
+            },
+        )
+    })
+    .unwrap_or(TC_CONTRIBUTION_CONTROL_NONE)
+}
+
+/// The sentence for one queue entry's `eligibility_reason` label.
+///
+/// **The EMPTY STRING for an absent, NULL, non-UTF-8 or unfamiliar reason**,
+/// and a shell renders nothing for it. That is not the hedge the state line
+/// makes: the state sentence has already said what is true, and a second
+/// sentence guessing at a reason this build does not know would add a detail
+/// nobody established. An `eligible` entry carries no reason at all.
+///
+/// Returns an owned string; free it with [`tc_string_free`]. NULL only on a
+/// caught panic.
+///
+/// # Safety
+/// `reason`, if non-null, must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_contribution_eligibility_reason_line(
+    reason: *const c_char,
+) -> *mut c_char {
+    guarded_string_no_err(|| {
+        let reason = if reason.is_null() {
+            ""
+        } else {
+            unsafe { borrow_str(reason) }.unwrap_or("")
+        };
+        Ok(to_owned_cstring(
+            trace_commons_contributor::private_inference_copy::eligibility_reason_line(reason),
+        ))
+    })
+}
+
+/// Whether a group's submit control may be offered: one of the
+/// `TC_CONTRIBUTION_CONTROL_*` values.
+///
+/// `pending` is a `list_projects` row's `pending_count`. `contributable` is
+/// its `contributable_count`, or **any negative value when that key was
+/// ABSENT** -- an invited contributor, for whom every pending session is
+/// sendable.
+///
+/// ABSENT IS NOT ZERO, and this is the distinction most likely to be got
+/// wrong. `contributable = 0` means the question applies and nothing in this
+/// group can be sent, so nothing is offered. A negative `contributable` means
+/// the question does not apply, and the control is offered on `pending`
+/// alone. A shell that passed `0` for an absent field would refuse a control
+/// to somebody whose sessions are all perfectly sendable.
+///
+/// A header offering "Submit all" on a group where nothing is eligible is a
+/// press with no visible consequence -- the row-level rule ("shown, not
+/// offered") applied one level up, and it crosses this ABI for the reason
+/// [`tc_contribution_eligibility_control`] does.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_contribution_group_control(pending: i64, contributable: i64) -> i32 {
+    use trace_commons_contributor::private_inference_copy::ContributionControl;
+    guard(|| {
+        let pending = u64::try_from(pending).unwrap_or(0);
+        let contributable = u64::try_from(contributable).ok();
+        Ok(
+            match trace_commons_contributor::private_inference_copy::group_control(
+                pending,
+                contributable,
+            ) {
+                ContributionControl::None => TC_CONTRIBUTION_CONTROL_NONE,
+                ContributionControl::Contribute => TC_CONTRIBUTION_CONTROL_CONTRIBUTE,
+            },
+        )
+    })
+    .unwrap_or(TC_CONTRIBUTION_CONTROL_NONE)
+}
+
+/// How many sessions a group submit is leaving behind, as a sentence.
+///
+/// `withheld` is `approve`'s `excluded_ineligible`, or the difference between
+/// a project row's `pending_count` and its `contributable_count`.
+///
+/// **The EMPTY STRING for zero**, and for a negative value, which no honest
+/// caller produces. Render nothing: there is no gap to explain, and a line
+/// reading "0 sessions are not being sent" invents a caveat where none
+/// exists.
+///
+/// The sentence says how many and NOT why. The reason a particular session
+/// cannot be sent is that row's own sentence, one level in; a summary here
+/// would stand for up to thirteen different reasons and would say nothing
+/// true about any of them. Assembled on the Rust side for the reason on
+/// [`tc_routing_token_line`]: three shells writing this sentence is three
+/// chances for one of them to name a reason.
+///
+/// Returns an owned string; free it with [`tc_string_free`]. NULL only on a
+/// caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_contribution_withheld_line(withheld: i64) -> *mut c_char {
+    guarded_string_no_err(|| {
+        Ok(to_owned_cstring(
+            &trace_commons_contributor::private_inference_copy::group_withheld_line(
+                u64::try_from(withheld).unwrap_or(0),
+            ),
+        ))
+    })
+}
+
 /// The reported local port, assembled without a readiness claim.
 ///
 /// `port` is the `port` field of `private_inference_state`. A value outside

@@ -649,7 +649,9 @@ No port, token, or row content appears here.
 ```
 
 `subagent_count` and `subagents_dropped` also appear on every queue entry
-(`list_pending`, the `snapshot` event). Both are additive; the schema version
+(`list_pending`, the `snapshot` event), as do `eligibility` and
+`eligibility_reason` -- see "Contribution eligibility" below. Both are
+additive; the schema version
 stays `trace_commons.daemon.v1_1`, and a client that ignores them behaves
 exactly as before.
 
@@ -1105,11 +1107,48 @@ render, not from anything the daemon left out.
       "mode": "notify_only",
       "added_at": null,
       "configured": false,
-      "is_unresolved_bucket": false
+      "is_unresolved_bucket": false,
+      "pending_count": 7,
+      "contributable_count": 3
     }
   ]
 }
 ```
+
+`pending_count` is how many `Pending` entries this project holds.
+`contributable_count` is how many of those a group-level `approve` would act
+on -- what a shell needs to draw "send the 3 of 7 that can be sent" without
+enumerating rows and classifying them itself.
+
+**`contributable_count` is ABSENT when eligibility does not apply**, on the
+same rule as an entry's `eligibility` field: an invited contributor has no
+"3 of 7" to be told about, and `pending_count` alone is their answer. Test
+for the key; it is never null.
+
+Both numbers, never one. "Submit all (7)" quietly becoming "Submit all (3)"
+is worse than either: the contributor sees a smaller number with no
+explanation and cannot tell whether four sessions vanished or were never
+counted. A control that counts the sendable ones needs the total beside it,
+and `pending_count - contributable_count` is what
+`tc_contribution_withheld_line` turns into the sentence that closes the gap.
+
+**Absent, never zero.** A client that read a zero where the question does not
+apply would draw "Submit all (0)" and offer nothing to an invited contributor
+whose sessions are all perfectly sendable. When the key is missing, count the
+button off `pending_count` and render no withheld line.
+
+**`contributable_count: 0` means the group's submit control is not offered.**
+A header offering "Submit all" where nothing is eligible is a press with no
+visible consequence -- the row-level rule ("shown, not offered") one level up.
+The group still renders, with its rows and their sentences; only the control
+goes. Decide it through `tc_contribution_group_control(pending,
+contributable)`, passing **any negative value** for an absent
+`contributable_count`, so the absent-versus-zero distinction is made once
+rather than in three shells.
+
+It is a count and not a promise. Entries can move between this call and the
+approve, and the expensive checks still run at submit -- see "Contribution
+eligibility" below.
 
 Every project the daemon knows about, in two kinds:
 
@@ -1208,9 +1247,52 @@ and must never echo the correction text or the detected value.
   "hold_until": "2026-08-08T12:00:10Z",
   "flagged": 1,
   "redactions": { "private_email": 2, "secret:openai_api_key": 1 },
-  "skipped": [ { "entry_id": "…", "reason_label": "not-enrolled" } ]
+  "skipped": [ { "entry_id": "…", "reason_label": "not-enrolled" } ],
+  "excluded_ineligible": 4
 }
 ```
+
+**A group-level `approve` means "all eligible", never "all".** Both group
+selectors -- `project_id` and `all` -- act only on entries whose
+`eligibility` is `eligible`. The alternative either fails partway or succeeds
+at sending exactly what the surface just finished saying could not be sent,
+and no shell can close it: a per-project approve has no row to check, so the
+per-row gate cannot reach it.
+
+`excluded_ineligible` is how many pending entries the selector left out for
+this reason, so a client can say what became of the rest rather than infer it
+from a count smaller than the one it drew a button for. Excluded entries do
+**not** appear in `skipped`: they were never selected, and `skipped` is the
+account of what this call was asked to act on.
+
+`excluded_ineligible` is **absent** when no filter ran -- an invited
+contributor, or a single `entry_id`. Absent, never zero: zero would read as
+"nothing was left out", which is a claim about a filter that did not run.
+
+Render it through `tc_contribution_withheld_line`, which turns the count into
+a sentence and answers the **empty string** for zero. A button reading
+"Submit all (2)" above a folder showing five rows, with nothing explaining the
+gap, is the same small dishonesty the rest of this surface removes. The
+sentence says how many and **not why**: the reason a particular session cannot
+be sent is that row's own sentence, one level in, and a summary here would
+stand for up to thirteen different reasons and say nothing true about any of
+them.
+
+**One reply, one deadline.** A group `approve` does not fan out. It takes one
+approval instant for the whole call, so every entry it approves shares one
+hold and the single `hold_until` it reports is true of all of them. A client
+must not fan a group submit out into per-entry calls and keep the first
+reply's hold: an undo bar has to outlast every entry it offers to undo, and
+the first reply's deadline retires Undo while something it covers is still
+recoverable. Ask for the group and use the group's deadline.
+
+An entry with no recorded eligibility renders `unknown`, which offers no
+control, so a group selector excludes it too.
+
+**A single `entry_id` is never filtered.** Naming one entry is an explicit act
+about a session the contributor is looking at, the shell's per-row gate
+already covers it, and the server decides admission either way. The daemon
+reports eligibility on a row; it enforces it only where a shell cannot.
 
 This is the whole signal a one-click submit needs: a client that never calls
 `preview` can still show "Sent -- scrubbing removed 3 things, 1 flagged.
@@ -1935,6 +2017,115 @@ settings key) supplies these 62 fixed string fields:
 - `credential_absent`, `credential_obtaining`, `credential_failed`,
   `credential_cancelled`, `credential_present`, `credential_unknown`,
   `credential_unreported`.
+
+### Contribution eligibility
+
+Queue entries carry two additive fields. They appear on **every** surface that
+hands a client an entry object -- `list_pending`, the `snapshot` event, and
+the `entry` object both `preview` responses carry (the async-dispatch one and
+the built card) -- and on no other, because `entry_value` is the only thing
+that serialises a queue entry and those are all of its callers. `approve` and
+the `preview_ready` event do not carry an entry object at all; they carry an
+`entry_id`. A client MUST NOT reconstruct eligibility from an entry it cached
+from some other path.
+
+| Field | Meaning |
+|---|---|
+| `eligibility` | `eligible` \| `ineligible_permanent` \| `ineligible_configuration` \| `unknown` |
+| `eligibility_reason` | a stable label naming why, or absent |
+
+**`eligibility` is ABSENT -- not `unknown`, not null -- whenever the
+contributor is admitted on an invite** rather than on evidence, i.e. whenever
+`admission_evidence_required` is false or could not be read. An invited
+contributor has no eligibility question: everything in their queue is
+contributable, which is why this whole surface stayed invisible for so long.
+A field answering a question they do not have would put three shells to work
+rendering a caveat on work that carries none. A client MUST test for the key,
+never read a missing key as a state.
+
+Show every session. Offer only the eligible ones. Hiding a contributor's own
+work is its own dishonesty and makes the app look as though it had not
+noticed files the contributor knows it can see. An ineligible row is present,
+not offered, and carries its reason.
+
+| `eligibility` | Means | Sentence | Control a shell may offer |
+|---|---|---|---|
+| `eligible` | the cheap checks pass and the marked call is here | `eligibility_eligible` | contribute |
+| `ineligible_permanent` | nothing the contributor changes will alter this | `eligibility_ineligible_permanent` | **none** |
+| `ineligible_configuration` | this session stays ineligible; a setting decides future ones | `eligibility_ineligible_configuration` | **none** |
+| `unknown` | not evaluated | `eligibility_unknown` | **none** |
+| anything else | the state could not be read | `eligibility_unknown` | **none** |
+
+The sentence, the tone and the control come from the shared Rust tables --
+`tc_contribution_eligibility_line`, `tc_contribution_eligibility_tone` and
+`tc_contribution_eligibility_control` -- never from shell-authored branching
+on a variant name, and a shell must not recover any of the three by reading
+another. `TC_CONTRIBUTION_CONTROL_NONE` (50) and
+`TC_CONTRIBUTION_CONTROL_CONTRIBUTE` (51) are the control values.
+
+**An unrecognised state must not borrow an ineligibility sentence.** A state
+this build cannot read is not evidence about a contributor's session, and
+saying it is would stop them offering work that is fine. Every shell carries
+a test for this.
+
+A shell does not have to apply this rule to a group control itself. Ask for
+the project and the daemon returns the honest subset; `list_projects` carries
+`contributable_count` so the button can name it before the press. See "What
+`approve` reports".
+
+`eligible` is a well-founded expectation and not a guarantee. The cheap
+checks -- the ones a list may run -- are answered here; the expensive ones,
+which need every captured body read back and hashed, still run at submit. The
+server decides admission either way, and if this answer and the server's
+decision disagree, **the server is right**. When a submission is refused for
+an admission reason the daemon writes the refusal back into the row, so a row
+that was `eligible` stops saying so. A list that changes while it is being
+read is the cost of that, and it is also just what happened.
+
+`eligibility_reason` is absent on an `eligible` entry -- there is nothing to
+explain -- and is one of these otherwise. Render each through
+`tc_contribution_eligibility_reason_line`, which answers the **empty string**
+for a label this build does not know; render nothing for an empty string
+rather than guessing.
+
+The two unknown-handling rules are deliberately different, and the difference
+is not an inconsistency. An unrecognised **state** degrades to a sentence
+because the row still has to say something -- it is on screen, a contributor
+is reading it, and silence there would leave them to infer a state from an
+empty space. An unrecognised **reason** has nothing honest to say: the state
+sentence beside it has already carried the fact, and a sentence invented for a
+label this build does not know would add a detail nobody established. Silence
+beats a guess exactly where something true has already been said.
+
+| `eligibility_reason` | Sentence | Usually seen with |
+|---|---|---|
+| `no_inference_call` | `eligibility_reason_no_call` | `ineligible_permanent` |
+| `capture_off` | `eligibility_reason_capture_off` | `ineligible_configuration` |
+| `digest_absent` | `eligibility_reason_digest_absent` | `ineligible_permanent` |
+| `upstream_id_absent` | `eligibility_reason_upstream_id_absent` | `ineligible_permanent` |
+| `digest_mismatch` | `eligibility_reason_digest_mismatch` | `ineligible_permanent` |
+| `reference_malformed` | `eligibility_reason_reference_malformed` | `ineligible_permanent` |
+| `bodies_unreadable` | `eligibility_reason_bodies_unreadable` | `ineligible_permanent` |
+| `body_not_utf8` | `eligibility_reason_body_not_utf8` | `ineligible_permanent` |
+| `body_too_large` | `eligibility_reason_body_too_large` | `ineligible_permanent` |
+| `evidence_capture_off` | `eligibility_reason_evidence_capture_off` | `ineligible_configuration` |
+| `marker_absent` | `eligibility_reason_marker_absent` | `ineligible_permanent` |
+| `request_malformed` | `eligibility_reason_request_malformed` | `ineligible_permanent` |
+| `receipt_unavailable` | `eligibility_reason_receipt_unavailable` | `unknown` |
+
+Only `ineligible_configuration` names a setting, and it is the only state
+painted `TC_PRIVATE_INFERENCE_TONE_ATTENTION`. `no_inference_call` has no
+actionable answer for the session the row is about, and advice about the
+*next* session is guidance rather than status -- rows stay about their own
+session. A permanent ineligibility is `_NEUTRAL` and never `_REFUSED`:
+nothing was refused and nothing went wrong.
+
+Both fields are additive; the schema version stays
+`trace_commons.daemon.v1_1`, and a client that ignores them behaves exactly
+as before.
+
+The seventeen sentences named above are fields of the `private_inference_copy`
+payload (`tc_private_inference_copy`), which now carries **80** fields.
 
 ### The credential state
 

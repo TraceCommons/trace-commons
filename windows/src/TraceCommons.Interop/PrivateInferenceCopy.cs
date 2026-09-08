@@ -321,6 +321,96 @@ public sealed record PrivateInferenceCopy
     [JsonPropertyName("harness_needs_credential")]
     public string HarnessNeedsCredential { get; init; } = string.Empty;
 
+    /// <summary>
+    /// The four <c>eligibility</c> states a queue entry can carry, and the
+    /// thirteen <c>eligibility_reason</c> labels.
+    ///
+    /// Rendered through <see cref="ContributionEligibilitySurface"/>, which
+    /// asks the ABI rather than these properties; they are carried here so
+    /// this shell's complete-payload check pins the set it was built against.
+    /// </summary>
+    /// <summary>The cheap checks pass and the admission marker is there. A well-founded
+    /// expectation and NEVER a guarantee -- the expensive checks still run at
+    /// submit, and the server decides admission.</summary>
+    [JsonPropertyName("eligibility_eligible")]
+    public string EligibilityEligible { get; init; } = string.Empty;
+
+    /// <summary>Nothing the contributor does will change this session. The sentence says
+    /// so plainly enough that nobody retries it.</summary>
+    [JsonPropertyName("eligibility_ineligible_permanent")]
+    public string EligibilityIneligiblePermanent { get; init; } = string.Empty;
+
+    /// <summary>This session stays ineligible; a setting decides whether future ones are.
+    /// The only state whose sentence names a setting -- a row stays about its
+    /// own session, and advice about the next one is guidance, not status.</summary>
+    [JsonPropertyName("eligibility_ineligible_configuration")]
+    public string EligibilityIneligibleConfiguration { get; init; } = string.Empty;
+
+    /// <summary>Not worked out. The fallback for a state this build cannot read, and it
+    /// MUST NOT degrade to an ineligibility: "could not tell" turned into "no"
+    /// invites a contributor to conclude something false about their own work.
+    ///
+    /// <para>
+    /// Not the sentence for an ABSENT <c>eligibility</c> field either. An
+    /// invited contributor has no eligibility question, and their rows carry
+    /// no sentence at all. See
+    /// <see cref="ContributionEligibility.Absent"/>.
+    /// </para></summary>
+    [JsonPropertyName("eligibility_unknown")]
+    public string EligibilityUnknown { get; init; } = string.Empty;
+
+    /// <summary>No model call was answered here while the session ran.</summary>
+    [JsonPropertyName("eligibility_reason_no_call")]
+    public string EligibilityReasonNoCall { get; init; } = string.Empty;
+
+    /// <summary>The final hop kept no copy of what was said.</summary>
+    [JsonPropertyName("eligibility_reason_capture_off")]
+    public string EligibilityReasonCaptureOff { get; init; } = string.Empty;
+
+    /// <summary>A restarted, cancelled or truncated stream.</summary>
+    [JsonPropertyName("eligibility_reason_digest_absent")]
+    public string EligibilityReasonDigestAbsent { get; init; } = string.Empty;
+
+    /// <summary>No provider identifier, so no receipt is reachable.</summary>
+    [JsonPropertyName("eligibility_reason_upstream_id_absent")]
+    public string EligibilityReasonUpstreamIdAbsent { get; init; } = string.Empty;
+
+    /// <summary>What was kept does not match what was sent.</summary>
+    [JsonPropertyName("eligibility_reason_digest_mismatch")]
+    public string EligibilityReasonDigestMismatch { get; init; } = string.Empty;
+
+    /// <summary>The note saying where the kept copy lives is unreadable.</summary>
+    [JsonPropertyName("eligibility_reason_reference_malformed")]
+    public string EligibilityReasonReferenceMalformed { get; init; } = string.Empty;
+
+    /// <summary>The kept copy could not be read back.</summary>
+    [JsonPropertyName("eligibility_reason_bodies_unreadable")]
+    public string EligibilityReasonBodiesUnreadable { get; init; } = string.Empty;
+
+    /// <summary>The kept copy is not text this app can read.</summary>
+    [JsonPropertyName("eligibility_reason_body_not_utf8")]
+    public string EligibilityReasonBodyNotUtf8 { get; init; } = string.Empty;
+
+    /// <summary>The kept copy is past the size this check will read.</summary>
+    [JsonPropertyName("eligibility_reason_body_too_large")]
+    public string EligibilityReasonBodyTooLarge { get; init; } = string.Empty;
+
+    /// <summary>This computer keeps no copy of the model calls it answers.</summary>
+    [JsonPropertyName("eligibility_reason_evidence_capture_off")]
+    public string EligibilityReasonEvidenceCaptureOff { get; init; } = string.Empty;
+
+    /// <summary>The final call went out without the mark a contribution needs.</summary>
+    [JsonPropertyName("eligibility_reason_marker_absent")]
+    public string EligibilityReasonMarkerAbsent { get; init; } = string.Empty;
+
+    /// <summary>The final call was not written down in a readable shape.</summary>
+    [JsonPropertyName("eligibility_reason_request_malformed")]
+    public string EligibilityReasonRequestMalformed { get; init; } = string.Empty;
+
+    /// <summary>The proof that goes with the final call could not be had.</summary>
+    [JsonPropertyName("eligibility_reason_receipt_unavailable")]
+    public string EligibilityReasonReceiptUnavailable { get; init; } = string.Empty;
+
     /// <summary>Every sentence for the complete-payload check, not a rendering order.</summary>
     public string[] Sentences =>
         new[]
@@ -388,5 +478,22 @@ public sealed record PrivateInferenceCopy
             CredentialUnknown,
             CredentialUnreported,
             HarnessNeedsCredential,
+            EligibilityEligible,
+            EligibilityIneligiblePermanent,
+            EligibilityIneligibleConfiguration,
+            EligibilityUnknown,
+            EligibilityReasonNoCall,
+            EligibilityReasonCaptureOff,
+            EligibilityReasonDigestAbsent,
+            EligibilityReasonUpstreamIdAbsent,
+            EligibilityReasonDigestMismatch,
+            EligibilityReasonReferenceMalformed,
+            EligibilityReasonBodiesUnreadable,
+            EligibilityReasonBodyNotUtf8,
+            EligibilityReasonBodyTooLarge,
+            EligibilityReasonEvidenceCaptureOff,
+            EligibilityReasonMarkerAbsent,
+            EligibilityReasonRequestMalformed,
+            EligibilityReasonReceiptUnavailable,
         };
 }
