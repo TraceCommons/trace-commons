@@ -235,56 +235,56 @@ final class CredentialSurfaceTests: XCTestCase {
         XCTAssertNil(CredentialSurface.actionExplains(CredentialAction.none, copy: copy()))
     }
 
-    // MARK: - A control this shell cannot send
+    // MARK: - A control this shell can always send
 
-    /// A Cancel this shell cannot address is never live.
+    /// A Cancel with no attempt to name is offered, and is sent.
     ///
     /// The ORDINARY case, not an edge one: `near_ai_credential_status`
     /// resolves `obtaining` from the ceremony the daemon holds, needing no
     /// attempt id, so an app restarted while the daemon kept running reads
-    /// `obtaining` and is offered Cancel -- while `near_ai_credential_cancel`
-    /// requires the id this shell never saw. A control drawn live that
-    /// silently does nothing is the one answer nobody can defend.
-    func testACancelWithNoAttemptToNameIsNotAddressable() {
-        XCTAssertFalse(CredentialSurface.canAddress(.cancel, attemptID: nil))
-        XCTAssertFalse(CredentialSurface.canAddress(.cancel, attemptID: ""))
-        XCTAssertTrue(CredentialSurface.canAddress(.cancel, attemptID: "a1"))
+    /// `obtaining` and is offered Cancel with no id to give. The daemon now
+    /// accepts an unnamed cancel and stops whatever it is running, so the
+    /// button is live and the call goes out -- with the field OMITTED, never
+    /// sent empty, because an empty id names no running attempt.
+    func testACancelWithNoAttemptToNameIsStillSent() {
+        XCTAssertTrue(CredentialSurface.cancelParams(attemptID: nil).isEmpty)
+        XCTAssertTrue(CredentialSurface.cancelParams(attemptID: "").isEmpty)
+        XCTAssertEqual(
+            CredentialSurface.cancelParams(attemptID: "a1")["attempt_id"] as? String, "a1")
 
-        // Every other action stands on its own. Obtain and Forget name no
-        // attempt, so an absent id says nothing about them, and `.none` has
-        // no button to enable at all.
-        for action: CredentialAction in [.none, .obtain, .forget] {
-            XCTAssertTrue(
-                CredentialSurface.canAddress(action, attemptID: nil), "\(action) names no attempt")
-            XCTAssertTrue(CredentialSurface.canAddress(action, attemptID: "a1"), "\(action)")
-        }
+        // And it is a Cancel the state table really does offer: `obtaining`
+        // reached this shell without an attempt id in the first place.
+        let obtaining = CredentialStatus(state: "obtaining")
+        XCTAssertNil(obtaining.attemptID)
+        XCTAssertEqual(
+            CredentialSurface.action(obtaining, calls: calls(action: { _ in 32 })), .cancel)
     }
 
-    /// Addressability does not touch the state sentence.
+    /// Holding an attempt id does not touch the state sentence.
     ///
-    /// A Cancel that cannot be sent does not make the ceremony untrue --
-    /// `obtaining` is still exactly what is happening, and the card must go
-    /// on saying so. This is what stops someone later "fixing" the sentence
-    /// instead of the transport: the sentence, the tone and the offered
-    /// action are all read from the state label alone, and none of the three
-    /// is handed an attempt id to consult.
-    func testTheStateSentenceDoesNotConsultAddressability() {
+    /// Whether this shell can name the ceremony does not make it more or less
+    /// true -- `obtaining` is still exactly what is happening, and the card
+    /// must go on saying so. This is what stops someone later "fixing" the
+    /// sentence instead of the transport: the sentence, the tone and the
+    /// offered action are all read from the state label alone, and none of
+    /// the three is handed an attempt id to consult.
+    func testTheStateSentenceDoesNotConsultTheAttemptID() {
         let obtaining = CredentialStatus(state: "obtaining")
-        let addressable = CredentialStatus(
+        let named = CredentialStatus(
             state: "obtaining", attemptID: "a1", attemptStatus: "waiting_for_browser")
-        XCTAssertFalse(CredentialSurface.canAddress(.cancel, attemptID: obtaining.attemptID))
-        XCTAssertTrue(CredentialSurface.canAddress(.cancel, attemptID: addressable.attemptID))
+        XCTAssertTrue(CredentialSurface.cancelParams(attemptID: obtaining.attemptID).isEmpty)
+        XCTAssertFalse(CredentialSurface.cancelParams(attemptID: named.attemptID).isEmpty)
 
-        // Addressability just flipped. Nothing the contributor reads moves.
+        // What the call carries just changed. Nothing the contributor reads moves.
         XCTAssertEqual(
             CredentialSurface.stateLine(obtaining, copy: copy(), calls: calls()),
-            CredentialSurface.stateLine(addressable, copy: copy(), calls: calls()))
+            CredentialSurface.stateLine(named, copy: copy(), calls: calls()))
         XCTAssertEqual(
             CredentialSurface.tone(obtaining, calls: calls()),
-            CredentialSurface.tone(addressable, calls: calls()))
+            CredentialSurface.tone(named, calls: calls()))
         XCTAssertEqual(
             CredentialSurface.action(obtaining, calls: calls(action: { _ in 32 })),
-            CredentialSurface.action(addressable, calls: calls(action: { _ in 32 })))
+            CredentialSurface.action(named, calls: calls(action: { _ in 32 })))
     }
 
     // MARK: - The tri-state on the tool list
@@ -396,9 +396,8 @@ final class CredentialSurfaceTests: XCTestCase {
                 fromJSON: "{\"attempt_id\":\"\",\"browser_url\":\"https://example.invalid/x\"}"))
     }
 
-    /// Status names the attempt when there is one and nothing when there is
-    /// not; cancel always names one, because an attempt this shell cannot
-    /// name is one it did not start.
+    /// Status and cancel both name the attempt when there is one and nothing
+    /// when there is not. Neither ever sends an empty id.
     func testTheCallsNameTheAttemptOnlyWhenThereIsOne() {
         XCTAssertTrue(CredentialSurface.statusParams(attemptID: nil).isEmpty)
         XCTAssertTrue(CredentialSurface.statusParams(attemptID: "").isEmpty)

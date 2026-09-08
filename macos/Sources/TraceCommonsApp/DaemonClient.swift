@@ -346,9 +346,9 @@ final class DaemonClient {
             fromJSON: try rawResultJSON(CredentialSurface.startMethod))
     }
 
-    /// Stops waiting on the browser. Requires the attempt id: an attempt this
-    /// shell cannot name is one it did not start.
-    func nearAiCredentialCancel(attemptID: String) throws {
+    /// Stops waiting on the browser. The attempt id is optional: the daemon
+    /// accepts an unnamed cancel and stops whatever it is running.
+    func nearAiCredentialCancel(attemptID: String?) throws {
         _ = try rawResultJSON(
             CredentialSurface.cancelMethod,
             params: CredentialSurface.cancelParams(attemptID: attemptID))
