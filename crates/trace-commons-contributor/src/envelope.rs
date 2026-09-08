@@ -579,6 +579,39 @@ pub(crate) fn build_import_preview_raw(
     preview
 }
 
+/// Isolate admission evidence from unsigned companion history. The caller must
+/// append the receipt-bound exchange last and review the returned certified
+/// artifact; this projection makes no claim about omitted session execution.
+/// Configuration supplies identity and consent, never imported metadata.
+pub(crate) fn final_call_witness_input(
+    raw: RawTraceContribution,
+    cfg: &ContributorConfig,
+) -> RawTraceContribution {
+    let transcript = SessionTranscript {
+        source: raw
+            .ironclaw
+            .feature_flags
+            .get("agent")
+            .cloned()
+            .unwrap_or_default()
+            .into(),
+        ..Default::default()
+    };
+    let mut isolated = build_raw_contribution_with_id(
+        &transcript,
+        cfg,
+        raw.created_at,
+        raw.submission_id,
+        None,
+        None,
+    );
+    isolated.trace_id = raw.trace_id;
+    isolated.replay.replay_notes = vec![
+        "Final-call evidence only; session history and tool execution are not covered.".into(),
+    ];
+    isolated
+}
+
 fn build_raw_contribution_with_id(
     t: &SessionTranscript,
     cfg: &ContributorConfig,
@@ -811,13 +844,17 @@ pub fn apply_verdict(envelope: &mut TraceContributionEnvelope, verdict: Contribu
 /// builder reads them apart, and three positional bools is exactly the shape
 /// that silently swaps two of them.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-struct DeclaredPresence {
-    message_text: bool,
-    tool_payloads: bool,
-    routing_metadata: bool,
+pub(crate) struct DeclaredPresence {
+    pub(crate) message_text: bool,
+    pub(crate) tool_payloads: bool,
+    pub(crate) routing_metadata: bool,
 }
 
-fn declared_content_presence(events: &[RawTraceContributionEvent]) -> DeclaredPresence {
+/// `pub(crate)` because the witness transport appends the attested exchange
+/// after this module has finished building the contribution, and the
+/// declaration has to describe the list as it goes out rather than the list as
+/// it was built. See `witness::transport::witness_contribution`.
+pub(crate) fn declared_content_presence(events: &[RawTraceContributionEvent]) -> DeclaredPresence {
     let mut presence = DeclaredPresence::default();
 
     for event in events {
