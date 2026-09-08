@@ -180,9 +180,11 @@ jobs:
       # This suite has a skip inside its tests, not just around them: the raw
       # SQL RLS assertion returns early when the connecting role bypasses RLS,
       # and `trace` here is the container superuser, so it does return early.
-      # The tests around it still assert through the runtime roles. Narrowing
-      # that gap means giving this job a non-superuser role to connect as; it is
-      # pre-existing and not what #750 was about.
+      # The tests around it still assert through the runtime roles, and the
+      # xact_commit guard below does NOT catch this -- the suite runs and
+      # commits, it just does not make that one assertion. Closing it means
+      # giving this job a NOBYPASSRLS role to connect as, the way other steps
+      # here already do. See #752.
       - name: trace_corpus_pg_rls
         run: cargo test -p trace-commons-server --test trace_corpus_pg_rls
         env:
