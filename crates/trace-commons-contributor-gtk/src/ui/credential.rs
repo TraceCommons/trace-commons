@@ -73,10 +73,10 @@ pub struct CredentialView {
     /// has something to cancel. NEVER DRAWN.
     ///
     /// `near_ai_credential_status` echoes the attempt only to a caller that
-    /// already knew its id, so this cannot be recovered by asking: a shell
-    /// that did not start the ceremony holds `None` for it and says so by
-    /// leaving the cancel control insensitive rather than sending a call the
-    /// daemon would refuse.
+    /// already knew its id, so this cannot be recovered by asking. `None` does
+    /// not disarm the cancel: the daemon accepts an unnamed one and stops
+    /// whatever sign-in it is running, so a shell that cannot name the
+    /// ceremony still sends the call, with the field omitted.
     attempt: RefCell<Option<String>>,
     /// Whether a poll is already running, so a second read does not start a
     /// second one.
@@ -229,12 +229,10 @@ pub fn render(app: &Rc<App>, state: &str) {
         }
         let button = gtk::Button::with_label(label);
         button.set_halign(gtk::Align::Start);
-        // A cancel needs the id of the ceremony to cancel, and only the shell
-        // that started one holds it. Rather than send a call the daemon would
-        // refuse, the control says by being unpressable that this window is
-        // not the one that opened the browser.
-        let addressable = action != CredentialAction::Cancel || view.attempt.borrow().is_some();
-        button.set_sensitive(addressable && !view.pending.get());
+        // The daemon accepts an unnamed cancel and stops the sign-in it is
+        // holding, so a window that never saw the attempt id still sends one.
+        // Only a call already in flight makes a control unpressable.
+        button.set_sensitive(!view.pending.get());
         let app = Rc::clone(app);
         button.connect_clicked(move |_| act(&app, action));
         view.action.append(&button);
@@ -287,11 +285,9 @@ fn open_browser(url: &str) -> bool {
 /// or the daemon sent none at all -- there is no tab anywhere for anybody to
 /// sign in to, and the alternative is a contributor watching this section say
 /// a sign-in is under way until the daemon's own five-minute timeout expires.
-/// On this shell that is worse than on the others: the control beside that
-/// sentence is Cancel, and a window that lost the attempt id draws it
-/// unpressable. The attempt id is in hand at exactly this moment, so this is
-/// the one place the cancel is certain to be addressable. macOS and Windows do
-/// the same thing for the same reason.
+/// The attempt id is in hand at exactly this moment, so the cancel sent here
+/// names the ceremony it belongs to rather than whatever is running. macOS and
+/// Windows do the same thing for the same reason.
 ///
 /// Every other outcome ends in a read. There is no shared sentence for a start
 /// that did not start, and inventing one in this shell is the thing this whole
@@ -330,7 +326,12 @@ fn start(app: &Rc<App>) {
 
 /// Stop waiting on the browser.
 ///
-/// The attempt id is required by the method and is the one this shell started.
+/// The attempt is named when this shell started one and left unnamed when it
+/// did not -- the daemon then cancels whatever it is running, which is what
+/// lets a window opened mid-ceremony stop it. The field is OMITTED rather than
+/// sent empty: an empty id names no running attempt and would be refused
+/// exactly as a wrong one is.
+///
 /// Whatever comes back, the state is read again rather than assumed: a cancel
 /// that raced a sign-in which had already completed leaves a key here, and
 /// this section would otherwise be claiming there is none.
@@ -341,19 +342,16 @@ fn cancel(app: &Rc<App>) {
         .attempt
         .borrow()
         .as_deref()
+        .filter(|id| !id.is_empty())
         .map(str::to_string);
-    let Some(attempt) = attempt else {
-        app.private_inference.credential.pending.set(false);
-        return;
+    let params = match attempt {
+        Some(id) => serde_json::json!({ "attempt_id": id }),
+        None => serde_json::json!({}),
     };
-    app.call(
-        "near_ai_credential_cancel",
-        serde_json::json!({ "attempt_id": attempt }),
-        |app, _result| {
-            app.private_inference.credential.pending.set(false);
-            refresh(app);
-        },
-    );
+    app.call("near_ai_credential_cancel", params, |app, _result| {
+        app.private_inference.credential.pending.set(false);
+        refresh(app);
+    });
 }
 
 /// Remove the stored key from this machine.
@@ -610,6 +608,96 @@ mod tests {
                 .contains("action_explains(action)"),
             "the button is built before the sentence that qualifies it"
         );
+    }
+
+    /// A Cancel with no attempt to name is offered, and is sent.
+    ///
+    /// The ORDINARY case, not an edge one: `near_ai_credential_status`
+    /// resolves `obtaining` from the ceremony the daemon holds, needing no
+    /// attempt id, so a window opened while a sign-in was already under way is
+    /// offered Cancel with nothing to name. The daemon accepts an unnamed
+    /// cancel, so the button is live and the call goes out -- with the field
+    /// OMITTED, never sent empty, which names no running attempt and would be
+    /// refused.
+    ///
+    /// Read from the source because both halves are control flow: a button
+    /// built insensitive and a call that returns early render identically to
+    /// a compiler and differ only in what a press does.
+    #[test]
+    fn a_cancel_with_no_attempt_to_name_is_still_sent() {
+        // `obtaining` is the state that offers Cancel, and it is the state a
+        // shell reaches without ever holding an attempt id.
+        assert_eq!(
+            action_label(copy::credential_action(LABEL_CREDENTIAL_OBTAINING)),
+            Some(copy::CREDENTIAL_CANCEL)
+        );
+
+        let render = code()
+            .split("pub fn render(")
+            .nth(1)
+            .expect("render is in this file");
+        assert!(
+            render.contains("button.set_sensitive(!view.pending.get());"),
+            "something other than a call in flight decides whether the control is live"
+        );
+
+        let body = code()
+            .split("fn cancel(app: &Rc<App>) {")
+            .nth(1)
+            .expect("cancel is in this file")
+            .split("\n}\n")
+            .next()
+            .expect("cancel closes");
+        // No early return on an absent id: the press reaches the daemon.
+        assert!(
+            !body.contains("let Some(attempt) = attempt else"),
+            "a window that cannot name the attempt drops the press"
+        );
+        assert!(
+            body.contains("None => serde_json::json!({})"),
+            "an unnamed cancel no longer sends the empty body"
+        );
+        assert!(
+            body.contains(r#"Some(id) => serde_json::json!({ "attempt_id": id })"#),
+            "a cancel this shell can name no longer names its attempt"
+        );
+        // Omitted, never empty. An empty id names no running attempt.
+        assert!(
+            body.contains("filter(|id| !id.is_empty())"),
+            "an empty attempt id would be sent as though it named something"
+        );
+    }
+
+    /// Holding the attempt id does not touch what the section says.
+    ///
+    /// Whether this window can name the ceremony does not make it more or less
+    /// true -- `obtaining` is still exactly what is happening. This is what
+    /// stops someone later "fixing" the sentence instead of the transport: the
+    /// sentence, the tone and the offered action are read from the state label
+    /// alone, before `render` ever looks at `view.attempt`.
+    #[test]
+    fn the_state_sentence_does_not_consult_the_attempt_id() {
+        let render = code()
+            .split("pub fn render(")
+            .nth(1)
+            .expect("render is in this file");
+        let before_the_attempt = render
+            .split("view.attempt")
+            .next()
+            .expect("something precedes the attempt id");
+        for read in [
+            "copy::credential_state_line(state)",
+            "copy::credential_state_tone(state)",
+            "copy::credential_action(state)",
+        ] {
+            assert!(
+                before_the_attempt.contains(read),
+                "{read} is decided after the attempt id is read"
+            );
+            // Each takes the state label and nothing else -- there is no
+            // second argument for an id to arrive through.
+            assert_eq!(render.matches(read).count(), 1, "{read}");
+        }
     }
 
     /// A sign-in nobody can finish is cancelled, not left to time out.
