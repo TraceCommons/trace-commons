@@ -923,6 +923,41 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    /// Start against a home whose previous owner has released it.
+    ///
+    /// IronWire's home guard closes its lock descriptor without first calling
+    /// `flock(LOCK_UN)`, and `flock` ownership belongs to the open file
+    /// description rather than to the descriptor: `fork` duplicates it and
+    /// `O_CLOEXEC` only takes effect at the following `exec`, so a child that
+    /// any other test in this binary spawns carries a copy of that descriptor
+    /// and keeps the lock held past the release. Closing is not a release
+    /// there, and the first acquisition afterwards can see `WouldBlock` with
+    /// no owner at all.
+    ///
+    /// Retrying does not soften what is being asserted. Ownership that really
+    /// was retained is held by a live proxy and never frees, so a bounded
+    /// retry still fails; only an inherited descriptor on its way to `exec`
+    /// clears. See `HeldLock` in `compute::process` for the release this
+    /// upstream guard is missing.
+    ///
+    /// This is a workaround with an expiry condition, not a permanent shape:
+    /// nearai/ironwire#54 adds the missing `unlock` to that guard. Remove this
+    /// helper and go back to a plain `embed::start(...).unwrap()` when that
+    /// merges and the pin moves.
+    async fn start_once_the_home_is_free(home: &Path) -> EmbeddedProxy {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            match embed::start(home, Some(0)).await {
+                Ok(proxy) => return proxy,
+                Err(EmbedError::Lock { port }) if tokio::time::Instant::now() < deadline => {
+                    assert_eq!(port, 0, "a live owner published a port, so it is not free");
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                Err(error) => panic!("the released home never became startable: {error:?}"),
+            }
+        }
+    }
+
     /// Counts every event IronWire's catalog refresh emits, and nothing else.
     ///
     /// The refresh logs on both outcomes -- applied, unchanged, or skipped
@@ -1245,7 +1280,7 @@ mod tests {
         assert!(!home.path().join("endpoint.json").exists());
         // Reusing the isolated home proves the late startup's ownership was
         // released; it cannot leave a server or home lock behind after Off.
-        let next = embed::start(home.path(), Some(0)).await.unwrap();
+        let next = start_once_the_home_is_free(home.path()).await;
         next.shutdown().await;
     }
 

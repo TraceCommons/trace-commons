@@ -667,6 +667,12 @@ fn stop_running_daemon(store: &ConfigStore) -> Result<DaemonStopOutcome> {
         }
         if let Ok(f) = std::fs::OpenOptions::new().write(true).open(&lock_path) {
             if f.try_lock().is_ok() {
+                // Probing takes the lock. Release it rather than closing over
+                // it: `flock` belongs to the open file description, and a
+                // child forked from another thread between `fork` and `exec`
+                // carries a copy of this descriptor, so a close alone can
+                // leave the lock held against the next daemon start.
+                let _ = f.unlock();
                 return Ok(DaemonStopOutcome::Stopped);
             }
         }
