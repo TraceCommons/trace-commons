@@ -513,6 +513,70 @@ public class NearAiCredentialTests
     }
 
     /// <summary>
+    /// A Cancel this shell cannot address is never live.
+    /// </summary>
+    /// <remarks>
+    /// The ordinary case, not an edge one: <c>near_ai_credential_status</c>
+    /// resolves <c>obtaining</c> from the ceremony on disk with no attempt id,
+    /// so an app restarted while the daemon kept running reads <c>obtaining</c>
+    /// and is offered Cancel -- while <c>near_ai_credential_cancel</c> requires
+    /// the id this shell never saw. A control drawn live that silently does
+    /// nothing is the one answer nobody can defend.
+    /// </remarks>
+    [Fact]
+    public void ACancelWithNoAttemptToNameIsNotAddressable()
+    {
+        Assert.False(NearAiCredentialSurface.CanAddress(CredentialAction.Cancel, null));
+        Assert.False(NearAiCredentialSurface.CanAddress(CredentialAction.Cancel, string.Empty));
+        Assert.True(NearAiCredentialSurface.CanAddress(CredentialAction.Cancel, "a1"));
+
+        // Every other action stands on its own. Obtain and Forget name no
+        // attempt, so an absent id says nothing about them.
+        foreach (CredentialAction action in new[]
+        {
+            CredentialAction.None, CredentialAction.Obtain, CredentialAction.Forget,
+        })
+        {
+            Assert.True(NearAiCredentialSurface.CanAddress(action, null));
+            Assert.True(NearAiCredentialSurface.CanAddress(action, "a1"));
+        }
+    }
+
+    /// <summary>
+    /// The card asks that question before enabling its control, and the
+    /// browser failing to open cancels the ceremony rather than leaving it to
+    /// time out.
+    /// </summary>
+    [Fact]
+    public void TheCardRefusesToEnableWhatItCannotSendAndCleansUpAFailedLaunch()
+    {
+        string viewModel = ShellSource("TraceCommons.App/ViewModels/PrivateInferenceViewModel.cs");
+        Assert.Contains(
+            "NearAiCredentialSurface.CanAddress(OfferedAction, _attemptId)",
+            viewModel,
+            StringComparison.Ordinal);
+
+        // The state sentence is unaffected: a Cancel that cannot be sent does
+        // not make the ceremony untrue, and the card still says one is under
+        // way.
+        int stateAt = viewModel.IndexOf(
+            "public string CredentialStateText =>", StringComparison.Ordinal);
+        Assert.True(stateAt >= 0, "the state sentence is gone from the view model");
+        Assert.DoesNotContain(
+            "CanAddress",
+            viewModel[stateAt..(stateAt + 300)],
+            StringComparison.Ordinal);
+
+        string codeBehind = ShellSource("TraceCommons.App/Controls/PrivateInferenceView.xaml.cs");
+        int launch = codeBehind.IndexOf("LaunchUriAsync", StringComparison.Ordinal);
+        Assert.True(launch >= 0, "the handler no longer opens a browser");
+        Assert.Contains(
+            "ViewModel.CancelCredentialAsync()",
+            codeBehind[launch..],
+            StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// No sentence on this surface is authored in this shell.
     ///
     /// Asserted about the source rather than about behaviour, for the reason
