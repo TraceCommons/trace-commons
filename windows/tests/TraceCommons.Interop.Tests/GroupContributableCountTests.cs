@@ -51,6 +51,7 @@ public class GroupContributableCountTests
         Assert.Equal(7, group.OfferedCount);
         Assert.Equal(0, group.Withheld);
         Assert.True(group.ShowSubmitAll);
+        Assert.True(group.CanSubmitAll);
         Assert.Null(ContributionEligibilitySurface.WithheldLine(group.Withheld));
 
         // Same answer when a map exists but carries no row for this project.
@@ -60,6 +61,7 @@ public class GroupContributableCountTests
         Assert.Equal(7, other.OfferedCount);
         Assert.Equal(0, other.Withheld);
         Assert.True(other.ShowSubmitAll);
+        Assert.True(other.CanSubmitAll);
     }
 
     /// <summary>
@@ -75,26 +77,34 @@ public class GroupContributableCountTests
         Assert.Equal(3, group.OfferedCount);
         Assert.Equal(4, group.Withheld);
         Assert.True(group.ShowSubmitAll);
+        Assert.True(group.CanSubmitAll);
 
         string? line = ContributionEligibilitySurface.WithheldLine(group.Withheld);
         Assert.False(string.IsNullOrWhiteSpace(line));
     }
 
     /// <summary>
-    /// A count of zero withdraws the control entirely.
+    /// A count of zero makes the group's controls INERT, not absent.
     /// </summary>
     /// <remarks>
-    /// The same rule as an ineligible row, and it removes the
-    /// press-with-no-consequence case. Reached only when the daemon SENT a
-    /// zero -- an absent count offers everything, which the test above pins.
+    /// A group header is not a row, and the two rules differ deliberately: an
+    /// ineligible row draws no control at all, but the group still holds
+    /// sessions, and a folder offering no way to act on it reads as broken
+    /// rather than finished.
+    ///
+    /// <para>
+    /// Reached only when the daemon SENT a zero. An absent count offers
+    /// everything, which the test above pins.
+    /// </para>
     /// </remarks>
     [Fact]
-    public void AZeroCountWithdrawsTheControl()
+    public void AZeroCountMakesTheControlsInertNotAbsent()
     {
         ProjectQueueGroup group = Group(7, Counts(0));
 
         Assert.Equal(0, group.OfferedCount);
-        Assert.False(group.ShowSubmitAll);
+        Assert.False(group.CanSubmitAll);
+        Assert.True(group.ShowSubmitAll);
 
         // The row is still there and still says how many it is holding: the
         // group is unoffered, never hidden.
@@ -102,6 +112,114 @@ public class GroupContributableCountTests
         Assert.Equal(7, group.Withheld);
         Assert.False(string.IsNullOrWhiteSpace(
             ContributionEligibilitySurface.WithheldLine(group.Withheld)));
+    }
+
+    /// <summary>
+    /// AN ABSENT COUNT GOES OVER THE ABI AS A NEGATIVE, NEVER AS ZERO.
+    /// </summary>
+    /// <remarks>
+    /// The trap this surface is most likely to fall into, because
+    /// <c>int?</c> to <c>0</c> is the obvious null-coalesce and it is exactly
+    /// wrong: zero means the question applies and nothing here can be sent,
+    /// so a shell that spelled absence as zero would refuse the control to an
+    /// invited contributor whose sessions are all perfectly sendable.
+    ///
+    /// <para>
+    /// Asserted against the raw ABI at several negatives, because the
+    /// contract is that ANY negative means absent -- not one sentinel this
+    /// shell happens to send.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void AnAbsentCountIsSpelledNegativeAndNeverZero()
+    {
+        Assert.Equal(
+            ContributionControl.Contribute,
+            ContributionEligibilitySurface.GroupControl(7, null));
+
+        foreach (long absent in new long[] { -1, -7, long.MinValue + 1 })
+        {
+            Assert.Equal(
+                ContributionControl.Contribute,
+                ContributionEligibilitySurface.FromAbiControl(
+                    NativeMethods.tc_contribution_group_control(7, absent)));
+        }
+
+        // And zero is emphatically not the same answer.
+        Assert.Equal(
+            ContributionControl.None,
+            ContributionEligibilitySurface.FromAbiControl(
+                NativeMethods.tc_contribution_group_control(7, 0)));
+        Assert.Equal(
+            ContributionControl.None,
+            ContributionEligibilitySurface.GroupControl(7, 0));
+    }
+
+    /// <summary>
+    /// The group control is the ABI's answer, not this shell's.
+    /// </summary>
+    [Fact]
+    public void TheGroupControlComesFromTheAbi()
+    {
+        foreach ((int pending, int? contributable) in new (int, int?)[]
+        {
+            (7, null), (7, 0), (7, 3), (7, 7), (0, 0), (0, null), (1, 1),
+        })
+        {
+            Assert.Equal(
+                ContributionEligibilitySurface.FromAbiControl(
+                    NativeMethods.tc_contribution_group_control(
+                        pending, contributable ?? -1)),
+                ContributionEligibilitySurface.GroupControl(pending, contributable));
+
+            // A group with no entries is not a group at all -- ByProject
+            // returns none -- so the round-trip through ProjectQueueGroup is
+            // asserted only where one exists.
+            if (pending > 0)
+            {
+                Assert.Equal(
+                    ContributionEligibilitySurface.GroupControl(pending, contributable)
+                        == ContributionControl.Contribute,
+                    Group(pending, contributable is { } c
+                        ? new Dictionary<string, int>(StringComparer.Ordinal) { ["proj"] = c }
+                        : null).CanSubmitAll);
+            }
+        }
+    }
+
+    /// <summary>
+    /// <c>excluded_ineligible</c> decodes as absent, not as zero.
+    /// </summary>
+    /// <remarks>
+    /// Absent for a single-entry approve and for an invited contributor,
+    /// because zero would read as "nothing was left out" -- a claim about a
+    /// filter that did not run. Present-and-zero is a different, meaningful
+    /// answer: the filter ran and took everything.
+    /// </remarks>
+    [Fact]
+    public void TheApproveReplyDistinguishesAnAbsentExclusionFromZero()
+    {
+        ApprovalHold absent = JsonSerializer.Deserialize<ApprovalHold>(
+            "{\"approved\":1,\"hold_secs\":5}")!;
+        Assert.Null(absent.ExcludedIneligible);
+
+        ApprovalHold ranAndTookEverything = JsonSerializer.Deserialize<ApprovalHold>(
+            "{\"approved\":7,\"hold_secs\":5,\"excluded_ineligible\":0}")!;
+        Assert.Equal(0, ranAndTookEverything.ExcludedIneligible);
+        Assert.NotNull(ranAndTookEverything.ExcludedIneligible);
+        // Present-and-zero still draws no line: there is no gap to explain.
+        Assert.Null(ContributionEligibilitySurface.WithheldLine(
+            ranAndTookEverything.ExcludedIneligible!.Value));
+
+        ApprovalHold leftSomeBehind = JsonSerializer.Deserialize<ApprovalHold>(
+            "{\"approved\":3,\"hold_secs\":5,\"excluded_ineligible\":4}")!;
+        Assert.Equal(4, leftSomeBehind.ExcludedIneligible);
+        Assert.False(string.IsNullOrWhiteSpace(
+            ContributionEligibilitySurface.WithheldLine(
+                leftSomeBehind.ExcludedIneligible!.Value)));
+
+        // Excluded entries are never in skipped: they were never selected.
+        Assert.Empty(leftSomeBehind.Skipped);
     }
 
     /// <summary>

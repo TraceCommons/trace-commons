@@ -958,8 +958,19 @@ public sealed class PreviewSheetViewModel : INotifyPropertyChanged, IDisposable
         // Re-checked here rather than trusted from the button's enabled state.
         // The gate is the invariant; a disabled control is only how it is
         // usually expressed.
+        //
+        // Draw time decides what is offered; the press decides what is sent,
+        // and only the second is load-bearing. CanContribute resolves the
+        // entry against the live queue, so this asks the queue as it stands
+        // NOW -- a session downgraded between the last redraw and this click
+        // is refused here rather than sent and turned away.
+        //
+        // Refuses and redraws rather than sending: QueueChanged re-reads
+        // everything the footer draws, so the button disables itself and the
+        // sentence beside it says why. Not a throw, and not a silent no-op.
         if (!CanContribute)
         {
+            QueueChanged();
             return;
         }
 

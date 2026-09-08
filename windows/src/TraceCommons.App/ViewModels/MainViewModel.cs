@@ -901,20 +901,32 @@ public sealed class MainViewModel : INotifyPropertyChanged
     {
         ArgumentNullException.ThrowIfNull(entry);
 
-        // Re-checked here rather than trusted from the button's visibility,
-        // the same discipline PreviewSheetViewModel.ContributeAsync states:
-        // the gate is the invariant, and a control that is not drawn is only
-        // how it is usually expressed.
+        // Re-checked AT THE PRESS, against the LIVE row rather than the one
+        // this click carried.
         //
-        // Nothing reaches this today except the row's own button, which is
-        // hidden for an ineligible session. That is exactly why it is worth
-        // asserting here: the eligibility rule would otherwise live in a
-        // single markup attribute, and the next caller -- an accelerator, a
-        // context menu, a tray action, a retry -- would send a contributor's
-        // work and have it turned away, which is the defect this whole
-        // surface exists to remove.
-        if (!entry.CanContribute)
+        // Draw time decides what is offered; the press decides what is sent,
+        // and only the second is load-bearing. The button's Tag holds the row
+        // object as it was when the card was drawn, and ReplacePending
+        // rebuilds every row on refresh -- so a session downgraded between the
+        // last render and this click arrives here still claiming it can be
+        // contributed. Asking the queue closes that window; the pinned copy
+        // only narrows it.
+        //
+        // Refuses and refreshes rather than sending: the refresh redraws the
+        // row without its control and with the sentence saying why, which is
+        // the honest outcome and not a silent no-op.
+        if (LiveEntry(entry.EntryId) is { } live && !live.CanContribute)
         {
+            await RefreshAsync().ConfigureAwait(true);
+            return;
+        }
+
+        // An entry the queue no longer knows about falls back to what the
+        // click carried, for the reason the preview sheet does: gone from the
+        // queue is not evidence that it became ineligible.
+        if (LiveEntry(entry.EntryId) is null && !entry.CanContribute)
+        {
+            await RefreshAsync().ConfigureAwait(true);
             return;
         }
 
@@ -1062,7 +1074,18 @@ public sealed class MainViewModel : INotifyPropertyChanged
             return;
         }
 
-        Notice = hold.Toast.Line;
+        // What a group approve left behind, appended to the toast the shared
+        // crate already wrote. Absent for a single-entry approve and for an
+        // invited contributor, and empty for a present zero -- so nothing
+        // here branches on the count.
+        string withheld = hold.ExcludedIneligible is { } excluded
+            ? ContributionEligibilitySurface.WithheldLine(excluded) ?? string.Empty
+            : string.Empty;
+
+        Notice = withheld.Length > 0
+            ? string.Format(
+                CultureInfo.CurrentCulture, "{0} {1}", hold.Toast.Line, withheld)
+            : hold.Toast.Line;
 
         if (hold.Toast.OfferUndo && hold.IsLive(DateTimeOffset.UtcNow))
         {

@@ -76,6 +76,18 @@ public sealed class QueueGroupViewModel
     /// </summary>
     public bool ShowSubmitAll => _group.ShowSubmitAll;
 
+    /// <summary>
+    /// Whether the group's submit controls may be pressed.
+    /// </summary>
+    /// <remarks>
+    /// False only when the daemon said nothing in this folder can be sent.
+    /// The controls stay on screen and go inert -- a group header is not a
+    /// row, and the folder still holds sessions. See
+    /// <see cref="ProjectQueueGroup.CanSubmitAll"/> for why the two rules
+    /// differ.
+    /// </remarks>
+    public bool CanSubmitAll => _group.CanSubmitAll;
+
     /// <summary>"Submit all (3)" -- the header action's label, when shown.</summary>
     public string SubmitAllText =>
         string.Format(CultureInfo.CurrentCulture, "Submit all ({0})", _group.OfferedCount);

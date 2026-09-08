@@ -119,11 +119,9 @@ public sealed class ProjectQueueGroup
     /// </summary>
     /// <remarks>
     /// <para>
-    /// Withheld at an offered count of zero, on the same rule as an
-    /// ineligible row: a control that would send nothing is a press with no
-    /// consequence, and the row's own sentences already say why. Note this is
-    /// reached only when the daemon SENT a count of zero -- an absent count
-    /// offers the whole group.
+    /// Always true, still. Whether the controls can be PRESSED is
+    /// <see cref="CanSubmitAll"/>, which is a different question and has a
+    /// different answer at zero submittable.
     /// </para>
     ///
     /// This used to be <c>Count &gt; 1</c>, on the reasoning that a
@@ -134,7 +132,29 @@ public sealed class ProjectQueueGroup
     /// the folder is offering. The rule expired with the layout it was
     /// written for; the property stays so callers do not have to know that.
     /// </remarks>
-    public bool ShowSubmitAll => OfferedCount > 0;
+    public bool ShowSubmitAll => true;
+
+    /// <summary>
+    /// Whether the group's submit controls may be PRESSED.
+    /// </summary>
+    /// <remarks>
+    /// <b>A GROUP HEADER IS NOT A ROW, AND THE TWO RULES DIFFER
+    /// DELIBERATELY.</b> An ineligible row simply does not draw its control.
+    /// A group at zero submittable draws its controls DISABLED: the group
+    /// still holds sessions, and a folder offering no way to act on it at all
+    /// reads as broken rather than finished. See
+    /// <see cref="ShowSubmitAll"/>, which stays true.
+    ///
+    /// <para>
+    /// The answer is the shared branch table's, reached with the count spelled
+    /// as the ABI spells it -- an absent count goes over as a NEGATIVE, never
+    /// as zero. See
+    /// <see cref="ContributionEligibilitySurface.GroupControl"/>.
+    /// </para>
+    /// </remarks>
+    public bool CanSubmitAll =>
+        ContributionEligibilitySurface.GroupControl(Count, ContributableCount)
+        == ContributionControl.Contribute;
 }
 
 /// <summary>

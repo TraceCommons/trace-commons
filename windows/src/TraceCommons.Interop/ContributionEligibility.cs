@@ -192,6 +192,29 @@ public static class ContributionEligibilitySurface
     }
 
     /// <summary>
+    /// Whether a group's submit control may be offered.
+    /// </summary>
+    /// <remarks>
+    /// The branch table's, not this shell's -- the same rule the row control
+    /// follows, one level up. A null <paramref name="contributable"/> is an
+    /// ABSENT count and is spelled to the ABI as a negative, never as zero:
+    /// zero means the question applies and nothing here can be sent, and
+    /// answering it for a contributor who has no eligibility question would
+    /// refuse a control over sessions that are all perfectly sendable.
+    /// </remarks>
+    public static ContributionControl GroupControl(int pending, int? contributable) =>
+        FromAbiControl(
+            NativeMethods.tc_contribution_group_control(
+                pending,
+                contributable ?? AbsentCount));
+
+    /// <summary>
+    /// How an absent count is spelled across this ABI. Any negative does; this
+    /// is the one this shell sends.
+    /// </summary>
+    private const long AbsentCount = -1;
+
+    /// <summary>
     /// The ABI value, spelled out rather than cast.
     ///
     /// Anything unknown is <see cref="ContributionControl.None"/>. That is

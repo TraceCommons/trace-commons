@@ -151,19 +151,66 @@ public class EligibilityShellWiringTests
     [Fact]
     public void BothSendPathsRecheckTheGateAtTheAction()
     {
+        // The row's send asks the LIVE queue, not the row object the click
+        // carried, and it refuses BEFORE the approve call rather than after.
         Assert.Matches(
             new Regex(
                 @"public async Task SubmitEntryAsync\(QueueEntryViewModel entry\)\s*\{"
-                + @"(?:(?!ClearUndo|CallAsync).)*?if \(!entry\.CanContribute\)\s*\{\s*return;",
+                + @"(?:(?!ClearUndo|CallAsync).)*?"
+                + @"if \(LiveEntry\(entry\.EntryId\) is \{ \} live && !live\.CanContribute\)"
+                + @"\s*\{\s*await RefreshAsync\(\)\.ConfigureAwait\(true\);\s*return;",
                 RegexOptions.Singleline),
             ShellSource("TraceCommons.App/ViewModels/MainViewModel.cs"));
 
+        // The sheet's Contribute re-checks a gate that already resolves live,
+        // and redraws itself rather than failing silently.
         Assert.Matches(
             new Regex(
                 @"public async Task ContributeAsync\(\)\s*\{"
-                + @"(?:(?!CallAsync).)*?if \(!CanContribute\)\s*\{\s*return;",
+                + @"(?:(?!CallAsync).)*?if \(!CanContribute\)\s*\{\s*"
+                + @"QueueChanged\(\);\s*return;",
                 RegexOptions.Singleline),
             ShellSource("TraceCommons.App/ViewModels/PreviewSheetViewModel.cs"));
+    }
+
+    /// <summary>
+    /// The group header disables its controls; it does not remove them.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately unlike the row rule, where an ineligible session simply
+    /// draws no control. A group still HOLDS sessions, and a folder offering
+    /// no way to act on it at all reads as broken rather than finished.
+    /// </remarks>
+    [Fact]
+    public void TheGroupHeaderDisablesRatherThanRemoves()
+    {
+        string markup = ShellSource("TraceCommons.App/MainWindow.xaml");
+
+        // Both group controls are gated on pressability, and neither has its
+        // visibility tied to it.
+        Assert.Equal(
+            2, Regex.Matches(markup, @"IsEnabled=""\{x:Bind CanSubmitAll\}""").Count);
+        Assert.DoesNotContain(
+            "Visibility=\"{x:Bind CanSubmitAll}\"", markup, StringComparison.Ordinal);
+
+        // ShowSubmitAll stays the visibility question and stays unconditional.
+        string grouping = ShellSource("TraceCommons.Interop/QueueGrouping.cs");
+        Assert.Contains(
+            "public bool ShowSubmitAll => true;", grouping, StringComparison.Ordinal);
+
+        // And pressability is the shared branch table's answer, ASKED rather
+        // than reproduced. A local `OfferedCount > 0` agrees with the ABI
+        // today and would go on agreeing with itself after the Rust changed
+        // an arm, so this cannot be established behaviourally -- it has to be
+        // asserted about the call.
+        Assert.Matches(
+            new Regex(
+                @"public bool CanSubmitAll =>\s*"
+                + @"ContributionEligibilitySurface\.GroupControl\(Count, ContributableCount\)",
+                RegexOptions.Singleline),
+            grouping);
+        Assert.DoesNotContain(
+            "CanSubmitAll => OfferedCount", grouping, StringComparison.Ordinal);
     }
 
     /// <summary>

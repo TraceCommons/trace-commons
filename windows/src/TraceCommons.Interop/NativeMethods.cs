@@ -450,6 +450,29 @@ internal static class NativeMethods
     internal static extern IntPtr tc_contribution_withheld_line(long withheld);
 
     /// <summary>
+    /// Whether a group's submit control may be offered, as a raw
+    /// <c>TC_CONTRIBUTION_CONTROL_*</c> value.
+    /// </summary>
+    /// <remarks>
+    /// <paramref name="contributable"/> is the project row's
+    /// <c>contributable_count</c>, or <b>ANY NEGATIVE VALUE when that key was
+    /// ABSENT</b> -- an invited contributor, for whom every pending session is
+    /// sendable.
+    ///
+    /// <para>
+    /// ABSENT IS NOT ZERO, and it is the distinction most likely to be got
+    /// wrong: zero means the question applies and nothing here can be sent, so
+    /// nothing is offered; negative means the question does not apply and the
+    /// control is offered on <paramref name="pending"/> alone. Passing 0 for an
+    /// absent field would refuse a control to somebody whose sessions are all
+    /// perfectly sendable -- which is what a <c>?? 0</c> on a nullable count
+    /// does, so do not write one.
+    /// </para>
+    /// </remarks>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int tc_contribution_group_control(long pending, long contributable);
+
+    /// <summary>
     /// One <c>harness_list</c> row's state, as a TC_HARNESS_STATE_* code.
     ///
     /// THE BRANCH TABLE CROSSES. "answering" is the only value meaning a call
