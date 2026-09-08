@@ -33,7 +33,16 @@ final class HarnessSurfaceTests: XCTestCase {
          "harness_not_installed":"H-NOT-INSTALLED",
          "harness_plan_nothing_to_change":"H-NOTHING-TO-CHANGE",
          "harness_plan_entry_unusable":"H-ENTRY-UNUSABLE",
-         "harness_plan_no_config_path":"H-NO-CONFIG-PATH"}
+         "harness_plan_no_config_path":"H-NO-CONFIG-PATH",
+         "credential_title":"C-TITLE","credential_what":"C-WHAT",
+         "credential_cost":"C-COST","credential_obtain":"C-OBTAIN",
+         "credential_cancel":"C-CANCEL","credential_forget":"C-FORGET",
+         "credential_forget_explains":"C-FORGET-EXPLAINS",
+         "credential_absent":"C-ABSENT","credential_obtaining":"C-OBTAINING",
+         "credential_failed":"C-FAILED","credential_cancelled":"C-CANCELLED",
+         "credential_present":"C-PRESENT","credential_unknown":"C-UNKNOWN",
+         "credential_unreported":"C-UNREPORTED",
+         "harness_needs_credential":"H-NEEDS-CREDENTIAL"}
         """
 
     private func copy() -> PrivateInferenceCopy {

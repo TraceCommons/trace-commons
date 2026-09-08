@@ -71,6 +71,47 @@ public struct PrivateInferenceCopy: Decodable, Equatable, Sendable {
     public let harnessPlanEntryUnusable: String
     public let harnessPlanNoConfigPath: String
 
+    /// The heading over the sign-in card.
+    public let credentialTitle: String
+    /// What holding a key of one's own changes about this destination.
+    public let credentialWhat: String
+    /// The three consequences of pressing Obtain: a browser opens, the
+    /// contributor signs in with a company that is not this app, and a key
+    /// is minted and kept here.
+    ///
+    /// Drawn WHEREVER Obtain is offered, and never separated from it. The
+    /// button is the only control on this shell that opens a browser and
+    /// mints something at a third party, and a contributor who pressed it
+    /// having read only its label was not told what they agreed to.
+    public let credentialCost: String
+    public let credentialObtain: String
+    public let credentialCancel: String
+    public let credentialForget: String
+    /// That forgetting is local: the key stays valid at the service until
+    /// the contributor removes it in their own account. Drawn WHEREVER
+    /// Forget is offered -- `handle_forget`'s `revoked: false` in words, and
+    /// a button labelled only "Forget" reads as a revocation it is not.
+    public let credentialForgetExplains: String
+    public let credentialAbsent: String
+    public let credentialObtaining: String
+    public let credentialFailed: String
+    public let credentialCancelled: String
+    public let credentialPresent: String
+    /// A state label this build has never heard of.
+    ///
+    /// Its own sentence, and it must never degrade to `credentialAbsent`:
+    /// that is a claim about what this machine holds, and a contributor who
+    /// already has a key would read it as an invitation to mint a second one
+    /// in their own account that nothing here would ever mention again.
+    public let credentialUnknown: String
+    /// A daemon that does not answer the question at all. Distinct from
+    /// `credentialUnknown` for the same reason and by the same rule.
+    public let credentialUnreported: String
+    /// Why a connect control is not on offer. Drawn from
+    /// `tc_harness_credential_notice` and never from this shell's own
+    /// reading of a `destination_credentialed` field.
+    public let harnessNeedsCredential: String
+
     /// `CaseIterable` so a test on the far side can compare the exported
     /// field set against the declared one in BOTH directions -- a field the
     /// Rust grows and this struct drops would sail past a test that only
@@ -124,6 +165,21 @@ public struct PrivateInferenceCopy: Decodable, Equatable, Sendable {
         case harnessPlanNothingToChange = "harness_plan_nothing_to_change"
         case harnessPlanEntryUnusable = "harness_plan_entry_unusable"
         case harnessPlanNoConfigPath = "harness_plan_no_config_path"
+        case credentialTitle = "credential_title"
+        case credentialWhat = "credential_what"
+        case credentialCost = "credential_cost"
+        case credentialObtain = "credential_obtain"
+        case credentialCancel = "credential_cancel"
+        case credentialForget = "credential_forget"
+        case credentialForgetExplains = "credential_forget_explains"
+        case credentialAbsent = "credential_absent"
+        case credentialObtaining = "credential_obtaining"
+        case credentialFailed = "credential_failed"
+        case credentialCancelled = "credential_cancelled"
+        case credentialPresent = "credential_present"
+        case credentialUnknown = "credential_unknown"
+        case credentialUnreported = "credential_unreported"
+        case harnessNeedsCredential = "harness_needs_credential"
     }
 
     /// All or nothing, for the reason on the type.
