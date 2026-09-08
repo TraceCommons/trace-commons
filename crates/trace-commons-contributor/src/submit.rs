@@ -1579,9 +1579,30 @@ pub(crate) async fn checked_local_redaction(
             .await
             .map_err(|_| PRECONDITION_CANARY_FAILED)?;
     }
-    let envelope = redact_to_envelope(redactor, raw)
-        .await
-        .map_err(|_| "redaction-failed")?;
+    // A credential the contributor typed is the one pipeline refusal they can
+    // act on, so it keeps its own label and the shells can say "rotate it".
+    // Everything else is a condition of the machine and stays generic.
+    //
+    // Flattening this to "redaction-failed" is what the rescued admission work
+    // was compensating for at its own call site; fixing it here means every
+    // caller of this function gets the distinction rather than one of them.
+    let envelope = redact_to_envelope(redactor, raw).await.map_err(|error| {
+        // Named refusals survive; everything else is a condition of the
+        // machine and stays generic. A credential the contributor typed and a
+        // filter backend that collapsed two metadata keys are both things a
+        // shell can say something useful about, and flattening them to
+        // "redaction-failed" sends the reader looking at their own trace for
+        // a fault that is not there.
+        match error.to_string().as_str() {
+            crate::envelope::REASON_METADATA_CREDENTIAL => {
+                crate::envelope::REASON_METADATA_CREDENTIAL
+            }
+            crate::envelope::REASON_METADATA_KEY_COLLISION => {
+                crate::envelope::REASON_METADATA_KEY_COLLISION
+            }
+            _ => "redaction-failed",
+        }
+    })?;
     validate_local_envelope(redactor, &envelope)?;
     Ok(envelope)
 }
@@ -2964,17 +2985,16 @@ mod tests {
         assert!(envelope_has_residual_secret(&redactor, &envelope).unwrap());
     }
 
-    /// The `model` field (`IronclawTraceMetadata::model_name`) is copied
-    /// verbatim from the transcript into the envelope and is never routed
-    /// through the per-field redaction pass (only `content` and
-    /// `structured_payload` are). The whole-envelope residual-secret rescan
-    /// (`residual_secret_refusal`, called from both submit-path call sites)
-    /// is the only thing standing between a secret-shaped literal placed
-    /// there and delivery to ingest. This drives the *real* `submit_sessions`
-    /// entrypoint end to end with a fixture whose `model` field is a
-    /// recognized secret shape (`sk-ant-...`), so it fails if either call
-    /// site is ever deleted: without the guard, this session would upload
-    /// (`Submitted`, 1 delivery) instead of refusing.
+    /// A credential in the `model` field (`IronclawTraceMetadata::model_name`)
+    /// is refused, not masked and uploaded. Two guards now stand behind that,
+    /// and this drives the *real* `submit_sessions` entrypoint end to end
+    /// from a fixture on disk, so it fails if either is deleted: the metadata
+    /// redaction pass refuses at `METADATA_CREDENTIAL_REFUSAL`, and the
+    /// whole-envelope residual rescan (`residual_secret_refusal`, called from
+    /// both submit-path call sites) catches anything that reaches the
+    /// finished envelope. Both report the same wire label, because the
+    /// contributor's situation is the same either way: remove it and rotate
+    /// it. Without them this session would upload (`Submitted`, 1 delivery).
     #[tokio::test]
     async fn submit_sessions_refuses_session_with_secret_in_unredacted_model_field() {
         let received = Arc::new(Mutex::new(Vec::new()));

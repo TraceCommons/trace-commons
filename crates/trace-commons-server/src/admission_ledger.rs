@@ -49,6 +49,14 @@ impl AdmissionLimits {
     }
 }
 
+/// A reservation for a *new* submission. A terminal retry is a read of an
+/// already-admitted request and never builds one.
+///
+/// The two evidence hashes stay `Option` because `trace_reserve_admission`
+/// still models both row kinds -- `window` (both null) and `attested` (both
+/// set) -- and `admission_ledger_pg` covers that SQL contract. The ingest
+/// path no longer produces a `window` row: see `admission::evidence_binding`,
+/// which is where the refusal lives and where it is tested.
 #[derive(Clone)]
 pub struct AdmissionReservation {
     pub tenant_id: String,

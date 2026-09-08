@@ -1,7 +1,9 @@
 // Copyright (C) 2026 K&Z Partners LLC
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Receipt-bound admission evidence. Redaction v1 alone never grants admission.
-use crate::near_attestation::receipt::{ReceiptAlgo, ReceiptPayload, verify_receipt};
+use crate::near_attestation::receipt::{
+    ReceiptAlgo, ReceiptPayload, ReceiptSignatureKind, verify_receipt,
+};
 use crate::redaction_witness::verification::{VerifiedWitnessCertificate, WitnessPin};
 use crate::witness_service::{Signer, WitnessContributionResponse};
 use std::collections::BTreeSet;
@@ -13,9 +15,28 @@ use trace_commons_protocol::trace_contribution::{
     RawTraceContribution, TraceContributionEventType,
 };
 
+/// Which keys may vouch for an admission receipt, kept in one set per
+/// signature kind and never merged.
+///
+/// The same reasoning as `check_inference_attestation`
+/// (`witness_service/inference.rs`): NEAR AI signs with a different attested
+/// key depending on the protocol the call used, and a key attested for one
+/// role must not be able to vouch for the other -- that is the property two
+/// separate attestations exist to deny.
+///
+/// It matters more here than there, because the two forms do not bind the
+/// same thing. The three-part provider-TEE receipt commits to the model; the
+/// two-part gateway receipt binds no model at all, so `accepts_request` can
+/// only compare the accepted-model list against a model read out of the
+/// request body the caller supplied. Admitting a gateway receipt against the
+/// provider-TEE set would silently downgrade that binding from
+/// provider-attested to body-asserted. An operator who wants the weaker form
+/// says so by configuring `..._GATEWAY_SIGNERS`; absent, the set is empty and
+/// every gateway receipt is refused.
 #[derive(Clone)]
 pub struct AdmissionProviderTrust {
-    signers: BTreeSet<String>,
+    provider_tee_signers: BTreeSet<String>,
+    gateway_signers: BTreeSet<String>,
     models: BTreeSet<String>,
     min_request_bytes: u64,
 }
@@ -24,14 +45,21 @@ pub struct AdmissionProviderTrust {
 pub struct AdmissionEvidenceError;
 impl AdmissionProviderTrust {
     pub fn new(
-        keys: impl IntoIterator<Item = String>,
+        provider_tee_keys: impl IntoIterator<Item = String>,
+        gateway_keys: impl IntoIterator<Item = String>,
         models: impl IntoIterator<Item = String>,
         min_request_bytes: u64,
     ) -> Result<Self, AdmissionEvidenceError> {
-        let signers: BTreeSet<_> = keys.into_iter().collect();
+        let provider_tee_signers: BTreeSet<_> = provider_tee_keys.into_iter().collect();
+        let gateway_signers: BTreeSet<_> = gateway_keys.into_iter().collect();
         let models: BTreeSet<_> = models.into_iter().collect();
-        if signers.is_empty()
-            || signers.iter().any(|s| !is_hash(s))
+        if provider_tee_signers.is_empty()
+            || provider_tee_signers
+                .union(&gateway_signers)
+                .any(|s| !is_hash(s))
+            // A key in both sets is one key holding both roles, which is the
+            // thing the split exists to make impossible to express.
+            || provider_tee_signers.intersection(&gateway_signers).count() != 0
             || models.is_empty()
             || models
                 .iter()
@@ -41,7 +69,8 @@ impl AdmissionProviderTrust {
             return Err(AdmissionEvidenceError);
         }
         Ok(Self {
-            signers,
+            provider_tee_signers,
+            gateway_signers,
             models,
             min_request_bytes,
         })
@@ -50,22 +79,49 @@ impl AdmissionProviderTrust {
         let read = |suffix| {
             std::env::var(format!("{prefix}_{suffix}")).map_err(|_| AdmissionEvidenceError)
         };
+        let split = |raw: String| {
+            raw.split(',')
+                .map(str::trim)
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        };
         Self::new(
-            read("PROVIDER_SIGNERS")?
-                .split(',')
-                .map(str::trim)
-                .map(str::to_string),
-            read("ACCEPTED_MODELS")?
-                .split(',')
-                .map(str::trim)
-                .map(str::to_string),
+            split(read("PROVIDER_SIGNERS")?),
+            // Optional, and empty means "no gateway receipt is admissible".
+            // That is the fail-closed reading and it is deliberate: an
+            // operator who pinned provider-TEE keys did not thereby agree to
+            // accept a receipt that binds no model.
+            std::env::var(format!("{prefix}_GATEWAY_SIGNERS"))
+                .map(split)
+                .unwrap_or_default(),
+            split(read("ACCEPTED_MODELS")?),
             read("MIN_REQUEST_BYTES")?
                 .parse()
                 .map_err(|_| AdmissionEvidenceError)?,
         )
     }
+    /// Whether `signer` may vouch for a receipt of this kind. `Unrecognised`
+    /// names no key source, so there is nothing to check it against -- not a
+    /// licence to try both sets.
+    pub fn accepts_kind(&self, kind: ReceiptSignatureKind, signer: &str) -> bool {
+        let signers = match kind {
+            ReceiptSignatureKind::ProviderTee => &self.provider_tee_signers,
+            ReceiptSignatureKind::Gateway => &self.gateway_signers,
+            ReceiptSignatureKind::Unrecognised => return false,
+        };
+        is_hash(signer) && signers.contains(signer)
+    }
+    /// Kind-agnostic membership, for the ingest-side re-check only.
+    ///
+    /// [`AdmissionEvidence`] carries no signature kind, so ingest cannot
+    /// reconstruct which set applied. It does not need to: the kind was
+    /// decided by [`accepts_kind`](Self::accepts_kind) at certification time,
+    /// inside the witness, and the witness pin's signature over the evidence
+    /// is what ingest verifies. This is a defence-in-depth membership check on
+    /// top of that signature, not the control that separates the two roles.
     pub fn accepts(&self, signer: &str) -> bool {
-        is_hash(signer) && self.signers.contains(signer)
+        is_hash(signer)
+            && (self.provider_tee_signers.contains(signer) || self.gateway_signers.contains(signer))
     }
     pub fn accepts_request(&self, model: &str, request_bytes: u64) -> bool {
         self.models.contains(model) && request_bytes >= self.min_request_bytes
@@ -89,6 +145,12 @@ pub fn verify_admission_call(
     now: i64,
     max_body_bytes: usize,
 ) -> Result<VerifiedAdmissionCall, AdmissionEvidenceError> {
+    // This receipt profile binds exactly one exchange. Companion events are
+    // not evidence-covered, even if their source claims they are the same
+    // session. Ordinary invited contributions do not use this boundary.
+    if raw.events.len() != 1 {
+        return Err(AdmissionEvidenceError);
+    }
     let event = raw
         .events
         .iter()
@@ -116,7 +178,12 @@ pub fn verify_admission_call(
     }
     let verified = verify_receipt(receipt, request.as_bytes(), response.as_bytes(), model)
         .map_err(|_| AdmissionEvidenceError)?;
-    if !trust.accepts(&verified.signing_address) {
+    // `signature_kind` is a client-supplied wire label, not covered by the
+    // receipt signature, so it cannot be trusted to *widen* anything. It is
+    // used only to select which set the signer must be in, and every set is
+    // narrower than their union; claiming the other kind therefore only ever
+    // costs the caller its own admission. `Unrecognised` selects no set.
+    if !trust.accepts_kind(receipt.signature_kind, &verified.signing_address) {
         return Err(AdmissionEvidenceError);
     }
     let binding = AdmissionBinding::parse(
@@ -140,6 +207,54 @@ pub fn verify_admission_call(
 }
 
 impl VerifiedAdmissionCall {
+    /// A receipt does not certify the importer's tool outcomes, replay claims,
+    /// cost estimates or companion metadata. Retain only the verified exchange
+    /// and source provenance before redaction and contributor review.
+    pub(crate) fn restrict_contribution(
+        &self,
+        raw: &mut RawTraceContribution,
+    ) -> Result<(), AdmissionEvidenceError> {
+        if raw.events.len() != 1 {
+            return Err(AdmissionEvidenceError);
+        }
+        let (request, response) =
+            crate::witness_service::inference::exchange_bodies(&raw.events[0])
+                .ok_or(AdmissionEvidenceError)?;
+        if hash_hex(request.as_bytes()) != self.request_hash
+            || hash_hex(response.as_bytes()) != self.response_hash
+        {
+            return Err(AdmissionEvidenceError);
+        }
+        let response = response.to_owned();
+        let payload = serde_json::json!({"request": {"body": request}, "response": {}});
+        raw.outcome = Default::default();
+        raw.value = Default::default();
+        raw.embedding_analysis = None;
+        raw.conversation_id = None;
+        raw.replay = trace_commons_protocol::trace_contribution::ReplayMetadata {
+            replayable: false,
+            required_tools: Vec::new(),
+            tool_manifest_hashes: Default::default(),
+            expected_assertions: Vec::new(),
+            replay_notes: Vec::new(),
+        };
+        raw.ironclaw.feature_flags.retain(|key, _| key == "agent");
+        raw.ironclaw.model_name = Some(self.model.clone());
+        raw.ironclaw.engine_version = None;
+        let event = &mut raw.events[0]; // verify_admission_call required exactly one.
+        event.structured_payload = payload;
+        event.content = Some(response);
+        event.parent_event_id = None;
+        event.tool_name = None;
+        event.tool_call_id = None;
+        event.latency_ms = None;
+        event.token_counts = None;
+        event.cost_usd = None;
+        event.success = None;
+        event.failure_modes.clear();
+        Ok(())
+    }
+
     /// Called only after the redactor has produced the immutable returned envelope.
     pub fn certify(
         self,
@@ -224,14 +339,65 @@ mod tests {
     #[test]
     fn policy_requires_explicit_canonical_keys_models_and_positive_floor() {
         let key = "a".repeat(64);
+        let none = Vec::new;
         let good = || ["operator-approved-model".to_string()];
-        assert!(AdmissionProviderTrust::new([key.clone()], good(), 1).is_ok());
-        assert!(AdmissionProviderTrust::new(Vec::new(), good(), 1).is_err());
-        assert!(AdmissionProviderTrust::new([format!("0x{}", "a".repeat(40))], good(), 1).is_err());
-        assert!(AdmissionProviderTrust::new([key.to_uppercase()], good(), 1).is_err());
-        assert!(AdmissionProviderTrust::new([key.clone()], Vec::new(), 1).is_err());
-        assert!(AdmissionProviderTrust::new([key.clone()], ["".into()], 1).is_err());
-        assert!(AdmissionProviderTrust::new([key.clone()], [" padded ".into()], 1).is_err());
-        assert!(AdmissionProviderTrust::new([key], good(), 0).is_err());
+        assert!(AdmissionProviderTrust::new([key.clone()], none(), good(), 1).is_ok());
+        assert!(AdmissionProviderTrust::new(none(), none(), good(), 1).is_err());
+        assert!(
+            AdmissionProviderTrust::new([format!("0x{}", "a".repeat(40))], none(), good(), 1)
+                .is_err()
+        );
+        assert!(AdmissionProviderTrust::new([key.to_uppercase()], none(), good(), 1).is_err());
+        assert!(AdmissionProviderTrust::new([key.clone()], none(), none(), 1).is_err());
+        assert!(AdmissionProviderTrust::new([key.clone()], none(), ["".into()], 1).is_err());
+        assert!(
+            AdmissionProviderTrust::new([key.clone()], none(), [" padded ".into()], 1).is_err()
+        );
+        assert!(AdmissionProviderTrust::new([key.clone()], none(), good(), 0).is_err());
+        // A gateway set is optional but is held to the same key shape, and a
+        // key may not hold both roles.
+        assert!(
+            AdmissionProviderTrust::new([key.clone()], ["not-a-hash".into()], good(), 1).is_err()
+        );
+        assert!(AdmissionProviderTrust::new([key.clone()], [key.clone()], good(), 1).is_err());
+    }
+
+    /// Selecting the pin set by `signature_kind` is the whole of the split.
+    /// A gateway-signed receipt admitted under a provider-TEE key, or the
+    /// reverse, would mean a key attested for one role could vouch for the
+    /// other. Deleting either arm of `accepts_kind` fails here.
+    #[test]
+    fn a_signer_vouches_only_for_the_kind_it_was_configured_under() {
+        let provider = "a".repeat(64);
+        let gateway = "b".repeat(64);
+        let trust = AdmissionProviderTrust::new(
+            [provider.clone()],
+            [gateway.clone()],
+            ["operator-approved-model".to_string()],
+            1,
+        )
+        .unwrap();
+
+        assert!(trust.accepts_kind(ReceiptSignatureKind::ProviderTee, &provider));
+        assert!(trust.accepts_kind(ReceiptSignatureKind::Gateway, &gateway));
+        assert!(!trust.accepts_kind(ReceiptSignatureKind::ProviderTee, &gateway));
+        assert!(!trust.accepts_kind(ReceiptSignatureKind::Gateway, &provider));
+        for signer in [&provider, &gateway] {
+            assert!(!trust.accepts_kind(ReceiptSignatureKind::Unrecognised, signer));
+        }
+    }
+
+    /// Absent gateway configuration is an empty set, not an unchecked one.
+    #[test]
+    fn no_gateway_configuration_refuses_every_gateway_receipt() {
+        let provider = "a".repeat(64);
+        let trust = AdmissionProviderTrust::new(
+            [provider.clone()],
+            Vec::new(),
+            ["operator-approved-model".to_string()],
+            1,
+        )
+        .unwrap();
+        assert!(!trust.accepts_kind(ReceiptSignatureKind::Gateway, &provider));
     }
 }

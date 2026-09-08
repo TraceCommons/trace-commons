@@ -98,7 +98,9 @@ async fn actual_postgres_challenge_witness_ingest_and_terminal_retry() {
         pii_backstop_driver_url: None,
         invite_registry_url: None,
     };
-    let admin = PgBackend::new(&config(url)).await.unwrap();
+    let mut admin_config = config(url.clone());
+    admin_config.invite_registry_url = Some(SecretString::from(url));
+    let admin = PgBackend::new(&admin_config).await.unwrap();
     admin.run_migrations().await.unwrap();
     let client = admin
         .raw_pool_for_tests_and_diagnostics()
@@ -164,8 +166,13 @@ async fn actual_postgres_challenge_witness_ingest_and_terminal_retry() {
     let provider = ring::signature::Ed25519KeyPair::from_seed_unchecked(&[7; 32]).unwrap();
     let provider_key = hex::encode(provider.public_key().as_ref());
     let signer = Arc::new(FixtureSigner::new("admission-route-witness"));
-    let trust =
-        AdmissionProviderTrust::new([provider_key.clone()], ["synthetic-model".into()], 1).unwrap();
+    let trust = AdmissionProviderTrust::new(
+        [provider_key.clone()],
+        Vec::new(),
+        ["synthetic-model".into()],
+        1,
+    )
+    .unwrap();
     let temp = tempfile::tempdir().unwrap();
     let mut state = test_state_with_tokens(temp.path().to_path_buf(), tokens);
     let state_mut = Arc::make_mut(&mut state);
@@ -183,43 +190,142 @@ async fn actual_postgres_challenge_witness_ingest_and_terminal_retry() {
         },
         providers: trust.clone(),
     });
-    // Window admission uses the real route and consumes exactly one attempt.
+    // Resolve an actual registry invite, then use its resolved tenant with a
+    // synthetic authenticated token. No receipt or witness header is needed.
+    use trace_commons_server::db::InviteGrantWrite;
+    use trace_commons_server::trace_invite_registry::InviteTenantMode;
+    let invite_hash = format!("sha256:{}", hash_hex(Uuid::new_v4().as_bytes()));
+    let invite_tenant = format!("invited-{}", Uuid::new_v4());
+    admin
+        .insert_invite_grant(InviteGrantWrite {
+            invite_subject_hash: invite_hash.clone(),
+            policy_label: "v012-test".into(),
+            tenant_mode: InviteTenantMode::Fixed,
+            fixed_tenant_id: Some(invite_tenant),
+            tenant_template_id: None,
+            policy_version: "v1".into(),
+            allowed_consent_scopes: vec!["model_training".into()],
+            allowed_uses: vec!["research".into()],
+            max_uses: 1,
+            expires_at: None,
+            issuance_source: "operator".into(),
+            issued_by_label: None,
+            credential_binding_hash: None,
+            note_label: None,
+        })
+        .await
+        .unwrap();
+    let redeemed = admin
+        .redeem_invite_grant(&invite_hash, "v012-invited-user")
+        .await
+        .unwrap()
+        .unwrap();
+    // Exercise the same durable enrollment transaction the issuer calls,
+    // including idempotency and global use-count enforcement.
+    use trace_commons_server::db::{DeviceKeyWrite, OnboardDeviceKeyError};
+    client
+        .execute(
+            "INSERT INTO trace_tenants(tenant_id) VALUES($1) ON CONFLICT DO NOTHING",
+            &[&redeemed.tenant_id],
+        )
+        .await
+        .unwrap();
+    let enrollment_seed: [u8; 32] = sha2::Sha256::digest(Uuid::new_v4().as_bytes()).into();
+    let enrollment = |seed: [u8; 32], invite: &str| {
+        let key = ring::signature::Ed25519KeyPair::from_seed_unchecked(&seed).unwrap();
+        DeviceKeyWrite {
+            device_key_id: trace_commons_protocol::onboarding::device_key_id_from_public_key_bytes(
+                key.public_key().as_ref(),
+            ),
+            tenant_id: redeemed.tenant_id.clone(),
+            public_key: base64::engine::general_purpose::STANDARD.encode(key.public_key().as_ref()),
+            invite_subject_hash: invite.into(),
+            client_info: serde_json::json!({}),
+            allowed_consent_scopes: Some(redeemed.allowed_consent_scopes.clone()),
+            allowed_uses: Some(redeemed.allowed_uses.clone()),
+        }
+    };
+    admin
+        .onboard_device_key(enrollment(enrollment_seed, &invite_hash), 1)
+        .await
+        .unwrap();
+    admin
+        .onboard_device_key(enrollment(enrollment_seed, &invite_hash), 1)
+        .await
+        .unwrap();
+    let second_seed: [u8; 32] = sha2::Sha256::digest(Uuid::new_v4().as_bytes()).into();
+    assert!(matches!(
+        admin
+            .onboard_device_key(enrollment(second_seed, &invite_hash), 1)
+            .await,
+        Err(OnboardDeviceKeyError::InviteAlreadyConsumed)
+    ));
+    let unknown_invite = format!("sha256:{}", hash_hex(Uuid::new_v4().as_bytes()));
+    // Registry authorization precedes enrollment; the storage transaction also
+    // supports legacy file-authorized invites and cannot reject all absent rows.
+    assert!(
+        admin
+            .redeem_invite_grant(&unknown_invite, "v012-unknown-user")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    client.execute("UPDATE onboarding_invite_grants SET expires_at=now()-interval '1 second' WHERE invite_subject_hash=$1", &[&invite_hash]).await.unwrap();
+    assert!(
+        admin
+            .redeem_invite_grant(&invite_hash, "v012-expired-user")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    // Expiring the invite prevents new enrollments; the already enrolled
+    // contributor still follows ordinary authenticated contribution policy.
+    let mut invited_tokens = BTreeMap::new();
+    insert_token(
+        &mut invited_tokens,
+        &redeemed.tenant_id,
+        "admission-fixture-token",
+        TokenRole::Contributor,
+    );
+    let invited_root = tempfile::tempdir().unwrap();
+    let mut invited_state =
+        test_state_with_tokens(invited_root.path().to_path_buf(), invited_tokens);
+    Arc::make_mut(&mut invited_state).db_mirror = Some(db.clone());
+    Arc::make_mut(&mut invited_state).require_db_mirror_writes = true;
+    for source in ["opencode", "second-client"] {
+        let mut ordinary = sample_envelope().await;
+        make_metadata_only_low_risk(&mut ordinary);
+        ordinary
+            .ironclaw
+            .feature_flags
+            .insert("agent".into(), source.into());
+        require_ok(
+            post(
+                invited_state.clone(),
+                "/v1/traces",
+                serde_json::to_vec(&ordinary).unwrap(),
+                HeaderMap::new(),
+            )
+            .await,
+        )
+        .await;
+    }
+    // An authenticated account without redeemed invite authority cannot use
+    // the historical trial window to contribute an ordinary artifact.
     let mut window = sample_envelope().await;
     make_metadata_only_low_risk(&mut window);
     let window_id = window.submission_id;
     let window_body = serde_json::to_vec(&window).unwrap();
-    require_ok(
-        post(
-            state.clone(),
-            "/v1/traces",
-            window_body.clone(),
-            HeaderMap::new(),
-        )
-        .await,
-    )
-    .await;
-    require_ok(
-        post(
-            state.clone(),
-            "/v1/traces",
-            window_body.clone(),
-            HeaderMap::new(),
-        )
-        .await,
-    )
-    .await;
-    let mut next = window.clone();
-    next.submission_id = Uuid::new_v4();
     assert_eq!(
         post(
             state.clone(),
             "/v1/traces",
-            serde_json::to_vec(&next).unwrap(),
+            window_body.clone(),
             HeaderMap::new()
         )
         .await
         .status(),
-        StatusCode::TOO_MANY_REQUESTS
+        StatusCode::FORBIDDEN
     );
     let challenge = require_ok(
         post(
@@ -267,12 +373,22 @@ async fn actual_postgres_challenge_witness_ingest_and_terminal_retry() {
             ..Default::default()
         },
     );
+    const METADATA_SENTINEL: &str = "witness-sentinel@example.com";
+    raw.conversation_id = Some(METADATA_SENTINEL.into());
+    raw.ironclaw
+        .feature_flags
+        .insert("agent".into(), "opencode".into());
+    raw.ironclaw
+        .feature_flags
+        .insert("note".into(), METADATA_SENTINEL.into());
+    raw.replay.replay_notes.push(METADATA_SENTINEL.into());
+    raw.value.explanation.push(METADATA_SENTINEL.into());
     let mut event = raw.events.last().unwrap().clone();
     event.event_id = Uuid::new_v4();
     event.event_type = TraceContributionEventType::HttpExchange;
     event.content = Some(response_body.into());
     event.structured_payload = serde_json::json!({"request":{"method":"POST","body":request_body},"response":{"status":200}});
-    raw.events.push(event);
+    raw.events = vec![event];
     let witness = witness_service::surface::WitnessService::new(
         Arc::new(witness_service::DeterministicRedaction::new(Vec::new())),
         signer.clone(),
@@ -329,6 +445,41 @@ async fn actual_postgres_challenge_witness_ingest_and_terminal_retry() {
         trace_commons_protocol::admission::SIGNATURE_HEADER,
         signature.parse().unwrap(),
     );
+    // Each missing binding fails before any submission is admitted.
+    for missing in [
+        trace_commons_protocol::admission::EVIDENCE_HEADER,
+        trace_commons_protocol::admission::SIGNATURE_HEADER,
+        trace_commons_server::redaction_witness::request::CERTIFICATE_HEADER,
+        trace_commons_server::redaction_witness::request::SIGNATURE_HEADER,
+    ] {
+        let mut incomplete = headers.clone();
+        incomplete.remove(missing);
+        assert_eq!(
+            post(
+                state.clone(),
+                "/v1/traces",
+                response.envelope_bytes.clone(),
+                incomplete
+            )
+            .await
+            .status(),
+            StatusCode::FORBIDDEN,
+            "missing {missing}"
+        );
+    }
+    let mut changed_approved_bytes = response.envelope_bytes.clone();
+    changed_approved_bytes.push(b'\n');
+    assert_eq!(
+        post(
+            state.clone(),
+            "/v1/traces",
+            changed_approved_bytes,
+            headers.clone()
+        )
+        .await
+        .status(),
+        StatusCode::FORBIDDEN
+    );
     let accepted = require_ok(
         post(
             state.clone(),
@@ -339,6 +490,58 @@ async fn actual_postgres_challenge_witness_ingest_and_terminal_retry() {
         .await,
     )
     .await;
+    let artifact: TraceContributionEnvelope =
+        serde_json::from_slice(&response.envelope_bytes).unwrap();
+    let receipt: serde_json::Value = serde_json::from_slice(&accepted).unwrap();
+    let stored_path = state.root.join(format!(
+        "tenants/{}/objects/{}/{}.json",
+        tenant_storage_key(&tenant),
+        receipt["status"].as_str().unwrap(),
+        artifact.submission_id
+    ));
+    let stored = std::fs::read_to_string(stored_path).unwrap();
+    assert!(
+        !stored.contains(METADATA_SENTINEL),
+        "stored artifact retained metadata PII"
+    );
+    let stored: TraceContributionEnvelope = serde_json::from_str(&stored).unwrap();
+    for event in &stored.events {
+        if event.event_type == TraceContributionEventType::HttpExchange {
+            assert!(event.redacted_content.is_none());
+            for side in ["request", "response"] {
+                assert!(event.structured_payload[side].get("body").is_none());
+                assert!(event.structured_payload[side].get("headers").is_none());
+            }
+        }
+    }
+    let mut later_ordinary = window.clone();
+    later_ordinary.submission_id = Uuid::new_v4();
+    assert_eq!(
+        post(
+            state.clone(),
+            "/v1/traces",
+            serde_json::to_vec(&later_ordinary).unwrap(),
+            HeaderMap::new()
+        )
+        .await
+        .status(),
+        StatusCode::FORBIDDEN,
+        "successful attestation must not establish a permanent ordinary-upload bypass"
+    );
+    assert_eq!(
+        accepted,
+        require_ok(
+            post(
+                state.clone(),
+                "/v1/traces",
+                response.envelope_bytes.clone(),
+                HeaderMap::new()
+            )
+            .await
+        )
+        .await,
+        "exact completed retry is a receipt read, not a new contribution"
+    );
     // A terminal replay is an authenticated immutable receipt read even when
     // the original short-lived evidence is now expired or unavailable.
     let mut expired = evidence.clone();
@@ -388,10 +591,10 @@ async fn actual_postgres_challenge_witness_ingest_and_terminal_retry() {
         )
         .await
         .unwrap();
-    assert_eq!(row.get::<_, i64>(0), 1);
-    assert_eq!(row.get::<_, i64>(1), 20);
+    assert_eq!(row.get::<_, i64>(0), 0);
+    assert_eq!(row.get::<_, i64>(1), 10);
     assert!(
-        db.lookup_completed_submission_admission(
+        !db.lookup_completed_submission_admission(
             &tenant,
             &anchor,
             window_id,

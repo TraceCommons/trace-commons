@@ -224,6 +224,18 @@ pub async fn canary_self_test_async(redactor: &DeterministicTraceRedactor) -> Re
 /// the text nor the match.
 pub const REASON_CORRECTION_CREDENTIAL: &str = "correction-credential-detected";
 
+/// The second, for the same reason: a credential the contributor typed into a
+/// metadata field -- `model`, a feature flag, a replay note.
+///
+/// Reported under the label the whole-envelope residual scan already uses, so
+/// every shell keeps one wire label and one piece of advice for "a secret of
+/// yours is in this session; remove it and rotate it". The pipeline now
+/// catches it a pass earlier than that scan did, which is the only change a
+/// contributor sees.
+pub const REASON_METADATA_CREDENTIAL: &str = "secret-leak-detected";
+/// The privacy filter collapsed two metadata keys into one.
+pub const REASON_METADATA_KEY_COLLISION: &str = "metadata-key-collision";
+
 /// Run `raw` through `redactor`, mapping any failure to a label-only error
 /// (never trace content).
 pub async fn redact_to_envelope(
@@ -239,6 +251,23 @@ pub async fn redact_to_envelope(
                 if reason == REASON_CORRECTION_CREDENTIAL =>
             {
                 anyhow::anyhow!("{REASON_CORRECTION_CREDENTIAL}")
+            }
+            TraceContributionError::RedactionFailed { reason }
+                if reason
+                    == trace_commons_protocol::trace_contribution::METADATA_CREDENTIAL_REFUSAL =>
+            {
+                anyhow::anyhow!("{REASON_METADATA_CREDENTIAL}")
+            }
+            // A backend that rewrites metadata keys until two collapse is
+            // misbehaving in a way the contributor can neither see nor fix,
+            // so it gets its own label rather than the generic one -- a
+            // shell saying "redaction failed" would send them looking at
+            // their own trace for a fault that is not there.
+            TraceContributionError::RedactionFailed { reason }
+                if reason
+                    == trace_commons_protocol::trace_contribution::METADATA_KEY_COLLISION_REFUSAL =>
+            {
+                anyhow::anyhow!("{REASON_METADATA_KEY_COLLISION}")
             }
             _ => anyhow::anyhow!("trace-redaction-failed"),
         }
