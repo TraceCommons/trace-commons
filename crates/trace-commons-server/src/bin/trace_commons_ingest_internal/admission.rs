@@ -58,8 +58,55 @@ pub(super) async fn anchor(state: &AppState, tenant: &TenantCtx) -> ApiResult<Op
     Ok(Some(stored.to_string()))
 }
 
+/// What a request's admission headers demand, decided from the headers alone.
+///
+/// Pure on purpose. The refusal below is what closes the V59 trial window,
+/// and the RLS matrix that exercises it end to end
+/// (`admission_pg_tests::actual_postgres_challenge_witness_ingest_and_terminal_retry`)
+/// needs an isolated PostgreSQL and is `#[ignore]`d, so CI never runs it. This
+/// seam is what stands behind the refusal in a plain `cargo test --workspace`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum EvidencePlan {
+    /// At least one evidence header is present: verify it or refuse.
+    Verify,
+    /// No evidence headers at all.
+    ///
+    /// NEAR account bootstrap establishes identity, not invitation authority.
+    /// Every new contribution on this path needs receipt-bound evidence; the
+    /// historical trial-window budget must not authorize ordinary data.
+    RefuseNewSubmission,
+}
+
+pub(super) fn evidence_plan(headers: &HeaderMap) -> EvidencePlan {
+    if headers.contains_key(EVIDENCE_HEADER) || headers.contains_key(SIGNATURE_HEADER) {
+        EvidencePlan::Verify
+    } else {
+        EvidencePlan::RefuseNewSubmission
+    }
+}
+
+/// The evidence hashes a new submission's reservation carries, or a refusal.
+///
+/// This is the whole of the trial-window closure, in one pure function so it
+/// can be tested without a database. `verified` is `Some` only after
+/// [`verify_admission_evidence`] has accepted a receipt bound to this
+/// account's challenge; there is no third case, and in particular no case
+/// that yields a `window`-kind reservation. Reverting that is an edit to this
+/// function, and `an_unverified_request_never_binds_a_reservation` fails.
+pub(super) fn evidence_binding(
+    plan: EvidencePlan,
+    verified: Option<(String, String)>,
+) -> ApiResult<(Option<String>, Option<String>)> {
+    match (plan, verified) {
+        (EvidencePlan::Verify, Some((receipt, challenge))) => Ok((Some(receipt), Some(challenge))),
+        _ => Err(denied()),
+    }
+}
+
 pub(super) struct Attempt {
-    reservation: AdmissionReservation,
+    tenant_id: String,
+    submission_id: Uuid,
+    lease_id: Uuid,
     _guard: AdmissionProcessingGuard,
     processing: bool,
     completed: bool,
@@ -75,9 +122,9 @@ impl Attempt {
         }
         if !db
             .transition_submission_admission(
-                &self.reservation.tenant_id,
-                self.reservation.submission_id,
-                self.reservation.lease_id,
+                &self.tenant_id,
+                self.submission_id,
+                self.lease_id,
                 "processing",
             )
             .await
@@ -104,9 +151,9 @@ impl Attempt {
         };
         if !db
             .transition_submission_admission(
-                &self.reservation.tenant_id,
-                self.reservation.submission_id,
-                self.reservation.lease_id,
+                &self.tenant_id,
+                self.submission_id,
+                self.lease_id,
                 next,
             )
             .await
@@ -133,83 +180,91 @@ pub(super) async fn reserve(
         return Err(denied());
     }
     let db = state.db_mirror.as_ref().ok_or_else(denied)?;
+    let plan = evidence_plan(headers);
+    let body_hash = hash_hex(body);
+    // A terminal retry is a read of an already-admitted immutable request.
+    // Short-lived evidence may now be expired or absent; no new work or
+    // authorization is derived from those retry headers. The handler still
+    // checks ownership before returning the existing receipt.
+    //
+    // Decided before the lock. Without evidence headers, a request that is not
+    // already a completed retry has a fixed outcome, and every rejected probe
+    // from a provisioned account would otherwise cost an advisory lock and a
+    // pooled connection held for the rest of this function.
+    if plan == EvidencePlan::RefuseNewSubmission
+        && !db
+            .lookup_completed_submission_admission(
+                tenant.tenant_id(),
+                &anchor,
+                submission,
+                &body_hash,
+            )
+            .await
+            .map_err(|_| denied())?
+    {
+        return Err(denied());
+    }
     let guard = db
         .acquire_admission_processing_lock(tenant.tenant_id(), submission)
         .await
         .map_err(|_| denied())?
         .ok_or_else(|| api_error(StatusCode::CONFLICT, "admission_in_progress"))?;
-    // A terminal retry is a read of an already-admitted immutable request.
-    // Short-lived evidence may now be expired or absent; no new work or
-    // authorization is derived from those retry headers. The handler still
-    // checks ownership before returning the existing receipt.
-    let body_hash = hash_hex(body);
+    // Re-read under the lock: the check above was advisory and unserialized.
     if db
         .lookup_completed_submission_admission(tenant.tenant_id(), &anchor, submission, &body_hash)
         .await
         .map_err(|_| denied())?
     {
         return Ok(Some(Attempt {
-            reservation: AdmissionReservation {
-                tenant_id: tenant.tenant_id().into(),
-                anchor_hash: anchor,
-                submission_id: submission,
-                body_hash,
-                receipt_hash: None,
-                challenge_hash: None,
-                lease_id: Uuid::new_v4(),
-                limits: config.limits.clone(),
-            },
+            tenant_id: tenant.tenant_id().into(),
+            submission_id: submission,
+            lease_id: Uuid::new_v4(),
             _guard: guard,
             processing: false,
             completed: true,
         }));
     }
-    let (receipt_hash, challenge_hash) = if headers.contains_key(EVIDENCE_HEADER)
-        || headers.contains_key(SIGNATURE_HEADER)
-    {
-        let read = |name: &str| -> ApiResult<&str> {
-            let values = headers.get_all(name);
-            if values.iter().count() != 1 {
+    let verified = match plan {
+        EvidencePlan::Verify => {
+            let read = |name: &str| -> ApiResult<&str> {
+                let values = headers.get_all(name);
+                if values.iter().count() != 1 {
+                    return Err(denied());
+                }
+                let value = values
+                    .iter()
+                    .next()
+                    .ok_or_else(denied)?
+                    .to_str()
+                    .map_err(|_| denied())?;
+                if value.len() > 8192 {
+                    return Err(denied());
+                }
+                Ok(value)
+            };
+            let evidence: AdmissionEvidence =
+                serde_json::from_str(read(EVIDENCE_HEADER)?).map_err(|_| denied())?;
+            let witness =
+                verified_witness_for_submission(state, headers, body).ok_or_else(denied)?;
+            let bypass = state.witness_bypass.as_ref().ok_or_else(denied)?;
+            if !bypass.policy_version_allowed(witness.redaction_policy_version()) {
                 return Err(denied());
             }
-            let value = values
-                .iter()
-                .next()
-                .ok_or_else(denied)?
-                .to_str()
-                .map_err(|_| denied())?;
-            if value.len() > 8192 {
-                return Err(denied());
-            }
-            Ok(value)
-        };
-        let evidence: AdmissionEvidence =
-            serde_json::from_str(read(EVIDENCE_HEADER)?).map_err(|_| denied())?;
-        let witness = verified_witness_for_submission(state, headers, body).ok_or_else(denied)?;
-        let bypass = state.witness_bypass.as_ref().ok_or_else(denied)?;
-        if !bypass.policy_version_allowed(witness.redaction_policy_version()) {
-            return Err(denied());
+            verify_admission_evidence(
+                &evidence,
+                read(SIGNATURE_HEADER)?,
+                &witness,
+                bypass.pin(),
+                &config.providers,
+                &anchor,
+                Utc::now().timestamp(),
+            )
+            .map_err(|_| denied())?;
+            Some((evidence.receipt_sha256, evidence.challenge_sha256))
         }
-        verify_admission_evidence(
-            &evidence,
-            read(SIGNATURE_HEADER)?,
-            &witness,
-            bypass.pin(),
-            &config.providers,
-            &anchor,
-            Utc::now().timestamp(),
-        )
-        .map_err(|_| denied())?;
-        (
-            Some(evidence.receipt_sha256),
-            Some(evidence.challenge_sha256),
-        )
-    } else {
-        // NEAR account bootstrap establishes identity, not invitation authority.
-        // Every new contribution on this path needs receipt-bound evidence;
-        // the historical trial-window budget must not authorize ordinary data.
-        return Err(denied());
+        EvidencePlan::RefuseNewSubmission => None,
     };
+    let (receipt_hash, challenge_hash) = evidence_binding(plan, verified)?;
     let reservation = AdmissionReservation {
         tenant_id: tenant.tenant_id().to_string(),
         anchor_hash: anchor,
@@ -245,11 +300,76 @@ pub(super) async fn reserve(
         AdmissionDecision::Refused => return Err(denied()),
     };
     Ok(Some(Attempt {
-        reservation,
+        tenant_id: reservation.tenant_id,
+        submission_id: reservation.submission_id,
+        lease_id: reservation.lease_id,
         _guard: guard,
         processing: false,
         completed,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::{HeaderName, HeaderValue};
+
+    /// The V59 trial window is closed, not narrowed: with no evidence headers
+    /// there is no reachable path that admits a new submission.
+    ///
+    /// This runs in a plain `cargo test --workspace`. The RLS matrix that
+    /// proves the same thing end to end is `#[ignore]`d for want of an
+    /// isolated PostgreSQL, so without this the refusal could be reverted
+    /// with `main` staying green.
+    #[test]
+    fn a_request_with_no_evidence_headers_refuses_a_new_submission() {
+        assert_eq!(
+            evidence_plan(&HeaderMap::new()),
+            EvidencePlan::RefuseNewSubmission
+        );
+        for name in [EVIDENCE_HEADER, SIGNATURE_HEADER] {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                HeaderValue::from_static("offered"),
+            );
+            assert_eq!(
+                evidence_plan(&headers),
+                EvidencePlan::Verify,
+                "{name} alone must still enter the verify branch, which then \
+                 fails on the header it is missing"
+            );
+        }
+    }
+
+    /// A NEAR account that bootstrapped its identity has no admission
+    /// authority of its own. Before this, an evidence-less request fell
+    /// through to the V59 trial-window budget and uploaded ordinary data
+    /// under it; the only end-to-end test of that is `#[ignore]`d.
+    #[test]
+    fn an_unverified_request_never_binds_a_reservation() {
+        let receipt = "a".repeat(64);
+        let challenge = "b".repeat(64);
+        assert!(evidence_binding(EvidencePlan::RefuseNewSubmission, None).is_err());
+        assert!(
+            evidence_binding(
+                EvidencePlan::RefuseNewSubmission,
+                Some((receipt.clone(), challenge.clone()))
+            )
+            .is_err()
+        );
+        assert!(evidence_binding(EvidencePlan::Verify, None).is_err());
+        assert_eq!(
+            evidence_binding(
+                EvidencePlan::Verify,
+                Some((receipt.clone(), challenge.clone()))
+            )
+            .map_err(|_| ())
+            .unwrap(),
+            (Some(receipt), Some(challenge)),
+            "positive control: verified evidence does bind"
+        );
+    }
 }
 
 pub(super) async fn challenge_handler(

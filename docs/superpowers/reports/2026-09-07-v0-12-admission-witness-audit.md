@@ -7,7 +7,7 @@ Baseline: `7d518662`. Workstream C; implementation in progress, not release evid
 | Identity / contribution | Required authority | Current verification |
 | --- | --- | --- |
 | Redeemed invite, ordinary local trace | Existing authenticated invite grants, ordinary privacy and approval | Real registry resolution and device-registration transaction (idempotency and use cap), then synthetic authenticated tenant + ordinary ingest succeeds for two source names |
-| NEAR identity without invite, ordinary trace | Refuse | Real PostgreSQL/RLS ingest reproduced HTTP200; fixed to403 |
+| NEAR identity without invite, ordinary trace | Refuse | Real PostgreSQL/RLS ingest reproduced HTTP 200; fixed to 403 |
 | NEAR identity, verified single-call witness artifact | Receipt, account challenge, exact artifact certificate, authenticated approved upload | Existing synthetic signed witness-to-ingest PostgreSQL fixture passes after narrowing |
 | Valid receipt plus unrelated companion history | Refuse unsupported coverage | Reproduced witness success; fixed by single-exchange admission restriction |
 | Completed exact retry | Read existing authenticated immutable result | Existing PostgreSQL regression retained |
@@ -44,10 +44,32 @@ invited credentials do not acquire a global receipt requirement.
 - Still required: complete native HTTP invite enrollment qualification,
   deployed signer/quote verification, real client/provider sessions and agreed
   native coverage/approval presentation. Local preview is not eligibility.
-- Metadata traversal shares existing byte/node/depth budgets and refuses
-  collisions or invalid typed output. Fixed schema keys are not sent to the
-  classifier; contributed values and dynamic map keys are. Additional classifier
-  work is bounded but its real-provider latency has not been measured.
+- Metadata traversal takes one byte/node/depth budget per pass -- the trace
+  metadata, each event's metadata, each event's payload -- and going over
+  budget degrades to `coverage_incomplete`, which forces residual risk to
+  High. It is not a refusal: this pass runs on every submission path, and one
+  budget spanning a whole contribution is reached by an ordinary long session.
+  Key collisions and invalid typed output are still refusals.
+- Typed leaves are not classified: UUIDs, RFC3339 timestamps, enum variants
+  and server-assigned identifiers. A verdict on one is never useful and a
+  rewrite of one fails the round-trip back into the typed struct. The whole
+  `contributor` subtree is excluded for a second reason -- identity does not
+  leave the machine for a third-party classifier.
+  `metadata_schema_fields_are_pinned` fails when the schema grows, so both the
+  typed set and the dynamic-key set get revisited deliberately.
+- A credential detected in a metadata leaf is refused, not masked, matching
+  the correction path. A contributor whose API key landed in `model_name` is
+  told to rotate it rather than having it masked and uploaded.
+- Fixed schema keys are not sent to the classifier; contributed values and
+  dynamic map keys are. Additional classifier work is bounded but its
+  real-provider latency has not been measured.
+- `AdmissionProviderTrust` holds one signer set per receipt kind and never
+  merges them, mirroring `check_inference_attestation`. The two-part gateway
+  form binds no model, so admitting it against the provider-TEE set would
+  downgrade the model binding from provider-attested to body-asserted; an
+  operator opts into the weaker form by setting
+  `TRACE_COMMONS_ADMISSION_GATEWAY_SIGNERS`, and absent that no gateway
+  receipt is admissible.
 
 ## Evidence limits
 
@@ -65,15 +87,20 @@ were performed. Native/adapter integration remains a subsequent checkpoint.
 
 ## Local checkpoint validation
 
-- Reproduced baseline failures: uninvited ordinary ingest returned200 instead
-  of403; a final-call receipt certified unrelated history; metadata retained a
+- Reproduced baseline failures: uninvited ordinary ingest returned 200 instead
+  of 403; a final-call receipt certified unrelated history; metadata retained a
   synthetic name removed from event content.
-- After fixes:122 witness tests,277 protocol privacy-filter tests,239 standalone
-  protocol tests, the real PostgreSQL/RLS admission matrix, and4 license-boundary
-  tests pass. Clippy passes with the repository's existing allow-list.
+- After fixes: 121 witness tests, 244 standalone protocol tests, 1,553
+  contributor tests, the admission gate's own unit tests and 4
+  license-boundary tests pass. Clippy passes with the repository's existing allow-list.
 - The matrix also proves an already accepted attestation does not permit a new
   ordinary upload; a byte-identical completed retry without short-lived headers
-  remains a receipt read.
+  remains a receipt read. That matrix needs an isolated PostgreSQL and is
+  `#[ignore]`d, so CI does not run it: the refusal itself is decided by
+  `admission::evidence_binding`, a pure function whose unit tests do run under
+  `cargo test --workspace`, and `restrict_contribution` is now covered by a
+  running witness test asserting that importer-supplied replay claims and cost
+  figures are absent from the certified artifact.
 - Final residual-secret scan refuses incomplete coverage or classifier-echoed
   secrets before certificate signing. A clean deterministic scan is not a
   guarantee that every possible PII category was removed.

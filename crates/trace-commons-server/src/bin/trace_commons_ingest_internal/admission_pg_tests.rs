@@ -166,8 +166,13 @@ async fn actual_postgres_challenge_witness_ingest_and_terminal_retry() {
     let provider = ring::signature::Ed25519KeyPair::from_seed_unchecked(&[7; 32]).unwrap();
     let provider_key = hex::encode(provider.public_key().as_ref());
     let signer = Arc::new(FixtureSigner::new("admission-route-witness"));
-    let trust =
-        AdmissionProviderTrust::new([provider_key.clone()], ["synthetic-model".into()], 1).unwrap();
+    let trust = AdmissionProviderTrust::new(
+        [provider_key.clone()],
+        Vec::new(),
+        ["synthetic-model".into()],
+        1,
+    )
+    .unwrap();
     let temp = tempfile::tempdir().unwrap();
     let mut state = test_state_with_tokens(temp.path().to_path_buf(), tokens);
     let state_mut = Arc::make_mut(&mut state);

@@ -589,7 +589,7 @@ fn successful_near_ai_dry_run_records_notice_without_generating_device_key() {
 }
 
 #[test]
-fn metadata_secret_is_redacted_in_enrolled_and_unenrolled_dry_runs() {
+fn residual_secret_refusal_fails_enrolled_and_unenrolled_dry_runs() {
     let fixture_dir = tempfile::tempdir().unwrap();
     let trajectory = write_trajectory_with_model(
         fixture_dir.path(),
@@ -605,17 +605,13 @@ fn metadata_secret_is_redacted_in_enrolled_and_unenrolled_dry_runs() {
         let output = run_submit(config_dir.path(), &trajectory, true, true);
         let document: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
         assert!(
-            output.status.success(),
+            !output.status.success(),
             "enrolled={enrolled} stdout={} stderr={}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
-        assert_eq!(document["results"][0]["status"], "dry-run");
-        assert!(
-            !String::from_utf8_lossy(&output.stdout)
-                .contains("sk-ant-EXPOSEDsecret0123456789abcdefghij")
-        );
-        assert!(!config_dir.path().join("device.pk8").exists());
+        assert_eq!(document["results"][0]["outcome"], "refused");
+        assert_eq!(document["results"][0]["reason"], "secret-leak-detected");
     }
 }
 

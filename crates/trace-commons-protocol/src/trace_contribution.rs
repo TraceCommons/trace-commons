@@ -4020,6 +4020,18 @@ impl DeterministicTraceRedactor {
 
     // Metadata is also contributor input. Share the exact text pipeline and
     // report state; never label an event-only scan as whole-artifact coverage.
+    //
+    // Two things this pass deliberately does not do.
+    //
+    // It does not classify typed leaves -- see `TYPED_METADATA_FIELDS`.
+    //
+    // And it does not refuse a trace for running out of scan budget. Over
+    // budget degrades to `coverage_incomplete`, which forces residual risk to
+    // High, exactly as `classify_structured_payload_node` already resolves an
+    // oversized payload. This runs on every submission path, not only
+    // admission, and one budget spanning a whole contribution is reached by an
+    // ordinary long session; refusing there would stop routine uploads that
+    // previously succeeded at High risk.
     fn redact_metadata_value<'a>(
         &'a self,
         value: Value,
@@ -4031,48 +4043,53 @@ impl DeterministicTraceRedactor {
     > {
         Box::pin(async move {
             context.budget.nodes += 1;
-            if depth > STRUCTURED_PAYLOAD_MAX_DEPTH
-                || context.budget.nodes > STRUCTURED_PAYLOAD_MAX_NODES
-            {
-                return Err(TraceContributionError::RedactionFailed {
-                    reason: "metadata-redaction-budget".into(),
-                });
-            }
-            let charge = |text: &str, budget: &mut StructuredPayloadBudget| {
-                budget.aggregate_bytes = budget.aggregate_bytes.saturating_add(text.len());
-                if budget.nodes > STRUCTURED_PAYLOAD_MAX_NODES
-                    || text.len() > STRUCTURED_PAYLOAD_MAX_FIELD_BYTES
-                    || budget.aggregate_bytes > STRUCTURED_PAYLOAD_MAX_AGGREGATE_BYTES
-                {
-                    Err(TraceContributionError::RedactionFailed {
-                        reason: "metadata-redaction-budget".into(),
-                    })
-                } else {
-                    Ok(())
-                }
-            };
-            if let Value::String(text) = &value {
-                charge(text, context.budget)?;
+            let exhausted = context.exhausted
+                || depth > STRUCTURED_PAYLOAD_MAX_DEPTH
+                || context.budget.nodes > STRUCTURED_PAYLOAD_MAX_NODES;
+            if exhausted {
+                context.exhaust();
             }
             Ok(match value {
-                Value::String(text) => Value::String(
-                    self.redact_text_with_state_through_prose_filter(
-                        &text,
-                        context.state,
-                        context.report,
-                        context.summary,
-                    )
-                    .await?,
-                ),
-                Value::Array(values) => {
-                    // Every child consumes at least one node. Refuse before
-                    // allocating an output buffer for an oversized import.
-                    if values.len()
-                        > STRUCTURED_PAYLOAD_MAX_NODES.saturating_sub(context.budget.nodes)
+                Value::String(text) => {
+                    // Refused, not masked, exactly as the correction path in
+                    // `redact_trace` does: a credential that reached a
+                    // metadata field has still been typed and transmitted,
+                    // and what the contributor needs to hear is "rotate it",
+                    // not a silent mask. Deliberately ahead of the budget
+                    // check so that a long trace cannot buy a leak; a leaf
+                    // the budget stops us reaching is still caught by the
+                    // whole-envelope residual secret scan, which refuses.
+                    if context.refuse_on_secret
+                        && self
+                            .detect_correction_credentials(&text)
+                            .blocked_secret_detected
                     {
                         return Err(TraceContributionError::RedactionFailed {
-                            reason: "metadata-redaction-budget".into(),
+                            reason: METADATA_CREDENTIAL_REFUSAL.into(),
                         });
+                    }
+                    if exhausted || !context.charge(text.len()) {
+                        return Ok(Value::String(text));
+                    }
+                    Value::String(
+                        self.redact_text_with_state_through_prose_filter(
+                            &text,
+                            context.state,
+                            context.report,
+                            context.summary,
+                        )
+                        .await?,
+                    )
+                }
+                Value::Array(values) => {
+                    // Every child consumes at least one node. Stop before
+                    // allocating an output buffer for an oversized import.
+                    if exhausted
+                        || values.len()
+                            > STRUCTURED_PAYLOAD_MAX_NODES.saturating_sub(context.budget.nodes)
+                    {
+                        context.exhaust();
+                        return Ok(Value::Array(values));
                     }
                     let mut redacted = Vec::with_capacity(values.len());
                     for value in values {
@@ -4084,6 +4101,9 @@ impl DeterministicTraceRedactor {
                     Value::Array(redacted)
                 }
                 Value::Object(values) => {
+                    if exhausted {
+                        return Ok(Value::Object(values));
+                    }
                     let mut redacted = serde_json::Map::new();
                     for (key, value) in values {
                         // Serialized struct field names are fixed schema, not
@@ -4093,8 +4113,17 @@ impl DeterministicTraceRedactor {
                                 key.as_str(),
                                 "feature_flags" | "tool_manifest_hashes" | "expected_assertions"
                             );
-                        let key = if redact_keys {
-                            charge(&key, context.budget)?;
+                        // A fixed-schema field carrying a typed value never
+                        // goes to the classifier. See `TYPED_METADATA_FIELDS`.
+                        if !redact_keys && TYPED_METADATA_FIELDS.contains(&key.as_str()) {
+                            if redacted.insert(key, value).is_some() {
+                                return Err(TraceContributionError::RedactionFailed {
+                                    reason: "metadata-redaction-key-collision".into(),
+                                });
+                            }
+                            continue;
+                        }
+                        let key = if redact_keys && context.charge(key.len()) {
                             self.redact_text_with_state_through_prose_filter(
                                 &key,
                                 context.state,
@@ -4463,6 +4492,11 @@ impl TraceRedactor for DeterministicTraceRedactor {
         let mut report = RedactionReport::default();
         let mut state = RedactionState::default();
         let mut privacy_filter_summary = None;
+        // One budget per pass, matching the scope `classify_structured_payload_node`
+        // already uses: the trace metadata, each event's metadata and each
+        // event's payload are each bounded on their own. A single budget
+        // spanning the whole contribution turns event count into a scan-budget
+        // limit, which is not what any of these constants were sized for.
         let mut metadata_budget = StructuredPayloadBudget::default();
         // Preserve the correction's deliberate S5 refusal path below. It must
         // not be rewritten into an apparently safe correction.
@@ -4483,6 +4517,8 @@ impl TraceRedactor for DeterministicTraceRedactor {
                     state: &mut state,
                     report: &mut report,
                     summary: &mut privacy_filter_summary,
+                    refuse_on_secret: true,
+                    exhausted: false,
                 },
             )
             .await?;
@@ -4512,10 +4548,12 @@ impl TraceRedactor for DeterministicTraceRedactor {
                     false,
                     0,
                     &mut MetadataRedactionContext {
-                        budget: &mut metadata_budget,
+                        budget: &mut StructuredPayloadBudget::default(),
                         state: &mut state,
                         report: &mut report,
                         summary: &mut privacy_filter_summary,
+                        refuse_on_secret: true,
+                        exhausted: false,
                     },
                 )
                 .await?;
@@ -4556,10 +4594,14 @@ impl TraceRedactor for DeterministicTraceRedactor {
                     true,
                     0,
                     &mut MetadataRedactionContext {
-                        budget: &mut metadata_budget,
+                        budget: &mut StructuredPayloadBudget::default(),
                         state: &mut state,
                         report: &mut report,
                         summary: &mut privacy_filter_summary,
+                        // `redact_json_value` above has already masked what
+                        // the detector finds here.
+                        refuse_on_secret: false,
+                        exhausted: false,
                     },
                 )
                 .await?;
@@ -4832,7 +4874,91 @@ struct MetadataRedactionContext<'a> {
     state: &'a mut RedactionState,
     report: &'a mut RedactionReport,
     summary: &'a mut Option<SafePrivacyFilterSummary>,
+    /// Set for the trace and event metadata passes, whose leaves reach this
+    /// function raw. The structured-payload pass runs *after*
+    /// `redact_json_value` has already masked what the detector finds there,
+    /// so a hit on that path would be a mask reported as a leak.
+    refuse_on_secret: bool,
+    exhausted: bool,
 }
+
+impl MetadataRedactionContext<'_> {
+    /// End the classifier pass and record that it did not cover the whole
+    /// artifact. `residual_risk` reads `coverage_incomplete` and forces High;
+    /// the deterministic passes and the residual scans still run.
+    fn exhaust(&mut self) {
+        self.exhausted = true;
+        self.report.coverage_incomplete = true;
+    }
+
+    /// Charge one text leaf against the budget, returning whether it may be
+    /// classified. A single oversized field is skipped without ending the
+    /// pass; only the cumulative limits do that.
+    fn charge(&mut self, len: usize) -> bool {
+        if len > STRUCTURED_PAYLOAD_MAX_FIELD_BYTES {
+            self.report.coverage_incomplete = true;
+            return false;
+        }
+        self.budget.aggregate_bytes = self.budget.aggregate_bytes.saturating_add(len);
+        if self.budget.aggregate_bytes > STRUCTURED_PAYLOAD_MAX_AGGREGATE_BYTES {
+            self.exhaust();
+            return false;
+        }
+        true
+    }
+}
+
+/// The refusal a credential in a contributed metadata field raises.
+///
+/// Metadata is the one place the redactor rewrites where masking is the wrong
+/// answer: `IronclawTraceMetadata::model_name`, a `feature_flags` value or a
+/// replay note holding an `sk-...` literal means the contributor has typed and
+/// transmitted a live credential, and a masked upload never tells them to
+/// rotate it. Same doctrine, same shape, as the correction refusal.
+pub const METADATA_CREDENTIAL_REFUSAL: &str = "metadata-credential-detected";
+
+/// Fixed-schema field names whose serialized value is a UUID, an RFC3339
+/// timestamp, an enum variant or an opaque server-assigned identifier.
+///
+/// Two reasons these never reach the prose classifier. A verdict on a UUID or
+/// a timestamp is never useful -- `DATE_TIME` is a first-class entity in every
+/// standard PII model, so `created_at` and every `event.timestamp` would draw
+/// a span -- and a *rewrite* of one fails the round-trip back into the typed
+/// struct, refusing the whole contribution over a value that cannot carry PII
+/// in the first place.
+///
+/// `contributor` is the whole subtree, and it is here for a second reason:
+/// `pseudonymous_contributor_id`, `tenant_scope_ref` and `credit_account_ref`
+/// are contributor identity, and identity does not leave the machine for a
+/// third-party classifier. They are opaque identifiers, not prose, so the
+/// deterministic pass is the whole of what they need.
+///
+/// Consulted only where `redact_keys` is false, i.e. inside fixed-schema
+/// objects. A dynamic map keyed `timestamp` by an importer is still scanned.
+///
+/// The default is the safe direction: a *new* field is classified unless it is
+/// added here. `metadata_schema_fields_are_pinned` fails when the schema grows,
+/// so the choice is made deliberately rather than by omission.
+const TYPED_METADATA_FIELDS: &[&str] = &[
+    "canonical_summary_hash",
+    "channel",
+    "cluster_id",
+    "contributor",
+    "created_at",
+    "event_id",
+    "event_type",
+    "failure_modes",
+    "nearest_cluster_id",
+    "nearest_trace_ids",
+    "parent_event_id",
+    "scopes",
+    "submission_id",
+    "task_success",
+    "timestamp",
+    "trace_id",
+    "trace_vector_id",
+    "user_feedback",
+];
 
 /// Recursively classify every string leaf and object key inside a
 /// structured tool payload through the async classifier.
@@ -4844,6 +4970,16 @@ struct MetadataRedactionContext<'a> {
 /// collision guard `insert_without_collision` gives map values. A finding
 /// on a key therefore forces High via `RedactionReport::key_finding_detected`
 /// rather than being "resolved" by a rewrite that could silently drop data.
+///
+/// `DeterministicTraceRedactor::redact_metadata_value` is the one place that
+/// does rewrite keys, and it takes the other horn of the same dilemma: it
+/// refuses the contribution outright on a collision rather than dropping a
+/// sibling. Both are fail-closed; neither leaves a colliding key in an
+/// artifact. The two disagree only about what a *dynamic* key is worth --
+/// this function keeps the payload and raises the risk, that one keeps the
+/// key out of the artifact and pays for it with a refusal on the rare
+/// collision. `residual_risk` is unaffected either way: a key finding forces
+/// High from either pass, because it can never assume a rewrite happened.
 ///
 /// Returns `Ok(true)` when the whole subtree was covered within budget, or
 /// `Ok(false)` the moment any budget is exceeded (aggregate bytes, a single
@@ -5282,6 +5418,16 @@ fn redact_envelope_side_channels(
     if let Some(model_name) = envelope.ironclaw.model_name.as_mut() {
         redact_string_in_place(redactor, model_name, report, state);
     }
+    // Both are contributor-supplied free text that `residual_envelope_scan`
+    // already *detects* in, raising risk to High while leaving the text in
+    // place. This is the server re-scrub, the path an envelope takes when an
+    // invited contributor submits straight to ingest with no witness, so
+    // without these two a patched client can still land prose here and have
+    // it stored.
+    if let Some(conversation_id) = envelope.conversation_id.as_mut() {
+        redact_string_in_place(redactor, conversation_id, report, state);
+    }
+    redact_strings_in_place(redactor, &mut envelope.value.explanation, report, state);
 
     for event in &mut envelope.events {
         if let Some(tool_name) = event.tool_name.as_mut() {
@@ -10939,6 +11085,313 @@ mod tests {
         )
     }
 
+    /// Records every text the classifier was asked about and finds nothing,
+    /// so a test can assert what did and did not leave the process.
+    #[derive(Default)]
+    struct RecordingFilter(std::sync::Mutex<Vec<String>>);
+    #[async_trait::async_trait]
+    impl super::PrivacyFilterAdapter for RecordingFilter {
+        async fn redact_text(
+            &self,
+            text: &str,
+        ) -> Result<Option<super::SafePrivacyFilterRedaction>, super::TraceContributionError>
+        {
+            self.0.lock().unwrap().push(text.to_string());
+            Ok(None)
+        }
+    }
+
+    /// Typed leaves are not prose and a classifier verdict on one is never
+    /// useful: `DATE_TIME` is a first-class entity in every standard PII
+    /// model, so an RFC3339 `created_at` draws a span, and a *rewrite* of one
+    /// fails the round-trip back into the typed struct -- refusing the whole
+    /// contribution over a value that cannot carry PII.
+    ///
+    /// The contributor subtree is here for the second reason as well:
+    /// identity does not leave the machine for a third-party classifier.
+    #[tokio::test]
+    async fn typed_metadata_and_contributor_identity_never_reach_the_classifier() {
+        use super::*;
+
+        let mut raw = raw_contribution_with_content("ran the build");
+        raw.conversation_id = Some("a note the contributor typed".to_string());
+        raw.contributor.pseudonymous_contributor_id = Some("pseudonymous-contributor-0001".into());
+        raw.contributor.tenant_scope_ref = Some("tenant-scope-0001".into());
+        raw.contributor.credit_account_ref = Some("credit-account-0001".into());
+
+        let filter = Arc::new(RecordingFilter::default());
+        DeterministicTraceRedactor::deterministic_only(Vec::new())
+            .with_privacy_filter(filter.clone(), PrivacyFilterBackendTag::SelfHosted)
+            .redact_trace(raw)
+            .await
+            .expect("a trace of typed metadata is not a refusal");
+
+        let seen = filter.0.lock().unwrap().clone();
+        assert!(
+            seen.iter().any(|t| t == "a note the contributor typed"),
+            "positive control: prose metadata is still classified"
+        );
+        for identity in [
+            "pseudonymous-contributor-0001",
+            "tenant-scope-0001",
+            "credit-account-0001",
+        ] {
+            assert!(
+                !seen.iter().any(|t| t == identity),
+                "contributor identity must not be sent to the classifier: {identity}"
+            );
+        }
+        assert!(
+            !seen
+                .iter()
+                .any(|t| chrono::DateTime::parse_from_rfc3339(t).is_ok()),
+            "a timestamp is not prose: {seen:?}"
+        );
+        assert!(
+            !seen.iter().any(|t| Uuid::parse_str(t).is_ok()),
+            "a UUID is not prose: {seen:?}"
+        );
+    }
+
+    /// Over budget degrades to incomplete coverage, exactly as
+    /// `classify_structured_payload_node` already resolves an oversized
+    /// payload. A hard refusal here would reject ordinary contributions on
+    /// every submission path, not just admission.
+    #[tokio::test]
+    async fn metadata_beyond_the_scan_budget_degrades_instead_of_refusing() {
+        use super::*;
+
+        let mut raw = raw_contribution_with_content("ran the build");
+        raw.replay.expected_assertions = vec![Value::Null; STRUCTURED_PAYLOAD_MAX_NODES + 1];
+        let envelope = DeterministicTraceRedactor::deterministic_only(Vec::new())
+            .redact_trace(raw)
+            .await
+            .expect("an oversized metadata scan degrades, it does not refuse");
+        assert_eq!(
+            envelope.privacy.residual_pii_risk,
+            ResidualPiiRisk::High,
+            "an incomplete scan cannot speak for what it never examined"
+        );
+    }
+
+    /// One budget per pass, not one for the whole contribution. A shared
+    /// budget turns event count into a scan limit: ~200 events reaches 4,000
+    /// nodes, which is a routine agent session.
+    #[tokio::test]
+    async fn a_long_session_is_scanned_completely() {
+        use super::*;
+
+        let started = Utc::now();
+        let turns: Vec<_> = (0..400)
+            .map(|i| RawTraceCaptureTurn {
+                user_input: format!("step {i}"),
+                response: None,
+                tool_calls: Vec::new(),
+                started_at: started,
+                completed_at: Some(started + chrono::Duration::milliseconds(10)),
+                state: Some("Completed".to_string()),
+            })
+            .collect();
+        let raw = RawTraceContribution::from_capture_turns(
+            &turns,
+            RecordedTraceContributionOptions {
+                include_message_text: true,
+                ..RecordedTraceContributionOptions::default()
+            },
+        );
+        let envelope = DeterministicTraceRedactor::deterministic_only(Vec::new())
+            .redact_trace(raw)
+            .await
+            .expect("a long session still submits");
+        assert_ne!(
+            envelope.privacy.residual_pii_risk,
+            ResidualPiiRisk::High,
+            "a long clean session must not be forced High by a shared scan budget"
+        );
+    }
+
+    /// Refused, not masked -- the same doctrine as the correction path. A
+    /// masked credential has still been typed and transmitted, and an upload
+    /// that succeeds never tells the contributor to rotate it.
+    #[tokio::test]
+    async fn a_credential_in_metadata_is_refused_not_masked() {
+        use super::*;
+
+        let mut raw = raw_contribution_with_content("ran the build");
+        raw.ironclaw.model_name = Some("sk-ant-EXPOSEDsecret0123456789abcdefghij".to_string());
+        let error = DeterministicTraceRedactor::deterministic_only(Vec::new())
+            .redact_trace(raw)
+            .await
+            .expect_err("a credential in metadata is a refusal");
+        assert!(
+            matches!(
+                &error,
+                TraceContributionError::RedactionFailed { reason }
+                    if reason == METADATA_CREDENTIAL_REFUSAL
+            ),
+            "got {error:?}"
+        );
+    }
+
+    /// `TYPED_METADATA_FIELDS` and the dynamic-key allowlist in
+    /// `redact_metadata_value` are both keyed on schema field names, and
+    /// neither coupling is visible from the struct definitions: adding a
+    /// `BTreeMap` or `Value` field silently opts its keys out of scanning,
+    /// and adding a typed field silently opts its value into the classifier.
+    ///
+    /// This fails when the schema grows, so both choices get made on purpose.
+    #[test]
+    fn metadata_schema_fields_are_pinned() {
+        use super::*;
+
+        // Every optional field populated, so `skip_serializing_if` hides
+        // nothing. Dynamic maps carry one `DYNAMIC` key, filtered below --
+        // those are contributor-chosen, not schema.
+        let mut raw = raw_contribution_with_content("ran the build");
+        raw.conversation_id = Some("note".into());
+        raw.ironclaw.engine_version = Some("1".into());
+        raw.ironclaw.model_name = Some("model".into());
+        raw.ironclaw
+            .feature_flags
+            .insert("DYNAMIC".into(), "1".into());
+        raw.contributor.pseudonymous_contributor_id = Some("c".into());
+        raw.contributor.tenant_scope_ref = Some("t".into());
+        raw.contributor.credit_account_ref = Some("a".into());
+        raw.outcome.human_correction = Some("correction".into());
+        raw.outcome.error_taxonomy = vec!["taxonomy".into()];
+        raw.outcome.failure_modes = vec![TraceFailureMode::Other("mode".into())];
+        raw.replay.required_tools = vec!["tool".into()];
+        raw.replay
+            .tool_manifest_hashes
+            .insert("DYNAMIC".into(), "1".into());
+        raw.replay.expected_assertions = vec![serde_json::json!({"DYNAMIC": 1})];
+        raw.replay.replay_notes = vec!["note".into()];
+        raw.value.explanation = vec!["explanation".into()];
+        raw.value.credit_points_final = Some(0.0);
+        raw.embedding_analysis = Some(EmbeddingAnalysisMetadata {
+            embedding_model: Some("m".into()),
+            canonical_summary_hash: "h".into(),
+            trace_vector_id: Some("v".into()),
+            nearest_trace_ids: vec!["n".into()],
+            cluster_id: Some("c".into()),
+            nearest_cluster_id: Some("nc".into()),
+            novelty_score: Some(0.0),
+            duplicate_score: Some(0.0),
+            coverage_tags: vec!["tag".into()],
+        });
+        for event in &mut raw.events {
+            event.parent_event_id = Some(Uuid::nil());
+            event.tool_call_id = Some("call".into());
+            event.tool_name = Some("tool".into());
+            event.latency_ms = Some(1);
+            event.token_counts = Some(TokenCounts {
+                input_tokens: 1,
+                output_tokens: 1,
+            });
+            event.cost_usd = Some(Default::default());
+            event.success = Some(true);
+            event.failure_modes = vec![TraceFailureMode::Other("mode".into())];
+            event.structured_payload = serde_json::json!({"DYNAMIC": 1});
+        }
+
+        fn collect(value: &Value, into: &mut std::collections::BTreeSet<String>) {
+            match value {
+                Value::Object(map) => {
+                    for (key, child) in map {
+                        into.insert(key.clone());
+                        collect(child, into);
+                    }
+                }
+                Value::Array(items) => items.iter().for_each(|item| collect(item, into)),
+                _ => {}
+            }
+        }
+        let mut found = std::collections::BTreeSet::new();
+        collect(&serde_json::to_value(&raw).unwrap(), &mut found);
+        found.remove("DYNAMIC");
+
+        let expected: std::collections::BTreeSet<String> = [
+            "canonical_summary_hash",
+            "channel",
+            "cluster_id",
+            "consent",
+            "content",
+            "contributor",
+            "correction_included",
+            "cost_usd",
+            "coverage_tags",
+            "created_at",
+            "credit_account_ref",
+            "credit_points_final",
+            "credit_points_pending",
+            "conversation_id",
+            "duplicate_score",
+            "embedding_analysis",
+            "embedding_model",
+            "engine_version",
+            "error_taxonomy",
+            "event_id",
+            "event_type",
+            "events",
+            "expected_assertions",
+            "explanation",
+            "failure_modes",
+            "feature_flags",
+            "human_correction",
+            "input_tokens",
+            "ironclaw",
+            "latency_ms",
+            "message_text_included",
+            "model_name",
+            "nearest_cluster_id",
+            "nearest_trace_ids",
+            "novelty_score",
+            // `TraceFailureMode::Other`'s payload key.
+            "other",
+            "outcome",
+            "output_tokens",
+            "parent_event_id",
+            "policy_version",
+            "pseudonymous_contributor_id",
+            "replay",
+            "replay_notes",
+            "replayable",
+            "required_tools",
+            "revocable",
+            "revocation_handle",
+            "routing_metadata_included",
+            "scopes",
+            "structured_payload",
+            "submission_id",
+            "submission_score",
+            "success",
+            "task_success",
+            "tenant_scope_ref",
+            "timestamp",
+            "token_counts",
+            "tool_call_id",
+            "tool_manifest_hashes",
+            "tool_name",
+            "tool_payloads_included",
+            "trace_id",
+            "trace_vector_id",
+            "user_feedback",
+            "value",
+            "version",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+
+        assert_eq!(
+            found, expected,
+            "the contributed metadata schema changed. Decide whether the new \
+             field is typed (add it to TYPED_METADATA_FIELDS) and whether it \
+             carries contributor-chosen keys (add it to the dynamic-key list \
+             in redact_metadata_value), then update this pin."
+        );
+    }
+
     // S5: a correction is composed deliberately, for submission, by someone
     // who chooses every word knowing where it goes. "The agent used
     // /Users/zaki/proj/config.toml instead of the staging one" is useless once
@@ -12139,6 +12592,35 @@ mod tests {
     /// stale. Keep the survivor on a deliberate exemption: a fixture that
     /// depends on a bug turns every fix into a test failure, and worse, it
     /// makes "this test passes" mean "the bug is still there".
+    /// The server re-scrub is the path an envelope takes when an invited
+    /// contributor submits straight to ingest with no witness. Both fields
+    /// are contributor-supplied free text that `residual_envelope_scan`
+    /// already detects in -- raising risk to High while leaving the text
+    /// where it is -- so without these two a patched client can still land
+    /// prose in them and have it stored.
+    #[test]
+    fn the_server_rescrub_rewrites_conversation_id_and_the_value_explanation() {
+        use super::*;
+
+        let secret = "sk-abcdefghijklmnopqrstuvwxyz012345";
+        let mut env = sample_envelope_with_event_content("please list the files");
+        env.conversation_id = Some(format!("export OPENAI_API_KEY={secret}"));
+        env.value.explanation = vec![format!("token was {secret}")];
+
+        rescrub_trace_envelope_with(&DeterministicTraceRedactor::bare(), &mut env);
+
+        assert!(
+            !env.conversation_id.as_deref().unwrap().contains(secret),
+            "conversation_id: {:?}",
+            env.conversation_id
+        );
+        assert!(
+            !env.value.explanation[0].contains(secret),
+            "value.explanation: {:?}",
+            env.value.explanation
+        );
+    }
+
     #[test]
     fn a_secret_that_survives_the_rescrub_forces_high() {
         use super::*;

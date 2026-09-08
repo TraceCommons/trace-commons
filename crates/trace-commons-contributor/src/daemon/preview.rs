@@ -1225,12 +1225,19 @@ mod tests {
         (dir, src, r)
     }
 
-    /// Metadata is scrubbed during normal preview. Deliberately inject a
-    /// residual into the finished envelope to prove the shared summary still
-    /// distinguishes survivors from removals without relying on an old leak.
+    /// A credential in a metadata field is now refused a pass earlier, by
+    /// the metadata redaction pass, so no fixture on disk reaches the summary
+    /// still carrying one. The property this test exists for is the *summary*
+    /// one -- that `build_preview_core` merges residual-secret labels, so a
+    /// survivor is reported rather than silent -- so the residual is injected
+    /// into a finished envelope from a clean session instead. Deleting that
+    /// merge still fails this.
+    ///
+    /// `a_preview_refuses_a_secret_in_a_metadata_field` is the fixture-driven
+    /// half, and it covers the guard that made this one unreachable.
     #[tokio::test]
     async fn a_preview_reports_a_secret_that_survived_redaction_as_a_survivor() {
-        let (_d, src, r) = session_with_secret_in_unredacted_model_field();
+        let (_d, src, r) = fixture_session();
         let (_sd, store) = crate::config::tests_support::temp_store();
         let cfg = sample_cfg(&store);
         let (clean_summary, _body, mut envelope) =
@@ -1298,6 +1305,23 @@ mod tests {
         assert_eq!(
             card.redactions, clean_summary.redactions,
             "card and sheet must agree on what survived"
+        );
+    }
+
+    /// Refused, not masked and previewed: a credential in `model` means the
+    /// contributor has typed and transmitted a live one, and a preview that
+    /// succeeds never tells them to rotate it.
+    #[tokio::test]
+    async fn a_preview_refuses_a_secret_in_a_metadata_field() {
+        let (_d, src, r) = session_with_secret_in_unredacted_model_field();
+        let (_sd, store) = crate::config::tests_support::temp_store();
+        let cfg = sample_cfg(&store);
+        let error = build_preview(&store, Some(&cfg), None, &src, &r)
+            .await
+            .expect_err("a credential in metadata is a refusal");
+        assert_eq!(
+            error.to_string(),
+            crate::envelope::REASON_METADATA_CREDENTIAL
         );
     }
 

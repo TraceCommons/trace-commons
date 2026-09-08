@@ -121,9 +121,7 @@ fn jittery_privacy_filter(generation: Arc<AtomicUsize>) -> Router {
                         }));
                     }
                 }
-                if spans.is_empty() && input == "fix the parser please" {
-                    // Vary conversational text, not typed metadata such as RFC3339
-                    // timestamps: invalid typed redaction correctly fails closed.
+                if spans.is_empty() && chars.len() > 4 {
                     // The jitter: the same field, classified twice, comes
                     // back with a differently sized span.
                     let end = 1 + generation.load(Ordering::SeqCst) % 3;

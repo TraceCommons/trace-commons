@@ -2197,36 +2197,37 @@ mod tests {
         );
     }
 
+    /// Over budget degrades to incomplete coverage, which forces High -- it
+    /// is not a refusal. A hard `Err` here would refuse an ordinary long
+    /// session on every submission path, not just admission.
     #[tokio::test]
-    async fn structured_witness_refuses_metadata_beyond_classifier_budget() {
-        let mut request = contribution_request(SURVIVOR);
-        request.raw_contribution.conversation_id = Some("x".repeat(32_001));
-        assert!(
-            witness_contribution(
-                request,
-                &contribution_redactor(),
-                &TestSigner::new("metadata-witness"),
-                &TestEnclave
-            )
-            .await
-            .is_err()
-        );
-    }
-
-    #[tokio::test]
-    async fn structured_witness_counts_nontext_metadata_nodes_against_budget() {
+    async fn structured_witness_degrades_metadata_beyond_the_classifier_budget() {
+        let oversized_field = {
+            let mut request = contribution_request(SURVIVOR);
+            request.raw_contribution.conversation_id = Some("x".repeat(32_001));
+            request
+        };
+        let mut cases = vec![oversized_field];
         for value in [serde_json::json!(0), serde_json::json!([])] {
             let mut request = contribution_request(SURVIVOR);
             request.raw_contribution.replay.expected_assertions = vec![value; 4_001];
-            assert!(
-                witness_contribution(
-                    request,
-                    &contribution_redactor(),
-                    &TestSigner::new("metadata-witness"),
-                    &TestEnclave
-                )
-                .await
-                .is_err()
+            cases.push(request);
+        }
+        for request in cases {
+            let response = witness_contribution(
+                request,
+                &contribution_redactor(),
+                &TestSigner::new("metadata-witness"),
+                &TestEnclave,
+            )
+            .await
+            .expect("an oversized metadata scan degrades, it does not refuse");
+            let envelope: TraceContributionEnvelope =
+                serde_json::from_slice(&response.envelope_bytes).unwrap();
+            assert_eq!(
+                envelope.privacy.residual_pii_risk,
+                trace_commons_protocol::trace_contribution::ResidualPiiRisk::High,
+                "an incomplete scan cannot speak for what it never examined"
             );
         }
     }
@@ -2253,9 +2254,13 @@ mod tests {
                 Ok(vec![0xab; 8])
             }
         }
-        let trust =
-            AdmissionProviderTrust::new([provider_key.clone()], ["fixture-model".into()], 1)
-                .unwrap();
+        let trust = AdmissionProviderTrust::new(
+            [provider_key.clone()],
+            Vec::new(),
+            ["fixture-model".into()],
+            1,
+        )
+        .unwrap();
         let service = surface::WitnessService::new(
             Arc::new(redactor()),
             witness.clone(),
@@ -2289,6 +2294,17 @@ mod tests {
         event.event_type = TraceContributionEventType::HttpExchange;
         event.structured_payload = serde_json::json!({"request":{"method":"POST","body":request_body},"response":{"status":200}});
         event.content = Some(response_body.into());
+        // Importer claims the receipt does not cover, and that no redaction
+        // pass would remove because none of them is PII. `restrict_contribution`
+        // is the only thing that clears them; deleting it fails the assertions
+        // on the certified artifact below.
+        event.cost_usd = Some("12.34".parse().unwrap());
+        request.raw_contribution.replay.replayable = true;
+        request
+            .raw_contribution
+            .replay
+            .replay_notes
+            .push("importer-supplied replay claim".into());
         request.offered_receipt = Some(receipt);
         // A valid receipt for the final exchange does not cover companion
         // history supplied by an arbitrary importer.
@@ -2305,7 +2321,10 @@ mod tests {
             .witness_admission_contribution(request.clone())
             .await
             .unwrap();
-        // Gateway and provider-TEE signatures retain distinct receipt kinds.
+        // The two signer sets are disjoint. This key is trusted to sign a
+        // provider-TEE receipt, which binds the model; the same key offering
+        // the two-part gateway form, which binds no model, is a different
+        // claim and this deployment pinned nobody to make it.
         let mut gateway_request = request.clone();
         let gateway_text = format!(
             "{}:{}",
@@ -2321,16 +2340,54 @@ mod tests {
         });
         assert!(
             service
-                .witness_admission_contribution(gateway_request)
+                .witness_admission_contribution(gateway_request.clone())
                 .await
-                .is_ok()
+                .is_err(),
+            "a provider-TEE key must not vouch for a gateway receipt"
+        );
+        // The same request against a deployment that did pin this key as a
+        // gateway signer: non-vacuity for the refusal above.
+        assert!(
+            surface::WitnessService::new(
+                Arc::new(redactor()),
+                witness.clone(),
+                Arc::new(MatchingEnclave(witness.address())),
+                1024 * 1024,
+            )
+            .with_contribution_redactor(Arc::new(contribution_redactor()))
+            .with_admission_provider_trust(
+                AdmissionProviderTrust::new(
+                    ["f".repeat(64)],
+                    [provider_key.clone()],
+                    ["fixture-model".into()],
+                    1
+                )
+                .unwrap()
+            )
+            .witness_admission_contribution(gateway_request)
+            .await
+            .is_ok()
         );
         assert_eq!(evidence.model, "fixture-model");
         assert_eq!(evidence.request_bytes, request_body.len() as u64);
+        // A receipt certifies one exchange, not the importer's claims about
+        // it. None of these is PII, so no redaction pass would remove them.
+        let certified: TraceContributionEnvelope =
+            serde_json::from_slice(&response.envelope_bytes).unwrap();
+        assert!(!certified.replay.replayable);
+        assert!(certified.replay.replay_notes.is_empty());
+        assert!(certified.events.iter().all(|e| e.cost_usd.is_none()));
         for restricted in [
-            AdmissionProviderTrust::new([provider_key.clone()], ["other-model".into()], 1).unwrap(),
             AdmissionProviderTrust::new(
                 [provider_key.clone()],
+                Vec::new(),
+                ["other-model".into()],
+                1,
+            )
+            .unwrap(),
+            AdmissionProviderTrust::new(
+                [provider_key.clone()],
+                Vec::new(),
                 ["fixture-model".into()],
                 request_body.len() as u64 + 1,
             )
@@ -2380,9 +2437,16 @@ mod tests {
         )
         .unwrap();
         for restricted in [
-            AdmissionProviderTrust::new([provider_key.clone()], ["other-model".into()], 1).unwrap(),
             AdmissionProviderTrust::new(
                 [provider_key.clone()],
+                Vec::new(),
+                ["other-model".into()],
+                1,
+            )
+            .unwrap(),
+            AdmissionProviderTrust::new(
+                [provider_key.clone()],
+                Vec::new(),
                 ["fixture-model".into()],
                 request_body.len() as u64 + 1,
             )
@@ -2468,7 +2532,8 @@ mod tests {
             "receipt binds exact final bytes, including whitespace"
         );
         let untrusted =
-            AdmissionProviderTrust::new(["f".repeat(64)], ["fixture-model".into()], 1).unwrap();
+            AdmissionProviderTrust::new(["f".repeat(64)], Vec::new(), ["fixture-model".into()], 1)
+                .unwrap();
         assert!(
             verify_admission_evidence(
                 &evidence,

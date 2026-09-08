@@ -1579,9 +1579,20 @@ pub(crate) async fn checked_local_redaction(
             .await
             .map_err(|_| PRECONDITION_CANARY_FAILED)?;
     }
-    let envelope = redact_to_envelope(redactor, raw)
-        .await
-        .map_err(|_| "redaction-failed")?;
+    // A credential the contributor typed is the one pipeline refusal they can
+    // act on, so it keeps its own label and the shells can say "rotate it".
+    // Everything else is a condition of the machine and stays generic.
+    //
+    // Flattening this to "redaction-failed" is what the rescued admission work
+    // was compensating for at its own call site; fixing it here means every
+    // caller of this function gets the distinction rather than one of them.
+    let envelope = redact_to_envelope(redactor, raw).await.map_err(|error| {
+        if error.to_string() == crate::envelope::REASON_METADATA_CREDENTIAL {
+            crate::envelope::REASON_METADATA_CREDENTIAL
+        } else {
+            "redaction-failed"
+        }
+    })?;
     validate_local_envelope(redactor, &envelope)?;
     Ok(envelope)
 }
@@ -2964,11 +2975,18 @@ mod tests {
         assert!(envelope_has_residual_secret(&redactor, &envelope).unwrap());
     }
 
-    /// Normal metadata redaction removes the model secret. An approved
-    /// envelope can still contain a residual (for example after a buggy
-    /// redactor); the real submit path must refuse those exact bytes.
+    /// A credential in the `model` field (`IronclawTraceMetadata::model_name`)
+    /// is refused, not masked and uploaded. Two guards now stand behind that,
+    /// and this drives the *real* `submit_sessions` entrypoint end to end
+    /// from a fixture on disk, so it fails if either is deleted: the metadata
+    /// redaction pass refuses at `METADATA_CREDENTIAL_REFUSAL`, and the
+    /// whole-envelope residual rescan (`residual_secret_refusal`, called from
+    /// both submit-path call sites) catches anything that reaches the
+    /// finished envelope. Both report the same wire label, because the
+    /// contributor's situation is the same either way: remove it and rotate
+    /// it. Without them this session would upload (`Submitted`, 1 delivery).
     #[tokio::test]
-    async fn submit_refuses_approved_envelope_with_residual_model_secret() {
+    async fn submit_sessions_refuses_session_with_secret_in_unredacted_model_field() {
         let received = Arc::new(Mutex::new(Vec::new()));
         let issuer = spawn(stub_issuer()).await;
         let ingest = spawn(stub_ingest(received.clone())).await;
@@ -2981,8 +2999,8 @@ mod tests {
         };
 
         // A minimal transcript whose assistant message carries a
-        // detector-recognized secret shape in `model`, now covered by
-        // metadata redaction.
+        // detector-recognized secret shape in `model`, a field the per-field
+        // redaction pass never scans.
         let fixture_root = tempfile::tempdir().unwrap();
         let project_dir = fixture_root.path().join("-tmp-secret-model-proj");
         std::fs::create_dir_all(&project_dir).unwrap();
@@ -3011,20 +3029,9 @@ mod tests {
             session_ref,
         )];
 
-        let (source, session_ref) = &selection[0];
-        let transcript = source.load(session_ref).unwrap();
-        let redactor = build_redactor_with(&cfg, transcript.cwd.as_deref(), None).unwrap();
-        let raw = build_raw_contribution_with_verdict(&transcript, &cfg, Utc::now(), None);
-        let mut approved = redact_to_envelope(&redactor, raw).await.unwrap();
-        assert!(
-            !serde_json::to_string(&approved)
-                .unwrap()
-                .contains("sk-ant-EXPOSEDsecret0123456789abcdefghij")
-        );
-        approved.ironclaw.model_name = Some("sk-ant-EXPOSEDsecret0123456789abcdefghij".into());
-        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
-        ctx.use_approved_envelope(Some(approved));
-        let outcomes = [ctx.submit_one(source.as_ref(), session_ref).await.unwrap()];
+        let outcomes = submit_sessions(&store, &cfg, selection, &opts)
+            .await
+            .unwrap();
         match &outcomes[0] {
             SubmitOutcome::Refused { reason_label, .. } => {
                 assert_eq!(reason_label, "secret-leak-detected");
