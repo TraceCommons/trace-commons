@@ -475,6 +475,11 @@ pub struct PrivateInference {
     /// would hide a proxy that cannot stay up behind a state that keeps
     /// flickering back to green.
     crashed: bool,
+    /// How many proxies this instance has started, for [`Self::starts`].
+    /// Test-only: nothing in production asks, and a field written and never
+    /// read is exactly what the warnings-as-errors build refuses.
+    #[cfg(test)]
+    starts: u64,
 }
 
 /// Why a start did not produce a proxy.
@@ -510,6 +515,8 @@ impl PrivateInference {
             credential: None,
             state: PrivateInferenceState::Off,
             crashed: false,
+            #[cfg(test)]
+            starts: 0,
         }
     }
 
@@ -575,6 +582,13 @@ impl PrivateInference {
     /// mid-run is picked up without restarting the daemon. It takes effect at
     /// the proxy's next start, because IronWire resolves its credentials once,
     /// while building the registry.
+    ///
+    /// That next start is not left to chance. Handing the key to this
+    /// instance and stopping there is what made a completed ceremony change
+    /// nothing a contributor could see: `DaemonShared` advances the
+    /// private-inference generation when the stored credential changes, and
+    /// [`Self::accept_generation`] turns that into the stop-and-start that
+    /// actually rebuilds the registry.
     pub fn set_credential(&mut self, credential: Option<HostSecret>) {
         self.credential = credential;
     }
@@ -584,6 +598,18 @@ impl PrivateInference {
     #[cfg(test)]
     pub(crate) fn holds_credential(&self) -> bool {
         self.credential.is_some()
+    }
+
+    /// How many proxies this instance has started.
+    ///
+    /// Counted unconditionally and read only by tests, because a restart is
+    /// otherwise observable only as a new ephemeral port -- and a port the
+    /// kernel happens to hand back is a test that passes by luck. The
+    /// question "did the key reach IronWire" is answerable only by "was the
+    /// registry built again", and this is that.
+    #[cfg(test)]
+    pub(crate) fn starts(&self) -> u64 {
+        self.starts
     }
 
     /// Whether accepted settings superseded the request this instance observed.
@@ -630,6 +656,30 @@ impl PrivateInference {
     #[must_use]
     pub fn state(&self) -> PrivateInferenceState {
         self.state.clone()
+    }
+
+    /// Stop, and where it is safe to, finish stopping -- so the caller's
+    /// following `apply(true)` starts a new proxy on this pass rather than
+    /// finding a shutdown in flight and declining.
+    ///
+    /// The drain is conditional and the condition is the whole point.
+    /// `apply(false)` spawns the shutdown and returns precisely so a stop
+    /// cannot park the daemon's lifecycle lock on a future with no deadline
+    /// of its own, and the future it would park on is real: a shutdown task
+    /// built over a *pending start* awaits that start first, and a start
+    /// awaits IronWire binding a port. Waiting for that here would wedge the
+    /// pass, and with it every later one.
+    ///
+    /// So this drains only when what is being stopped is a proxy that is
+    /// already running and nothing else is in flight -- a plain
+    /// `proxy.shutdown()`, which ends on its own. Every other shape falls
+    /// back to the two-pass cycle each generation change has always had.
+    pub(crate) async fn cycle(&mut self) {
+        let drainable = self.proxy.is_some() && self.starting.is_none() && self.stopping.is_none();
+        self.apply(false).await;
+        if drainable {
+            self.finish_stop().await;
+        }
     }
 
     /// Bring the instance in line with the switch. Idempotent both ways.
@@ -779,6 +829,10 @@ impl PrivateInference {
     /// A missing adopted runtime uses the caller's current runtime, as before.
     async fn start_proxy(&mut self) -> Result<EmbeddedProxy, StartRefusal> {
         if self.starting.is_none() {
+            #[cfg(test)]
+            {
+                self.starts += 1;
+            }
             let runtime = self
                 .runtime
                 .clone()

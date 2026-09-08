@@ -59,6 +59,63 @@ fn attempts() -> &'static Mutex<HashMap<PathBuf, Attempt>> {
     ATTEMPTS.get_or_init(Default::default)
 }
 
+/// How many times the stored credential has been written or removed for a
+/// config directory, since this process started.
+///
+/// This exists because the ceremony finishes somewhere the daemon cannot be
+/// reached from. The browser round trip outlives the IPC call that began it,
+/// so the last leg runs as a detached task on [`ceremony_runtime`], holding a
+/// path and nothing else -- no `DaemonShared`, no settings lock, no channel.
+/// All it can do is write the settings document. A daemon that is already
+/// running has its own in-memory copy of that document and would never
+/// re-read it, so the write would sit on disk until the next daemon start:
+/// the contributor completes a ceremony, is told it succeeded, and nothing
+/// they can see changes. This counter is the one bit that crosses that gap --
+/// `DaemonShared::absorb_near_ai_credential_change` compares it against the
+/// last value it observed and re-reads the credential when it has moved.
+///
+/// A counter and not a flag, for two reasons. Two ceremonies can complete
+/// between two reconcile passes, and a flag cleared by the first reader is a
+/// notification the second reader never sees; a counter each consumer
+/// compares against its own last value is stolen from by nobody.
+///
+/// Keyed by directory, like [`ATTEMPTS`], and uncapped where that is bounded:
+/// an entry appears only for a directory this process has actually written a
+/// credential into, which is one per daemon.
+static CHANGES: OnceLock<Mutex<HashMap<PathBuf, u64>>> = OnceLock::new();
+
+fn changes() -> &'static Mutex<HashMap<PathBuf, u64>> {
+    CHANGES.get_or_init(Default::default)
+}
+
+/// Note that this directory's stored credential is not what it was.
+///
+/// Called only after the settings document has been written, never before: a
+/// daemon that reacted to this and then read the old document would cycle its
+/// proxy onto the credential it already had, and would not look again.
+fn record_change(dir: &std::path::Path) {
+    *changes()
+        .lock()
+        .expect("credential change lock")
+        .entry(dir.to_path_buf())
+        .or_default() += 1;
+}
+
+/// How many credential changes this process has made for `dir`.
+///
+/// Zero for a directory nothing has written, which is the ordinary case: a
+/// daemon whose contributor ran no ceremony this run compares zero against
+/// zero on every pass and touches the disk not at all.
+#[must_use]
+pub fn change_count(dir: &std::path::Path) -> u64 {
+    changes()
+        .lock()
+        .expect("credential change lock")
+        .get(dir)
+        .copied()
+        .unwrap_or(0)
+}
+
 /// A runtime that outlives the IPC call that started the ceremony.
 ///
 /// The embedded FFI builds a short-lived runtime per call, and the browser
@@ -190,7 +247,12 @@ pub async fn begin(store: &ConfigStore, provider: &str) -> Result<serde_json::Va
 /// writer of this file does. It reads from disk rather than from the in-memory
 /// copy so a ceremony that finished while the daemon was doing something else
 /// cannot silently revert an unrelated setting.
-fn persist(dir: &std::path::Path, minted: super::api::MintedKey) -> Result<()> {
+///
+/// `pub(crate)` so the reconcile test can write a credential the way the
+/// ceremony does rather than the way a test finds convenient -- the coupling
+/// under test is precisely that this function, and not an IPC call, is what a
+/// running daemon has to notice.
+pub(crate) fn persist(dir: &std::path::Path, minted: super::api::MintedKey) -> Result<()> {
     let store = ConfigStore::open(dir.to_path_buf())?;
     let mut settings = DaemonSettings::load(&store)?;
     settings.near_ai_inference = Some(NearAiInferenceCredential {
@@ -201,7 +263,9 @@ fn persist(dir: &std::path::Path, minted: super::api::MintedKey) -> Result<()> {
         workspace_id: minted.workspace_id,
         minted_at: Utc::now(),
     });
-    settings.save(&store)
+    settings.save(&store)?;
+    record_change(dir);
+    Ok(())
 }
 
 /// This directory's current attempt, if the caller names the right one.
@@ -239,6 +303,12 @@ pub fn forget(store: &ConfigStore) -> Result<bool> {
     let mut settings = DaemonSettings::load(store)?;
     let had = settings.near_ai_inference.take().is_some();
     settings.save(store)?;
+    if had {
+        // Only on a real removal. A second forget removed nothing, and
+        // announcing a change that did not happen would cycle a running
+        // proxy for no reason.
+        record_change(store.dir());
+    }
     Ok(had)
 }
 

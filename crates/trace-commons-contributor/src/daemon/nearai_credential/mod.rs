@@ -48,6 +48,41 @@ pub async fn handle_start(shared: &DaemonShared, req: &Request) -> Response {
     }
 }
 
+/// `handle_status`, plus the thing the shell is actually waiting for.
+///
+/// A shell polls this until it reads `complete`, and the honest answer to
+/// "what changed when it did" used to be "nothing yet": the ceremony had
+/// written the key to disk and the daemon would notice on its next poll tick,
+/// up to a minute later. So the contributor saw a ceremony succeed and a
+/// screen that still said their calls were being answered by accounts already
+/// set up on their computer -- which reads as failure, and invites minting a
+/// second key.
+///
+/// Reconciling here is what closes that: the poll that reports `complete` has
+/// already cycled the proxy onto the new key, so the state the shell reads
+/// next is the true one. It is not a second mechanism -- the poll tick still
+/// does this, and a shell that never polls status still converges. This only
+/// makes the common path prompt.
+///
+/// Guarded on `complete` because status is polled repeatedly and stays
+/// `complete` forever; reconciling on `waiting_for_browser` would take the
+/// lifecycle lock once a second for five minutes to discover nothing changed.
+/// Reconcile is idempotent, so the repeat `complete` polls that do reach it
+/// are a cheap no-op.
+pub async fn handle_status_async(shared: &DaemonShared, req: &Request) -> Response {
+    let response = handle_status(shared, req);
+    if response
+        .result
+        .as_ref()
+        .and_then(|v| v.get("status"))
+        .and_then(|v| v.as_str())
+        == Some("complete")
+    {
+        shared.reconcile_private_inference().await;
+    }
+    response
+}
+
 pub fn handle_status(shared: &DaemonShared, req: &Request) -> Response {
     let attempt = req.params.get("attempt_id").and_then(|v| v.as_str());
     match ceremony::status(shared.store.dir(), attempt) {
@@ -79,4 +114,21 @@ pub fn handle_forget(shared: &DaemonShared, req: &Request) -> Response {
         ),
         Err(_) => Response::err(req.id, ERR_UNAVAILABLE, "near_ai_credential_unavailable"),
     }
+}
+
+/// `handle_forget`, plus the one thing it cannot do synchronously: take the
+/// key back out of the running proxy.
+///
+/// The same shape as `handle_set_settings_async`, and for the same reason --
+/// the sync handler is what defines the answer, and the async wrapper is only
+/// what makes it true of the machine before it is returned. Withdrawing
+/// something is the half of this pair that must not wait: a contributor who
+/// forgets a credential has said stop using it, and "stopped, at some point
+/// in the next minute" is not that.
+pub async fn handle_forget_async(shared: &DaemonShared, req: &Request) -> Response {
+    let response = handle_forget(shared, req);
+    if response.error.is_none() {
+        shared.reconcile_private_inference().await;
+    }
+    response
 }

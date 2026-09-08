@@ -442,6 +442,14 @@ pub struct DaemonShared {
     private_inference: Arc<tokio::sync::Mutex<Option<super::private_inference::PrivateInference>>>,
     private_inference_terminating: AtomicBool,
     private_inference_generation: std::sync::atomic::AtomicU64,
+    /// The credential-change count this daemon has already absorbed.
+    ///
+    /// See [`super::nearai_credential::ceremony::change_count`] for what the
+    /// other side of this is and why it has to be a count on a static rather
+    /// than a message: the ceremony's last leg holds no handle to this
+    /// struct. Starts at zero and is compared, never cleared, so a second
+    /// ceremony completing before the first has been absorbed is not lost.
+    near_ai_credential_changes: std::sync::atomic::AtomicU64,
     private_inference_stop_confirmed: Arc<AtomicBool>,
     pub(crate) private_inference_changed: tokio::sync::Notify,
     private_inference_stop_task: Mutex<Option<tokio::task::JoinHandle<bool>>>,
@@ -599,6 +607,7 @@ impl DaemonShared {
             )),
             private_inference_terminating: AtomicBool::new(false),
             private_inference_generation: std::sync::atomic::AtomicU64::new(0),
+            near_ai_credential_changes: std::sync::atomic::AtomicU64::new(0),
             private_inference_stop_confirmed: Arc::new(AtomicBool::new(false)),
             private_inference_changed: tokio::sync::Notify::new(),
             private_inference_stop_task: Mutex::new(None),
@@ -640,11 +649,59 @@ impl DaemonShared {
         self.proxy_runtime.get().is_some()
     }
 
+    /// Take on a credential a ceremony wrote while this daemon was running,
+    /// and treat it as a change to what the proxy is.
+    ///
+    /// The gap this closes: the ceremony writes the settings document from a
+    /// detached task and cannot reach this struct, so the daemon's in-memory
+    /// copy still says the contributor has no key. Reading the count first
+    /// keeps the ordinary pass off the disk entirely -- it is zero against
+    /// zero for every daemon whose contributor ran no ceremony.
+    ///
+    /// Only `near_ai_inference` is taken from the document that comes back.
+    /// The rest of the in-memory copy is authoritative and must stay so: the
+    /// ceremony's read-modify-write started from whatever was on disk when it
+    /// happened to run, and adopting all of it would let a mint quietly
+    /// revert a setting the contributor changed while the browser was open.
+    ///
+    /// The observed count is stored only once the change has been applied. A
+    /// settings document that will not load leaves it where it was, so the
+    /// next pass tries again rather than dropping the credential forever.
+    fn absorb_near_ai_credential_change(&self) {
+        let observed = super::nearai_credential::ceremony::change_count(self.store.dir());
+        if observed == self.near_ai_credential_changes.load(Ordering::Acquire) {
+            return;
+        }
+        let Ok(stored) = super::settings::DaemonSettings::load(&self.store) else {
+            return;
+        };
+        let mut settings = self.settings.lock().expect("settings lock");
+        if settings.near_ai_inference != stored.near_ai_inference {
+            settings.near_ai_inference = stored.near_ai_inference;
+            // Same bump, and for the same reason, as a changed proxy
+            // declaration in `handle_set_settings`: IronWire resolves its
+            // credentials once, while building the registry, so a key that
+            // is merely handed to the host reaches nothing. Advancing the
+            // generation is what makes the reconcile below stop the proxy
+            // and start it again on the key. Taken while the settings lock
+            // is held, as there, so the value a pass reads and the switch it
+            // read belong to the same document.
+            self.private_inference_generation
+                .fetch_add(1, Ordering::Release);
+        }
+        drop(settings);
+        self.near_ai_credential_changes
+            .store(observed, Ordering::Release);
+    }
+
     pub(crate) async fn reconcile_private_inference(&self) {
         if self.private_inference_terminating.load(Ordering::Acquire) {
             return;
         }
         let mut held = self.private_inference.lock().await;
+        // Under the lifecycle lock, so the generation this may advance is
+        // observed by the read below rather than by a pass already past it.
+        self.absorb_near_ai_credential_change();
         // Read after acquiring lifecycle ownership: a queued reconciliation
         // must not replay a setting superseded while it waited for that lock.
         let (on, generation, credential) = {
@@ -683,7 +740,19 @@ impl DaemonShared {
         host.set_runtime(self.proxy_runtime.get().cloned());
         host.set_credential(credential);
         if host.accept_generation(generation) {
-            host.apply(false).await;
+            if on {
+                // A cycle, not a stop: `apply(false)` alone leaves the start
+                // below looking at a shutdown still in flight, which it
+                // declines, so the proxy stays dark until some later pass.
+                // Tolerable while the only reason to be here with the switch
+                // still on was a changed port; not tolerable for a
+                // credential, where coming back up a minute later is the
+                // same dead end as never coming back. `cycle` drains only
+                // when draining is bounded -- see its doc.
+                host.cycle().await;
+            } else {
+                host.apply(false).await;
+            }
         }
         host.apply(on).await;
         loop {
@@ -2266,7 +2335,8 @@ async fn handle_set_settings_async(shared: &DaemonShared, req: &Request) -> Resp
 /// The complete dispatcher: answers the async methods (`"approve"`,
 /// `"preview"`, `"preview_body"`, `"preview_turns"`, `"probe_routing"`,
 /// `"probe_routed_tools"`,
-/// `"quiesce"`, `"enroll"`,
+/// `"quiesce"`, `"enroll"`, `"near_ai_credential_status"`,
+/// `"near_ai_credential_forget"`,
 /// `"withdraw"`, `"withdraw_bulk"`, `"set_public_profile"`,
 /// `"clear_public_profile"`) for real and delegates every other method,
 /// unchanged, to the synchronous `handle_request`. See the module doc's
@@ -2283,6 +2353,17 @@ pub async fn handle_request_async(shared: &DaemonShared, req: &Request) -> Respo
         ),
         "near_account_start" => super::account_onboarding::handle_start(shared, req).await,
         "near_ai_credential_start" => super::nearai_credential::handle_start(shared, req).await,
+        // Both of these answer identically on the sync path -- they are in
+        // `handle_request` too, and that is what defines the response. The
+        // override exists so the reconcile that makes the answer true of the
+        // running proxy happens before the caller is told, exactly as
+        // `set_settings` does it.
+        "near_ai_credential_status" => {
+            super::nearai_credential::handle_status_async(shared, req).await
+        }
+        "near_ai_credential_forget" => {
+            super::nearai_credential::handle_forget_async(shared, req).await
+        }
         "near_account_capabilities" => {
             super::account_onboarding::handle_capabilities(shared, req).await
         }
@@ -7605,6 +7686,104 @@ mod tests {
                 .holds_credential(),
             "a revoked key must stop being offered"
         );
+    }
+
+    /// A ceremony that finishes while the daemon runs reaches IronWire, and
+    /// forgetting takes the key back out -- neither waits for a restart.
+    ///
+    /// The assertion that matters is `starts()`, not `holds_credential()`.
+    /// Handing the key to the host is what already happened before this and
+    /// changed nothing a contributor could see: IronWire resolves its
+    /// credentials once, while building the registry, so a key that arrives
+    /// without a rebuild is a key nothing answers with. A proxy started again
+    /// is the whole observable difference between a credential that works and
+    /// one that sits in a file.
+    #[tokio::test]
+    async fn a_ceremony_that_finishes_mid_run_rebuilds_the_proxy_on_the_new_key() {
+        let s = shared();
+        let home = tempfile::tempdir().unwrap();
+        // On, persisted, and running a real proxy: the case where a cycle
+        // costs something. A proxy that is off has nothing to interrupt.
+        s.settings.lock().unwrap().private_inference = true;
+        s.settings.lock().unwrap().save(&s.store).unwrap();
+        *s.private_inference.lock().await = Some(
+            super::super::private_inference::PrivateInference::with_port(
+                home.path().to_path_buf(),
+                0,
+            ),
+        );
+        s.reconcile_private_inference().await;
+        {
+            let held = s.private_inference.lock().await;
+            let host = held.as_ref().unwrap();
+            assert!(!host.holds_credential(), "nothing has been minted yet");
+            assert_eq!(host.starts(), 1, "{:?}", host.state());
+        }
+
+        // Exactly what the ceremony's last leg does, from exactly where it
+        // does it: a settings write against the config directory, with no
+        // handle to this daemon and no IPC call to hang anything on.
+        crate::daemon::nearai_credential::ceremony::persist(
+            s.store.dir(),
+            crate::daemon::nearai_credential::api::MintedKey {
+                key: "sk-minted-secret".into(),
+                key_id: "key-1".into(),
+                key_prefix: "sk-min".into(),
+                organization_id: "org-1".into(),
+                workspace_id: "ws-1".into(),
+            },
+        )
+        .unwrap();
+
+        s.reconcile_private_inference().await;
+        {
+            let held = s.private_inference.lock().await;
+            let host = held.as_ref().unwrap();
+            assert!(host.holds_credential(), "the minted key never arrived");
+            assert_eq!(
+                host.starts(),
+                2,
+                "the key reached the host and the registry was never rebuilt, \
+                 which is the ceremony that succeeds and changes nothing"
+            );
+        }
+        // The in-memory document took the credential and nothing else: the
+        // ceremony wrote from disk, where this was never true.
+        assert!(s.settings.lock().unwrap().private_inference);
+
+        // Forgetting is the other half, and it must not linger either.
+        let r = handle_request_async(&s, &req("near_ai_credential_forget", serde_json::json!({})))
+            .await;
+        assert_eq!(r.result.unwrap()["removed"], true);
+        {
+            let held = s.private_inference.lock().await;
+            let host = held.as_ref().unwrap();
+            assert!(!host.holds_credential(), "a forgotten key is still held");
+            assert_eq!(
+                host.starts(),
+                3,
+                "the proxy kept answering with a key the contributor withdrew"
+            );
+        }
+        assert!(s.settings.lock().unwrap().near_ai_inference.is_none());
+
+        // A second forget removed nothing and must not cycle a live proxy for
+        // it -- the counter is only advanced by a real change.
+        let r = handle_request_async(&s, &req("near_ai_credential_forget", serde_json::json!({})))
+            .await;
+        assert_eq!(r.result.unwrap()["removed"], false);
+        {
+            let held = s.private_inference.lock().await;
+            assert_eq!(held.as_ref().unwrap().starts(), 3);
+        }
+
+        s.private_inference
+            .lock()
+            .await
+            .as_mut()
+            .unwrap()
+            .finish_stop()
+            .await;
     }
 
     #[tokio::test]
