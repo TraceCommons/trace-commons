@@ -77,6 +77,13 @@ struct EligibilityTable {
     state_tone: fn(&str) -> copy::PrivateInferenceTone,
     reason_line: fn(&str) -> &'static str,
     control: fn(&str) -> copy::ContributionControl,
+    /// The GROUP control, which takes two counts rather than a state.
+    ///
+    /// In the table for the same reason the row control is: the decision
+    /// is the shared crate's, and a behavioural test needs to be able to
+    /// hand this shell a different one. A source sweep can say the call is
+    /// written; only an inverted table can say the answer is USED.
+    group_control: fn(u64, Option<u64>) -> copy::ContributionControl,
 }
 
 /// The one table this shell ships: the shared crate's, which macOS and
@@ -86,6 +93,7 @@ const SHARED: EligibilityTable = EligibilityTable {
     state_tone: copy::eligibility_state_tone,
     reason_line: copy::eligibility_reason_line,
     control: copy::eligibility_control,
+    group_control: copy::group_control,
 };
 
 /// Read one entry through a table.
@@ -111,6 +119,28 @@ fn view_through(entry: &QueueEntry, table: &EligibilityTable) -> Option<Eligibil
         reason_line: (table.reason_line)(entry.eligibility_reason.as_deref().unwrap_or_default()),
         control: (table.control)(state),
     })
+}
+
+/// Whether a GROUP may draw a control that sends its sessions.
+///
+/// `contributable` is `None` when the question does not apply -- the wire's
+/// absent `contributable_count`, which is an invited contributor. **Read as
+/// zero it would refuse the control to somebody whose every session is
+/// sendable**, so the absence is carried rather than flattened, and the
+/// answer comes from the shared branch table rather than from a `> 0` here.
+#[must_use]
+pub fn group_offers_send(pending: u64, contributable: Option<u64>) -> bool {
+    group_offers_send_through(pending, contributable, &SHARED)
+}
+
+/// [`group_offers_send`] against a given table, so a test can hand it one
+/// that answers the inverse and require the answer to follow.
+fn group_offers_send_through(
+    pending: u64,
+    contributable: Option<u64>,
+    table: &EligibilityTable,
+) -> bool {
+    (table.group_control)(pending, contributable) == copy::ContributionControl::Contribute
 }
 
 /// Whether a row may draw a control that sends this session.
@@ -530,12 +560,28 @@ mod tests {
         }
     }
 
+    /// `Contribute` wherever the real table refuses, and `None` where it
+    /// offers. **The absent case is the one that matters**: the real table
+    /// answers `Contribute` for `None`, so this answers `None` -- and a
+    /// shell computing `contributable.unwrap_or(pending) > 0` for itself
+    /// would say `Contribute` and be caught.
+    fn inverse_group_control(
+        pending: u64,
+        contributable: Option<u64>,
+    ) -> copy::ContributionControl {
+        match copy::group_control(pending, contributable) {
+            copy::ContributionControl::Contribute => copy::ContributionControl::None,
+            copy::ContributionControl::None => copy::ContributionControl::Contribute,
+        }
+    }
+
     fn inverse_table() -> EligibilityTable {
         EligibilityTable {
             state_line: inverse_state_line,
             state_tone: inverse_tone,
             reason_line: inverse_reason_line,
             control: inverse_control,
+            group_control: inverse_group_control,
         }
     }
 
@@ -597,6 +643,52 @@ mod tests {
                 .reason_line,
             "INVERSE-REASON"
         );
+    }
+
+    /// **The group control is read from the table, not decided here.**
+    ///
+    /// The mutation this exists for survived on Windows: a local
+    /// `contributable > 0` agrees with the shared table in every case that
+    /// can be produced today, so no test whose expectation is a hand-written
+    /// table matching the current answers can separate them. An inverted
+    /// table can -- a shell deciding for itself goes on agreeing with the
+    /// real answers and disagrees with these.
+    ///
+    /// Every pair is checked, absent and present, because the arm a local
+    /// computation gets wrong is `None`.
+    #[test]
+    fn the_group_control_follows_the_table_it_is_given() {
+        let inverse = inverse_table();
+        for (pending, contributable) in [
+            (7u64, None),
+            (7, Some(0u64)),
+            (7, Some(1)),
+            (7, Some(7)),
+            (0, None),
+            (0, Some(0)),
+        ] {
+            let real = group_offers_send(pending, contributable);
+            let faked = group_offers_send_through(pending, contributable, &inverse);
+            assert_ne!(
+                real, faked,
+                "({pending}, {contributable:?}) ignored the table it was given"
+            );
+            assert_eq!(
+                faked,
+                inverse_group_control(pending, contributable)
+                    == copy::ContributionControl::Contribute,
+                "({pending}, {contributable:?}) did not follow the table"
+            );
+        }
+        // And the real answers, stated once so the inversion above is
+        // anchored to something rather than only to itself.
+        assert!(
+            group_offers_send(7, None),
+            "an invited contributor's group offers its control"
+        );
+        assert!(!group_offers_send(7, Some(0)));
+        assert!(group_offers_send(7, Some(1)));
+        assert!(!group_offers_send(0, None), "an empty group offers nothing");
     }
 
     /// The absent-key rule is this shell's own and NO table may overturn
@@ -849,11 +941,12 @@ mod tests {
         // reading that as zero would take the control away from somebody
         // whose sessions are all sendable.
         assert!(
-            row.contains("copy::group_control(waitingasu64,group.contributable)"),
+            row.contains("crate::eligibility::group_offers_send(waitingasu64,group.contributable)"),
             "the group control is decided here instead of asked for"
         );
         assert_eq!(
-            row.matches("letsendable=copy::group_control(").count(),
+            row.matches("letsendable=crate::eligibility::group_offers_send(")
+                .count(),
             1,
             "the two controls do not share one computed answer"
         );

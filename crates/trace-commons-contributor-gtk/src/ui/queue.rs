@@ -1437,8 +1437,7 @@ fn folder_row(app: &Rc<App>, folder: &crate::queue_folders::Folder) -> gtk::Widg
         // `None` carries the absence, exactly as a negative does across the
         // C ABI that macOS and Windows reach this through.
         let group = group_submit(app, project_id);
-        let sendable = copy::group_control(waiting as u64, group.contributable)
-            == copy::ContributionControl::Contribute;
+        let sendable = crate::eligibility::group_offers_send(waiting as u64, group.contributable);
         if sendable {
             bar.append(&submit_all);
         }
