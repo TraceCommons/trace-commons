@@ -227,6 +227,31 @@ public sealed class ProjectSetting
     [JsonPropertyName("project_path")]
     public string ProjectPath { get; set; } = string.Empty;
 
+    /// <summary>How many sessions of this project are waiting. Always sent.</summary>
+    [JsonPropertyName("pending_count")]
+    public int PendingCount { get; set; }
+
+    /// <summary>
+    /// How many of them a group submit would actually send.
+    /// </summary>
+    /// <remarks>
+    /// <b>NULL MEANS THE KEY WAS ABSENT, AND ABSENT IS NOT ZERO.</b> The
+    /// daemon omits it when eligibility does not apply -- an invited
+    /// contributor has no "3 of 7" to be told about, and
+    /// <see cref="PendingCount"/> alone is their answer. Reading absent as
+    /// zero would take the group control away from every project they have,
+    /// which is the failure that silently stops people submitting; reading
+    /// zero as absent would offer a send that has nothing to send.
+    ///
+    /// <para>
+    /// This is the daemon's own count, never recomputed here. A group approve
+    /// applies the same filter server-side, and three shells each
+    /// reimplementing it is what put the hole here in the first place.
+    /// </para>
+    /// </remarks>
+    [JsonPropertyName("contributable_count")]
+    public int? ContributableCount { get; set; }
+
     [JsonPropertyName("mode")]
     public string Mode { get; set; } = "ask";
 

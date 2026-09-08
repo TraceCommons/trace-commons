@@ -378,6 +378,101 @@ internal static class NativeMethods
         [MarshalAs(UnmanagedType.LPUTF8Str)] string? state);
 
     /// <summary>
+    /// The sentence for one queue entry's <c>eligibility</c> label.
+    ///
+    /// A ROW THAT CARRIED NO <c>eligibility</c> FIELD MUST NOT REACH HERE. An
+    /// absent field means the contributor was invited and has no eligibility
+    /// question, and answering one they do not have puts a caveat on work
+    /// that carries none. Absent is not "unknown".
+    ///
+    /// An empty, NULL or unfamiliar state reports that the answer has not
+    /// been worked out. IT NEVER REPORTS AN INELIGIBILITY: a state this build
+    /// cannot read is not evidence about a contributor's session. NULL only
+    /// on a caught panic.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    internal static extern IntPtr tc_contribution_eligibility_line(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? state);
+
+    /// <summary>
+    /// How that sentence is painted, as a raw
+    /// <c>TC_PRIVATE_INFERENCE_TONE_*</c> value -- the same five the listener
+    /// row uses, so this shell keeps one mapping onto colours.
+    ///
+    /// A permanent ineligibility is deliberately NOT <c>_REFUSED</c>: nothing
+    /// was refused and nothing went wrong, and painting a contributor's
+    /// ordinary older work as a failure is a judgement this surface has no
+    /// business making.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    internal static extern int tc_contribution_eligibility_tone(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? state);
+
+    /// <summary>
+    /// The one control a shell may offer for an eligibility state, as a raw
+    /// <c>TC_CONTRIBUTION_CONTROL_*</c> value.
+    ///
+    /// THE BRANCH TABLE CROSSES, NOT ONLY THE WORDS. Three shells each
+    /// deciding which rows get a send button is three chances to offer one
+    /// beside a session the server will refuse -- the defect this surface
+    /// exists to remove, and worse than an inert button: pressing it sends a
+    /// contributor's work and has it turned away.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    internal static extern int tc_contribution_eligibility_control(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? state);
+
+    /// <summary>
+    /// The sentence for one queue entry's <c>eligibility_reason</c> label, or
+    /// THE EMPTY STRING for an absent, NULL or unfamiliar reason -- for which
+    /// a shell renders nothing.
+    ///
+    /// Deliberately not the hedge the state line makes: the state sentence
+    /// has already said what is true, and a second sentence guessing at a
+    /// reason this build does not know would add a detail nobody
+    /// established. NULL only on a caught panic.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    internal static extern IntPtr tc_contribution_eligibility_reason_line(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? reason);
+
+    /// <summary>
+    /// How many sessions a group submit is leaving behind, as a sentence, or
+    /// THE EMPTY STRING for zero and for a negative.
+    /// </summary>
+    /// <remarks>
+    /// Says how many and NOT why. The reason a particular session cannot be
+    /// sent is that row's own sentence one level in; a summary here would
+    /// stand for up to thirteen different reasons and say nothing true about
+    /// any of them. NULL only on a caught panic.
+    /// </remarks>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_contribution_withheld_line(long withheld);
+
+    /// <summary>
+    /// Whether a group's submit control may be offered, as a raw
+    /// <c>TC_CONTRIBUTION_CONTROL_*</c> value.
+    /// </summary>
+    /// <remarks>
+    /// <paramref name="contributable"/> is the project row's
+    /// <c>contributable_count</c>, or <b>ANY NEGATIVE VALUE when that key was
+    /// ABSENT</b> -- an invited contributor, for whom every pending session is
+    /// sendable.
+    ///
+    /// <para>
+    /// ABSENT IS NOT ZERO, and it is the distinction most likely to be got
+    /// wrong: zero means the question applies and nothing here can be sent, so
+    /// nothing is offered; negative means the question does not apply and the
+    /// control is offered on <paramref name="pending"/> alone. Passing 0 for an
+    /// absent field would refuse a control to somebody whose sessions are all
+    /// perfectly sendable -- which is what a <c>?? 0</c> on a nullable count
+    /// does, so do not write one.
+    /// </para>
+    /// </remarks>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int tc_contribution_group_control(long pending, long contributable);
+
+    /// <summary>
     /// One <c>harness_list</c> row's state, as a TC_HARNESS_STATE_* code.
     ///
     /// THE BRANCH TABLE CROSSES. "answering" is the only value meaning a call

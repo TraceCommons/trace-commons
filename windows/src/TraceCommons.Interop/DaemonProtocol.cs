@@ -488,6 +488,45 @@ public sealed class QueueEntry
     /// </summary>
     [JsonPropertyName("subagents_dropped")]
     public int SubagentsDropped { get; set; }
+
+    /// <summary>
+    /// Whether this session can actually be contributed: <c>eligible</c>,
+    /// <c>ineligible_permanent</c>, <c>ineligible_configuration</c> or
+    /// <c>unknown</c>.
+    /// </summary>
+    /// <remarks>
+    /// <b>NULL MEANS THE KEY WAS ABSENT, AND ABSENT IS NOT <c>unknown</c>.</b>
+    /// The daemon omits this field entirely when the contributor was invited
+    /// rather than admitted on evidence, or when the setting could not be
+    /// read: they have no eligibility question, and a row answering one they
+    /// do not have puts a caveat on work that carries none. Such a row
+    /// renders exactly as it did before this field existed.
+    ///
+    /// <para>
+    /// <c>unknown</c> is a real state that arrives on the wire -- a row this
+    /// build never evaluated, or one whose submission failed transiently --
+    /// and it is rendered, with its own sentence and no send control. Never
+    /// collapse the two. Every decision that follows from this value is made
+    /// in <see cref="ContributionEligibilitySurface"/>, which asks the shared
+    /// crate; nothing here or above it branches on the string.
+    /// </para>
+    /// </remarks>
+    [JsonPropertyName("eligibility")]
+    public string? Eligibility { get; set; }
+
+    /// <summary>
+    /// A stable label naming why, or null. Absent on every <c>eligible</c>
+    /// row, and on a daemon that reported no eligibility at all.
+    /// </summary>
+    /// <remarks>
+    /// Rendered only through
+    /// <see cref="ContributionEligibilitySurface.ReasonLine"/>, which answers
+    /// nothing at all for a label this build does not know -- deliberately
+    /// unlike the state line's fallback. An unknown state still has to say
+    /// something; an unknown reason has nothing honest to say.
+    /// </remarks>
+    [JsonPropertyName("eligibility_reason")]
+    public string? EligibilityReason { get; set; }
 }
 
 /// <summary>

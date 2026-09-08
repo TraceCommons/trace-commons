@@ -20,11 +20,24 @@ public sealed class PreviewWindow : Window
 {
     private readonly PreviewSheet _sheet;
 
-    public PreviewWindow(DaemonHost host, QueueEntryViewModel entry)
+    /// <remarks>
+    /// <paramref name="liveEntry"/> is REQUIRED AND HAS NO DEFAULT. Making it
+    /// optional would mean a caller that forgot it silently got the stale
+    /// behaviour back -- the exact defect this parameter exists to remove,
+    /// re-armed as a default, with no test failure and no warning to whoever
+    /// added the call site. Required, it fails at compile time where the
+    /// mistake is. A caller that genuinely has no queue to resolve against
+    /// passes <c>liveEntry: null</c> and says why, so choosing it is visible
+    /// in the code and indistinguishable from nothing.
+    /// </remarks>
+    public PreviewWindow(
+        DaemonHost host,
+        QueueEntryViewModel entry,
+        Func<string, QueueEntryViewModel?>? liveEntry)
     {
         Title = "Look inside";
 
-        _sheet = new PreviewSheet(host, entry);
+        _sheet = new PreviewSheet(host, entry, liveEntry);
         _sheet.Decided += OnDecided;
         _sheet.CloseRequested += Close;
         Content = _sheet;
@@ -38,6 +51,13 @@ public sealed class PreviewWindow : Window
     /// they land on rather than behind a sheet that has closed.
     /// </summary>
     public event Action<QueueEntryViewModel, PreviewDecision>? Decided;
+
+    /// <summary>
+    /// The queue changed underneath this window. Forwarded to the sheet,
+    /// whose gate is computed from the live entry rather than the copy it
+    /// opened with. See <c>PreviewSheetViewModel.LiveEntry</c>.
+    /// </summary>
+    public void QueueChanged() => _sheet.ViewModel.QueueChanged();
 
     private void OnDecided(QueueEntryViewModel entry, PreviewDecision decision) =>
         Decided?.Invoke(entry, decision);
