@@ -112,6 +112,34 @@ public struct PrivateInferenceCopy: Decodable, Equatable, Sendable {
     /// reading of a `destination_credentialed` field.
     public let harnessNeedsCredential: String
 
+    /// The four `eligibility` states a queue entry can carry.
+    ///
+    /// Never picked by a `switch` here: the sentence for a state comes back
+    /// from `tc_contribution_eligibility_line`, and these are carried so a
+    /// test can pin what that table answered against the set this build was
+    /// compiled with. `eligibilityUnknown` is the one an unfamiliar state
+    /// reaches, and it must never degrade into an ineligibility.
+    public let eligibilityEligible: String
+    public let eligibilityIneligiblePermanent: String
+    public let eligibilityIneligibleConfiguration: String
+    public let eligibilityUnknown: String
+    /// The thirteen `eligibility_reason` labels, in the order the Rust
+    /// declares them. An `eligible` row carries no reason at all, and an
+    /// unfamiliar one renders nothing rather than borrowing one of these.
+    public let eligibilityReasonNoCall: String
+    public let eligibilityReasonCaptureOff: String
+    public let eligibilityReasonDigestAbsent: String
+    public let eligibilityReasonUpstreamIdAbsent: String
+    public let eligibilityReasonDigestMismatch: String
+    public let eligibilityReasonReferenceMalformed: String
+    public let eligibilityReasonBodiesUnreadable: String
+    public let eligibilityReasonBodyNotUtf8: String
+    public let eligibilityReasonBodyTooLarge: String
+    public let eligibilityReasonEvidenceCaptureOff: String
+    public let eligibilityReasonMarkerAbsent: String
+    public let eligibilityReasonRequestMalformed: String
+    public let eligibilityReasonReceiptUnavailable: String
+
     /// `CaseIterable` so a test on the far side can compare the exported
     /// field set against the declared one in BOTH directions -- a field the
     /// Rust grows and this struct drops would sail past a test that only
@@ -180,6 +208,23 @@ public struct PrivateInferenceCopy: Decodable, Equatable, Sendable {
         case credentialUnknown = "credential_unknown"
         case credentialUnreported = "credential_unreported"
         case harnessNeedsCredential = "harness_needs_credential"
+        case eligibilityEligible = "eligibility_eligible"
+        case eligibilityIneligiblePermanent = "eligibility_ineligible_permanent"
+        case eligibilityIneligibleConfiguration = "eligibility_ineligible_configuration"
+        case eligibilityUnknown = "eligibility_unknown"
+        case eligibilityReasonNoCall = "eligibility_reason_no_call"
+        case eligibilityReasonCaptureOff = "eligibility_reason_capture_off"
+        case eligibilityReasonDigestAbsent = "eligibility_reason_digest_absent"
+        case eligibilityReasonUpstreamIdAbsent = "eligibility_reason_upstream_id_absent"
+        case eligibilityReasonDigestMismatch = "eligibility_reason_digest_mismatch"
+        case eligibilityReasonReferenceMalformed = "eligibility_reason_reference_malformed"
+        case eligibilityReasonBodiesUnreadable = "eligibility_reason_bodies_unreadable"
+        case eligibilityReasonBodyNotUtf8 = "eligibility_reason_body_not_utf8"
+        case eligibilityReasonBodyTooLarge = "eligibility_reason_body_too_large"
+        case eligibilityReasonEvidenceCaptureOff = "eligibility_reason_evidence_capture_off"
+        case eligibilityReasonMarkerAbsent = "eligibility_reason_marker_absent"
+        case eligibilityReasonRequestMalformed = "eligibility_reason_request_malformed"
+        case eligibilityReasonReceiptUnavailable = "eligibility_reason_receipt_unavailable"
     }
 
     /// All or nothing, for the reason on the type.

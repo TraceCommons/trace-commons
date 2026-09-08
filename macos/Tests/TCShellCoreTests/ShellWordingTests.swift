@@ -79,6 +79,9 @@ final class ShellWordingTests: XCTestCase {
         "TraceCommonsApp/Views/OnboardingWelcomeView.swift": 8,
         "TraceCommonsApp/Views/PreviewSheet.swift": 38,
         "TraceCommonsApp/Views/PublicProfileCopy.swift": 46,
+        // Back to 3: the withheld line briefly lived here and is now
+        // `tc_contribution_withheld_line`, assembled in the Rust and shared
+        // with the other two shells. Do not raise this again for it.
         "TraceCommonsApp/Views/QueueFolderRow.swift": 3,
         "TraceCommonsApp/Views/QueueView.swift": 26,
         "TraceCommonsApp/Views/ScrubbingCaveat.swift": 4,
@@ -92,8 +95,10 @@ final class ShellWordingTests: XCTestCase {
     /// and an entry here would be a quiet way of undoing that.
     private static let rustOwnedSurfaces = [
         "TCBridge/TCConsentCopy.swift",
+        "TCBridge/TCContributionEligibility.swift",
         "TCBridge/TCRoutingCopy.swift",
         "TCShellCore/ConsentCopy.swift",
+        "TCShellCore/EligibilitySurface.swift",
         "TCShellCore/ReadGate.swift",
         "TCShellCore/RoutingCopy.swift",
         "TCShellCore/RoutingSurface.swift",

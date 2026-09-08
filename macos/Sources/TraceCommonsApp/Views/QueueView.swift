@@ -194,6 +194,11 @@ struct QueueContent: View {
                 ForEach(model.waitingByProject) { group in
                     QueueFolderRow(
                         group: group,
+                        // The daemon's own row for this project, matched by
+                        // the id `list_projects` mints -- the same id the
+                        // grouping keys on. Nil until that call answers.
+                        project: model.projects.first { $0.projectId == group.id },
+                        eligibilityCalls: model.eligibilityCalls,
                         onOpen: { location = .project(group.id) },
                         onSubmitAll: { model.submitProject(id: group.id) },
                         onSubmitAllAs: { model.submitProject(id: group.id, verdict: $0) },
@@ -243,6 +248,8 @@ struct QueueContent: View {
 
             ProjectQueueGroup(
                 group: group,
+                copy: model.privateInferenceCopy,
+                eligibilityCalls: model.eligibilityCalls,
                 summaries: model.summaries,
                 summaryErrors: model.summaryErrors,
                 tooLarge: model.tooLarge,
@@ -272,6 +279,11 @@ struct QueueContent: View {
 /// and stating them in both places would be two things to keep in step.
 private struct ProjectQueueGroup: View {
     let group: QueueGroup<QueueEntry>
+    /// The shared sentences, or `nil` when the payload would not decode.
+    /// Passed down rather than read here: this view draws nothing itself.
+    let copy: PrivateInferenceCopy?
+    /// The eligibility branch tables, all four of them the Rust's.
+    let eligibilityCalls: EligibilityCalls
     let summaries: [String: PreviewSummary]
     let summaryErrors: [String: String]
     let tooLarge: [String: PreviewTooLarge]
@@ -331,6 +343,8 @@ private struct ProjectQueueGroup: View {
         ForEach(group.entries) { entry in
             QueueRow(
                 entry: entry,
+                copy: copy,
+                eligibilityCalls: eligibilityCalls,
                 summary: summaries[entry.entryID],
                 summaryError: summaryErrors[entry.entryID],
                 tooLarge: tooLarge[entry.entryID],
@@ -355,6 +369,11 @@ private struct ProjectQueueGroup: View {
 /// above.
 struct QueueRow: View {
     let entry: QueueEntry
+    /// The shared sentences. `nil` when the copy payload would not decode,
+    /// which draws no eligibility sentence rather than a blank one -- but
+    /// does NOT re-offer a control the ABI withheld; see `offersContribute`.
+    let copy: PrivateInferenceCopy?
+    let eligibilityCalls: EligibilityCalls
     let summary: PreviewSummary?
     let summaryError: String?
     /// Set when the daemon's preview scheduler refused this session for
@@ -387,6 +406,53 @@ struct QueueRow: View {
     private var survivorLine: String? {
         guard let summary else { return nil }
         return RedactionLabels.survivorLine(summary.redactions)
+    }
+
+    // MARK: - Whether this session can be contributed at all
+
+    /// What the daemon said about contributing this session, or nothing.
+    ///
+    /// `nil` for an invited contributor and for a daemon predating the
+    /// field. Nothing below branches on the state string; all three
+    /// questions go to `EligibilitySurface`, which asks the Rust.
+    private var eligibility: ContributionEligibility? { entry.contributionEligibility }
+
+    /// The sentence on the row, or none. Absent both when there is no
+    /// eligibility question and when the copy payload would not decode -- in
+    /// the second case the card says nothing rather than saying it blankly.
+    private var eligibilityLine: String? {
+        guard let copy else { return nil }
+        return EligibilitySurface.stateLine(
+            eligibility, copy: copy, calls: eligibilityCalls)
+    }
+
+    /// The reason under it, or none. Absent on every `eligible` row and on a
+    /// reason this build has never heard of.
+    private var eligibilityReasonLine: String? {
+        EligibilitySurface.reasonLine(eligibility, calls: eligibilityCalls)
+    }
+
+    /// The tone both sentences are painted in, from the ABI and never from
+    /// this shell's reading of the state.
+    private var eligibilityTone: TC.Tone? {
+        EligibilitySurface.tone(eligibility, calls: eligibilityCalls)
+            .map(PrivateInferenceIndicator.palette)
+    }
+
+    /// Whether `Submit` is drawn at all.
+    ///
+    /// The ROW's send control is removed rather than disabled: there is
+    /// nothing to enable, and a greyed button invites a contributor to hunt
+    /// for what would ungrey it. The row itself stays -- the session is
+    /// still shown, still openable, still dismissable -- because hiding a
+    /// contributor's own work is its own dishonesty.
+    ///
+    /// Asked of the ABI even when `copy` is nil. A build that could not read
+    /// its sentences must not fall back to offering the button: the sentence
+    /// is what explains the missing control, and losing the sentence is not
+    /// a reason to send work the server will refuse.
+    private var offersContribute: Bool {
+        EligibilitySurface.offersContribute(eligibility, calls: eligibilityCalls)
     }
 
     var body: some View {
@@ -529,6 +595,7 @@ struct QueueRow: View {
                     survivor
                 }
                 extent
+                admissibility
             }
             Spacer(minLength: TC.Space.m)
             actions
@@ -578,6 +645,41 @@ struct QueueRow: View {
                 .lineSpacing(TC.Font_.LineHeight.spacing(for: 10, TC.Font_.LineHeight.caption))
                 .fixedSize(horizontal: false, vertical: true)
                 .accessibilityLabel(line)
+        }
+    }
+
+    /// Whether this session can be contributed, and why not when it cannot.
+    ///
+    /// Outside the `if let summary` for the reason `extent` is: eligibility
+    /// is a load-time fact carried on the entry, so the line is as true
+    /// while the card still reads "Reading it locally…" as it is afterwards.
+    /// A session that cannot be sent must not be able to reach a decision
+    /// through a card that never got a preview.
+    ///
+    /// Absent entirely when the entry carried no `eligibility` key, so an
+    /// invited contributor's card is the card they always had.
+    @ViewBuilder
+    private var admissibility: some View {
+        if let eligibilityLine {
+            let tone = eligibilityTone ?? TC.Tone.neutral
+            VStack(alignment: .leading, spacing: TC.Space.xxs) {
+                // The glyph comes off the same tone as the colour, so the
+                // state survives greyscale and a black-and-white screenshot.
+                Label(eligibilityLine, systemImage: tone.symbol)
+                    .font(TC.Font_.footnote)
+                    .foregroundStyle(tone.textColor)
+                    .lineSpacing(TC.Font_.LineHeight.spacing(for: 10, TC.Font_.LineHeight.caption))
+                    .fixedSize(horizontal: false, vertical: true)
+                if let eligibilityReasonLine {
+                    Text(eligibilityReasonLine)
+                        .font(TC.Font_.footnote)
+                        .foregroundStyle(TC.inkSecondary)
+                        .lineSpacing(
+                            TC.Font_.LineHeight.spacing(for: 10, TC.Font_.LineHeight.caption))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .accessibilityElement(children: .combine)
         }
     }
 
@@ -679,14 +781,21 @@ struct QueueRow: View {
                 Skips this session for good, even if you keep working in it. \
                 This project will keep being offered.
                 """)
-            Button("Submit", action: onSubmit)
-                // Untinted, and the same weight as "Not this one": a
-                // shortcut is not a recommendation. See the note above.
-                .tint(.primary)
-                .help("""
-                Sends this session now. Scrubbing runs the same as it always does, and \
-                you'll get a moment to undo.
-                """)
+            // Drawn only when the shared table offers it. Not disabled:
+            // there is nothing to enable, the sentence in the footer has
+            // already said why, and a greyed button sends a contributor
+            // hunting for a setting that would ungrey it. The row is still
+            // here, still openable, still dismissable.
+            if offersContribute {
+                Button("Submit", action: onSubmit)
+                    // Untinted, and the same weight as "Not this one": a
+                    // shortcut is not a recommendation. See the note above.
+                    .tint(.primary)
+                    .help("""
+                    Sends this session now. Scrubbing runs the same as it always does, and \
+                    you'll get a moment to undo.
+                    """)
+            }
             // No keyboard shortcut. Return used to be bound here as the
             // default action, which meant a two-row queue registered the
             // same shortcut twice and neither row could say which one a

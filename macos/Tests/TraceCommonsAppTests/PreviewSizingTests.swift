@@ -10,7 +10,10 @@ final class PreviewSizingTests: XCTestCase {
         let entry = QueueEntry(entryID: "synthetic", sessionHash: "synthetic", source: "claude_code",
             declaredSource: nil, projectID: "synthetic", projectLabel: "Synthetic project", projectPath: "~/synthetic",
             sessionPath: nil, sizeBytes: 100, discoveredAt: Date(timeIntervalSince1970: 0), state: .pending,
-            reasonLabel: nil, attempts: 0, subagentCount: nil, subagentsDropped: nil)
+            reasonLabel: nil, attempts: 0, subagentCount: nil, subagentsDropped: nil,
+            // No eligibility field: this fixture stands for an invited
+            // contributor, whose sheet is the sheet it always was.
+            eligibility: nil, eligibilityReason: nil)
         let summary = PreviewSummary(wouldSendBytes: 80, rawSessionBytes: 100, eventCount: 2,
             openingPrompt: "Review a synthetic session", redactions: [:], redactionsDistinct: [:],
             piiLabelsPresent: [], consentScopes: [], residualRisk: "low")

@@ -77,8 +77,37 @@ struct QueueEntry: Decodable, Identifiable, Hashable {
     /// silence here. See `TCShellCore.SubagentCopy` for the words.
     let subagentCount: Int?
     let subagentsDropped: Int?
+    /// Whether this session can actually be contributed, as the daemon
+    /// answered it: `eligible`, `ineligible_permanent`,
+    /// `ineligible_configuration`, `unknown`, or a label a later daemon
+    /// grew.
+    ///
+    /// **`nil` MEANS THE DAEMON SENT NO FIELD, AND THAT IS NOT `unknown`.**
+    /// An invited contributor has no eligibility question -- everything in
+    /// their queue is contributable -- and a daemon predating this contract
+    /// asks none either. Both render as the row always did. `unknown` is a
+    /// real state that arrives on the wire, for a session this build never
+    /// evaluated or one whose submission failed transiently, and it gets its
+    /// own sentence. `Decodable` keeps the two apart for free: a missing key
+    /// decodes to `nil`, a present `"unknown"` to the string.
+    let eligibility: String?
+    /// Which of the thirteen reason labels stands behind that state, or
+    /// `nil`. Absent on every `eligible` row -- there is nothing to explain
+    /// -- and on a state a daemon sent without one.
+    let eligibilityReason: String?
 
     var id: String { entryID }
+
+    /// The eligibility question this row carries, or none at all.
+    ///
+    /// Built ONLY from a present `eligibility`, so an absent field can never
+    /// reach a sentence. Everything the shell draws about it goes through
+    /// `EligibilitySurface` from here; nothing in this file reads the state
+    /// string.
+    var contributionEligibility: ContributionEligibility? {
+        guard let eligibility else { return nil }
+        return ContributionEligibility(state: eligibility, reason: eligibilityReason)
+    }
 
     /// The card's extent line, or `nil` when there is nothing to report.
     /// The contract makes surfacing a non-zero `subagents_dropped`
@@ -108,6 +137,8 @@ struct QueueEntry: Decodable, Identifiable, Hashable {
         case attempts
         case subagentCount = "subagent_count"
         case subagentsDropped = "subagents_dropped"
+        case eligibility
+        case eligibilityReason = "eligibility_reason"
     }
 
     /// "Claude Code" / "Antigravity", never the raw source token.
@@ -739,7 +770,14 @@ extension QueueEntry {
             reasonLabel: try c.decodeIfPresent(String.self, forKey: .reasonLabel),
             attempts: try c.decode(Int.self, forKey: .attempts),
             subagentCount: try c.decodeIfPresent(Int.self, forKey: .subagentCount),
-            subagentsDropped: try c.decodeIfPresent(Int.self, forKey: .subagentsDropped)
+            subagentsDropped: try c.decodeIfPresent(Int.self, forKey: .subagentsDropped),
+            // `decodeIfPresent` IS THE CONTRACT HERE, not a tolerance for an
+            // older daemon. A missing key must stay `nil` and must never
+            // become `"unknown"`: `unknown` is a state the daemon really
+            // sends, and an absent field is a contributor who has no
+            // eligibility question at all.
+            eligibility: try c.decodeIfPresent(String.self, forKey: .eligibility),
+            eligibilityReason: try c.decodeIfPresent(String.self, forKey: .eligibilityReason)
         )
     }
 }
