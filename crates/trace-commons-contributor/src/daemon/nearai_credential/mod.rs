@@ -21,4 +21,5 @@
 //! way: an inference credential with no refresh story at all beats a session
 //! this daemon would have to keep alive for the rest of its life.
 
+pub mod api;
 pub mod loopback;
