@@ -91,12 +91,10 @@ struct QueueContent: View {
                 )
             }
             if let error = model.lastActionError {
-                ActionErrorBanner(text: error) { model.lastActionError = nil }
+                ActionMessageBanner(text: error) { model.lastActionError = nil }
             }
             if let notice = model.lastActionNotice {
-                Text(notice)
-                    .font(TC.Font_.meta)
-                    .foregroundStyle(.secondary)
+                ActionMessageBanner(text: notice) { model.lastActionNotice = nil }
             }
 
             // The offer to answer model calls on this computer, on the

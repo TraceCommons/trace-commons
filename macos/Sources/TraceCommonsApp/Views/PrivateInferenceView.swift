@@ -137,7 +137,7 @@ struct PrivateInferenceContent: View {
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             if let error = model.lastActionError {
-                ActionErrorBanner(text: error) { model.lastActionError = nil }
+                ActionMessageBanner(text: error) { model.lastActionError = nil }
             }
         }
         .padding(.top, TC.Space.Content.top)
