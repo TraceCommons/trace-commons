@@ -38,6 +38,20 @@ struct HarnessListSection: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
+            // Why a connect control is not on offer. Drawn ONCE, here, and
+            // not per row: the fact is about the destination and not about
+            // any one tool. An empty sentence draws no line, which is what a
+            // daemon that predates the credential gate and a destination the
+            // contributor runs themselves both answer -- neither of them
+            // refuses a connect, and saying so would be false.
+            if let notice = CredentialSurface.harnessNotice(
+                credentialed: model.harnesses.destinationCredentialed,
+                calls: model.credentialCalls)
+            {
+                Text(notice)
+                    .font(TC.Font_.body)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             if model.harnesses.harnesses.isEmpty {
                 Text(copy.harnessesNoneFound)
                     .font(TC.Font_.body)
