@@ -437,6 +437,19 @@ internal static class NativeMethods
         [MarshalAs(UnmanagedType.LPUTF8Str)] string? reason);
 
     /// <summary>
+    /// How many sessions a group submit is leaving behind, as a sentence, or
+    /// THE EMPTY STRING for zero and for a negative.
+    /// </summary>
+    /// <remarks>
+    /// Says how many and NOT why. The reason a particular session cannot be
+    /// sent is that row's own sentence one level in; a summary here would
+    /// stand for up to thirteen different reasons and say nothing true about
+    /// any of them. NULL only on a caught panic.
+    /// </remarks>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_contribution_withheld_line(long withheld);
+
+    /// <summary>
     /// One <c>harness_list</c> row's state, as a TC_HARNESS_STATE_* code.
     ///
     /// THE BRANCH TABLE CROSSES. "answering" is the only value meaning a call

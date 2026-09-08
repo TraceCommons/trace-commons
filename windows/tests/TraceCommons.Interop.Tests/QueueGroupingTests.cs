@@ -13,6 +13,18 @@ namespace TraceCommons.Interop.Tests;
 /// </summary>
 public sealed class QueueGroupingTests
 {
+
+    /// <summary>
+    /// This test is not about eligibility counts.
+    /// </summary>
+    /// <remarks>
+    /// Spelled out at every call site rather than defaulted, because a group
+    /// built with no counts offers everything it holds -- which is correct
+    /// for an invited contributor and is the over-offer bug for anyone else.
+    /// Saying so is what keeps forgetting distinguishable from choosing.
+    /// </remarks>
+    private static readonly IReadOnlyDictionary<string, int>? NoCounts = null;
+
     // Lifted into QueueEntries so QueueNavigationTests buckets entries built
     // exactly the same way, rather than with a second fixture that could
     // drift from this one.
@@ -39,7 +51,7 @@ public sealed class QueueGroupingTests
             Entry("e3", "proj_a", "Shared Label"),
         };
 
-        IReadOnlyList<ProjectQueueGroup> groups = QueueGrouping.ByProject(entries);
+        IReadOnlyList<ProjectQueueGroup> groups = QueueGrouping.ByProject(entries, NoCounts);
 
         Assert.Equal(2, groups.Count);
         Assert.Equal(2, groups[0].Count);
@@ -64,7 +76,7 @@ public sealed class QueueGroupingTests
             Entry("e2", "proj_a", "New Name"),
         };
 
-        IReadOnlyList<ProjectQueueGroup> groups = QueueGrouping.ByProject(entries);
+        IReadOnlyList<ProjectQueueGroup> groups = QueueGrouping.ByProject(entries, NoCounts);
 
         Assert.Single(groups);
         Assert.Equal(2, groups[0].Count);
@@ -82,7 +94,7 @@ public sealed class QueueGroupingTests
             Entry("e4", "proj_b", "B"),
         };
 
-        IReadOnlyList<ProjectQueueGroup> groups = QueueGrouping.ByProject(entries);
+        IReadOnlyList<ProjectQueueGroup> groups = QueueGrouping.ByProject(entries, NoCounts);
 
         Assert.Equal(new[] { "proj_c", "proj_a", "proj_b" }, new[]
         {
@@ -109,7 +121,7 @@ public sealed class QueueGroupingTests
             Entry("e3", "proj_pair", "Pair"),
         };
 
-        IReadOnlyList<ProjectQueueGroup> groups = QueueGrouping.ByProject(entries);
+        IReadOnlyList<ProjectQueueGroup> groups = QueueGrouping.ByProject(entries, NoCounts);
 
         ProjectQueueGroup solo = Assert.Single(groups, g => g.ProjectId == "proj_solo");
         ProjectQueueGroup pair = Assert.Single(groups, g => g.ProjectId == "proj_pair");
@@ -129,7 +141,7 @@ public sealed class QueueGroupingTests
         {
             Entry("e1", "proj_a", "api", bytes: 30),
             Entry("e2", "proj_a", "api", bytes: 12),
-        });
+        }, NoCounts);
 
         Assert.Equal(42, groups[0].SizeBytes);
     }
@@ -145,7 +157,7 @@ public sealed class QueueGroupingTests
         {
             Entry("e1", "proj_a", "api", path: "~/work/api"),
             Entry("e2", "proj_a", "api", path: "~/work/api"),
-        });
+        }, NoCounts);
 
         Assert.Equal("~/work/api", groups[0].ProjectPath);
     }
@@ -158,7 +170,7 @@ public sealed class QueueGroupingTests
     public void AGroupFromAnOlderDaemonHasNoPath()
     {
         IReadOnlyList<ProjectQueueGroup> groups =
-            QueueGrouping.ByProject(new[] { Entry("e1", "proj_a", "api") });
+            QueueGrouping.ByProject(new[] { Entry("e1", "proj_a", "api") }, NoCounts);
 
         Assert.Equal("", groups[0].ProjectPath);
     }
@@ -177,7 +189,7 @@ public sealed class QueueGroupingTests
             Entry("e2", "", null),
         };
 
-        IReadOnlyList<ProjectQueueGroup> groups = QueueGrouping.ByProject(entries);
+        IReadOnlyList<ProjectQueueGroup> groups = QueueGrouping.ByProject(entries, NoCounts);
 
         Assert.Single(groups);
         Assert.Equal(2, groups[0].Count);
@@ -194,11 +206,11 @@ public sealed class QueueGroupingTests
     public void LabelFallsBackToIdThenToAPlaceholder()
     {
         IReadOnlyList<ProjectQueueGroup> labelled =
-            QueueGrouping.ByProject(new[] { Entry("e1", "proj_a", "Readable Name") });
+            QueueGrouping.ByProject(new[] { Entry("e1", "proj_a", "Readable Name") }, NoCounts);
         IReadOnlyList<ProjectQueueGroup> idOnly =
-            QueueGrouping.ByProject(new[] { Entry("e2", "proj_b", null) });
+            QueueGrouping.ByProject(new[] { Entry("e2", "proj_b", null) }, NoCounts);
         IReadOnlyList<ProjectQueueGroup> neither =
-            QueueGrouping.ByProject(new[] { Entry("e3", null, null) });
+            QueueGrouping.ByProject(new[] { Entry("e3", null, null) }, NoCounts);
 
         Assert.Equal("Readable Name", labelled[0].ProjectLabel);
         Assert.Equal("proj_b", idOnly[0].ProjectLabel);
@@ -208,7 +220,7 @@ public sealed class QueueGroupingTests
     [Fact]
     public void AnEmptyQueueProducesNoGroups()
     {
-        Assert.Empty(QueueGrouping.ByProject(new List<QueueEntry>()));
+        Assert.Empty(QueueGrouping.ByProject(new List<QueueEntry>(), NoCounts));
     }
 
     /// <summary>
@@ -229,7 +241,7 @@ public sealed class QueueGroupingTests
         Assert.Equal("proj_a", QueueGrouping.KeyOf(entries[0]));
         Assert.Equal(string.Empty, QueueGrouping.KeyOf(entries[1]));
 
-        foreach (ProjectQueueGroup group in QueueGrouping.ByProject(entries))
+        foreach (ProjectQueueGroup group in QueueGrouping.ByProject(entries, NoCounts))
         {
             Assert.Contains(entries, e => QueueGrouping.KeyOf(e) == group.ProjectId);
         }

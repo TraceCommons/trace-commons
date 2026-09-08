@@ -99,6 +99,20 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private Dictionary<string, QueueEntryViewModel> _rowsByEntryId = new(StringComparer.Ordinal);
 
     /// <summary>
+    /// How many sessions each project would actually send, as the daemon
+    /// counted them, keyed by project id. Missing key means the daemon sent
+    /// no count for that project.
+    /// </summary>
+    /// <remarks>
+    /// Kept across a failed <c>list_projects</c> rather than cleared: an
+    /// empty map makes every group offer its whole count, so a daemon that
+    /// could not answer would silently restore the over-offer this exists to
+    /// remove. A read that failed has not told us the counts changed --
+    /// matching how this class treats every other error frame.
+    /// </remarks>
+    private Dictionary<string, int> _contributableByProject = new(StringComparer.Ordinal);
+
+    /// <summary>
     /// The entry ids <see cref="Pending"/> carried before the most recent
     /// <see cref="ReplacePending"/>, so it can tell which ones dropped out of
     /// the queue for good -- dismissed, submitted, expired, or superseded --
@@ -1288,6 +1302,35 @@ public sealed class MainViewModel : INotifyPropertyChanged
             IsBusy = true;
 
             IReadOnlyList<QueueEntry> pending = await _host.ListPendingAsync().ConfigureAwait(true);
+
+            // Before ReplacePending, because the groups it builds need these
+            // counts to know what a "Submit all" would actually send. The
+            // daemon applies the same filter inside a group approve; asking
+            // it here is what lets the button say so BEFORE the press rather
+            // than reporting it afterwards.
+            DaemonResponse projects = await _host
+                .CallAsync(DaemonProtocol.Methods.ListProjects)
+                .ConfigureAwait(true);
+            if (!projects.IsError
+                && projects.ResultAs<ProjectSettingsPayload>() is { } projectRows)
+            {
+                var contributable = new Dictionary<string, int>(StringComparer.Ordinal);
+                foreach (ProjectSetting row in projectRows.Projects)
+                {
+                    // Only a count the daemon actually sent. An absent one is
+                    // left out of the map entirely, so the group falls back to
+                    // offering everything -- which is the right answer for an
+                    // invited contributor and the wrong one to reach by
+                    // reading a missing key as zero.
+                    if (row.ContributableCount is { } value)
+                    {
+                        contributable[row.ProjectId] = value;
+                    }
+                }
+
+                _contributableByProject = contributable;
+            }
+
             ReplacePending(pending);
 
             // Asked alongside the queue because it is drawn on the queue
@@ -1553,7 +1596,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         // under each group, using QueueGrouping.KeyOf so membership is
         // computed by the exact same rule the groups were bucketed with.
         Groups.Clear();
-        _groups = QueueGrouping.ByProject(entries);
+        _groups = QueueGrouping.ByProject(entries, _contributableByProject);
         foreach (ProjectQueueGroup group in _groups)
         {
             var rows = new ObservableCollection<QueueEntryViewModel>();

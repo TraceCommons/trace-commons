@@ -902,6 +902,30 @@
                                     folder too; this button is the same act
                                     with the accent on it.
                                 -->
+                                <!--
+                                    How many of this folder's sessions a
+                                    "Submit all" would leave behind, BEFORE
+                                    the press. The daemon publishes the count
+                                    on the project row for exactly this: the
+                                    number used to be discoverable only from
+                                    approve's excluded_ineligible, which is
+                                    after the fact.
+
+                                    Absent entirely for an invited
+                                    contributor, whose group offers everything
+                                    it holds. It says how many and NOT why --
+                                    the reason a particular session cannot be
+                                    sent is that row's own sentence, one level
+                                    in, and a summary here would stand for up
+                                    to thirteen different reasons and say
+                                    nothing true about any of them.
+                                -->
+                                <TextBlock Text="{x:Bind WithheldText}"
+                                           Visibility="{x:Bind HasWithheldText}"
+                                           Style="{StaticResource TcCaptionSmallTextStyle}"
+                                           Foreground="{ThemeResource TcInkSecondaryBrush}"
+                                           TextWrapping="Wrap" />
+
                                 <StackPanel Orientation="Horizontal" Spacing="8">
                                     <Button Style="{StaticResource TcPrimaryButtonStyle}"
                                             Content="Look inside"

@@ -174,6 +174,24 @@ public static class ContributionEligibilitySurface
     }
 
     /// <summary>
+    /// How many sessions a group submit is leaving behind, or null where
+    /// there is nothing to say.
+    /// </summary>
+    /// <remarks>
+    /// Null for zero and for a negative -- the shared crate answers the empty
+    /// string for both, and a line reading "0 sessions are not being sent"
+    /// invents a caveat where none exists. A negative is what a race between
+    /// the daemon's count and the rows on screen produces; silence is the
+    /// honest answer to a number that cannot be right.
+    /// </remarks>
+    public static string? WithheldLine(long withheld)
+    {
+        string? line = NativeMethods.TakeOwnedString(
+            NativeMethods.tc_contribution_withheld_line(withheld));
+        return line is { Length: > 0 } ? line : null;
+    }
+
+    /// <summary>
     /// The ABI value, spelled out rather than cast.
     ///
     /// Anything unknown is <see cref="ContributionControl.None"/>. That is

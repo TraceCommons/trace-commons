@@ -393,6 +393,73 @@ public class EligibilityShellWiringTests
             StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// The group header's counts come from the daemon, and a failed read does
+    /// not silently restore the over-offer.
+    /// </summary>
+    /// <remarks>
+    /// The shell must not recompute which of a project's sessions are
+    /// contributable -- the same filter runs inside the group approve, and
+    /// three shells each reimplementing it is what put the hole here. So the
+    /// only honest source is <c>list_projects</c>, and the only honest
+    /// response to a read that failed is to keep the previous answer: an
+    /// emptied map makes every group offer its whole count again.
+    /// </remarks>
+    [Fact]
+    public void TheGroupCountsComeFromTheDaemonAndSurviveAFailedRead()
+    {
+        string source = ShellSource("TraceCommons.App/ViewModels/MainViewModel.cs");
+
+        Assert.Contains(
+            "QueueGrouping.ByProject(entries, _contributableByProject)",
+            source,
+            StringComparison.Ordinal);
+        Assert.Contains("DaemonProtocol.Methods.ListProjects", source, StringComparison.Ordinal);
+
+        // Only assigned inside the success branch, so an error frame keeps
+        // what was already known.
+        Assert.Matches(
+            new Regex(
+                @"if \(!projects\.IsError(?:(?!\n            \}).)*"
+                + @"_contributableByProject = contributable;",
+                RegexOptions.Singleline),
+            source);
+
+        // And only a count the daemon actually sent goes into the map.
+        Assert.Matches(
+            new Regex(
+                @"if \(row\.ContributableCount is \{ \} value\)\s*\{\s*"
+                + @"contributable\[row\.ProjectId\] = value;",
+                RegexOptions.Singleline),
+            source);
+
+        // The shell never derives the count from the rows' own eligibility.
+        Assert.DoesNotContain("CanContribute)", ShellSource(
+            "TraceCommons.App/ViewModels/QueueGroupViewModel.cs"), StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The header offers the contributable count and draws the shared
+    /// withheld sentence.
+    /// </summary>
+    [Fact]
+    public void TheHeaderOffersTheContributableCount()
+    {
+        string vm = ShellSource("TraceCommons.App/ViewModels/QueueGroupViewModel.cs");
+        Assert.Contains("_group.OfferedCount", vm, StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "\"Submit all ({0})\", _group.Count", vm, StringComparison.Ordinal);
+        Assert.Contains(
+            "ContributionEligibilitySurface.WithheldLine(_group.Withheld)",
+            vm,
+            StringComparison.Ordinal);
+
+        string markup = ShellSource("TraceCommons.App/MainWindow.xaml");
+        Assert.Contains("Text=\"{x:Bind WithheldText}\"", markup, StringComparison.Ordinal);
+        Assert.Contains(
+            "Visibility=\"{x:Bind HasWithheldText}\"", markup, StringComparison.Ordinal);
+    }
+
     private static string ShellSource(string relativePath)
     {
         string path = Path.Combine(

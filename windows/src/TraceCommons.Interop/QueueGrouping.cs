@@ -28,13 +28,15 @@ public sealed class ProjectQueueGroup
         string projectLabel,
         string projectPath,
         int count,
-        long sizeBytes)
+        long sizeBytes,
+        int? contributableCount)
     {
         ProjectId = projectId;
         ProjectLabel = projectLabel;
         ProjectPath = projectPath;
         Count = count;
         SizeBytes = sizeBytes;
+        ContributableCount = contributableCount;
     }
 
     /// <summary>
@@ -81,10 +83,49 @@ public sealed class ProjectQueueGroup
     public long SizeBytes { get; }
 
     /// <summary>
-    /// Whether the folder row offers a "Submit all" action. Always -- see the
-    /// remark.
+    /// How many of this project's sessions a group submit would actually
+    /// send, as the daemon counted them.
     /// </summary>
     /// <remarks>
+    /// <b>NULL IS AN ABSENT ANSWER, NOT ZERO.</b> See
+    /// <see cref="ProjectSetting.ContributableCount"/>: the daemon omits it
+    /// for a contributor who has no eligibility question, and this group then
+    /// offers its whole count exactly as it did before the field existed.
+    /// </remarks>
+    public int? ContributableCount { get; }
+
+    /// <summary>
+    /// The number the group's action puts in front of a contributor: what
+    /// would actually be sent.
+    /// </summary>
+    public int OfferedCount => ContributableCount ?? Count;
+
+    /// <summary>
+    /// How many this group's submit would leave behind, for the shared
+    /// withheld sentence.
+    /// </summary>
+    /// <remarks>
+    /// Zero when no count applies, so no line is drawn. It can go NEGATIVE if
+    /// the daemon's count and the rows on screen were read a moment apart --
+    /// the sentence answers nothing for a negative, which is why it is passed
+    /// through rather than clamped here: a clamp would turn a race into a
+    /// confident "0 withheld", and silence is the honest answer to a number
+    /// that cannot be right.
+    /// </remarks>
+    public int Withheld => ContributableCount is { } contributable ? Count - contributable : 0;
+
+    /// <summary>
+    /// Whether the folder row offers a "Submit all" action.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Withheld at an offered count of zero, on the same rule as an
+    /// ineligible row: a control that would send nothing is a press with no
+    /// consequence, and the row's own sentences already say why. Note this is
+    /// reached only when the daemon SENT a count of zero -- an absent count
+    /// offers the whole group.
+    /// </para>
+    ///
     /// This used to be <c>Count &gt; 1</c>, on the reasoning that a
     /// single-entry group's own row already had a Submit doing exactly the
     /// same thing. That was true of a flat list where the row and the header
@@ -93,7 +134,7 @@ public sealed class ProjectQueueGroup
     /// the folder is offering. The rule expired with the layout it was
     /// written for; the property stays so callers do not have to know that.
     /// </remarks>
-    public bool ShowSubmitAll => true;
+    public bool ShowSubmitAll => OfferedCount > 0;
 }
 
 /// <summary>
@@ -123,7 +164,18 @@ public static class QueueGrouping
     /// silently disappear from the queue, and it does not get a project id
     /// invented for it.
     /// </summary>
-    public static IReadOnlyList<ProjectQueueGroup> ByProject(IEnumerable<QueueEntry> entries)
+    /// <remarks>
+    /// <paramref name="contributableByProject"/> is REQUIRED AND HAS NO
+    /// DEFAULT, for the reason the preview sheet's resolver is: omitting it
+    /// makes every group offer its whole count, which for a contributor
+    /// admitted on evidence is a "Submit all (7)" over four sessions the
+    /// server will refuse -- the exact defect this argument removes, restored
+    /// silently at whatever call site forgot it. Pass null to say there are
+    /// no counts, and say why.
+    /// </remarks>
+    public static IReadOnlyList<ProjectQueueGroup> ByProject(
+        IEnumerable<QueueEntry> entries,
+        IReadOnlyDictionary<string, int>? contributableByProject)
     {
         ArgumentNullException.ThrowIfNull(entries);
 
@@ -157,7 +209,11 @@ public static class QueueGrouping
                 labels[key],
                 paths[key],
                 counts[key],
-                bytes[key]))
+                bytes[key],
+                contributableByProject is not null
+                && contributableByProject.TryGetValue(key, out int contributable)
+                    ? contributable
+                    : null))
             .ToList();
     }
 
