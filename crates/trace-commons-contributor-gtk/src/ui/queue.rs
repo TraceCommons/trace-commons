@@ -1245,6 +1245,29 @@ pub(super) fn group_submit(app: &Rc<App>, project_id: &str) -> GroupSubmit {
 ///
 /// An empty eligible set sends nothing at all rather than falling back to
 /// the project call, which would send exactly the rows that must not go.
+///
+/// # This shape is provisional
+///
+/// The fan-out exists only because `approve` cannot say "these three". The
+/// daemon is gaining a project-scoped approve that admits eligible entries
+/// alone, and when it lands **this function collapses to the single
+/// `project_id` call in every arm** -- that call will then mean what it
+/// says, and the three shells stop each inventing their own aggregation.
+/// That is the point: a subset the client has to assemble is a subset three
+/// clients assemble three ways, with three answers for what happens when
+/// call two of three fails.
+///
+/// Two things must survive the collapse.
+///
+/// 1. **The guarantee, and its test.** A bulk control may not send a
+///    session the daemon says cannot be sent. Which layer enforces it
+///    changes; that it is enforced does not. See
+///    `eligibility::tests::a_group_submit_never_sends_by_project_id_directly`,
+///    which stays true in spirit once the daemon filters -- keep it.
+/// 2. **Nothing else.** `submit_each_and_toast` and `FanOut` have no other
+///    caller and should go with the arm that used them, hold rule included:
+///    a single call has one hold, so the longest-of-N rule below becomes
+///    meaningless rather than merely unused.
 fn submit_group(
     app: &Rc<App>,
     project_id: &str,
