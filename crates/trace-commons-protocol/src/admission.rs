@@ -15,6 +15,17 @@ pub struct AdmissionEvidence {
     pub account_anchor_sha256: String,
     pub challenge_sha256: String,
     pub provider_signer: String,
+    /// The model the admitted request **asked for**, which is what the
+    /// operator's accepted-model list is checked against.
+    ///
+    /// Not evidence of which model answered. A gateway-signed receipt binds
+    /// the request and response bytes and names no model at all -- the
+    /// gateway key is shared across every model behind it -- so on such a
+    /// call this string is the caller's own request body and nothing more.
+    /// A consumer keying credit, scoring, pricing or eligibility off a served
+    /// model must not read it from here; the server-side
+    /// `VerifiedAdmissionCall::receipt_bound_model` is the accessor that
+    /// distinguishes the two.
     pub model: String,
     pub request_bytes: u64,
     pub request_sha256: String,

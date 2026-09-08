@@ -128,13 +128,39 @@ impl AdmissionProviderTrust {
     }
 }
 
+/// What, if anything, evidences the model an admitted call names.
+///
+/// The two forms of receipt do not bind the same thing, and the difference is
+/// the whole reason this type exists rather than a bare `String`. A three-part
+/// provider-TEE receipt puts the model inside the signed text, signed by a key
+/// attested for that model: the model is evidenced. A two-part gateway receipt
+/// binds the bytes and names no model, and the gateway key is shared across
+/// every hosted model behind it, so the only thing saying which model answered
+/// is the request body the caller supplied.
+///
+/// Credit scoring, per-model tiers, and any served-model field must read
+/// [`VerifiedAdmissionCall::receipt_bound_model`] and never
+/// [`VerifiedAdmissionCall::requested_model`]. Nothing consumes either today;
+/// that is exactly why the distinction is recorded now, while it is free.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelAttribution {
+    /// The receipt's own signed text committed to this model.
+    ReceiptBound,
+    /// The request asked for this model. Nothing attested that it answered.
+    RequestAsserted,
+}
+
 /// Only constructed after receipt verification, exact body binding, and provider trust.
 pub struct VerifiedAdmissionCall {
     binding: AdmissionBinding,
     provider_signer: String,
     request_hash: String,
     response_hash: String,
+    /// The model named in the request body. `model_attribution` says whether
+    /// anything beyond that body vouches for it; read it through the
+    /// accessors rather than directly.
     model: String,
+    model_attribution: ModelAttribution,
     request_bytes: u64,
 }
 
@@ -196,17 +222,52 @@ pub fn verify_admission_call(
     if now < 0 || binding.expires_at <= now {
         return Err(AdmissionEvidenceError);
     }
+    // Both conditions, and neither alone. `verdict.model` is `Some` only for
+    // the three-part text, so the signature covers the model -- but a gateway
+    // key signing a three-part text still says nothing about which model
+    // answered, because that one key vouches for every model behind the
+    // gateway. `ProviderTee` alone is not enough either: the kind is a wire
+    // label the signature does not cover, so on its own it would let a caller
+    // *claim* its way to an attributed model. Requiring both means the label
+    // can only ever narrow what this call is credited with.
+    let model_attribution = match (verified.signature_kind, verified.model.as_deref()) {
+        (ReceiptSignatureKind::ProviderTee, Some(_)) => ModelAttribution::ReceiptBound,
+        _ => ModelAttribution::RequestAsserted,
+    };
     Ok(VerifiedAdmissionCall {
         binding,
         provider_signer: verified.signing_address,
         request_hash: verified.request_sha256,
         response_hash: verified.response_sha256,
         model: model.to_string(),
+        model_attribution,
         request_bytes: request.len() as u64,
     })
 }
 
 impl VerifiedAdmissionCall {
+    /// The model the receipt itself commits to, or `None` when nothing but
+    /// the request body says which model answered.
+    ///
+    /// This is the only accessor a served-model claim may be derived from.
+    pub fn receipt_bound_model(&self) -> Option<&str> {
+        match self.model_attribution {
+            ModelAttribution::ReceiptBound => Some(&self.model),
+            ModelAttribution::RequestAsserted => None,
+        }
+    }
+
+    /// The model the request asked for.
+    ///
+    /// Admission policy compares this against the operator's accepted-model
+    /// list, which is a statement about what this deployment is willing to
+    /// admit -- not a statement about what served the call. Do not put it in
+    /// a scoring input, a per-model tier or a served-model field; use
+    /// [`receipt_bound_model`](Self::receipt_bound_model) there.
+    pub fn requested_model(&self) -> &str {
+        &self.model
+    }
+
     /// A receipt does not certify the importer's tool outcomes, replay claims,
     /// cost estimates or companion metadata. Retain only the verified exchange
     /// and source provenance before redaction and contributor review.
@@ -239,7 +300,12 @@ impl VerifiedAdmissionCall {
             replay_notes: Vec::new(),
         };
         raw.ironclaw.feature_flags.retain(|key, _| key == "agent");
-        raw.ironclaw.model_name = Some(self.model.clone());
+        // Only when the receipt committed to it. A gateway-admitted call
+        // leaves this `None` rather than repeating the request body's claim
+        // as though the server had verified it: the envelope is what a
+        // consumer reads, and an unattested model there is indistinguishable
+        // from an attested one.
+        raw.ironclaw.model_name = self.receipt_bound_model().map(str::to_string);
         raw.ironclaw.engine_version = None;
         let event = &mut raw.events[0]; // verify_admission_call required exactly one.
         event.structured_payload = payload;
@@ -503,6 +569,8 @@ mod tests {
             AdmissionProviderTrust::new([signer], Vec::new(), [FIXTURE_MODEL.to_string()], 1)
                 .unwrap();
         let call = verify_admission_call(&raw, &receipt, &trust, now, max_body).unwrap();
+        assert_eq!(call.receipt_bound_model(), Some(FIXTURE_MODEL));
+        assert_eq!(call.requested_model(), FIXTURE_MODEL);
         let mut restricted = raw.clone();
         call.restrict_contribution(&mut restricted).unwrap();
         assert_eq!(
@@ -527,6 +595,14 @@ mod tests {
             // Admitted -- the refusal below is about the model claim, not
             // about the call.
             let call = verify_admission_call(&raw, &receipt, &trust, now, max_body).unwrap();
+            assert_eq!(
+                call.receipt_bound_model(),
+                None,
+                "the gateway key vouches for every model behind it, so a model \
+                 in its signed text is still not evidence of which one answered"
+            );
+            // Unchanged: admission policy still knows what was asked for.
+            assert_eq!(call.requested_model(), FIXTURE_MODEL);
             let mut restricted = raw.clone();
             call.restrict_contribution(&mut restricted).unwrap();
             assert_eq!(
