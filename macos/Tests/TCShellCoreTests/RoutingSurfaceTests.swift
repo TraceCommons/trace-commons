@@ -48,12 +48,29 @@ final class RoutingSurfaceTests: XCTestCase {
     }
     """
 
-    private func copy() -> RoutingCopy {
-        guard let copy = RoutingCopy.decode(fromJSON: Self.fixtureJSON) else {
-            fatalError("the fixture payload must decode")
-        }
-        return copy
+    /// Decoded once, in `setUpWithError`, so a fixture that stops decoding
+    /// fails THIS TEST and lets the rest of the bundle run.
+    ///
+    /// It used to be `XCTFail` followed by `fatalError("unreachable")`, which
+    /// aborted the whole XCTest process at the first fixture failure: every
+    /// remaining test in every target simply never ran, no total was printed,
+    /// and the log carried one error line no matter how much was broken. A
+    /// red `macOS app tests` job was unreadable for that reason -- it looked
+    /// far emptier than a normal failing run, and its failure count was
+    /// always about one.
+    ///
+    /// A throw from `setUpWithError` is reported against each test in this
+    /// class in turn, which is honest: every one of them needs this payload.
+    private var decodedCopy: RoutingCopy!
+
+    override func setUpWithError() throws {
+        try super.setUpWithError()
+        decodedCopy = try XCTUnwrap(
+            RoutingCopy.decode(fromJSON: Self.fixtureJSON),
+            "the fixture payload must decode")
     }
+
+    private func copy() -> RoutingCopy { decodedCopy }
 
     /// Calls that report which one was asked for and what arguments it got.
     /// The real ones live in Rust and cross the ABI; this target does not
