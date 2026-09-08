@@ -194,6 +194,39 @@ public enum CredentialSurface {
         }
     }
 
+    /// Whether this shell can actually address the offered action to the
+    /// daemon.
+    ///
+    /// FALSE IS AN ORDINARY CASE, NOT AN EDGE ONE. `near_ai_credential_status`
+    /// resolves `obtaining` from the ceremony the daemon is holding, with no
+    /// attempt id required -- so a shell that started after the ceremony did,
+    /// which is any app restarted while the daemon kept running, reads
+    /// `obtaining` and is offered Cancel. But `near_ai_credential_cancel`
+    /// REQUIRES the attempt id, and this shell has none to give.
+    ///
+    /// A control drawn live that silently does nothing is the worst of the
+    /// three answers, so the card asks this and refuses to enable what it
+    /// cannot send. It lives here rather than in the SwiftUI body so it is
+    /// exercised off-platform, and not left resting on a binding only CI can
+    /// see.
+    ///
+    /// This is a consistency fix and NOT a correctness one. The daemon can
+    /// cancel the ceremony it is holding; it simply refuses to be asked
+    /// without an id. So a disabled Cancel still tells a contributor
+    /// something false -- that this sign-in cannot be stopped from here. The
+    /// honest fix is daemon-side, and #728 tracks it; if it lands, all three
+    /// shells should go back to drawing Cancel live, because it would then
+    /// always work.
+    ///
+    /// Every other action stands on its own: Obtain and Forget name no
+    /// attempt, so an absent id says nothing about them, and `.none` has no
+    /// button to enable in the first place.
+    public static func canAddress(_ action: CredentialAction, attemptID: String?) -> Bool {
+        guard action == .cancel else { return true }
+        guard let attemptID else { return false }
+        return !attemptID.isEmpty
+    }
+
     /// The sentence that must accompany the button, or none.
     ///
     /// Returned FROM THE ACTION rather than left to a view's own `if`, so the

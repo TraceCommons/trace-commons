@@ -219,6 +219,58 @@ final class CredentialSurfaceTests: XCTestCase {
         XCTAssertNil(CredentialSurface.actionExplains(CredentialAction.none, copy: copy()))
     }
 
+    // MARK: - A control this shell cannot send
+
+    /// A Cancel this shell cannot address is never live.
+    ///
+    /// The ORDINARY case, not an edge one: `near_ai_credential_status`
+    /// resolves `obtaining` from the ceremony the daemon holds, needing no
+    /// attempt id, so an app restarted while the daemon kept running reads
+    /// `obtaining` and is offered Cancel -- while `near_ai_credential_cancel`
+    /// requires the id this shell never saw. A control drawn live that
+    /// silently does nothing is the one answer nobody can defend.
+    func testACancelWithNoAttemptToNameIsNotAddressable() {
+        XCTAssertFalse(CredentialSurface.canAddress(.cancel, attemptID: nil))
+        XCTAssertFalse(CredentialSurface.canAddress(.cancel, attemptID: ""))
+        XCTAssertTrue(CredentialSurface.canAddress(.cancel, attemptID: "a1"))
+
+        // Every other action stands on its own. Obtain and Forget name no
+        // attempt, so an absent id says nothing about them, and `.none` has
+        // no button to enable at all.
+        for action: CredentialAction in [.none, .obtain, .forget] {
+            XCTAssertTrue(
+                CredentialSurface.canAddress(action, attemptID: nil), "\(action) names no attempt")
+            XCTAssertTrue(CredentialSurface.canAddress(action, attemptID: "a1"), "\(action)")
+        }
+    }
+
+    /// Addressability does not touch the state sentence.
+    ///
+    /// A Cancel that cannot be sent does not make the ceremony untrue --
+    /// `obtaining` is still exactly what is happening, and the card must go
+    /// on saying so. This is what stops someone later "fixing" the sentence
+    /// instead of the transport: the sentence, the tone and the offered
+    /// action are all read from the state label alone, and none of the three
+    /// is handed an attempt id to consult.
+    func testTheStateSentenceDoesNotConsultAddressability() {
+        let obtaining = CredentialStatus(state: "obtaining")
+        let addressable = CredentialStatus(
+            state: "obtaining", attemptID: "a1", attemptStatus: "waiting_for_browser")
+        XCTAssertFalse(CredentialSurface.canAddress(.cancel, attemptID: obtaining.attemptID))
+        XCTAssertTrue(CredentialSurface.canAddress(.cancel, attemptID: addressable.attemptID))
+
+        // Addressability just flipped. Nothing the contributor reads moves.
+        XCTAssertEqual(
+            CredentialSurface.stateLine(obtaining, copy: copy(), calls: calls()),
+            CredentialSurface.stateLine(addressable, copy: copy(), calls: calls()))
+        XCTAssertEqual(
+            CredentialSurface.tone(obtaining, calls: calls()),
+            CredentialSurface.tone(addressable, calls: calls()))
+        XCTAssertEqual(
+            CredentialSurface.action(obtaining, calls: calls(action: { _ in 32 })),
+            CredentialSurface.action(addressable, calls: calls(action: { _ in 32 })))
+    }
+
     // MARK: - The tri-state on the tool list
 
     /// An absent field is NOT a refused connect.
