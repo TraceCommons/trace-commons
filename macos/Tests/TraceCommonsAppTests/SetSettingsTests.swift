@@ -558,10 +558,26 @@ final class SourceSettingsModelTests: XCTestCase {
 
 private final class ConsentReconciliationDaemon: DaemonCalling {
     let failRead: Bool
-    private(set) var calls: [String] = []
+    /// Locked pre-emptively, not because a crash was seen here. These tests
+    /// only exercise the failure path of `setConsentScopes`, where every
+    /// daemon call is awaited and nothing races. Its success path fires
+    /// `refreshStatus()` and `refreshAudit()` fire-and-forget onto detached
+    /// tasks (AppModel.swift:1363-1364), so a success-path test -- an
+    /// entirely ordinary thing to add -- would have several threads
+    /// appending here at once. See CredentialCancelTests for what that
+    /// costs when it is left unguarded.
+    private let lock = NSLock()
+    private var recorded: [String] = []
+    var calls: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return recorded
+    }
     init(failRead: Bool) { self.failRead = failRead }
     func call(_ method: String, params paramsJSON: String) -> String {
-        calls.append(method)
+        lock.lock()
+        recorded.append(method)
+        lock.unlock()
         if method == "status", !failRead {
             return #"{"result":{"logged_in":true,"consent_scopes":["debugging_evaluation","training"],"health":{}}}"#
         }
