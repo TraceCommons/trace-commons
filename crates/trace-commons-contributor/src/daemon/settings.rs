@@ -9,6 +9,7 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::config::{ConfigStore, DAEMON_SETTINGS_FILE};
@@ -84,6 +85,42 @@ const DEFAULT_CANARY_INTERVAL_SECS: u64 = 3600;
 /// `approve` reports no `hold_until`.
 const DEFAULT_APPROVAL_HOLD_SECS: u64 = 10;
 
+/// A minted NEAR AI inference credential, as persisted.
+///
+/// The service returns the plaintext key exactly once, at creation, so there
+/// is no re-reading it: this record is the only copy the contributor has, and
+/// losing it means minting another. Everything beside the key is context the
+/// service itself renders in its own key list -- the prefix, the ids -- and is
+/// safe to show; the key never is.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NearAiInferenceCredential {
+    /// The `sk-` key. Never rendered, never logged, never crosses the socket.
+    pub key: String,
+    /// The service's own id for the key, which is what revoking it needs.
+    pub key_id: String,
+    /// The leading characters the service shows in its key list, so a
+    /// contributor can tell which of their keys this is without seeing it.
+    pub key_prefix: String,
+    pub organization_id: String,
+    pub workspace_id: String,
+    pub minted_at: DateTime<Utc>,
+}
+
+impl std::fmt::Debug for NearAiInferenceCredential {
+    /// Hand-written because `DaemonSettings` derives `Debug`: a derived impl
+    /// here would put the key in every `{:?}` of the whole settings document.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NearAiInferenceCredential")
+            .field("key", &"<redacted>")
+            .field("key_id", &self.key_id)
+            .field("key_prefix", &self.key_prefix)
+            .field("organization_id", &self.organization_id)
+            .field("workspace_id", &self.workspace_id)
+            .field("minted_at", &self.minted_at)
+            .finish()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DaemonSettings {
     pub schema_version: String,
@@ -121,6 +158,27 @@ pub struct DaemonSettings {
     /// Privacy-filter credentials, persisted so a service-managed daemon can
     /// reach the filter without a shell environment.
     pub near_ai: Option<NearAiSettings>,
+    /// The NEAR AI **inference** credential this daemon obtained for the
+    /// contributor, distinct from `near_ai` above, which is the
+    /// **privacy-filter** credential and answers a different service. Two
+    /// near-homonyms in one file invite "I set my NEAR AI key, why do calls
+    /// still fail", so the distinction is stated here, on the IPC boolean, and
+    /// in the doc inventory rather than left to be inferred from the name.
+    ///
+    /// This slot is the daemon's, and that is the point. The rule this module
+    /// keeps elsewhere -- never act on a slot the contributor owns -- is about
+    /// IronWire's own `config.json`, which a contributor may edit and which
+    /// `StartupProbes::Configured` exists to respect. Writing a minted key
+    /// into that file would be exactly the violation the rule forbids. So the
+    /// credential lives here instead, in the daemon's own settings document,
+    /// which is written 0600 inside a 0700 directory and is already in the
+    /// account-removal inventory -- meaning wiping an account erases this key
+    /// with no further change.
+    ///
+    /// `#[serde(default)]` so a settings file written before this field
+    /// existed loads without one rather than failing to parse.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub near_ai_inference: Option<NearAiInferenceCredential>,
     /// What the contributor said about each agent's sessions.
     ///
     /// `None` is "never asked", and it is the ONLY state that still falls
@@ -578,6 +636,7 @@ impl Default for DaemonSettings {
             approval_hold_secs: DEFAULT_APPROVAL_HOLD_SECS,
             local_notifications: false,
             near_ai: None,
+            near_ai_inference: None,
             claude_source: None,
             codex_source: None,
             gemini_source: None,
@@ -985,6 +1044,62 @@ fn parse_source_declaration(
 mod tests {
     use super::*;
     use crate::config::tests_support::temp_store;
+
+    fn credential() -> NearAiInferenceCredential {
+        NearAiInferenceCredential {
+            key: "sk-super-secret-key".into(),
+            key_id: "key-1".into(),
+            key_prefix: "sk-sup".into(),
+            organization_id: "org-1".into(),
+            workspace_id: "ws-1".into(),
+            minted_at: Utc::now(),
+        }
+    }
+
+    /// `DaemonSettings` derives `Debug`, so a derived `Debug` on the
+    /// credential would put a live inference key into every `{:?}` of the
+    /// whole settings document -- one `tracing::debug!` from a log file.
+    #[test]
+    fn the_inference_key_is_not_printable_through_the_settings_it_lives_in() {
+        let mut settings = DaemonSettings::default();
+        assert!(settings.near_ai_inference.is_none(), "off by default");
+        settings.near_ai_inference = Some(credential());
+        let rendered = format!("{settings:?}");
+        assert!(!rendered.contains("sk-super-secret-key"), "{rendered}");
+        // The prefix is what the service itself shows in its key list, and is
+        // how a contributor tells which of their keys this is.
+        assert!(rendered.contains("sk-sup"), "{rendered}");
+    }
+
+    /// The credential survives the 0600 settings file, and a file written
+    /// before the field existed still loads.
+    #[test]
+    fn the_credential_round_trips_and_an_older_settings_file_still_loads() {
+        let (_dir, store) = temp_store();
+        let mut settings = DaemonSettings::default();
+        settings.near_ai_inference = Some(credential());
+        settings.save(&store).unwrap();
+        assert_eq!(
+            DaemonSettings::load(&store).unwrap().near_ai_inference,
+            settings.near_ai_inference
+        );
+
+        let mut older: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(store.dir().join(DAEMON_SETTINGS_FILE)).unwrap())
+                .unwrap();
+        older.as_object_mut().unwrap().remove("near_ai_inference");
+        std::fs::write(
+            store.dir().join(DAEMON_SETTINGS_FILE),
+            serde_json::to_vec(&older).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            DaemonSettings::load(&store)
+                .unwrap()
+                .near_ai_inference
+                .is_none()
+        );
+    }
 
     /// The daemon reads the staging directory `import-antigravity` writes to.
     ///

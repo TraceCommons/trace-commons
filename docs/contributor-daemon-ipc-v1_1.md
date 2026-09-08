@@ -297,12 +297,15 @@ something it can corroborate, rather than to a string a client invented.
   cross the socket. Do not display or log a path. Render the label; send the
   id back.
 - History records carry no path at all.
-- `get_settings` reports three booleans -- `near_ai_configured`,
-  `claude_root_configured`, `codex_root_configured` -- and never the
-  underlying values. The first is a credential (the privacy-filter API key);
-  the other two are local filesystem paths. All three are configured-or-not
-  facts an app may render as a checkmark, never as text containing the
-  actual value.
+- `get_settings` reports four booleans -- `near_ai_configured`,
+  `near_ai_inference_configured`, `claude_root_configured`,
+  `codex_root_configured` -- and never the underlying values. The first two
+  are credentials and are **different credentials for different services**,
+  which their near-identical names do not convey: `near_ai_configured` is the
+  privacy-filter API key, and `near_ai_inference_configured` is the NEAR AI
+  inference key this daemon mints for a contributor. The other two are local
+  filesystem paths. All four are configured-or-not facts an app may render as
+  a checkmark, never as text containing the actual value.
 - `preview` returns a **summary** over the socket -- counts, labels, and
   sizes. The full redacted event body is a separate call, `preview_body`,
   because it does not fit one frame and has to be paged. Both carry trace

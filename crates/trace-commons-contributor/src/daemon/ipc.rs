@@ -3817,6 +3817,18 @@ fn redacted_settings(s: &DaemonSettings) -> serde_json::Value {
             "near_ai_configured".to_string(),
             serde_json::Value::Bool(configured),
         );
+        // The inference credential is a second, different credential in the
+        // same document -- see `DaemonSettings::near_ai_inference` -- and gets
+        // the same treatment for the same reason. `skip_serializing_if` keeps
+        // the absent case out of the blob already; the `remove` is what
+        // matters, because without it the whole record, key included, crosses
+        // the socket to every shell that asks for settings.
+        let inference_configured = s.near_ai_inference.is_some();
+        obj.remove("near_ai_inference");
+        obj.insert(
+            "near_ai_inference_configured".to_string(),
+            serde_json::Value::Bool(inference_configured),
+        );
         // claude_root / codex_root are local filesystem paths. entry_value
         // is scrupulous about never putting a path on the wire; this
         // serialized-wholesale settings blob was not, and leaked one
@@ -6464,6 +6476,32 @@ mod tests {
         let body = serde_json::to_string(&r.result.unwrap()).unwrap();
         assert!(!body.contains("super-secret-key"), "{body}");
         assert!(body.contains("near_ai_configured"));
+    }
+
+    /// A second credential in the same document as the privacy-filter one,
+    /// and the same rule: presence crosses the socket, the value never does.
+    #[test]
+    fn settings_never_echo_the_inference_credential() {
+        let s = shared();
+        s.settings.lock().unwrap().near_ai_inference =
+            Some(crate::daemon::settings::NearAiInferenceCredential {
+                key: "sk-super-secret-key".into(),
+                key_id: "key-1".into(),
+                key_prefix: "sk-sup".into(),
+                organization_id: "org-1".into(),
+                workspace_id: "ws-1".into(),
+                minted_at: chrono::Utc::now(),
+            });
+        let r = handle_request(&s, &req("get_settings", serde_json::json!({})));
+        let body = serde_json::to_string(&r.result.unwrap()).unwrap();
+        assert!(!body.contains("sk-super-secret-key"), "{body}");
+        assert!(
+            body.contains("\"near_ai_inference_configured\":true"),
+            "{body}"
+        );
+        // The two are near-homonyms and must not be conflated: the
+        // privacy-filter credential is absent here and must still report so.
+        assert!(body.contains("\"near_ai_configured\":false"), "{body}");
     }
 
     #[test]
