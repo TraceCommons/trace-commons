@@ -266,14 +266,35 @@ fn act(app: &Rc<App>, action: CredentialAction) {
     }
 }
 
+/// Open the sign-in page, and say whether anything took it.
+///
+/// A URL GLib will not parse, and one no installed application claims, both
+/// come back as an error -- and both mean the same thing to the caller: no tab
+/// opened anywhere. The distinction is not worth keeping, because the answer
+/// to either is the same.
+fn open_browser(url: &str) -> bool {
+    gtk::gio::AppInfo::launch_default_for_uri(url, None::<&gtk::gio::AppLaunchContext>).is_ok()
+}
+
 /// Start the ceremony and open the browser it minted a URL for.
 ///
 /// **The URL is served once, by `start`, and no poll re-serves it.** It is
 /// used here and not stored: a link kept on screen after the attempt it
 /// belongs to has finished is an invitation to sign in a second time.
 ///
-/// Every outcome ends in a read. There is no shared sentence for a start that
-/// did not start, and inventing one in this shell is the thing this whole
+/// **A ceremony nobody can finish is cancelled here, not left to time out.**
+/// If the browser did not open -- the launch failed, the URL would not parse,
+/// or the daemon sent none at all -- there is no tab anywhere for anybody to
+/// sign in to, and the alternative is a contributor watching this section say
+/// a sign-in is under way until the daemon's own five-minute timeout expires.
+/// On this shell that is worse than on the others: the control beside that
+/// sentence is Cancel, and a window that lost the attempt id draws it
+/// unpressable. The attempt id is in hand at exactly this moment, so this is
+/// the one place the cancel is certain to be addressable. macOS and Windows do
+/// the same thing for the same reason.
+///
+/// Every other outcome ends in a read. There is no shared sentence for a start
+/// that did not start, and inventing one in this shell is the thing this whole
 /// surface is written against -- so the answer to a refusal is to ask the
 /// daemon what is true and draw that.
 fn start(app: &Rc<App>) {
@@ -282,19 +303,26 @@ fn start(app: &Rc<App>) {
         serde_json::json!({}),
         |app, result| {
             let view = &app.private_inference.credential;
-            view.pending.set(false);
-            if let Ok(value) = result {
-                if let Some(id) = value.get("attempt_id").and_then(serde_json::Value::as_str) {
-                    view.attempt.replace(Some(id.to_string()));
+            let opened = match result {
+                Ok(value) => {
+                    if let Some(id) = value.get("attempt_id").and_then(serde_json::Value::as_str) {
+                        view.attempt.replace(Some(id.to_string()));
+                    }
+                    value
+                        .get("browser_url")
+                        .and_then(serde_json::Value::as_str)
+                        .filter(|url| !url.is_empty())
+                        .is_some_and(open_browser)
                 }
-                if let Some(url) = value.get("browser_url").and_then(serde_json::Value::as_str) {
-                    gtk::gio::AppInfo::launch_default_for_uri(
-                        url,
-                        None::<&gtk::gio::AppLaunchContext>,
-                    )
-                    .ok();
-                }
+                Err(_) => false,
+            };
+            if !opened && view.attempt.borrow().is_some() {
+                // `pending` stays set on purpose: the cancel that follows is
+                // the same press still being answered, and clears it itself.
+                cancel(app);
+                return;
             }
+            view.pending.set(false);
             refresh(app);
         },
     );
@@ -582,6 +610,66 @@ mod tests {
                 .contains("action_explains(action)"),
             "the button is built before the sentence that qualifies it"
         );
+    }
+
+    /// A sign-in nobody can finish is cancelled, not left to time out.
+    ///
+    /// The daemon gives a ceremony five minutes. With no tab open anywhere,
+    /// every one of those minutes is spent telling a contributor that a
+    /// sign-in is under way, beside a Cancel control -- and on a window that
+    /// does not hold the attempt id, an unpressable one. The id is in hand at
+    /// this exact moment, which is what makes cancelling here reliable.
+    ///
+    /// Read from the source because the failure is a control-flow one: the
+    /// shape that regressed on this shell was a `.ok()` discarding the launch
+    /// result, which compiles, renders identically, and differs only in what
+    /// happens over the following five minutes.
+    #[test]
+    fn a_browser_that_did_not_open_cancels_the_attempt_it_belongs_to() {
+        let body = code()
+            .split("fn start(app: &Rc<App>) {")
+            .nth(1)
+            .expect("start is in this file")
+            .split("\n}\n")
+            .next()
+            .expect("start closes");
+        assert!(
+            body.contains("if !opened && view.attempt.borrow().is_some() {"),
+            "a failed launch no longer reaches the cancel"
+        );
+        assert!(
+            body.contains("cancel(app);"),
+            "the failed launch does not cancel the attempt"
+        );
+        // The regression this replaces, in the words it was written in. A
+        // launch whose result is discarded cannot reach the branch above.
+        assert!(
+            !body.contains(".ok();"),
+            "the launch result is discarded rather than acted on"
+        );
+        // Absent, empty, and unopenable are one outcome, because the answer
+        // to all three is the same: nobody is going to finish this.
+        assert!(
+            body.contains("is_some_and(open_browser)"),
+            "the launch outcome stopped deciding whether the attempt stands"
+        );
+        assert!(
+            body.contains("filter(|url| !url.is_empty())"),
+            "an empty browser URL is treated as a browser that opened"
+        );
+    }
+
+    /// A URL this shell cannot open is a browser that did not open.
+    ///
+    /// Run rather than scanned: `open_browser` is the one function whose
+    /// answer the branch above turns on, and a version of it that returned
+    /// `true` unconditionally would satisfy every source check here while
+    /// leaving the timeout to expire. A string GLib will not parse as a URI
+    /// reaches no launcher and spawns nothing.
+    #[test]
+    fn a_url_that_cannot_be_opened_reports_that_it_was_not() {
+        assert!(!open_browser(":::not a uri"));
+        assert!(!open_browser(""));
     }
 
     /// Nothing on this section is authored here. Every string literal in the
