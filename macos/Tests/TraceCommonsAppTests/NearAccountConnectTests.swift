@@ -3,9 +3,33 @@ import XCTest
 @testable import TraceCommonsApp
 
 private final class NearRecordingDaemon: DaemonCalling {
-    var response = #"{"id":1,"result":{"ready":true}}"#
-    var calls: [(String, String)] = []
-    func call(_ method: String, params: String) -> String { calls.append((method, params)); return response }
+    /// Locked pre-emptively, not because a crash was seen here. These tests
+    /// drive `DaemonClient` directly and synchronously on the test thread
+    /// and never go through `AppModel`, so no `Task.detached` fan-out
+    /// reaches this double today. Routing it through `AppModel` would make
+    /// it race exactly as CredentialCancelTests did; the guard is free and
+    /// removes the trap rather than leaving it for whoever does that.
+    private let lock = NSLock()
+    private var responseValue = #"{"id":1,"result":{"ready":true}}"#
+    private var recorded: [(String, String)] = []
+
+    var response: String {
+        get { lock.lock(); defer { lock.unlock() }; return responseValue }
+        set { lock.lock(); defer { lock.unlock() }; responseValue = newValue }
+    }
+
+    var calls: [(String, String)] {
+        lock.lock()
+        defer { lock.unlock() }
+        return recorded
+    }
+
+    func call(_ method: String, params: String) -> String {
+        lock.lock()
+        defer { lock.unlock() }
+        recorded.append((method, params))
+        return responseValue
+    }
     func searchOriginal(entryID: String, needle: String) -> Int? { nil }
     func openPreview(entryID: String) throws -> TCPreview { throw TCDaemon.TCError.daemonGone }
 }
