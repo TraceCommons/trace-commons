@@ -141,6 +141,9 @@
     <None Include="$(MSBuildThisFileDirectory)../../src/TraceCommons.Interop/NearAiCredentialSurface.cs"
           Link="NearAiCredentialSurface.cs.txt"
           CopyToOutputDirectory="PreserveNewest" />
+    <None Include="$(MSBuildThisFileDirectory)../../src/TraceCommons.Interop/ContributionEligibility.cs"
+          Link="ContributionEligibility.cs.txt"
+          CopyToOutputDirectory="PreserveNewest" />
     <None Include="$(MSBuildThisFileDirectory)../../src/TraceCommons.App/Controls/PrivateInferenceView.xaml.cs"
           Link="PrivateInferenceView.xaml.cs.txt"
           CopyToOutputDirectory="PreserveNewest" />

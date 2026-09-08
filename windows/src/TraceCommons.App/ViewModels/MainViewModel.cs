@@ -99,6 +99,20 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private Dictionary<string, QueueEntryViewModel> _rowsByEntryId = new(StringComparer.Ordinal);
 
     /// <summary>
+    /// How many sessions each project would actually send, as the daemon
+    /// counted them, keyed by project id. Missing key means the daemon sent
+    /// no count for that project.
+    /// </summary>
+    /// <remarks>
+    /// Kept across a failed <c>list_projects</c> rather than cleared: an
+    /// empty map makes every group offer its whole count, so a daemon that
+    /// could not answer would silently restore the over-offer this exists to
+    /// remove. A read that failed has not told us the counts changed --
+    /// matching how this class treats every other error frame.
+    /// </remarks>
+    private Dictionary<string, int> _contributableByProject = new(StringComparer.Ordinal);
+
+    /// <summary>
     /// The entry ids <see cref="Pending"/> carried before the most recent
     /// <see cref="ReplacePending"/>, so it can tell which ones dropped out of
     /// the queue for good -- dismissed, submitted, expired, or superseded --
@@ -133,6 +147,27 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     /// <summary>The pending queue, newest state as the daemon reports it.</summary>
     public ObservableCollection<QueueEntryViewModel> Pending { get; } = new();
+
+    /// <summary>
+    /// This entry as the queue describes it NOW, or null if it has left the
+    /// queue.
+    /// </summary>
+    /// <remarks>
+    /// For an open preview sheet, whose own copy stops being true the moment
+    /// the queue refreshes: <see cref="ReplacePending"/> clears and refills
+    /// rather than diffing, so every row object is replaced and the sheet
+    /// keeps one nobody updates. A submit-time failure writes its reason back
+    /// into the row, so a session can be downgraded while its sheet is on
+    /// screen. See <c>PreviewSheetViewModel.LiveEntry</c>.
+    ///
+    /// <para>
+    /// Null when the entry is gone, and the sheet then falls back to its
+    /// pinned copy rather than to a guess -- an entry that has left the queue
+    /// is not evidence that it became ineligible.
+    /// </para>
+    /// </remarks>
+    public QueueEntryViewModel? LiveEntry(string entryId) =>
+        _rowsByEntryId.TryGetValue(entryId, out QueueEntryViewModel? row) ? row : null;
 
     /// <summary>
     /// The same queue, grouped by project. Rebuilt alongside <see cref="Pending"/>
@@ -866,6 +901,35 @@ public sealed class MainViewModel : INotifyPropertyChanged
     {
         ArgumentNullException.ThrowIfNull(entry);
 
+        // Re-checked AT THE PRESS, against the LIVE row rather than the one
+        // this click carried.
+        //
+        // Draw time decides what is offered; the press decides what is sent,
+        // and only the second is load-bearing. The button's Tag holds the row
+        // object as it was when the card was drawn, and ReplacePending
+        // rebuilds every row on refresh -- so a session downgraded between the
+        // last render and this click arrives here still claiming it can be
+        // contributed. Asking the queue closes that window; the pinned copy
+        // only narrows it.
+        //
+        // Refuses and refreshes rather than sending: the refresh redraws the
+        // row without its control and with the sentence saying why, which is
+        // the honest outcome and not a silent no-op.
+        if (LiveEntry(entry.EntryId) is { } live && !live.CanContribute)
+        {
+            await RefreshAsync().ConfigureAwait(true);
+            return;
+        }
+
+        // An entry the queue no longer knows about falls back to what the
+        // click carried, for the reason the preview sheet does: gone from the
+        // queue is not evidence that it became ineligible.
+        if (LiveEntry(entry.EntryId) is null && !entry.CanContribute)
+        {
+            await RefreshAsync().ConfigureAwait(true);
+            return;
+        }
+
         ClearUndo();
 
         DaemonResponse response = await _host
@@ -1010,7 +1074,18 @@ public sealed class MainViewModel : INotifyPropertyChanged
             return;
         }
 
-        Notice = hold.Toast.Line;
+        // What a group approve left behind, appended to the toast the shared
+        // crate already wrote. Absent for a single-entry approve and for an
+        // invited contributor, and empty for a present zero -- so nothing
+        // here branches on the count.
+        string withheld = hold.ExcludedIneligible is { } excluded
+            ? ContributionEligibilitySurface.WithheldLine(excluded) ?? string.Empty
+            : string.Empty;
+
+        Notice = withheld.Length > 0
+            ? string.Format(
+                CultureInfo.CurrentCulture, "{0} {1}", hold.Toast.Line, withheld)
+            : hold.Toast.Line;
 
         if (hold.Toast.OfferUndo && hold.IsLive(DateTimeOffset.UtcNow))
         {
@@ -1250,6 +1325,35 @@ public sealed class MainViewModel : INotifyPropertyChanged
             IsBusy = true;
 
             IReadOnlyList<QueueEntry> pending = await _host.ListPendingAsync().ConfigureAwait(true);
+
+            // Before ReplacePending, because the groups it builds need these
+            // counts to know what a "Submit all" would actually send. The
+            // daemon applies the same filter inside a group approve; asking
+            // it here is what lets the button say so BEFORE the press rather
+            // than reporting it afterwards.
+            DaemonResponse projects = await _host
+                .CallAsync(DaemonProtocol.Methods.ListProjects)
+                .ConfigureAwait(true);
+            if (!projects.IsError
+                && projects.ResultAs<ProjectSettingsPayload>() is { } projectRows)
+            {
+                var contributable = new Dictionary<string, int>(StringComparer.Ordinal);
+                foreach (ProjectSetting row in projectRows.Projects)
+                {
+                    // Only a count the daemon actually sent. An absent one is
+                    // left out of the map entirely, so the group falls back to
+                    // offering everything -- which is the right answer for an
+                    // invited contributor and the wrong one to reach by
+                    // reading a missing key as zero.
+                    if (row.ContributableCount is { } value)
+                    {
+                        contributable[row.ProjectId] = value;
+                    }
+                }
+
+                _contributableByProject = contributable;
+            }
+
             ReplacePending(pending);
 
             // Asked alongside the queue because it is drawn on the queue
@@ -1515,7 +1619,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         // under each group, using QueueGrouping.KeyOf so membership is
         // computed by the exact same rule the groups were bucketed with.
         Groups.Clear();
-        _groups = QueueGrouping.ByProject(entries);
+        _groups = QueueGrouping.ByProject(entries, _contributableByProject);
         foreach (ProjectQueueGroup group in _groups)
         {
             var rows = new ObservableCollection<QueueEntryViewModel>();
