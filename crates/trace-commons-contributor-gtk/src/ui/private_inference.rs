@@ -1144,6 +1144,78 @@ mod tests {
         }
     }
 
+    /// The connect notice is drawn for the one answer that means it, and the
+    /// other two draw nothing.
+    ///
+    /// Fed through the real deserializer, because the `Option` is the whole
+    /// mechanism and a hand-built value would skip the part that can go
+    /// wrong: `#[serde(default)]` on an `Option<bool>` gives `None` for an
+    /// absent field, and a `bool` with the same default would give `false` --
+    /// which draws the notice on every daemon older than the gate and sends
+    /// somebody to get a key nothing wants.
+    ///
+    /// `Some(true)` covers a destination the contributor declared and runs
+    /// themselves as well as a key kept here; neither is ours to comment on.
+    #[test]
+    fn the_connect_notice_is_drawn_for_a_reported_missing_key_and_nothing_else() {
+        use trace_commons_contributor::private_inference_copy::private_inference_copy;
+        let notice_for = |body: serde_json::Value| {
+            let list: crate::model::HarnessList =
+                serde_json::from_value(body).expect("the list parses");
+            copy::harness_credential_notice(list.destination_credentialed)
+        };
+        let shared = private_inference_copy();
+        assert_eq!(
+            notice_for(serde_json::json!({ "destination_credentialed": false })),
+            shared.harness_needs_credential,
+            "a daemon reporting no key draws nothing to explain the missing control"
+        );
+        assert_eq!(
+            notice_for(serde_json::json!({ "destination_credentialed": true })),
+            ""
+        );
+        assert_eq!(
+            notice_for(serde_json::json!({})),
+            "",
+            "an absent field is not a refused connect"
+        );
+        // And the drawn sentence is not empty, so the assertion above is
+        // distinguishing two real values rather than two blanks.
+        assert!(!shared.harness_needs_credential.trim().is_empty());
+    }
+
+    /// The three answers stay three in this shell.
+    ///
+    /// The one-character change that breaks it -- `Option<bool>` to `bool`, or
+    /// an `unwrap_or(false)` on the way to the notice -- compiles, passes
+    /// every rendering test, and silently collapses "this daemon does not gate
+    /// connects" into "this daemon has no key".
+    #[test]
+    fn the_notice_is_never_reduced_to_a_boolean_in_this_shell() {
+        let body = SOURCE
+            .split("pub fn render_harnesses(")
+            .nth(1)
+            .expect("render_harnesses is in this file")
+            .split("\n}\n")
+            .next()
+            .expect("render_harnesses closes");
+        assert!(
+            body.contains("copy::harness_credential_notice(list.destination_credentialed)"),
+            "the notice stopped being read from the shared table"
+        );
+        for collapsed in [
+            "destination_credentialed.unwrap_or",
+            "destination_credentialed ==",
+            "destination_credentialed.is_some",
+            "!list.destination_credentialed",
+        ] {
+            assert!(
+                !body.contains(collapsed),
+                "the field is read as a boolean in this shell: {collapsed}"
+            );
+        }
+    }
+
     /// Only a tool a call actually arrived from may be painted as working.
     ///
     /// `activity_shared` is the state this rule exists for: two connected
