@@ -17,6 +17,30 @@ import XCTest
 /// x" test would pass and fail for reasons that have nothing to do with this
 /// defect. Reading the render sites is the same guard `ShellWordingTests`
 /// applies to this shell's wording, for the same reason.
+///
+/// ## The sweep, so it is not run again from scratch
+///
+/// Every other piece of state this shell shows a contributor and holds in a
+/// model was checked for the same shape -- assigned, shown, never cleared --
+/// and `lastActionNotice` was the only one. The near misses, and why each is
+/// a different thing:
+///
+/// - `AppModel.profileOutcome`, `AppModel.routingProbeLine`,
+///   `AppModel.withdrawals[id]`, `AppModel.inferenceEvidenceSaveFailed` and
+///   `ComputeModel.failureLabel` are all set to `nil`/`false` at the START of
+///   the action that produces them. They are the standing result of a check a
+///   person just asked for -- a readout, not a one-shot announcement -- and
+///   the next attempt replaces them. Dismissing a readout would leave the
+///   surface saying nothing about a state that still holds.
+/// - `AppModel.summaryErrors[id]`, `credentialAttempt` and
+///   `harnessExposureRequest` are each cleared on their own completion path.
+/// - `SettingsView.loginItemActionError`, `SettingsView.consentSaveError`,
+///   `OnboardingRootsView.failure` and `PreviewSheet.failure` are view-local
+///   `@State`, cleared at the top of each attempt and gone with the view.
+///
+/// What made the notice different is that only two actions ever assign it and
+/// nothing anywhere assigns `nil`, so nothing in the app's own operation could
+/// ever take it off the screen.
 final class ActionNoticeDismissTests: XCTestCase {
     /// The published properties that reach a contributor as a banner.
     private static let messageProperties = ["lastActionError", "lastActionNotice"]
