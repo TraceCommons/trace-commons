@@ -39,6 +39,15 @@ public struct ApproveResponse: Decodable, Equatable, Sendable {
     public let skipped: [ApproveSkip]
     public let holdSecs: UInt64
     public let holdUntil: String?
+    /// How many pending entries a GROUP selector left out because they
+    /// cannot be contributed.
+    ///
+    /// **Absent, never zero, when no filter ran** -- an invited contributor,
+    /// or a single `entry_id`. Zero would read as "nothing was left out",
+    /// which is a claim about a filter that did not run. Excluded entries do
+    /// not appear in `skipped`: they were never selected, and `skipped` is
+    /// the account of what the call was asked to act on.
+    public let excludedIneligible: UInt64?
 
     public init(
         approved: UInt64,
@@ -46,7 +55,8 @@ public struct ApproveResponse: Decodable, Equatable, Sendable {
         redactions: [String: UInt32],
         skipped: [ApproveSkip],
         holdSecs: UInt64,
-        holdUntil: String?
+        holdUntil: String?,
+        excludedIneligible: UInt64? = nil
     ) {
         self.approved = approved
         self.flagged = flagged
@@ -54,6 +64,7 @@ public struct ApproveResponse: Decodable, Equatable, Sendable {
         self.skipped = skipped
         self.holdSecs = holdSecs
         self.holdUntil = holdUntil
+        self.excludedIneligible = excludedIneligible
     }
 
     enum CodingKeys: String, CodingKey {
@@ -63,6 +74,7 @@ public struct ApproveResponse: Decodable, Equatable, Sendable {
         case skipped
         case holdSecs = "hold_secs"
         case holdUntil = "hold_until"
+        case excludedIneligible = "excluded_ineligible"
     }
 
     /// Whether this response is the correction-credential refusal.
@@ -93,39 +105,6 @@ public struct ApproveResponse: Decodable, Equatable, Sendable {
             flagged: flagged,
             skipped: skipped.map(\.reasonLabel)
         )
-    }
-
-    /// One response standing for several calls.
-    ///
-    /// Needed because a group-level submit that must leave some sessions
-    /// behind cannot use the daemon's `project_id` form -- that approves
-    /// everything in the project -- and sends one `entry_id` call per
-    /// eligible session instead. The toast, the skip list and the undo
-    /// window all have to read as one action, because to the contributor it
-    /// was one press.
-    ///
-    /// `holdSecs` is the LONGEST of the windows and `holdUntil` the LAST
-    /// non-nil deadline, so the recovery affordance stands as long as the
-    /// most recently approved entry allows. Taking the shortest would retire
-    /// Undo while something it covers is still recoverable.
-    ///
-    /// An empty list answers a response that approved nothing and skipped
-    /// nothing, which is the honest rendering of a group with nothing
-    /// eligible in it -- not an error.
-    public static func merged(_ responses: [ApproveResponse]) -> ApproveResponse {
-        var redactions: [String: UInt32] = [:]
-        for response in responses {
-            for (label, count) in response.redactions {
-                redactions[label, default: 0] += count
-            }
-        }
-        return ApproveResponse(
-            approved: responses.reduce(0) { $0 + $1.approved },
-            flagged: responses.reduce(0) { $0 + $1.flagged },
-            redactions: redactions,
-            skipped: responses.flatMap(\.skipped),
-            holdSecs: responses.map(\.holdSecs).max() ?? 0,
-            holdUntil: responses.compactMap(\.holdUntil).last)
     }
 
     /// Which of `attempted` this response actually approved.

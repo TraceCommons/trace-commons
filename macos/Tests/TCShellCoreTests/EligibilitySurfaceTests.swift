@@ -99,10 +99,12 @@ final class EligibilitySurfaceTests: XCTestCase {
         line: @escaping @Sendable (String) -> String? = { "LINE:\($0)" },
         tone: @escaping @Sendable (String) -> Int32 = { _ in 20 },
         control: @escaping @Sendable (String) -> Int32 = { _ in 50 },
-        reason: @escaping @Sendable (String) -> String? = { "REASON:\($0)" }
+        reason: @escaping @Sendable (String) -> String? = { "REASON:\($0)" },
+        withheld: @escaping @Sendable (Int64) -> String? = { $0 > 0 ? "WITHHELD:\($0)" : "" }
     ) -> EligibilityCalls {
         EligibilityCalls(
-            stateLine: line, stateTone: tone, control: control, reasonLine: reason)
+            stateLine: line, stateTone: tone, control: control, reasonLine: reason,
+            withheldLine: withheld)
     }
 
     // MARK: - The payload is all or nothing
@@ -390,66 +392,86 @@ final class EligibilitySurfaceTests: XCTestCase {
             group, eligibility: { $0 }, calls: table)
         XCTAssertEqual(sendable.count, 2)
         XCTAssertTrue(sendable.allSatisfy { $0?.state == "eligible" })
-        XCTAssertEqual(
-            EligibilitySurface.withheldCount(group, eligibility: { $0 }, calls: table), 3)
     }
 
-    /// Order survives, so a caller can report what it sent in the order the
-    /// folder showed it.
-    func testAGroupLevelSubmitKeepsTheFoldersOrder() {
-        let table = calls(control: { $0 == "eligible" ? 51 : 50 })
-        let group = [
-            ContributionEligibility(state: "ineligible_permanent"),
-            ContributionEligibility(state: "eligible", reason: nil),
-            ContributionEligibility(state: "unknown"),
-            ContributionEligibility(state: "eligible", reason: nil),
-        ]
-        let sendable = EligibilitySurface.contributable(
-            group.enumerated().map { ($0.offset, $0.element) },
-            eligibility: { $0.1 }, calls: table)
-        XCTAssertEqual(sendable.map(\.0), [1, 3])
+    /// The counts come from the DAEMON now, not from this shell walking the
+    /// folder. Its row says three of seven; the button says three.
+    func testTheButtonCountsWhatTheDaemonSaysIsContributable() {
+        let offer = EligibilitySurface.groupSubmit(
+            pendingCount: 7, contributableCount: 3, fallbackPending: 99, calls: calls())
+        XCTAssertEqual(offer.count, 3)
+        XCTAssertEqual(offer.withheldLine, "WITHHELD:4")
     }
 
-    /// An invited contributor's folder is untouched: every entry carries no
-    /// key, every entry is still sent, and nothing is withheld.
-    func testAFolderWithNoEligibilityQuestionSubmitsWhole() {
-        let refusesEverything = calls(control: { _ in 50 })
-        let group: [ContributionEligibility?] = [nil, nil, nil]
-        XCTAssertEqual(
-            EligibilitySurface.contributable(
-                group, eligibility: { $0 }, calls: refusesEverything
-            ).count, 3)
-        XCTAssertEqual(
-            EligibilitySurface.withheldCount(
-                group, eligibility: { $0 }, calls: refusesEverything), 0)
-    }
-
-    /// A folder with nothing eligible in it sends nothing. Not an error --
-    /// the rows are all still shown, one level in, each with its sentence.
-    func testAFolderWithNothingEligibleSendsNothing() {
-        let table = calls(control: { $0 == "eligible" ? 51 : 50 })
-        let group = [
-            ContributionEligibility(state: "ineligible_permanent"),
-            ContributionEligibility(state: "unknown"),
-        ]
-        XCTAssertTrue(
-            EligibilitySurface.contributable(group, eligibility: { $0 }, calls: table).isEmpty)
-    }
-
-    /// Which entries a group submit covers is the TABLE's decision, not a
-    /// Swift filter on the state string.
+    /// **Absent is not zero.** An invited contributor's project row carries
+    /// `pending_count` and no `contributable_count`; their folder submits
+    /// whole and there is no gap to explain.
     ///
-    /// The fake inverts the real table exactly, so a surface that had
-    /// reimplemented "eligible means sendable" would answer the other two.
-    func testWhichEntriesAGroupSubmitCoversIsTheTablesDecision() {
-        let inverted = calls(control: { $0 == "eligible" ? 50 : 51 })
-        let group = [
-            ContributionEligibility(state: "eligible"),
-            ContributionEligibility(state: "ineligible_permanent"),
-        ]
-        let sendable = EligibilitySurface.contributable(
-            group, eligibility: { $0 }, calls: inverted)
-        XCTAssertEqual(sendable.map(\.state), ["ineligible_permanent"])
+    /// Proved against a table that would answer a sentence for any nonzero
+    /// withheld, so a surface that had read the absence as 0-contributable
+    /// would draw a line here and fail.
+    func testAnAbsentContributableCountSubmitsTheFolderWhole() {
+        let offer = EligibilitySurface.groupSubmit(
+            pendingCount: 7, contributableCount: nil, fallbackPending: 99, calls: calls())
+        XCTAssertEqual(offer.count, 7)
+        XCTAssertNil(offer.withheldLine)
+    }
+
+    /// RULED: nothing contributable offers no control at all -- the same
+    /// rule an ineligible row follows. Not a disabled button: there is
+    /// nothing to enable, and the rows inside already say why.
+    func testAFolderWithNothingContributableOffersNoControl() {
+        let offer = EligibilitySurface.groupSubmit(
+            pendingCount: 5, contributableCount: 0, fallbackPending: 5, calls: calls())
+        XCTAssertNil(offer.count)
+        XCTAssertNil(offer.withheldLine)
+    }
+
+    /// A count of zero is never drawn as a button. "Submit all (0)" is a
+    /// control that does nothing, discovered on the press.
+    func testTheOfferNeverCarriesAZeroCount() {
+        for (pending, contributable) in [(0, nil as Int?), (0, 0), (3, 0)] {
+            XCTAssertNil(
+                EligibilitySurface.groupSubmit(
+                    pendingCount: pending, contributableCount: contributable,
+                    fallbackPending: pending, calls: calls()
+                ).count, "\(pending)/\(String(describing: contributable))")
+        }
+    }
+
+    /// A project the queue is showing before `list_projects` answered for
+    /// it still draws its folder. The fallback is what the queue itself
+    /// says.
+    func testAProjectWithNoRowYetFallsBackToTheQueuesOwnCount() {
+        let offer = EligibilitySurface.groupSubmit(
+            pendingCount: nil, contributableCount: nil, fallbackPending: 4, calls: calls())
+        XCTAssertEqual(offer.count, 4)
+        XCTAssertNil(offer.withheldLine)
+    }
+
+    /// The withheld sentence is the SHARED table's, never authored here.
+    ///
+    /// The fake returns a string no Swift branch in this shell could
+    /// produce, and an empty answer renders nothing rather than a blank
+    /// line.
+    func testTheWithheldSentenceIsTheTablesAndAnEmptyOneDrawsNothing() {
+        XCTAssertEqual(
+            EligibilitySurface.groupSubmit(
+                pendingCount: 9, contributableCount: 2,
+                fallbackPending: 9, calls: calls(withheld: { _ in "FROM-THE-TABLE" })
+            ).withheldLine, "FROM-THE-TABLE")
+        XCTAssertNil(
+            EligibilitySurface.groupSubmit(
+                pendingCount: 9, contributableCount: 2,
+                fallbackPending: 9, calls: calls(withheld: { _ in "" })
+            ).withheldLine)
+        // A caught panic draws nothing too. There is no sentence this shell
+        // could honestly substitute.
+        XCTAssertNil(
+            EligibilitySurface.groupSubmit(
+                pendingCount: 9, contributableCount: 2,
+                fallbackPending: 9, calls: calls(withheld: { _ in nil })
+            ).withheldLine)
     }
 
     // MARK: - An unanticipated tone still says something

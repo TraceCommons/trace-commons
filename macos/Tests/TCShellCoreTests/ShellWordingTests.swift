@@ -79,12 +79,10 @@ final class ShellWordingTests: XCTestCase {
         "TraceCommonsApp/Views/OnboardingWelcomeView.swift": 8,
         "TraceCommonsApp/Views/PreviewSheet.swift": 38,
         "TraceCommonsApp/Views/PublicProfileCopy.swift": 46,
-        // 4, not 3, since the group submit became "all eligible": the
-        // button's count can now be short of the folder's, and the line
-        // saying how many it leaves behind is authored here. It belongs in
-        // the shared payload beside the eligibility sentences -- the other
-        // two shells need the same line. Raise nothing else for it.
-        "TraceCommonsApp/Views/QueueFolderRow.swift": 4,
+        // Back to 3: the withheld line briefly lived here and is now
+        // `tc_contribution_withheld_line`, assembled in the Rust and shared
+        // with the other two shells. Do not raise this again for it.
+        "TraceCommonsApp/Views/QueueFolderRow.swift": 3,
         "TraceCommonsApp/Views/QueueView.swift": 26,
         "TraceCommonsApp/Views/ScrubbingCaveat.swift": 4,
         "TraceCommonsApp/Views/SettingsView.swift": 40,

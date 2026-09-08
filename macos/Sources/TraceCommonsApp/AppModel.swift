@@ -406,7 +406,8 @@ final class AppModel: ObservableObject {
         stateLine: { TCContributionEligibility.stateLine(state: $0) },
         stateTone: { TCContributionEligibility.stateTone(state: $0) },
         control: { TCContributionEligibility.control(state: $0) },
-        reasonLine: { TCContributionEligibility.reasonLine(reason: $0) }
+        reasonLine: { TCContributionEligibility.reasonLine(reason: $0) },
+        withheldLine: { TCContributionEligibility.withheldLine(withheld: $0) }
     )
 
     let credentialCalls = CredentialCalls(
@@ -1666,40 +1667,25 @@ final class AppModel: ObservableObject {
     /// `Submit all` passes none; `Submit all as...` is the opt-in path that
     /// passes one.
     ///
-    /// **A GROUP-LEVEL SUBMIT MEANS "ALL ELIGIBLE", NEVER "ALL".** The
-    /// daemon's `project_id` form approves everything in the project and
-    /// cannot be told to hold anything back, so a folder carrying an
-    /// ineligible session is submitted as one `entry_id` call per eligible
-    /// session instead, merged into a single response
-    /// (`ApproveResponse.merged`): to the contributor it was one press, and
-    /// the toast, the skip list and the undo window have to read that way.
-    /// A folder with nothing withheld keeps the single project call it
-    /// always made -- one round trip, and the daemon's own view of the
-    /// folder rather than this shell's snapshot of it.
-    ///
-    /// Ruled 2026-09-08, after the same defect was found on the Windows
-    /// shell's group header: one button sending sessions the server will
-    /// refuse is this surface's own defect, one layer up, and worse there
-    /// because the contributor never saw them.
+    /// **A GROUP-LEVEL SUBMIT MEANS "ALL ELIGIBLE", NEVER "ALL", AND THE
+    /// DAEMON ENFORCES THAT.** Both group selectors act only on entries whose
+    /// eligibility is `eligible`, and report how many they left out as
+    /// `excluded_ineligible`. This shell used to fan the call out into one
+    /// `entry_id` approval per eligible entry and merge the responses; it
+    /// does not any more, because a per-project approve has no row to check
+    /// and no shell can close that gap from outside. One call, one approval
+    /// instant, one hold that covers every entry it took.
     func submitProject(id projectID: String, verdict: ContributorVerdict? = nil) {
-        let inProject = awaitingDecision.filter { $0.projectID == projectID }
-        let eligible = EligibilitySurface.contributable(
-            inProject, eligibility: { $0.contributionEligibility }, calls: eligibilityCalls)
-        let attempted = eligible.map(\.entryID)
-        guard eligible.count < inProject.count else {
-            perform("approve", work: {
-                try $0.approve(projectID: projectID, verdict: verdict)
-            }) { response in
-                self.refreshQueue()
-                self.showToast(for: response, attempted: attempted)
-            }
-            return
-        }
-        // Nothing to send is not an error and not a silent no-op: the merged
-        // empty response renders the toast that says nothing was approved.
-        perform("approve", work: { client in
-            ApproveResponse.merged(
-                try attempted.map { try client.approve(entryID: $0, verdict: verdict) })
+        // The ids this shell believes the call covers, for the undo path
+        // only. The daemon decides what it actually takes, and its
+        // `excluded_ineligible` says how many it did not -- neither is
+        // recovered by filtering here.
+        let attempted = EligibilitySurface.contributable(
+            awaitingDecision.filter { $0.projectID == projectID },
+            eligibility: { $0.contributionEligibility }, calls: eligibilityCalls
+        ).map(\.entryID)
+        perform("approve", work: {
+            try $0.approve(projectID: projectID, verdict: verdict)
         }) { response in
             self.refreshQueue()
             self.showToast(for: response, attempted: attempted)

@@ -87,17 +87,43 @@ public struct EligibilityCalls: Sendable {
     public let control: @Sendable (String) -> Int32
     /// The sentence for one `eligibility_reason` label, or the empty string.
     public let reasonLine: @Sendable (String) -> String?
+    /// How many sessions a group submit leaves behind, as a sentence.
+    /// Empty for zero and for a negative.
+    public let withheldLine: @Sendable (Int64) -> String?
 
     public init(
         stateLine: @escaping @Sendable (String) -> String?,
         stateTone: @escaping @Sendable (String) -> Int32,
         control: @escaping @Sendable (String) -> Int32,
-        reasonLine: @escaping @Sendable (String) -> String?
+        reasonLine: @escaping @Sendable (String) -> String?,
+        withheldLine: @escaping @Sendable (Int64) -> String?
     ) {
         self.stateLine = stateLine
         self.stateTone = stateTone
         self.control = control
         self.reasonLine = reasonLine
+        self.withheldLine = withheldLine
+    }
+}
+
+/// What a folder's group submit control offers.
+///
+/// `count` is `nil` when NO CONTROL IS DRAWN -- ruled for a folder with
+/// nothing contributable in it, on the same rule an ineligible row follows.
+/// It is never zero: a button reading "Submit all (0)" is a control that
+/// does nothing, discovered on the press.
+///
+/// `withheldLine` is the shared sentence saying how many the button leaves
+/// behind, and `nil` when there is no gap to explain. It never says why --
+/// the reason a particular session cannot be sent is that row's own
+/// sentence, one level in.
+public struct GroupSubmitOffer: Equatable, Sendable {
+    public let count: Int?
+    public let withheldLine: String?
+
+    public init(count: Int?, withheldLine: String?) {
+        self.count = count
+        self.withheldLine = withheldLine
     }
 }
 
@@ -225,18 +251,45 @@ public enum EligibilitySurface {
         entries.filter { offersContribute(eligibility($0), calls: calls) }
     }
 
-    /// How many of a group's entries a group-level submit would leave
-    /// behind.
+    /// What a folder's group control offers, from the counts the daemon
+    /// reports on its `list_projects` row.
     ///
-    /// Drawn beside the button so the count on it is not the only thing that
-    /// changed. A folder whose button says fewer sessions than the folder
-    /// says, with nothing explaining the gap, is its own small dishonesty.
-    public static func withheldCount<Entry>(
-        _ entries: [Entry],
-        eligibility: (Entry) -> ContributionEligibility?,
+    /// `contributableCount` is **absent when eligibility does not apply** --
+    /// an invited contributor has no "3 of 7" to be told about, and
+    /// `pendingCount` alone is their answer. Test for the key; it is never
+    /// null and never zero-as-absent.
+    ///
+    /// The counts come from the daemon rather than being recomputed here,
+    /// which is what changed when the group approve moved server-side: the
+    /// daemon decides what a group selector takes, so the daemon is what
+    /// says how many that is. This shell no longer classifies rows to
+    /// answer it.
+    ///
+    /// `fallbackPending` covers a project the queue is showing before
+    /// `list_projects` has answered for it -- the folder is on screen either
+    /// way and must say something.
+    public static func groupSubmit(
+        pendingCount: Int?,
+        contributableCount: Int?,
+        fallbackPending: Int,
         calls: EligibilityCalls
-    ) -> Int {
-        entries.count - contributable(entries, eligibility: eligibility, calls: calls).count
+    ) -> GroupSubmitOffer {
+        let pending = pendingCount ?? fallbackPending
+        guard let contributable = contributableCount else {
+            // No eligibility question. The folder submits whole, exactly as
+            // it did before this surface existed, and there is no gap to
+            // explain.
+            return GroupSubmitOffer(count: pending == 0 ? nil : pending, withheldLine: nil)
+        }
+        // RULED: nothing contributable offers no control at all, the same
+        // rule an ineligible row follows. A disabled button on a folder
+        // where every session is unsendable is something to hunt for a
+        // setting about; the rows inside already say why.
+        guard contributable > 0 else { return GroupSubmitOffer(count: nil, withheldLine: nil) }
+        let sentence = calls.withheldLine(Int64(pending - contributable))
+        return GroupSubmitOffer(
+            count: contributable,
+            withheldLine: (sentence?.isEmpty ?? true) ? nil : sentence)
     }
 
     // MARK: - The reason

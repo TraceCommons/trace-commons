@@ -29,7 +29,8 @@ final class EligibilityExportTests: XCTestCase {
             stateLine: { TCContributionEligibility.stateLine(state: $0) },
             stateTone: { TCContributionEligibility.stateTone(state: $0) },
             control: { TCContributionEligibility.control(state: $0) },
-            reasonLine: { TCContributionEligibility.reasonLine(reason: $0) }
+            reasonLine: { TCContributionEligibility.reasonLine(reason: $0) },
+            withheldLine: { TCContributionEligibility.withheldLine(withheld: $0) }
         )
     }
 
@@ -193,6 +194,51 @@ final class EligibilityExportTests: XCTestCase {
             XCTAssertFalse(sentence.contains(promise), copy.eligibilityEligible)
         }
         XCTAssertTrue(sentence.contains("send"), copy.eligibilityEligible)
+    }
+
+    /// The withheld sentence, across the real boundary.
+    ///
+    /// Empty for zero AND for a negative -- there is no gap to explain, and
+    /// "0 sessions are not being sent" invents a caveat where none exists.
+    /// It says how many and never why: a summary standing for up to thirteen
+    /// different reasons would say nothing true about any of them.
+    func testTheWithheldSentenceSaysHowManyAndNeverWhy() throws {
+        let copy = try XCTUnwrap(copy())
+        XCTAssertEqual(TCContributionEligibility.withheldLine(withheld: 0), "")
+        for negative: Int64 in [-1, -7, Int64.min] {
+            XCTAssertEqual(
+                TCContributionEligibility.withheldLine(withheld: negative), "", "\(negative)")
+        }
+        let one = try XCTUnwrap(TCContributionEligibility.withheldLine(withheld: 1))
+        let four = try XCTUnwrap(TCContributionEligibility.withheldLine(withheld: 4))
+        XCTAssertTrue(one.contains("1 session"), one)
+        XCTAssertTrue(four.contains("4 sessions"), four)
+        // Never a reason. These are the reason sentences; none of them may
+        // leak into the summary.
+        for reason in [
+            copy.eligibilityReasonNoCall, copy.eligibilityReasonCaptureOff,
+            copy.eligibilityReasonMarkerAbsent,
+        ] {
+            XCTAssertFalse(four.contains(reason), four)
+        }
+        XCTAssertFalse(four.lowercased().contains("because"), four)
+    }
+
+    /// The offer, assembled from the real table.
+    func testTheGroupOfferCrossesTheAbi() {
+        let offer = EligibilitySurface.groupSubmit(
+            pendingCount: 7, contributableCount: 3, fallbackPending: 7, calls: calls())
+        XCTAssertEqual(offer.count, 3)
+        XCTAssertEqual(offer.withheldLine, TCContributionEligibility.withheldLine(withheld: 4))
+        // Absent draws no line at all, and a full folder draws none either.
+        XCTAssertNil(
+            EligibilitySurface.groupSubmit(
+                pendingCount: 7, contributableCount: nil, fallbackPending: 7, calls: calls()
+            ).withheldLine)
+        XCTAssertNil(
+            EligibilitySurface.groupSubmit(
+                pendingCount: 7, contributableCount: 7, fallbackPending: 7, calls: calls()
+            ).withheldLine)
     }
 
     /// Nothing on this surface has a hole a value could be poured into.

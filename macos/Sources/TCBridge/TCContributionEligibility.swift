@@ -69,4 +69,22 @@ public enum TCContributionEligibility {
         defer { tc_string_free(raw) }
         return String(cString: raw)
     }
+
+    /// How many sessions a group submit is leaving behind, as a sentence.
+    ///
+    /// `withheld` is `approve`'s `excluded_ineligible`, or the difference
+    /// between a project row's `pending_count` and its
+    /// `contributable_count`.
+    ///
+    /// The empty string for zero AND for a negative, which no honest caller
+    /// produces; the caller renders nothing. There is no gap to explain, and
+    /// a line reading "0 sessions are not being sent" invents a caveat where
+    /// none exists. The sentence says how many and not why -- the reason a
+    /// particular session cannot be sent is that row's own sentence, one
+    /// level in.
+    public static func withheldLine(withheld: Int64) -> String? {
+        guard let raw = tc_contribution_withheld_line(withheld) else { return nil }
+        defer { tc_string_free(raw) }
+        return String(cString: raw)
+    }
 }

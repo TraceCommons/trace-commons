@@ -194,6 +194,10 @@ struct QueueContent: View {
                 ForEach(model.waitingByProject) { group in
                     QueueFolderRow(
                         group: group,
+                        // The daemon's own row for this project, matched by
+                        // the id `list_projects` mints -- the same id the
+                        // grouping keys on. Nil until that call answers.
+                        project: model.projects.first { $0.projectId == group.id },
                         eligibilityCalls: model.eligibilityCalls,
                         onOpen: { location = .project(group.id) },
                         onSubmitAll: { model.submitProject(id: group.id) },
