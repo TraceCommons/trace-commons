@@ -758,70 +758,101 @@ mod tests {
 
     // -- both group controls, or neither --------------------------------
 
-    /// **A second live route to a call whose button is disabled is worse
-    /// than either alone.**
+    /// **Neither group control is built when nothing in the group can be
+    /// sent**, and both are built from the same answer.
     ///
-    /// The `Submit all as...` verdict menu reaches the same `approve` the
-    /// plain `Submit all` button does. Disabling one and leaving the other
-    /// live tells a contributor the group cannot be sent and then lets them
-    /// send it.
+    /// `Submit all as...` is a second route to the same `approve`; a live
+    /// one beside an absent button would offer exactly what the missing
+    /// button withheld.
+    ///
+    /// Not built rather than built-and-disabled. The folder now SAYS what
+    /// it is withholding, so a dead control has nothing left to
+    /// communicate.
     #[test]
-    fn both_group_controls_take_the_gate_or_neither_does() {
-        let row = QUEUE_SOURCE
-            .split("#[cfg(test)]")
-            .next()
-            .expect("production code above the tests");
+    fn neither_group_control_is_built_when_nothing_can_be_sent() {
+        let row = squashed(
+            QUEUE_SOURCE
+                .split("#[cfg(test)]")
+                .next()
+                .expect("production code above the tests"),
+        );
         for control in ["submit_all", "submit_all_as"] {
             assert!(
-                squashed(row).contains(&format!("{control}.set_sensitive(sendable)")),
-                "{control} does not take the zero-submittable gate"
+                row.contains(&format!("ifsendable{{bar.append(&{control});}}")),
+                "{control} is not gated on the group having something to send"
+            );
+            assert!(
+                !row.contains(&format!("{control}.set_sensitive(")),
+                "{control} is drawn and disabled; it should not be drawn at all"
             );
         }
-        // Both read the SAME answer, computed once. Two computations are
-        // two chances to disagree.
+        // Both read ONE computed answer. Two computations are two chances
+        // to disagree.
         assert_eq!(
-            squashed(row)
-                .matches("letsendable=!group_submit(app,project_id)")
+            row.matches("letsendable=!group.eligible.is_empty()")
                 .count(),
             1,
             "the two controls do not share one computed answer"
         );
     }
 
-    // -- the group header, one layer up -------------------------------
+    /// The folder says what its submit will leave behind, in the shared
+    /// crate's words, before the press.
+    #[test]
+    fn the_folder_says_what_its_submit_leaves_behind() {
+        let row = squashed(
+            QUEUE_SOURCE
+                .split("#[cfg(test)]")
+                .next()
+                .expect("production code above the tests"),
+        );
+        assert!(
+            row.contains("copy::group_withheld_line("),
+            "the folder authors its own withheld sentence instead of asking for one"
+        );
+        assert!(
+            row.contains(".saturating_sub("),
+            "the withheld count can underflow"
+        );
+        // Zero draws nothing, which is also the invited contributor's whole
+        // case: no eligibility field, nothing withheld, no line.
+        assert_eq!(copy::group_withheld_line(0), "");
+        assert!(!copy::group_withheld_line(1).is_empty());
+        // It counts and does not explain -- the reason lives on the row.
+        let line = copy::group_withheld_line(3).to_lowercase();
+        assert!(line.contains('3'), "{line}");
+        for reason_word in ["attested", "eligib", "setting", "capture"] {
+            assert!(
+                !line.contains(reason_word),
+                "the withheld line reaches for a reason: {line}"
+            );
+        }
+    }
 
-    /// **A group-level submit means "all eligible", never "all".**
+    /// **A bulk control may not reach `approve` around `submit_group`.**
     ///
-    /// The header's button sends by `project_id`, which the daemon reads as
-    /// every pending row in the project -- so a group holding one ineligible
-    /// session had one button that sent it, while the row right below it
-    /// correctly offered nothing. Both bulk controls now go through
-    /// `submit_group`, and neither reaches `ApproveTarget::Project` on its
-    /// own.
+    /// The guarantee is unchanged and only the enforcing layer moved: a
+    /// project-wide `approve` now admits eligible entries alone, so
+    /// `submit_group` makes the one call and the daemon does the filtering.
+    /// What must stay true is that no second bulk path builds that call
+    /// itself.
     #[test]
     fn a_group_submit_never_sends_by_project_id_directly() {
         let production = QUEUE_SOURCE
             .split("#[cfg(test)]")
             .next()
             .expect("production code above the tests");
-        // The one place the project-wide call may be built is inside
-        // `submit_group`, which reaches it only when the group holds no
-        // ineligible row.
         let group = production
             .find("fn submit_group(")
             .expect("the group submit exists");
         let group_end = production[group..]
-            .find("\n/// What the fan-out")
+            .find("\n/// The head of a folder")
             .expect("submit_group ends")
             + group;
         let inside = &production[group..group_end];
         assert!(
             inside.contains("ApproveTarget::Project"),
             "submit_group no longer builds the project-wide call"
-        );
-        assert!(
-            inside.contains("group.ineligible == 0"),
-            "submit_group does not gate the project-wide call on the group being wholly eligible"
         );
 
         // Everything but `submit_group` and `approve_params`. The latter is
@@ -840,47 +871,21 @@ mod tests {
         outside = outside.replace(serializer_arm, "");
         assert!(
             !outside.contains("ApproveTarget::Project"),
-            "a bulk control builds the project-wide call outside submit_group, which sends \
-             every pending row whatever its eligibility"
+            "a bulk control builds the project-wide call outside submit_group, which is \
+             the one place the rule is enforced"
         );
-        // And both bulk handlers reach the rule.
         assert_eq!(
             production.matches("submit_group(").count(),
             3,
             "expected the definition plus both bulk handlers to reach submit_group"
         );
-    }
-
-    /// The empty-eligible group sends nothing rather than falling back to
-    /// the project-wide call, which would send exactly the rows that must
-    /// not go.
-    #[test]
-    fn a_group_with_nothing_eligible_sends_nothing() {
-        let production = QUEUE_SOURCE
-            .split("#[cfg(test)]")
-            .next()
-            .expect("production code above the tests");
-        let group = production
-            .find("fn submit_group(")
-            .expect("the group submit exists");
-        let inside = &production[group..];
-        let empty = inside
-            .find("if group.eligible.is_empty() {")
-            .expect("the empty-eligible arm exists");
-        let arm_end = inside[empty..].find("\n    }").expect("the arm closes") + empty;
-        let arm = &inside[empty..arm_end];
-        assert!(
-            !arm.contains("submit_and_toast") && !arm.contains("submit_each_and_toast"),
-            "the empty-eligible arm submits something: {arm}"
-        );
-        // The gate is reached BEFORE the fan-out, not after it.
-        assert!(
-            empty
-                < inside
-                    .find("submit_each_and_toast(")
-                    .expect("the fan-out is called"),
-            "the empty-eligible check must precede the fan-out"
-        );
+        // The fan-out went with the constraint that forced it.
+        for removed in ["submit_each_and_toast", "struct FanOut"] {
+            assert!(
+                !production.contains(removed),
+                "{removed} outlived the daemon-side filter that replaced it"
+            );
+        }
     }
 
     /// The split itself: eligible rows are collected, ineligible ones are

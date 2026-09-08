@@ -1226,169 +1226,47 @@ pub(super) fn group_submit(app: &Rc<App>, project_id: &str) -> GroupSubmit {
 
 /// Send a whole project group, meaning **all eligible and never all**.
 ///
-/// A group header offering one button that sends sessions the server will
-/// refuse is the defect this surface exists to remove, one layer up: the
-/// rows below it are each correctly unoffered, and the button above them
-/// sends them anyway.
+/// One call. `approve` with a `project_id` now admits only the entries the
+/// daemon considers contributable and reports the rest as
+/// `excluded_ineligible`, so the selector means what it says and the shell
+/// no longer assembles the subset itself.
 ///
-/// The daemon has no "approve exactly these" call -- `approve` takes one of
-/// `entry_id`, `project_id` or `all`, and `project_id` means every pending
-/// row in the project. So:
+/// This used to fan out one `approve` per eligible entry, because `approve`
+/// took one of `entry_id` / `project_id` / `all` and none of them could say
+/// "these three". That shape is gone: a client-assembled subset is a subset
+/// three clients assemble three ways, with three answers for what happens
+/// when call two of three fails, and the longest-of-N hold rule it needed
+/// is meaningless against a call that takes one approval instant for the
+/// whole group.
 ///
-/// - **No ineligible row in the group**: the single `project_id` call, byte
-///   for byte the request this made before. An invited contributor's queue
-///   carries no eligibility field at all, so every group takes this arm and
-///   nothing about their experience changes.
-/// - **Otherwise**: one `approve` per eligible entry, aggregated into a
-///   single toast. More calls, but it is the only shape that expresses the
-///   subset, and it is the uncommon arm.
-///
-/// An empty eligible set sends nothing at all rather than falling back to
-/// the project call, which would send exactly the rows that must not go.
-///
-/// # This shape is provisional
-///
-/// The fan-out exists only because `approve` cannot say "these three". The
-/// daemon is gaining a project-scoped approve that admits eligible entries
-/// alone, and when it lands **this function collapses to the single
-/// `project_id` call in every arm** -- that call will then mean what it
-/// says, and the three shells stop each inventing their own aggregation.
-/// That is the point: a subset the client has to assemble is a subset three
-/// clients assemble three ways, with three answers for what happens when
-/// call two of three fails.
-///
-/// Two things must survive the collapse.
-///
-/// 1. **The guarantee, and its test.** A bulk control may not send a
-///    session the daemon says cannot be sent. Which layer enforces it
-///    changes; that it is enforced does not. See
-///    `eligibility::tests::a_group_submit_never_sends_by_project_id_directly`,
-///    which stays true in spirit once the daemon filters -- keep it.
-/// 2. **Nothing else.** `submit_each_and_toast` and `FanOut` have no other
-///    caller and should go with the arm that used them, hold rule included:
-///    a single call has one hold, so the longest-of-N rule below becomes
-///    meaningless rather than merely unused.
+/// **The guarantee did not move, only the layer enforcing it**: a bulk
+/// control may not send a session the daemon says cannot be sent. It is now
+/// the daemon's filter rather than this function's arithmetic, and
+/// `eligibility::tests::a_group_submit_never_sends_by_project_id_directly`
+/// still holds it -- the rule is that no bulk control reaches `approve`
+/// around `submit_group`.
 fn submit_group(
     app: &Rc<App>,
     project_id: &str,
     project_label: &str,
     verdict: Option<&'static str>,
 ) {
-    let group = group_submit(app, project_id);
-    if group.ineligible == 0 {
-        submit_and_toast(
-            app,
-            approve_params(
-                ApproveTarget::Project(project_id.to_string()),
-                verdict,
-                None,
-            ),
-            project_label.to_string(),
-            group.eligible,
-        );
-        return;
-    }
-    if group.eligible.is_empty() {
-        // Nothing in this group may be sent. Refreshing re-renders the
-        // header against the queue as it now stands rather than leaving a
-        // press with no visible consequence.
-        app.refresh();
-        return;
-    }
-    submit_each_and_toast(app, group.eligible, verdict, project_label.to_string());
-}
-
-/// What the fan-out has learned so far, folded into one `ApproveResult`.
-///
-/// The toast a contributor reads describes ONE submission, because that is
-/// what they performed: they pressed one button. Rendering a toast per
-/// entry would turn a group submit into a stack of them.
-#[derive(Default)]
-struct FanOut {
-    outstanding: usize,
-    result: ApproveResult,
-    sent: Vec<String>,
-    /// Set when any call failed at the transport. Reported plainly rather
-    /// than folded into the toast's skip clause -- nothing about those
-    /// requests was honoured, so no clause describes them.
-    refused: bool,
-}
-
-/// One `approve` per entry, aggregated into a single submit response.
-///
-/// `hold_secs` and `hold_until` take the LONGEST of the replies, never the
-/// first or the shortest: the undo bar has to outlast every entry it offers
-/// to undo, and a countdown that expires while one of them is still held
-/// would take the undo away while it still worked.
-fn submit_each_and_toast(
-    app: &Rc<App>,
-    entry_ids: Vec<String>,
-    verdict: Option<&'static str>,
-    project_label: String,
-) {
-    let state = Rc::new(RefCell::new(FanOut {
-        outstanding: entry_ids.len(),
-        ..FanOut::default()
-    }));
-    for entry_id in entry_ids {
-        let state = Rc::clone(&state);
-        let project_label = project_label.clone();
-        let id = entry_id.clone();
-        app.call(
-            "approve",
-            approve_params(ApproveTarget::Entry(entry_id), verdict, None),
-            move |app, result| {
-                let finished = {
-                    let mut state = state.borrow_mut();
-                    match result.and_then(|value| {
-                        serde_json::from_value::<ApproveResult>(value).map_err(|e| e.to_string())
-                    }) {
-                        Ok(one) => {
-                            let skipped = one.skipped.iter().any(|s| s.entry_id == id);
-                            state.result.approved += one.approved;
-                            state.result.flagged += one.flagged;
-                            for (category, count) in &one.redactions {
-                                *state.result.redactions.entry(category.clone()).or_default() +=
-                                    count;
-                            }
-                            state.result.skipped.extend(one.skipped);
-                            if one.hold_secs > state.result.hold_secs {
-                                state.result.hold_secs = one.hold_secs;
-                            }
-                            if one.hold_until > state.result.hold_until {
-                                state.result.hold_until = one.hold_until;
-                            }
-                            if !skipped {
-                                state.sent.push(id);
-                            }
-                        }
-                        Err(_) => state.refused = true,
-                    }
-                    state.outstanding -= 1;
-                    if state.outstanding > 0 {
-                        return;
-                    }
-                    // Last reply in: the whole group is accounted for, so
-                    // the one toast this submission earns can be drawn.
-                    // Taken out of the cell rather than read through it,
-                    // because rendering calls back into the app and must
-                    // not do so with this borrow still open.
-                    (
-                        std::mem::take(&mut state.result),
-                        std::mem::take(&mut state.sent),
-                        state.refused,
-                    )
-                };
-                let (result, sent, refused) = finished;
-                if refused && result.approved == 0 {
-                    app.toast(copy::SUBMIT_FAILED);
-                } else {
-                    app.render_submit_response(&result, sent, &project_label);
-                }
-                app.refresh();
-            },
-        );
-    }
+    // The candidate set for the undo bar, and only that -- `project_id`
+    // alone tells the daemon what to approve. Read fresh at click time
+    // because the queue can change between a render and a click, and
+    // narrowed to the sendable rows so the bar does not offer to undo an
+    // entry that was never sent.
+    let candidates = group_submit(app, project_id).eligible;
+    submit_and_toast(
+        app,
+        approve_params(
+            ApproveTarget::Project(project_id.to_string()),
+            verdict,
+            None,
+        ),
+        project_label.to_string(),
+        candidates,
+    );
 }
 
 /// The head of a folder's sessions: the way back, and which folder this is.
@@ -1483,6 +1361,34 @@ fn folder_row(app: &Rc<App>, folder: &crate::queue_folders::Folder) -> gtk::Widg
         path.add_css_class("tc-meta");
         naming.append(&path);
     }
+
+    // What a group submit will leave behind, said BEFORE the press.
+    //
+    // A button reading "Submit all" over a folder showing five rows that
+    // sends three, with nothing explaining the gap, is the same small
+    // dishonesty the rest of this surface removes. The sentence is the
+    // shared crate's -- it says HOW MANY and not why, because the reason a
+    // particular session cannot be sent is that row's own sentence one
+    // level in, and a summary here would be a summary of up to thirteen
+    // different reasons.
+    //
+    // The empty string for zero draws nothing, which is also the whole of
+    // the invited contributor's case: their rows carry no eligibility field,
+    // every one of them is sendable, and the gap is zero.
+    //
+    // `saturating_sub` because the count is a difference between two
+    // numbers this shell did not compute together. It cannot go negative
+    // today -- the eligible set is a subset of the members -- and if it ever
+    // did, the honest answer is the one zero already gives: say nothing.
+    let withheld = copy::group_withheld_line(
+        (folder.members.len() as u64)
+            .saturating_sub(group_submit(app, project_id).eligible.len() as u64),
+    );
+    if !withheld.is_empty() {
+        let line = style::caveat(&withheld);
+        line.add_css_class("tc-attention");
+        naming.append(&line);
+    }
     opener.append(&naming);
 
     let summary = gtk::Label::new(Some(&copy::folder_summary(waiting, folder.bytes)));
@@ -1516,7 +1422,6 @@ fn folder_row(app: &Rc<App>, folder: &crate::queue_folders::Folder) -> gtk::Widg
         submit_all.add_css_class("suggested-action");
         submit_all.add_css_class("tc-primary");
         submit_all.set_tooltip_text(Some(copy::SUBMIT_ALL_TOOLTIP));
-        bar.append(&submit_all);
 
         // Both group controls take the gate, or neither should.
         //
@@ -1528,14 +1433,27 @@ fn folder_row(app: &Rc<App>, folder: &crate::queue_folders::Folder) -> gtk::Widg
         // either alone, because the disabled button is what tells a
         // contributor the group cannot be sent.
         //
-        // Disabled rather than removed. A group header is not a queue row:
-        // the group still holds sessions, and a folder offering no way to
-        // act on it at all reads as broken rather than as finished. The row
-        // rule -- build no control -- applies where the control would
-        // otherwise appear from nothing; here it would disappear from a
-        // header that has one on every other folder.
-        let sendable = !group_submit(app, project_id).eligible.is_empty();
-        submit_all.set_sensitive(sendable);
+        // **Nothing sendable means no control at all**, the same rule an
+        // ineligible row follows. It used to be drawn and disabled, on the
+        // argument that a folder with no button reads as broken. That
+        // argument was answered by the withheld line below: the folder now
+        // SAYS why it is offering nothing, so the control has nothing left
+        // to communicate and a dead button is just a dead button.
+        //
+        // Counted off this group's own rows rather than `list_projects`'s
+        // `contributable_count`. The queue view builds its folders from the
+        // entries it already holds -- it never fetches project rows -- so
+        // reading the count from a second source would be a second source
+        // that can disagree with the rows on screen. The numbers are the
+        // same by construction: `offers_send` and the daemon's
+        // `contributable_in_a_group` both admit `eligible` alone, and both
+        // admit everything when the evidence flag is off, which is the
+        // absent-field case.
+        let group = group_submit(app, project_id);
+        let sendable = !group.eligible.is_empty();
+        if sendable {
+            bar.append(&submit_all);
+        }
 
         let app_for_submit = Rc::clone(app);
         let project_id_for_submit = project_id.to_string();
@@ -1601,8 +1519,12 @@ fn folder_row(app: &Rc<App>, folder: &crate::queue_folders::Folder) -> gtk::Widg
         }
         let verdict_popover = gtk::Popover::builder().child(&verdict_popover_box).build();
         submit_all_as.set_popover(Some(&verdict_popover));
-        submit_all_as.set_sensitive(sendable);
-        bar.append(&submit_all_as);
+        // The same answer, not a second computation. `Submit all as...` is
+        // a second route to the same call, and a live one beside an absent
+        // button would offer exactly what the missing button withheld.
+        if sendable {
+            bar.append(&submit_all_as);
+        }
     }
 
     let ignore = gtk::Button::with_label(copy::IGNORE_PROJECT);
