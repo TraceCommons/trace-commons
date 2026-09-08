@@ -157,61 +157,50 @@ pub fn offers_send(entry: &QueueEntry) -> bool {
     }
 }
 
-/// A project group's pending rows, split by whether they may be sent.
+/// The entries a group-level submit is expected to send, for the undo bar.
 ///
-/// `ineligible` is a count and not a list because nothing renders it: it
-/// decides only WHICH CALL a group-level submit makes, and the rows
-/// themselves already carry their own sentences.
-pub struct GroupSubmit {
-    /// The entries a group-level submit may send, oldest first.
-    pub eligible: Vec<String>,
-    /// How many of this group's pending rows are contributable, or `None`
-    /// when the question does not apply to this contributor at all.
-    ///
-    /// **`None` is not zero.** It is the wire's absent `contributable_count`
-    /// -- an invited contributor, whose every pending session is sendable
-    /// and who has no "3 of 7" to be told about. Read as zero it would take
-    /// the group control away from somebody with nothing wrong. The same
-    /// distinction the `eligibility` field itself carries, one level up.
-    pub contributable: Option<u64>,
+/// **This is a display list, not the control's decision.** The number that
+/// decides whether the control is drawn at all comes off the wire -- see
+/// [`group_contributable`] -- because it is the daemon's filter, and a second
+/// implementation of it agrees right up until the day the rule changes an
+/// arm.
+///
+/// The undo bar still needs the ids and `approve` returns none: excluded
+/// entries are deliberately absent from `skipped`, which is the account of
+/// what the call was ASKED to act on. Handing the bar every pending id would
+/// offer to undo sessions that were never sent. Narrowing it by the row's own
+/// gate is the closest true answer available, and it is what the contributor
+/// saw offered.
+#[must_use]
+pub fn sendable_ids<'a>(pending: impl Iterator<Item = &'a QueueEntry>) -> Vec<String> {
+    pending
+        .filter(|entry| offers_send(entry))
+        .map(|entry| entry.entry_id.clone())
+        .collect()
 }
 
-/// Split a group's pending rows into what may be sent and how many that is.
+/// How many of one project's waiting sessions a group submit would send, as
+/// the DAEMON counted them.
 ///
-/// Lives here, taking an iterator, so it can be tested against rows built by
-/// the real deserializer -- `ui::queue::group_submit` only ever supplies them
-/// off the live queue.
+/// `None` in three cases a shell must treat alike, because all three mean
+/// "no count to apply here":
 ///
-/// **`contributable` is `None` when the question does not apply**, which is
-/// the absent `contributable_count` on the wire: the daemon writes an
-/// `eligibility` key on every row when the evidence flag is on and on none of
-/// them when it is off, so "any row carries one" is exactly the condition
-/// under which it sends the count.
+/// - the project row carries no `contributable_count`, which is an invited
+///   contributor and the field's documented absence;
+/// - `list_projects` has not answered yet on this refresh;
+/// - the id names no row this shell holds.
 ///
-/// It matters less here than on the other two shells, and is spelled properly
-/// anyway. GTK derives BOTH numbers from the same rows with the same
-/// predicate, so `Some(n)` and `None` reach the same answer in every case this
-/// shell can actually produce -- `offers_send` admits an unkeyed row, so an
-/// invited contributor's eligible count equals their pending count. macOS and
-/// Windows read `contributable_count` off `list_projects` as a SEPARATE
-/// number, where collapsing absent into `0` refuses the control outright.
-/// That is a fact about how GTK gets the count, not a licence to spell it
-/// loosely: either half could change.
+/// All three offer the control on the pending total, which is safe now for a
+/// reason it was not before: a project-wide `approve` applies the filter
+/// itself, so the worst an optimistic control can do is send fewer sessions
+/// than its label implied and say so afterwards. Refusing it instead would
+/// hide a working control from an invited contributor on every first paint.
 #[must_use]
-pub fn group_of<'a>(pending: impl Iterator<Item = &'a QueueEntry>) -> GroupSubmit {
-    let mut eligible = Vec::new();
-    let mut applies = false;
-    for entry in pending {
-        applies |= entry.eligibility.is_some();
-        if offers_send(entry) {
-            eligible.push(entry.entry_id.clone());
-        }
-    }
-    let contributable = applies.then_some(eligible.len() as u64);
-    GroupSubmit {
-        eligible,
-        contributable,
-    }
+pub fn group_contributable(projects: &[crate::model::Project], project_id: &str) -> Option<u64> {
+    projects
+        .iter()
+        .find(|project| project.project_id == project_id)?
+        .contributable_count
 }
 
 #[cfg(test)]
@@ -941,7 +930,7 @@ mod tests {
         // reading that as zero would take the control away from somebody
         // whose sessions are all sendable.
         assert!(
-            row.contains("crate::eligibility::group_offers_send(waitingasu64,group.contributable)"),
+            row.contains("crate::eligibility::group_offers_send(waitingasu64,contributable)"),
             "the group control is decided here instead of asked for"
         );
         assert_eq!(
@@ -954,69 +943,124 @@ mod tests {
             !row.contains("!group.eligible.is_empty()"),
             "the group control is re-derived from an emptiness test"
         );
+        // And it is decided from the DAEMON's count, not from a total the
+        // shell could have filtered itself.
+        assert!(
+            row.contains("letcontributable=crate::eligibility::group_contributable("),
+            "the control is fed a count this shell derived"
+        );
     }
 
-    /// **The derivation itself: absent when no row carries the key,
-    /// present when any does.**
+    /// **The count comes off the wire, never from these rows.**
     ///
-    /// This is the arm a shell gets wrong, and it needs a test that can
-    /// catch its removal -- collapsing the distinction to `Some(count)`
-    /// otherwise passes everything, because GTK derives both numbers from
-    /// one predicate. Run against rows built by the real deserializer, so
-    /// the absence is serde's and not a literal.
+    /// The shell used to derive it by applying its own copy of the daemon's
+    /// group filter. The two agreed, which is exactly the condition that
+    /// makes a reimplementation invisible: when the daemon changes an arm,
+    /// a derived count keeps answering the old rule and nothing fails.
+    ///
+    /// `group_contributable` reads the daemon's number and re-derives
+    /// nothing, so it cannot drift. Fed rows from the real deserializer.
     #[test]
-    fn a_groups_contributable_count_is_absent_when_the_question_does_not_apply() {
-        // An invited contributor: no row carries an eligibility key.
-        let invited = [wire(serde_json::json!({})), wire(serde_json::json!({}))];
-        let group = group_of(invited.iter());
-        assert_eq!(
-            group.contributable, None,
-            "an invited contributor's group must report no count at all"
-        );
-        assert_eq!(group.eligible.len(), 2, "every row of theirs is sendable");
-        assert_eq!(
-            copy::group_control(2, group.contributable),
-            copy::ContributionControl::Contribute
-        );
+    fn a_groups_contributable_count_is_read_from_the_project_row() {
+        let projects: Vec<crate::model::Project> = serde_json::from_value(serde_json::json!([
+            // Admitted on evidence: the filter ran and took one of four.
+            { "project_id": "p1", "pending_count": 4, "contributable_count": 1 },
+            // Admitted, and it took nothing. Zero is a real answer.
+            { "project_id": "p2", "pending_count": 3, "contributable_count": 0 },
+            // Invited: no count at all, and this is NOT zero.
+            { "project_id": "p3", "pending_count": 7 },
+        ]))
+        .expect("real project rows deserialize");
 
-        // Admitted on evidence, nothing sendable.
-        let none_sendable = [
-            wire(serde_json::json!({ "eligibility": "ineligible_permanent" })),
-            wire(serde_json::json!({ "eligibility": "unknown" })),
-        ];
-        let group = group_of(none_sendable.iter());
+        assert_eq!(group_contributable(&projects, "p1"), Some(1));
         assert_eq!(
-            group.contributable,
+            group_contributable(&projects, "p2"),
             Some(0),
             "a filter that ran and took nothing reports zero, not absence"
         );
         assert_eq!(
-            copy::group_control(2, group.contributable),
-            copy::ContributionControl::None
+            group_contributable(&projects, "p3"),
+            None,
+            "an invited contributor's row must carry no count at all"
         );
+        // A project the shell has no row for -- `list_projects` has not
+        // answered yet, or the id names nothing -- is the same absence.
+        assert_eq!(group_contributable(&projects, "p4"), None);
+        assert_eq!(group_contributable(&[], "p1"), None);
 
-        // Admitted, some sendable: the withheld count is the difference.
-        let mixed = [
-            wire(serde_json::json!({ "eligibility": "eligible" })),
-            wire(serde_json::json!({ "eligibility": "ineligible_permanent" })),
-            wire(serde_json::json!({ "eligibility": "ineligible_configuration" })),
+        // And that absence offers the control on the pending total, which
+        // is the arm a shell gets wrong.
+        assert!(group_offers_send(7, group_contributable(&projects, "p3")));
+        assert!(!group_offers_send(3, group_contributable(&projects, "p2")));
+        assert!(group_offers_send(4, group_contributable(&projects, "p1")));
+    }
+
+    /// Nothing in this shell re-derives the filter's answer.
+    ///
+    /// The derivation is gone, not merely unused: a leftover one is a second
+    /// implementation waiting for a caller.
+    #[test]
+    fn the_group_filter_is_not_reimplemented_here() {
+        let production = SOURCE
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production code above the tests");
+        assert!(
+            production.contains("fn group_contributable("),
+            "the wire count is not read"
+        );
+        for removed in [
+            "fn group_of(",
+            "struct GroupSubmit",
+            "contributable_count =",
+        ] {
+            assert!(
+                !production.contains(removed),
+                "a derived contributable count survives: {removed}"
+            );
+        }
+        // The queue asks for it and computes nothing.
+        let queue = squashed(
+            QUEUE_SOURCE
+                .split("#[cfg(test)]")
+                .next()
+                .expect("production code above the tests"),
+        );
+        assert!(
+            queue.contains(
+                "crate::eligibility::group_contributable(&app.projects.borrow(),project_id)"
+            ),
+            "the folder does not read the daemon's count"
+        );
+        assert!(
+            !queue.contains("group_submit("),
+            "the old derivation is still called"
+        );
+    }
+
+    /// The undo bar's candidate list is narrowed by the row gate, which is
+    /// a display list and not the control's decision.
+    ///
+    /// It cannot come off the wire: `approve` returns no ids, and excluded
+    /// entries are deliberately absent from `skipped`. Handing the bar every
+    /// pending id would offer to undo sessions that were never sent.
+    #[test]
+    fn the_undo_candidates_are_the_rows_that_were_offered() {
+        let rows = [
+            wire(serde_json::json!({ "entry_id": "a", "eligibility": "eligible" })),
+            wire(serde_json::json!({ "entry_id": "b", "eligibility": "ineligible_permanent" })),
+            wire(serde_json::json!({ "entry_id": "c", "eligibility": "unknown" })),
         ];
-        let group = group_of(mixed.iter());
-        assert_eq!(group.contributable, Some(1));
-        assert_eq!(
-            3u64.saturating_sub(group.contributable.unwrap_or(3)),
-            2,
-            "two of the three are withheld"
-        );
-        assert!(!copy::group_withheld_line(2).is_empty());
+        assert_eq!(sendable_ids(rows.iter()), vec!["a".to_string()]);
 
-        // An empty group reports absence, and offers nothing either way.
-        let empty: [QueueEntry; 0] = [];
-        let group = group_of(empty.iter());
-        assert_eq!(group.contributable, None);
+        // An invited contributor's rows are all candidates.
+        let invited = [
+            wire(serde_json::json!({ "entry_id": "x" })),
+            wire(serde_json::json!({ "entry_id": "y" })),
+        ];
         assert_eq!(
-            copy::group_control(0, group.contributable),
-            copy::ContributionControl::None
+            sendable_ids(invited.iter()),
+            vec!["x".to_string(), "y".to_string()]
         );
     }
 

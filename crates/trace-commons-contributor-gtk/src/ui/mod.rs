@@ -149,6 +149,16 @@ pub struct App {
 
     callbacks: RefCell<HashMap<u64, Callback>>,
     pub entries: RefCell<Vec<QueueEntry>>,
+    /// `list_projects` rows, held for the two counts they carry.
+    ///
+    /// The queue builds its folders from `entries` and always will -- the
+    /// header must agree with the rows on screen, not with a number the
+    /// contributor cannot check. What these rows are for is the ONE number
+    /// the shell must not compute: how many of a group a project-wide
+    /// `approve` would actually send. That is the daemon's filter, and a
+    /// shell deriving it is a second implementation which agrees until the
+    /// day the rule changes an arm.
+    pub projects: RefCell<Vec<crate::model::Project>>,
     pub status: RefCell<Option<Status>>,
     /// The week band's three figures. Read here rather than passed down from
     /// `history` so the queue can draw the band without depending on which
@@ -357,6 +367,7 @@ impl App {
             queue_badge,
             callbacks: RefCell::new(HashMap::new()),
             entries: RefCell::new(Vec::new()),
+            projects: RefCell::new(Vec::new()),
             status: RefCell::new(None),
             rollup: RefCell::new(HistoryRollup::default()),
             undo: RefCell::new(None),
@@ -663,6 +674,17 @@ impl App {
                 return;
             };
             queue::render_private_inference_offer(app, &settings);
+        });
+        // The group counts, asked on the same refresh as the queue itself.
+        // Only `contributable_count` is read from here: the folder's total
+        // stays the rows on screen.
+        self.call("list_projects", serde_json::json!({}), |app, result| {
+            let Ok(value) = result else { return };
+            let projects: Vec<crate::model::Project> =
+                serde_json::from_value(value.get("projects").cloned().unwrap_or_default())
+                    .unwrap_or_default();
+            *app.projects.borrow_mut() = projects;
+            queue::render(app);
         });
         self.call("list_pending", serde_json::json!({}), |app, result| {
             let Ok(value) = result else { return };

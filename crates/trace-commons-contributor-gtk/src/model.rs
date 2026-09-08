@@ -524,6 +524,24 @@ pub struct Project {
     /// contributor should read.
     #[serde(default)]
     pub is_unresolved_bucket: bool,
+    /// How many of this project's sessions are waiting. Always present.
+    #[serde(default)]
+    pub pending_count: u64,
+    /// How many of those a group-level submit would actually send.
+    ///
+    /// **Absent when eligibility does not apply**, which is an invited
+    /// contributor -- they have no "3 of 7" to be told about, and
+    /// [`Self::pending_count`] alone is their answer. Never null, and never
+    /// zero standing in for absence: zero means the daemon's filter RAN and
+    /// took nothing, which is a different and offerable-nothing answer.
+    ///
+    /// This is the daemon's own count, not one this shell re-derives. The
+    /// filter that produces it is the filter a project-wide `approve`
+    /// applies, so the button and the call cannot disagree about what
+    /// "all eligible" means -- and if that rule ever changes an arm, this
+    /// follows it without anything here being edited.
+    #[serde(default)]
+    pub contributable_count: Option<u64>,
 }
 
 /// `list_history`.

@@ -1189,16 +1189,17 @@ fn manifest_block(
     block
 }
 
-/// Split one project's pending rows on eligibility.
+/// The entries a group-level submit is expected to send, for the undo bar.
 ///
 /// Read fresh at click time, never off what `render` captured: the queue can
 /// change between a render and a click.
-pub(super) fn group_submit(app: &Rc<App>, project_id: &str) -> crate::eligibility::GroupSubmit {
+pub(super) fn group_candidates(app: &Rc<App>, project_id: &str) -> Vec<String> {
     let entries = app.entries.borrow();
-    let pending = entries
-        .iter()
-        .filter(|e| e.state == "pending" && e.project_id == project_id);
-    crate::eligibility::group_of(pending)
+    crate::eligibility::sendable_ids(
+        entries
+            .iter()
+            .filter(|e| e.state == "pending" && e.project_id == project_id),
+    )
 }
 
 /// Send a whole project group, meaning **all eligible and never all**.
@@ -1233,7 +1234,7 @@ fn submit_group(
     // because the queue can change between a render and a click, and
     // narrowed to the sendable rows so the bar does not offer to undo an
     // entry that was never sent.
-    let candidates = group_submit(app, project_id).eligible;
+    let candidates = group_candidates(app, project_id);
     submit_and_toast(
         app,
         approve_params(
@@ -1357,12 +1358,14 @@ fn folder_row(app: &Rc<App>, folder: &crate::queue_folders::Folder) -> gtk::Widg
     // numbers this shell did not compute together. It cannot go negative
     // today -- the eligible set is a subset of the members -- and if it ever
     // did, the honest answer is the one zero already gives: say nothing.
+    // The daemon's own count of what a group submit would send, beside the
+    // total from the rows on screen. Only the FILTER's answer comes off the
+    // wire: the header's total must agree with what the contributor can
+    // count, and the filter's answer must agree with the call that applies
+    // it.
+    let contributable = crate::eligibility::group_contributable(&app.projects.borrow(), project_id);
     let withheld = copy::group_withheld_line(
-        (waiting as u64).saturating_sub(
-            group_submit(app, project_id)
-                .contributable
-                .unwrap_or(waiting as u64),
-        ),
+        (waiting as u64).saturating_sub(contributable.unwrap_or(waiting as u64)),
     );
     if !withheld.is_empty() {
         let line = style::caveat(&withheld);
@@ -1436,8 +1439,7 @@ fn folder_row(app: &Rc<App>, folder: &crate::queue_folders::Folder) -> gtk::Widg
         // invited contributor whose sessions are all perfectly sendable.
         // `None` carries the absence, exactly as a negative does across the
         // C ABI that macOS and Windows reach this through.
-        let group = group_submit(app, project_id);
-        let sendable = crate::eligibility::group_offers_send(waiting as u64, group.contributable);
+        let sendable = crate::eligibility::group_offers_send(waiting as u64, contributable);
         if sendable {
             bar.append(&submit_all);
         }
