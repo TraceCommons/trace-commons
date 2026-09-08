@@ -9,19 +9,22 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use trace_commons_contributor_ffi::{
-    TC_CREDENTIAL_ACTION_CANCEL, TC_CREDENTIAL_ACTION_FORGET, TC_CREDENTIAL_ACTION_NONE,
-    TC_CREDENTIAL_ACTION_OBTAIN, TC_HARNESS_PLAN_CHANGES, TC_HARNESS_PLAN_ENTRY_UNUSABLE,
-    TC_HARNESS_PLAN_NO_CONFIG_PATH, TC_HARNESS_PLAN_NOOP, TC_HARNESS_PLAN_NOT_INSTALLED,
-    TC_HARNESS_PLAN_UNKNOWN, TC_HARNESS_PLAN_UNPARSEABLE, TC_HARNESS_STATE_ACTIVITY_SHARED,
-    TC_HARNESS_STATE_ANSWERING, TC_HARNESS_STATE_CONNECTED_NO_CALLS,
-    TC_HARNESS_STATE_NOT_CONNECTED, TC_HARNESS_STATE_UNKNOWN, TC_PRIVATE_INFERENCE_TONE_ATTENTION,
-    TC_PRIVATE_INFERENCE_TONE_CLEAR, TC_PRIVATE_INFERENCE_TONE_HELD,
-    TC_PRIVATE_INFERENCE_TONE_NEUTRAL, TC_PRIVATE_INFERENCE_TONE_REFUSED, TC_WITNESS_STATE_ABSENT,
-    TC_WITNESS_STATE_NOT_ENROLLED, TC_WITNESS_STATE_PINNED,
-    TC_WITNESS_STATE_REFUSING_INFERENCE_RECEIPTS_MISSING, TC_WITNESS_STATE_REFUSING_PIN_MALFORMED,
-    TC_WITNESS_STATE_REFUSING_UNPINNED, TC_WITNESS_STATE_UNREADABLE, TC_WITNESS_TONE_ATTENTION,
-    TC_WITNESS_TONE_CLEAR, TC_WITNESS_TONE_HELD, TC_WITNESS_TONE_NEUTRAL, TC_WITNESS_TONE_REFUSED,
-    tc_call, tc_consent_copy, tc_consent_gate_help, tc_daemon_start, tc_daemon_start_with_settings,
+    TC_CONTRIBUTION_CONTROL_CONTRIBUTE, TC_CONTRIBUTION_CONTROL_NONE, TC_CREDENTIAL_ACTION_CANCEL,
+    TC_CREDENTIAL_ACTION_FORGET, TC_CREDENTIAL_ACTION_NONE, TC_CREDENTIAL_ACTION_OBTAIN,
+    TC_HARNESS_PLAN_CHANGES, TC_HARNESS_PLAN_ENTRY_UNUSABLE, TC_HARNESS_PLAN_NO_CONFIG_PATH,
+    TC_HARNESS_PLAN_NOOP, TC_HARNESS_PLAN_NOT_INSTALLED, TC_HARNESS_PLAN_UNKNOWN,
+    TC_HARNESS_PLAN_UNPARSEABLE, TC_HARNESS_STATE_ACTIVITY_SHARED, TC_HARNESS_STATE_ANSWERING,
+    TC_HARNESS_STATE_CONNECTED_NO_CALLS, TC_HARNESS_STATE_NOT_CONNECTED, TC_HARNESS_STATE_UNKNOWN,
+    TC_PRIVATE_INFERENCE_TONE_ATTENTION, TC_PRIVATE_INFERENCE_TONE_CLEAR,
+    TC_PRIVATE_INFERENCE_TONE_HELD, TC_PRIVATE_INFERENCE_TONE_NEUTRAL,
+    TC_PRIVATE_INFERENCE_TONE_REFUSED, TC_WITNESS_STATE_ABSENT, TC_WITNESS_STATE_NOT_ENROLLED,
+    TC_WITNESS_STATE_PINNED, TC_WITNESS_STATE_REFUSING_INFERENCE_RECEIPTS_MISSING,
+    TC_WITNESS_STATE_REFUSING_PIN_MALFORMED, TC_WITNESS_STATE_REFUSING_UNPINNED,
+    TC_WITNESS_STATE_UNREADABLE, TC_WITNESS_TONE_ATTENTION, TC_WITNESS_TONE_CLEAR,
+    TC_WITNESS_TONE_HELD, TC_WITNESS_TONE_NEUTRAL, TC_WITNESS_TONE_REFUSED, tc_call,
+    tc_consent_copy, tc_consent_gate_help, tc_contribution_eligibility_control,
+    tc_contribution_eligibility_line, tc_contribution_eligibility_reason_line,
+    tc_contribution_eligibility_tone, tc_daemon_start, tc_daemon_start_with_settings,
     tc_daemon_stop, tc_discover_sources, tc_handle, tc_handle_free, tc_invite_issuer_host,
     tc_last_error, tc_near_ai_credential_action, tc_near_ai_credential_state_line,
     tc_near_ai_credential_state_tone, tc_preview, tc_preview_body, tc_preview_open,
@@ -3562,6 +3565,134 @@ fn the_credential_state_crosses_with_its_tone_and_its_action() {
         unsafe { tc_near_ai_credential_state_tone(std::ptr::null()) },
         TC_PRIVATE_INFERENCE_TONE_NEUTRAL
     );
+}
+
+/// The eligibility row crosses whole: the sentence, the tone, the control and
+/// the reason.
+///
+/// Pinned against the Rust tables rather than against literals, so this
+/// cannot become a second place any of the four is decided.
+#[test]
+fn the_eligibility_state_crosses_with_its_tone_its_control_and_its_reason() {
+    use trace_commons_contributor::private_inference_copy as copy;
+    let line = |state: &str| {
+        let state = cstr_str(state);
+        take_owned(unsafe { tc_contribution_eligibility_line(state.as_ptr()) })
+    };
+    let control = |state: &str| {
+        let state = cstr_str(state);
+        unsafe { tc_contribution_eligibility_control(state.as_ptr()) }
+    };
+    let tone = |state: &str| {
+        let state = cstr_str(state);
+        unsafe { tc_contribution_eligibility_tone(state.as_ptr()) }
+    };
+    let reason = |label: &str| {
+        let label = cstr_str(label);
+        take_owned(unsafe { tc_contribution_eligibility_reason_line(label.as_ptr()) })
+    };
+
+    for state in [
+        "eligible",
+        "ineligible_permanent",
+        "ineligible_configuration",
+        "unknown",
+        "",
+        "ELIGIBLE",
+        "a_state_from_a_later_daemon",
+    ] {
+        assert_eq!(
+            line(state),
+            copy::eligibility_state_line(state),
+            "{state:?}"
+        );
+        let expected = match copy::eligibility_control(state) {
+            copy::ContributionControl::None => TC_CONTRIBUTION_CONTROL_NONE,
+            copy::ContributionControl::Contribute => TC_CONTRIBUTION_CONTROL_CONTRIBUTE,
+        };
+        assert_eq!(control(state), expected, "{state:?}");
+    }
+
+    // Only an eligible session is offered, and only the one state with
+    // something to do about it reads as actionable.
+    assert_eq!(control("eligible"), TC_CONTRIBUTION_CONTROL_CONTRIBUTE);
+    assert_eq!(tone("eligible"), TC_PRIVATE_INFERENCE_TONE_CLEAR);
+    assert_eq!(
+        tone("ineligible_configuration"),
+        TC_PRIVATE_INFERENCE_TONE_ATTENTION
+    );
+    assert_eq!(
+        tone("ineligible_permanent"),
+        TC_PRIVATE_INFERENCE_TONE_NEUTRAL
+    );
+
+    // Nothing read is offered, borrows no ineligibility, and a null pointer
+    // is the same answer.
+    for unread in ["", "a_state_from_a_later_daemon"] {
+        assert_eq!(control(unread), TC_CONTRIBUTION_CONTROL_NONE, "{unread:?}");
+        assert_eq!(line(unread), copy::ELIGIBILITY_UNKNOWN, "{unread:?}");
+        assert_ne!(
+            line(unread),
+            copy::ELIGIBILITY_INELIGIBLE_PERMANENT,
+            "{unread:?}"
+        );
+        assert_ne!(tone(unread), TC_PRIVATE_INFERENCE_TONE_CLEAR, "{unread:?}");
+    }
+    assert_eq!(
+        unsafe { tc_contribution_eligibility_control(std::ptr::null()) },
+        TC_CONTRIBUTION_CONTROL_NONE
+    );
+    assert_eq!(
+        take_owned(unsafe { tc_contribution_eligibility_line(std::ptr::null()) }),
+        copy::ELIGIBILITY_UNKNOWN
+    );
+    assert_eq!(
+        unsafe { tc_contribution_eligibility_tone(std::ptr::null()) },
+        TC_PRIVATE_INFERENCE_TONE_NEUTRAL
+    );
+
+    // Every reason the daemon can produce crosses; anything else, including
+    // a null pointer, is the empty string a shell renders nothing for.
+    for label in trace_commons_contributor::daemon::contribution_eligibility::ALL_REASONS {
+        assert_eq!(
+            reason(label),
+            copy::eligibility_reason_line(label),
+            "{label}"
+        );
+        assert!(!reason(label).is_empty(), "{label}");
+    }
+    for unknown in ["", "a_reason_from_a_later_daemon"] {
+        assert_eq!(reason(unknown), "", "{unknown:?}");
+    }
+    assert_eq!(
+        take_owned(unsafe { tc_contribution_eligibility_reason_line(std::ptr::null()) }),
+        ""
+    );
+}
+
+/// The contribution control numbering shares no number with a credential
+/// action or a tone. Both blocks have a "nothing" member, and one collision
+/// draws a sign-in button on a queue row.
+#[test]
+fn the_contribution_controls_share_no_number_with_an_action_or_a_tone() {
+    for control in [
+        TC_CONTRIBUTION_CONTROL_NONE,
+        TC_CONTRIBUTION_CONTROL_CONTRIBUTE,
+    ] {
+        for other in [
+            TC_CREDENTIAL_ACTION_NONE,
+            TC_CREDENTIAL_ACTION_OBTAIN,
+            TC_CREDENTIAL_ACTION_CANCEL,
+            TC_CREDENTIAL_ACTION_FORGET,
+            TC_PRIVATE_INFERENCE_TONE_NEUTRAL,
+            TC_PRIVATE_INFERENCE_TONE_HELD,
+            TC_PRIVATE_INFERENCE_TONE_CLEAR,
+            TC_PRIVATE_INFERENCE_TONE_ATTENTION,
+            TC_PRIVATE_INFERENCE_TONE_REFUSED,
+        ] {
+            assert_ne!(control, other);
+        }
+    }
 }
 
 /// The action numbering shares no number with any tone that crosses this ABI.

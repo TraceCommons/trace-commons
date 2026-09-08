@@ -687,6 +687,77 @@ int32_t     tc_near_ai_credential_state_tone(const char* state);
  */
 int32_t     tc_near_ai_credential_action(const char* state);
 
+/* What a shell may offer for one queue entry's eligibility state.
+ *
+ * Distinct from the TC_CREDENTIAL_ACTION_* block above despite both having a
+ * "nothing" member: they govern different controls, and one numbering shared
+ * between them is one renumbering away from drawing a sign-in button on a
+ * queue row.
+ */
+#define TC_CONTRIBUTION_CONTROL_NONE       50
+#define TC_CONTRIBUTION_CONTROL_CONTRIBUTE 51
+
+/* The sentence for one queue entry's eligibility label.
+ *
+ * state is that field from a list_pending entry: "eligible",
+ * "ineligible_permanent", "ineligible_configuration" or "unknown".
+ *
+ * A SHELL THAT RECEIVED NO eligibility FIELD MUST NOT CALL THIS. An absent
+ * field means the contributor was invited and has no eligibility question;
+ * answering one they do not have puts a caveat on work that carries none.
+ * Absent is not "unknown".
+ *
+ * An empty, NULL, non-UTF-8 or unfamiliar state reports that the answer has
+ * not been worked out. IT NEVER REPORTS AN INELIGIBILITY: a state this build
+ * cannot read is not evidence about a contributor's session, and saying it is
+ * would stop them offering work that is fine.
+ *
+ * Returns an owned string; free it with tc_string_free. NULL only on a caught
+ * panic.
+ */
+char*       tc_contribution_eligibility_line(const char* state);
+
+/* How firmly the sentence tc_contribution_eligibility_line returned reads:
+ * one of the TC_PRIVATE_INFERENCE_TONE_* values.
+ *
+ * "eligible" is _CLEAR and "ineligible_configuration" is _ATTENTION -- the one
+ * state with something to do about it. Everything else, including a state this
+ * build has never heard of, a NULL or non-UTF-8 state, and a caught panic, is
+ * TC_PRIVATE_INFERENCE_TONE_NEUTRAL. A permanent ineligibility is deliberately
+ * NOT _REFUSED: nothing was refused and nothing went wrong, and painting a
+ * contributor's ordinary older work as a failure is a judgement this surface
+ * has no business making.
+ */
+int32_t     tc_contribution_eligibility_tone(const char* state);
+
+/* The one control a shell may offer for an eligibility state: one of the
+ * TC_CONTRIBUTION_CONTROL_* values.
+ *
+ * THE BRANCH TABLE CROSSES, NOT ONLY THE WORDS. Three shells each deciding
+ * which rows get a send button is three chances to offer one beside a session
+ * the server will refuse -- which is the defect this whole surface exists to
+ * remove, and it is worse than an inert button: pressing it sends a
+ * contributor's work and has it turned away.
+ *
+ * TC_CONTRIBUTION_CONTROL_NONE is not "hide the row". Every session is shown,
+ * because hiding a contributor's own work is its own dishonesty. The row is
+ * present, unoffered, and carries its sentence.
+ */
+int32_t     tc_contribution_eligibility_control(const char* state);
+
+/* The sentence for one queue entry's eligibility_reason label.
+ *
+ * THE EMPTY STRING for an absent, NULL, non-UTF-8 or unfamiliar reason, and a
+ * shell renders nothing for it. That is not the hedge the state line makes:
+ * the state sentence has already said what is true, and a second sentence
+ * guessing at a reason this build does not know would add a detail nobody
+ * established. An "eligible" entry carries no reason at all.
+ *
+ * Returns an owned string; free it with tc_string_free. NULL only on a caught
+ * panic.
+ */
+char*       tc_contribution_eligibility_reason_line(const char* reason);
+
 /* The reported local port, assembled without a readiness claim.
  *
  * port is private_inference_state's port field. A value outside 1..65535 --
