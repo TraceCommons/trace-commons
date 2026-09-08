@@ -2182,6 +2182,35 @@ pub use trace_commons_contributor::private_inference_copy::{
     credential_state_line, credential_state_tone, harness_credential_notice,
 };
 
+// --- Whether a session can be contributed at all ------------------------
+//
+// Same rule as the block above, and the reason this surface exists at all:
+// a queue row that offers `Submit` beside a session the server will refuse
+// is an action the transport cannot perform, discovered on the press. Three
+// shells each deciding which rows get that button is three chances to draw
+// one in the wrong place.
+//
+// The four state sentences and the thirteen reason sentences are NOT
+// re-exported one by one. Which sentence a row shows is
+// `eligibility_state_line`'s decision, `eligibility_state_tone` paints it,
+// `eligibility_control` says whether the send control may be drawn at all,
+// and `eligibility_reason_line` adds the detail underneath. All four take
+// the SAME label and are used as one, so the words, the colour and the
+// button cannot disagree.
+//
+// The arm that matters is the unread one. A state this build has never
+// heard of answers the `unknown` sentence and `ContributionControl::None`
+// -- never an ineligibility sentence, which would tell a contributor their
+// own finished work is unsendable on no evidence at all. The reason line
+// answers the EMPTY STRING there instead, and this shell draws nothing for
+// it: the state sentence has already said what is true, and a second
+// sentence guessing at a reason nobody established is a detail invented on
+// screen.
+pub use trace_commons_contributor::private_inference_copy::{
+    ContributionControl, eligibility_control, eligibility_reason_line, eligibility_state_line,
+    eligibility_state_tone,
+};
+
 // --- The redaction witness ---------------------------------------------
 //
 // Same rule as the Tools block above, for the same reason. The witness

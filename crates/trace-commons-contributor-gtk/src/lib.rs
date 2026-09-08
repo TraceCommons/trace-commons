@@ -20,6 +20,7 @@
 pub mod autostart;
 pub mod backend;
 pub mod copy;
+pub mod eligibility;
 pub mod model;
 pub mod notify;
 pub mod original_search;

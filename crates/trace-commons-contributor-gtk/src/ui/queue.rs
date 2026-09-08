@@ -1099,6 +1099,33 @@ fn manifest_block(
         }
         facts.append(&extent);
     }
+
+    // Whether this session can be contributed at all, and why not.
+    //
+    // Absent entirely for a contributor who was invited rather than
+    // admitted on evidence: `eligibility::view` answers `None` there and
+    // the card renders exactly as it did before this surface existed. It is
+    // NOT the `unknown` state, which is a real answer with its own
+    // sentence.
+    //
+    // Nothing is branched on here. The sentence, the colour and the reason
+    // all arrive already decided in the view; this is the part that puts
+    // them on screen.
+    if let Some(view) = crate::eligibility::view(entry) {
+        let tone = super::private_inference::indicator_tone(view.tone);
+        let state = style::caveat(view.state_line);
+        state.add_css_class(tone.css());
+        facts.append(&state);
+        // The empty string is what an unfamiliar or absent reason answers,
+        // and it draws no line: the sentence above has already said what is
+        // true, and a second one guessing at a reason nobody established
+        // would be a detail invented on screen.
+        if !view.reason_line.is_empty() {
+            let reason = style::caveat(view.reason_line);
+            reason.add_css_class("tc-tertiary");
+            facts.append(&reason);
+        }
+    }
     block.append(&facts);
 
     let actions = gtk::Box::new(gtk::Orientation::Horizontal, space::S);
@@ -1119,7 +1146,13 @@ fn manifest_block(
     submit.set_tooltip_text(Some(copy::SUBMIT_TOOLTIP));
     actions.append(&skip);
     actions.append(&look);
-    actions.append(&submit);
+    // `Look inside` stays on every row: a contributor may always read their
+    // own session. `Submit` is the control the daemon's answer governs, and
+    // it is the only one -- an ineligible row is present and unoffered, not
+    // hidden and not made inert everywhere.
+    if crate::eligibility::offers_send(entry) {
+        actions.append(&submit);
+    }
     block.append(&actions);
 
     let app_for_look = Rc::clone(app);

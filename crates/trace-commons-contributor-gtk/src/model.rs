@@ -170,6 +170,28 @@ pub struct QueueEntry {
     pub subagent_count: u32,
     #[serde(default)]
     pub subagents_dropped: u32,
+    /// Whether this session can be contributed, as the daemon worked it out
+    /// from the cheap checks it can run without reading bodies off disk.
+    ///
+    /// `None` IS NOT `unknown`. The field is absent from the wire entirely
+    /// when the contributor was invited rather than admitted on evidence, or
+    /// when the config could not be read -- they have no eligibility
+    /// question, and a row that answered one they do not have would put a
+    /// sentence about admissibility on every card an invited contributor
+    /// owns. `unknown` is a real state that arrives as a string and gets its
+    /// own sentence. The same tri-state discipline
+    /// `Settings::destination_credentialed` follows, and `#[serde(default)]`
+    /// on an `Option` is the mechanism that keeps the two apart.
+    ///
+    /// Never matched on in this shell: it is handed to
+    /// [`crate::eligibility`], which asks the shared crate.
+    #[serde(default)]
+    pub eligibility: Option<String>,
+    /// Which `Unattestable` variant decided [`Self::eligibility`], as a
+    /// stable label. Absent on every `eligible` row, and on a daemon that
+    /// predates the field.
+    #[serde(default)]
+    pub eligibility_reason: Option<String>,
 }
 
 impl QueueEntry {
