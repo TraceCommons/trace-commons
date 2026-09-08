@@ -932,25 +932,22 @@
                                             Tag="{x:Bind}"
                                             Click="OnOpenFolder" />
                                     <!--
-                                        DISABLED, never removed, when nothing
-                                        in this folder can be sent. A group
-                                        header is not a row and the two rules
-                                        differ deliberately: an ineligible row
-                                        draws no control at all, but the group
-                                        still HOLDS sessions, and a folder
-                                        offering no way to act on it reads as
-                                        broken rather than finished. The
-                                        withheld line above says how many.
+                                        GONE, not greyed, when nothing in this
+                                        folder can be sent. The withheld line
+                                        above already SAYS SO IN WORDS, and an
+                                        inert button beside that sentence is an
+                                        inert control with its own explanation
+                                        standing next to it proving it
+                                        redundant.
 
-                                        CanSubmitAll is the shared branch
+                                        ShowSubmitAll is the shared branch
                                         table's answer, reached with an absent
-                                        count spelled as a negative -- see
-                                        QueueGroupViewModel.
+                                        count spelled as a NEGATIVE -- see
+                                        ProjectQueueGroup.
                                     -->
                                     <Button Style="{StaticResource TcSecondaryButtonStyle}"
                                             Content="{x:Bind SubmitAllText}"
                                             Visibility="{x:Bind ShowSubmitAll}"
-                                            IsEnabled="{x:Bind CanSubmitAll}"
                                             Tag="{x:Bind}"
                                             ToolTipService.ToolTip="Sends every session waiting in this project, in one call. Scrubbing still runs, and Undo follows for a few seconds."
                                             Click="OnSubmitAll" />
@@ -968,7 +965,6 @@
                                     <Button Style="{StaticResource TcSecondaryButtonStyle}"
                                             Content="{x:Bind SubmitAllAsText}"
                                             Visibility="{x:Bind ShowSubmitAll}"
-                                            IsEnabled="{x:Bind CanSubmitAll}"
                                             Tag="{x:Bind}"
                                             ToolTipService.ToolTip="{x:Bind SubmitAllAsTooltip}">
                                         <Button.Flyout>

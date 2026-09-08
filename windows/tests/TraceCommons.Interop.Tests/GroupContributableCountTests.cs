@@ -51,7 +51,6 @@ public class GroupContributableCountTests
         Assert.Equal(7, group.OfferedCount);
         Assert.Equal(0, group.Withheld);
         Assert.True(group.ShowSubmitAll);
-        Assert.True(group.CanSubmitAll);
         Assert.Null(ContributionEligibilitySurface.WithheldLine(group.Withheld));
 
         // Same answer when a map exists but carries no row for this project.
@@ -61,7 +60,6 @@ public class GroupContributableCountTests
         Assert.Equal(7, other.OfferedCount);
         Assert.Equal(0, other.Withheld);
         Assert.True(other.ShowSubmitAll);
-        Assert.True(other.CanSubmitAll);
     }
 
     /// <summary>
@@ -77,20 +75,19 @@ public class GroupContributableCountTests
         Assert.Equal(3, group.OfferedCount);
         Assert.Equal(4, group.Withheld);
         Assert.True(group.ShowSubmitAll);
-        Assert.True(group.CanSubmitAll);
 
         string? line = ContributionEligibilitySurface.WithheldLine(group.Withheld);
         Assert.False(string.IsNullOrWhiteSpace(line));
     }
 
     /// <summary>
-    /// A count of zero makes the group's controls INERT, not absent.
+    /// A count of zero REMOVES the group's controls.
     /// </summary>
     /// <remarks>
-    /// A group header is not a row, and the two rules differ deliberately: an
-    /// ineligible row draws no control at all, but the group still holds
-    /// sessions, and a folder offering no way to act on it reads as broken
-    /// rather than finished.
+    /// The same answer as a row, reached for a slightly different reason: the
+    /// group now says in words that nothing here can be sent -- the withheld
+    /// line -- and an inert button beside that sentence is an inert control
+    /// with its own explanation proving it redundant.
     ///
     /// <para>
     /// Reached only when the daemon SENT a zero. An absent count offers
@@ -98,13 +95,12 @@ public class GroupContributableCountTests
     /// </para>
     /// </remarks>
     [Fact]
-    public void AZeroCountMakesTheControlsInertNotAbsent()
+    public void AZeroCountRemovesTheControls()
     {
         ProjectQueueGroup group = Group(7, Counts(0));
 
         Assert.Equal(0, group.OfferedCount);
-        Assert.False(group.CanSubmitAll);
-        Assert.True(group.ShowSubmitAll);
+        Assert.False(group.ShowSubmitAll);
 
         // The row is still there and still says how many it is holding: the
         // group is unoffered, never hidden.
@@ -182,7 +178,7 @@ public class GroupContributableCountTests
                         == ContributionControl.Contribute,
                     Group(pending, contributable is { } c
                         ? new Dictionary<string, int>(StringComparer.Ordinal) { ["proj"] = c }
-                        : null).CanSubmitAll);
+                        : null).ShowSubmitAll);
             }
         }
     }

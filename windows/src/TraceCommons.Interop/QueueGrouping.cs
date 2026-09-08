@@ -119,9 +119,19 @@ public sealed class ProjectQueueGroup
     /// </summary>
     /// <remarks>
     /// <para>
-    /// Always true, still. Whether the controls can be PRESSED is
-    /// <see cref="CanSubmitAll"/>, which is a different question and has a
-    /// different answer at zero submittable.
+    /// REMOVED, not disabled, when nothing in this group can be sent. The
+    /// group now SAYS SO IN WORDS -- the withheld line sits above these
+    /// controls -- and an inert button beside that sentence is an inert
+    /// control with its own explanation standing next to it proving it
+    /// redundant. The earlier argument for disabling, that a folder with no
+    /// control reads as broken, was made before that sentence existed.
+    /// </para>
+    ///
+    /// <para>
+    /// The answer is the shared branch table's, reached with the count
+    /// spelled as the ABI spells it -- an absent count goes over as a
+    /// NEGATIVE, never as zero. See
+    /// <see cref="ContributionEligibilitySurface.GroupControl"/>.
     /// </para>
     ///
     /// This used to be <c>Count &gt; 1</c>, on the reasoning that a
@@ -132,27 +142,7 @@ public sealed class ProjectQueueGroup
     /// the folder is offering. The rule expired with the layout it was
     /// written for; the property stays so callers do not have to know that.
     /// </remarks>
-    public bool ShowSubmitAll => true;
-
-    /// <summary>
-    /// Whether the group's submit controls may be PRESSED.
-    /// </summary>
-    /// <remarks>
-    /// <b>A GROUP HEADER IS NOT A ROW, AND THE TWO RULES DIFFER
-    /// DELIBERATELY.</b> An ineligible row simply does not draw its control.
-    /// A group at zero submittable draws its controls DISABLED: the group
-    /// still holds sessions, and a folder offering no way to act on it at all
-    /// reads as broken rather than finished. See
-    /// <see cref="ShowSubmitAll"/>, which stays true.
-    ///
-    /// <para>
-    /// The answer is the shared branch table's, reached with the count spelled
-    /// as the ABI spells it -- an absent count goes over as a NEGATIVE, never
-    /// as zero. See
-    /// <see cref="ContributionEligibilitySurface.GroupControl"/>.
-    /// </para>
-    /// </remarks>
-    public bool CanSubmitAll =>
+    public bool ShowSubmitAll =>
         ContributionEligibilitySurface.GroupControl(Count, ContributableCount)
         == ContributionControl.Contribute;
 }

@@ -174,43 +174,42 @@ public class EligibilityShellWiringTests
     }
 
     /// <summary>
-    /// The group header disables its controls; it does not remove them.
+    /// The group header REMOVES its controls; it does not grey them.
     /// </summary>
     /// <remarks>
-    /// Deliberately unlike the row rule, where an ineligible session simply
-    /// draws no control. A group still HOLDS sessions, and a folder offering
-    /// no way to act on it at all reads as broken rather than finished.
+    /// The group says in words that nothing here can be sent -- the withheld
+    /// line sits above these controls -- so an inert button beside that
+    /// sentence is an inert control with its own explanation standing next to
+    /// it proving it redundant.
     /// </remarks>
     [Fact]
-    public void TheGroupHeaderDisablesRatherThanRemoves()
+    public void TheGroupHeaderRemovesRatherThanDisables()
     {
         string markup = ShellSource("TraceCommons.App/MainWindow.xaml");
 
-        // Both group controls are gated on pressability, and neither has its
-        // visibility tied to it.
+        // Both group controls are gated on VISIBILITY, and nothing on the
+        // header is greyed by eligibility.
         Assert.Equal(
-            2, Regex.Matches(markup, @"IsEnabled=""\{x:Bind CanSubmitAll\}""").Count);
+            2, Regex.Matches(markup, @"Visibility=""\{x:Bind ShowSubmitAll\}""").Count);
+        Assert.DoesNotContain("CanSubmitAll", markup, StringComparison.Ordinal);
         Assert.DoesNotContain(
-            "Visibility=\"{x:Bind CanSubmitAll}\"", markup, StringComparison.Ordinal);
+            "IsEnabled=\"{x:Bind ShowSubmitAll}\"", markup, StringComparison.Ordinal);
 
-        // ShowSubmitAll stays the visibility question and stays unconditional.
+        // And that visibility is the shared branch table's answer, ASKED
+        // rather than reproduced. A local `OfferedCount > 0` agrees with the
+        // ABI today and would go on agreeing with itself after the Rust
+        // changed an arm, so this cannot be established behaviourally -- it
+        // has to be asserted about the call.
         string grouping = ShellSource("TraceCommons.Interop/QueueGrouping.cs");
-        Assert.Contains(
-            "public bool ShowSubmitAll => true;", grouping, StringComparison.Ordinal);
-
-        // And pressability is the shared branch table's answer, ASKED rather
-        // than reproduced. A local `OfferedCount > 0` agrees with the ABI
-        // today and would go on agreeing with itself after the Rust changed
-        // an arm, so this cannot be established behaviourally -- it has to be
-        // asserted about the call.
         Assert.Matches(
             new Regex(
-                @"public bool CanSubmitAll =>\s*"
+                @"public bool ShowSubmitAll =>\s*"
                 + @"ContributionEligibilitySurface\.GroupControl\(Count, ContributableCount\)",
                 RegexOptions.Singleline),
             grouping);
         Assert.DoesNotContain(
-            "CanSubmitAll => OfferedCount", grouping, StringComparison.Ordinal);
+            "ShowSubmitAll => OfferedCount", grouping, StringComparison.Ordinal);
+        Assert.DoesNotContain("ShowSubmitAll => true", grouping, StringComparison.Ordinal);
     }
 
     /// <summary>
