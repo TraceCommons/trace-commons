@@ -11,13 +11,36 @@ use trace_commons_server::account_onboarding::{
 };
 use trace_commons_server::config::{DatabaseConfig, NearConfig, SslMode};
 use trace_commons_server::db::{Database, NewSession, postgres::PgBackend};
+use trace_commons_server::near_account_identity::NearAccountIdentity;
+use trace_commons_server::trace_artifact_kek::{KmsKeyWrapper, LocalMasterKeyWrapper};
+
+/// Provisioning now needs a pepper and an account-name key. The identity is a
+/// required argument with no default, so there is nothing to configure here
+/// except real controls -- an absent one refuses rather than falling back.
+fn identity() -> NearAccountIdentity {
+    let crypto =
+        trace_commons_server::secrets::SecretsCrypto::new(SecretString::new("a".repeat(32).into()))
+            .expect("fixture SecretsCrypto");
+    let kek: std::sync::Arc<dyn KmsKeyWrapper> = std::sync::Arc::new(LocalMasterKeyWrapper::new(
+        crypto,
+        "account-onboarding-pg-fixture",
+    ));
+    NearAccountIdentity::from_parts(
+        Some(&base64::engine::general_purpose::STANDARD.encode([9u8; 32])),
+        Some(kek),
+    )
+    .expect("fixture identity")
+}
 
 fn config(url: String) -> DatabaseConfig {
     DatabaseConfig {
-        url: SecretString::from(url),
+        url: SecretString::from(url.clone()),
         pool_size: 8,
         ssl_mode: SslMode::Prefer,
-        login_resolver_url: None,
+        // The anchor is a blind index and the tenant is random, so a returning
+        // contributor can only be found by resolving the index with no tenant
+        // context -- the same narrow resolver role V30 introduced for redeem.
+        login_resolver_url: Some(SecretString::from(url)),
         gate_driver_url: None,
         pii_backstop_driver_url: None,
         invite_registry_url: None,
@@ -170,6 +193,7 @@ async fn durable_provisioning_is_atomic_replay_safe_and_tenant_scoped() {
                 client_kind: "native",
                 expires_at: Utc::now() + Duration::hours(12),
             },
+            &identity(),
         )
         .await
         .unwrap();
@@ -245,6 +269,7 @@ async fn durable_provisioning_is_atomic_replay_safe_and_tenant_scoped() {
     let p2 = make_proof().await;
     let h1 = hash(&uuid::Uuid::new_v4().to_string());
     let h2 = hash(&uuid::Uuid::new_v4().to_string());
+    let (racing_one, racing_two) = (identity(), identity());
     let (one, two) = tokio::join!(
         db.provision_verified_near_account(
             p1,
@@ -252,7 +277,8 @@ async fn durable_provisioning_is_atomic_replay_safe_and_tenant_scoped() {
                 token_hash: &h1,
                 client_kind: "native",
                 expires_at: Utc::now() + Duration::hours(12)
-            }
+            },
+            &racing_one
         ),
         db2.provision_verified_near_account(
             p2,
@@ -260,7 +286,8 @@ async fn durable_provisioning_is_atomic_replay_safe_and_tenant_scoped() {
                 token_hash: &h2,
                 client_kind: "native",
                 expires_at: Utc::now() + Duration::hours(12)
-            }
+            },
+            &racing_two
         )
     );
     assert_eq!(one.unwrap().account_id, result.account_id);
@@ -280,6 +307,7 @@ async fn durable_provisioning_is_atomic_replay_safe_and_tenant_scoped() {
                 client_kind: "native",
                 expires_at: Utc::now() + Duration::hours(12),
             },
+            &identity(),
         )
         .await;
     assert!(failed.is_err());

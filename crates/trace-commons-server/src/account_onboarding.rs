@@ -72,7 +72,6 @@ pub struct VerifiedNearProvisioning {
     network: String,
     wallet_public_key: String,
     device_public_key: [u8; 32],
-    anchor_hash: [u8; 32],
     ceremony_hash: [u8; 32],
     expires_at: i64,
 }
@@ -90,10 +89,6 @@ impl VerifiedNearProvisioning {
     pub fn device_public_key(&self) -> &[u8; 32] {
         &self.device_public_key
     }
-    /// Stable across key rotation/devices; not proof of a unique human.
-    pub fn anchor_hash(&self) -> &[u8; 32] {
-        &self.anchor_hash
-    }
     pub fn ceremony_hash(&self) -> &[u8; 32] {
         &self.ceremony_hash
     }
@@ -109,7 +104,19 @@ impl VerifiedNearProvisioning {
 pub struct StoredProvisioningCeremony {
     callback_hash: Option<[u8; 32]>,
     nonce: [u8; 32],
-    anchor_hash: [u8; 32],
+    /// Issue-time commitment binding this ceremony to the account name and
+    /// network presented at start, rechecked in [`PendingNearProvisioning::restore`]
+    /// so finish cannot switch accounts.
+    ///
+    /// This is deliberately NOT the durable anchor. Since the anchor became a
+    /// peppered blind index (`near_account_identity`), an unkeyed digest of
+    /// public inputs no longer belongs anywhere identity is stored -- but this
+    /// row lives for [`PROVISIONING_TTL_SECONDS`], is deleted when taken, and is
+    /// reachable only by possession of the ceremony handle, so keying it would
+    /// buy a five-minute window in exchange for threading a secret through the
+    /// pure issue/restore path. It keeps the unkeyed form and a name that says
+    /// what it is.
+    account_commitment: [u8; 32],
     device_hash: [u8; 32],
     browser_binding: [u8; 32],
     config_hash: [u8; 32],
@@ -139,7 +146,7 @@ impl PendingNearProvisioning {
                 .as_ref()
                 .map(|s| Sha256::digest(s.as_bytes()).into()),
             nonce: self.nonce,
-            anchor_hash: framed_hash(
+            account_commitment: framed_hash(
                 b"trace_commons.near_account_anchor.v1\n",
                 &[self.network.as_bytes(), self.account_id.as_bytes()],
             ),
@@ -167,13 +174,13 @@ impl PendingNearProvisioning {
             stored.browser_binding,
             stored.issued_at,
         )?;
-        let anchor = framed_hash(
+        let commitment = framed_hash(
             b"trace_commons.near_account_anchor.v1\n",
             &[cfg.network.as_bytes(), account_id.as_bytes()],
         );
         let device_hash: [u8; 32] = Sha256::digest(device_public_key).into();
         if stored.config_hash != pending.config_hash
-            || stored.anchor_hash != anchor
+            || stored.account_commitment != commitment
             || stored.device_hash != device_hash
             || stored.expires_at != pending.expires_at
         {
@@ -336,10 +343,6 @@ impl PendingNearProvisioning {
             network: self.network.clone(),
             wallet_public_key: assertion.wallet_public_key.into(),
             device_public_key: self.device_public_key,
-            anchor_hash: framed_hash(
-                b"trace_commons.near_account_anchor.v1\n",
-                &[self.network.as_bytes(), self.account_id.as_bytes()],
-            ),
             ceremony_hash: framed_hash(
                 b"trace_commons.near_provisioning_ceremony.v1\n",
                 &[&self.nonce],
@@ -452,9 +455,14 @@ mod tests {
             .encode(device.sign(&p.device_signing_bytes()).as_ref())
     }
 
+    /// The proof no longer carries an anchor -- the durable anchor is a peppered
+    /// blind index computed in `near_account_identity` from the fields asserted
+    /// here. What still has to hold at this layer is that those fields are the
+    /// ceremony's own account and network and survive a change of wallet key and
+    /// device, because that is what makes the index stable for a returning user.
     #[tokio::test]
-    async fn verified_anchor_survives_keys_devices_and_has_network_separation() {
-        let mut anchors = Vec::new();
+    async fn verified_identity_fields_survive_keys_and_devices() {
+        let mut identities = Vec::new();
         for seed in [1, 2] {
             let wallet = key(seed);
             let device = key(seed + 10);
@@ -484,26 +492,15 @@ mod tests {
                 device.public_key().as_ref()
             );
             assert_eq!(result.expires_at(), 400);
-            anchors.push(*result.anchor_hash());
+            identities.push((
+                result.account_id().to_string(),
+                result.network().to_string(),
+            ));
         }
-        assert_eq!(anchors[0], anchors[1]);
+        assert_eq!(identities[0], identities[1]);
         assert_eq!(
-            hex::encode(anchors[0]),
-            "9c2335d9afa6312a1b75700f1baf786dd207823002eaff79da64dd572cf53463"
-        );
-        assert_ne!(
-            anchors[0],
-            framed_hash(
-                b"trace_commons.near_account_anchor.v1\n",
-                &[b"testnet", b"alice.near"]
-            )
-        );
-        assert_ne!(
-            anchors[0],
-            framed_hash(
-                b"trace_commons.near_account_anchor.v1\n",
-                &[b"mainnet", b"bob.near"]
-            )
+            identities[0],
+            ("alice.near".to_string(), "mainnet".to_string())
         );
         assert_ne!(
             framed_hash(b"x", &[b"a", b"bc"]),

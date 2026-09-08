@@ -170,6 +170,12 @@ pub enum TraceArtifactKind {
     RankerTrainingExport,
     VectorPayload,
     AuditSnapshot,
+    /// A NEAR wallet account name sealed for read-back at pepper-rotation time
+    /// (`near_account_identity`). Not an object-store artifact: nothing under
+    /// this kind is ever written to the object store, and the segment exists so
+    /// the sealed name gets its own `KekContext` binding rather than sharing
+    /// one with a real artifact.
+    NearAccountName,
     Other,
 }
 
@@ -187,6 +193,7 @@ impl TraceArtifactKind {
             Self::RankerTrainingExport => "ranker_training_export",
             Self::VectorPayload => "vector_payload",
             Self::AuditSnapshot => "audit_snapshot",
+            Self::NearAccountName => "near_account_name",
             Self::Other => "other",
         }
     }
@@ -1179,7 +1186,10 @@ fn verify_kek_binding(
 /// Returns a `Zeroizing` wrapper so the raw key bytes are cleared from the
 /// stack automatically on drop, reducing the window during which plaintext
 /// key material could appear in core dumps or stack traces.
-fn generate_dek() -> Zeroizing<[u8; 32]> {
+/// `pub(crate)` so `near_account_identity` can seal an account name under the
+/// same per-row DEK envelope the artifact store uses, rather than growing a
+/// second key-generation path.
+pub(crate) fn generate_dek() -> Zeroizing<[u8; 32]> {
     let mut dek = Zeroizing::new([0u8; 32]);
     rand::RngCore::fill_bytes(&mut aes_gcm::aead::OsRng, dek.as_mut());
     dek

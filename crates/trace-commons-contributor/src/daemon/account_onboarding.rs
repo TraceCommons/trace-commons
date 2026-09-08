@@ -513,6 +513,25 @@ fn validate_published_witness(mut value: serde_json::Value) -> Result<WitnessSet
     Ok(witness)
 }
 
+/// Shape check for a wallet tenant id: the `near-` namespace plus 64 lowercase
+/// hex characters.
+///
+/// This used to be `tenant_id == format!("near-{}", &anchor_hash[7..])`, and it
+/// stopped being true when the server salted the anchor. The tenant id is now
+/// drawn from the OS RNG and is a function of nothing -- that is the point of
+/// the change, since the old binding let anyone who knew a NEAR account name
+/// compute its tenant id offline. The client cannot re-derive it, so shape is
+/// all there is to check here; the value is authenticated by the session token
+/// issued alongside it, not by its own contents.
+fn is_near_tenant_id(tenant_id: &str) -> bool {
+    tenant_id.strip_prefix("near-").is_some_and(|suffix| {
+        suffix.len() == 64
+            && suffix
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    })
+}
+
 fn persist(
     dir: &std::path::Path,
     options: &Options,
@@ -532,7 +551,7 @@ fn persist(
         || !result.anchor_hash[7..]
             .bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-        || result.tenant_id != format!("near-{}", &result.anchor_hash[7..])
+        || !is_near_tenant_id(&result.tenant_id)
     {
         bail!("near_signup_result_invalid")
     }
@@ -648,7 +667,12 @@ mod tests {
                 token_type: "Bearer".into(),
                 expires_in_secs: 3600,
                 account_id: "example-account".into(),
-                tenant_id: format!("near-{}", "ab".repeat(32)),
+                // Deliberately unrelated to anchor_hash below. The server's
+                // tenant id is now drawn at random, so a fixture where the two
+                // agreed would keep passing under the retired
+                // `tenant_id == "near-" || anchor_hash[7..]` binding and prove
+                // nothing about the check that replaced it.
+                tenant_id: format!("near-{}", "3c".repeat(32)),
                 device_key_id: identity.device_key_id.clone(),
                 anchor_hash: format!("sha256:{}", "ab".repeat(32)),
             };
@@ -708,6 +732,20 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn wallet_tenant_ids_are_accepted_on_shape_and_not_on_a_derivation() {
+        assert!(is_near_tenant_id(&format!("near-{}", "3c".repeat(32))));
+        assert!(is_near_tenant_id(&format!("near-{}", "ab".repeat(32))));
+        // Upper-case hex, the wrong length, and the wrong namespace are all
+        // rejected; the server emits lower-case hex in the `near-` namespace.
+        assert!(!is_near_tenant_id(&format!("near-{}", "AB".repeat(32))));
+        assert!(!is_near_tenant_id(&format!("near-{}", "ab".repeat(31))));
+        assert!(!is_near_tenant_id(&format!("near-{}", "ab".repeat(33))));
+        assert!(!is_near_tenant_id(&format!("tenant-{}", "ab".repeat(32))));
+        assert!(!is_near_tenant_id("near-"));
+        assert!(!is_near_tenant_id(&format!("near-{}", "gz".repeat(32))));
+    }
+
     #[test]
     fn callback_survives_originating_ipc_runtime_drop() {
         use std::io::Write;

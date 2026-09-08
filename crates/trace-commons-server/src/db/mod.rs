@@ -743,10 +743,15 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         Err(DatabaseError::Pool("near_provisioning_unconfigured".into()))
     }
 
+    /// `identity` is not optional and has no default: a backend that cannot be
+    /// handed a pepper and an account-name key must not provision, because the
+    /// alternative is an anchor computed from public inputs alone -- the exact
+    /// defect the salted scheme exists to remove.
     async fn provision_verified_near_account(
         &self,
         _proof: crate::account_onboarding::VerifiedNearProvisioning,
         _session: NewSession<'_>,
+        _identity: &crate::near_account_identity::NearAccountIdentity,
     ) -> Result<crate::account_onboarding::ProvisionedNearAccount, DatabaseError> {
         Err(DatabaseError::Pool("near_provisioning_unconfigured".into()))
     }

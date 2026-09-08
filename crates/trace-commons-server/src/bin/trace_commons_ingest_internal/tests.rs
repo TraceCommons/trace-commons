@@ -5118,6 +5118,7 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
     Arc::new(AppState {
         root,
         near_provisioning_enabled: false,
+        near_account_identity: None,
         near_provisioning_public_origin: None,
         near_provisioning_admission_ready: false,
         near_attestation_client: None,
@@ -26065,6 +26066,7 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
     let state = Arc::new(AppState {
         root: temp.path().to_path_buf(),
         near_provisioning_enabled: false,
+        near_account_identity: None,
         near_provisioning_public_origin: None,
         near_provisioning_admission_ready: false,
         near_attestation_client: None,

@@ -281,6 +281,10 @@ async fn finish(
         )
         .await
         .ok()?;
+    // Absent identity controls collapse to the same uniform deny as every other
+    // failure on this path. Boot already refuses when provisioning is enabled
+    // without them, so reaching here means provisioning is off.
+    let identity = state.near_account_identity.as_ref()?;
     let secret = generate_session_secret();
     let token_hash = hash_secret(&secret);
     let provisioned = db
@@ -291,6 +295,7 @@ async fn finish(
                 client_kind: NATIVE_SESSION_CLIENT_KIND,
                 expires_at: Utc::now() + Duration::hours(NATIVE_SESSION_TTL_HOURS),
             },
+            identity,
         )
         .await
         .ok()?;
