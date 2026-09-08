@@ -134,6 +134,12 @@ struct QueueFolderRow: View {
                 }
                 .menuStyle(.borderlessButton)
                 .fixedSize()
+                // Disabled on the same condition as the plain button, and
+                // it has to be said separately: this is a second route to
+                // the same call, and a menu that stayed live beside a
+                // disabled button would be the inert control #728 is
+                // about -- pressing it would send nothing and say nothing.
+                .disabled(submittableCount == 0)
                 .help(VerdictCopy.submitAllAsTooltip)
                 Spacer(minLength: TC.Space.m)
                 // Never `.tcPrimaryAction()`: it sits beside a control that
