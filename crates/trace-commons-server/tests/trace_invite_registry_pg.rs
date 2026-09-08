@@ -4,7 +4,9 @@
 //! Postgres-backed tests for the V42 invite-grant table.
 //!
 //! Skipped unless TRACE_COMMONS_PG_TEST_DATABASE_URL (or DATABASE_URL) is set.
-//! CI does not run these; run them locally against a real PostgreSQL.
+//! The `database suites against a real PostgreSQL` CI job sets it and runs
+//! them; run them locally against a real PostgreSQL too, because with the
+//! variable unset every test here returns early and the run still prints ok.
 
 use secrecy::SecretString;
 use trace_commons_server::config::{DatabaseConfig, SslMode};
