@@ -152,7 +152,13 @@ async fn actual_postgres_challenge_witness_ingest_and_terminal_retry() {
         )
         .await
         .unwrap();
-    client.execute("INSERT INTO trace_near_account_anchors(tenant_id,anchor_hash,account_id) VALUES($1,$2,$3)",&[&tenant,&prefixed,&account]).await.unwrap();
+    // V61 gave this table three NOT NULL columns with no default: the sealed
+    // account name and the two labels naming which pepper indexed it and which
+    // key sealed it. Provisioning writes all three; this fixture stands one
+    // provisioned account up by hand, so it has to write them too. They are
+    // deliberately obvious placeholders -- nothing in this test reads them, and
+    // a value that looked like a real seal would invite someone to trust it.
+    client.execute("INSERT INTO trace_near_account_anchors(tenant_id,anchor_hash,account_id,sealed_account_name,index_pepper_ref,account_name_key_ref) VALUES($1,$2,$3,$4,$5,$6)",&[&tenant,&prefixed,&account,&serde_json::json!({"fixture":"not a real seal"}),&"fixture-pepper-ref",&"fixture-key-ref"]).await.unwrap();
     client.execute("INSERT INTO device_keys(device_key_id,tenant_id,public_key,invite_subject_hash,onboarding_origin) VALUES($1,$2,$3,NULL,'near')",&[&device,&tenant,&base64::engine::general_purpose::STANDARD.encode(device_bytes)]).await.unwrap();
     client.execute("INSERT INTO trace_account_principals(tenant_id,account_id,principal_ref) VALUES($1,$2,$3)",&[&tenant,&account,&principal]).await.unwrap();
     client.execute("INSERT INTO trace_near_provisioned_devices(tenant_id,principal_ref,account_id,device_key_id,anchor_hash) VALUES($1,$2,$3,$4,$5)",&[&tenant,&principal,&account,&device,&prefixed]).await.unwrap();
