@@ -171,13 +171,30 @@ open redaction service, and an open quote oracle.
 | `Dockerfile` | Builds the witness image. Not reproducible; see below. |
 | `docker-compose.yml` | The application. **Measured** — every value in it is part of the enclave's identity. |
 | `app-compose.json` | dstack's manifest. Generated; embeds the compose file verbatim. |
-| `build-app-compose.sh` | Regenerates the manifest, and `--check` fails if it has drifted. |
+| `build-app-compose.sh` | Regenerates the manifest, and `--check` fails if it has drifted. Drift is also a CI test. |
 
 `docker-compose.yml` is the source of truth and `app-compose.json` is derived.
 **Run `./build-app-compose.sh` after every compose edit and commit both.**
-`./build-app-compose.sh --check` answers "is the manifest I am about to upload
-the one this compose file describes" without modifying anything; run it before
-a deploy.
+`./build-app-compose.sh --check` answers "is the committed manifest the one
+this compose file generates" without modifying anything; run it before a
+deploy.
+
+**Read that question narrowly.** It compares two files in this repository. It
+says nothing about the running CVM -- see the next section -- and a green
+`--check` beside a stale deployment is still a stale deployment. The converse
+is what makes a red one safe to act on: regenerating this file cannot move a
+deployed measurement, because nothing in the deploy path reads it. A red
+`--check` is a bookkeeping failure, fixed by regenerating and committing. It is
+never on its own a reason to redeploy, and a redeploy is what moves the
+measurement and forces every pin holder to re-pin.
+
+**It is enforced in CI**, by `witness_manifest_matches_compose` in the server
+crate's test suite, which asserts that the manifest embeds the current compose
+file. Before that existed the step was simply forgotten: five commits between
+#604 and #681 edited the compose without regenerating, leaving `--check` red on
+`main` and the committed manifest naming an image digest the CVM was not
+running (#760). A check that is always red is a check operators learn to
+ignore.
 
 **It prints no hash, and that is deliberate.** It once printed the SHA-256 of
 the manifest it writes; that value is not `compose_hash` and cannot be made
