@@ -2419,6 +2419,7 @@ mod tests {
             subagents_dropped: 0,
             routing: Vec::new(),
             attested_call: None,
+            attested_refusal: None,
         };
         super::strip_reasoning(&mut t);
         let kinds: Vec<_> = t.events.iter().map(|e| e.kind.clone()).collect();

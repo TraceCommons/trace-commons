@@ -92,11 +92,20 @@ impl TraceSource for RoutingEnrichedSource {
         // attested content this transcript never produced. Every failure
         // resolves to `None`, in keeping with this module's rule that nothing
         // here can fail a load.
-        transcript.attested_call = self.bodies_dir.as_deref().and_then(|dir| {
-            super::attested::attested_final_call(&transcript.routing, dir)
-                .ok()
-                .map(Arc::new)
-        });
+        // The refusal is kept beside the absence, not thrown away with it.
+        // This is the only place the expensive half of `attested_final_call`
+        // is paid for, and a later surface that wants to name the reason
+        // cannot afford to run it again -- see
+        // `SessionTranscript::attested_refusal`.
+        match self
+            .bodies_dir
+            .as_deref()
+            .map(|dir| super::attested::attested_final_call(&transcript.routing, dir))
+        {
+            Some(Ok(call)) => transcript.attested_call = Some(Arc::new(call)),
+            Some(Err(refusal)) => transcript.attested_refusal = Some(refusal),
+            None => {}
+        }
         Ok(transcript)
     }
 }

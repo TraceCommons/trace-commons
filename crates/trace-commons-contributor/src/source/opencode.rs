@@ -452,6 +452,7 @@ fn parse_export_with_record_budget(
         subagents_dropped: 0,
         routing: Vec::new(),
         attested_call: None,
+        attested_refusal: None,
     })
 }
 

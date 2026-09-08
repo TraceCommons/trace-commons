@@ -577,6 +577,7 @@ impl TraceSource for TrajectorySource {
             subagents_dropped: 0,
             routing: Vec::new(),
             attested_call: None,
+            attested_refusal: None,
         })
     }
 }

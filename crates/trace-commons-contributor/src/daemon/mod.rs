@@ -26,6 +26,7 @@ pub mod approved_envelope;
 pub mod audit;
 pub mod client;
 pub mod community;
+pub mod contribution_eligibility;
 pub mod eligibility;
 pub mod enroll;
 pub mod harness;
