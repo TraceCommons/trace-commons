@@ -24,20 +24,21 @@ use trace_commons_contributor_ffi::{
     TC_WITNESS_TONE_HELD, TC_WITNESS_TONE_NEUTRAL, TC_WITNESS_TONE_REFUSED, tc_call,
     tc_consent_copy, tc_consent_gate_help, tc_contribution_eligibility_control,
     tc_contribution_eligibility_line, tc_contribution_eligibility_reason_line,
-    tc_contribution_eligibility_tone, tc_daemon_start, tc_daemon_start_with_settings,
-    tc_daemon_stop, tc_discover_sources, tc_handle, tc_handle_free, tc_invite_issuer_host,
-    tc_last_error, tc_near_ai_credential_action, tc_near_ai_credential_state_line,
-    tc_near_ai_credential_state_tone, tc_preview, tc_preview_body, tc_preview_open,
-    tc_preview_search, tc_preview_summary_json, tc_preview_turns_json, tc_private_inference_copy,
-    tc_private_inference_quit_needs_notice, tc_private_inference_serving_line,
-    tc_private_inference_should_offer, tc_private_inference_state_line,
-    tc_private_inference_state_tone, tc_routing_copy, tc_routing_discovery_line,
-    tc_routing_last_checked, tc_routing_state_line, tc_routing_state_tone, tc_routing_token_line,
-    tc_routing_tool_tone, tc_routing_tool_word, tc_routing_unreachable_line,
-    tc_scrub_detector_names, tc_search_original, tc_source_check_line, tc_string_free,
-    tc_subscribe, tc_unsubscribe, tc_witness_clear, tc_witness_configure, tc_witness_copy,
-    tc_witness_last_result_json, tc_witness_last_result_line, tc_witness_last_result_tone,
-    tc_witness_state_line, tc_witness_state_tone, tc_witness_status_json, tc_witness_trust_state,
+    tc_contribution_eligibility_tone, tc_contribution_withheld_line, tc_daemon_start,
+    tc_daemon_start_with_settings, tc_daemon_stop, tc_discover_sources, tc_handle, tc_handle_free,
+    tc_invite_issuer_host, tc_last_error, tc_near_ai_credential_action,
+    tc_near_ai_credential_state_line, tc_near_ai_credential_state_tone, tc_preview,
+    tc_preview_body, tc_preview_open, tc_preview_search, tc_preview_summary_json,
+    tc_preview_turns_json, tc_private_inference_copy, tc_private_inference_quit_needs_notice,
+    tc_private_inference_serving_line, tc_private_inference_should_offer,
+    tc_private_inference_state_line, tc_private_inference_state_tone, tc_routing_copy,
+    tc_routing_discovery_line, tc_routing_last_checked, tc_routing_state_line,
+    tc_routing_state_tone, tc_routing_token_line, tc_routing_tool_tone, tc_routing_tool_word,
+    tc_routing_unreachable_line, tc_scrub_detector_names, tc_search_original, tc_source_check_line,
+    tc_string_free, tc_subscribe, tc_unsubscribe, tc_witness_clear, tc_witness_configure,
+    tc_witness_copy, tc_witness_last_result_json, tc_witness_last_result_line,
+    tc_witness_last_result_tone, tc_witness_state_line, tc_witness_state_tone,
+    tc_witness_status_json, tc_witness_trust_state,
 };
 use trace_commons_contributor_ffi::{
     tc_harness_action_available, tc_harness_last_call_line, tc_harness_outcome_line,
@@ -3668,6 +3669,23 @@ fn the_eligibility_state_crosses_with_its_tone_its_control_and_its_reason() {
         take_owned(unsafe { tc_contribution_eligibility_reason_line(std::ptr::null()) }),
         ""
     );
+}
+
+/// The withheld-count line crosses, counts, and stays silent at zero.
+#[test]
+fn the_withheld_line_crosses_and_says_nothing_at_zero() {
+    use trace_commons_contributor::private_inference_copy as copy;
+    let line = |n: i64| take_owned(tc_contribution_withheld_line(n));
+
+    for n in [0i64, 1, 2, 13, 114] {
+        assert_eq!(line(n), copy::group_withheld_line(n as u64), "{n}");
+    }
+    assert_eq!(line(0), "", "zero explains no gap");
+    // A negative count is nobody's honest answer, and it must not become a
+    // huge one through a wrapping conversion.
+    assert_eq!(line(-1), "", "a negative count says nothing");
+    assert!(line(4).contains('4'));
+    assert!(!line(4).is_empty());
 }
 
 /// The contribution control numbering shares no number with a credential

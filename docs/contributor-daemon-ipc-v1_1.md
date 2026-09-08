@@ -1125,6 +1125,18 @@ same rule as an entry's `eligibility` field: an invited contributor has no
 "3 of 7" to be told about, and `pending_count` alone is their answer. Test
 for the key; it is never null.
 
+Both numbers, never one. "Submit all (7)" quietly becoming "Submit all (3)"
+is worse than either: the contributor sees a smaller number with no
+explanation and cannot tell whether four sessions vanished or were never
+counted. A control that counts the sendable ones needs the total beside it,
+and `pending_count - contributable_count` is what
+`tc_contribution_withheld_line` turns into the sentence that closes the gap.
+
+**Absent, never zero.** A client that read a zero where the question does not
+apply would draw "Submit all (0)" and offer nothing to an invited contributor
+whose sessions are all perfectly sendable. When the key is missing, count the
+button off `pending_count` and render no withheld line.
+
 It is a count and not a promise. Entries can move between this call and the
 approve, and the expensive checks still run at submit -- see "Contribution
 eligibility" below.
@@ -1247,6 +1259,23 @@ account of what this call was asked to act on.
 `excluded_ineligible` is **absent** when no filter ran -- an invited
 contributor, or a single `entry_id`. Absent, never zero: zero would read as
 "nothing was left out", which is a claim about a filter that did not run.
+
+Render it through `tc_contribution_withheld_line`, which turns the count into
+a sentence and answers the **empty string** for zero. A button reading
+"Submit all (2)" above a folder showing five rows, with nothing explaining the
+gap, is the same small dishonesty the rest of this surface removes. The
+sentence says how many and **not why**: the reason a particular session cannot
+be sent is that row's own sentence, one level in, and a summary here would
+stand for up to thirteen different reasons and say nothing true about any of
+them.
+
+**One reply, one deadline.** A group `approve` does not fan out. It takes one
+approval instant for the whole call, so every entry it approves shares one
+hold and the single `hold_until` it reports is true of all of them. A client
+must not fan a group submit out into per-entry calls and keep the first
+reply's hold: an undo bar has to outlast every entry it offers to undo, and
+the first reply's deadline retires Undo while something it covers is still
+recoverable. Ask for the group and use the group's deadline.
 
 An entry with no recorded eligibility renders `unknown`, which offers no
 control, so a group selector excludes it too.

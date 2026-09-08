@@ -2964,6 +2964,36 @@ pub unsafe extern "C" fn tc_contribution_eligibility_reason_line(
     })
 }
 
+/// How many sessions a group submit is leaving behind, as a sentence.
+///
+/// `withheld` is `approve`'s `excluded_ineligible`, or the difference between
+/// a project row's `pending_count` and its `contributable_count`.
+///
+/// **The EMPTY STRING for zero**, and for a negative value, which no honest
+/// caller produces. Render nothing: there is no gap to explain, and a line
+/// reading "0 sessions are not being sent" invents a caveat where none
+/// exists.
+///
+/// The sentence says how many and NOT why. The reason a particular session
+/// cannot be sent is that row's own sentence, one level in; a summary here
+/// would stand for up to thirteen different reasons and would say nothing
+/// true about any of them. Assembled on the Rust side for the reason on
+/// [`tc_routing_token_line`]: three shells writing this sentence is three
+/// chances for one of them to name a reason.
+///
+/// Returns an owned string; free it with [`tc_string_free`]. NULL only on a
+/// caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_contribution_withheld_line(withheld: i64) -> *mut c_char {
+    guarded_string_no_err(|| {
+        Ok(to_owned_cstring(
+            &trace_commons_contributor::private_inference_copy::group_withheld_line(
+                u64::try_from(withheld).unwrap_or(0),
+            ),
+        ))
+    })
+}
+
 /// The reported local port, assembled without a readiness claim.
 ///
 /// `port` is the `port` field of `private_inference_state`. A value outside

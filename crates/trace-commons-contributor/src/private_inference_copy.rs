@@ -1240,6 +1240,36 @@ pub const ELIGIBILITY_REASON_REQUEST_MALFORMED: &str = "The last model call in t
 pub const ELIGIBILITY_REASON_RECEIPT_UNAVAILABLE: &str = "The proof that goes with this session's last model call could not be \
      fetched just now. It may work later.";
 
+/// How many sessions a group submit is leaving behind.
+///
+/// **A button reading "Submit all (2)" above a folder showing five rows, with
+/// nothing explaining the gap, is the same small dishonesty the rest of this
+/// surface removes.** The group control now sends only what can be sent, and
+/// the contributor can count the rows it did not take. This is the line that
+/// says so.
+///
+/// **It says how many and not why, deliberately.** The reason a particular
+/// session cannot be sent is that row's own sentence, one level in. A summary
+/// here would be a summary of up to thirteen different reasons and would say
+/// nothing true about any of them.
+///
+/// The empty string for zero, and a shell renders nothing: there is no gap to
+/// explain, and a line reading "0 sessions are not being sent" invents a
+/// caveat where none exists. Assembled here rather than in three shells, for
+/// the reason every other assembled line on this surface is -- three versions
+/// of one sentence is three chances for one of them to name a reason.
+///
+/// "here" rather than "in this folder": the same line serves a folder's
+/// submit and a whole-queue one, and only one of those is a folder.
+#[must_use]
+pub fn group_withheld_line(withheld: u64) -> String {
+    match withheld {
+        0 => String::new(),
+        1 => "1 session here cannot be sent, so it is not included.".to_string(),
+        n => format!("{n} sessions here cannot be sent, so they are not included."),
+    }
+}
+
 /// What a shell may offer for one eligibility state.
 ///
 /// ONE TABLE, NOT THREE -- the rule [`CredentialAction`] states, applied to
@@ -2368,6 +2398,37 @@ mod tests {
         );
     }
 
+    /// The withheld line counts and says nothing else.
+    ///
+    /// Zero renders nothing -- there is no gap to explain -- and the sentence
+    /// must never name a reason, because it would be standing for up to
+    /// thirteen different ones.
+    #[test]
+    fn the_withheld_line_counts_without_explaining() {
+        assert_eq!(group_withheld_line(0), "");
+        assert!(group_withheld_line(1).starts_with("1 session "));
+        assert!(group_withheld_line(2).starts_with("2 sessions "));
+        assert!(group_withheld_line(114).starts_with("114 sessions "));
+
+        // Not one reason label's sentence, nor any word from one. The line
+        // stands for a set, and a set has no reason.
+        for withheld in [1, 2, 13] {
+            let line = group_withheld_line(withheld).to_lowercase();
+            for reason in crate::daemon::contribution_eligibility::ALL_REASONS {
+                assert_ne!(
+                    group_withheld_line(withheld),
+                    eligibility_reason_line(reason)
+                );
+            }
+            for word in ["setting", "model call", "copy", "mark", "digest", "proof"] {
+                assert!(
+                    !line.contains(word),
+                    "the withheld line reaches for a reason: {line}"
+                );
+            }
+        }
+    }
+
     /// Every state and every reason the daemon can produce has a sentence,
     /// and no two states share one.
     ///
@@ -2563,6 +2624,9 @@ mod tests {
             strings.len()
         );
         strings.push(serving_line(Some(8463)));
+        for withheld in [0, 1, 2, 13, 114] {
+            strings.push(group_withheld_line(withheld));
+        }
         for seconds in [None, Some(0), Some(1), Some(60), Some(3_600), Some(86_400)] {
             strings.push(harness_last_call_line(seconds));
         }

@@ -6177,6 +6177,71 @@ mod tests {
         assert_eq!(result["skipped"].as_array().unwrap().len(), 1, "{result}");
     }
 
+    /// **One reply, one deadline, covering everything it approved.**
+    ///
+    /// Two shells found the same trap independently: an undo bar has to
+    /// outlast every entry it offers to undo, so a client that fanned a group
+    /// submit out into per-entry calls and kept the FIRST reply's hold would
+    /// retire Undo while something it covers is still recoverable. A group
+    /// approve does not fan out -- it takes one `approved_at` for the whole
+    /// call, so every entry it approves shares one deadline and the single
+    /// `hold_until` it reports is true of all of them.
+    ///
+    /// Pinned here rather than left as a property of the code, because it is
+    /// the guarantee the contract makes to three shells.
+    #[tokio::test]
+    async fn a_group_approve_reports_one_hold_that_covers_every_entry() {
+        let s = shared();
+        let key = "/tmp/holdproj";
+        let ids = [
+            seed_entry_with_eligibility(&s, key, None),
+            seed_entry_with_eligibility(&s, key, None),
+            seed_entry_with_eligibility(&s, key, None),
+        ];
+        // Pin each entry directly: the seeds have no session file, so the
+        // build path would skip them before anything could be approved.
+        {
+            let mut queue = s.queue.lock().unwrap();
+            for id in ids {
+                assert!(queue.record_previewed_envelope(id, "sha256:pinned"));
+            }
+        }
+
+        let r = handle_request_async(
+            &s,
+            &req(
+                "approve",
+                serde_json::json!({ "project_id": project_id_for(key) }),
+            ),
+        )
+        .await;
+        let result = r.result.expect("approve answers");
+        assert_eq!(result["approved"], 3, "{result}");
+
+        // Parsed rather than string-compared: the reply and the entry
+        // serialise the same instant at different precisions, and what is
+        // being pinned is the instant.
+        let reported: chrono::DateTime<Utc> = result["hold_until"]
+            .as_str()
+            .expect("a deadline")
+            .parse()
+            .expect("an RFC 3339 instant");
+        let queue = s.queue.lock().unwrap();
+        let hold_secs = s.settings.lock().unwrap().approval_hold_secs;
+        for id in ids {
+            let entry_hold = queue
+                .get(id)
+                .expect("the entry")
+                .hold_until(hold_secs)
+                .expect("a hold");
+            assert!(
+                entry_hold <= reported,
+                "the reported deadline must outlast every entry it covers: \
+                 {entry_hold} > {reported}"
+            );
+        }
+    }
+
     /// The count a shell draws its button from: "send the 1 of 5 that can be
     /// sent", answerable from the row it already fetched to draw the group.
     #[test]
