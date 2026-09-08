@@ -54,6 +54,128 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all -- --check
 
+  postgres-suites:
+    name: database suites against a real PostgreSQL
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    # The tests in this repository that touch PostgreSQL do not run anywhere.
+    # Each skips or is `#[ignore]`d without an environment variable, no job sets
+    # one, and `cargo test` therefore reports them as passing or ignored while
+    # running nothing.
+    #
+    # That is not theoretical. On 2026-09-08 three defects were found by hand in
+    # one day, each behind one of these suites, each live on main:
+    #
+    #   #723  V61's constraint drop matched rendered SQL, dropped nothing, and
+    #         reported success -- wallet provisioning could not insert a row.
+    #   #727  one fixture wired the runtime pool and the login-resolver pool to
+    #         a single role, so no returning contributor was ever recognised.
+    #   #735  the only end-to-end test of an invite-free contribution had been
+    #         failing since V61 added columns its fixture did not write.
+    #
+    # Each would have failed at the commit that introduced it if this job had
+    # existed.
+    #
+    # FOUR SUITES ARE DELIBERATELY NOT RUN HERE. They already fail against a
+    # real database on main -- 84 tests between them, all pre-existing. Adding
+    # them would make this job red on its first run, and a permanently red job
+    # is one nobody reads, which is how the others got into this state. They are
+    # named so the debt is visible rather than implied:
+    #
+    #   account_merge_pg          8 failing
+    #   trace_corpus_pg_store    31 failing
+    #   trace_corpus_pg_rls      25 failing
+    #   trace_invite_registry_pg 20 failing
+    #
+    # Fixing one means deleting its line here and adding a step, not editing an
+    # allow-list elsewhere. Do not add a suite without running it first.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: trace
+          POSTGRES_PASSWORD: trace
+          POSTGRES_DB: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U trace"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: pg-suites-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+      # Several suites assert their database name begins `admission_test`
+      # before running destructive fixtures, and every one of them requires the
+      # host to be the literal 127.0.0.1 -- `localhost` fails the assertion. One
+      # database each: they create roles and drop tables, and sharing one makes
+      # a failure in the first look like a defect in the second.
+      - name: Create one database per suite
+        run: |
+          set -euo pipefail
+          for db in onboarding ledger retention migration ingest; do
+            PGPASSWORD=trace createdb -h 127.0.0.1 -U trace "admission_test_$db"
+          done
+      # Each step carries only the variables its own suite reads, NOT a job-wide
+      # `env:` block. That is not tidiness: `trace_invite_registry_pg` reads
+      # `TRACE_COMMONS_PG_TEST_DATABASE_URL` as its own main URL, so setting
+      # that variable job-wide for `migration_atomicity_pg` silently repoints
+      # another suite at the wrong database.
+      - name: account_onboarding_pg
+        run: cargo test -p trace-commons-server --test account_onboarding_pg
+        env:
+          TRACE_COMMONS_NEAR_PG_TEST_DATABASE_URL: postgres://trace:trace@127.0.0.1:5432/admission_test_onboarding
+      - name: migration_atomicity_pg
+        run: cargo test -p trace-commons-server --test migration_atomicity_pg
+        env:
+          TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace:trace@127.0.0.1:5432/admission_test_migration
+      # `--ignored` is not optional for these three. Without it they report
+      # `ignored`, the step passes having run nothing, and this job becomes the
+      # thing it was built to replace.
+      - name: admission_ledger_pg
+        run: cargo test -p trace-commons-server --test admission_ledger_pg -- --ignored
+        env:
+          TRACE_COMMONS_ADMISSION_PG_TEST_URL: postgres://trace:trace@127.0.0.1:5432/admission_test_ledger
+      - name: onboarding_retention_pg
+        run: cargo test -p trace-commons-server --test onboarding_retention_pg -- --ignored
+        env:
+          TRACE_COMMONS_ONBOARDING_RETENTION_PG_TEST_URL: postgres://trace:trace@127.0.0.1:5432/admission_test_retention
+      - name: the invite-free path, end to end
+        run: cargo test --bin trace-commons-ingest admission_pg_tests -- --ignored
+        env:
+          TRACE_COMMONS_ADMISSION_INGEST_PG_TEST_URL: postgres://trace:trace@127.0.0.1:5432/admission_test_ingest
+      # A suite that runs nothing passes, so the steps above cannot prove
+      # themselves. `trace_invite_registry_pg` reports "21 passed" in 0.00s with
+      # no database configured; a pass count is not evidence that anything ran.
+      #
+      # Connection statistics are. A suite that skipped never opened a
+      # connection, so its database sits at xact_commit = 0 exactly as createdb
+      # left it. Every suite above commits between roughly 19 and 340
+      # transactions when it actually runs. A renamed variable, a dropped
+      # `--ignored`, or a new early return therefore fails here rather than
+      # going quietly green.
+      - name: Refuse a run that executed nothing
+        run: |
+          set -euo pipefail
+          fail=0
+          for db in onboarding ledger retention migration ingest; do
+            n=$(PGPASSWORD=trace psql -qtA -h 127.0.0.1 -U trace postgres \
+                  -c "SELECT xact_commit FROM pg_stat_database WHERE datname='admission_test_$db';")
+            echo "admission_test_$db committed ${n:-0} transactions"
+            if [ "${n:-0}" -lt 5 ]; then
+              echo "::error::admission_test_$db shows no activity; its suite skipped instead of running"
+              fail=1
+            fi
+          done
+          exit $fail
+
   mark-assets-drift:
     name: mark assets match the generator
     runs-on: ubuntu-latest
