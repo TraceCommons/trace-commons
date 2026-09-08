@@ -684,8 +684,7 @@ private struct CommunitySection: View {
                 "Shown only while \u{201C}List my handle publicly\u{201D} is on. Turn it off in "
                 + "Settings and this section disappears with it."
             )
-            .font(TC.Font_.caption)
-            .lineSpacing(TC.Font_.LineHeight.spacing(for: 11, TC.Font_.LineHeight.caption))
+            .tcType(TC.Font_.captionText)
             .foregroundStyle(TC.inkSecondary)
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: TC.Measure.prose, alignment: .leading)
@@ -799,7 +798,7 @@ private struct CommunitySection: View {
             + "nothing is charted here either."
         )
         .font(CommunityBrand.Font_.body)
-        .lineSpacing(TC.Font_.LineHeight.spacing(for: 13, 1.45))
+        .lineSpacing(CommunityBrand.Font_.bodyLineSpacing)
         .foregroundStyle(CommunityBrand.ink)
         .fixedSize(horizontal: false, vertical: true)
         .frame(maxWidth: .infinity, alignment: .leading)

@@ -981,8 +981,7 @@ struct SearchTab: View {
                 VStack(alignment: .leading, spacing: TC.Space.sm) {
                     ForEach(Array(contexts.enumerated()), id: \.offset) { _, snippet in
                         Text(highlighting(snippet, term: needle))
-                            .font(TC.Font_.monoCode)
-                            .lineSpacing(TC.Font_.LineHeight.spacing(for: 11, TC.Font_.LineHeight.caption))
+                            .tcType(TC.Font_.monoCodeText)
                             .textSelection(.enabled)
                             .padding(.horizontal, TC.Space.sm)
                             .padding(.vertical, TC.Space.s)
@@ -1356,8 +1355,7 @@ struct TranscriptTab: View {
     var body: some View {
         VStack(alignment: .leading, spacing: TC.Space.sm) {
             Text(TranscriptMarkers.chipped(Self.caption, font: TC.Font_.caption))
-                .font(TC.Font_.caption)
-                .lineSpacing(TC.Font_.LineHeight.spacing(for: 11, TC.Font_.LineHeight.caption))
+                .tcType(TC.Font_.captionText)
                 .foregroundStyle(TC.inkSecondary)
                 .fixedSize(horizontal: false, vertical: true)
 
@@ -1411,10 +1409,7 @@ struct TranscriptTab: View {
         Group {
             if let chunk = resident.rendered[index] {
                 Text(chunk.text)
-                    .font(TC.Font_.monoTranscript)
-                    .lineSpacing(
-                        TC.Font_.LineHeight.spacing(for: 11, TC.Font_.LineHeight.transcript)
-                    )
+                    .tcType(TC.Font_.monoTranscriptText)
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     // The chips are named here and nowhere else: SwiftUI has
@@ -1487,7 +1482,8 @@ struct TranscriptTab: View {
     private static let columnWidth = ("M" as NSString).size(withAttributes: [.font: font]).width
     private static let rowHeight =
         NSLayoutManager().defaultLineHeight(for: font)
-        + TC.Font_.LineHeight.spacing(for: 11, TC.Font_.LineHeight.transcript)
+        + TC.Font_.LineHeight.spacing(
+            for: font.pointSize, TC.Font_.monoTranscriptText.lineHeight)
 
     /// Spec copy, with the sample marker rendered as a live chip so the
     /// sentence demonstrates the thing it describes.

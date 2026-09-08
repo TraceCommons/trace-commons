@@ -729,9 +729,8 @@ struct HealthBanner: View {
                     .font(TC.Font_.cardTitle)
                     .foregroundStyle(TC.inkPrimary)
                 Text(health.detail)
-                    .font(TC.Font_.meta)
+                    .tcType(TC.Font_.captionText)
                     .foregroundStyle(TC.inkSecondary)
-                    .lineSpacing(TC.Font_.LineHeight.spacing(for: 11, TC.Font_.LineHeight.caption))
                     .fixedSize(horizontal: false, vertical: true)
             }
             Spacer(minLength: TC.Space.m)

@@ -591,8 +591,7 @@ struct SettingsContent: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             Text(PublicProfileCopy.footnote)
-                .font(TC.Font_.caption)
-                .lineSpacing(TC.Font_.LineHeight.spacing(for: 11, TC.Font_.LineHeight.caption))
+                .tcType(TC.Font_.captionText)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             profileCopyDefects

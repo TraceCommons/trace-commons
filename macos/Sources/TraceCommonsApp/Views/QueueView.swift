@@ -523,9 +523,8 @@ struct QueueRow: View {
         Group {
             if let summary {
                 Text(summary.openingPrompt.isEmpty ? "(no opening prompt)" : summary.openingPrompt)
-                    .font(TC.Font_.body)
+                    .tcType(TC.Font_.bodyText)
                     .foregroundStyle(TC.inkPrimary)
-                    .lineSpacing(TC.Font_.LineHeight.spacing(for: 13, TC.Font_.LineHeight.body))
                     .lineLimit(3)
                     .textSelection(.enabled)
             } else if let tooLarge {
@@ -617,9 +616,8 @@ struct QueueRow: View {
     /// case that gets the gold rather than the strip's grey.
     private var caption: some View {
         Text(ScrubbingCaveat.rowLine(redactionCount: redactionCount))
-            .font(TC.Font_.footnote)
+            .tcType(TC.Font_.footnoteText)
             .foregroundStyle(ScrubbingCaveat.tone(redactionCount: redactionCount).textColor)
-            .lineSpacing(TC.Font_.LineHeight.spacing(for: 10, TC.Font_.LineHeight.caption))
             .fixedSize(horizontal: false, vertical: true)
     }
 
@@ -638,9 +636,8 @@ struct QueueRow: View {
     private var extent: some View {
         if let line = entry.subagentLine {
             Text(line)
-                .font(TC.Font_.footnote)
+                .tcType(TC.Font_.footnoteText)
                 .foregroundStyle(entry.wasTrimmed ? TC.goldText : TC.inkSecondary)
-                .lineSpacing(TC.Font_.LineHeight.spacing(for: 10, TC.Font_.LineHeight.caption))
                 .fixedSize(horizontal: false, vertical: true)
                 .accessibilityLabel(line)
         }
@@ -664,16 +661,13 @@ struct QueueRow: View {
                 // The glyph comes off the same tone as the colour, so the
                 // state survives greyscale and a black-and-white screenshot.
                 Label(eligibilityLine, systemImage: tone.symbol)
-                    .font(TC.Font_.footnote)
+                    .tcType(TC.Font_.footnoteText)
                     .foregroundStyle(tone.textColor)
-                    .lineSpacing(TC.Font_.LineHeight.spacing(for: 10, TC.Font_.LineHeight.caption))
                     .fixedSize(horizontal: false, vertical: true)
                 if let eligibilityReasonLine {
                     Text(eligibilityReasonLine)
-                        .font(TC.Font_.footnote)
+                        .tcType(TC.Font_.footnoteText)
                         .foregroundStyle(TC.inkSecondary)
-                        .lineSpacing(
-                            TC.Font_.LineHeight.spacing(for: 10, TC.Font_.LineHeight.caption))
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
@@ -911,9 +905,8 @@ struct UndoBar: View {
                 down: undo works until the sweep starts, and says so plainly if \
                 it is already too late.
                 """)
-                .font(TC.Font_.footnote)
+                .tcType(TC.Font_.footnoteText)
                 .foregroundStyle(TC.inkSecondary)
-                .lineSpacing(TC.Font_.LineHeight.spacing(for: 10, TC.Font_.LineHeight.caption))
                 .fixedSize(horizontal: false, vertical: true)
             }
             HStack(spacing: TC.Space.s) {

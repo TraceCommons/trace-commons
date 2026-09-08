@@ -198,7 +198,7 @@ struct PrivacyManifestoView: View {
             when you press the one button that sends it. There is no other path out.
             """)
             .font(CommunityBrand.Font_.lede)
-            .lineSpacing(TC.Font_.LineHeight.spacing(for: 18, 1.3))
+            .lineSpacing(CommunityBrand.Font_.ledeLineSpacing)
             .foregroundStyle(primaryInk)
             .frame(maxWidth: 520, alignment: .leading)
             .fixedSize(horizontal: false, vertical: true)
