@@ -177,6 +177,30 @@ public enum EligibilitySurface {
         control(eligibility, calls: calls) == .contribute
     }
 
+    // MARK: - A sheet that is already open
+
+    /// The copy of a held entry a still-open surface must gate on.
+    ///
+    /// **A GATE APPLIED ONCE AT OPEN TIME IS NOT A GATE.** A sheet holds the
+    /// entry it was handed when it opened, and the queue behind it is
+    /// republished whenever a snapshot arrives -- including the snapshot
+    /// that carries a submit-time failure written back into the row
+    /// (Decision 1 of the design). A surface still reading its opening copy
+    /// goes on offering to send a session the queue already knows cannot be
+    /// sent, which is this surface's own defect reproduced by staleness
+    /// rather than by a missing check.
+    ///
+    /// Falls back to the held copy when the queue no longer lists it: an
+    /// entry that has just been approved or dismissed is leaving the screen
+    /// anyway, and blanking its sentence on the way out would be a flicker
+    /// that says something it does not mean.
+    public static func current<Entry>(
+        _ held: Entry, in queue: [Entry], id: (Entry) -> String
+    ) -> Entry {
+        let heldID = id(held)
+        return queue.first { id($0) == heldID } ?? held
+    }
+
     // MARK: - A group-level submit
 
     /// Which of a group's entries a group-level submit may actually send.

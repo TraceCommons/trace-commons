@@ -477,9 +477,26 @@ struct PreviewSheet: View {
         TCConsentCopy.copyJSON().flatMap(ConsentCopy.decode(fromJSON:))
     }
 
+    /// This session's row AS THE QUEUE HOLDS IT NOW, not as it was when the
+    /// sheet opened.
+    ///
+    /// `entry` is a `let` captured at open time, and this sheet can stay up
+    /// across any number of snapshots -- including the one carrying a
+    /// submit-time failure written back into the row. Reading the opening
+    /// copy would apply the eligibility gate once and then never again,
+    /// which is the same defect as never applying it.
+    ///
+    /// ONLY the eligibility gate and its sentence read this. Everything the
+    /// sheet approves still goes through `entry`, whose id is the same
+    /// either way -- what a preview pinned must not start moving under a
+    /// contributor who is reading it.
+    private var liveEntry: QueueEntry {
+        EligibilitySurface.current(entry, in: model.awaitingDecision, id: \.entryID)
+    }
+
     /// What the daemon said about contributing THIS session, or nothing at
     /// all for a contributor who has no eligibility question.
-    private var eligibility: ContributionEligibility? { entry.contributionEligibility }
+    private var eligibility: ContributionEligibility? { liveEntry.contributionEligibility }
 
     /// Whether the shared table offers a send control for this session.
     ///

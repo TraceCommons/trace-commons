@@ -296,6 +296,80 @@ final class EligibilitySurfaceTests: XCTestCase {
         }
     }
 
+    // MARK: - A sheet that is already open
+
+    /// The defect GTK found in its own shell, in the shape macOS can have
+    /// it: not a widget poked back to sensitive, but a gate applied once at
+    /// open time and never re-consulted.
+    ///
+    /// A sheet holds the entry it was handed. When a snapshot downgrades
+    /// that row -- which is exactly what a submit-time failure written back
+    /// into it produces -- the sheet must gate on the queue's copy, not on
+    /// the one it opened with.
+    func testAnOpenSheetGatesOnTheQueuesCopyNotItsOpeningCopy() {
+        struct Row { let id: String; let eligibility: ContributionEligibility? }
+        let opened = Row(id: "e1", eligibility: ContributionEligibility(state: "eligible"))
+        let downgraded = Row(
+            id: "e1",
+            eligibility: ContributionEligibility(
+                state: "ineligible_permanent", reason: "digest_mismatch"))
+        let live = EligibilitySurface.current(
+            opened, in: [Row(id: "e0", eligibility: nil), downgraded], id: \.id)
+        XCTAssertEqual(live.eligibility?.state, "ineligible_permanent")
+        XCTAssertEqual(live.eligibility?.reason, "digest_mismatch")
+
+        let table = calls(control: { $0 == "eligible" ? 51 : 50 })
+        XCTAssertFalse(
+            EligibilitySurface.offersContribute(live.eligibility, calls: table),
+            "a row the queue has downgraded must not still offer to send")
+        // And the opening copy, which is what a sheet reading `entry`
+        // directly would have gated on, still says yes -- so this test
+        // fails if the resolution is dropped.
+        XCTAssertTrue(EligibilitySurface.offersContribute(opened.eligibility, calls: table))
+    }
+
+    /// An upgrade is honoured too. The rule is "read the queue", not
+    /// "assume the worst": a row the daemon re-evaluated into eligibility
+    /// must become sendable without closing and reopening the sheet.
+    func testAnOpenSheetAlsoSeesARowBecomeEligible() {
+        struct Row { let id: String; let eligibility: ContributionEligibility? }
+        let opened = Row(id: "e1", eligibility: ContributionEligibility(state: "unknown"))
+        let upgraded = Row(id: "e1", eligibility: ContributionEligibility(state: "eligible"))
+        let table = calls(control: { $0 == "eligible" ? 51 : 50 })
+        XCTAssertTrue(
+            EligibilitySurface.offersContribute(
+                EligibilitySurface.current(opened, in: [upgraded], id: \.id).eligibility,
+                calls: table))
+    }
+
+    /// A row the queue no longer lists keeps its held copy. It has just
+    /// been approved or dismissed and is leaving the screen; blanking its
+    /// sentence on the way out would be a flicker saying something it does
+    /// not mean.
+    func testARowTheQueueNoLongerListsKeepsItsHeldCopy() {
+        struct Row: Equatable { let id: String; let eligibility: ContributionEligibility? }
+        let opened = Row(id: "e1", eligibility: ContributionEligibility(state: "eligible"))
+        XCTAssertEqual(EligibilitySurface.current(opened, in: [], id: \.id), opened)
+        XCTAssertEqual(
+            EligibilitySurface.current(
+                opened, in: [Row(id: "e2", eligibility: nil)], id: \.id),
+            opened)
+    }
+
+    /// Resolution is by id, never by position: the queue reorders and
+    /// shrinks between snapshots, and an index would hand the sheet a
+    /// different session's answer.
+    func testResolutionIsByIdAndNotByPosition() {
+        struct Row { let id: String; let eligibility: ContributionEligibility? }
+        let opened = Row(id: "e3", eligibility: ContributionEligibility(state: "eligible"))
+        let queue = [
+            Row(id: "e9", eligibility: ContributionEligibility(state: "ineligible_permanent")),
+            Row(id: "e3", eligibility: ContributionEligibility(state: "unknown")),
+        ]
+        XCTAssertEqual(
+            EligibilitySurface.current(opened, in: queue, id: \.id).eligibility?.state, "unknown")
+    }
+
     // MARK: - A group-level submit means "all eligible"
 
     /// The ruling, at the seam a folder header uses.
