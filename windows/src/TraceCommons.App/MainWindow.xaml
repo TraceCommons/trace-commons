@@ -913,7 +913,7 @@
 
                                     Absent entirely for an invited
                                     contributor, whose group offers everything
-                                    it holds. It says how many and NOT why --
+                                    it holds. It says how many and NOT why:
                                     the reason a particular session cannot be
                                     sent is that row's own sentence, one level
                                     in, and a summary here would stand for up
@@ -942,7 +942,7 @@
 
                                         ShowSubmitAll is the shared branch
                                         table's answer, reached with an absent
-                                        count spelled as a NEGATIVE -- see
+                                        count spelled as a NEGATIVE. See
                                         ProjectQueueGroup.
                                     -->
                                     <Button Style="{StaticResource TcSecondaryButtonStyle}"
