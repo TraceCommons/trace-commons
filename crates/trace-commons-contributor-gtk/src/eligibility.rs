@@ -54,22 +54,62 @@ pub struct EligibilityView {
 /// nothing. Collapsing the two would put "has not been worked out" on every
 /// card an invited contributor owns.
 ///
-/// `#[serde(default)]` on `QueueEntry::eligibility` is what keeps them
-/// apart, so the tests go through the real deserializer.
+/// `QueueEntry::eligibility` being an `Option` is what keeps them apart, so
+/// the tests go through the real deserializer.
 #[must_use]
 pub fn view(entry: &QueueEntry) -> Option<EligibilityView> {
+    view_through(entry, &SHARED)
+}
+
+/// The four lookups one entry's row is built from, behind function
+/// pointers.
+///
+/// **A seam for the tests, not a policy choice.** `SHARED` is the only
+/// table this shell ever ships, and `view` is the only caller that names
+/// it. What the indirection buys is a mutation proof with teeth: a test can
+/// hand `view_through` a table answering the INVERSE of the real one and
+/// require the output to follow it. Code that decided anything for itself
+/// would keep agreeing with the real table and fail, and -- the part a
+/// same-answer fake cannot check -- it could not agree with the inverse by
+/// coincidence either.
+struct EligibilityTable {
+    state_line: fn(&str) -> &'static str,
+    state_tone: fn(&str) -> copy::PrivateInferenceTone,
+    reason_line: fn(&str) -> &'static str,
+    control: fn(&str) -> copy::ContributionControl,
+}
+
+/// The one table this shell ships: the shared crate's, which macOS and
+/// Windows reach across the C ABI as `tc_eligibility_*`.
+const SHARED: EligibilityTable = EligibilityTable {
+    state_line: copy::eligibility_state_line,
+    state_tone: copy::eligibility_state_tone,
+    reason_line: copy::eligibility_reason_line,
+    control: copy::eligibility_control,
+};
+
+/// Read one entry through a table.
+///
+/// Every field is a lookup. There is no `match` on a state name, no
+/// `if state == ...`, and nothing here that would still be true if the
+/// table said something else -- which is exactly what the inverse-table
+/// test checks.
+///
+/// The ONE decision this shell makes is the first line, and it is not
+/// about eligibility: an absent field is not a state, so there is nothing
+/// to look up and no row to draw. No table can change that, and none
+/// should.
+fn view_through(entry: &QueueEntry, table: &EligibilityTable) -> Option<EligibilityView> {
     let state = entry.eligibility.as_deref()?;
     Some(EligibilityView {
-        state_line: copy::eligibility_state_line(state),
-        tone: copy::eligibility_state_tone(state),
+        state_line: (table.state_line)(state),
+        tone: (table.state_tone)(state),
         // An absent reason is the ordinary case on an `eligible` row --
         // there is nothing to explain -- and it answers the same empty
         // string an unfamiliar one does. Not `?`: a missing reason must not
         // take the state sentence down with it.
-        reason_line: copy::eligibility_reason_line(
-            entry.eligibility_reason.as_deref().unwrap_or_default(),
-        ),
-        control: copy::eligibility_control(state),
+        reason_line: (table.reason_line)(entry.eligibility_reason.as_deref().unwrap_or_default()),
+        control: (table.control)(state),
     })
 }
 
@@ -391,6 +431,193 @@ mod tests {
                 );
             }
         }
+    }
+
+    // -- the inverse table ----------------------------------------------
+    //
+    // A fake that AGREES with the real table proves nothing: a shell that
+    // ignored the table entirely and decided for itself would pass. These
+    // fakes answer the inverse at every state, so agreeing with them is
+    // only possible by actually reading them.
+
+    /// `Contribute` for everything the real table refuses, and `None` for
+    /// the one state it offers.
+    fn inverse_control(state: &str) -> copy::ContributionControl {
+        match copy::eligibility_control(state) {
+            copy::ContributionControl::Contribute => copy::ContributionControl::None,
+            copy::ContributionControl::None => copy::ContributionControl::Contribute,
+        }
+    }
+
+    /// `Attention` everywhere the real table is not, and `Neutral` where it
+    /// is -- so the one actionable state becomes the unremarkable one.
+    fn inverse_tone(state: &str) -> copy::PrivateInferenceTone {
+        match copy::eligibility_state_tone(state) {
+            copy::PrivateInferenceTone::Attention => copy::PrivateInferenceTone::Neutral,
+            _ => copy::PrivateInferenceTone::Attention,
+        }
+    }
+
+    /// A sentence no real state has.
+    fn inverse_state_line(_state: &str) -> &'static str {
+        "INVERSE-STATE"
+    }
+
+    /// A non-empty answer where the real table says nothing, and the empty
+    /// string where it speaks.
+    fn inverse_reason_line(label: &str) -> &'static str {
+        if copy::eligibility_reason_line(label).is_empty() {
+            "INVERSE-REASON"
+        } else {
+            ""
+        }
+    }
+
+    fn inverse_table() -> EligibilityTable {
+        EligibilityTable {
+            state_line: inverse_state_line,
+            state_tone: inverse_tone,
+            reason_line: inverse_reason_line,
+            control: inverse_control,
+        }
+    }
+
+    /// **The table is read, not re-decided.**
+    ///
+    /// Handed a table answering the inverse of the shared one at every
+    /// state, every field of the view follows the fake. A shell that made
+    /// any of these four decisions itself would keep agreeing with the real
+    /// table here and fail -- and, unlike a fake that happens to match, it
+    /// cannot agree with this one by coincidence.
+    #[test]
+    fn every_field_follows_the_table_it_is_given() {
+        use trace_commons_contributor::daemon::contribution_eligibility::{
+            ALL_REASONS, ALL_STATES,
+        };
+        let inverse = inverse_table();
+        for state in ALL_STATES {
+            let entry = wire(serde_json::json!({ "eligibility": state }));
+            let real = view(&entry).expect("renders");
+            let faked = view_through(&entry, &inverse).expect("renders");
+
+            assert_eq!(faked.state_line, "INVERSE-STATE", "{state}: sentence");
+            assert_ne!(
+                faked.state_line, real.state_line,
+                "{state}: the sentence ignored the table"
+            );
+            assert_eq!(faked.tone, inverse_tone(state), "{state}: tone");
+            assert_ne!(faked.tone, real.tone, "{state}: the tone ignored the table");
+            assert_eq!(faked.control, inverse_control(state), "{state}: control");
+            assert_ne!(
+                faked.control, real.control,
+                "{state}: the control ignored the table"
+            );
+        }
+        // And the reason line, which is keyed on the other field.
+        for reason in ALL_REASONS {
+            let entry = wire(serde_json::json!({
+                "eligibility": "ineligible_permanent",
+                "eligibility_reason": reason,
+            }));
+            let real = view(&entry).expect("renders");
+            let faked = view_through(&entry, &inverse).expect("renders");
+            assert_eq!(faked.reason_line, "", "{reason}: reason");
+            assert_ne!(
+                faked.reason_line, real.reason_line,
+                "{reason}: the reason line ignored the table"
+            );
+        }
+        // An unfamiliar reason: the real table says nothing, the inverse
+        // speaks, and the view must say what it was told.
+        let unfamiliar = wire(serde_json::json!({
+            "eligibility": "ineligible_permanent",
+            "eligibility_reason": "a_reason_from_a_later_daemon",
+        }));
+        assert_eq!(view(&unfamiliar).expect("renders").reason_line, "");
+        assert_eq!(
+            view_through(&unfamiliar, &inverse)
+                .expect("renders")
+                .reason_line,
+            "INVERSE-REASON"
+        );
+    }
+
+    /// The absent-key rule is this shell's own and NO table may overturn
+    /// it.
+    ///
+    /// It is not an eligibility decision -- it is the decision that there
+    /// is no eligibility question to answer -- so the inverse table, which
+    /// changes every real answer, must not change this one.
+    #[test]
+    fn no_table_can_make_the_absent_key_into_a_state() {
+        let absent = wire(serde_json::json!({}));
+        assert!(view(&absent).is_none());
+        assert!(
+            view_through(&absent, &inverse_table()).is_none(),
+            "a table was allowed to invent a row for an entry that has no eligibility question"
+        );
+    }
+
+    // -- removed on the row, disarmed in the sheet ----------------------
+
+    /// **A queue row REMOVES the control; the preview sheet DISARMS it.**
+    ///
+    /// The same table, rendered two ways, because the two surfaces differ
+    /// in whether the control was already there. A row is drawn fresh, so
+    /// nothing vanishes under anyone -- there was never a button there for
+    /// this session. The sheet's `Contribute` is already on screen under
+    /// the contributor's cursor while they read the sentence saying why the
+    /// session cannot be sent, and a primary control that disappears
+    /// mid-read is its own small confusion.
+    #[test]
+    fn the_row_removes_the_control_and_the_sheet_only_disarms_it() {
+        let row = QUEUE_SOURCE
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production code above the tests");
+        let sheet = PREVIEW_SOURCE
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production code above the tests");
+
+        // The row: the send control is appended only inside the gate, so an
+        // ineligible row never builds one.
+        assert!(
+            row.contains("if crate::eligibility::offers_send(entry) {"),
+            "the row does not gate its send control"
+        );
+        assert_eq!(
+            row.matches("actions.append(&submit)").count(),
+            1,
+            "the row appends its send control somewhere other than the gate"
+        );
+        assert!(
+            !row.contains("submit.set_sensitive("),
+            "the row disarms its send control instead of removing it; a row is drawn fresh \
+             and should simply not build a button it may not offer"
+        );
+
+        // The sheet: sensitivity is the lever, and the button is never
+        // removed, hidden, or unparented.
+        let sync = sheet
+            .find("fn sync_contribute(&self)")
+            .expect("the sheet has one place its control is decided");
+        let sync_end = sheet[sync..].find("\n    }").expect("it closes") + sync;
+        let body = &sheet[sync..sync_end];
+        assert!(
+            body.contains("self.contribute.set_sensitive("),
+            "the sheet does not disarm its control: {body}"
+        );
+        assert!(
+            !body.contains("self.contribute.set_visible(")
+                && !body.contains("self.contribute.unparent("),
+            "the sheet hides or removes a primary control the contributor is already \
+             looking at: {body}"
+        );
+        assert!(
+            !sheet.contains("self.contribute.set_visible("),
+            "the sheet hides its send control somewhere outside sync_contribute"
+        );
     }
 
     // -- the group header, one layer up -------------------------------
