@@ -127,6 +127,63 @@ pub fn offers_send(entry: &QueueEntry) -> bool {
     }
 }
 
+/// A project group's pending rows, split by whether they may be sent.
+///
+/// `ineligible` is a count and not a list because nothing renders it: it
+/// decides only WHICH CALL a group-level submit makes, and the rows
+/// themselves already carry their own sentences.
+pub struct GroupSubmit {
+    /// The entries a group-level submit may send, oldest first.
+    pub eligible: Vec<String>,
+    /// How many of this group's pending rows are contributable, or `None`
+    /// when the question does not apply to this contributor at all.
+    ///
+    /// **`None` is not zero.** It is the wire's absent `contributable_count`
+    /// -- an invited contributor, whose every pending session is sendable
+    /// and who has no "3 of 7" to be told about. Read as zero it would take
+    /// the group control away from somebody with nothing wrong. The same
+    /// distinction the `eligibility` field itself carries, one level up.
+    pub contributable: Option<u64>,
+}
+
+/// Split a group's pending rows into what may be sent and how many that is.
+///
+/// Lives here, taking an iterator, so it can be tested against rows built by
+/// the real deserializer -- `ui::queue::group_submit` only ever supplies them
+/// off the live queue.
+///
+/// **`contributable` is `None` when the question does not apply**, which is
+/// the absent `contributable_count` on the wire: the daemon writes an
+/// `eligibility` key on every row when the evidence flag is on and on none of
+/// them when it is off, so "any row carries one" is exactly the condition
+/// under which it sends the count.
+///
+/// It matters less here than on the other two shells, and is spelled properly
+/// anyway. GTK derives BOTH numbers from the same rows with the same
+/// predicate, so `Some(n)` and `None` reach the same answer in every case this
+/// shell can actually produce -- `offers_send` admits an unkeyed row, so an
+/// invited contributor's eligible count equals their pending count. macOS and
+/// Windows read `contributable_count` off `list_projects` as a SEPARATE
+/// number, where collapsing absent into `0` refuses the control outright.
+/// That is a fact about how GTK gets the count, not a licence to spell it
+/// loosely: either half could change.
+#[must_use]
+pub fn group_of<'a>(pending: impl Iterator<Item = &'a QueueEntry>) -> GroupSubmit {
+    let mut eligible = Vec::new();
+    let mut applies = false;
+    for entry in pending {
+        applies |= entry.eligibility.is_some();
+        if offers_send(entry) {
+            eligible.push(entry.entry_id.clone());
+        }
+    }
+    let contributable = applies.then_some(eligible.len() as u64);
+    GroupSubmit {
+        eligible,
+        contributable,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -803,6 +860,70 @@ mod tests {
         assert!(
             !row.contains("!group.eligible.is_empty()"),
             "the group control is re-derived from an emptiness test"
+        );
+    }
+
+    /// **The derivation itself: absent when no row carries the key,
+    /// present when any does.**
+    ///
+    /// This is the arm a shell gets wrong, and it needs a test that can
+    /// catch its removal -- collapsing the distinction to `Some(count)`
+    /// otherwise passes everything, because GTK derives both numbers from
+    /// one predicate. Run against rows built by the real deserializer, so
+    /// the absence is serde's and not a literal.
+    #[test]
+    fn a_groups_contributable_count_is_absent_when_the_question_does_not_apply() {
+        // An invited contributor: no row carries an eligibility key.
+        let invited = [wire(serde_json::json!({})), wire(serde_json::json!({}))];
+        let group = group_of(invited.iter());
+        assert_eq!(
+            group.contributable, None,
+            "an invited contributor's group must report no count at all"
+        );
+        assert_eq!(group.eligible.len(), 2, "every row of theirs is sendable");
+        assert_eq!(
+            copy::group_control(2, group.contributable),
+            copy::ContributionControl::Contribute
+        );
+
+        // Admitted on evidence, nothing sendable.
+        let none_sendable = [
+            wire(serde_json::json!({ "eligibility": "ineligible_permanent" })),
+            wire(serde_json::json!({ "eligibility": "unknown" })),
+        ];
+        let group = group_of(none_sendable.iter());
+        assert_eq!(
+            group.contributable,
+            Some(0),
+            "a filter that ran and took nothing reports zero, not absence"
+        );
+        assert_eq!(
+            copy::group_control(2, group.contributable),
+            copy::ContributionControl::None
+        );
+
+        // Admitted, some sendable: the withheld count is the difference.
+        let mixed = [
+            wire(serde_json::json!({ "eligibility": "eligible" })),
+            wire(serde_json::json!({ "eligibility": "ineligible_permanent" })),
+            wire(serde_json::json!({ "eligibility": "ineligible_configuration" })),
+        ];
+        let group = group_of(mixed.iter());
+        assert_eq!(group.contributable, Some(1));
+        assert_eq!(
+            3u64.saturating_sub(group.contributable.unwrap_or(3)),
+            2,
+            "two of the three are withheld"
+        );
+        assert!(!copy::group_withheld_line(2).is_empty());
+
+        // An empty group reports absence, and offers nothing either way.
+        let empty: [QueueEntry; 0] = [];
+        let group = group_of(empty.iter());
+        assert_eq!(group.contributable, None);
+        assert_eq!(
+            copy::group_control(0, group.contributable),
+            copy::ContributionControl::None
         );
     }
 

@@ -1189,51 +1189,16 @@ fn manifest_block(
     block
 }
 
-/// A project group's pending rows, split by whether they may be sent.
-///
-/// `ineligible` is a count and not a list because nothing renders it: it
-/// decides only WHICH CALL a group-level submit makes, and the rows
-/// themselves already carry their own sentences.
-pub(super) struct GroupSubmit {
-    /// The entries a group-level submit may send, oldest first.
-    pub eligible: Vec<String>,
-    /// How many of this group's pending rows are contributable, or `None`
-    /// when the question does not apply to this contributor at all.
-    ///
-    /// **`None` is not zero.** It is the wire's absent `contributable_count`
-    /// -- an invited contributor, whose every pending session is sendable
-    /// and who has no "3 of 7" to be told about. Read as zero it would take
-    /// the group control away from somebody with nothing wrong. The same
-    /// distinction the `eligibility` field itself carries, one level up.
-    pub contributable: Option<u64>,
-}
-
 /// Split one project's pending rows on eligibility.
 ///
 /// Read fresh at click time, never off what `render` captured: the queue can
 /// change between a render and a click.
-pub(super) fn group_submit(app: &Rc<App>, project_id: &str) -> GroupSubmit {
+pub(super) fn group_submit(app: &Rc<App>, project_id: &str) -> crate::eligibility::GroupSubmit {
     let entries = app.entries.borrow();
     let pending = entries
         .iter()
         .filter(|e| e.state == "pending" && e.project_id == project_id);
-    let mut eligible = Vec::new();
-    // Whether the question applies here at all, taken from the rows
-    // themselves: the daemon writes an `eligibility` key on every row when
-    // the evidence flag is on and on none of them when it is off, which is
-    // exactly the condition under which it sends `contributable_count`.
-    let mut applies = false;
-    for entry in pending {
-        applies |= entry.eligibility.is_some();
-        if crate::eligibility::offers_send(entry) {
-            eligible.push(entry.entry_id.clone());
-        }
-    }
-    let contributable = applies.then_some(eligible.len() as u64);
-    GroupSubmit {
-        eligible,
-        contributable,
-    }
+    crate::eligibility::group_of(pending)
 }
 
 /// Send a whole project group, meaning **all eligible and never all**.
