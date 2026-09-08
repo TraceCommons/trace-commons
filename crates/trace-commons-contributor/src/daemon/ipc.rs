@@ -647,12 +647,20 @@ impl DaemonShared {
         let mut held = self.private_inference.lock().await;
         // Read after acquiring lifecycle ownership: a queued reconciliation
         // must not replay a setting superseded while it waited for that lock.
-        let (on, generation) = {
+        let (on, generation, credential) = {
             let settings = self.settings.lock().expect("settings lock");
             (
                 !self.private_inference_terminating.load(Ordering::Acquire)
                     && settings.private_inference,
                 self.private_inference_generation.load(Ordering::Acquire),
+                // Read here, under the same lock as the switch, so a key
+                // obtained while the daemon runs is picked up on the next
+                // pass. Cloned out rather than borrowed: the settings lock
+                // must not be held across the proxy start.
+                settings
+                    .near_ai_inference
+                    .as_ref()
+                    .map(|c| ironwire_proxy::embed::HostSecret::from(c.key.clone())),
             )
         };
         let Some(host) = held.as_mut() else {
@@ -673,6 +681,7 @@ impl DaemonShared {
             return;
         };
         host.set_runtime(self.proxy_runtime.get().cloned());
+        host.set_credential(credential);
         if host.accept_generation(generation) {
             host.apply(false).await;
         }
@@ -7491,6 +7500,62 @@ mod tests {
         s.reconcile_private_inference().await;
         assert_eq!(s.private_inference_value()["state"], "off");
         assert!(!absent_home.exists());
+    }
+
+    /// A key obtained after the daemon started still reaches the proxy, and
+    /// a key removed stops reaching it. The reconcile pass reads it from the
+    /// same lock as the switch, so neither needs a daemon restart.
+    #[tokio::test]
+    async fn a_minted_key_reaches_the_proxy_from_settings_and_leaving_stops_it() {
+        let s = shared();
+        let home = tempfile::tempdir().unwrap();
+        *s.private_inference.lock().await = Some(
+            super::super::private_inference::PrivateInference::with_port(
+                home.path().join("never-created"),
+                0,
+            ),
+        );
+        s.reconcile_private_inference().await;
+        assert!(
+            !s.private_inference
+                .lock()
+                .await
+                .as_ref()
+                .unwrap()
+                .holds_credential(),
+            "a daemon that has obtained nothing must hand IronWire nothing"
+        );
+
+        s.settings.lock().unwrap().near_ai_inference =
+            Some(crate::daemon::settings::NearAiInferenceCredential {
+                key: "sk-minted".into(),
+                key_id: "key-1".into(),
+                key_prefix: "sk-min".into(),
+                organization_id: "org-1".into(),
+                workspace_id: "ws-1".into(),
+                minted_at: chrono::Utc::now(),
+            });
+        s.reconcile_private_inference().await;
+        assert!(
+            s.private_inference
+                .lock()
+                .await
+                .as_ref()
+                .unwrap()
+                .holds_credential()
+        );
+
+        s.settings.lock().unwrap().near_ai_inference = None;
+        s.reconcile_private_inference().await;
+        assert!(
+            !s.private_inference
+                .lock()
+                .await
+                .as_ref()
+                .unwrap()
+                .holds_credential(),
+            "a revoked key must stop being offered"
+        );
     }
 
     #[tokio::test]

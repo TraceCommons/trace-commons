@@ -33,7 +33,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use ironwire_proxy::embed::{
-    self, EmbedError, EmbedOptions, EmbeddedProxy, ExitError, StartupProbes, UpdateChecks,
+    self, EmbedError, EmbedOptions, EmbeddedProxy, ExitError, HostSecret, StartupProbes,
+    UpdateChecks,
 };
 
 /// How long a liveness probe of an existing instance may take.
@@ -391,11 +392,48 @@ pub(crate) fn effective_metadata_declaration(
 /// It is not a network kill switch and must not be described as one. A
 /// contributor who declares a backend still gets one probe per declared
 /// backend at startup, by their own choice.
-fn embed_options() -> EmbedOptions {
-    EmbedOptions::default()
+/// The credential argument is the daemon's NEAR AI inference key, or `None`
+/// when the contributor has not obtained one.
+///
+/// `None` is not "a source that answers nothing" -- it is *no source*, and
+/// the difference is the whole reason this takes an `Option` rather than
+/// always installing a closure. IronWire's `credentials` field is one switch
+/// governing two things: whose answers count, and whether the credential
+/// files Claude Code and Codex write may be read at all. Supplying any source
+/// turns the second off. So a contributor with no key of ours must be handed
+/// `None`, or their working Claude subscription would silently stop being a
+/// destination while the daemon went on reporting `running` -- the NEAR AI
+/// backend is registered unconditionally, key or no key, so the registry is
+/// never empty and nothing announces the loss.
+///
+/// When a key *is* present, the closure answers exactly one name and nothing
+/// else. It cannot answer for a subscription: those are key-less by
+/// construction and there is no name a host could supply to bring one back.
+/// That trade is the contributor's to make and is why this follows the key
+/// rather than a setting of its own -- obtaining one is a deliberate act.
+///
+/// Nothing here can leak the key. `HostSecret` has no `Debug` and zeroes on
+/// drop, and `EmbedOptions`' own `Debug` renders this field as "host-owned"
+/// or "discovered" and never a value.
+fn embed_options(credential: Option<HostSecret>) -> EmbedOptions {
+    let base = EmbedOptions::default()
         .with_update_checks(UpdateChecks::Off)
-        .with_startup_probes(StartupProbes::Configured)
+        .with_startup_probes(StartupProbes::Configured);
+    match credential {
+        Some(key) => base
+            .with_credentials(move |name| (name == NEAR_AI_CREDENTIAL_NAME).then(|| key.clone())),
+        None => base,
+    }
 }
+
+/// The one environment name this daemon will ever answer for IronWire.
+///
+/// It is answered through the credential source rather than by setting the
+/// variable, and that is a decision rather than a preference: `set_var` is
+/// `unsafe` in Rust 2024, and a credential placed in this process's
+/// environment is readable by every other thing running in the daemon,
+/// including code we did not write.
+const NEAR_AI_CREDENTIAL_NAME: &str = "NEARAI_API_KEY";
 
 /// One daemon's private-inference instance: at most one proxy, and the state
 /// the daemon reports for it.
@@ -425,6 +463,12 @@ pub struct PrivateInference {
     /// later -- taking every one of the proxy's tasks with it while the
     /// response says `running`. That path sets this.
     runtime: Option<tokio::runtime::Handle>,
+    /// The NEAR AI inference key to answer with, when the contributor has
+    /// one. Read from settings on each reconcile pass rather than captured at
+    /// construction, because a ceremony can complete while the daemon runs.
+    /// A change takes effect at the next start: IronWire reads its
+    /// credentials once, when the registry is built.
+    credential: Option<HostSecret>,
     state: PrivateInferenceState,
     /// A proxy this daemon started has ended on its own. Sticky until the
     /// switch is turned off and on again: restarting it every poll tick
@@ -463,6 +507,7 @@ impl PrivateInference {
             recovery_requested: false,
             requested_generation: None,
             runtime: None,
+            credential: None,
             state: PrivateInferenceState::Off,
             crashed: false,
         }
@@ -520,6 +565,25 @@ impl PrivateInference {
     /// what.
     pub fn set_runtime(&mut self, runtime: Option<tokio::runtime::Handle>) {
         self.runtime = runtime;
+    }
+
+    /// Hand the proxy the credential it should answer `NEARAI_API_KEY` with,
+    /// or `None` when the contributor has obtained none.
+    ///
+    /// Called on every reconcile pass, from the same read of settings that
+    /// decides whether the proxy runs at all, so a ceremony that completes
+    /// mid-run is picked up without restarting the daemon. It takes effect at
+    /// the proxy's next start, because IronWire resolves its credentials once,
+    /// while building the registry.
+    pub fn set_credential(&mut self, credential: Option<HostSecret>) {
+        self.credential = credential;
+    }
+
+    /// Whether a credential is held, for the reconcile test that proves one
+    /// reaches here from settings. Presence only; the value never leaves.
+    #[cfg(test)]
+    pub(crate) fn holds_credential(&self) -> bool {
+        self.credential.is_some()
     }
 
     /// Whether accepted settings superseded the request this instance observed.
@@ -721,8 +785,9 @@ impl PrivateInference {
                 .unwrap_or_else(tokio::runtime::Handle::current);
             let home = self.home.clone();
             let port = self.port;
+            let credential = self.credential.clone();
             self.starting = Some(runtime.spawn(async move {
-                embed::start_with_options(&home, port, embed_options(), |_, _| {}).await
+                embed::start_with_options(&home, port, embed_options(credential), |_, _| {}).await
             }));
         }
         // Await through the retained handle. Canceling a caller leaves the
@@ -833,11 +898,50 @@ mod tests {
         fn exit(&self, _: &tracing::span::Id) {}
     }
 
+    /// Without a key of ours, IronWire must be left entirely on its own
+    /// discovery -- and with one, we must answer that one name and no other.
+    ///
+    /// The first half is the load-bearing one and the least obvious. Handing
+    /// IronWire a credential source that simply answers nothing is NOT the
+    /// same as handing it none: any source at all turns off its reading of
+    /// the credential files Claude Code and Codex write, so a contributor's
+    /// working subscription would stop being a destination. Nothing would
+    /// report it, either -- the NEAR AI backend is registered whether or not
+    /// a key was found, so the registry is never empty and the state stays
+    /// `running`.
+    #[test]
+    fn no_key_of_ours_leaves_every_other_destination_alone() {
+        assert!(
+            embed_options(None).credentials.is_none(),
+            "a contributor with no key of ours must reach IronWire's own \
+             discovery, or their Claude and Codex subscriptions stop \
+             answering with nothing to say so"
+        );
+
+        let options = embed_options(Some(HostSecret::from("sk-minted".to_string())));
+        let source = options
+            .credentials
+            .as_ref()
+            .expect("a held key is answered for");
+        assert!(source(NEAR_AI_CREDENTIAL_NAME).is_some());
+        // Exactly one name. Answering a second would put this daemon in the
+        // path of a credential it never obtained and does not own.
+        for other in [
+            "ANTHROPIC_API_KEY",
+            "OPENAI_API_KEY",
+            "NEARAI_API_KEY_2",
+            "nearai_api_key",
+            "",
+        ] {
+            assert!(source(other).is_none(), "{other}");
+        }
+    }
+
     /// The choices, stated once, so a later edit that quietly widens them
     /// fails here rather than on a contributor's machine.
     #[test]
     fn the_daemon_declines_both_kinds_of_request_it_never_asked_for() {
-        let options = embed_options();
+        let options = embed_options(None);
         assert_eq!(
             options.update_checks,
             UpdateChecks::Off,
@@ -901,7 +1005,7 @@ mod tests {
         let config = home.path().join("config.toml");
         std::fs::write(&config, "[updates]\ncheck = true\n").unwrap();
 
-        let proxy = embed::start_with_options(home.path(), Some(0), embed_options(), |_, _| {})
+        let proxy = embed::start_with_options(home.path(), Some(0), embed_options(None), |_, _| {})
             .await
             .expect("start");
         assert!(
