@@ -100,6 +100,11 @@ pub const REASON_EVIDENCE_CAPTURE_OFF: &str = "evidence_capture_off";
 /// server admits on. Recorded before the marker existed, or made by a tool
 /// that does not add it.
 pub const REASON_MARKER_ABSENT: &str = "marker_absent";
+/// The call carries the marker, and the receipt that has to accompany it
+/// could not be obtained. Not a fact about this session: the receipt is
+/// fetched from elsewhere and elsewhere can be down, which is why it answers
+/// [`STATE_UNKNOWN`] rather than an ineligibility.
+pub const REASON_RECEIPT_UNAVAILABLE: &str = "receipt_unavailable";
 /// The request could not be read as the shape the marker lives in. Refused
 /// rather than retried as an ordinary submission -- the same rule
 /// `submit::admission_profile_for_request` follows.
@@ -135,6 +140,42 @@ impl Verdict {
             state: STATE_INELIGIBLE_CONFIGURATION,
             reason: Some(reason),
         }
+    }
+
+    fn unknown(reason: &'static str) -> Self {
+        Self {
+            state: STATE_UNKNOWN,
+            reason: Some(reason),
+        }
+    }
+}
+
+/// What a refused submission proved about the entry it was sent for.
+///
+/// **The row must stop claiming `eligible`.** A row that goes on saying a
+/// session can be sent, after a send of that session was refused for an
+/// admission reason, is the exact defect this surface exists to remove --
+/// reproduced one layer up, and now with the contributor's own attempt as the
+/// evidence against it.
+///
+/// `None` for every other refusal label, and that is the common case: a
+/// daily cap, an unreachable server, a stale approval and a filter outage all
+/// say nothing whatever about whether this session is admissible, and
+/// rewriting the row from one of them would be inventing an answer.
+///
+/// The two that do say something say different things.
+/// `admission_request_malformed` is about bytes that were sent long ago and
+/// cannot change: permanent. `admission_receipt_unavailable` is about a
+/// receipt fetched from a service that can be down, so it retracts the
+/// `eligible` claim without replacing it with a "no" -- see
+/// [`REASON_RECEIPT_UNAVAILABLE`]. This is the one path in this slice that
+/// produces [`STATE_UNKNOWN`], and it is why the label ships in the contract.
+#[must_use]
+pub fn writeback_for(reason_label: &str) -> Option<Verdict> {
+    match reason_label {
+        "admission_request_malformed" => Some(Verdict::permanent(REASON_REQUEST_MALFORMED)),
+        "admission_receipt_unavailable" => Some(Verdict::unknown(REASON_RECEIPT_UNAVAILABLE)),
+        _ => None,
     }
 }
 
@@ -215,7 +256,7 @@ pub const ALL_STATES: [&str; 4] = [
 ];
 
 /// Every reason label this module can produce, for tests that pin the set.
-pub const ALL_REASONS: [&str; 12] = [
+pub const ALL_REASONS: [&str; 13] = [
     REASON_NO_CALL,
     REASON_CAPTURE_OFF,
     REASON_DIGEST_ABSENT,
@@ -228,6 +269,7 @@ pub const ALL_REASONS: [&str; 12] = [
     REASON_EVIDENCE_CAPTURE_OFF,
     REASON_MARKER_ABSENT,
     REASON_REQUEST_MALFORMED,
+    REASON_RECEIPT_UNAVAILABLE,
 ];
 
 #[cfg(test)]
@@ -463,8 +505,55 @@ mod tests {
         }
     }
 
-    /// The daemon never emits `unknown` in this slice: every input above
-    /// produces a real answer. The label ships in the contract anyway,
+    /// Decision 1, pinned. A submission refused for an admission reason
+    /// leaves the row unable to claim `eligible`.
+    #[test]
+    fn an_admission_refusal_retracts_the_claim() {
+        assert_eq!(
+            writeback_for("admission_request_malformed"),
+            Some(Verdict {
+                state: STATE_INELIGIBLE_PERMANENT,
+                reason: Some(REASON_REQUEST_MALFORMED),
+            })
+        );
+        assert_eq!(
+            writeback_for("admission_receipt_unavailable"),
+            Some(Verdict {
+                state: STATE_UNKNOWN,
+                reason: Some(REASON_RECEIPT_UNAVAILABLE),
+            })
+        );
+        for verdict in [
+            writeback_for("admission_request_malformed"),
+            writeback_for("admission_receipt_unavailable"),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            assert_ne!(verdict.state, STATE_ELIGIBLE);
+        }
+    }
+
+    /// And a refusal that says nothing about admissibility rewrites nothing.
+    /// An unreachable server is not evidence about a contributor's session.
+    #[test]
+    fn an_unrelated_refusal_rewrites_nothing() {
+        for label in [
+            "upload-failed",
+            "claim-mint-failed",
+            "pii-filter-unavailable",
+            "witness-review-stale",
+            "parse-failed",
+            "",
+        ] {
+            assert_eq!(writeback_for(label), None, "{label} rewrote the row");
+        }
+    }
+
+    /// The daemon never emits `unknown` for a session it evaluates: every
+    /// input above produces a real answer. (The one path that does produce
+    /// it is [`writeback_for`], which retracts a claim rather than
+    /// classifying a session.) The label ships in the contract anyway,
     /// because lazy evaluation is the obvious later optimisation and a shell
     /// that has never seen `unknown` will render it wrong on the day it first
     /// arrives.

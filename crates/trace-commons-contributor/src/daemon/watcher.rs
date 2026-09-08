@@ -257,6 +257,10 @@ struct PassContext {
     max_queue_entries: usize,
     consent_scopes: Vec<String>,
     approval_inputs: Option<String>,
+    /// The signup flag, read once per pass with everything else. Off for an
+    /// invited contributor, whose entries carry no eligibility at all -- see
+    /// `QueueEntry::eligibility`.
+    admission_evidence: bool,
 }
 
 impl PassContext {
@@ -284,11 +288,16 @@ impl PassContext {
             };
             crate::daemon::preview::input_fingerprint(c, near_ai.as_ref(), attested_bodies)
         });
+        let admission_evidence = cfg
+            .as_ref()
+            .and_then(|c| c.witness.as_ref())
+            .is_some_and(|w| w.admission_evidence);
         Self {
             now,
             max_queue_entries,
             consent_scopes,
             approval_inputs,
+            admission_evidence,
         }
     }
 }
@@ -584,6 +593,13 @@ fn visit_session(
         && !from_staging
         && armed_settle_elapsed(obs.modified_at, ctx.now);
 
+    let eligibility = super::contribution_eligibility::evaluate(
+        ctx.admission_evidence,
+        &transcript.routing,
+        transcript.attested_call.as_deref(),
+        transcript.attested_refusal,
+    );
+
     let entry = QueueEntry {
         entry_id: entry_id_for(&transcript.session_hash),
         session_hash: transcript.session_hash.clone(),
@@ -634,6 +650,14 @@ fn visit_session(
         // can recognize it without reading the group again. See
         // `QueueEntry::observed_modified_at`.
         observed_modified_at: Some(obs.modified_at),
+        // Free here and nowhere else. The load above already joined this
+        // session's ledger hops and, where a body store is configured,
+        // already ran the full attested check; recording what they said
+        // costs two labels. A list that asked the question instead would
+        // pay for a re-read and re-hash of every captured body in the
+        // queue, every time anything called it.
+        eligibility: eligibility.map(|v| v.state.to_string()),
+        eligibility_reason: eligibility.and_then(|v| v.reason).map(str::to_string),
     };
     let entry_id = entry.entry_id;
 

@@ -746,6 +746,16 @@ async fn drain_approved(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<U
                 }
             }
             uploader::UploadDecision::Refused { reason_label } => {
+                // Decision 1: a refusal for an admission reason is evidence
+                // about the entry, and the entry stops claiming otherwise.
+                // Every other refusal label says nothing about
+                // admissibility and rewrites nothing -- see
+                // `contribution_eligibility::writeback_for`.
+                if let Some(verdict) =
+                    contribution_eligibility::writeback_for(&reason_label)
+                {
+                    q.record_eligibility(entry.entry_id, verdict.state, verdict.reason);
+                }
                 q.set_state(
                     entry.entry_id,
                     queue::QueueState::Refused,
@@ -770,6 +780,16 @@ async fn drain_approved(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<U
                 q.revoke_approval(entry.entry_id, &reason_label);
             }
             uploader::UploadDecision::Failed { reason_label } => {
+                // Same rule on the failure side: `submit_one` can report an
+                // admission refusal either way round depending on where in
+                // the pipeline it surfaced, and a row that kept its claim
+                // on one of the two paths would be the same defect with a
+                // narrower reproduction.
+                if let Some(verdict) =
+                    contribution_eligibility::writeback_for(&reason_label)
+                {
+                    q.record_eligibility(entry.entry_id, verdict.state, verdict.reason);
+                }
                 q.record_attempt(entry.entry_id, None);
                 q.set_state(
                     entry.entry_id,

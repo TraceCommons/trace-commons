@@ -1060,6 +1060,22 @@ impl DaemonShared {
             .is_some()
     }
 
+    /// Whether this contributor is admitted on evidence rather than on an
+    /// invite -- `WitnessSettings::admission_evidence`.
+    ///
+    /// `None` when the config could not be read, which is a different fact
+    /// from "off" and is kept apart from it here so callers do not have to
+    /// guess. `add_admission_setting` reports the same three-way answer on
+    /// the wire.
+    pub(crate) fn admission_evidence(&self) -> Option<bool> {
+        self.store
+            .load_config()
+            .ok()?
+            .and_then(|c| c.witness)
+            .map(|w| w.admission_evidence)
+            .or(Some(false))
+    }
+
     /// Source roots with the daemon's live routing ledger attached.
     ///
     /// Settings describe the declaration; the daemon owns the instance.
@@ -1378,9 +1394,13 @@ impl DaemonShared {
     }
 
     fn snapshot_value(&self) -> serde_json::Value {
+        let admission_evidence = self.admission_evidence();
         let pending: Vec<serde_json::Value> = {
             let queue = self.queue.lock().expect("queue lock");
-            queue.pending().iter().map(|e| entry_value(e)).collect()
+            queue.pending()
+                .iter()
+                .map(|e| entry_value(e, admission_evidence))
+                .collect()
         };
         serde_json::json!({
             "pending": pending,
@@ -1531,8 +1551,11 @@ pub fn display_path(project_key: &str) -> String {
     }
 }
 
-pub fn entry_value(e: &super::queue::QueueEntry) -> serde_json::Value {
-    serde_json::json!({
+pub fn entry_value(
+    e: &super::queue::QueueEntry,
+    admission_evidence: Option<bool>,
+) -> serde_json::Value {
+    let mut value = serde_json::json!({
         "entry_id": e.entry_id,
         "session_hash": e.session_hash,
         "source": e.source,
@@ -1575,7 +1598,35 @@ pub fn entry_value(e: &super::queue::QueueEntry) -> serde_json::Value {
         // to expose, because nothing in the format supplies one.
         "subagent_count": e.subagent_count,
         "subagents_dropped": e.subagents_dropped,
-    })
+    });
+    // ABSENT, NOT `unknown`, WHENEVER THE SIGNUP FLAG IS OFF.
+    //
+    // An invited contributor has no eligibility question: everything in
+    // their queue is contributable, which is why this whole surface stayed
+    // invisible for so long. A field answering a question they do not have
+    // would put three shells to work rendering an answer to it, and the
+    // first thing any of them would render is a caveat on work that has
+    // none.
+    //
+    // A config that could not be read answers `None` here and is treated the
+    // same way, for the same reason: it is not known that the question
+    // applies, and `unknown` would assert that it does.
+    if admission_evidence == Some(true) {
+        // A row the daemon never evaluated -- written before these fields
+        // existed, or re-offered after its content moved -- is `unknown`
+        // rather than absent. Not evaluated is a different fact from not
+        // asked, and degrading "could not tell" into "no" invites a
+        // contributor to conclude something false about their own work.
+        value["eligibility"] = serde_json::Value::from(
+            e.eligibility
+                .clone()
+                .unwrap_or_else(|| super::contribution_eligibility::STATE_UNKNOWN.to_string()),
+        );
+        if let Some(reason) = e.eligibility_reason.as_deref() {
+            value["eligibility_reason"] = serde_json::Value::from(reason);
+        }
+    }
+    value
 }
 
 /// `?` for a handler that returns a [`Response`] rather than a `Result`.
@@ -1744,7 +1795,7 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
                 Some(e) => Response::ok(
                     req.id,
                     serde_json::json!({
-                        "entry": entry_value(e),
+                        "entry": entry_value(e, shared.admission_evidence()),
                         "preview_requires_async": true,
                     }),
                 ),
@@ -1914,8 +1965,15 @@ fn add_admission_setting(shared: &DaemonShared, value: &mut serde_json::Value) {
 }
 
 fn handle_list_pending(shared: &DaemonShared, req: &Request) -> Response {
+    // Read once for the whole list, and outside the queue lock: it reads the
+    // config file, and holding the queue across that would put a file read
+    // in front of every other queue caller.
+    let admission_evidence = shared.admission_evidence();
     let queue = shared.queue.lock().expect("queue lock");
-    let entries: Vec<serde_json::Value> = queue.pending().iter().map(|e| entry_value(e)).collect();
+    let entries: Vec<serde_json::Value> = queue.pending()
+                .iter()
+                .map(|e| entry_value(e, admission_evidence))
+                .collect();
     Response::ok(req.id, serde_json::json!({ "pending": entries }))
 }
 
@@ -3170,7 +3228,7 @@ async fn handle_preview(shared: &DaemonShared, req: &Request) -> Response {
             Ok((summary, _)) => {
                 let mut value =
                     serde_json::to_value(summary).expect("preview summary serialization");
-                value["entry"] = entry_value(&entry);
+                value["entry"] = entry_value(&entry, shared.admission_evidence());
                 Response::ok(req.id, value)
             }
             Err(label) => Response::err(req.id, ERR_UNAVAILABLE, label),
@@ -3214,7 +3272,7 @@ async fn handle_preview(shared: &DaemonShared, req: &Request) -> Response {
             // added only here: this response describes an entry the caller
             // just named, while a cached summary outlives that state.
             let mut value = preview_card_value(&summary);
-            value["entry"] = entry_value(&entry);
+            value["entry"] = entry_value(&entry, shared.admission_evidence());
             Response::ok(req.id, value)
         }
         Err(_) => Response::err(req.id, ERR_UNAVAILABLE, "preview-failed"),
@@ -6944,7 +7002,7 @@ mod tests {
             discovered_at: Utc::now(),
             ..Default::default()
         };
-        let v = entry_value(&e);
+        let v = entry_value(&e, None);
         let body = serde_json::to_string(&v).unwrap();
         assert!(
             !body.contains(".claude"),
@@ -7063,6 +7121,77 @@ mod tests {
         }
     }
 
+    /// **The rule the whole field exists for.** An invited contributor gets
+    /// NO eligibility field at all -- not `unknown`, not `eligible`, not an
+    /// explicit null. Everything in their queue is contributable; a field
+    /// answering a question they do not have is three shells' worth of
+    /// caveat on work that carries none.
+    ///
+    /// Asserted on the JSON rather than on the entry, because the entry
+    /// carrying a value and the wire suppressing it is exactly the state a
+    /// contributor's config can produce.
+    #[test]
+    fn an_invited_contributor_is_handed_no_eligibility_field() {
+        let mut e = card_entry();
+        e.eligibility = Some(
+            super::super::contribution_eligibility::STATE_ELIGIBLE.to_string(),
+        );
+        e.eligibility_reason = None;
+
+        for flag in [Some(false), None] {
+            let v = entry_value(&e, flag);
+            let object = v.as_object().expect("an object");
+            assert!(
+                !object.contains_key("eligibility"),
+                "the key itself must be absent, not null: {v}"
+            );
+            assert!(!object.contains_key("eligibility_reason"));
+        }
+    }
+
+    /// And with the flag on, the recorded answer crosses whole.
+    #[test]
+    fn an_evidence_contributor_is_handed_the_recorded_answer() {
+        use super::super::contribution_eligibility as ce;
+        let mut e = card_entry();
+        e.eligibility = Some(ce::STATE_INELIGIBLE_PERMANENT.to_string());
+        e.eligibility_reason = Some(ce::REASON_NO_CALL.to_string());
+
+        let v = entry_value(&e, Some(true));
+        assert_eq!(v["eligibility"], ce::STATE_INELIGIBLE_PERMANENT);
+        assert_eq!(v["eligibility_reason"], ce::REASON_NO_CALL);
+    }
+
+    /// An eligible row carries no reason: there is nothing to explain, and a
+    /// reason beside it would be a caveat with no content.
+    #[test]
+    fn an_eligible_row_carries_no_reason() {
+        use super::super::contribution_eligibility as ce;
+        let mut e = card_entry();
+        e.eligibility = Some(ce::STATE_ELIGIBLE.to_string());
+        e.eligibility_reason = None;
+
+        let v = entry_value(&e, Some(true));
+        assert_eq!(v["eligibility"], ce::STATE_ELIGIBLE);
+        assert!(
+            !v.as_object().expect("an object").contains_key("eligibility_reason"),
+            "an eligible row must carry no reason: {v}"
+        );
+    }
+
+    /// A row this build never evaluated -- written before the fields
+    /// existed, or re-offered after its content moved -- is `unknown` and
+    /// not absent. Not evaluated is a different fact from not asked.
+    #[test]
+    fn an_unevaluated_row_is_unknown_rather_than_absent() {
+        use super::super::contribution_eligibility as ce;
+        let e = card_entry();
+        assert!(e.eligibility.is_none());
+
+        let v = entry_value(&e, Some(true));
+        assert_eq!(v["eligibility"], ce::STATE_UNKNOWN);
+    }
+
     /// The origin has to cross the IPC boundary, not merely exist on the ref.
     ///
     /// The desktop apps read this JSON and nothing else. An equivalent
@@ -7075,7 +7204,7 @@ mod tests {
         e.source = "trajectory".to_string();
         e.declared_source = Some("antigravity".to_string());
 
-        let v = entry_value(&e);
+        let v = entry_value(&e, None);
         assert_eq!(
             v["source"], "trajectory",
             "the adapter that loads it must stay reportable"
@@ -7089,7 +7218,7 @@ mod tests {
         e.project_key = "/tmp/somewhere/repo".to_string();
         e.session_cwd = Some("/tmp/somewhere/repo/crates/inner".to_string());
 
-        let v = entry_value(&e);
+        let v = entry_value(&e, None);
         assert_eq!(v["project_path"], "/tmp/somewhere/repo");
         assert_eq!(v["session_path"], "/tmp/somewhere/repo/crates/inner");
     }
@@ -7170,7 +7299,7 @@ mod tests {
             std::slice::from_ref(&key),
         );
 
-        let v = entry_value(&e);
+        let v = entry_value(&e, None);
         let rendered = v["project_path"].as_str().expect("a rendered path");
         assert!(
             rendered.ends_with("IronWire"),
@@ -7209,7 +7338,7 @@ mod tests {
         let mut e = card_entry();
         e.project_key = "/tmp/somewhere/repo".to_string();
         e.session_cwd = Some("/tmp/somewhere/repo".to_string());
-        assert!(entry_value(&e)["session_path"].is_null());
+        assert!(entry_value(&e, None)["session_path"].is_null());
     }
 
     /// The path is on the socket and nowhere else.
@@ -7252,7 +7381,7 @@ mod tests {
     /// A native session declares nothing and must not grow an empty label.
     #[test]
     fn an_entry_with_no_declared_origin_reports_null() {
-        let v = entry_value(&card_entry());
+        let v = entry_value(&card_entry(), None);
         assert_eq!(v["source"], "claude-code");
         assert!(
             v["declared_source"].is_null(),
@@ -7267,7 +7396,7 @@ mod tests {
         // not decoration. No ordinal is exposed -- nothing in the format
         // supplies one.
         let e = card_entry();
-        let v = entry_value(&e);
+        let v = entry_value(&e, None);
         assert_eq!(v["subagent_count"], 114);
         assert_eq!(v["subagents_dropped"], 2);
         let body = serde_json::to_string(&v).unwrap();

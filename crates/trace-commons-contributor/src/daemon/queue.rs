@@ -308,6 +308,34 @@ pub struct QueueEntry {
     /// exactly as they did before: the fast path fails open.
     #[serde(default)]
     pub observed_modified_at: Option<DateTime<Utc>>,
+    /// Whether this session can be contributed on evidence, and why not when
+    /// it cannot: one of `contribution_eligibility`'s `STATE_*` labels and
+    /// one of its `REASON_*` labels.
+    ///
+    /// Recorded when the entry is built, from the transcript the watcher had
+    /// just loaded -- the one moment the answer is free, because the ledger
+    /// join and the body check have both already run for that load. Nothing
+    /// re-derives it on a list: doing so would put a full re-read and re-hash
+    /// of every captured body behind every `list_pending`.
+    ///
+    /// `None` on an entry built while `admission_evidence` was off, which is
+    /// every invited contributor's whole queue, and on an entry written
+    /// before these fields existed. Both render as an ABSENT field rather
+    /// than as `unknown`: a contributor with an invite has no eligibility
+    /// question. `handle_list_pending` is what tells the two apart, from the
+    /// flag as it stands now.
+    ///
+    /// **A submission that fails for an admission reason writes back here.**
+    /// A row that goes on claiming `eligible` after a submission proved
+    /// otherwise is the exact defect this surface exists to remove,
+    /// reproduced one layer up. See `Queue::record_eligibility`.
+    ///
+    /// Fixed labels, both. Neither ever carries a path, a digest, an
+    /// identifier or anything a contributor wrote.
+    #[serde(default)]
+    pub eligibility: Option<String>,
+    #[serde(default)]
+    pub eligibility_reason: Option<String>,
 }
 
 impl QueueEntry {
@@ -425,6 +453,14 @@ fn reoffered_from(old: QueueEntry) -> QueueEntry {
         // `None` sends the next poll down the load path, which is the
         // fail-open direction.
         observed_modified_at: None,
+        // Cleared rather than carried. This re-offer exists because the
+        // content moved, and the old answer was about the old bytes; a
+        // stale `eligible` riding across a content change is the very
+        // claim this surface exists to stop making. Absent here renders as
+        // `unknown` -- not evaluated -- until the next poll's load mints an
+        // entry that was.
+        eligibility: None,
+        eligibility_reason: None,
         ..old
     }
 }
@@ -836,6 +872,35 @@ impl Queue {
         // The artifact the contributor was shown is no longer the one that
         // would be sent, so the re-offer must be previewed afresh.
         e.previewed_envelope_digest = None;
+        true
+    }
+
+    /// Record what a submission proved about this entry's eligibility.
+    ///
+    /// **A row that goes on claiming `eligible` after a submission was
+    /// refused for an admission reason is the exact defect the eligibility
+    /// surface exists to remove, reproduced one layer up.** The client's
+    /// cheap check is an expectation and the server's decision is the
+    /// answer; when they disagree the server is right, and the row has to
+    /// stop saying otherwise.
+    ///
+    /// The cost is a list that can change while a contributor is reading it.
+    /// That is real, and it is also just what happened: a surface that hides
+    /// a change to stay still is lying to look calm.
+    ///
+    /// `state` and `reason` are `contribution_eligibility` labels. Returns
+    /// whether an entry was found.
+    pub fn record_eligibility(
+        &mut self,
+        entry_id: Uuid,
+        state: &str,
+        reason: Option<&str>,
+    ) -> bool {
+        let Some(e) = self.entries.iter_mut().find(|e| e.entry_id == entry_id) else {
+            return false;
+        };
+        e.eligibility = Some(state.to_string());
+        e.eligibility_reason = reason.map(str::to_string);
         true
     }
 
