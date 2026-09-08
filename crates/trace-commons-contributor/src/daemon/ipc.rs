@@ -647,12 +647,20 @@ impl DaemonShared {
         let mut held = self.private_inference.lock().await;
         // Read after acquiring lifecycle ownership: a queued reconciliation
         // must not replay a setting superseded while it waited for that lock.
-        let (on, generation) = {
+        let (on, generation, credential) = {
             let settings = self.settings.lock().expect("settings lock");
             (
                 !self.private_inference_terminating.load(Ordering::Acquire)
                     && settings.private_inference,
                 self.private_inference_generation.load(Ordering::Acquire),
+                // Read here, under the same lock as the switch, so a key
+                // obtained while the daemon runs is picked up on the next
+                // pass. Cloned out rather than borrowed: the settings lock
+                // must not be held across the proxy start.
+                settings
+                    .near_ai_inference
+                    .as_ref()
+                    .map(|c| ironwire_proxy::embed::HostSecret::from(c.key.clone())),
             )
         };
         let Some(host) = held.as_mut() else {
@@ -673,6 +681,7 @@ impl DaemonShared {
             return;
         };
         host.set_runtime(self.proxy_runtime.get().cloned());
+        host.set_credential(credential);
         if host.accept_generation(generation) {
             host.apply(false).await;
         }
@@ -1634,6 +1643,9 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         }
         "near_account_status" => super::account_onboarding::handle_status(shared, req),
         "near_account_cancel" => super::account_onboarding::handle_cancel(shared, req),
+        "near_ai_credential_status" => super::nearai_credential::handle_status(shared, req),
+        "near_ai_credential_cancel" => super::nearai_credential::handle_cancel(shared, req),
+        "near_ai_credential_forget" => super::nearai_credential::handle_forget(shared, req),
 
         // Unlike the probe, discovery opens no connection: it reads one
         // small file the proxy left on disk. So it answers here, on the
@@ -2270,6 +2282,7 @@ pub async fn handle_request_async(shared: &DaemonShared, req: &Request) -> Respo
             chrono::Utc::now().timestamp(),
         ),
         "near_account_start" => super::account_onboarding::handle_start(shared, req).await,
+        "near_ai_credential_start" => super::nearai_credential::handle_start(shared, req).await,
         "near_account_capabilities" => {
             super::account_onboarding::handle_capabilities(shared, req).await
         }
@@ -3816,6 +3829,18 @@ fn redacted_settings(s: &DaemonSettings) -> serde_json::Value {
         obj.insert(
             "near_ai_configured".to_string(),
             serde_json::Value::Bool(configured),
+        );
+        // The inference credential is a second, different credential in the
+        // same document -- see `DaemonSettings::near_ai_inference` -- and gets
+        // the same treatment for the same reason. `skip_serializing_if` keeps
+        // the absent case out of the blob already; the `remove` is what
+        // matters, because without it the whole record, key included, crosses
+        // the socket to every shell that asks for settings.
+        let inference_configured = s.near_ai_inference.is_some();
+        obj.remove("near_ai_inference");
+        obj.insert(
+            "near_ai_inference_configured".to_string(),
+            serde_json::Value::Bool(inference_configured),
         );
         // claude_root / codex_root are local filesystem paths. entry_value
         // is scrupulous about never putting a path on the wire; this
@@ -6466,6 +6491,77 @@ mod tests {
         assert!(body.contains("near_ai_configured"));
     }
 
+    /// The ceremony is reachable over the socket, and forgetting says what it
+    /// actually did rather than implying a revocation it cannot perform.
+    #[test]
+    fn the_credential_ceremony_is_dispatched_and_forgetting_claims_nothing_extra() {
+        let s = shared();
+        // An attempt nobody started is unknown, not an empty success.
+        let r = handle_request(&s, &req("near_ai_credential_status", serde_json::json!({})));
+        assert_eq!(r.error.unwrap().message, "near_ai_credential_unknown");
+        let r = handle_request(
+            &s,
+            &req(
+                "near_ai_credential_cancel",
+                serde_json::json!({"attempt_id": "never-began"}),
+            ),
+        );
+        assert_eq!(r.error.unwrap().message, "near_ai_credential_unknown");
+
+        s.settings.lock().unwrap().near_ai_inference =
+            Some(crate::daemon::settings::NearAiInferenceCredential {
+                key: "sk-super-secret-key".into(),
+                key_id: "key-1".into(),
+                key_prefix: "sk-min".into(),
+                organization_id: "org-1".into(),
+                workspace_id: "ws-1".into(),
+                minted_at: chrono::Utc::now(),
+            });
+        s.settings.lock().unwrap().save(&s.store).unwrap();
+        let r = handle_request(&s, &req("near_ai_credential_forget", serde_json::json!({})));
+        let body = r.result.unwrap();
+        assert_eq!(body["removed"], true);
+        // Local only. Revoking needs a session, and the session was discarded
+        // the moment the key was minted.
+        assert_eq!(body["revoked"], false);
+        assert!(
+            DaemonSettings::load(&s.store)
+                .unwrap()
+                .near_ai_inference
+                .is_none()
+        );
+        assert!(
+            !serde_json::to_string(&body).unwrap().contains("sk-super"),
+            "{body}"
+        );
+    }
+
+    /// A second credential in the same document as the privacy-filter one,
+    /// and the same rule: presence crosses the socket, the value never does.
+    #[test]
+    fn settings_never_echo_the_inference_credential() {
+        let s = shared();
+        s.settings.lock().unwrap().near_ai_inference =
+            Some(crate::daemon::settings::NearAiInferenceCredential {
+                key: "sk-super-secret-key".into(),
+                key_id: "key-1".into(),
+                key_prefix: "sk-sup".into(),
+                organization_id: "org-1".into(),
+                workspace_id: "ws-1".into(),
+                minted_at: chrono::Utc::now(),
+            });
+        let r = handle_request(&s, &req("get_settings", serde_json::json!({})));
+        let body = serde_json::to_string(&r.result.unwrap()).unwrap();
+        assert!(!body.contains("sk-super-secret-key"), "{body}");
+        assert!(
+            body.contains("\"near_ai_inference_configured\":true"),
+            "{body}"
+        );
+        // The two are near-homonyms and must not be conflated: the
+        // privacy-filter credential is absent here and must still report so.
+        assert!(body.contains("\"near_ai_configured\":false"), "{body}");
+    }
+
     #[test]
     fn get_settings_never_carries_a_local_filesystem_path() {
         // The wholesale-serialized settings blob used to leak claude_root /
@@ -7453,6 +7549,62 @@ mod tests {
         s.reconcile_private_inference().await;
         assert_eq!(s.private_inference_value()["state"], "off");
         assert!(!absent_home.exists());
+    }
+
+    /// A key obtained after the daemon started still reaches the proxy, and
+    /// a key removed stops reaching it. The reconcile pass reads it from the
+    /// same lock as the switch, so neither needs a daemon restart.
+    #[tokio::test]
+    async fn a_minted_key_reaches_the_proxy_from_settings_and_leaving_stops_it() {
+        let s = shared();
+        let home = tempfile::tempdir().unwrap();
+        *s.private_inference.lock().await = Some(
+            super::super::private_inference::PrivateInference::with_port(
+                home.path().join("never-created"),
+                0,
+            ),
+        );
+        s.reconcile_private_inference().await;
+        assert!(
+            !s.private_inference
+                .lock()
+                .await
+                .as_ref()
+                .unwrap()
+                .holds_credential(),
+            "a daemon that has obtained nothing must hand IronWire nothing"
+        );
+
+        s.settings.lock().unwrap().near_ai_inference =
+            Some(crate::daemon::settings::NearAiInferenceCredential {
+                key: "sk-minted".into(),
+                key_id: "key-1".into(),
+                key_prefix: "sk-min".into(),
+                organization_id: "org-1".into(),
+                workspace_id: "ws-1".into(),
+                minted_at: chrono::Utc::now(),
+            });
+        s.reconcile_private_inference().await;
+        assert!(
+            s.private_inference
+                .lock()
+                .await
+                .as_ref()
+                .unwrap()
+                .holds_credential()
+        );
+
+        s.settings.lock().unwrap().near_ai_inference = None;
+        s.reconcile_private_inference().await;
+        assert!(
+            !s.private_inference
+                .lock()
+                .await
+                .as_ref()
+                .unwrap()
+                .holds_credential(),
+            "a revoked key must stop being offered"
+        );
     }
 
     #[tokio::test]
