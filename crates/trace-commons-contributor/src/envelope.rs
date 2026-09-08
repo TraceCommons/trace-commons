@@ -582,7 +582,6 @@ pub(crate) fn final_call_witness_input(
     ];
     isolated
 }
-}
 
 fn build_raw_contribution_with_id(
     t: &SessionTranscript,
