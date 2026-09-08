@@ -103,14 +103,62 @@ What this buys:
 2. **A secret enters a path that had none.** Rotatable, but it must be present
    at every provisioning and every returning login. That is a new availability
    dependency on the same footing as the database.
-3. **Rotation requires the account name.** To recompute the index we must hold
-   the NEAR account name, which the current design deliberately avoids storing.
-   This is the sharpest tradeoff in the document: **the design trades data
-   minimisation for rotatability.** If we would rather not store account names,
-   the pepper is unrotatable again and the trap above applies. Decide this
-   explicitly; do not let it be settled by whoever writes the migration.
+3. **Rotation requires the account name in some recoverable form.** To
+   recompute the index we must be able to read each account name back. Storing
+   it in plaintext is the obvious way and is a **false economy** -- see
+   "Storing the name in plaintext defeats the pepper" below. Store it encrypted
+   instead.
 4. **A migration over existing anchors**, which must run before any wallet
    account exists in production, or it becomes an identity rewrite.
+
+## Storing the name in plaintext defeats the pepper
+
+An earlier revision of this document presented a binary: store account names
+and get rotation, or keep minimisation and accept an unrotatable pepper. That
+framing was wrong, and the error is worth stating because it is easy to repeat.
+
+**Name the threat the pepper answers.** It is a database disclosure *without*
+application secrets: a leaked backup, a stolen replica, a SQL-injection read.
+An attacker who has fully compromised the application host holds the pepper
+already, so the pepper does nothing for that case and was never meant to.
+
+Now apply that to plaintext storage. In exactly the scenario the pepper exists
+for, a plaintext `account_name` column hands over every wallet identity
+directly. The pepper would be a rotatable secret guarding data lying in the
+clear beside it. It defeats the property it exists to provide, and the
+resulting system is barely better than today while carrying a new secret and a
+lost invariant.
+
+That both original options were bad is a signal the framing was wrong, not that
+the problem is hard.
+
+## The design, revised: encrypt the name, pepper the index
+
+Store the account name **encrypted under a KMS-held key**, and derive the blind
+index under a pepper also held in KMS.
+
+This repository already has the machinery. `crates/trace-commons-server/src/trace_artifact_kek.rs`
+implements a KEK/DEK envelope with a KMS-backed wrapper (`gcp-kms` feature,
+`crates/trace-commons-server/Cargo.toml:107`), and
+`trace_artifact_store.rs:1193` provides `aead_encrypt_with_dek`. Trace
+artifacts already use it. This is not new infrastructure.
+
+What it buys over both original options:
+
+- **A database disclosure alone reveals nothing.** Names are ciphertext, the
+  index is peppered, and neither key is in the database.
+- **Rotation works.** Decrypt with the old key, recompute the index under the
+  new pepper, write both back. Tenant ids never move, because they are random
+  and independent of the derivation.
+- **Key durability becomes KMS's problem**, which is a far better home for it
+  than a hand-managed secret. The catastrophic-loss case in the trap above is
+  answered by the same key-management guarantees already relied on for trace
+  artifacts.
+
+The cost that remains is complexity: two key references to manage, a decrypt on
+every returning login, and a rotation path that must be written and tested
+rather than assumed. That is a real cost and it is why the recommendation below
+is still "not yet".
 
 ## When this becomes required
 
@@ -134,11 +182,9 @@ trade.
   encryption is a blind index with extra steps and the same key-rotation
   problem; non-deterministic encryption cannot be indexed.
 - **Drop the anchor and store the account name in plaintext behind RLS** --
-  simplest, defeats offline enumeration since nothing is derived, and needs no
-  secret. Rejected on data minimisation: a database disclosure would then hand
-  over wallet identities directly, where today it hands over hashes. Worth
-  revisiting only if we conclude we must store account names anyway for
-  rotation (cost 3), at which point this becomes the honest choice.
+  simplest, and needs no secret. Rejected for the reason in "Storing the name
+  in plaintext defeats the pepper": it loses precisely the property this work
+  exists to add, in precisely the scenario it exists to defend.
 
 ## Verification, if built
 
