@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Collections.Specialized;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -1146,8 +1147,24 @@ public sealed partial class MainWindow : Window
             return;
         }
 
-        var sheet = new PreviewWindow(_host, entry);
+        var sheet = new PreviewWindow(_host, entry, ViewModel.LiveEntry);
         sheet.Decided += OnSheetDecided;
+
+        // The sheet's gate reads the LIVE entry, but the properties it feeds
+        // are pull-bound: without a nudge the footer keeps drawing what it
+        // last read, and a session downgraded while the sheet is open would go
+        // on offering Contribute for as long as the sheet stayed up.
+        //
+        // Pending is cleared and refilled on every refresh, so its
+        // CollectionChanged is the queue's own signal that the rows have been
+        // replaced. Unsubscribed on close: a sheet that has gone must not keep
+        // the window alive through an event handler.
+        void OnQueueChanged(object? _, NotifyCollectionChangedEventArgs __) =>
+            sheet.QueueChanged();
+
+        ViewModel.Pending.CollectionChanged += OnQueueChanged;
+        sheet.Closed += (_, _) => ViewModel.Pending.CollectionChanged -= OnQueueChanged;
+
         sheet.Activate();
     }
 
