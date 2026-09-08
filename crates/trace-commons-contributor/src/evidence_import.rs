@@ -477,7 +477,19 @@ mod tests {
             .await
             .err()
             .expect("injected survivor must refuse the actual preview path");
-        assert_eq!(error.to_string(), "secret-leak-detected");
+        // The property is the REFUSAL: a backend that tampers after passing
+        // its canary never produces a preview. Which guard catches it first
+        // is not the guarantee. This backend rewrites metadata keys as well
+        // as trace text, so under the metadata redaction pass the collision
+        // guard fires before the whole-envelope residual scan is reached --
+        // both are real, both refuse, and pinning one name here would make
+        // this test fail whenever the earlier guard improves.
+        let label = error.to_string();
+        assert!(
+            label == crate::envelope::REASON_METADATA_CREDENTIAL
+                || label == crate::envelope::REASON_METADATA_KEY_COLLISION,
+            "a tampering backend must be refused by a named guard, got {label}"
+        );
     }
 
     #[cfg(windows)]

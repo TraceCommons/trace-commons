@@ -1587,10 +1587,20 @@ pub(crate) async fn checked_local_redaction(
     // was compensating for at its own call site; fixing it here means every
     // caller of this function gets the distinction rather than one of them.
     let envelope = redact_to_envelope(redactor, raw).await.map_err(|error| {
-        if error.to_string() == crate::envelope::REASON_METADATA_CREDENTIAL {
-            crate::envelope::REASON_METADATA_CREDENTIAL
-        } else {
-            "redaction-failed"
+        // Named refusals survive; everything else is a condition of the
+        // machine and stays generic. A credential the contributor typed and a
+        // filter backend that collapsed two metadata keys are both things a
+        // shell can say something useful about, and flattening them to
+        // "redaction-failed" sends the reader looking at their own trace for
+        // a fault that is not there.
+        match error.to_string().as_str() {
+            crate::envelope::REASON_METADATA_CREDENTIAL => {
+                crate::envelope::REASON_METADATA_CREDENTIAL
+            }
+            crate::envelope::REASON_METADATA_KEY_COLLISION => {
+                crate::envelope::REASON_METADATA_KEY_COLLISION
+            }
+            _ => "redaction-failed",
         }
     })?;
     validate_local_envelope(redactor, &envelope)?;

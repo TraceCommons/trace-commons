@@ -4118,7 +4118,7 @@ impl DeterministicTraceRedactor {
                         if !redact_keys && TYPED_METADATA_FIELDS.contains(&key.as_str()) {
                             if redacted.insert(key, value).is_some() {
                                 return Err(TraceContributionError::RedactionFailed {
-                                    reason: "metadata-redaction-key-collision".into(),
+                                    reason: METADATA_KEY_COLLISION_REFUSAL.into(),
                                 });
                             }
                             continue;
@@ -4139,7 +4139,7 @@ impl DeterministicTraceRedactor {
                             .await?;
                         if redacted.insert(key, value).is_some() {
                             return Err(TraceContributionError::RedactionFailed {
-                                reason: "metadata-redaction-key-collision".into(),
+                                reason: METADATA_KEY_COLLISION_REFUSAL.into(),
                             });
                         }
                     }
@@ -4916,6 +4916,13 @@ impl MetadataRedactionContext<'_> {
 /// transmitted a live credential, and a masked upload never tells them to
 /// rotate it. Same doctrine, same shape, as the correction refusal.
 pub const METADATA_CREDENTIAL_REFUSAL: &str = "metadata-credential-detected";
+
+/// Two metadata keys redacted to the same key, so one would have silently
+/// replaced the other. Refused rather than resolved: picking a winner would
+/// drop a field the contributor sent, and this is reachable from a privacy
+/// filter backend that rewrites keys, so it is a real guard rather than a
+/// theoretical one.
+pub const METADATA_KEY_COLLISION_REFUSAL: &str = "metadata-redaction-key-collision";
 
 /// Fixed-schema field names whose serialized value is a UUID, an RFC3339
 /// timestamp, an enum variant or an opaque server-assigned identifier.
