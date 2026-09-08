@@ -69,7 +69,24 @@ final class CredentialSurfaceTests: XCTestCase {
          "eligibility_reason_evidence_capture_off":"R-EVIDENCE-CAPTURE-OFF",
          "eligibility_reason_marker_absent":"R-MARKER-ABSENT",
          "eligibility_reason_request_malformed":"R-REQUEST-MALFORMED",
-         "eligibility_reason_receipt_unavailable":"R-RECEIPT-UNAVAILABLE"}
+         "eligibility_reason_receipt_unavailable":"R-RECEIPT-UNAVAILABLE",
+         "attestation_attested":"A-ATTESTED",
+         "attestation_unattested_permanent":"A-UNATTESTED-PERMANENT",
+         "attestation_unattested_configuration":"A-UNATTESTED-CONFIGURATION",
+         "attestation_unknown":"A-UNKNOWN",
+         "attestation_reason_no_call":"AR-NO-CALL",
+         "attestation_reason_capture_off":"AR-CAPTURE-OFF",
+         "attestation_reason_digest_absent":"AR-DIGEST-ABSENT",
+         "attestation_reason_upstream_id_absent":"AR-UPSTREAM-ID-ABSENT",
+         "attestation_reason_digest_mismatch":"AR-DIGEST-MISMATCH",
+         "attestation_reason_reference_malformed":"AR-REFERENCE-MALFORMED",
+         "attestation_reason_bodies_unreadable":"AR-BODIES-UNREADABLE",
+         "attestation_reason_body_not_utf8":"AR-BODY-NOT-UTF8",
+         "attestation_reason_body_too_large":"AR-BODY-TOO-LARGE",
+         "attestation_reason_evidence_capture_off":"AR-EVIDENCE-CAPTURE-OFF",
+         "attestation_reason_marker_absent":"AR-MARKER-ABSENT",
+         "attestation_reason_request_malformed":"AR-REQUEST-MALFORMED",
+         "attestation_reason_receipt_unavailable":"AR-RECEIPT-UNAVAILABLE"}
         """
 
     /// Decoded once, in `setUpWithError`, so a fixture that stops decoding

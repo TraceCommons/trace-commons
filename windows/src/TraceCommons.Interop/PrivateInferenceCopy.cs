@@ -411,6 +411,83 @@ public sealed record PrivateInferenceCopy
     [JsonPropertyName("eligibility_reason_receipt_unavailable")]
     public string EligibilityReasonReceiptUnavailable { get; init; } = string.Empty;
 
+    // The four attestation marks and the thirteen attestation reasons.
+    //
+    // Separate sentences from the Eligibility* properties above over the SAME
+    // thirteen reason labels. Five of the eligibility sentences say the
+    // session cannot be sent, which is true for an evidence-admitted
+    // contributor and false for an invited one, whose session sends perfectly
+    // well and merely arrives without a copy of its call. Do not render one
+    // where the other belongs.
+
+    /// <summary>The session carries a checkable copy of its last model call.</summary>
+    [JsonPropertyName("attestation_attested")]
+    public string AttestationAttested { get; init; } = string.Empty;
+
+    /// <summary>It carries none, and nothing the contributor changes adds one.</summary>
+    [JsonPropertyName("attestation_unattested_permanent")]
+    public string AttestationUnattestedPermanent { get; init; } = string.Empty;
+
+    /// <summary>It carries none; a setting decides whether future ones will.</summary>
+    [JsonPropertyName("attestation_unattested_configuration")]
+    public string AttestationUnattestedConfiguration { get; init; } = string.Empty;
+
+    /// <summary>Not worked out. Never a stand-in for "no copy".</summary>
+    [JsonPropertyName("attestation_unknown")]
+    public string AttestationUnknown { get; init; } = string.Empty;
+
+    /// <summary>No model call was answered here while the session ran.</summary>
+    [JsonPropertyName("attestation_reason_no_call")]
+    public string AttestationReasonNoCall { get; init; } = string.Empty;
+
+    /// <summary>The final call was answered without keeping a copy.</summary>
+    [JsonPropertyName("attestation_reason_capture_off")]
+    public string AttestationReasonCaptureOff { get; init; } = string.Empty;
+
+    /// <summary>The final call did not finish cleanly.</summary>
+    [JsonPropertyName("attestation_reason_digest_absent")]
+    public string AttestationReasonDigestAbsent { get; init; } = string.Empty;
+
+    /// <summary>Nothing was written down that would let anyone check it.</summary>
+    [JsonPropertyName("attestation_reason_upstream_id_absent")]
+    public string AttestationReasonUpstreamIdAbsent { get; init; } = string.Empty;
+
+    /// <summary>The kept copy disagrees with the record of it.</summary>
+    [JsonPropertyName("attestation_reason_digest_mismatch")]
+    public string AttestationReasonDigestMismatch { get; init; } = string.Empty;
+
+    /// <summary>The note saying where the copy lives is not a valid one.</summary>
+    [JsonPropertyName("attestation_reason_reference_malformed")]
+    public string AttestationReasonReferenceMalformed { get; init; } = string.Empty;
+
+    /// <summary>The kept copy could not be read back from this computer.</summary>
+    [JsonPropertyName("attestation_reason_bodies_unreadable")]
+    public string AttestationReasonBodiesUnreadable { get; init; } = string.Empty;
+
+    /// <summary>The kept copy is not text the app can carry unchanged.</summary>
+    [JsonPropertyName("attestation_reason_body_not_utf8")]
+    public string AttestationReasonBodyNotUtf8 { get; init; } = string.Empty;
+
+    /// <summary>The kept copy is larger than the app will carry.</summary>
+    [JsonPropertyName("attestation_reason_body_too_large")]
+    public string AttestationReasonBodyTooLarge { get; init; } = string.Empty;
+
+    /// <summary>This computer keeps no copy of the model calls it answers.</summary>
+    [JsonPropertyName("attestation_reason_evidence_capture_off")]
+    public string AttestationReasonEvidenceCaptureOff { get; init; } = string.Empty;
+
+    /// <summary>The final call went out without the mark a copy is checked against.</summary>
+    [JsonPropertyName("attestation_reason_marker_absent")]
+    public string AttestationReasonMarkerAbsent { get; init; } = string.Empty;
+
+    /// <summary>The final call was not written down in a readable shape.</summary>
+    [JsonPropertyName("attestation_reason_request_malformed")]
+    public string AttestationReasonRequestMalformed { get; init; } = string.Empty;
+
+    /// <summary>The proof that goes with the final call could not be had.</summary>
+    [JsonPropertyName("attestation_reason_receipt_unavailable")]
+    public string AttestationReasonReceiptUnavailable { get; init; } = string.Empty;
+
     /// <summary>Every sentence for the complete-payload check, not a rendering order.</summary>
     public string[] Sentences =>
         new[]
@@ -495,5 +572,22 @@ public sealed record PrivateInferenceCopy
             EligibilityReasonMarkerAbsent,
             EligibilityReasonRequestMalformed,
             EligibilityReasonReceiptUnavailable,
+            AttestationAttested,
+            AttestationUnattestedPermanent,
+            AttestationUnattestedConfiguration,
+            AttestationUnknown,
+            AttestationReasonNoCall,
+            AttestationReasonCaptureOff,
+            AttestationReasonDigestAbsent,
+            AttestationReasonUpstreamIdAbsent,
+            AttestationReasonDigestMismatch,
+            AttestationReasonReferenceMalformed,
+            AttestationReasonBodiesUnreadable,
+            AttestationReasonBodyNotUtf8,
+            AttestationReasonBodyTooLarge,
+            AttestationReasonEvidenceCaptureOff,
+            AttestationReasonMarkerAbsent,
+            AttestationReasonRequestMalformed,
+            AttestationReasonReceiptUnavailable,
         };
 }
