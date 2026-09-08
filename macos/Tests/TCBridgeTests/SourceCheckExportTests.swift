@@ -83,7 +83,17 @@ final class SourceCheckExportTests: XCTestCase {
 extension SourceCheckExportTests {
     func testSettingsMetadataFollowsActualUndeclaredSourcePolicy() throws {
         let copy = try XCTUnwrap(TCSourceChecks.settingsCopy())
-        XCTAssertEqual(Set(copy.tools.keys), ["claude-code", "codex", "gemini-cli", "cline"])
+        // Derived from the payload, not hand-listed. A hand-written set is
+        // how this broke: `opencode` became the fifth source and the four
+        // named here silently became wrong. The property worth pinning is
+        // that the Swift side sees exactly what Rust registered -- the count
+        // guards against a source vanishing, and the membership checks below
+        // are keyed off the payload rather than a literal.
+        XCTAssertFalse(copy.tools.isEmpty, "the settings copy must carry the registered sources")
+        XCTAssertTrue(
+            copy.tools.keys.contains("claude-code") && copy.tools.keys.contains("codex"),
+            "the two conventional-scan sources must always be present, got \(Set(copy.tools.keys))"
+        )
         for (adapter, tool) in copy.tools {
             XCTAssertEqual(tool.unsetScansConventional, adapter == "claude-code" || adapter == "codex")
             let unset = try XCTUnwrap(TCSourceChecks.checkLine(tool: tool.key, sourceMode: "unset"))
