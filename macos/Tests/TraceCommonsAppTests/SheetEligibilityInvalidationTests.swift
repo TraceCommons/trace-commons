@@ -91,6 +91,61 @@ final class SheetEligibilityInvalidationTests: XCTestCase {
             "the opening copy still says yes, which is what made the staleness a bypass")
     }
 
+    // MARK: - The press
+
+    /// **The press decides what is sent.** A single approval is refused when
+    /// the queue has downgraded the row since the control was drawn.
+    ///
+    /// Observed through the completion callback, which is the one thing this
+    /// path does synchronously. `perform` needs a daemon client and there is
+    /// none here, so an approval that got past the guard reaches the wire
+    /// and calls nothing back; one the guard refused calls back at once.
+    /// Deleting the guard therefore makes this test hang up on its own
+    /// expectation rather than pass quietly.
+    @MainActor
+    func testASingleApprovalIsRefusedOnARowTheQueueHasDowngraded() {
+        let model = AppModel()
+        let armed = entry("e1", eligibility: "eligible")
+        model.applyPendingUpdate([
+            entry("e1", eligibility: "ineligible_permanent", reason: "digest_mismatch")
+        ])
+
+        var refused = false
+        model.approve(armed) { _ in refused = true }
+        XCTAssertTrue(
+            refused,
+            "the queue downgraded this row after the button was drawn; the press must decline")
+    }
+
+    /// And an ordinary press is NOT refused by the guard.
+    ///
+    /// The other half, so the test above cannot be satisfied by a guard that
+    /// refuses everything: here the callback must NOT fire synchronously,
+    /// because the approval got through to a wire that is not there.
+    @MainActor
+    func testAnApprovalOnAStillEligibleRowIsNotRefusedByTheGuard() {
+        let model = AppModel()
+        let eligible = entry("e1", eligibility: "eligible")
+        model.applyPendingUpdate([eligible])
+
+        var refused = false
+        model.approve(eligible) { _ in refused = true }
+        XCTAssertFalse(refused, "an eligible row must not be declined at the press")
+    }
+
+    /// An invited contributor's row has no eligibility question and is never
+    /// declined at the press.
+    @MainActor
+    func testAnInvitedContributorsPressIsNeverRefused() {
+        let model = AppModel()
+        let invited = entry("e1", eligibility: nil)
+        model.applyPendingUpdate([invited])
+
+        var refused = false
+        model.approve(invited) { _ in refused = true }
+        XCTAssertFalse(refused)
+    }
+
     /// The sheet's body, hosted for real, draws differently before and after
     /// the queue downgrades the row.
     ///
