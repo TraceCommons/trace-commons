@@ -7723,6 +7723,48 @@ mod tests {
         }
     }
 
+    /// **`unknown` is the one mark that may arrive with OR without a reason,
+    /// and a shell must branch on the key rather than on the mark.**
+    ///
+    /// Two different things produce it. A row the daemon never evaluated has
+    /// no reason -- nobody worked anything out, so there is nothing to
+    /// explain. A row whose send was turned away because the receipt could
+    /// not be fetched is `unknown` WITH `receipt_unavailable`: the claim was
+    /// retracted, and the reason is the only thing telling the contributor it
+    /// may work later.
+    ///
+    /// A shell that assumed the mark implies the shape lays out for a case
+    /// that cannot occur, or drops the one sentence that says "try later".
+    #[test]
+    fn an_unknown_mark_carries_a_reason_only_when_one_was_established() {
+        use super::super::attestation_mark as am;
+
+        // Never evaluated: no reason at all.
+        let unevaluated = card_entry();
+        assert!(unevaluated.attestation.is_none());
+        let v = entry_value(&unevaluated, Some(true));
+        assert_eq!(v["attestation"], am::MARK_UNKNOWN);
+        assert!(
+            !v.as_object()
+                .expect("an object")
+                .contains_key("attestation_reason"),
+            "an unevaluated row establishes no reason: {v}"
+        );
+
+        // Retracted by a send that could not fetch the receipt: same mark,
+        // and a reason. Built through `writeback_for` rather than spelled
+        // out, so this cannot drift from the rule that produces it.
+        let retracted = am::writeback_for("admission_receipt_unavailable")
+            .expect("a receipt-unavailable refusal retracts the mark");
+        assert_eq!(retracted.state, am::MARK_UNKNOWN);
+        let mut e = card_entry();
+        e.attestation = Some(retracted.state.to_string());
+        e.attestation_reason = retracted.reason.map(str::to_string);
+        let v = entry_value(&e, Some(true));
+        assert_eq!(v["attestation"], am::MARK_UNKNOWN);
+        assert_eq!(v["attestation_reason"], am::REASON_RECEIPT_UNAVAILABLE);
+    }
+
     /// The origin has to cross the IPC boundary, not merely exist on the ref.
     ///
     /// The desktop apps read this JSON and nothing else. An equivalent

@@ -2193,6 +2193,15 @@ to either question -- and is rendered through
 `tc_contribution_attestation_reason_line`, which answers the **empty string**
 for an unfamiliar or absent label. It is absent on an `attested` entry.
 
+**`unknown` may arrive with or without a reason, and a shell MUST branch on
+the key rather than on the mark.** Two different things produce that mark. A
+row the daemon never evaluated has no reason -- nobody worked anything out.
+A row whose send was turned away because the receipt could not be fetched is
+`unknown` **with** `receipt_unavailable`, and that reason is the only thing
+telling the contributor it may work later. Every other mark is
+shape-predictable: `attested` never carries a reason, and the two unattested
+marks always do.
+
 **The sentences are NOT the same, and a shell must not substitute one call
 for the other.** Five of the eligibility sentences say the session cannot be
 sent, which is true for an evidence-admitted contributor and false for an
