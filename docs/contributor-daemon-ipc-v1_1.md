@@ -650,7 +650,9 @@ No port, token, or row content appears here.
 
 `subagent_count` and `subagents_dropped` also appear on every queue entry
 (`list_pending`, the `snapshot` event), as do `eligibility` and
-`eligibility_reason` -- see "Contribution eligibility" below. Both are
+`eligibility_reason` -- see "Contribution eligibility" below -- and
+`attestation` and `attestation_reason`, see "The attestation mark" below.
+`attestation` is on EVERY entry; `eligibility` is not. All are
 additive; the schema version
 stays `trace_commons.daemon.v1_1`, and a client that ignores them behaves
 exactly as before.
@@ -2125,7 +2127,102 @@ Both fields are additive; the schema version stays
 as before.
 
 The seventeen sentences named above are fields of the `private_inference_copy`
-payload (`tc_private_inference_copy`), which now carries **80** fields.
+payload (`tc_private_inference_copy`), which now carries **97** fields.
+
+### The attestation mark
+
+`eligibility` above answers *may I send this?* -- a permission question, and
+one an invited contributor does not have. Underneath it is a second question
+every contributor has, all of the time:
+
+> Does this session carry a checkable copy of the model call that produced it?
+
+That is a fact about the trace rather than about anyone's permission, and it
+is about to stop being provenance metadata: the credit scoring function is
+expected to weight attestations. A contributor who cannot see which of their
+sessions carry one cannot act on it, and an app that showed the same
+classification to one class of user under a different name would be
+withholding a fact that affects what their work is worth.
+
+| Field | Values |
+|---|---|
+| `attestation` | `attested` \| `unattested_permanent` \| `unattested_configuration` \| `unknown` |
+| `attestation_reason` | a stable label naming why not, or absent |
+
+**`attestation` is ALWAYS PRESENT, on every entry, for every contributor.**
+The exact opposite of the `eligibility` rule above, and deliberately: there
+is no contributor for whom the question does not apply, so the only thing an
+absent field could mean is a build too old to answer it. An entry written
+before the field existed reports `unknown`, never an unattested mark.
+
+| `attestation` | Means | Sentence | Tone |
+|---|---|---|---|
+| `attested` | the session carries a checkable copy of its last model call | `attestation_attested` | `_CLEAR` |
+| `unattested_permanent` | it does not, and nothing the contributor changes will add one | `attestation_unattested_permanent` | `_NEUTRAL` |
+| `unattested_configuration` | it does not; a setting decides whether future ones will | `attestation_unattested_configuration` | `_ATTENTION` |
+| `unknown` | not worked out | `attestation_unknown` | `_NEUTRAL` |
+| anything else | the mark could not be read | `attestation_unknown` | `_NEUTRAL` |
+
+Sentence and tone come from `tc_contribution_attestation_line` and
+`tc_contribution_attestation_tone` -- never from shell-authored branching on
+the label.
+
+**There is no control accessor, and that is the contract.** The mark
+describes the trace; it offers nothing to press. A shell that drew a button
+from it would be inventing an action out of a description. Whether a row may
+be sent is `eligibility`'s question and `tc_contribution_eligibility_control`
+answers it.
+
+**The positive case is the one that matters here**, unlike `eligibility`,
+whose surface only ever spoke up to explain a refusal. A session that IS
+attested says so. A surface that only names what is missing teaches a
+contributor that the mark means bad news.
+
+**An unrecognised mark must not read as "no copy".** A mark this build
+cannot read is not evidence about a contributor's session, and telling them
+an attested session carries nothing is the one wrong answer this table can
+give.
+
+**A permanently unattested session is `_NEUTRAL` and never `_REFUSED`.**
+Nothing was refused and nothing went wrong: most of a contributor's history
+was recorded before anything was keeping copies.
+
+`attestation_reason` takes the **same thirteen labels** as
+`eligibility_reason` -- a reason names a fact about the session, not an answer
+to either question -- and is rendered through
+`tc_contribution_attestation_reason_line`, which answers the **empty string**
+for an unfamiliar or absent label. It is absent on an `attested` entry.
+
+**The sentences are NOT the same, and a shell must not substitute one call
+for the other.** Five of the eligibility sentences say the session cannot be
+sent, which is true for an evidence-admitted contributor and false for an
+invited one, whose session sends perfectly well and merely arrives without a
+copy of its call.
+
+| `attestation_reason` | Sentence | Usually seen with |
+|---|---|---|
+| `no_inference_call` | `attestation_reason_no_call` | `unattested_permanent` |
+| `capture_off` | `attestation_reason_capture_off` | `unattested_configuration` |
+| `digest_absent` | `attestation_reason_digest_absent` | `unattested_permanent` |
+| `upstream_id_absent` | `attestation_reason_upstream_id_absent` | `unattested_permanent` |
+| `digest_mismatch` | `attestation_reason_digest_mismatch` | `unattested_permanent` |
+| `reference_malformed` | `attestation_reason_reference_malformed` | `unattested_permanent` |
+| `bodies_unreadable` | `attestation_reason_bodies_unreadable` | `unattested_permanent` |
+| `body_not_utf8` | `attestation_reason_body_not_utf8` | `unattested_permanent` |
+| `body_too_large` | `attestation_reason_body_too_large` | `unattested_permanent` |
+| `evidence_capture_off` | `attestation_reason_evidence_capture_off` | `unattested_configuration` |
+| `marker_absent` | `attestation_reason_marker_absent` | `unattested_permanent` |
+| `request_malformed` | `attestation_reason_request_malformed` | `unattested_permanent` |
+| `receipt_unavailable` | `attestation_reason_receipt_unavailable` | `unknown` |
+
+A submission turned away for an admission reason writes back here exactly as
+it does to `eligibility`: a row still claiming its session carries proof,
+after a send of that session was refused for want of that proof, is the
+defect this surface removes reproduced one layer up.
+
+Both fields are additive; the schema version stays
+`trace_commons.daemon.v1_1`, and a client that ignores them behaves exactly
+as before.
 
 ### The credential state
 
