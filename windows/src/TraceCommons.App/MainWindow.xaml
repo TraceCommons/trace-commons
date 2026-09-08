@@ -1215,6 +1215,74 @@
                                                        TextWrapping="Wrap" />
 
                                             <!--
+                                                Whether this session can
+                                                actually be contributed.
+
+                                                THE ROW IS ALWAYS DRAWN. An
+                                                ineligible session is present,
+                                                unoffered, and carries its
+                                                reason: hiding a contributor's
+                                                own work is its own dishonesty
+                                                and makes this app look as
+                                                though it had not noticed
+                                                files they know it can see.
+                                                What changes is only whether
+                                                "Submit" is on the row below.
+                                                See
+                                                docs/superpowers/specs/2026-09-08-contribution-eligibility-surface-design.md.
+
+                                                Nothing at all on an invited
+                                                contributor's rows: the daemon
+                                                sends no eligibility field for
+                                                them, absent is not "unknown",
+                                                and a caveat on work that
+                                                carries no question would be
+                                                one invented here.
+
+                                                Three arms because the tone
+                                                comes from the ABI and this
+                                                shell paints it, exactly as
+                                                the model-calls state row does.
+                                                Every one needs Mode=OneWay:
+                                                a submit-time failure writes
+                                                its reason back into the row,
+                                                so this can change while a
+                                                contributor is reading it.
+                                            -->
+                                            <TextBlock Text="{x:Bind EligibilityText, Mode=OneWay}"
+                                                       Visibility="{x:Bind EligibilityIsPlain, Mode=OneWay}"
+                                                       Style="{StaticResource TcCaptionSmallTextStyle}"
+                                                       Foreground="{ThemeResource TcInkSecondaryBrush}"
+                                                       TextWrapping="Wrap" />
+                                            <TextBlock Text="{x:Bind EligibilityText, Mode=OneWay}"
+                                                       Visibility="{x:Bind EligibilityIsClear, Mode=OneWay}"
+                                                       Style="{StaticResource TcCaptionSmallTextStyle}"
+                                                       Foreground="{ThemeResource TcGreenTextBrush}"
+                                                       TextWrapping="Wrap" />
+                                            <TextBlock Text="{x:Bind EligibilityText, Mode=OneWay}"
+                                                       Visibility="{x:Bind EligibilityIsAttention, Mode=OneWay}"
+                                                       Style="{StaticResource TcCaptionSmallTextStyle}"
+                                                       Foreground="{ThemeResource TcGoldTextBrush}"
+                                                       TextWrapping="Wrap" />
+
+                                            <!--
+                                                Why, when there is a reason
+                                                worth naming. Absent on every
+                                                eligible row and on a label
+                                                this build does not know: the
+                                                shared crate answers nothing
+                                                rather than guessing, and a
+                                                sentence about a reason nobody
+                                                established is a detail this
+                                                row would be inventing.
+                                            -->
+                                            <TextBlock Text="{x:Bind EligibilityReasonText, Mode=OneWay}"
+                                                       Visibility="{x:Bind HasEligibilityReason, Mode=OneWay}"
+                                                       Style="{StaticResource TcCaptionSmallTextStyle}"
+                                                       Foreground="{ThemeResource TcInkTertiaryBrush}"
+                                                       TextWrapping="Wrap" />
+
+                                            <!--
                                                 The card's own preview, requested through the
                                                 daemon's bounded scheduler (preview_request) rather
                                                 than driven in process here, see
@@ -1321,9 +1389,23 @@
                                                         Tag="{x:Bind}"
                                                         ToolTipService.ToolTip="Skips this session for good, even if you keep working in it. This project will keep being offered."
                                                         Click="OnNotThisOne" />
+                                                <!--
+                                                    Drawn only where the
+                                                    shared crate says a send
+                                                    may be offered. Hidden
+                                                    rather than disabled: a
+                                                    greyed button invites
+                                                    hunting for the setting
+                                                    that would ungrey it, and
+                                                    for a permanent
+                                                    ineligibility there is
+                                                    none. The sentence above
+                                                    is what says why.
+                                                -->
                                                 <Button Style="{StaticResource TcSecondaryButtonStyle}"
                                                         Content="Submit"
                                                         Tag="{x:Bind}"
+                                                        Visibility="{x:Bind CanContribute, Mode=OneWay}"
                                                         ToolTipService.ToolTip="Sends this session without opening it. Scrubbing still runs, and Undo follows for a few seconds."
                                                         Click="OnSubmitEntry" />
                                             </StackPanel>

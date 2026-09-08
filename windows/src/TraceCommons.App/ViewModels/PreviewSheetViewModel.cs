@@ -451,11 +451,41 @@ public sealed class PreviewSheetViewModel : INotifyPropertyChanged, IDisposable
 
     /// <summary>
     /// Armed only with a pinned preview, the sentences that explain the
-    /// button, and no decision already in flight. See
-    /// <see cref="ReadGate.CanArm"/>: a build that cannot read the claim
-    /// must not take an approval against it.
+    /// button, no decision already in flight, and a session the shared crate
+    /// says may be offered at all. See <see cref="ReadGate.CanArm"/>: a build
+    /// that cannot read the claim must not take an approval against it.
     /// </summary>
-    public bool CanContribute => ReadGate.CanArm(_consent, Gate.CanContribute) && !_deciding;
+    /// <remarks>
+    /// The eligibility half is the same rule the queue row follows, and it
+    /// has to be here too: "Look inside" is a second route to the send, and a
+    /// button the row withheld would otherwise be waiting one click behind
+    /// it. <see cref="QueueEntryViewModel.CanContribute"/> is true for a row
+    /// the daemon never asked the question of, so an invited contributor's
+    /// sheet is unchanged.
+    ///
+    /// <para>
+    /// The sentence saying why is drawn beside the button by
+    /// <see cref="EligibilityText"/>, so this is never a control that
+    /// vanished without explanation.
+    /// </para>
+    /// </remarks>
+    public bool CanContribute =>
+        ReadGate.CanArm(_consent, Gate.CanContribute) && !_deciding && Entry.CanContribute;
+
+    /// <summary>
+    /// Whether this session carries a sentence about whether it can be
+    /// contributed. See <see cref="QueueEntryViewModel.HasEligibilityText"/>.
+    /// </summary>
+    public bool HasEligibilityText => Entry.HasEligibilityText;
+
+    /// <summary>That sentence, from the shared crate.</summary>
+    public string EligibilityText => Entry.EligibilityText;
+
+    /// <summary>Whether a reason worth naming came with it.</summary>
+    public bool HasEligibilityReason => Entry.HasEligibilityReason;
+
+    /// <summary>That reason, from the shared crate.</summary>
+    public string EligibilityReasonText => Entry.EligibilityReasonText;
 
     public bool CanDecide => !_deciding;
 
