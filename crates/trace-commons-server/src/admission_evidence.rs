@@ -128,13 +128,39 @@ impl AdmissionProviderTrust {
     }
 }
 
+/// What, if anything, evidences the model an admitted call names.
+///
+/// The two forms of receipt do not bind the same thing, and the difference is
+/// the whole reason this type exists rather than a bare `String`. A three-part
+/// provider-TEE receipt puts the model inside the signed text, signed by a key
+/// attested for that model: the model is evidenced. A two-part gateway receipt
+/// binds the bytes and names no model, and the gateway key is shared across
+/// every hosted model behind it, so the only thing saying which model answered
+/// is the request body the caller supplied.
+///
+/// Credit scoring, per-model tiers, and any served-model field must read
+/// [`VerifiedAdmissionCall::receipt_bound_model`] and never
+/// [`VerifiedAdmissionCall::requested_model`]. Nothing consumes either today;
+/// that is exactly why the distinction is recorded now, while it is free.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelAttribution {
+    /// The receipt's own signed text committed to this model.
+    ReceiptBound,
+    /// The request asked for this model. Nothing attested that it answered.
+    RequestAsserted,
+}
+
 /// Only constructed after receipt verification, exact body binding, and provider trust.
 pub struct VerifiedAdmissionCall {
     binding: AdmissionBinding,
     provider_signer: String,
     request_hash: String,
     response_hash: String,
+    /// The model named in the request body. `model_attribution` says whether
+    /// anything beyond that body vouches for it; read it through the
+    /// accessors rather than directly.
     model: String,
+    model_attribution: ModelAttribution,
     request_bytes: u64,
 }
 
@@ -196,17 +222,52 @@ pub fn verify_admission_call(
     if now < 0 || binding.expires_at <= now {
         return Err(AdmissionEvidenceError);
     }
+    // Both conditions, and neither alone. `verdict.model` is `Some` only for
+    // the three-part text, so the signature covers the model -- but a gateway
+    // key signing a three-part text still says nothing about which model
+    // answered, because that one key vouches for every model behind the
+    // gateway. `ProviderTee` alone is not enough either: the kind is a wire
+    // label the signature does not cover, so on its own it would let a caller
+    // *claim* its way to an attributed model. Requiring both means the label
+    // can only ever narrow what this call is credited with.
+    let model_attribution = match (verified.signature_kind, verified.model.as_deref()) {
+        (ReceiptSignatureKind::ProviderTee, Some(_)) => ModelAttribution::ReceiptBound,
+        _ => ModelAttribution::RequestAsserted,
+    };
     Ok(VerifiedAdmissionCall {
         binding,
         provider_signer: verified.signing_address,
         request_hash: verified.request_sha256,
         response_hash: verified.response_sha256,
         model: model.to_string(),
+        model_attribution,
         request_bytes: request.len() as u64,
     })
 }
 
 impl VerifiedAdmissionCall {
+    /// The model the receipt itself commits to, or `None` when nothing but
+    /// the request body says which model answered.
+    ///
+    /// This is the only accessor a served-model claim may be derived from.
+    pub fn receipt_bound_model(&self) -> Option<&str> {
+        match self.model_attribution {
+            ModelAttribution::ReceiptBound => Some(&self.model),
+            ModelAttribution::RequestAsserted => None,
+        }
+    }
+
+    /// The model the request asked for.
+    ///
+    /// Admission policy compares this against the operator's accepted-model
+    /// list, which is a statement about what this deployment is willing to
+    /// admit -- not a statement about what served the call. Do not put it in
+    /// a scoring input, a per-model tier or a served-model field; use
+    /// [`receipt_bound_model`](Self::receipt_bound_model) there.
+    pub fn requested_model(&self) -> &str {
+        &self.model
+    }
+
     /// A receipt does not certify the importer's tool outcomes, replay claims,
     /// cost estimates or companion metadata. Retain only the verified exchange
     /// and source provenance before redaction and contributor review.
@@ -239,7 +300,12 @@ impl VerifiedAdmissionCall {
             replay_notes: Vec::new(),
         };
         raw.ironclaw.feature_flags.retain(|key, _| key == "agent");
-        raw.ironclaw.model_name = Some(self.model.clone());
+        // Only when the receipt committed to it. A gateway-admitted call
+        // leaves this `None` rather than repeating the request body's claim
+        // as though the server had verified it: the envelope is what a
+        // consumer reads, and an unattested model there is indistinguishable
+        // from an attested one.
+        raw.ironclaw.model_name = self.receipt_bound_model().map(str::to_string);
         raw.ironclaw.engine_version = None;
         let event = &mut raw.events[0]; // verify_admission_call required exactly one.
         event.structured_payload = payload;
@@ -399,5 +465,150 @@ mod tests {
         )
         .unwrap();
         assert!(!trust.accepts_kind(ReceiptSignatureKind::Gateway, &provider));
+    }
+
+    const FIXTURE_MODEL: &str = "fixture-model";
+
+    /// One admissible call: a single `HttpExchange`, a binding the request
+    /// body carries, and a receipt over exactly those bytes. `bound_model`
+    /// picks the receipt's signed form -- `Some` is the three-part text that
+    /// commits to a model, `None` the two-part text that commits to none.
+    fn admission_fixture(
+        bound_model: Option<&str>,
+        kind: ReceiptSignatureKind,
+    ) -> (RawTraceContribution, ReceiptPayload, String, i64) {
+        use ring::signature::KeyPair as _;
+        use trace_commons_protocol::admission::AdmissionBinding;
+        use trace_commons_protocol::trace_contribution::{
+            RawTraceCaptureTurn, RawTraceContributionEvent, RecordedTraceContributionOptions,
+        };
+        // Fixed seed: a generated key makes a failure unreproducible.
+        let provider = ring::signature::Ed25519KeyPair::from_seed_unchecked(&[9; 32]).unwrap();
+        let signer = hex::encode(provider.public_key().as_ref());
+        let now = chrono::Utc::now().timestamp();
+        let binding = AdmissionBinding {
+            account_anchor_sha256: "a".repeat(64),
+            nonce_hex: "b".repeat(64),
+            expires_at: now + 60,
+        };
+        let request_body = serde_json::json!({
+            "model": FIXTURE_MODEL,
+            "metadata": {REQUEST_METADATA_KEY: binding.encode().unwrap()},
+            "messages": [{"role": "user", "content": "hello"}],
+        })
+        .to_string();
+        let response_body = r#"{"choices":[{"message":{"role":"assistant","content":"hi"}}]}"#;
+        let request_hash = hash_hex(request_body.as_bytes());
+        let response_hash = hash_hex(response_body.as_bytes());
+        let text = match bound_model {
+            Some(model) => format!("{model}:{request_hash}:{response_hash}"),
+            None => format!("{request_hash}:{response_hash}"),
+        };
+        let receipt = ReceiptPayload {
+            signature: hex::encode(provider.sign(text.as_bytes()).as_ref()),
+            signing_address: signer.clone(),
+            signing_algo: ReceiptAlgo::Ed25519,
+            signature_kind: kind,
+            text,
+        };
+        let started = chrono::Utc::now();
+        let mut raw = RawTraceContribution::from_capture_turns(
+            &[RawTraceCaptureTurn {
+                user_input: "asked the model something".to_string(),
+                response: None,
+                tool_calls: Vec::new(),
+                started_at: started,
+                completed_at: Some(started + chrono::Duration::milliseconds(10)),
+                state: Some("Completed".to_string()),
+            }],
+            RecordedTraceContributionOptions::default(),
+        );
+        raw.events = vec![RawTraceContributionEvent {
+            event_id: uuid::Uuid::new_v4(),
+            parent_event_id: None,
+            event_type: TraceContributionEventType::HttpExchange,
+            timestamp: started,
+            content: Some(response_body.to_string()),
+            structured_payload: serde_json::json!({
+                "request": {"method": "POST", "body": request_body},
+                "response": {"status": 200},
+            }),
+            tool_name: None,
+            tool_call_id: None,
+            latency_ms: None,
+            token_counts: None,
+            cost_usd: None,
+            success: None,
+            failure_modes: Vec::new(),
+        }];
+        (raw, receipt, signer, now)
+    }
+
+    /// A gateway receipt proves the bytes were served through the gateway. It
+    /// does not prove *which model* served them: the two-part signed text
+    /// names no model, and the gateway key is shared across every hosted
+    /// model behind it. So on a gateway-admitted call the model is only what
+    /// the request body asked for, and nothing downstream -- credit scoring,
+    /// a per-model tier, a `served_model` field -- may read it as what
+    /// answered.
+    ///
+    /// The only model claim this crate stamps is
+    /// `restrict_contribution`'s `ironclaw.model_name`, so that is where the
+    /// distinction is observable. Both arms are asserted: dropping the
+    /// `signature_kind` read makes a gateway receipt stamp a served model,
+    /// and stamping nothing at all would pass a one-sided test while losing
+    /// the claim a provider-TEE receipt genuinely earns.
+    #[test]
+    fn a_gateway_receipt_never_evidences_which_model_served_the_call() {
+        let max_body = 1024 * 1024;
+
+        // Provider-TEE: the signature covers the model, so the claim stands.
+        let (raw, receipt, signer, now) =
+            admission_fixture(Some(FIXTURE_MODEL), ReceiptSignatureKind::ProviderTee);
+        let trust =
+            AdmissionProviderTrust::new([signer], Vec::new(), [FIXTURE_MODEL.to_string()], 1)
+                .unwrap();
+        let call = verify_admission_call(&raw, &receipt, &trust, now, max_body).unwrap();
+        assert_eq!(call.receipt_bound_model(), Some(FIXTURE_MODEL));
+        assert_eq!(call.requested_model(), FIXTURE_MODEL);
+        let mut restricted = raw.clone();
+        call.restrict_contribution(&mut restricted).unwrap();
+        assert_eq!(
+            restricted.ironclaw.model_name.as_deref(),
+            Some(FIXTURE_MODEL),
+            "a receipt whose signed text commits to the model does evidence it"
+        );
+
+        // Gateway, both signed forms. The three-part case matters: a model in
+        // the text is not model evidence when the key that signed it vouches
+        // for every model behind the gateway.
+        for bound_model in [None, Some(FIXTURE_MODEL)] {
+            let (raw, receipt, signer, now) =
+                admission_fixture(bound_model, ReceiptSignatureKind::Gateway);
+            let trust = AdmissionProviderTrust::new(
+                ["f".repeat(64)],
+                [signer],
+                [FIXTURE_MODEL.to_string()],
+                1,
+            )
+            .unwrap();
+            // Admitted -- the refusal below is about the model claim, not
+            // about the call.
+            let call = verify_admission_call(&raw, &receipt, &trust, now, max_body).unwrap();
+            assert_eq!(
+                call.receipt_bound_model(),
+                None,
+                "the gateway key vouches for every model behind it, so a model \
+                 in its signed text is still not evidence of which one answered"
+            );
+            // Unchanged: admission policy still knows what was asked for.
+            assert_eq!(call.requested_model(), FIXTURE_MODEL);
+            let mut restricted = raw.clone();
+            call.restrict_contribution(&mut restricted).unwrap();
+            assert_eq!(
+                restricted.ironclaw.model_name, None,
+                "a gateway receipt names no model that served the call"
+            );
+        }
     }
 }
