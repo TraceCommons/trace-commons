@@ -977,6 +977,19 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
         }
     }
 
+    /// <summary>
+    /// Moves one project to its next manual mode.
+    /// </summary>
+    /// <remarks>
+    /// The rows are rebuilt from a fresh list_projects rather than from the
+    /// mode that was sent: what this screen shows about a consent field has
+    /// to be what the daemon stores, and a write that was refused or that
+    /// stored something else is invisible to a shell that believes its own
+    /// request. The re-read runs on the failure path too -- that is the path
+    /// where the two can disagree, and a refused toggle that still flips the
+    /// row is a lie the contributor then acts on. Onboarding's list was
+    /// fixed the same way and reads the same notice table.
+    /// </remarks>
     public async Task ToggleProjectAsync(ProjectSettingViewModel project)
     {
         ArgumentNullException.ThrowIfNull(project);
@@ -990,32 +1003,47 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
         {
             return;
         }
+
+        // Held separately because the row object this was called with does
+        // not survive the re-read: LoadProjectsAsync rebuilds the collection.
+        string projectId = project.ProjectId;
         string payload = JsonSerializer.Serialize(
             new Dictionary<string, string>
             {
-                ["project_id"] = project.ProjectId,
+                ["project_id"] = projectId,
                 ["mode"] = next,
             });
 
         IsBusy = true;
+        project.IsPending = true;
         try
         {
             DaemonResponse response = await _host
                 .CallAsync(DaemonProtocol.Methods.SetProjectMode, payload)
                 .ConfigureAwait(true);
 
-            Notice = response.IsError
-                ? WatchCopy.WriteFailed
-                : string.Empty;
-            if (!response.IsError)
-            {
-                project.SetMode(next);
-            }
+            await LoadProjectsAsync().ConfigureAwait(true);
+            Notice = ProjectManualMode.NoticeFor(
+                response.IsError, next, FindProject(projectId)?.Mode);
         }
         finally
         {
+            project.IsPending = false;
             IsBusy = false;
         }
+    }
+
+    private ProjectSettingViewModel? FindProject(string projectId)
+    {
+        foreach (ProjectSettingViewModel candidate in Projects)
+        {
+            if (string.Equals(candidate.ProjectId, projectId, StringComparison.Ordinal))
+            {
+                return candidate;
+            }
+        }
+
+        return null;
     }
 
     public async Task SaveBehaviorAsync(BehaviorSetting setting, double displayedValue)
@@ -1850,7 +1878,8 @@ public sealed class ConnectionStatusViewModel
 
 public sealed class ProjectSettingViewModel : INotifyPropertyChanged
 {
-    private string _mode;
+    private readonly string _mode;
+    private bool _isPending;
 
     public ProjectSettingViewModel(ProjectSetting project)
     {
@@ -1919,21 +1948,27 @@ public sealed class ProjectSettingViewModel : INotifyPropertyChanged
     /// </summary>
     public string ActionText => WatchCopy.ActionFor(_mode) ?? WatchCopy.IgnoreAction;
 
-    public bool CanToggle => ProjectManualMode.Next(_mode) is not null;
+    public bool CanToggle => !_isPending && ProjectManualMode.Next(_mode) is not null;
 
-    public void SetMode(string mode)
+    /// <summary>
+    /// Set while this row's write is in flight, so the button that started it
+    /// cannot be pressed again before the stored answer has been read back.
+    /// </summary>
+    public bool IsPending
     {
-        if (_mode == mode)
+        get => _isPending;
+        set
         {
-            return;
+            _isPending = value;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsPending)));
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(CanToggle)));
         }
-
-        _mode = mode;
-        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Mode)));
-        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(StateText)));
-        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(ActionText)));
-        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(CanToggle)));
     }
+
+    // There is deliberately no mode setter here, for the reason onboarding's
+    // row has none: a row's mode arrives from list_projects and nowhere else.
+    // The one caller this class had set it from the value the shell had just
+    // sent, which is the optimism the re-read in ToggleProjectAsync replaced.
 }
 
 /// <summary>
