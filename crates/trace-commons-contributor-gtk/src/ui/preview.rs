@@ -1035,9 +1035,8 @@ impl Sheet {
     /// answers `true` and nothing changes for it.
     fn sync_contribute(&self) {
         let view = self.current().and_then(crate::eligibility::view);
-        let sendable = view.is_none_or(|view| {
-            view.control == crate::copy::ContributionControl::Contribute
-        });
+        let sendable =
+            view.is_none_or(|view| view.control == crate::copy::ContributionControl::Contribute);
         self.contribute.set_sensitive(self.pinned.get() && sendable);
 
         // The sentence beside the control it explains. Drawn only where it
@@ -1054,7 +1053,13 @@ impl Sheet {
                 format!("{} {}", view.state_line, view.reason_line)
             };
             self.eligibility_note.set_label(&text);
-            for class in ["tc-neutral", "tc-clear", "tc-attention", "tc-held", "tc-refused"] {
+            for class in [
+                "tc-neutral",
+                "tc-clear",
+                "tc-attention",
+                "tc-held",
+                "tc-refused",
+            ] {
                 self.eligibility_note.remove_css_class(class);
             }
             self.eligibility_note

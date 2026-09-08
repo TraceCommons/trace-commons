@@ -226,7 +226,10 @@ mod tests {
                 "{unread:?} must read as unevaluated"
             );
             assert_eq!(view.control, copy::ContributionControl::None, "{unread:?}");
-            assert!(!offers_send(&entry), "{unread:?} must offer no send control");
+            assert!(
+                !offers_send(&entry),
+                "{unread:?} must offer no send control"
+            );
         }
     }
 
@@ -330,7 +333,10 @@ mod tests {
             "copy::eligibility_control(state)",
             "copy::eligibility_reason_line(",
         ] {
-            assert!(SOURCE.contains(asked), "the shared crate is not asked: {asked}");
+            assert!(
+                SOURCE.contains(asked),
+                "the shared crate is not asked: {asked}"
+            );
         }
         // The state and reason labels are never spelled in this shell
         // outside its own tests -- a literal here is a table forming.
@@ -405,10 +411,7 @@ mod tests {
         let gate = production
             .find("if crate::eligibility::offers_send(entry) {")
             .expect("the send control is gated");
-        let body_end = production[gate..]
-            .find('}')
-            .expect("the gate closes")
-            + gate;
+        let body_end = production[gate..].find('}').expect("the gate closes") + gate;
         let gated = &production[gate..body_end];
         assert!(gated.contains("actions.append(&submit)"), "{gated}");
         for ungated in ["actions.append(&skip)", "actions.append(&look)"] {
