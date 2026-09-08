@@ -96,6 +96,18 @@ jobs:
           POSTGRES_USER: trace
           POSTGRES_PASSWORD: trace
           POSTGRES_DB: postgres
+          # These suites create their own login roles -- `tc_near_runtime`,
+          # `trace_login_resolver`, `admission_ingest_runtime` -- and give them
+          # no password, then connect as them by rewriting the username in the
+          # URL. That is the shape they were written against, and it only works
+          # where the server does not demand one. The container defaults to
+          # scram-sha-256 and answers "password authentication failed for user
+          # \"tc_near_runtime\"", which is what this job did on its first run.
+          #
+          # Trust auth is safe here and nowhere else: the server lives and dies
+          # with the job, listens only on the runner's loopback, and holds
+          # nothing but fixtures.
+          POSTGRES_HOST_AUTH_METHOD: trust
         ports: ["5432:5432"]
         options: >-
           --health-cmd "pg_isready -U trace"
@@ -131,26 +143,26 @@ jobs:
       - name: account_onboarding_pg
         run: cargo test -p trace-commons-server --test account_onboarding_pg
         env:
-          TRACE_COMMONS_NEAR_PG_TEST_DATABASE_URL: postgres://trace:trace@127.0.0.1:5432/admission_test_onboarding
+          TRACE_COMMONS_NEAR_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_onboarding
       - name: migration_atomicity_pg
         run: cargo test -p trace-commons-server --test migration_atomicity_pg
         env:
-          TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace:trace@127.0.0.1:5432/admission_test_migration
+          TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_migration
       # `--ignored` is not optional for these three. Without it they report
       # `ignored`, the step passes having run nothing, and this job becomes the
       # thing it was built to replace.
       - name: admission_ledger_pg
         run: cargo test -p trace-commons-server --test admission_ledger_pg -- --ignored
         env:
-          TRACE_COMMONS_ADMISSION_PG_TEST_URL: postgres://trace:trace@127.0.0.1:5432/admission_test_ledger
+          TRACE_COMMONS_ADMISSION_PG_TEST_URL: postgres://trace@127.0.0.1:5432/admission_test_ledger
       - name: onboarding_retention_pg
         run: cargo test -p trace-commons-server --test onboarding_retention_pg -- --ignored
         env:
-          TRACE_COMMONS_ONBOARDING_RETENTION_PG_TEST_URL: postgres://trace:trace@127.0.0.1:5432/admission_test_retention
+          TRACE_COMMONS_ONBOARDING_RETENTION_PG_TEST_URL: postgres://trace@127.0.0.1:5432/admission_test_retention
       - name: the invite-free path, end to end
         run: cargo test --bin trace-commons-ingest admission_pg_tests -- --ignored
         env:
-          TRACE_COMMONS_ADMISSION_INGEST_PG_TEST_URL: postgres://trace:trace@127.0.0.1:5432/admission_test_ingest
+          TRACE_COMMONS_ADMISSION_INGEST_PG_TEST_URL: postgres://trace@127.0.0.1:5432/admission_test_ingest
       # A suite that runs nothing passes, so the steps above cannot prove
       # themselves. `trace_invite_registry_pg` reports "21 passed" in 0.00s with
       # no database configured; a pass count is not evidence that anything ran.
