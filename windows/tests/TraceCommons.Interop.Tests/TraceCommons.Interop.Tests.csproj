@@ -127,6 +127,25 @@
     paraphrased into a shorter, friendlier one, and a paraphrase would pass
     every behavioural test in this file.
   -->
+  <!--
+    The credential surface's implementation source, copied for the reason the
+    others are and read by NoWordingIsAuthoredInTheCredentialSurface.
+
+    The sentence most at risk here is the one saying what obtaining a
+    credential costs: a browser opens, the contributor signs in with a company
+    that is not this app, and a key is minted and kept on this machine. A
+    shorter, friendlier paraphrase of it beside the button would render and
+    would pass every behavioural test in the suite.
+  -->
+  <ItemGroup>
+    <None Include="$(MSBuildThisFileDirectory)../../src/TraceCommons.Interop/NearAiCredentialSurface.cs"
+          Link="NearAiCredentialSurface.cs.txt"
+          CopyToOutputDirectory="PreserveNewest" />
+    <None Include="$(MSBuildThisFileDirectory)../../src/TraceCommons.App/Controls/PrivateInferenceView.xaml.cs"
+          Link="PrivateInferenceView.xaml.cs.txt"
+          CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
   <ItemGroup>
     <None Include="$(MSBuildThisFileDirectory)../../src/TraceCommons.Interop/PrivateInferenceSurface.cs"
           Link="PrivateInferenceSurface.cs.txt"

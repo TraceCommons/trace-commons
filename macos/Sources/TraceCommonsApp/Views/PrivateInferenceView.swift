@@ -86,6 +86,12 @@ struct PrivateInferenceContent: View {
             // because they connected one, not a question to settle first.
             HarnessListSection(copy: copy)
             Divider().padding(.vertical, TC.Space.s)
+            // The key the destination answers with, directly under the list
+            // that says a tool cannot be connected without one -- so the
+            // notice on a row points at something on the same screen rather
+            // than at a place a contributor has to go and find.
+            CredentialSection(copy: copy)
+            Divider().padding(.vertical, TC.Space.s)
             // The switch, below the list and unchanged: a kill switch, which
             // is what it always was.
             TCSectionHeader(title: copy.settingsTitle)

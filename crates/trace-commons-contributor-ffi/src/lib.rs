@@ -2678,6 +2678,151 @@ pub unsafe extern "C" fn tc_private_inference_state_tone(state: *const c_char) -
     .unwrap_or(TC_PRIVATE_INFERENCE_TONE_NEUTRAL)
 }
 
+/// What a shell may offer for one credential state.
+///
+/// A range of its own, disjoint from every tone range for the reason those
+/// ranges are disjoint from each other: a shell that cross-wired an action
+/// onto a tone mapper would draw a button from a colour. There is no failure
+/// value -- an unreadable label, a NULL pointer and a caught panic all answer
+/// `TC_CREDENTIAL_ACTION_NONE`, which offers nothing.
+///
+/// `NONE` is the safe direction here, and not by analogy: `OBTAIN` opens a
+/// browser and mints a key at a third party, so drawing it for a state
+/// nobody could read is how a contributor ends up holding a second key their
+/// own account lists and this app never mentions.
+pub const TC_CREDENTIAL_ACTION_NONE: i32 = 30;
+pub const TC_CREDENTIAL_ACTION_OBTAIN: i32 = 31;
+pub const TC_CREDENTIAL_ACTION_CANCEL: i32 = 32;
+pub const TC_CREDENTIAL_ACTION_FORGET: i32 = 33;
+
+/// Why a connect control is not on offer, or the empty string.
+///
+/// `credentialed` is `harness_list`'s `destination_credentialed` as a
+/// tri-state: any negative value means the field was absent, `0` false, `1`
+/// true -- the encoding [`tc_private_inference_write_confirmed`] uses for the
+/// same reason.
+///
+/// AN ABSENT FIELD IS NOT A REFUSED CONNECT. A daemon that predates the
+/// credential gate answers the empty string, because telling somebody to sign
+/// in before connecting a tool they can connect right now would be false.
+///
+/// Drawn once, beside the connect controls: the fact is about the destination
+/// and not about any one tool. A destination the contributor runs themselves
+/// reports credentialed and gets no sentence.
+///
+/// Returns an owned string; free it with [`tc_string_free`]. NULL only on a
+/// caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_harness_credential_notice(credentialed: i32) -> *mut c_char {
+    guarded_string_no_err(|| {
+        let credentialed = match credentialed {
+            0 => Some(false),
+            v if v > 0 => Some(true),
+            _ => None,
+        };
+        Ok(to_owned_cstring(
+            trace_commons_contributor::private_inference_copy::harness_credential_notice(
+                credentialed,
+            ),
+        ))
+    })
+}
+
+/// The sentence for one `near_ai_credential_status` state label.
+///
+/// `state` is that method's `state` field: `absent`, `obtaining`, `failed`,
+/// `cancelled` or `present`.
+///
+/// An empty, NULL or non-UTF-8 label reports that this daemon does not
+/// answer the question. An unfamiliar nonempty label reports that the state
+/// could not be read. NEITHER SAYS THAT NO KEY IS KEPT HERE: that is a claim
+/// about the machine, and a shell that made it up would invite a second
+/// sign-in.
+///
+/// Returns an owned string; free it with [`tc_string_free`]. NULL only on a
+/// caught panic.
+///
+/// # Safety
+/// `state`, if non-null, must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_near_ai_credential_state_line(state: *const c_char) -> *mut c_char {
+    guarded_string_no_err(|| {
+        let state = if state.is_null() {
+            ""
+        } else {
+            unsafe { borrow_str(state) }.unwrap_or("")
+        };
+        Ok(to_owned_cstring(
+            trace_commons_contributor::private_inference_copy::credential_state_line(state),
+        ))
+    })
+}
+
+/// How firmly the sentence [`tc_near_ai_credential_state_line`] returned
+/// reads: one of the `TC_PRIVATE_INFERENCE_TONE_*` values.
+///
+/// The same five values as the state row above it, because a shell maps
+/// those onto colours once and a second enum with the same five meanings is
+/// a second mapping to keep in agreement.
+///
+/// `present` is the only label that answers `_CLEAR`. Everything else --
+/// including a label this build has never heard of, a NULL or non-UTF-8
+/// `state`, and a caught panic -- answers `TC_PRIVATE_INFERENCE_TONE_NEUTRAL`.
+///
+/// # Safety
+/// `state`, if non-null, must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_near_ai_credential_state_tone(state: *const c_char) -> i32 {
+    use trace_commons_contributor::private_inference_copy::PrivateInferenceTone;
+    guard(|| {
+        let state = if state.is_null() {
+            ""
+        } else {
+            unsafe { borrow_str(state) }.unwrap_or("")
+        };
+        Ok(
+            match trace_commons_contributor::private_inference_copy::credential_state_tone(state) {
+                PrivateInferenceTone::Neutral => TC_PRIVATE_INFERENCE_TONE_NEUTRAL,
+                PrivateInferenceTone::Held => TC_PRIVATE_INFERENCE_TONE_HELD,
+                PrivateInferenceTone::Clear => TC_PRIVATE_INFERENCE_TONE_CLEAR,
+                PrivateInferenceTone::Attention => TC_PRIVATE_INFERENCE_TONE_ATTENTION,
+                PrivateInferenceTone::Refused => TC_PRIVATE_INFERENCE_TONE_REFUSED,
+            },
+        )
+    })
+    .unwrap_or(TC_PRIVATE_INFERENCE_TONE_NEUTRAL)
+}
+
+/// The one action a shell may offer for a credential state: one of the
+/// `TC_CREDENTIAL_ACTION_*` values.
+///
+/// THE BRANCH TABLE CROSSES, NOT ONLY THE WORDS. Three shells each deciding
+/// which button belongs beside which state is three chances to draw "Sign in"
+/// next to a key that is already here, or next to a state nobody could read.
+///
+/// # Safety
+/// `state`, if non-null, must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_near_ai_credential_action(state: *const c_char) -> i32 {
+    use trace_commons_contributor::private_inference_copy::CredentialAction;
+    guard(|| {
+        let state = if state.is_null() {
+            ""
+        } else {
+            unsafe { borrow_str(state) }.unwrap_or("")
+        };
+        Ok(
+            match trace_commons_contributor::private_inference_copy::credential_action(state) {
+                CredentialAction::None => TC_CREDENTIAL_ACTION_NONE,
+                CredentialAction::Obtain => TC_CREDENTIAL_ACTION_OBTAIN,
+                CredentialAction::Cancel => TC_CREDENTIAL_ACTION_CANCEL,
+                CredentialAction::Forget => TC_CREDENTIAL_ACTION_FORGET,
+            },
+        )
+    })
+    .unwrap_or(TC_CREDENTIAL_ACTION_NONE)
+}
+
 /// The reported local port, assembled without a readiness claim.
 ///
 /// `port` is the `port` field of `private_inference_state`. A value outside

@@ -139,6 +139,46 @@ public static class DaemonProtocol
         /// </remarks>
         public const string HarnessCommit = "harness_commit";
 
+        // The NEAR AI credential. Four methods, all four already in the
+        // daemon's pinned METHODS array, so naming them here adds nothing to
+        // the protocol -- the gap was that no shell asked.
+
+        /// <summary>
+        /// Begins the sign-in ceremony and hands back where to open the
+        /// browser.
+        /// </summary>
+        /// <remarks>
+        /// THE BROWSER URL COMES FROM HERE AND NOWHERE ELSE. No poll re-serves
+        /// it, so a shell that dropped it has to start a second ceremony to
+        /// get another -- which is a second browser tab in front of somebody
+        /// who is already looking at one.
+        /// </remarks>
+        public const string NearAiCredentialStart = "near_ai_credential_start";
+
+        /// <summary>
+        /// What this machine holds, and -- for a caller that can name the
+        /// attempt -- how that attempt is going.
+        /// </summary>
+        /// <remarks>
+        /// Always answers, and the resting <c>state</c> is always present.
+        /// <c>attempt_id</c> and <c>attempt_status</c> are echoed only to a
+        /// caller that already knew the id.
+        /// </remarks>
+        public const string NearAiCredentialStatus = "near_ai_credential_status";
+
+        /// <summary>Stops waiting on the browser. Requires the attempt id.</summary>
+        public const string NearAiCredentialCancel = "near_ai_credential_cancel";
+
+        /// <summary>
+        /// Removes the stored key from this machine.
+        /// </summary>
+        /// <remarks>
+        /// Answers <c>revoked: false</c>, and that is not a placeholder:
+        /// forgetting is local, and the key stays valid at the service until
+        /// the contributor removes it in their own account.
+        /// </remarks>
+        public const string NearAiCredentialForget = "near_ai_credential_forget";
+
         // History and withdrawal. Like the onboarding block above, every one
         // of these was already in the daemon's pinned METHODS array before
         // this app could call any of them -- the gap on Windows was never

@@ -140,28 +140,39 @@ public struct HarnessList: Decodable, Equatable, Sendable {
     /// The port a connect would write. Nil when nothing here answers model
     /// calls, which is what the daemon refuses a connect with.
     public let destinationPort: UInt16?
+    /// Whether the destination holds a key of its own, as a TRI-STATE.
+    ///
+    /// `nil` is a daemon that does not report the field, and it is a third
+    /// value rather than a flavour of `false`. A daemon that predates the
+    /// credential gate connects tools perfectly well, and a destination the
+    /// contributor runs themselves reports `true`; telling either of them to
+    /// sign in first would be false. `false` alone is the refused connect.
+    public let destinationCredentialed: Bool?
 
     public enum CodingKeys: String, CodingKey, CaseIterable {
         case harnesses, activity, spend
         case catalogPresent = "catalog_present"
         case destinationPort = "destination_port"
+        case destinationCredentialed = "destination_credentialed"
     }
 
     /// What a payload this build cannot read says: nothing about any tool.
     public static let none = HarnessList(
         catalogPresent: false, harnesses: [], activity: .none, spend: .none,
-        destinationPort: nil)
+        destinationPort: nil, destinationCredentialed: nil)
 
     public init(
         catalogPresent: Bool, harnesses: [HarnessRow], activity: HarnessActivity,
         spend: HarnessSpend = .none,
-        destinationPort: UInt16?
+        destinationPort: UInt16?,
+        destinationCredentialed: Bool? = nil
     ) {
         self.catalogPresent = catalogPresent
         self.harnesses = harnesses
         self.activity = activity
         self.spend = spend
         self.destinationPort = destinationPort
+        self.destinationCredentialed = destinationCredentialed
     }
 
     public init(from decoder: Decoder) throws {
@@ -171,6 +182,25 @@ public struct HarnessList: Decodable, Equatable, Sendable {
         activity = try c.decode(HarnessActivity.self, forKey: .activity)
         spend = (try? c.decode(HarnessSpend.self, forKey: .spend)) ?? .none
         destinationPort = try c.decodeIfPresent(UInt16.self, forKey: .destinationPort)
+        // `decodeIfPresent`, so an absent field stays absent. Decoding it as
+        // a plain `Bool` with a `false` default is the one mistake this
+        // field exists to make impossible.
+        destinationCredentialed = try c.decodeIfPresent(
+            Bool.self, forKey: .destinationCredentialed)
+    }
+
+    /// The tri-state on the wire the ABI reads it in: any negative value is
+    /// the absent field, `0` false, `1` true. Absence is deliberately NOT
+    /// zero, the way `HarnessSpend.abiValue` keeps an unmeasured amount out
+    /// of range rather than passing it as `$0.00`.
+    public static func credentialedABIValue(_ credentialed: Bool?) -> Int32 {
+        guard let credentialed else { return -1 }
+        return credentialed ? 1 : 0
+    }
+
+    /// This list's own answer, in that convention.
+    public var credentialedABIValue: Int32 {
+        Self.credentialedABIValue(destinationCredentialed)
     }
 }
 

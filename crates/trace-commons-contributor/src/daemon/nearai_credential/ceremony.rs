@@ -35,6 +35,13 @@ use std::{
 
 /// How long a contributor has to finish in the browser before the listener
 /// gives up and the port is released.
+/// The lifecycle word a finished ceremony reports.
+///
+/// A const because it crosses a module boundary: `mod.rs` matches on it to
+/// decide whether a completed sign-in should cycle the proxy onto the new
+/// key. As two literals, a rename here left that match dead and silent.
+pub const STATUS_COMPLETE: &str = "complete";
+
 const BROWSER_TIMEOUT: Duration = Duration::from_secs(300);
 /// Above this many tracked attempts the registry refuses rather than growing.
 const MAX_ATTEMPTS: usize = 128;
@@ -219,7 +226,7 @@ pub async fn begin(store: &ConfigStore, provider: &str) -> Result<serde_json::Va
             a.state.attempt_id == finished_id && a.state.status == "waiting_for_browser"
         }) {
             entry.state.status = if outcome.is_ok() {
-                "complete"
+                STATUS_COMPLETE
             } else {
                 "failed"
             };
@@ -274,6 +281,26 @@ pub fn status(dir: &std::path::Path, attempt_id: Option<&str>) -> Option<Status>
     map.get(dir)
         .filter(|a| attempt_id == Some(a.state.attempt_id.as_str()))
         .map(|a| a.state.clone())
+}
+
+/// Whether this directory has an attempt, and how far it got -- without
+/// saying which attempt it is.
+///
+/// [`status`] answers only a caller that can name the attempt, and that
+/// guard stays: the attempt id is the value the served page carries back,
+/// and the browser URL is handed out once and never re-served.
+///
+/// This is the other question, and it is not the same one. A shell that was
+/// restarted, or a second shell on the same machine, cannot name the attempt
+/// and still has to know whether one is in flight -- because the alternative
+/// is showing a contributor "no sign-in here" while a browser tab of theirs
+/// is waiting, which invites them to start a second ceremony and end up with
+/// a second key they did not want and will not find. What this hands back is
+/// a lifecycle word and nothing else: it names no attempt, carries no URL,
+/// and cannot be used to cancel anything.
+pub fn attempt_status(dir: &std::path::Path) -> Option<&'static str> {
+    let map = attempts().lock().expect("ceremony state lock");
+    map.get(dir).map(|a| a.state.status)
 }
 
 /// Abandon an attempt still waiting on the browser, releasing its port.

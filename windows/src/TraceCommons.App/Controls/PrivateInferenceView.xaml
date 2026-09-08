@@ -45,6 +45,79 @@
             <StackPanel Spacing="12" MaxWidth="640" HorizontalAlignment="Left">
 
                 <!--
+                    The credential this computer answers calls with, and it
+                    comes before the tool list: without one, a connect has
+                    nothing to offer, and a screen that hid the control
+                    without saying why would leave a contributor pressing a
+                    button that is not there.
+
+                    Nothing on this card renders a key, a prefix, an id or an
+                    account name. The payload carries no hole for one.
+
+                    One button, and which one it is comes from the shared
+                    table across the ABI rather than from anything decided
+                    here. The sentence above it is the consequence of
+                    pressing it, drawn from the same call that chose it, so a
+                    button that opens a browser and mints a key at a third
+                    party can never appear without the line saying so.
+                -->
+                <Border Background="{ThemeResource TcSurfaceCardBrush}"
+                        BorderBrush="{ThemeResource TcHairlineBrush}"
+                        BorderThickness="1"
+                        CornerRadius="{StaticResource TcCardCornerRadius}"
+                        Padding="14,12"
+                        Visibility="{x:Bind ViewModel.Available, Mode=OneWay}">
+                    <StackPanel Spacing="10">
+                        <TextBlock Text="{x:Bind ViewModel.CredentialTitle, Mode=OneWay}"
+                                   Style="{StaticResource TcTitleSectionTextStyle}"
+                                   TextWrapping="Wrap" />
+                        <TextBlock Text="{x:Bind ViewModel.CredentialWhat, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   TextWrapping="Wrap" />
+                        <!--
+                            One line per tone, chosen from the tone and never
+                            from the text, exactly as the listener row below
+                            is. Only the clear one, which is the one meaning a
+                            key is kept here, is green.
+                        -->
+                        <TextBlock Text="{x:Bind ViewModel.CredentialStateText, Mode=OneWay}"
+                                   Visibility="{x:Bind ViewModel.CredentialIsNeutral, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   TextWrapping="Wrap" />
+                        <TextBlock Text="{x:Bind ViewModel.CredentialStateText, Mode=OneWay}"
+                                   Visibility="{x:Bind ViewModel.CredentialIsHeld, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   Foreground="{ThemeResource TcBlueBrandBrush}"
+                                   TextWrapping="Wrap" />
+                        <TextBlock Text="{x:Bind ViewModel.CredentialStateText, Mode=OneWay}"
+                                   Visibility="{x:Bind ViewModel.CredentialIsClear, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   Foreground="{ThemeResource TcGreenTextBrush}"
+                                   TextWrapping="Wrap" />
+                        <TextBlock Text="{x:Bind ViewModel.CredentialStateText, Mode=OneWay}"
+                                   Visibility="{x:Bind ViewModel.CredentialIsRefused, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   Foreground="{ThemeResource TcCoralTextBrush}"
+                                   TextWrapping="Wrap" />
+                        <!--
+                            What pressing the button below costs, or what
+                            forgetting does not do. Bound to the same action
+                            the button is, so neither can be drawn without
+                            the other.
+                        -->
+                        <TextBlock Text="{x:Bind ViewModel.CredentialActionPreamble, Mode=OneWay}"
+                                   Visibility="{x:Bind ViewModel.HasCredentialActionPreamble, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   TextWrapping="Wrap" />
+                        <Button Content="{x:Bind ViewModel.CredentialActionText, Mode=OneWay}"
+                                Visibility="{x:Bind ViewModel.HasCredentialAction, Mode=OneWay}"
+                                IsEnabled="{x:Bind ViewModel.CredentialControlsEnabled, Mode=OneWay}"
+                                HorizontalAlignment="Left"
+                                Click="OnCredentialAction" />
+                    </StackPanel>
+                </Border>
+
+                <!--
                     The tools on this computer, and they come FIRST. Connecting
                     one is what a contributor came here to do; the switch below
                     is the kill switch over all of them, not the first question.
@@ -93,6 +166,20 @@
                         <TextBlock Text="{x:Bind ViewModel.HarnessesNoneFound, Mode=OneWay}"
                                    Visibility="{x:Bind ViewModel.HasNoHarnesses, Mode=OneWay}"
                                    Style="{StaticResource TcCaptionTextStyle}"
+                                   TextWrapping="Wrap" />
+                        <!--
+                            Why a connect is not on offer. Once, above the
+                            rows, because the fact is about the destination
+                            this app would answer from and not about any one
+                            tool, and absent entirely on a daemon that does
+                            not gate connects: telling somebody to sign in
+                            before connecting a tool they can connect right
+                            now would be false.
+                        -->
+                        <TextBlock Text="{x:Bind ViewModel.HarnessesCredentialNotice, Mode=OneWay}"
+                                   Visibility="{x:Bind ViewModel.HasHarnessesCredentialNotice, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   Foreground="{ThemeResource TcGoldTextBrush}"
                                    TextWrapping="Wrap" />
                         <ItemsControl ItemsSource="{x:Bind ViewModel.Harnesses, Mode=OneWay}">
                             <ItemsControl.ItemTemplate>

@@ -1,10 +1,16 @@
 # The Linux contributor shell.
 #
-# This is its own workspace, not a member of the repository root's. The root
-# workspace builds on macOS, and every crate in it must keep doing so; this
-# one links GTK 4 and libadwaita and cannot build there at all. Excluding it
-# keeps `cargo check` at the root honest instead of newly broken, and keeps
-# the GTK dependency tree out of every other crate's lockfile.
+# This is its own workspace, not a member of the repository root's. Excluding
+# it keeps `cargo check` at the root from dragging in GTK, and keeps the GTK
+# dependency tree out of every other crate's lockfile.
+#
+# It DOES build and test on macOS, contrary to what this comment claimed until
+# 2026-09-08: verified there against Homebrew's gtk4 4.22.4 and libadwaita-1
+# 1.9.3, `cargo test` green. The app itself is Linux-only -- the tray, the
+# portal and autostart paths are -- but the crate compiles and its unit tests
+# run anywhere the two libraries are installed, so a Linux-shell change can be
+# checked locally rather than waited on. Being a separate workspace means a
+# `--workspace` run at the root does NOT cover it: check it explicitly.
 [workspace]
 
 [package]

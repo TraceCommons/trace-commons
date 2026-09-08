@@ -2154,6 +2154,34 @@ pub use trace_commons_contributor::private_inference_copy::{
     harness_last_call_line, harness_outcome_line, harness_spend_line, harness_state_line,
 };
 
+// --- The key this computer answers with --------------------------------
+//
+// Same rule as the two blocks above, and one sharper reason: the control
+// these words sit beside MINTS A KEY at a third party, so the sentence in
+// front of it is the only thing a contributor reads before a browser opens.
+// Three shells holding three versions of that sentence is three versions of
+// what somebody was told they were agreeing to.
+//
+// The per-state sentences are NOT re-exported one by one, for the reason
+// `harness_state_line` is not: which one a state shows is
+// `credential_state_line`'s decision, `credential_state_tone` paints it, and
+// `credential_action` says what may be offered beside it. The three take the
+// same label and are used as one -- a shell that picked the button from the
+// state itself would be the second place that table lives, and the arm it
+// would get wrong is the unread one, where offering `Obtain` is how somebody
+// ends up with a second key.
+//
+// `harness_credential_notice` is a function and not a constant because its
+// input has THREE answers and only one of them draws anything: a daemon that
+// does not gate connects at all reports nothing, and a shell that read the
+// absent field as "no key here" would tell a contributor to sign in before
+// connecting a tool they could connect right now.
+pub use trace_commons_contributor::private_inference_copy::{
+    CREDENTIAL_CANCEL, CREDENTIAL_COST, CREDENTIAL_FORGET, CREDENTIAL_FORGET_EXPLAINS,
+    CREDENTIAL_OBTAIN, CREDENTIAL_TITLE, CREDENTIAL_WHAT, CredentialAction, credential_action,
+    credential_state_line, credential_state_tone, harness_credential_notice,
+};
+
 // --- The redaction witness ---------------------------------------------
 //
 // Same rule as the Tools block above, for the same reason. The witness

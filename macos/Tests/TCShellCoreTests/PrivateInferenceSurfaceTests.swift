@@ -33,16 +33,41 @@ final class PrivateInferenceSurfaceTests: XCTestCase {
          "harness_not_installed":"H-NOT-INSTALLED",
          "harness_plan_nothing_to_change":"H-NOTHING-TO-CHANGE",
          "harness_plan_entry_unusable":"H-ENTRY-UNUSABLE",
-         "harness_plan_no_config_path":"H-NO-CONFIG-PATH"}
+         "harness_plan_no_config_path":"H-NO-CONFIG-PATH",
+         "credential_title":"C-TITLE","credential_what":"C-WHAT",
+         "credential_cost":"C-COST","credential_obtain":"C-OBTAIN",
+         "credential_cancel":"C-CANCEL","credential_forget":"C-FORGET",
+         "credential_forget_explains":"C-FORGET-EXPLAINS",
+         "credential_absent":"C-ABSENT","credential_obtaining":"C-OBTAINING",
+         "credential_failed":"C-FAILED","credential_cancelled":"C-CANCELLED",
+         "credential_present":"C-PRESENT","credential_unknown":"C-UNKNOWN",
+         "credential_unreported":"C-UNREPORTED",
+         "harness_needs_credential":"H-NEEDS-CREDENTIAL"}
         """
 
-    private func copy() -> PrivateInferenceCopy {
-        guard let copy = PrivateInferenceCopy.decode(fromJSON: payload) else {
-            XCTFail("the fixture payload must decode")
-            fatalError("unreachable")
-        }
-        return copy
+    /// Decoded once, in `setUpWithError`, so a fixture that stops decoding
+    /// fails THIS TEST and lets the rest of the bundle run.
+    ///
+    /// It used to be `XCTFail` followed by `fatalError("unreachable")`, which
+    /// aborted the whole XCTest process at the first fixture failure: every
+    /// remaining test in every target simply never ran, no total was printed,
+    /// and the log carried one error line no matter how much was broken. A
+    /// red `macOS app tests` job was unreadable for that reason -- it looked
+    /// far emptier than a normal failing run, and its failure count was
+    /// always about one.
+    ///
+    /// A throw from `setUpWithError` is reported against each test in this
+    /// class in turn, which is honest: every one of them needs this payload.
+    private var decodedCopy: PrivateInferenceCopy!
+
+    override func setUpWithError() throws {
+        try super.setUpWithError()
+        decodedCopy = try XCTUnwrap(
+            PrivateInferenceCopy.decode(fromJSON: payload),
+            "the fixture payload must decode")
     }
+
+    private func copy() -> PrivateInferenceCopy { decodedCopy }
 
     private func calls(
         line: @escaping @Sendable (String) -> String? = { "LINE:\($0)" },

@@ -431,6 +431,10 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `near_account_start` | `ingest_url`, `account_id` | `attempt_id`, `browser_url`, `status` | explicit wallet ceremony; keys and PKCE stay in daemon |
 | `near_account_status` | `attempt_id` | `attempt_id`, `status` | no account token or signing material |
 | `near_account_cancel` | `attempt_id` | cancellation state | cancels the matching local attempt |
+| `near_ai_credential_start` | `provider` (optional, default `github`) | `attempt_id`, `browser_url`, `status` | asynchronous only; opens a sign-in whose result is an inference key kept on this machine. The browser URL is returned **once** and no poll re-serves it |
+| `near_ai_credential_status` | `attempt_id` (optional) | `state`, plus `attempt_id` and `attempt_status` for a caller that named the current attempt | never errors on a missing or stale `attempt_id`: `state` is a fact about the machine. See "The credential state" below |
+| `near_ai_credential_cancel` | `attempt_id` (**required**) | `attempt_id`, `status` | stops this machine waiting on the browser; `near_ai_credential_unknown` if the id is not the current attempt |
+| `near_ai_credential_forget` | — | `removed`, `revoked: false` | removes the key from **this machine only**; `revoked` is always false and is not a placeholder. See "The credential state" below |
 | `witness_preview_request` | `entry_id`, `raw_session_confirmed: true`; optional `outcome`, `correction` | `status: "ready"`, `summary` | awaits explicit remote review; saves and pins certified bytes without approval or upload |
 | `preview_request` | `entry_id` | `entry_id`, `state`, and the fields that state carries | enqueues and returns immediately; the result arrives as a `preview_ready` event. See "Scheduled previews" below |
 | `preview_visible` | `entry_ids[]` | `visible: <count>` | replaces the on-screen set wholesale; decides preview **order**, never membership |
@@ -1893,7 +1897,7 @@ retained-shutdown producer confirms cleanup; a port alone is metadata, not
 proof that calls can be answered.
 
 The companion C ABI copy payload (`tc_private_inference_copy`, not a daemon
-settings key) supplies these 48 fixed string fields:
+settings key) supplies these 62 fixed string fields:
 
 - `destination`, `subtitle`;
 - `offer_title`, `offer_what`, `offer_exposure`, `offer_no_repoint`,
@@ -1917,7 +1921,62 @@ settings key) supplies these 48 fixed string fields:
   `harness_unreadable_config`;
 - `harness_not_installed`;
 - `harness_plan_nothing_to_change`, `harness_plan_entry_unusable`,
-  `harness_plan_no_config_path`.
+  `harness_plan_no_config_path`;
+- `credential_title`, `credential_what`, `credential_cost`;
+- `credential_obtain`, `credential_cancel`, `credential_forget`,
+  `credential_forget_explains`;
+- `credential_absent`, `credential_obtaining`, `credential_failed`,
+  `credential_cancelled`, `credential_present`, `credential_unknown`,
+  `credential_unreported`.
+
+### The credential state
+
+`near_ai_credential_status` answers ONE label, and it is the only thing a
+shell branches on:
+
+| `state` | Means | Sentence | Action a shell may offer |
+|---|---|---|---|
+| `absent` | no key is kept on this machine | `credential_absent` | obtain |
+| `obtaining` | a ceremony is in flight here | `credential_obtaining` | cancel |
+| `failed` | the last attempt ended without a key | `credential_failed` | obtain |
+| `cancelled` | the last attempt was stopped by the contributor | `credential_cancelled` | obtain |
+| `present` | a key is kept on this machine | `credential_present` | forget |
+| absent/empty field | this daemon does not answer the question | `credential_unreported` | **none** |
+| anything else | the state could not be read | `credential_unknown` | **none** |
+
+The sentence, the tone and the action are chosen by the shared Rust tables --
+`tc_near_ai_credential_state_line`, `tc_near_ai_credential_state_tone` and
+`tc_near_ai_credential_action` -- never by shell-authored branching, and a
+shell must not recover any of the three by reading another.
+
+**Neither unread case may render as `absent`.** "No key is kept here" in
+front of somebody who has one invites a second sign-in, at a third party,
+that their own account will list and nothing on this screen will ever mention
+again. That is why the unread states also answer *no action*: the action in
+question mints the second key.
+
+The precedence is the daemon's, not a shell's. A ceremony in flight outranks
+a key already stored, because somebody with a browser tab open is waiting on
+that and not on what they had before; a stored key outranks the ending of an
+older attempt; `absent` is the answer only when there is nothing else to say.
+
+`attempt_id` and `attempt_status` are echoed only to a caller that already
+named the current attempt. A caller that names none, or names a stale one,
+still gets `state` -- the resting state is not a secret -- but learns nothing
+that would let it cancel somebody else's ceremony, and the browser URL is
+never re-served.
+
+`credential_cost` is the sentence that has to sit in front of the obtain
+action, and it is the counterpart of `offer_exposure`: getting a key opens a
+browser, signs the contributor in to a company that is not this app, and
+mints a key this app then keeps. `credential_forget_explains` is its
+counterpart at the other end -- forgetting is LOCAL, the key stays valid at
+the service until the contributor removes it there, and this app cannot do it
+for them, which is why `near_ai_credential_forget` answers `revoked: false`
+rather than leaving "removed" to be read as "revoked".
+
+No sentence on this surface renders a key, a key prefix, an id or an account
+name, and none of them carries a hole a shell could fill with one.
 
 The three per-harness states are not two. `harness_connected_nothing_seen`
 says a tool's own settings send its calls here; `harness_answering` says a
