@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# Regenerate app-compose.json from docker-compose.yml, and print the SHA-256 of
-# the result.
+# Regenerate app-compose.json from docker-compose.yml.
 #
 # WHY THIS EXISTS. dstack's application manifest embeds the compose file as a
 # JSON *string*, so there are two copies of it and only one of them is
@@ -8,16 +7,31 @@
 # configuration -- with a measurement that matches the old configuration, so
 # nothing downstream notices. Run this after every edit and commit both files.
 #
-# WHAT THE HASH IS, AND IS NOT. The value printed is the SHA-256 of the bytes
-# of app-compose.json as written here. dstack derives `compose_hash` from the
-# manifest it stores, and MRCONFIGID (config-id v1) is `01` followed by that
-# hash and fifteen zero bytes. Those are two statements about two different
-# artifacts, and this script can only make the first one. Before pinning
-# anything, compare this value against `tcb_info.compose_hash` reported by a
-# running instance. If they differ, the deployment path canonicalised the
-# manifest somewhere and the hash to pin is the instance's, not this one's.
-# Nobody on this project has run that comparison against a live agent yet.
-
+# THIS SCRIPT PRINTS NO HASH, DELIBERATELY, AND MUST NOT BE MADE TO. It used
+# to print the SHA-256 of the manifest it writes, with a caveat that the value
+# might not be dstack's `compose_hash`. It is not, and it cannot be made to be:
+# `phala deploy` never reads app-compose.json. It builds its own manifest --
+# forcing the visibility flags, adding a ~17 KB boot script and a second
+# `allowed_envs` name -- so the bytes hashed here are bytes no deployer ever
+# stored, and a hash over them is authoritative about nothing. Measured on the
+# live CVM, the two disagreed.
+#
+# That is worth more than a caveat because of what the number would be used
+# for. The measurement clients pin is `mrtd + mrconfigid`, and MRCONFIGID
+# (config-id v1) is `01` followed by the INSTANCE `compose_hash` and fifteen
+# zero bytes. Pin a locally derived hash and you have pinned a measurement no
+# client ever presents: every attested submission is refused. Fail-closed, so
+# not a security hole -- a self-inflicted outage that presents as a
+# verification bug, which is worse to diagnose than an obvious break.
+#
+# THE ONLY AUTHORITATIVE SOURCE is the deployed instance:
+#
+#     phala cvms get <cvm-id> --json     # -> compose_hash
+#
+# cross-checked against a live certificate's `witness_measurement`, whose
+# mrconfigid should be `01` + that hash + zero padding. See "Reading the
+# measurement" in README.md. A hash printed here with a caveat attached is
+# still a hash somebody copies and pins, which is why there is none.
 #
 # `--check` regenerates into a temporary file and exits non-zero if it differs
 # from the committed one, without touching it. That is the form to run in CI or
@@ -120,14 +134,6 @@ jq -S -n --rawfile compose "${compose}" '{
   pre_launch_script: ""
 }' > "${manifest}"
 
-digest() {
-  if command -v sha256sum >/dev/null; then
-    sha256sum "$1" | cut -d' ' -f1
-  else
-    shasum -a 256 "$1" | cut -d' ' -f1
-  fi
-}
-
 if [[ "${check_only}" == true ]]; then
   if ! diff -u "${here}/app-compose.json" "${manifest}" >/dev/null 2>&1; then
     echo "app-compose.json is stale: it does not match docker-compose.yml" >&2
@@ -136,9 +142,10 @@ if [[ "${check_only}" == true ]]; then
     exit 1
   fi
   echo "app-compose.json matches docker-compose.yml"
-  echo "sha256 $(digest "${manifest}")"
   exit 0
 fi
 
 echo "wrote ${manifest}"
-echo "sha256 $(digest "${manifest}")"
+echo "No compose_hash is printed: it is not derivable from this file. Read it"
+echo "from the deployed instance with 'phala cvms get <cvm-id> --json', and"
+echo "pin that. See the header of this script for why."
