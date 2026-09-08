@@ -121,6 +121,70 @@ impl std::fmt::Debug for NearAiInferenceCredential {
     }
 }
 
+/// The NEAR AI **session** this daemon retained after the credential
+/// ceremony, kept for one reason: reading the account balance.
+///
+/// **This is a wider credential than the inference key beside it, and the
+/// difference is not cosmetic.** The `sk-` key in
+/// [`NearAiInferenceCredential`] buys inference and nothing else -- every
+/// management route on cloud-api refuses it. A refresh token buys a session,
+/// and a session can mint further API keys, read organization and workspace
+/// state, and enumerate and delete the account's own tokens. A contributor
+/// who obtained inference has, by keeping this, given the daemon on their
+/// machine authority over their NEAR AI account that the inference key alone
+/// would never have carried.
+///
+/// It is retained anyway, deliberately, because the balance is
+/// session-authenticated and there is no narrower credential that can read
+/// it: `GET /v1/organizations/{org}/usage/balance` is `session_token`-only,
+/// as is every other management route, and an `sk-` key answers 401 on all of
+/// them. Showing a contributor what their account has left is worth the
+/// wider credential; pretending the credential is not wider would not be.
+///
+/// Only the refresh token is stored. The access token it buys is short-lived
+/// and lives in memory for as long as one daemon process runs -- there is
+/// nothing to gain from putting a second credential on disk, and the exchange
+/// route (`POST /v1/users/me/access-tokens`) is authenticated by the refresh
+/// token itself rather than by an access token, so a stale access token is
+/// never a reason to go back to the browser.
+///
+/// The refresh token **rotates**: every exchange returns a new one and the
+/// old one stops working. So this record is rewritten on each refresh, and a
+/// rotation that is minted but not persisted locks the contributor out until
+/// they re-run the ceremony. That is why the write happens before the new
+/// access token is used for anything.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NearAiSession {
+    /// The `rt_` refresh token. Never rendered, never logged, never crosses
+    /// the socket.
+    pub refresh_token: String,
+    /// When the service last said this refresh token stops working, if it has
+    /// said. `None` is "not known" -- the OAuth finish hands the token back in
+    /// a URL fragment with no expiry beside it, so the first exchange is what
+    /// populates this. It is never treated as "does not expire": the refresh
+    /// route is the only thing that can tell us, and a refusal is what a
+    /// contributor is actually shown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh_token_expires_at: Option<DateTime<Utc>>,
+    /// When this record was last written, which after a rotation is when the
+    /// current token was issued rather than when the ceremony ran.
+    pub stored_at: DateTime<Utc>,
+}
+
+impl std::fmt::Debug for NearAiSession {
+    /// Hand-written for the same reason as [`NearAiInferenceCredential`]'s:
+    /// `DaemonSettings` derives `Debug`, and a derived impl here would put a
+    /// live refresh token -- the wider of the two credentials in this
+    /// document -- into every `{:?}` of the whole settings blob.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NearAiSession")
+            .field("refresh_token", &"<redacted>")
+            .field("refresh_token_expires_at", &self.refresh_token_expires_at)
+            .field("stored_at", &self.stored_at)
+            .finish()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DaemonSettings {
     pub schema_version: String,
@@ -179,6 +243,22 @@ pub struct DaemonSettings {
     /// existed loads without one rather than failing to parse.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub near_ai_inference: Option<NearAiInferenceCredential>,
+    /// The session retained alongside the credential above, so the account
+    /// balance can be read. See [`NearAiSession`] for what this is authority
+    /// over, which is considerably more than the key beside it.
+    ///
+    /// A third NEAR-AI-shaped key in one document, and the three answer three
+    /// different questions: `near_ai` is the privacy-filter credential,
+    /// `near_ai_inference` is the key inference calls carry, and this is the
+    /// session that management reads need. Forgetting the credential clears
+    /// this too -- see `nearai_credential::ceremony::forget` -- because a
+    /// contributor who believes they revoked the daemon's access and left a
+    /// session behind has been told something false.
+    ///
+    /// `#[serde(default)]` so a settings file written before this field
+    /// existed loads without one rather than failing to parse.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub near_ai_session: Option<NearAiSession>,
     /// What the contributor said about each agent's sessions.
     ///
     /// `None` is "never asked", and it is the ONLY state that still falls
@@ -637,6 +717,7 @@ impl Default for DaemonSettings {
             local_notifications: false,
             near_ai: None,
             near_ai_inference: None,
+            near_ai_session: None,
             claude_source: None,
             codex_source: None,
             gemini_source: None,

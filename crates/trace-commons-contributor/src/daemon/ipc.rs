@@ -2405,6 +2405,7 @@ pub async fn handle_request_async(shared: &DaemonShared, req: &Request) -> Respo
         "near_ai_credential_forget" => {
             super::nearai_credential::handle_forget_async(shared, req).await
         }
+        "near_ai_balance" => super::nearai_credential::handle_balance(shared, req).await,
         "near_account_capabilities" => {
             super::account_onboarding::handle_capabilities(shared, req).await
         }
@@ -3963,6 +3964,22 @@ fn redacted_settings(s: &DaemonSettings) -> serde_json::Value {
         obj.insert(
             "near_ai_inference_configured".to_string(),
             serde_json::Value::Bool(inference_configured),
+        );
+        // And a third: the retained session. It is the *widest* of the three
+        // -- a refresh token can mint further API keys and read the account,
+        // where the key above only buys inference -- so if any of them must
+        // not cross the socket it is this one. Without the `remove` the whole
+        // record, refresh token included, is serialized to every shell that
+        // asks for settings.
+        //
+        // Presence only, and it is worth reporting: a shell that knows a
+        // session is stored knows the balance surface is worth showing, and
+        // one that sees `false` knows to offer the ceremony instead.
+        let session_retained = s.near_ai_session.is_some();
+        obj.remove("near_ai_session");
+        obj.insert(
+            "near_ai_session_retained".to_string(),
+            serde_json::Value::Bool(session_retained),
         );
         // claude_root / codex_root are local filesystem paths. entry_value
         // is scrupulous about never putting a path on the wire; this
@@ -6783,6 +6800,104 @@ mod tests {
         assert!(body.contains("\"near_ai_configured\":false"), "{body}");
     }
 
+    /// The third credential in the same document, and the widest of them.
+    ///
+    /// `skip_serializing_if` keeps the absent case out of the blob on its own,
+    /// which is exactly why this asserts the populated case: without the
+    /// `remove` in `redacted_settings` the whole record -- refresh token
+    /// included -- crosses the socket to every shell that asks for settings.
+    #[test]
+    fn settings_never_echo_the_retained_session() {
+        let s = shared();
+        s.settings.lock().unwrap().near_ai_session = Some(crate::daemon::settings::NearAiSession {
+            refresh_token: "rt_super-secret-session".into(),
+            refresh_token_expires_at: Some(chrono::Utc::now()),
+            stored_at: chrono::Utc::now(),
+        });
+        let r = handle_request(&s, &req("get_settings", serde_json::json!({})));
+        let body = serde_json::to_string(&r.result.unwrap()).unwrap();
+        assert!(!body.contains("rt_super-secret-session"), "{body}");
+        assert!(!body.contains("refresh_token"), "{body}");
+        assert!(body.contains("\"near_ai_session_retained\":true"), "{body}");
+
+        // And absent reports absent rather than being missing from the blob.
+        s.settings.lock().unwrap().near_ai_session = None;
+        let r = handle_request(&s, &req("get_settings", serde_json::json!({})));
+        let body = serde_json::to_string(&r.result.unwrap()).unwrap();
+        assert!(
+            body.contains("\"near_ai_session_retained\":false"),
+            "{body}"
+        );
+    }
+
+    /// Forgetting takes the session with the credential, on disk *and* in the
+    /// running process.
+    ///
+    /// A residual session is the worst outcome this pair can produce: the
+    /// contributor believes they revoked this machine's access to their NEAR
+    /// AI account, and the daemon is left holding the wider of the two
+    /// credentials -- one that can mint further API keys and read the account.
+    ///
+    /// Exercised through `handle_request_async`, which is the path the daemon
+    /// actually dispatches this method on, and the only one that reaches
+    /// `reconcile_private_inference`. The sync handler clears the session; the
+    /// reconcile clears the key and takes it back out of the running proxy.
+    /// Asserting against the sync handler alone would pass while the proxy
+    /// went on answering with a withdrawn key.
+    #[tokio::test]
+    async fn forgetting_the_credential_takes_the_session_with_it() {
+        let s = shared();
+        {
+            let mut settings = s.settings.lock().unwrap();
+            settings.near_ai_inference = Some(crate::daemon::settings::NearAiInferenceCredential {
+                key: "sk-super-secret-key".into(),
+                key_id: "key-1".into(),
+                key_prefix: "sk-sup".into(),
+                organization_id: "org-1".into(),
+                workspace_id: "ws-1".into(),
+                minted_at: chrono::Utc::now(),
+            });
+            settings.near_ai_session = Some(crate::daemon::settings::NearAiSession {
+                refresh_token: "rt_super-secret-session".into(),
+                refresh_token_expires_at: None,
+                stored_at: chrono::Utc::now(),
+            });
+            settings.save(&s.store).unwrap();
+        }
+
+        let r = handle_request_async(&s, &req("near_ai_credential_forget", serde_json::json!({})))
+            .await;
+        assert_eq!(r.result.unwrap()["removed"], true);
+
+        let on_disk = DaemonSettings::load(&s.store).unwrap();
+        assert!(on_disk.near_ai_inference.is_none());
+        assert!(on_disk.near_ai_session.is_none());
+        // The file is what survives a restart; the in-memory copy is what
+        // every read in this process consults. Clearing one and not the other
+        // leaves the daemon using both until something restarts it.
+        let in_memory = s.settings.lock().unwrap().clone();
+        assert!(in_memory.near_ai_inference.is_none());
+        assert!(in_memory.near_ai_session.is_none());
+    }
+
+    /// A daemon with no session answers a named state, over the socket, and
+    /// not a zero.
+    #[tokio::test]
+    async fn the_balance_surface_answers_a_named_state_rather_than_a_number() {
+        let s = shared();
+        let r = handle_request_async(&s, &req("near_ai_balance", serde_json::json!({}))).await;
+        // Never an IPC error: a shell has four different sentences to render
+        // and an error plus a null would make all four read the same.
+        assert!(r.error.is_none());
+        let body = r.result.unwrap();
+        assert_eq!(body["state"], "no_session");
+        assert!(body["remaining_nanos"].is_null(), "{body}");
+        assert!(body["total_spent_nanos"].is_null(), "{body}");
+        assert!(body["observed_at"].is_null(), "{body}");
+        assert_eq!(body["currency"], "USD");
+        assert_eq!(body["scale"], 9);
+    }
+
     #[test]
     fn get_settings_never_carries_a_local_filesystem_path() {
         // The wholesale-serialized settings blob used to leak claude_root /
@@ -7872,6 +7987,11 @@ mod tests {
                 organization_id: "org-1".into(),
                 workspace_id: "ws-1".into(),
             },
+            // The ceremony now stores a session beside the key, so this
+            // stands in for the refresh token its last leg carries. The
+            // coupling under test is the key reaching a running proxy; the
+            // session is written alongside and is not what reconcile reads.
+            "refresh-token-for-the-reconcile-test".to_string(),
         )
         .unwrap();
 

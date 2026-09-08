@@ -16,12 +16,23 @@
 //! ```
 //!
 //! The last call returns the plaintext key once and accepts an omitted
-//! `expires_at`, so the credential we keep does not expire and the session
-//! that minted it is discarded immediately. That is the point of doing it this
-//! way: an inference credential with no refresh story at all beats a session
-//! this daemon would have to keep alive for the rest of its life.
+//! `expires_at`, so the credential inference uses does not expire and needs no
+//! refresh story at all. That remains the point of doing it this way.
+//!
+//! The session is nonetheless **retained**, which is a change from how this
+//! module first shipped and is worth stating rather than leaving to be
+//! noticed. The reason is the account balance: `usage/balance` is a management
+//! route like every other, `session_token`-only, and the `sk-` key is a 401 on
+//! it. There is no narrower credential that can read what a contributor has
+//! left. So the refresh token is kept -- rotated at
+//! `POST /v1/users/me/access-tokens`, no browser round trip -- and it is a
+//! wider credential than the key beside it: it can mint further API keys and
+//! read organization and workspace state. See
+//! [`crate::daemon::settings::NearAiSession`] for the whole of that statement,
+//! and [`balance`] for the rules the reading itself keeps.
 
 pub mod api;
+pub mod balance;
 pub mod ceremony;
 pub mod loopback;
 
@@ -204,19 +215,54 @@ pub fn handle_cancel(shared: &DaemonShared, req: &Request) -> Response {
     }
 }
 
-/// Forget the stored credential.
+/// Forget the stored credential, and the session stored beside it.
 ///
 /// `revoked: false` is not a placeholder. Forgetting is local: the key stays
-/// valid at the service until the contributor revokes it there, and this
-/// cannot do it for them because revoking needs a session and the session was
-/// discarded the moment the key was minted. Saying `removed` and meaning
-/// "revoked" would be the kind of claim this codebase does not make.
+/// valid at the service until the contributor revokes it there, and this does
+/// not do it for them. Saying `removed` and meaning "revoked" would be the
+/// kind of claim this codebase does not make.
+///
+/// The running daemon's own copy is cleared too, not just the file. The
+/// settings on disk are what survive a restart, but the in-memory copy is what
+/// every read in this process consults -- `reconcile_private_inference` hands
+/// the inference key to IronWire from it, and [`balance::read`] takes the
+/// refresh token from it. Clearing one and not the other would leave a
+/// contributor told their credentials were forgotten while this process went
+/// on using both until something restarted it.
+///
+/// The memory clear is conditional on the disk write having succeeded. The
+/// other order -- clear memory, then fail to write -- reports a removal that
+/// the next start silently undoes.
 pub fn handle_forget(shared: &DaemonShared, req: &Request) -> Response {
     match ceremony::forget(&shared.store) {
-        Ok(removed) => Response::ok(
-            req.id,
-            serde_json::json!({ "removed": removed, "revoked": false }),
-        ),
+        Ok(removed) => {
+            {
+                // The session only. NOT `near_ai_inference`, and the
+                // difference is load-bearing: #718's
+                // `absorb_near_ai_credential_change` detects a credential
+                // change by COMPARING this in-memory copy against the file,
+                // and advances the generation that stops and restarts the
+                // proxy only when they differ. Clearing the key here makes
+                // both sides `None`, the comparison finds nothing, the
+                // generation never advances -- and the running proxy goes on
+                // answering with the key the contributor just withdrew.
+                //
+                // `reconcile_private_inference`, which `handle_forget_async`
+                // calls, is what clears the key from this document and from
+                // the proxy together. Nothing absorbs the session, so it is
+                // cleared here.
+                let mut settings = shared.settings.lock().expect("settings lock");
+                settings.near_ai_session = None;
+            }
+            // Any balance this directory had cached was read with the session
+            // just removed. Serving it again would put a figure from a
+            // forgotten account on screen.
+            balance::invalidate(shared.store.dir());
+            Response::ok(
+                req.id,
+                serde_json::json!({ "removed": removed, "revoked": false }),
+            )
+        }
         Err(_) => Response::err(req.id, ERR_UNAVAILABLE, "near_ai_credential_unavailable"),
     }
 }
@@ -236,6 +282,20 @@ pub async fn handle_forget_async(shared: &DaemonShared, req: &Request) -> Respon
         shared.reconcile_private_inference().await;
     }
     response
+}
+
+/// What the contributor's NEAR AI account has left.
+///
+/// Always `ok`, never an IPC error, and that is the design rather than
+/// laziness: every way of not knowing is a *named state* in the body -- see
+/// [`balance::BalanceReport`] -- and an error response would collapse four
+/// different things a shell must say into one. The one thing this can never
+/// answer with is a number it does not have.
+///
+/// Async because it may exchange a refresh token and then make two management
+/// calls; on the async dispatch path for the same reason `handle_start` is.
+pub async fn handle_balance(shared: &DaemonShared, req: &Request) -> Response {
+    Response::ok(req.id, balance::read(shared).await.to_value())
 }
 
 #[cfg(test)]

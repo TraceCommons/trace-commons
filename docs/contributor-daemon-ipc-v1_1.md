@@ -297,15 +297,21 @@ something it can corroborate, rather than to a string a client invented.
   cross the socket. Do not display or log a path. Render the label; send the
   id back.
 - History records carry no path at all.
-- `get_settings` reports four booleans -- `near_ai_configured`,
-  `near_ai_inference_configured`, `claude_root_configured`,
-  `codex_root_configured` -- and never the underlying values. The first two
-  are credentials and are **different credentials for different services**,
-  which their near-identical names do not convey: `near_ai_configured` is the
-  privacy-filter API key, and `near_ai_inference_configured` is the NEAR AI
-  inference key this daemon mints for a contributor. The other two are local
-  filesystem paths. All four are configured-or-not facts an app may render as
-  a checkmark, never as text containing the actual value.
+- `get_settings` reports five booleans -- `near_ai_configured`,
+  `near_ai_inference_configured`, `near_ai_session_retained`,
+  `claude_root_configured`, `codex_root_configured` -- and never the
+  underlying values. The first three are credentials and are **different
+  credentials for different services**, which their near-identical names do
+  not convey: `near_ai_configured` is the privacy-filter API key,
+  `near_ai_inference_configured` is the NEAR AI inference key this daemon
+  mints for a contributor, and `near_ai_session_retained` is the NEAR AI
+  session kept alongside that key so the account balance can be read. The
+  session is the **widest** of the three -- a refresh token can mint further
+  API keys and read organization and workspace state, where the inference key
+  buys inference and nothing else -- and it is the one that most obviously
+  must never cross this socket. The last two are local filesystem paths. All
+  five are configured-or-not facts an app may render as a checkmark, never as
+  text containing the actual value.
 - `preview` returns a **summary** over the socket -- counts, labels, and
   sizes. The full redacted event body is a separate call, `preview_body`,
   because it does not fit one frame and has to be paged. Both carry trace
@@ -463,6 +469,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `set_consent_scopes` | `scopes[]` (wire-name strings; omitted means floor scope only) | `consent_scopes[]` | requires an existing enrollment |
 | `enroll` | `grant` xor `invite`, `scopes[]` (optional) | `enrolled: bool`, and on success `tenant_id`, `device_key_id`, `consent_scopes[]` | performs real network I/O |
 | `acknowledge_near_ai_notice` | — | `acknowledged: true` | clears the `near-ai-notice-not-acknowledged` health label |
+| `near_ai_balance` | — | `state`, `currency`, `scale`, `remaining_nanos`, `spend_limit_nanos`, `total_spent_nanos`, `total_requests`, `total_tokens`, `observed_at` | performs real network I/O; **always succeeds** and reports every way of not knowing as a named `state`; see "`near_ai_balance`" below |
 | `set_public_profile` | `handle` (required), `bio` (required, string **or** `null`) | the profile, plus `handle_persisted` | performs real network I/O; replaces the whole profile; see "The public profile" below |
 | `clear_public_profile` | — | the profile (now empty), plus `withdrawn: true` and `handle_persisted` | performs real network I/O; see "The public profile" below |
 | `get_public_profile` | — | `on_roster`, `handle`, `bio`, `public_since`, `public_url` | a LOCAL cache, not a server read-back; `public_url` is always `null` |
@@ -2208,6 +2215,60 @@ notice on stdout) can get past that gate. Because this asserts, on the
 caller's unverified word, that a disclosure was actually shown to someone,
 it is audited (`near-ai-notice-acknowledged`) -- an application must not
 call it without actually having shown the notice text first.
+
+### `near_ai_balance`
+
+What the contributor's NEAR AI account has left, read with the session the
+credential ceremony retained. A `state` and a set of numbers:
+
+```json
+{
+  "state": "known",
+  "currency": "USD",
+  "scale": 9,
+  "remaining_nanos": 8500000000,
+  "spend_limit_nanos": 10000000000,
+  "total_spent_nanos": 1500000000,
+  "total_requests": 12,
+  "total_tokens": 3456,
+  "observed_at": "2026-09-08T09:17:15Z"
+}
+```
+
+`state` is one of:
+
+| `state` | What it means | What a client should say |
+|---|---|---|
+| `known` | The service answered. | The figures, with their age. |
+| `no_session` | Nothing is stored. The account was never connected, or was forgotten. | Offer the credential ceremony. |
+| `session_expired` | The stored session was refused. | Offer the ceremony again. It does **not** require forgetting first: the ceremony overwrites both records. |
+| `no_organization` | The account has no active organization, which is a real state -- the service creates one on signup **best effort**. | Point at the contributor's NEAR AI account page. |
+| `unavailable` | The service did not answer, or answered something this daemon cannot read. | Say nothing about the balance. |
+
+Three rules bind a client here, and they are the reason the shape is this
+shape rather than a bare number:
+
+- **Every numeric key is present and `null` in every state but `known`.** An
+  absent key would be ambiguous between "this daemon is too old to know" and
+  "this daemon knows it does not know"; a `null` is only ever the second.
+  **A `null` must never be rendered as `0`.** Zero is a real balance and
+  means the contributor is out of credit.
+- **`remaining_nanos` and `spend_limit_nanos` can be `null` even when `state`
+  is `known`.** They are nullable in the service's own schema: an
+  organization with no credit ceiling configured genuinely has no remaining
+  balance to report. Same rule -- not zero.
+- **`observed_at` is when this daemon asked**, not the service's own
+  `updated_at`. It is there so a client can say how old the figure is.
+  A stale balance presented as current is worse than no balance; the daemon
+  will not serve a cached figure older than a minute, and returns a failure
+  state rather than the last good number when a read fails.
+
+The units are the service's own: fixed scale 9 (nano-dollars) and USD,
+carried on the wire rather than assumed, and not rounded by the daemon.
+
+The call performs network I/O -- it may exchange the stored refresh token
+for an access token before making two management reads -- so it is on the
+async dispatch path and a client should not call it on a paint loop.
 
 ### The public profile
 

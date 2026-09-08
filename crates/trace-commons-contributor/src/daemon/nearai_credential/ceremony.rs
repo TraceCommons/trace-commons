@@ -22,7 +22,7 @@
 use super::api::CloudApi;
 use super::loopback;
 use crate::config::ConfigStore;
-use crate::daemon::settings::{DaemonSettings, NearAiInferenceCredential};
+use crate::daemon::settings::{DaemonSettings, NearAiInferenceCredential, NearAiSession};
 use anyhow::{Result, anyhow, bail};
 use chrono::Utc;
 use serde::Serialize;
@@ -215,10 +215,12 @@ pub async fn begin(store: &ConfigStore, provider: &str) -> Result<serde_json::Va
             let minted = CloudApi::live()?
                 .mint_inference_key(&session, &key_name(&finished_id))
                 .await?;
-            // The session dies here, unused and unstored. Everything past
-            // this point needs only the key.
-            drop(session);
-            persist(&finished_dir, minted)
+            // The session is kept, not dropped. Inference does not need it --
+            // the key above is non-expiring and self-sufficient -- but the
+            // balance does: every management route on cloud-api is
+            // session-only. What is retained is the refresh token alone, and
+            // `NearAiSession` states what that is authority over.
+            persist(&finished_dir, minted, session.refresh_token)
         }
         .await;
         let mut map = attempts().lock().expect("ceremony state lock");
@@ -248,18 +250,31 @@ pub async fn begin(store: &ConfigStore, provider: &str) -> Result<serde_json::Va
     }))
 }
 
-/// Write the minted key into the daemon's own settings.
+/// Write the minted key, and the session that reads the balance, into the
+/// daemon's own settings.
 ///
 /// Read-modify-write of the whole settings document, which is what every other
 /// writer of this file does. It reads from disk rather than from the in-memory
 /// copy so a ceremony that finished while the daemon was doing something else
 /// cannot silently revert an unrelated setting.
 ///
+/// Both records are written together, and both are overwritten. That is what
+/// makes a contributor whose session expired able to simply run the ceremony
+/// again: they do not have to forget first, and a stale session cannot survive
+/// beside a freshly minted key.
+///
+/// No expiry is recorded for the refresh token here because the OAuth finish
+/// does not supply one -- it arrives in a URL fragment with the access token
+/// and nothing else. The first exchange fills it in.
 /// `pub(crate)` so the reconcile test can write a credential the way the
 /// ceremony does rather than the way a test finds convenient -- the coupling
 /// under test is precisely that this function, and not an IPC call, is what a
 /// running daemon has to notice.
-pub(crate) fn persist(dir: &std::path::Path, minted: super::api::MintedKey) -> Result<()> {
+pub(crate) fn persist(
+    dir: &std::path::Path,
+    minted: super::api::MintedKey,
+    refresh_token: String,
+) -> Result<()> {
     let store = ConfigStore::open(dir.to_path_buf())?;
     let mut settings = DaemonSettings::load(&store)?;
     settings.near_ai_inference = Some(NearAiInferenceCredential {
@@ -270,6 +285,12 @@ pub(crate) fn persist(dir: &std::path::Path, minted: super::api::MintedKey) -> R
         workspace_id: minted.workspace_id,
         minted_at: Utc::now(),
     });
+    settings.near_ai_session = Some(NearAiSession {
+        refresh_token,
+        refresh_token_expires_at: None,
+        stored_at: Utc::now(),
+    });
+
     settings.save(&store)?;
     record_change(dir);
     Ok(())
@@ -319,24 +340,37 @@ pub fn cancel(dir: &std::path::Path, attempt_id: Option<&str>) -> Option<Status>
     Some(entry.state.clone())
 }
 
-/// Forget a stored credential.
+/// Forget a stored credential **and the session stored beside it**.
+///
+/// Both, always, and never one without the other. A contributor who forgets a
+/// credential believes they have taken this machine's access to their NEAR AI
+/// account away; a refresh token left behind would keep exactly the wider half
+/// of that access -- the half that can mint further keys and read the account
+/// -- while the screen said the credential was gone. That is the worst outcome
+/// this pair of records can produce, so it is one `take` beside the other with
+/// no condition between them.
 ///
 /// Local only, and it says so: the key remains valid at the service until the
-/// contributor revokes it there, and this cannot revoke it for them, because
-/// revoking needs a session and the session was discarded when the key was
-/// minted. `key_id` is kept precisely so a contributor can find the right key
-/// in their own list.
+/// contributor revokes it there, and this does not revoke it for them. It now
+/// *could* -- revoking needs a session and a session is retained -- but a
+/// forget that also called the service would be a network operation on a path
+/// a contributor expects to be instant and offline, and one that fails
+/// halfway leaves them unsure which of the two happened. `key_id` is kept
+/// precisely so a contributor can find the right key in their own list and
+/// revoke it there deliberately.
 pub fn forget(store: &ConfigStore) -> Result<bool> {
     let mut settings = DaemonSettings::load(store)?;
     let had = settings.near_ai_inference.take().is_some();
+    let had_session = settings.near_ai_session.take().is_some();
     settings.save(store)?;
     if had {
-        // Only on a real removal. A second forget removed nothing, and
-        // announcing a change that did not happen would cycle a running
-        // proxy for no reason.
+        // Only on a real removal of the key. A second forget removed nothing,
+        // and announcing a change that did not happen would cycle a running
+        // proxy for no reason. A session removed on its own is not a change
+        // the proxy can see -- it answers with the key, not the session.
         record_change(store.dir());
     }
-    Ok(had)
+    Ok(had || had_session)
 }
 
 #[cfg(test)]
@@ -365,7 +399,7 @@ mod tests {
         settings.max_uploads_per_day = 7;
         settings.save(&store).unwrap();
 
-        persist(dir.path(), minted()).unwrap();
+        persist(dir.path(), minted(), "rt_session-secret".into()).unwrap();
         let stored = DaemonSettings::load(&store).unwrap();
         assert_eq!(stored.max_uploads_per_day, 7);
         let credential = stored.near_ai_inference.unwrap();
@@ -382,13 +416,24 @@ mod tests {
                 .is_none()
         );
 
-        assert!(forget(&store).unwrap());
+        // The session is retained, because the balance is session-only.
+        let session = DaemonSettings::load(&store)
+            .unwrap()
+            .near_ai_session
+            .unwrap();
+        assert_eq!(session.refresh_token, "rt_session-secret");
         assert!(
-            DaemonSettings::load(&store)
-                .unwrap()
-                .near_ai_inference
-                .is_none()
+            session.refresh_token_expires_at.is_none(),
+            "the OAuth finish supplies no expiry; the first exchange does"
         );
+
+        assert!(forget(&store).unwrap());
+        let after = DaemonSettings::load(&store).unwrap();
+        assert!(after.near_ai_inference.is_none());
+        // A residual session after a forget would leave the daemon holding
+        // the wider of the two credentials while the contributor believed
+        // they had revoked both.
+        assert!(after.near_ai_session.is_none());
         // Forgetting twice is not an error, and the second says it removed
         // nothing rather than claiming a revocation it did not perform.
         assert!(!forget(&store).unwrap());
