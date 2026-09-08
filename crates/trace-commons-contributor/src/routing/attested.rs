@@ -730,7 +730,6 @@ mod tests {
         );
     }
 
-
     /// The prefix and the full check agree on every refusal the prefix can
     /// reach, and the prefix names the same final row.
     ///
@@ -811,9 +810,7 @@ mod tests {
     fn the_prefix_names_the_same_final_hop() {
         let mut earlier = row();
         earlier.id = Some(1);
-        earlier.started_at = chrono::Utc
-            .with_ymd_and_hms(2026, 9, 3, 11, 0, 0)
-            .unwrap();
+        earlier.started_at = chrono::Utc.with_ymd_and_hms(2026, 9, 3, 11, 0, 0).unwrap();
         earlier.upstream_id = Some("chatcmpl-earlier".to_string());
         let later = row();
         // Deliberately out of order, so a prefix that took `rows.last()`

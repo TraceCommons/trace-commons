@@ -751,9 +751,7 @@ async fn drain_approved(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<U
                 // Every other refusal label says nothing about
                 // admissibility and rewrites nothing -- see
                 // `contribution_eligibility::writeback_for`.
-                if let Some(verdict) =
-                    contribution_eligibility::writeback_for(&reason_label)
-                {
+                if let Some(verdict) = contribution_eligibility::writeback_for(&reason_label) {
                     q.record_eligibility(entry.entry_id, verdict.state, verdict.reason);
                 }
                 q.set_state(
@@ -785,9 +783,7 @@ async fn drain_approved(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<U
                 // the pipeline it surfaced, and a row that kept its claim
                 // on one of the two paths would be the same defect with a
                 // narrower reproduction.
-                if let Some(verdict) =
-                    contribution_eligibility::writeback_for(&reason_label)
-                {
+                if let Some(verdict) = contribution_eligibility::writeback_for(&reason_label) {
                     q.record_eligibility(entry.entry_id, verdict.state, verdict.reason);
                 }
                 q.record_attempt(entry.entry_id, None);

@@ -1397,7 +1397,8 @@ impl DaemonShared {
         let admission_evidence = self.admission_evidence();
         let pending: Vec<serde_json::Value> = {
             let queue = self.queue.lock().expect("queue lock");
-            queue.pending()
+            queue
+                .pending()
                 .iter()
                 .map(|e| entry_value(e, admission_evidence))
                 .collect()
@@ -1970,10 +1971,11 @@ fn handle_list_pending(shared: &DaemonShared, req: &Request) -> Response {
     // in front of every other queue caller.
     let admission_evidence = shared.admission_evidence();
     let queue = shared.queue.lock().expect("queue lock");
-    let entries: Vec<serde_json::Value> = queue.pending()
-                .iter()
-                .map(|e| entry_value(e, admission_evidence))
-                .collect();
+    let entries: Vec<serde_json::Value> = queue
+        .pending()
+        .iter()
+        .map(|e| entry_value(e, admission_evidence))
+        .collect();
     Response::ok(req.id, serde_json::json!({ "pending": entries }))
 }
 
@@ -7133,9 +7135,7 @@ mod tests {
     #[test]
     fn an_invited_contributor_is_handed_no_eligibility_field() {
         let mut e = card_entry();
-        e.eligibility = Some(
-            super::super::contribution_eligibility::STATE_ELIGIBLE.to_string(),
-        );
+        e.eligibility = Some(super::super::contribution_eligibility::STATE_ELIGIBLE.to_string());
         e.eligibility_reason = None;
 
         for flag in [Some(false), None] {
@@ -7174,7 +7174,9 @@ mod tests {
         let v = entry_value(&e, Some(true));
         assert_eq!(v["eligibility"], ce::STATE_ELIGIBLE);
         assert!(
-            !v.as_object().expect("an object").contains_key("eligibility_reason"),
+            !v.as_object()
+                .expect("an object")
+                .contains_key("eligibility_reason"),
             "an eligible row must carry no reason: {v}"
         );
     }
