@@ -33,8 +33,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use ironwire_proxy::embed::{
-    self, EmbedError, EmbedOptions, EmbeddedProxy, ExitError, HostSecret, StartupProbes,
-    UpdateChecks,
+    self, CredentialFiles, EmbedError, EmbedOptions, EmbeddedProxy, ExitError, HostSecret,
+    StartupProbes, UpdateChecks,
 };
 
 /// How long a liveness probe of an existing instance may take.
@@ -397,20 +397,40 @@ pub(crate) fn effective_metadata_declaration(
 ///
 /// `None` is not "a source that answers nothing" -- it is *no source*, and
 /// the difference is the whole reason this takes an `Option` rather than
-/// always installing a closure. IronWire's `credentials` field is one switch
-/// governing two things: whose answers count, and whether the credential
-/// files Claude Code and Codex write may be read at all. Supplying any source
-/// turns the second off. So a contributor with no key of ours must be handed
-/// `None`, or their working Claude subscription would silently stop being a
-/// destination while the daemon went on reporting `running` -- the NEAR AI
-/// backend is registered unconditionally, key or no key, so the registry is
-/// never empty and nothing announces the loss.
+/// always installing a closure. A source is a claim of ownership over every
+/// name, so installing one that answers nothing would leave IronWire unable
+/// to read a name it would otherwise have found for itself.
 ///
 /// When a key *is* present, the closure answers exactly one name and nothing
 /// else. It cannot answer for a subscription: those are key-less by
-/// construction and there is no name a host could supply to bring one back.
-/// That trade is the contributor's to make and is why this follows the key
-/// rather than a setting of its own -- obtaining one is a deliberate act.
+/// construction, a Claude Code or Codex login being a token in a file rather
+/// than a value any name-keyed source can supply.
+///
+/// Which is why the key arm also selects [`CredentialFiles::Discover`], and
+/// that pairing is the load-bearing part of this function. IronWire's
+/// `credentials` field used to be one switch governing two questions -- whose
+/// answers count for a name, *and* whether the credential files Claude Code
+/// and Codex write may be read at all -- so supplying any source turned the
+/// second off. Under that API a contributor who obtained a NEAR AI key would
+/// have had their working Claude subscription silently stop being a
+/// destination, and nothing would have announced it: the NEAR AI backend is
+/// registered unconditionally, key or no key, so the registry is never empty,
+/// `StartupReport::no_backends` never fires, and the daemon goes on reporting
+/// `running` while answering from fewer backends than the contributor has.
+/// ironwire#53 separated the two questions for exactly this case. We answer
+/// the one name we hold a key for; every login the contributor already had
+/// goes on answering for itself.
+///
+/// Selecting `Discover` is an acceptance, not a free win: a request can go to
+/// a backend registered from a login this daemon never named. That is the
+/// right trade here, because those destinations are ones the contributor set
+/// up deliberately and had before this switch existed -- taking them away is
+/// the change that would need consent, not leaving them.
+///
+/// The name half deliberately does not move with it. Under `Discover` the
+/// process environment is still not consulted, so a stray `ANTHROPIC_API_KEY`
+/// in the daemon's environment still registers nothing; only the files on
+/// disk are read.
 ///
 /// Nothing here can leak the key. `HostSecret` has no `Debug` and zeroes on
 /// drop, and `EmbedOptions`' own `Debug` renders this field as "host-owned"
@@ -421,7 +441,8 @@ fn embed_options(credential: Option<HostSecret>) -> EmbedOptions {
         .with_startup_probes(StartupProbes::Configured);
     match credential {
         Some(key) => base
-            .with_credentials(move |name| (name == NEAR_AI_CREDENTIAL_NAME).then(|| key.clone())),
+            .with_credentials(move |name| (name == NEAR_AI_CREDENTIAL_NAME).then(|| key.clone()))
+            .with_credential_files(CredentialFiles::Discover),
         None => base,
     }
 }
@@ -953,16 +974,18 @@ mod tests {
     }
 
     /// Without a key of ours, IronWire must be left entirely on its own
-    /// discovery -- and with one, we must answer that one name and no other.
+    /// discovery -- and with one, we must answer that one name and no other
+    /// while every destination the contributor already had keeps answering.
     ///
-    /// The first half is the load-bearing one and the least obvious. Handing
-    /// IronWire a credential source that simply answers nothing is NOT the
-    /// same as handing it none: any source at all turns off its reading of
-    /// the credential files Claude Code and Codex write, so a contributor's
-    /// working subscription would stop being a destination. Nothing would
-    /// report it, either -- the NEAR AI backend is registered whether or not
-    /// a key was found, so the registry is never empty and the state stays
-    /// `running`.
+    /// The file half is the load-bearing one and the least obvious. Handing
+    /// IronWire a credential source is a claim of ownership over every name,
+    /// and it used to carry a second meaning with it: reading of the
+    /// credential files Claude Code and Codex write was turned off with it,
+    /// so obtaining a NEAR AI key would have cost a contributor their working
+    /// subscription. Nothing would have reported it, either -- the NEAR AI
+    /// backend is registered whether or not a key was found, so the registry
+    /// is never empty and the state stays `running`. `CredentialFiles`
+    /// separates the two questions; this pins that we answer them separately.
     #[test]
     fn no_key_of_ours_leaves_every_other_destination_alone() {
         assert!(
@@ -971,8 +994,21 @@ mod tests {
              discovery, or their Claude and Codex subscriptions stop \
              answering with nothing to say so"
         );
+        assert_eq!(
+            embed_options(None).credential_files,
+            CredentialFiles::FollowCredentialOwner,
+            "with no source of ours, IronWire owns the names, and following \
+             that owner is what reads the files"
+        );
 
         let options = embed_options(Some(HostSecret::from("sk-minted".to_string())));
+        assert_eq!(
+            options.credential_files,
+            CredentialFiles::Discover,
+            "holding a key of ours must not cost a contributor the Claude or \
+             Codex login they already had -- those are files, not names, and \
+             no source of ours can answer for them"
+        );
         let source = options
             .credentials
             .as_ref()
