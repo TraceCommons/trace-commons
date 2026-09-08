@@ -631,6 +631,25 @@ int32_t     tc_private_inference_state_tone(const char* state);
 #define TC_CREDENTIAL_ACTION_CANCEL 32
 #define TC_CREDENTIAL_ACTION_FORGET 33
 
+/* Why a connect control is not on offer, or the EMPTY STRING.
+ *
+ * credentialed is harness_list's destination_credentialed as a tri-state: any
+ * negative value means the field was absent, 0 false, 1 true -- the encoding
+ * tc_private_inference_write_confirmed uses for the same reason.
+ *
+ * AN ABSENT FIELD IS NOT A REFUSED CONNECT. A daemon that predates the
+ * credential gate answers the empty string, because telling somebody to sign in
+ * before connecting a tool they can connect right now would be false.
+ *
+ * Draw it once, beside the connect controls: the fact is about the destination
+ * and not about any one tool. A destination the contributor runs themselves
+ * reports credentialed and gets no sentence.
+ *
+ * Returns an owned string; free it with tc_string_free. NULL only on a caught
+ * panic.
+ */
+char*       tc_harness_credential_notice(int32_t credentialed);
+
 /* The sentence for one near_ai_credential_status state label.
  *
  * state is that method's state field: "absent", "obtaining", "failed",

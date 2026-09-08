@@ -508,6 +508,10 @@ pub struct PrivateInferenceCopy {
     /// [`CREDENTIAL_ABSENT`].
     pub credential_unknown: &'static str,
     pub credential_unreported: &'static str,
+    /// [`HARNESS_NEEDS_CREDENTIAL`]. Drawn only through
+    /// [`harness_credential_notice`], never on a shell's own reading of a
+    /// boolean.
+    pub harness_needs_credential: &'static str,
 }
 
 /// The sentence the settings card shows once the control has moved out of it.
@@ -704,6 +708,28 @@ pub const HARNESS_PLAN_NO_CONFIG_PATH: &str = "This app could not work out where
      this computer, so it has no file to change. The command shown on the \
      tool does the same thing by hand.";
 
+/// Why a tool this app hosts the answering for cannot be connected yet.
+///
+/// **A next step, not a fault.** A contributor who has not signed in has done
+/// nothing wrong, and the sentence is shaped the way
+/// [`STATE_RUNNING_ANSWERED_ELSEWHERE`] is: here is what is true, here is what
+/// to do about it. Without it a shell simply hides the connect control, which
+/// is the silent dead end -- no way to connect a tool and no reason given.
+///
+/// **It is scoped to a destination this app hosts, and must stay that way.**
+/// A proxy the contributor declared and runs themselves answers from an
+/// account whose key was never handed to us; `destination_credentialed` is
+/// true for it, this sentence is never drawn for it, and the wording does not
+/// claim a tool needs our sign-in in general. It says what would answer, and
+/// what is missing from the thing that would answer.
+///
+/// The next step is spelled the way the button that performs it is spelled --
+/// see [`CREDENTIAL_OBTAIN`] -- so a contributor reading this sentence is
+/// looking for words that exist somewhere on the screen.
+pub const HARNESS_NEEDS_CREDENTIAL: &str = "This computer would be the one answering this tool's calls, and no key \
+     is kept here to answer them with yet. Sign in to Private AI first, and \
+     this tool can be connected after that.";
+
 /// The sentence for one tool's state, or the empty string.
 ///
 /// ONE TABLE, NOT THREE. Every shell used to hold its own map from a
@@ -737,6 +763,34 @@ pub fn harness_state_line(state: &str) -> &'static str {
         Some(HarnessState::ConnectedNoCalls) => HARNESS_CONNECTED_NOTHING_SEEN,
         Some(HarnessState::Answering) => HARNESS_ANSWERING,
         Some(HarnessState::ActivityShared | HarnessState::Unknown) | None => "",
+    }
+}
+
+/// The sentence explaining a connect that is not on offer, or the empty
+/// string.
+///
+/// `credentialed` is `harness_list`'s `destination_credentialed`. It is an
+/// `Option` and not a `bool` because the three answers are three different
+/// facts, and the third is the one a shell would get wrong on its own:
+///
+/// - `Some(false)` -- this app hosts the answering and holds no key. The
+///   connect control is not on offer and [`HARNESS_NEEDS_CREDENTIAL`] says
+///   why.
+/// - `Some(true)` -- nothing to explain. Either a key is here, or the
+///   destination is one the contributor runs themselves, which this gate has
+///   no business asking about.
+/// - `None` -- the field was not in the response, so this daemon does not
+///   gate connects at all. THE EMPTY STRING, never the sentence: telling
+///   somebody to sign in before connecting would be false on a build where
+///   connecting needs no sign-in.
+///
+/// A shell draws this once, beside the connect controls, rather than once per
+/// row -- the fact is about the destination and not about any one tool.
+#[must_use]
+pub fn harness_credential_notice(credentialed: Option<bool>) -> &'static str {
+    match credentialed {
+        Some(false) => HARNESS_NEEDS_CREDENTIAL,
+        Some(true) | None => "",
     }
 }
 
@@ -1125,6 +1179,7 @@ pub fn private_inference_copy() -> PrivateInferenceCopy {
         credential_present: CREDENTIAL_PRESENT,
         credential_unknown: CREDENTIAL_UNKNOWN,
         credential_unreported: CREDENTIAL_UNREPORTED,
+        harness_needs_credential: HARNESS_NEEDS_CREDENTIAL,
     }
 }
 
@@ -1964,6 +2019,82 @@ mod tests {
         );
     }
 
+    /// A hidden connect control says why it is hidden, and says it as a next
+    /// step rather than as a fault.
+    ///
+    /// The silent dead end this exists to close: #720 gates connecting a tool
+    /// on holding a key, `offers_connect` folds the fact in, and a shell that
+    /// simply drew nothing would leave a contributor with no way to connect
+    /// their tool and no reason given.
+    #[test]
+    fn a_connect_that_is_not_on_offer_says_why_and_names_the_next_step() {
+        let notice = private_inference_copy().harness_needs_credential;
+        // The next step, spelled as the button that performs it is spelled.
+        assert!(
+            notice.contains(CREDENTIAL_OBTAIN),
+            "the notice stopped naming the action that fixes it, which is \
+             spelled {CREDENTIAL_OBTAIN:?}: {notice}"
+        );
+        // Not a fault. None of these words belongs in front of somebody who
+        // has done nothing wrong.
+        for word in ["error", "failed", "cannot", "invalid", "refused", "must"] {
+            assert!(
+                !notice.to_lowercase().contains(word),
+                "the notice reads as {word}: {notice}"
+            );
+        }
+    }
+
+    /// THE NOTICE IS ABOUT A DESTINATION THIS APP HOSTS, AND SAYS SO.
+    ///
+    /// A proxy the contributor declared and runs themselves answers from an
+    /// account whose key was never handed to us, and `destination_credentialed`
+    /// is true for it -- so the sentence is never drawn there. The wording has
+    /// to be safe anyway: a sentence claiming a tool needs our sign-in before
+    /// it can be connected at all would be false for that contributor, and
+    /// would send them looking for a key nothing wants.
+    #[test]
+    fn the_notice_never_claims_a_key_is_needed_to_connect_anything_anywhere() {
+        let notice = private_inference_copy().harness_needs_credential;
+        assert!(
+            notice.contains("This computer would be the one answering"),
+            "the notice stopped scoping itself to what this app answers: {notice}"
+        );
+        for claim in [
+            "every tool",
+            "any tool",
+            "all tools",
+            "tools need",
+            "is required",
+        ] {
+            assert!(
+                !notice.to_lowercase().contains(claim),
+                "the notice generalises beyond what this app hosts ({claim}): {notice}"
+            );
+        }
+    }
+
+    /// A daemon that does not gate connects says nothing, and the silence is
+    /// the point.
+    ///
+    /// `None` is not `Some(false)`. Drawing the notice on a build that has no
+    /// credential gate would tell a contributor to sign in before connecting
+    /// a tool they could connect right now -- the same shape of invention as
+    /// an unread credential state rendering as `absent`.
+    #[test]
+    fn a_daemon_that_does_not_gate_connects_draws_no_notice() {
+        assert_eq!(
+            harness_credential_notice(Some(false)),
+            HARNESS_NEEDS_CREDENTIAL
+        );
+        assert_eq!(harness_credential_notice(Some(true)), "");
+        assert_eq!(
+            harness_credential_notice(None),
+            "",
+            "an absent field is not a refused connect"
+        );
+    }
+
     /// Every field of the payload carries a finished sentence: no empties,
     /// and no template markers a shell would have to fill in.
     #[test]
@@ -1973,7 +2104,7 @@ mod tests {
         let fields = payload.as_object().expect("a JSON object");
         assert_eq!(
             fields.len(),
-            62,
+            63,
             "the payload's field count changed -- update the shells' decoders \
              and the tests that pin the set"
         );

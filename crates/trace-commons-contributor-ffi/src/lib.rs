@@ -2695,6 +2695,39 @@ pub const TC_CREDENTIAL_ACTION_OBTAIN: i32 = 31;
 pub const TC_CREDENTIAL_ACTION_CANCEL: i32 = 32;
 pub const TC_CREDENTIAL_ACTION_FORGET: i32 = 33;
 
+/// Why a connect control is not on offer, or the empty string.
+///
+/// `credentialed` is `harness_list`'s `destination_credentialed` as a
+/// tri-state: any negative value means the field was absent, `0` false, `1`
+/// true -- the encoding [`tc_private_inference_write_confirmed`] uses for the
+/// same reason.
+///
+/// AN ABSENT FIELD IS NOT A REFUSED CONNECT. A daemon that predates the
+/// credential gate answers the empty string, because telling somebody to sign
+/// in before connecting a tool they can connect right now would be false.
+///
+/// Drawn once, beside the connect controls: the fact is about the destination
+/// and not about any one tool. A destination the contributor runs themselves
+/// reports credentialed and gets no sentence.
+///
+/// Returns an owned string; free it with [`tc_string_free`]. NULL only on a
+/// caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_harness_credential_notice(credentialed: i32) -> *mut c_char {
+    guarded_string_no_err(|| {
+        let credentialed = match credentialed {
+            0 => Some(false),
+            v if v > 0 => Some(true),
+            _ => None,
+        };
+        Ok(to_owned_cstring(
+            trace_commons_contributor::private_inference_copy::harness_credential_notice(
+                credentialed,
+            ),
+        ))
+    })
+}
+
 /// The sentence for one `near_ai_credential_status` state label.
 ///
 /// `state` is that method's `state` field: `absent`, `obtaining`, `failed`,
