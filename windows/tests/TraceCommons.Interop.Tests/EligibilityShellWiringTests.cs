@@ -335,6 +335,64 @@ public class EligibilityShellWiringTests
             ShellSource("TraceCommons.App/ViewModels/PreviewSheetViewModel.cs"));
     }
 
+    /// <summary>
+    /// The live-entry resolver is REQUIRED at every layer it passes through.
+    /// </summary>
+    /// <remarks>
+    /// An optional parameter whose omission restores a bug is a trap for
+    /// whoever adds the next construction site: they get no test failure and
+    /// no warning, just a sheet that quietly stops re-reading the queue. A
+    /// required parameter fails at compile time at the forgotten call site,
+    /// which is the earliest failure available here -- and it is the only one
+    /// available, because none of these three types can be constructed in
+    /// this suite at all.
+    ///
+    /// <para>
+    /// The type stays nullable so a caller with genuinely no queue to resolve
+    /// against can pass <c>liveEntry: null</c> and say why. What must not
+    /// exist is a DEFAULT, which would make forgetting indistinguishable from
+    /// choosing.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void TheLiveEntryResolverIsRequiredAtEveryLayer()
+    {
+        foreach (string path in new[]
+        {
+            "TraceCommons.App/ViewModels/PreviewSheetViewModel.cs",
+            "TraceCommons.App/Controls/PreviewSheet.xaml.cs",
+            "TraceCommons.App/PreviewWindow.cs",
+        })
+        {
+            string source = ShellSource(path);
+
+            Assert.Contains(
+                "Func<string, QueueEntryViewModel?>? liveEntry)",
+                source,
+                StringComparison.Ordinal);
+
+            Assert.DoesNotContain(
+                "liveEntry = null",
+                source,
+                StringComparison.Ordinal);
+        }
+
+        // And the one site that constructs the chain supplies it, so nothing
+        // is relying on a default that no longer exists.
+        Assert.Contains(
+            "new PreviewWindow(_host, entry, ViewModel.LiveEntry)",
+            ShellSource("TraceCommons.App/MainWindow.xaml.cs"),
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "new PreviewSheet(host, entry, liveEntry)",
+            ShellSource("TraceCommons.App/PreviewWindow.cs"),
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "new PreviewSheetViewModel(host, entry, liveEntry)",
+            ShellSource("TraceCommons.App/Controls/PreviewSheet.xaml.cs"),
+            StringComparison.Ordinal);
+    }
+
     private static string ShellSource(string relativePath)
     {
         string path = Path.Combine(

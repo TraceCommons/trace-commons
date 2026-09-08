@@ -20,10 +20,20 @@ public sealed class PreviewWindow : Window
 {
     private readonly PreviewSheet _sheet;
 
+    /// <remarks>
+    /// <paramref name="liveEntry"/> is REQUIRED AND HAS NO DEFAULT. Making it
+    /// optional would mean a caller that forgot it silently got the stale
+    /// behaviour back -- the exact defect this parameter exists to remove,
+    /// re-armed as a default, with no test failure and no warning to whoever
+    /// added the call site. Required, it fails at compile time where the
+    /// mistake is. A caller that genuinely has no queue to resolve against
+    /// passes <c>liveEntry: null</c> and says why, so choosing it is visible
+    /// in the code and indistinguishable from nothing.
+    /// </remarks>
     public PreviewWindow(
         DaemonHost host,
         QueueEntryViewModel entry,
-        Func<string, QueueEntryViewModel?>? liveEntry = null)
+        Func<string, QueueEntryViewModel?>? liveEntry)
     {
         Title = "Look inside";
 
