@@ -119,6 +119,13 @@ struct Sheet {
     pinned: Cell<bool>,
 
     contribute: gtk::Button,
+    /// Why `Contribute` is off, when eligibility is what turned it off.
+    ///
+    /// A dark button with no sentence beside it is the same defect one
+    /// click deeper: the contributor is left to guess. Hidden entirely for
+    /// an entry with no eligibility field, and for an eligible one -- there
+    /// is nothing to explain about a control that works.
+    eligibility_note: gtk::Label,
     /// The redacted body for the entry currently shown, when this
     /// deployment can serve one. See `backend`.
     body: RefCell<Option<String>>,
@@ -445,6 +452,17 @@ impl Sheet {
         gate_statement.add_css_class("tc-caveat");
         gate_statement.add_css_class("tc-tertiary");
 
+        // The daemon's answer about this session, in the shared crate's
+        // words. Empty and hidden until `sync_contribute` fills it, which
+        // is also the one place the button's state is decided -- so the
+        // sentence and the button cannot disagree about why.
+        let eligibility_note = gtk::Label::builder()
+            .xalign(0.0)
+            .wrap(true)
+            .visible(false)
+            .build();
+        eligibility_note.add_css_class("tc-caveat");
+
         // The concession, on the footer rather than on a tab, so it is on
         // screen at the moment of the decision whichever tab is open. See
         // `copy::RESIDUAL_RISK`.
@@ -583,6 +601,7 @@ impl Sheet {
             .build();
         footer.append(&residual_risk);
         footer.append(&gate_statement);
+        footer.append(&eligibility_note);
         let immutable_note = gtk::Label::builder()
             .label(
                 trace_commons_contributor::witness_copy::witness_copy()
@@ -659,6 +678,7 @@ impl Sheet {
             permissions,
             pinned: Cell::new(false),
             contribute: contribute.clone(),
+            eligibility_note: eligibility_note.clone(),
             body: RefCell::new(None),
             verdict_buttons: verdict_buttons.clone(),
             verdict: RefCell::new(None),
@@ -792,6 +812,45 @@ impl Sheet {
 
     fn current(&self) -> Option<&crate::model::QueueEntry> {
         self.pending.get(*self.index.borrow())
+    }
+
+    /// The entry now showing, resolved against the LIVE queue by id.
+    ///
+    /// **`self.pending` is a copy, taken when the sheet opened.** That is
+    /// right for everything the sheet displays -- a transcript must not
+    /// rearrange itself under somebody reading it -- and wrong for exactly
+    /// one thing: whether this session may still be sent.
+    ///
+    /// A submit-time failure writes its reason back into the row (Decision 1
+    /// of the eligibility design), so a row CAN be downgraded to
+    /// `ineligible_permanent` while a sheet sits open on it. Nothing undoes
+    /// the gate in that case; the gate goes on reading a copy that stopped
+    /// being true, and offers `Contribute` for a session the server will
+    /// refuse. Recomputing faithfully from a stale snapshot recomputes the
+    /// same wrong answer forever.
+    ///
+    /// Only the gate and its sentence read this. What an approval actually
+    /// covers still goes through the pinned entry -- the same id either way
+    /// -- so nothing a contributor started moves under them mid-read.
+    ///
+    /// It reads the queue rather than assuming the worst: an entry that has
+    /// become eligible arms the control, the same as one that stopped being
+    /// eligible disarms it.
+    ///
+    /// Falls back to the held copy when the id is not in the live queue at
+    /// all. That is not staleness -- there is no newer answer to read -- and
+    /// inventing an ineligibility from an absence would disarm a control on
+    /// no evidence.
+    fn current_live(&self) -> Option<crate::model::QueueEntry> {
+        let held = self.current()?;
+        let live = self
+            .app
+            .entries
+            .borrow()
+            .iter()
+            .find(|e| e.entry_id == held.entry_id)
+            .cloned();
+        Some(live.unwrap_or_else(|| held.clone()))
     }
 
     /// Fetch the preview for the entry now showing.
@@ -1006,8 +1065,50 @@ impl Sheet {
     ///
     /// Still one function, called from every place the pin can change, so
     /// no path sets the button sensitive on its own.
+    ///
+    /// The second condition is this surface's: a row the daemon says cannot
+    /// be sent must not be sendable from the sheet either. Gating the card's
+    /// `Submit` and leaving `Contribute` armed one click deeper would move
+    /// the defect rather than remove it -- the contributor still presses,
+    /// and the server still refuses. An entry with no eligibility field
+    /// answers `true` and nothing changes for it.
     fn sync_contribute(&self) {
-        self.contribute.set_sensitive(self.pinned.get());
+        // The LIVE row, not the copy this sheet opened with -- see
+        // `current_live`. A gate computed once from a snapshot recomputes
+        // the same stale answer for as long as the sheet stays open.
+        let view = self
+            .current_live()
+            .as_ref()
+            .and_then(crate::eligibility::view);
+        let sendable =
+            view.is_none_or(|view| view.control == crate::copy::ContributionControl::Contribute);
+        self.contribute.set_sensitive(self.pinned.get() && sendable);
+
+        // The sentence beside the control it explains. Drawn only where it
+        // says something: an entry with no eligibility field has no
+        // sentence, and an eligible one has nothing to explain.
+        let note = view.filter(|_| !sendable);
+        self.eligibility_note.set_visible(note.is_some());
+        if let Some(view) = note {
+            let text = if view.reason_line.is_empty() {
+                view.state_line.to_string()
+            } else {
+                // Two sentences the shared crate authored, joined by a
+                // space. This shell adds no words of its own to either.
+                format!("{} {}", view.state_line, view.reason_line)
+            };
+            self.eligibility_note.set_label(&text);
+            // The whole class set is REPLACED rather than the previous tone
+            // removed by name. A hand-written list of tones to strip is a
+            // second enumeration of `Tone`, and the arm it gets wrong is the
+            // one added after it was written: a tone this code has never
+            // heard of would be left stacked on top of the last one. Setting
+            // the set is exhaustive by construction.
+            self.eligibility_note.set_css_classes(&[
+                "tc-caveat",
+                super::private_inference::indicator_tone(view.tone).css(),
+            ]);
+        }
     }
 
     /// The removed-summary panel: one row per redaction family, and -- only
@@ -1433,6 +1534,27 @@ impl Sheet {
         let Some(entry) = self.current() else { return };
         let entry_id = entry.entry_id.clone();
         let project_label = entry.project_label.clone();
+        // Checked again HERE, against the live queue, and not only when the
+        // button was drawn.
+        //
+        // Nothing tells this sheet the queue changed -- it holds no
+        // subscription -- so `sync_contribute` runs only at the moments
+        // listed beside it. Between two of them a row can be downgraded
+        // under an armed button, and the press is what would send it. The
+        // gate at draw time decides what is OFFERED; this decides what is
+        // SENT, and only the second one is load-bearing.
+        //
+        // Repaints on the way out, so a contributor who presses a button
+        // that has stopped being valid sees it disarm and reads why, rather
+        // than pressing something that silently does nothing.
+        if !self
+            .current_live()
+            .as_ref()
+            .is_none_or(crate::eligibility::offers_send)
+        {
+            self.sync_contribute();
+            return;
+        }
         self.contribute.set_sensitive(false);
         let sheet = Rc::clone(self);
         // No selection is a valid, expected answer -- `approve_params`
@@ -1460,7 +1582,11 @@ impl Sheet {
                     // correction away from them along with the chance to
                     // act on the advice.
                     if approve.was_refused_for_a_correction_credential() {
-                        sheet.contribute.set_sensitive(true);
+                        // Through the one function, never straight at the
+                        // widget: re-arming here directly would put the
+                        // button back on a session eligibility says cannot
+                        // be sent.
+                        sheet.sync_contribute();
                         sheet.show_correction_credential_refusal();
                         app.refresh();
                         return;
