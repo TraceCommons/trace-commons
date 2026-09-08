@@ -407,7 +407,8 @@ final class AppModel: ObservableObject {
         stateTone: { TCContributionEligibility.stateTone(state: $0) },
         control: { TCContributionEligibility.control(state: $0) },
         reasonLine: { TCContributionEligibility.reasonLine(reason: $0) },
-        withheldLine: { TCContributionEligibility.withheldLine(withheld: $0) }
+        withheldLine: { TCContributionEligibility.withheldLine(withheld: $0) },
+        groupControl: { TCContributionEligibility.groupControl(pending: $0, contributable: $1) }
     )
 
     let credentialCalls = CredentialCalls(
@@ -1643,6 +1644,23 @@ final class AppModel: ObservableObject {
         correction: String? = nil,
         completion: ((Bool) -> Void)? = nil
     ) {
+        // THE PRESS DECIDES WHAT IS SENT. The queue card draws its Submit
+        // only for a row the shared table offers one for, and its rows come
+        // from `awaitingDecision` so they are never stale -- but the tap
+        // still lands after the render that drew the button, and a snapshot
+        // can arrive in between. Asked here rather than in the view so
+        // every route to a single approval goes through it.
+        //
+        // A refusal is silent on purpose: the row is about to repaint
+        // without its button and with the sentence saying why, which is the
+        // answer. An error banner would name a failure that did not happen.
+        guard EligibilitySurface.mayProceed(
+            entry, in: awaitingDecision, id: \.entryID,
+            eligibility: { $0.contributionEligibility }, calls: eligibilityCalls)
+        else {
+            completion?(false)
+            return
+        }
         perform("approve", work: {
             try $0.approve(entryID: entry.entryID, verdict: verdict, correction: correction)
         }) { response in
@@ -1689,6 +1707,14 @@ final class AppModel: ObservableObject {
         }) { response in
             self.refreshQueue()
             self.showToast(for: response, attempted: attempted)
+            // What became of the rest, from the daemon's own count and the
+            // shared sentence. NEVER BRANCHED ON HERE: the table answers the
+            // empty string for zero and for the absence, so a filter that
+            // ran and took everything, and one that never ran, both draw
+            // nothing without this code knowing which it was.
+            let withheld = Int64(response.excludedIneligible ?? 0)
+            let sentence = self.eligibilityCalls.withheldLine(withheld) ?? ""
+            self.lastActionNotice = sentence.isEmpty ? nil : sentence
         }
     }
 

@@ -90,39 +90,52 @@ public struct EligibilityCalls: Sendable {
     /// How many sessions a group submit leaves behind, as a sentence.
     /// Empty for zero and for a negative.
     public let withheldLine: @Sendable (Int64) -> String?
+    /// Whether a group's submit control may be offered, as a raw
+    /// `TC_CONTRIBUTION_CONTROL_*` value. Takes a NEGATIVE contributable
+    /// for an absent `contributable_count`.
+    public let groupControl: @Sendable (Int64, Int64) -> Int32
 
     public init(
         stateLine: @escaping @Sendable (String) -> String?,
         stateTone: @escaping @Sendable (String) -> Int32,
         control: @escaping @Sendable (String) -> Int32,
         reasonLine: @escaping @Sendable (String) -> String?,
-        withheldLine: @escaping @Sendable (Int64) -> String?
+        withheldLine: @escaping @Sendable (Int64) -> String?,
+        groupControl: @escaping @Sendable (Int64, Int64) -> Int32
     ) {
         self.stateLine = stateLine
         self.stateTone = stateTone
         self.control = control
         self.reasonLine = reasonLine
         self.withheldLine = withheldLine
+        self.groupControl = groupControl
     }
 }
 
 /// What a folder's group submit control offers.
 ///
-/// `count` is `nil` when NO CONTROL IS DRAWN -- ruled for a folder with
-/// nothing contributable in it, on the same rule an ineligible row follows.
-/// It is never zero: a button reading "Submit all (0)" is a control that
-/// does nothing, discovered on the press.
+/// `count` is what the button SAYS and is always a number, zero included.
+///
+/// `offersContribute` is whether it may be pressed, and it comes from the
+/// shared table -- never from this shell comparing `count` to zero.
+///
+/// **At zero the header's control is DISABLED, NOT REMOVED** -- a ratified
+/// deviation from the queue row, where the control is simply not drawn. A
+/// group header is not a row: the group still holds sessions, and a folder
+/// offering no way to act on it reads as broken rather than finished.
 ///
 /// `withheldLine` is the shared sentence saying how many the button leaves
 /// behind, and `nil` when there is no gap to explain. It never says why --
 /// the reason a particular session cannot be sent is that row's own
 /// sentence, one level in.
 public struct GroupSubmitOffer: Equatable, Sendable {
-    public let count: Int?
+    public let count: Int
+    public let offersContribute: Bool
     public let withheldLine: String?
 
-    public init(count: Int?, withheldLine: String?) {
+    public init(count: Int, offersContribute: Bool, withheldLine: String?) {
         self.count = count
+        self.offersContribute = offersContribute
         self.withheldLine = withheldLine
     }
 }
@@ -227,6 +240,36 @@ public enum EligibilitySurface {
         return queue.first { id($0) == heldID } ?? held
     }
 
+    // MARK: - The press
+
+    /// Whether a send may actually proceed, asked AT THE MOMENT OF THE PRESS.
+    ///
+    /// **DRAW TIME DECIDES WHAT IS OFFERED; THE PRESS DECIDES WHAT IS SENT,
+    /// AND ONLY THE SECOND IS LOAD-BEARING.** Resolving the row live at draw
+    /// time is necessary and not sufficient: between the render that armed a
+    /// control and the tap that fires it, a snapshot can downgrade the row.
+    /// This shell's window is small -- an `ObservableObject` republish
+    /// invalidates the sheet on every queue change -- but it is not zero,
+    /// and a tapped control otherwise acts on what was rendered rather than
+    /// on what is true.
+    ///
+    /// Declining lets the surface repaint and say why, which is strictly
+    /// better than sending and being refused by the server: the contributor
+    /// learns the same fact without their session making the trip.
+    ///
+    /// Takes the SAME resolution the draw took, so there is one rule and not
+    /// two. A `nil` eligibility proceeds, for the reason it is offered a
+    /// control in the first place.
+    public static func mayProceed<Entry>(
+        _ held: Entry,
+        in queue: [Entry],
+        id: (Entry) -> String,
+        eligibility: (Entry) -> ContributionEligibility?,
+        calls: EligibilityCalls
+    ) -> Bool {
+        offersContribute(eligibility(current(held, in: queue, id: id)), calls: calls)
+    }
+
     // MARK: - A group-level submit
 
     /// Which of a group's entries a group-level submit may actually send.
@@ -254,16 +297,17 @@ public enum EligibilitySurface {
     /// What a folder's group control offers, from the counts the daemon
     /// reports on its `list_projects` row.
     ///
-    /// `contributableCount` is **absent when eligibility does not apply** --
-    /// an invited contributor has no "3 of 7" to be told about, and
-    /// `pendingCount` alone is their answer. Test for the key; it is never
-    /// null and never zero-as-absent.
+    /// **ABSENT IS NOT ZERO.** `contributableCount` is absent when
+    /// eligibility does not apply -- an invited contributor has no "3 of 7"
+    /// to be told about. Absence is spelled to the ABI as a NEGATIVE, which
+    /// is how this contract spells it; passing `0` would refuse the control
+    /// to somebody whose sessions are all perfectly sendable, the same trap
+    /// as reading an absent `eligibility` as `unknown`.
     ///
-    /// The counts come from the daemon rather than being recomputed here,
-    /// which is what changed when the group approve moved server-side: the
-    /// daemon decides what a group selector takes, so the daemon is what
-    /// says how many that is. This shell no longer classifies rows to
-    /// answer it.
+    /// Nothing here compares a count to zero. Whether the control may be
+    /// offered is the shared table's answer, for the reason the row control
+    /// is: three shells each deciding it is three chances to offer a press
+    /// with no visible consequence.
     ///
     /// `fallbackPending` covers a project the queue is showing before
     /// `list_projects` has answered for it -- the folder is on screen either
@@ -275,20 +319,21 @@ public enum EligibilitySurface {
         calls: EligibilityCalls
     ) -> GroupSubmitOffer {
         let pending = pendingCount ?? fallbackPending
-        guard let contributable = contributableCount else {
-            // No eligibility question. The folder submits whole, exactly as
-            // it did before this surface existed, and there is no gap to
-            // explain.
-            return GroupSubmitOffer(count: pending == 0 ? nil : pending, withheldLine: nil)
+        // -1 stands for "the key was absent". Any negative means the same
+        // thing to the table; this one is spelled once, here.
+        let contributable = Int64(contributableCount ?? -1)
+        let offered = ContributionControl.fromABI(
+            calls.groupControl(Int64(pending), contributable)) == .contribute
+        guard let contributableCount else {
+            // No eligibility question: the folder submits whole and there is
+            // no gap to explain.
+            return GroupSubmitOffer(
+                count: pending, offersContribute: offered, withheldLine: nil)
         }
-        // RULED: nothing contributable offers no control at all, the same
-        // rule an ineligible row follows. A disabled button on a folder
-        // where every session is unsendable is something to hunt for a
-        // setting about; the rows inside already say why.
-        guard contributable > 0 else { return GroupSubmitOffer(count: nil, withheldLine: nil) }
-        let sentence = calls.withheldLine(Int64(pending - contributable))
+        let sentence = calls.withheldLine(Int64(pending - contributableCount))
         return GroupSubmitOffer(
-            count: contributable,
+            count: contributableCount,
+            offersContribute: offered,
             withheldLine: (sentence?.isEmpty ?? true) ? nil : sentence)
     }
 

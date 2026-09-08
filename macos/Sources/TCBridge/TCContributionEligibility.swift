@@ -70,6 +70,24 @@ public enum TCContributionEligibility {
         return String(cString: raw)
     }
 
+    /// Whether a group's submit control may be offered, as a raw
+    /// `TC_CONTRIBUTION_CONTROL_*` value.
+    ///
+    /// `pending` is a `list_projects` row's `pending_count`. `contributable`
+    /// is its `contributable_count`, **or any negative value when that key
+    /// was absent** -- an invited contributor, for whom every pending
+    /// session is sendable.
+    ///
+    /// ABSENT IS NOT ZERO. `0` means the question applies and nothing here
+    /// can be sent; a negative means the question does not apply and the
+    /// control is offered on `pending` alone. Passing `0` for an absent
+    /// field would refuse the control to somebody whose sessions are all
+    /// perfectly sendable -- the same trap as reading an absent
+    /// `eligibility` as `unknown`, one field over.
+    public static func groupControl(pending: Int64, contributable: Int64) -> Int32 {
+        tc_contribution_group_control(pending, contributable)
+    }
+
     /// How many sessions a group submit is leaving behind, as a sentence.
     ///
     /// `withheld` is `approve`'s `excluded_ineligible`, or the difference

@@ -631,6 +631,16 @@ struct PreviewSheet: View {
     /// the answers is "that correction contains a credential" and the
     /// contributor needs the text still in front of them to act on it.
     private func contribute() {
+        // THE PRESS DECIDES WHAT IS SENT. `canContribute` decided what was
+        // offered, at the last render; a snapshot landing between that
+        // render and this tap leaves the button acting on what was drawn.
+        // Asking again here costs nothing and closes the window. Declining
+        // leaves the sheet up, which repaints against the queue's current
+        // answer and says why.
+        guard EligibilitySurface.mayProceed(
+            entry, in: model.awaitingDecision, id: \.entryID,
+            eligibility: { $0.contributionEligibility }, calls: model.eligibilityCalls)
+        else { return }
         guard let text = correctionToSend else {
             model.approve(entry, verdict: verdict)
             dismiss()

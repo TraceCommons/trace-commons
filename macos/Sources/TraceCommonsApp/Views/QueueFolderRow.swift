@@ -99,39 +99,40 @@ struct QueueFolderRow: View {
                 // the accent on this row belongs to opening the folder --
                 // see `Open` at the trailing edge.
                 //
-                // Drawn only when there is something to send. A folder with
-                // nothing contributable in it offers no control at all --
-                // the same rule an ineligible row follows, and the rows
-                // inside already say why.
-                if let count = offer.count {
-                    Button("Submit all (\(count))", action: onSubmitAll)
-                        .tint(.primary)
-                        .help("""
-                        Submits every session in \(group.label) that can be sent. Each is \
-                        scrubbed the same way a single Submit would be, and flagged \
-                        sessions are included, not held back.
-                        """)
-                }
+                // DISABLED AT ZERO, NOT REMOVED -- a ratified deviation from
+                // the queue row, where the control is simply not drawn. A
+                // group header is not a row: the group still holds sessions,
+                // and a folder offering no way to act on it reads as broken
+                // rather than finished. Whether it may be pressed is the
+                // shared table's answer, never a comparison of the count to
+                // zero here.
+                Button("Submit all (\(offer.count))", action: onSubmitAll)
+                    .tint(.primary)
+                    .disabled(!offer.offersContribute)
+                    .help("""
+                    Submits every session in \(group.label) that can be sent. Each is \
+                    scrubbed the same way a single Submit would be, and flagged \
+                    sessions are included, not held back.
+                    """)
                 // Beside `Submit all`, never in front of it: answering the
                 // outcome question for a whole folder is a choice a
                 // contributor opts into, and the common path must not grow a
                 // step because this exists. Never `.tcPrimaryAction()` --
                 // one primary action per row, and it is the plain button.
                 //
-                // Hidden on the same condition as the plain button. This is
-                // a second route to the same call, and a live menu beside a
-                // button that is not there would send nothing and say
-                // nothing -- the inert control #728 is about.
-                if offer.count != nil {
-                    Menu(VerdictCopy.submitAllAs) {
-                        ForEach(ContributorVerdict.allCases, id: \.rawValue) { option in
-                            Button(option.label) { onSubmitAllAs(option) }
-                        }
+                // Disabled on the same condition as the plain button, and it
+                // has to be said separately: this is a second route to the
+                // same call, and a live menu beside a disabled button is the
+                // inert control #728 is about.
+                Menu(VerdictCopy.submitAllAs) {
+                    ForEach(ContributorVerdict.allCases, id: \.rawValue) { option in
+                        Button(option.label) { onSubmitAllAs(option) }
                     }
-                    .menuStyle(.borderlessButton)
-                    .fixedSize()
-                    .help(VerdictCopy.submitAllAsTooltip)
                 }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .disabled(!offer.offersContribute)
+                .help(VerdictCopy.submitAllAsTooltip)
                 Spacer(minLength: TC.Space.m)
                 // Never `.tcPrimaryAction()`: it sits beside a control that
                 // uploads the very traces this removes, and two adjacent

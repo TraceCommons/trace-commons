@@ -30,7 +30,8 @@ final class EligibilityExportTests: XCTestCase {
             stateTone: { TCContributionEligibility.stateTone(state: $0) },
             control: { TCContributionEligibility.control(state: $0) },
             reasonLine: { TCContributionEligibility.reasonLine(reason: $0) },
-            withheldLine: { TCContributionEligibility.withheldLine(withheld: $0) }
+            withheldLine: { TCContributionEligibility.withheldLine(withheld: $0) },
+            groupControl: { TCContributionEligibility.groupControl(pending: $0, contributable: $1) }
         )
     }
 
@@ -224,12 +225,48 @@ final class EligibilityExportTests: XCTestCase {
         XCTAssertFalse(four.lowercased().contains("because"), four)
     }
 
+    /// **Absent is not zero, across the real ABI.**
+    ///
+    /// The distinction most likely to be got wrong, and the one that costs
+    /// an invited contributor their button. Every negative spelling of
+    /// absence is pinned, `Int64.min` included.
+    func testAnAbsentContributableCountOffersTheControlOnPendingAlone() {
+        for absent: Int64 in [-1, -7, Int64.min] {
+            XCTAssertEqual(
+                ContributionControl.fromABI(
+                    TCContributionEligibility.groupControl(pending: 7, contributable: absent)),
+                .contribute, "\(absent)")
+        }
+        // Zero is the OTHER answer: the question applies and nothing here
+        // can be sent.
+        XCTAssertEqual(
+            ContributionControl.fromABI(
+                TCContributionEligibility.groupControl(pending: 7, contributable: 0)),
+            ContributionControl.none)
+        XCTAssertEqual(
+            ContributionControl.fromABI(
+                TCContributionEligibility.groupControl(pending: 7, contributable: 3)),
+            .contribute)
+        // Nothing pending offers nothing either way.
+        XCTAssertEqual(
+            ContributionControl.fromABI(
+                TCContributionEligibility.groupControl(pending: 0, contributable: -1)),
+            ContributionControl.none)
+    }
+
     /// The offer, assembled from the real table.
     func testTheGroupOfferCrossesTheAbi() {
         let offer = EligibilitySurface.groupSubmit(
             pendingCount: 7, contributableCount: 3, fallbackPending: 7, calls: calls())
         XCTAssertEqual(offer.count, 3)
+        XCTAssertTrue(offer.offersContribute)
         XCTAssertEqual(offer.withheldLine, TCContributionEligibility.withheldLine(withheld: 4))
+        // Zero draws a control and disables it -- the ratified deviation
+        // from the queue row, verified against the real table.
+        let empty = EligibilitySurface.groupSubmit(
+            pendingCount: 5, contributableCount: 0, fallbackPending: 5, calls: calls())
+        XCTAssertEqual(empty.count, 0)
+        XCTAssertFalse(empty.offersContribute)
         // Absent draws no line at all, and a full folder draws none either.
         XCTAssertNil(
             EligibilitySurface.groupSubmit(

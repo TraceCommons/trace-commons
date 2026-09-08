@@ -9,6 +9,20 @@ import XCTest
 /// input, so a surface that had quietly started deciding for itself could not
 /// agree with them -- which is the only way a test in this target can tell
 /// "asked the ABI" from "reproduced the ABI in Swift".
+/// Captures what the group-control table was actually handed, so a test can
+/// assert the ARGUMENT rather than the outcome. Absent-as-negative is only
+/// observable that way: a fake that answered correctly for both spellings
+/// would hide the bug.
+private final class Recorder: @unchecked Sendable {
+    private(set) var pending: Int64 = 0
+    private(set) var contributable: Int64 = 0
+
+    func record(pending: Int64, contributable: Int64) {
+        self.pending = pending
+        self.contributable = contributable
+    }
+}
+
 final class EligibilitySurfaceTests: XCTestCase {
     /// The 17 fields this surface added, so a test can delete each in turn.
     private static let eligibilityFields = [
@@ -100,11 +114,17 @@ final class EligibilitySurfaceTests: XCTestCase {
         tone: @escaping @Sendable (String) -> Int32 = { _ in 20 },
         control: @escaping @Sendable (String) -> Int32 = { _ in 50 },
         reason: @escaping @Sendable (String) -> String? = { "REASON:\($0)" },
-        withheld: @escaping @Sendable (Int64) -> String? = { $0 > 0 ? "WITHHELD:\($0)" : "" }
+        withheld: @escaping @Sendable (Int64) -> String? = { $0 > 0 ? "WITHHELD:\($0)" : "" },
+        groupControl: @escaping @Sendable (Int64, Int64) -> Int32 = { pending, contributable in
+            // The real table's rule, for tests that are not about it: a
+            // negative contributable means the key was absent and the
+            // control rides on `pending` alone.
+            (contributable < 0 ? pending > 0 : contributable > 0) ? 51 : 50
+        }
     ) -> EligibilityCalls {
         EligibilityCalls(
             stateLine: line, stateTone: tone, control: control, reasonLine: reason,
-            withheldLine: withheld)
+            withheldLine: withheld, groupControl: groupControl)
     }
 
     // MARK: - The payload is all or nothing
@@ -400,78 +420,158 @@ final class EligibilitySurfaceTests: XCTestCase {
         let offer = EligibilitySurface.groupSubmit(
             pendingCount: 7, contributableCount: 3, fallbackPending: 99, calls: calls())
         XCTAssertEqual(offer.count, 3)
+        XCTAssertTrue(offer.offersContribute)
         XCTAssertEqual(offer.withheldLine, "WITHHELD:4")
     }
 
-    /// **Absent is not zero.** An invited contributor's project row carries
-    /// `pending_count` and no `contributable_count`; their folder submits
-    /// whole and there is no gap to explain.
+    /// **Absent is spelled to the table as a NEGATIVE, never as zero.**
     ///
-    /// Proved against a table that would answer a sentence for any nonzero
-    /// withheld, so a surface that had read the absence as 0-contributable
-    /// would draw a line here and fail.
+    /// The trap this pins: passing `0` for an absent `contributable_count`
+    /// refuses the control to an invited contributor whose sessions are all
+    /// perfectly sendable. The fake records what it was handed, so this
+    /// asserts the actual argument rather than the outcome.
+    func testAnAbsentContributableCountReachesTheTableAsANegative() {
+        let seen = Recorder()
+        _ = EligibilitySurface.groupSubmit(
+            pendingCount: 7, contributableCount: nil, fallbackPending: 99,
+            calls: calls(groupControl: { pending, contributable in
+                seen.record(pending: pending, contributable: contributable)
+                return 51
+            }))
+        XCTAssertEqual(seen.pending, 7)
+        XCTAssertLessThan(seen.contributable, 0, "absent must not be spelled as 0")
+    }
+
+    /// And an invited contributor keeps their control and gets no withheld
+    /// line: there is no gap to explain.
     func testAnAbsentContributableCountSubmitsTheFolderWhole() {
         let offer = EligibilitySurface.groupSubmit(
             pendingCount: 7, contributableCount: nil, fallbackPending: 99, calls: calls())
         XCTAssertEqual(offer.count, 7)
+        XCTAssertTrue(offer.offersContribute)
         XCTAssertNil(offer.withheldLine)
     }
 
-    /// RULED: nothing contributable offers no control at all -- the same
-    /// rule an ineligible row follows. Not a disabled button: there is
-    /// nothing to enable, and the rows inside already say why.
-    func testAFolderWithNothingContributableOffersNoControl() {
+    /// **RATIFIED: at zero the header's control is DISABLED, NOT REMOVED.**
+    ///
+    /// A group header is not a row. The group still holds sessions, and a
+    /// folder offering no way to act on it reads as broken rather than
+    /// finished -- so the offer still carries a count to draw, and only
+    /// `offersContribute` goes false.
+    func testAFolderWithNothingContributableStillDrawsADisabledControl() {
         let offer = EligibilitySurface.groupSubmit(
             pendingCount: 5, contributableCount: 0, fallbackPending: 5, calls: calls())
-        XCTAssertNil(offer.count)
-        XCTAssertNil(offer.withheldLine)
+        XCTAssertEqual(offer.count, 0, "the header still draws a control")
+        XCTAssertFalse(offer.offersContribute, "and it cannot be pressed")
+        XCTAssertEqual(offer.withheldLine, "WITHHELD:5")
     }
 
-    /// A count of zero is never drawn as a button. "Submit all (0)" is a
-    /// control that does nothing, discovered on the press.
-    func testTheOfferNeverCarriesAZeroCount() {
-        for (pending, contributable) in [(0, nil as Int?), (0, 0), (3, 0)] {
-            XCTAssertNil(
+    /// Whether the control may be pressed is the TABLE's answer, never a
+    /// comparison of the count to zero here.
+    ///
+    /// The fake inverts the real rule exactly, so a surface that had written
+    /// `count > 0` would disagree with it.
+    func testWhetherTheGroupControlIsOfferedIsTheTablesDecision() {
+        let inverted = calls(groupControl: { _, contributable in contributable > 0 ? 50 : 51 })
+        XCTAssertFalse(
+            EligibilitySurface.groupSubmit(
+                pendingCount: 7, contributableCount: 3, fallbackPending: 7, calls: inverted
+            ).offersContribute)
+        XCTAssertTrue(
+            EligibilitySurface.groupSubmit(
+                pendingCount: 7, contributableCount: 0, fallbackPending: 7, calls: inverted
+            ).offersContribute)
+        // And a control code this build cannot read offers nothing.
+        for code: Int32 in [0, -1, 49, 52, 99] {
+            XCTAssertFalse(
                 EligibilitySurface.groupSubmit(
-                    pendingCount: pending, contributableCount: contributable,
-                    fallbackPending: pending, calls: calls()
-                ).count, "\(pending)/\(String(describing: contributable))")
+                    pendingCount: 7, contributableCount: 3, fallbackPending: 7,
+                    calls: calls(groupControl: { _, _ in code })
+                ).offersContribute, "\(code)")
         }
     }
 
-    /// A project the queue is showing before `list_projects` answered for
-    /// it still draws its folder. The fallback is what the queue itself
-    /// says.
+    /// A project the queue is showing before `list_projects` answered for it
+    /// still draws its folder, on what the queue itself says.
     func testAProjectWithNoRowYetFallsBackToTheQueuesOwnCount() {
         let offer = EligibilitySurface.groupSubmit(
             pendingCount: nil, contributableCount: nil, fallbackPending: 4, calls: calls())
         XCTAssertEqual(offer.count, 4)
+        XCTAssertTrue(offer.offersContribute)
         XCTAssertNil(offer.withheldLine)
     }
 
     /// The withheld sentence is the SHARED table's, never authored here.
-    ///
-    /// The fake returns a string no Swift branch in this shell could
-    /// produce, and an empty answer renders nothing rather than a blank
-    /// line.
     func testTheWithheldSentenceIsTheTablesAndAnEmptyOneDrawsNothing() {
         XCTAssertEqual(
             EligibilitySurface.groupSubmit(
                 pendingCount: 9, contributableCount: 2,
                 fallbackPending: 9, calls: calls(withheld: { _ in "FROM-THE-TABLE" })
             ).withheldLine, "FROM-THE-TABLE")
-        XCTAssertNil(
-            EligibilitySurface.groupSubmit(
-                pendingCount: 9, contributableCount: 2,
-                fallbackPending: 9, calls: calls(withheld: { _ in "" })
-            ).withheldLine)
-        // A caught panic draws nothing too. There is no sentence this shell
-        // could honestly substitute.
-        XCTAssertNil(
-            EligibilitySurface.groupSubmit(
-                pendingCount: 9, contributableCount: 2,
-                fallbackPending: 9, calls: calls(withheld: { _ in nil })
-            ).withheldLine)
+        for empty in ["", nil] {
+            XCTAssertNil(
+                EligibilitySurface.groupSubmit(
+                    pendingCount: 9, contributableCount: 2,
+                    fallbackPending: 9, calls: calls(withheld: { _ in empty })
+                ).withheldLine)
+        }
+    }
+
+    // MARK: - The press decides what is sent
+
+    /// Draw time decides what is OFFERED; the press decides what is SENT,
+    /// and only the second is load-bearing.
+    ///
+    /// A snapshot landing between the render that armed a control and the
+    /// tap that fires it leaves the tap acting on what was drawn. The
+    /// press-time question is asked against the queue as it is now.
+    func testThePressIsRefusedOnARowTheQueueHasDowngraded() {
+        struct Row { let id: String; let eligibility: ContributionEligibility? }
+        let table = calls(control: { $0 == "eligible" ? 51 : 50 })
+        let armed = Row(id: "e1", eligibility: ContributionEligibility(state: "eligible"))
+        let queue = [
+            Row(
+                id: "e1",
+                eligibility: ContributionEligibility(
+                    state: "ineligible_permanent", reason: "digest_mismatch"))
+        ]
+        XCTAssertFalse(
+            EligibilitySurface.mayProceed(
+                armed, in: queue, id: \.id, eligibility: { $0.eligibility }, calls: table),
+            "the queue downgraded this row after it was drawn armed")
+        // The copy the control was drawn from still says yes, which is what
+        // makes the window a real one.
+        XCTAssertTrue(
+            EligibilitySurface.offersContribute(armed.eligibility, calls: table))
+    }
+
+    /// An ordinary press on a row the queue still calls eligible proceeds,
+    /// and so does one on a row with no eligibility question at all.
+    func testAnOrdinaryPressProceeds() {
+        struct Row { let id: String; let eligibility: ContributionEligibility? }
+        let table = calls(control: { $0 == "eligible" ? 51 : 50 })
+        let eligible = Row(id: "e1", eligibility: ContributionEligibility(state: "eligible"))
+        XCTAssertTrue(
+            EligibilitySurface.mayProceed(
+                eligible, in: [eligible], id: \.id, eligibility: { $0.eligibility },
+                calls: table))
+        let invited = Row(id: "e2", eligibility: nil)
+        XCTAssertTrue(
+            EligibilitySurface.mayProceed(
+                invited, in: [invited], id: \.id, eligibility: { $0.eligibility },
+                calls: table))
+    }
+
+    /// A row that left the queue between the draw and the press keeps its
+    /// held answer, so an approval already in flight is not refused by a
+    /// list that has moved on.
+    func testAPressOnARowTheQueueNoLongerListsUsesItsHeldAnswer() {
+        struct Row { let id: String; let eligibility: ContributionEligibility? }
+        let table = calls(control: { $0 == "eligible" ? 51 : 50 })
+        let held = Row(id: "e1", eligibility: ContributionEligibility(state: "eligible"))
+        XCTAssertTrue(
+            EligibilitySurface.mayProceed(
+                held, in: [], id: \.id, eligibility: { $0.eligibility }, calls: table))
     }
 
     // MARK: - An unanticipated tone still says something
