@@ -445,6 +445,74 @@ public class NearAiCredentialTests
     }
 
     /// <summary>
+    /// A connect the daemon will refuse says why, and a daemon that refuses
+    /// nothing says nothing.
+    /// </summary>
+    /// <remarks>
+    /// The absent field is the arm worth the test. A shell that read
+    /// <c>destination_credentialed</c> as a boolean would flatten "this
+    /// daemon does not gate connects" into "no key here", and would then tell
+    /// a contributor to sign in before connecting a tool they can connect
+    /// right now.
+    /// </remarks>
+    [Fact]
+    public void ARefusedConnectSaysWhyAndAnUngatedOneSaysNothing()
+    {
+        PrivateInferenceCopy copy = Copy();
+
+        HarnessListing refused = HarnessSurface.ParseListing(
+            """{"harnesses":[],"destination_credentialed":false}""");
+        Assert.False(refused.DestinationCredentialed);
+        Assert.Equal(0, refused.CredentialedAbiValue);
+        Assert.Equal(copy.HarnessNeedsCredential, HarnessSurface.CredentialNotice(refused));
+
+        // A key is here, or the destination is one the contributor runs
+        // themselves. Either way there is nothing to explain.
+        HarnessListing held = HarnessSurface.ParseListing(
+            """{"harnesses":[],"destination_credentialed":true}""");
+        Assert.True(held.DestinationCredentialed);
+        Assert.Equal(1, held.CredentialedAbiValue);
+        Assert.Equal(string.Empty, HarnessSurface.CredentialNotice(held));
+
+        // The field absent, and the field present but unreadable. Both are
+        // the third answer, and neither draws a sentence.
+        foreach (string ungated in new[]
+        {
+            """{"harnesses":[]}""",
+            """{"harnesses":[],"destination_credentialed":null}""",
+            """{"harnesses":[],"destination_credentialed":"yes"}""",
+        })
+        {
+            HarnessListing listing = HarnessSurface.ParseListing(ungated);
+            Assert.Null(listing.DestinationCredentialed);
+            Assert.True(listing.CredentialedAbiValue < 0);
+            Assert.Equal(string.Empty, HarnessSurface.CredentialNotice(listing));
+        }
+    }
+
+    /// <summary>
+    /// That notice is drawn once, beside the rows, and read from the shared
+    /// table rather than from a boolean this shell interpreted.
+    /// </summary>
+    [Fact]
+    public void TheConnectNoticeIsDrawnOnceFromTheSharedTable()
+    {
+        string viewModel = ShellSource("TraceCommons.App/ViewModels/PrivateInferenceViewModel.cs");
+        Assert.Contains(
+            "HarnessSurface.CredentialNotice(listing)", viewModel, StringComparison.Ordinal);
+        Assert.DoesNotContain("DestinationCredentialed", viewModel, StringComparison.Ordinal);
+
+        string markup = ShellSource("TraceCommons.App/Controls/PrivateInferenceView.xaml");
+        Assert.Single(Regex.Matches(markup, Regex.Escape("ViewModel.HarnessesCredentialNotice")));
+
+        // Above the rows rather than inside the row template, which is what
+        // "once, about the destination" means in markup.
+        int notice = markup.IndexOf("ViewModel.HarnessesCredentialNotice", StringComparison.Ordinal);
+        int rows = markup.IndexOf("ItemsSource=\"{x:Bind ViewModel.Harnesses", StringComparison.Ordinal);
+        Assert.True(notice >= 0 && rows > notice, "the notice is not drawn above the tool rows");
+    }
+
+    /// <summary>
     /// No sentence on this surface is authored in this shell.
     ///
     /// Asserted about the source rather than about behaviour, for the reason

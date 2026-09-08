@@ -304,6 +304,22 @@ public sealed class PrivateInferenceViewModel : INotifyPropertyChanged
     /// </summary>
     public string HarnessesNoneFound => _copy?.HarnessesNoneFound ?? string.Empty;
 
+    /// <summary>
+    /// Why a connect is not on offer, or the empty string.
+    /// </summary>
+    /// <remarks>
+    /// Read from the listing through the shared table, and drawn ONCE beside
+    /// the rows rather than once per row: the fact is about the destination
+    /// this app would answer from, not about any one tool. Empty for a daemon
+    /// that does not gate connects at all, which is a third answer and not a
+    /// quiet no.
+    /// </remarks>
+    public string HarnessesCredentialNotice => _harnessCredentialNotice;
+
+    public bool HasHarnessesCredentialNotice => _harnessCredentialNotice.Length > 0;
+
+    private string _harnessCredentialNotice = string.Empty;
+
     public bool HasHarnesses => Harnesses.Count > 0;
 
     public bool HasNoHarnesses => _harnessesRead && Harnesses.Count == 0;
@@ -342,11 +358,17 @@ public sealed class PrivateInferenceViewModel : INotifyPropertyChanged
             // amount a later read could not measure must go, not linger.
             _harnessSpend = HarnessSurface.SpendSentence(listing);
 
+            // Read from the same listing and for the same reason: a refusal a
+            // later read no longer reports must go, not linger.
+            _harnessCredentialNotice = HarnessSurface.CredentialNotice(listing);
+
             _harnessesRead = true;
             Raise(nameof(HasHarnesses));
             Raise(nameof(HasNoHarnesses));
             Raise(nameof(HarnessesSpend));
             Raise(nameof(HasHarnessesSpend));
+            Raise(nameof(HarnessesCredentialNotice));
+            Raise(nameof(HasHarnessesCredentialNotice));
         }
         catch
         {

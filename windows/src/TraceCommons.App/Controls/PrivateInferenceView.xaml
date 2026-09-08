@@ -167,6 +167,20 @@
                                    Visibility="{x:Bind ViewModel.HasNoHarnesses, Mode=OneWay}"
                                    Style="{StaticResource TcCaptionTextStyle}"
                                    TextWrapping="Wrap" />
+                        <!--
+                            Why a connect is not on offer. Once, above the
+                            rows, because the fact is about the destination
+                            this app would answer from and not about any one
+                            tool, and absent entirely on a daemon that does
+                            not gate connects: telling somebody to sign in
+                            before connecting a tool they can connect right
+                            now would be false.
+                        -->
+                        <TextBlock Text="{x:Bind ViewModel.HarnessesCredentialNotice, Mode=OneWay}"
+                                   Visibility="{x:Bind ViewModel.HasHarnessesCredentialNotice, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   Foreground="{ThemeResource TcGoldTextBrush}"
+                                   TextWrapping="Wrap" />
                         <ItemsControl ItemsSource="{x:Bind ViewModel.Harnesses, Mode=OneWay}">
                             <ItemsControl.ItemTemplate>
                                 <DataTemplate x:DataType="vm:HarnessRowViewModel">

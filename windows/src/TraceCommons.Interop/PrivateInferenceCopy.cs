@@ -307,6 +307,20 @@ public sealed record PrivateInferenceCopy
     [JsonPropertyName("credential_unreported")]
     public string CredentialUnreported { get; init; } = string.Empty;
 
+    /// <summary>
+    /// Why a connect control is not on offer: this app would host the
+    /// answering and holds no key.
+    /// </summary>
+    /// <remarks>
+    /// Drawn ONLY through <see cref="HarnessSurface.CredentialNotice"/> and
+    /// never on this shell's own reading of a boolean. The unread case is a
+    /// third fact rather than a false one: a daemon that predates the gate
+    /// connects tools without a sign-in, and telling somebody otherwise would
+    /// be false.
+    /// </remarks>
+    [JsonPropertyName("harness_needs_credential")]
+    public string HarnessNeedsCredential { get; init; } = string.Empty;
+
     /// <summary>Every sentence for the complete-payload check, not a rendering order.</summary>
     public string[] Sentences =>
         new[]
@@ -373,5 +387,6 @@ public sealed record PrivateInferenceCopy
             CredentialPresent,
             CredentialUnknown,
             CredentialUnreported,
+            HarnessNeedsCredential,
         };
 }
