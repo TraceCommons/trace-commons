@@ -35,6 +35,7 @@ pub mod install;
 pub mod ipc;
 pub mod ironwire_pointer;
 pub mod native_flow;
+pub mod nearai_credential;
 pub mod notify;
 pub mod policy;
 pub mod preview;
