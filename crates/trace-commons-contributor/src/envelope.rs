@@ -816,13 +816,17 @@ pub fn apply_verdict(envelope: &mut TraceContributionEnvelope, verdict: Contribu
 /// builder reads them apart, and three positional bools is exactly the shape
 /// that silently swaps two of them.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-struct DeclaredPresence {
-    message_text: bool,
-    tool_payloads: bool,
-    routing_metadata: bool,
+pub(crate) struct DeclaredPresence {
+    pub(crate) message_text: bool,
+    pub(crate) tool_payloads: bool,
+    pub(crate) routing_metadata: bool,
 }
 
-fn declared_content_presence(events: &[RawTraceContributionEvent]) -> DeclaredPresence {
+/// `pub(crate)` because the witness transport appends the attested exchange
+/// after this module has finished building the contribution, and the
+/// declaration has to describe the list as it goes out rather than the list as
+/// it was built. See `witness::transport::witness_contribution`.
+pub(crate) fn declared_content_presence(events: &[RawTraceContributionEvent]) -> DeclaredPresence {
     let mut presence = DeclaredPresence::default();
 
     for event in events {

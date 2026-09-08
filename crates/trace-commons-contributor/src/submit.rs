@@ -377,6 +377,17 @@ pub struct SubmitContext<'a> {
     canary_runs: u32,
     approved_envelope: Option<TraceContributionEnvelope>,
     approved_witness: Option<WitnessedEnvelope>,
+    /// Stands in for a fetched provider receipt, tests only.
+    ///
+    /// `receipt_for_attested_call` refuses a plaintext endpoint before it
+    /// refuses anything else, so a loopback mock cannot be fetched from, and
+    /// a receipt is only verifiable against a signer no test holds. Without
+    /// this seam the bound admission path is unreachable in-process: it
+    /// refuses `admission_receipt_unavailable` before the projection below it
+    /// ever runs, and the projection is the control this profile exists for.
+    /// Compiled out of every shipped build.
+    #[cfg(test)]
+    receipt_override: Option<trace_commons_attestation::receipt::ReceiptPayload>,
 }
 
 impl<'a> SubmitContext<'a> {
@@ -419,6 +430,8 @@ impl<'a> SubmitContext<'a> {
             canary_runs: 0,
             approved_envelope: None,
             approved_witness: None,
+            #[cfg(test)]
+            receipt_override: None,
         })
     }
 
@@ -504,6 +517,22 @@ impl<'a> SubmitContext<'a> {
         }
         if settings.admission_evidence && !include_inference_bodies {
             anyhow::bail!("admission_receipt_unavailable");
+        }
+        // A verdict and a correction have nowhere to go on this profile. The
+        // projection in `witness_envelope` discards both, and the witness
+        // cannot stamp them afterwards -- that would change bytes its
+        // certificate already covers. Refused by name rather than dropped,
+        // because the review-binding fields on `WitnessReviewArtifact` are
+        // set from these arguments and validate against themselves, so a
+        // silent drop leaves an entry that reads approved-with-correction
+        // while the certified envelope carries neither.
+        if settings.admission_evidence
+            && (self.opts.verdict.is_some()
+                || correction
+                    .map(str::trim)
+                    .is_some_and(|text| !text.is_empty()))
+        {
+            anyhow::bail!("admission_correction_unsupported");
         }
         let now = Utc::now();
         let token = self
@@ -665,6 +694,10 @@ impl<'a> SubmitContext<'a> {
         &self,
         call: &crate::routing::attested::AttestedCall,
     ) -> Option<trace_commons_attestation::receipt::ReceiptPayload> {
+        #[cfg(test)]
+        if let Some(receipt) = self.receipt_override.clone() {
+            return Some(receipt);
+        }
         let result = crate::routing::receipt::receipt_for_attested_call(
             // `effective_cfg`, which is `cfg` with the flag-level overrides
             // applied, so a future `--no-attest` lands in one place.
@@ -1942,6 +1975,9 @@ mod tests {
         raw.ironclaw
             .feature_flags
             .insert("unbound".into(), "unsigned flag sentinel".into());
+        raw.ironclaw
+            .feature_flags
+            .insert("cwd_hash".into(), "unsigned cwd sentinel".into());
         raw.contributor.tenant_scope_ref = Some("unsigned tenant sentinel".into());
         raw.replay
             .expected_assertions
@@ -1967,6 +2003,31 @@ mod tests {
         assert!(isolated.conversation_id.is_none());
         assert!(isolated.ironclaw.model_name.is_none());
         assert_eq!(isolated.value, Default::default());
+        assert_eq!(
+            isolated
+                .ironclaw
+                .feature_flags
+                .get("cwd_hash")
+                .map(String::as_str),
+            Some("unknown"),
+            "a projection that copied only this key would pass every other assertion here"
+        );
+        let agent = raw
+            .ironclaw
+            .feature_flags
+            .get("agent")
+            .map(String::as_str)
+            .expect("the fixture transcript names its source");
+        assert!(!agent.is_empty());
+        assert_eq!(
+            isolated
+                .ironclaw
+                .feature_flags
+                .get("agent")
+                .map(String::as_str),
+            Some(agent),
+            "the syntactic source label is the one carry-through, and it must survive"
+        );
         assert!(
             !serde_json::to_string(&isolated)
                 .unwrap()
@@ -2086,6 +2147,14 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(restored.digest().unwrap(), artifact.digest().unwrap());
+        // The order `uploader::approved_witness_for` runs in: the pin first,
+        // against the bytes as stored, and only then the binding. Validating
+        // the reloaded artifact rather than the pre-save one is the point --
+        // a round trip that lost the admission headers would still satisfy
+        // the digest and fail here.
+        restored
+            .validate(&cfg, &transcript.session_hash, &fingerprint, None, None)
+            .unwrap();
         let opts = review_options();
         let mut context = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
         context
@@ -4347,6 +4416,61 @@ mod tests {
         assert_eq!(error.to_string(), "admission_receipt_unavailable");
     }
 
+    /// A correction has nowhere to go on this profile, and a contributor is
+    /// told so rather than shown an entry that reads approved-with-correction
+    /// over a certified envelope carrying neither. Refused before the claim
+    /// mint and before anything reaches a witness.
+    #[tokio::test]
+    async fn a_correction_the_admission_profile_cannot_carry_is_refused_by_name() {
+        let (_dir, store) = crate::config::tests_support::temp_store();
+        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
+        let mut cfg = cfg_for(
+            "http://issuer.invalid",
+            "http://ingest.invalid",
+            &device.device_key_id,
+        );
+        cfg.witness = Some(WitnessSettings {
+            admission_evidence: true,
+            ..pinned_witness()
+        });
+        let selection = fixture_selection();
+        let (source, reference) = &selection[0];
+        let transcript = source.load(reference).unwrap();
+
+        for (verdict, correction) in [
+            (None, Some("the model dropped the last hunk")),
+            (Some(crate::envelope::ContributorVerdict::Worked), None),
+        ] {
+            let opts = SubmitOptions {
+                verdict,
+                ..review_options()
+            };
+            let mut context = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+            let error = context
+                .prepare_witnessed_review(&transcript, correction, true)
+                .await
+                .unwrap_err();
+            assert_eq!(error.to_string(), "admission_correction_unsupported");
+        }
+
+        // Blank is not a correction, and the invited profile is untouched:
+        // both must get past this refusal to the one that comes next.
+        let opts = review_options();
+        let mut context = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let error = context
+            .prepare_witnessed_review(&transcript, Some("   "), true)
+            .await
+            .unwrap_err();
+        assert_ne!(error.to_string(), "admission_correction_unsupported");
+        cfg.witness.as_mut().unwrap().admission_evidence = false;
+        let mut context = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let error = context
+            .prepare_witnessed_review(&transcript, Some("a real correction"), false)
+            .await
+            .unwrap_err();
+        assert_ne!(error.to_string(), "admission_correction_unsupported");
+    }
+
     #[tokio::test]
     async fn bound_receipt_fetch_failure_cannot_turn_into_a_window_review() {
         let (_dir, store) = crate::config::tests_support::temp_store();
@@ -4403,6 +4527,104 @@ mod tests {
             .await
             .is_err(),
             "failed receipt fetch cannot send raw bodies to either witness route"
+        );
+    }
+
+    /// A receipt shaped like a fetched one. Not verifiable, and it does not
+    /// need to be: the enclave verifies receipts, and what this test needs is
+    /// for the fetch to succeed so the code under it runs.
+    fn stand_in_receipt() -> trace_commons_attestation::receipt::ReceiptPayload {
+        use trace_commons_attestation::receipt::{ReceiptAlgo, ReceiptSignatureKind};
+        trace_commons_attestation::receipt::ReceiptPayload {
+            text: "aaaa1111:bbbb2222".to_string(),
+            signature: "0xcccc3333".to_string(),
+            signing_address: "0xdddd444444444444444444444444444444444444".to_string(),
+            signing_algo: ReceiptAlgo::Ecdsa,
+            signature_kind: ReceiptSignatureKind::Unrecognised,
+        }
+    }
+
+    /// The projection is wired into the production path, not merely written.
+    ///
+    /// `witness_envelope` cannot be driven to the wire in-process:
+    /// `witness_session` verifies a real TDX quote before it offers anything
+    /// and no test holds one. What it can be driven to is the size bound that
+    /// sits ahead of the attestation fetch, and that bound is enough of an
+    /// observable. An oversized session refuses `witness_payload_too_large`
+    /// when it reaches the witness whole; the admission projection discards
+    /// the event list, so the same session clears that bound and refuses on
+    /// the unreachable attestation instead. Drop the projection from the call
+    /// site and the admission half reports the size refusal, because the
+    /// history it was supposed to have isolated is still attached.
+    ///
+    /// The invited half is the control: it is the same session, the same
+    /// call, the same everything but the profile, and it must still refuse on
+    /// size -- a projection applied unconditionally would be a different
+    /// defect.
+    #[tokio::test]
+    async fn the_admission_call_site_projects_before_anything_is_offered() {
+        let (_dir, store) = crate::config::tests_support::temp_store();
+        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
+        let unreachable = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let witness_address = unreachable.local_addr().unwrap();
+        drop(unreachable); // Deterministic loopback refusal; nothing is served.
+        let mut cfg = cfg_for(
+            "http://issuer.invalid",
+            "http://ingest.invalid",
+            &device.device_key_id,
+        );
+        cfg.allowed_hosts = Some("127.0.0.1".into());
+        let opts = review_options();
+        let selection = fixture_selection();
+        let (source, reference) = &selection[0];
+        let transcript = source.load(reference).unwrap();
+        let mut raw = crate::envelope::build_raw_contribution_with_correction(
+            &transcript,
+            &cfg,
+            Utc::now(),
+            None,
+            None,
+        );
+        let mut oversized = raw.events[0].clone();
+        oversized.content = Some("x".repeat(crate::envelope::MAX_ENVELOPE_BYTES + 1_000_000));
+        raw.events.push(oversized);
+        assert!(
+            crate::envelope::raw_contribution_size(&raw).unwrap()
+                > crate::envelope::MAX_ENVELOPE_BYTES,
+            "the session must exceed the bound, or this test observes nothing"
+        );
+        let request = r#"{"model":"Qwen/Qwen3.6-27B-FP8","metadata":{"trace_commons_admission":"tcad1:bound-call"}}"#;
+        let (call, _bodies) = receipt_fixture_call_with_request(request);
+        let token = ClaimToken {
+            access_token: "fixture".into(),
+            expires_at: Utc::now() + chrono::Duration::minutes(5),
+            consent_scopes: vec!["debugging_evaluation".into()],
+            allowed_uses: vec!["debugging".into()],
+        };
+
+        let mut labels = Vec::new();
+        for admission_evidence in [true, false] {
+            let settings = WitnessSettings {
+                admission_evidence,
+                url: format!("http://{witness_address}"),
+                ..pinned_witness()
+            };
+            let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+            ctx.receipt_override = Some(stand_in_receipt());
+            labels.push(
+                ctx.witness_envelope(&settings, raw.clone(), Some(&call), &token, Utc::now())
+                    .await
+                    .unwrap_err(),
+            );
+        }
+        assert_eq!(
+            labels,
+            vec![
+                "witness_attestation_unavailable",
+                "witness_payload_too_large"
+            ],
+            "the admission profile must reach the witness carrying only the bound call, \
+             and the invited profile must be left alone"
         );
     }
 

@@ -308,6 +308,23 @@ pub async fn witness_contribution(
         offered
             .events
             .push(crate::routing::attested::attested_exchange_event(call));
+        // The declaration describes what is offered, and what is offered has
+        // just changed: the exchange carries the request and the response
+        // bodies, which is `tool_payloads` content by the same rule the
+        // envelope builder applies. Recomputed here because this is where the
+        // event list stops changing -- the caller built its declaration over
+        // a list this function then appended to, and on the admission profile
+        // that list was empty, so every flag would otherwise read `false`
+        // beside the prompt and the completion.
+        //
+        // Derived rather than asserted, and derived from the same function
+        // the builder uses, so the two cannot drift. Nothing here can lower a
+        // flag: the events are a superset of the ones the caller declared
+        // over.
+        let presence = crate::envelope::declared_content_presence(&offered.events);
+        offered.consent.message_text_included = presence.message_text;
+        offered.consent.tool_payloads_included = presence.tool_payloads;
+        offered.consent.routing_metadata_included = presence.routing_metadata;
     }
 
     let body = witness_request_body(
@@ -1250,6 +1267,14 @@ mod tests {
             artifact_sha256: hash_hex(&response.envelope_bytes),
             witness_measurement: "aa".repeat(48),
             redaction_policy_version: "deterministic-v1".into(),
+            // Long expired, deliberately. Nothing on the client reloads an
+            // approved artifact and re-judges this window:
+            // `WitnessReviewArtifact::validate_stored` checks the account
+            // anchor and the certificate, and the queue digest pin catches
+            // stored tampering, so the window is the operator's to enforce at
+            // upload against a clock this process does not own. Epoch-2
+            // timestamps are here so a client-side expiry check added later
+            // shows up as these tests failing rather than as silence.
             issued_at: 1,
             expires_at: 2,
         };
@@ -2280,6 +2305,111 @@ mod tests {
         assert!(!serialized.contains(SECRET));
         assert!(!serialized.contains("UNBOUND-CORRECTION"));
         assert_eq!(body["raw_contribution"]["replay"]["replayable"], false);
+        assert_eq!(
+            body["raw_contribution"]["consent"]["tool_payloads_included"],
+            serde_json::json!(true),
+            "the declaration must describe the bodies this request carries"
+        );
+        task.abort();
+    }
+
+    /// The declaration follows the payload, in both directions.
+    ///
+    /// An admission projection carries no events, so it declares no content --
+    /// right up to the moment the transport appends the attested exchange,
+    /// whose `content` is the completion and whose structured payload is the
+    /// prompt. The second half is what a blanket `true` would fail: the same
+    /// projection offered without bodies must still declare `false`.
+    #[tokio::test]
+    async fn the_offered_declaration_follows_the_appended_bodies() {
+        let (transcript, _dirs) = transcript_from_a_declared_proxy(true).await;
+        let captured = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
+        let seen = captured.clone();
+        let app = Router::new().route(
+            "/v1/witness/admission",
+            post(move |request: Request| {
+                let seen = seen.clone();
+                async move {
+                    let body = axum::body::to_bytes(request.into_body(), MAX_WITNESS_REQUEST_BYTES)
+                        .await
+                        .unwrap();
+                    seen.lock().unwrap().push(body.to_vec());
+                    StatusCode::BAD_REQUEST
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let transport = transport_for(&url, permissive()).with_admission_evidence(true);
+        let key = test_signer("declaration");
+        let witness = crate::witness::verify::verified_witness_for_test(&url, &address_of(&key));
+        let cfg = crate::commands::unenrolled_preview_config();
+        let isolated = crate::submit::witness_input_for_profile(raw_with_secret(), &cfg, true);
+        assert!(
+            !isolated.consent.tool_payloads_included,
+            "the projection itself declares nothing; the append is what changes it"
+        );
+        let receipt = offered_receipt();
+        let call = transcript.attested_call.as_deref().unwrap();
+
+        assert!(
+            witness_contribution(
+                &transport,
+                &witness,
+                isolated.clone(),
+                Some(AttestedInference {
+                    call,
+                    receipt: Some(&receipt)
+                }),
+                &granted()
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            witness_contribution(&transport, &witness, isolated, None, &granted())
+                .await
+                .is_err()
+        );
+
+        let bodies = captured.lock().unwrap();
+        assert_eq!(bodies.len(), 2);
+        let with_bodies: serde_json::Value = serde_json::from_slice(&bodies[0]).unwrap();
+        let without: serde_json::Value = serde_json::from_slice(&bodies[1]).unwrap();
+        assert_eq!(
+            with_bodies["raw_contribution"]["events"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            with_bodies["raw_contribution"]["consent"]["tool_payloads_included"],
+            serde_json::json!(true),
+            "an offered prompt and completion must be declared"
+        );
+        assert_eq!(
+            with_bodies["raw_contribution"]["consent"]["message_text_included"],
+            serde_json::json!(false),
+            "an exchange is tool-payload content, and raising the other flags with it \
+             would declare conversation this request does not carry"
+        );
+        assert!(
+            without["raw_contribution"]["events"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            without["raw_contribution"]["consent"]["tool_payloads_included"],
+            serde_json::json!(false),
+            "declaring content that is not there is the same defect the other way round"
+        );
+        assert_eq!(
+            without["raw_contribution"]["consent"]["message_text_included"],
+            serde_json::json!(false)
+        );
         task.abort();
     }
 
