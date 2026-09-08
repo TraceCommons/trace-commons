@@ -325,11 +325,35 @@ pub fn attempt_status(dir: &std::path::Path) -> Option<&'static str> {
 }
 
 /// Abandon an attempt still waiting on the browser, releasing its port.
+///
+/// `attempt_id` is optional, and the two cases mean different things:
+///
+/// - `Some(id)` names an attempt, and it must be the one in flight. A caller
+///   that names the wrong attempt is refused exactly as before -- it is asking
+///   about a ceremony this directory is not running.
+/// - `None` cancels whatever this directory has in flight, without naming it.
+///
+/// **Why an unnamed cancel is allowed.** The id is handed out once, by
+/// `begin`, to the caller that started the ceremony. A shell restarted while
+/// the daemon kept running -- the ordinary case, not an edge one -- holds no
+/// id, and [`attempt_status`] deliberately still tells it a sign-in is in
+/// flight. Requiring an id to cancel therefore promised an action the
+/// transport could not perform: every shell drew a Cancel control that could
+/// not be sent, and had to either lie about why or silently do nothing.
+///
+/// It is not a widening of what this socket permits. [`forget`] already takes
+/// no id at all and does strictly more -- it discards a minted, valid
+/// credential -- while this only abandons a sign-in that has not finished. And
+/// the existence of an attempt is already served to every caller by
+/// `attempt_status`, by design. What stays guarded is the id itself: an
+/// unnamed cancel is answered with a lifecycle word alone, never with the
+/// attempt id, so this cannot be used to *learn* one.
 pub fn cancel(dir: &std::path::Path, attempt_id: Option<&str>) -> Option<Status> {
     let mut map = attempts().lock().expect("ceremony state lock");
     let entry = map
         .get_mut(dir)
-        .filter(|a| attempt_id == Some(a.state.attempt_id.as_str()))?;
+        // `None` matches the attempt in flight; `Some` must name it.
+        .filter(|a| attempt_id.is_none_or(|id| id == a.state.attempt_id.as_str()))?;
     if matches!(entry.state.status, "starting" | "waiting_for_browser") {
         entry.state.status = "cancelled";
         if let Some(task) = &entry.abort {
@@ -437,6 +461,57 @@ mod tests {
         // Forgetting twice is not an error, and the second says it removed
         // nothing rather than claiming a revocation it did not perform.
         assert!(!forget(&store).unwrap());
+    }
+
+    /// A shell that cannot name the attempt can still stop it.
+    ///
+    /// This is the ordinary case, not an exotic one: the id is handed out once
+    /// by `begin`, so a shell restarted while the daemon kept running holds
+    /// none -- and `attempt_status` still tells it a sign-in is in flight.
+    /// Before this, that state was unactionable, and every shell drew a Cancel
+    /// it could not send.
+    #[tokio::test]
+    async fn a_caller_that_cannot_name_the_attempt_can_still_cancel_it() {
+        let (dir, store) = temp_store();
+        let started = begin(&store, "github").await.unwrap();
+        let attempt_id = started["attempt_id"].as_str().unwrap().to_string();
+        assert_eq!(attempt_status(dir.path()), Some("waiting_for_browser"));
+
+        let cancelled = cancel(dir.path(), None).expect("an unnamed cancel reaches the attempt");
+        assert_eq!(cancelled.status, "cancelled");
+        // The same ceremony, not a new one: cancelling without naming it must
+        // not be a way to start over.
+        assert_eq!(cancelled.attempt_id, attempt_id);
+        assert_eq!(attempt_status(dir.path()), Some("cancelled"));
+    }
+
+    /// Naming the wrong attempt is still refused.
+    ///
+    /// Allowing an unnamed cancel must not degrade into ignoring the id when
+    /// one is given: a caller that names an attempt this directory is not
+    /// running is asking about something else, and answering it would let a
+    /// wrong id read as success.
+    #[tokio::test]
+    async fn naming_an_attempt_this_directory_is_not_running_is_still_refused() {
+        let (dir, store) = temp_store();
+        let started = begin(&store, "github").await.unwrap();
+        let attempt_id = started["attempt_id"].as_str().unwrap().to_string();
+
+        assert!(cancel(dir.path(), Some("some-other-attempt")).is_none());
+        // Untouched by the refusal.
+        assert_eq!(attempt_status(dir.path()), Some("waiting_for_browser"));
+        assert_eq!(
+            cancel(dir.path(), Some(&attempt_id)).map(|s| s.status),
+            Some("cancelled")
+        );
+    }
+
+    /// With nothing in flight, an unnamed cancel finds nothing rather than
+    /// inventing something to report.
+    #[tokio::test]
+    async fn an_unnamed_cancel_with_no_ceremony_in_flight_is_refused() {
+        let (dir, _store) = temp_store();
+        assert!(cancel(dir.path(), None).is_none());
     }
 
     #[tokio::test]

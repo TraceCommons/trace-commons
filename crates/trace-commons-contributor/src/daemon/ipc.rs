@@ -6830,6 +6830,42 @@ mod tests {
         );
     }
 
+    /// An unnamed cancel stops the ceremony without handing back its id.
+    ///
+    /// Both halves matter. A shell restarted while the daemon kept running
+    /// holds no attempt id and is still told a sign-in is in flight, so it
+    /// must be able to stop one -- that is the whole reason the id became
+    /// optional. But `near_ai_credential_status` deliberately withholds the id
+    /// from exactly this caller, and that refusal would be pointless if cancel
+    /// handed the same value to the same caller a moment later.
+    #[tokio::test]
+    async fn an_unnamed_cancel_acts_without_disclosing_the_attempt_it_acted_on() {
+        let s = shared();
+        let started = crate::daemon::nearai_credential::ceremony::begin(&s.store, "github")
+            .await
+            .expect("a ceremony to cancel");
+        let id = started["attempt_id"].as_str().unwrap().to_string();
+
+        // Naming nothing: the caller learns the outcome and not the identity.
+        let r = handle_request(&s, &req("near_ai_credential_cancel", serde_json::json!({})));
+        let body = r
+            .result
+            .expect("an unnamed cancel is answered, not refused");
+        assert_eq!(body["status"], "cancelled");
+        assert!(
+            body.get("attempt_id").is_none(),
+            "an unnamed cancel disclosed the attempt id: {body}"
+        );
+        assert!(
+            !serde_json::to_string(&body).unwrap().contains(&id),
+            "the attempt id reached a caller that could not name it: {body}"
+        );
+
+        // And the ceremony really is stopped, not merely reported so.
+        let r = handle_request(&s, &req("near_ai_credential_status", serde_json::json!({})));
+        assert_eq!(r.result.unwrap()["state"], "cancelled");
+    }
+
     /// Forgetting takes the session with the credential, on disk *and* in the
     /// running process.
     ///
