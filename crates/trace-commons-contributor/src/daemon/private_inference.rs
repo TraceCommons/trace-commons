@@ -939,6 +939,11 @@ mod tests {
     /// retry still fails; only an inherited descriptor on its way to `exec`
     /// clears. See `HeldLock` in `compute::process` for the release this
     /// upstream guard is missing.
+    ///
+    /// This is a workaround with an expiry condition, not a permanent shape:
+    /// nearai/ironwire#54 adds the missing `unlock` to that guard. Remove this
+    /// helper and go back to a plain `embed::start(...).unwrap()` when that
+    /// merges and the pin moves.
     async fn start_once_the_home_is_free(home: &Path) -> EmbeddedProxy {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         loop {
