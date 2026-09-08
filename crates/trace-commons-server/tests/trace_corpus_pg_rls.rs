@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, SubsecRound, Utc};
 use secrecy::{ExposeSecret, SecretString};
 use tokio::time::{Duration, sleep};
 use tokio_postgres::NoTls;
@@ -3069,7 +3069,13 @@ async fn store_facade_preserves_export_grant_job_scope_and_updates() {
     let alpha_grant_id = Uuid::new_v4();
     let beta_grant_id = Uuid::new_v4();
     let result_manifest_id = Uuid::new_v4();
-    let requested_at = Utc::now();
+    // PostgreSQL `timestamptz` holds microseconds, so anything finer is
+    // truncated on write and a read-back value can never equal an in-memory
+    // one that carried nanoseconds. Pin the fixture to what the store can
+    // actually hold. macOS clocks are microsecond-granular, so `Utc::now()`
+    // there has zero sub-microsecond nanos and this passed on every Mac; Linux
+    // clocks are nanosecond-granular, so it could never pass in CI.
+    let requested_at = Utc::now().trunc_subsecs(6);
     let expires_at = requested_at + chrono::Duration::minutes(15);
     let mut metadata = BTreeMap::new();
     metadata.insert("request_id".to_string(), "pg-rls-alpha".to_string());
