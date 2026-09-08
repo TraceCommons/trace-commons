@@ -1601,14 +1601,27 @@ public sealed class MainViewModel : INotifyPropertyChanged
     /// </summary>
     private void ReplacePending(IReadOnlyList<QueueEntry> entries)
     {
-        Pending.Clear();
-
+        // EVERYTHING IS BUILT AND PUBLISHED BEFORE ONE OBSERVABLE COLLECTION
+        // IS TOUCHED, and the order is the whole point of this arrangement.
+        //
+        // Pending is an ObservableCollection, and MainWindow.OpenPreview
+        // subscribes an open preview sheet to its CollectionChanged so the
+        // sheet re-reads its gate when the queue is replaced. That re-read
+        // goes through LiveEntry, which reads _rowsByEntryId. So every Clear
+        // and every Add here runs a handler that resolves against whatever
+        // that field holds AT THAT MOMENT -- and if the field is still the
+        // previous snapshot, the sheet's "live" resolution answers from the
+        // rows it exists to stop reading.
+        //
+        // Nothing below the publication line may be moved above it, and
+        // nothing above it may be made observable.
         var rowsByEntryId = new Dictionary<string, QueueEntryViewModel>(StringComparer.Ordinal);
         var currentIds = new List<string>(entries.Count);
+        var rows = new List<QueueEntryViewModel>(entries.Count);
         foreach (QueueEntry entry in entries)
         {
             var row = new QueueEntryViewModel(entry);
-            Pending.Add(row);
+            rows.Add(row);
             rowsByEntryId[entry.EntryId] = row;
             currentIds.Add(entry.EntryId);
         }
@@ -1618,26 +1631,56 @@ public sealed class MainViewModel : INotifyPropertyChanged
         // TraceCommons.Interop.Tests. This only reassembles which rows go
         // under each group, using QueueGrouping.KeyOf so membership is
         // computed by the exact same rule the groups were bucketed with.
-        Groups.Clear();
-        _groups = QueueGrouping.ByProject(entries, _contributableByProject);
-        foreach (ProjectQueueGroup group in _groups)
+        IReadOnlyList<ProjectQueueGroup> groups =
+            QueueGrouping.ByProject(entries, _contributableByProject);
+        var groupRows = new List<QueueGroupViewModel>(groups.Count);
+        foreach (ProjectQueueGroup group in groups)
         {
-            var rows = new ObservableCollection<QueueEntryViewModel>();
+            var groupEntries = new ObservableCollection<QueueEntryViewModel>();
             foreach (QueueEntry entry in entries)
             {
                 if (QueueGrouping.KeyOf(entry) == group.ProjectId)
                 {
-                    rows.Add(rowsByEntryId[entry.EntryId]);
+                    groupEntries.Add(rowsByEntryId[entry.EntryId]);
                 }
             }
 
-            Groups.Add(new QueueGroupViewModel(group, rows));
+            groupRows.Add(new QueueGroupViewModel(group, groupEntries));
+        }
+
+        // An id present before this call and absent now left the queue for
+        // good -- dismissed, submitted, expired, or superseded, all alike
+        // from here -- and its scheduled preview is cancelled. This is the
+        // queue's own membership diff, not a scroll signal: visibility
+        // (SetVisiblePreviewsAsync) is a completely separate axis that only
+        // ever affects build ORDER for ids still in this set.
+        //
+        // Computed here, against the field, because publishing currentIds is
+        // what makes the previous set unreadable.
+        IReadOnlyList<string> removed = PreviewCancellation.EntriesRemoved(_previousEntryIds, currentIds);
+
+        // The publication line.
+        _rowsByEntryId = rowsByEntryId;
+        _previousEntryIds = currentIds;
+        _groups = groups;
+
+        Pending.Clear();
+        foreach (QueueEntryViewModel row in rows)
+        {
+            Pending.Add(row);
+        }
+
+        Groups.Clear();
+        foreach (QueueGroupViewModel group in groupRows)
+        {
+            Groups.Add(group);
         }
 
         // Re-resolved on every snapshot, not only when the contributor
         // navigates. A folder can be emptied by their own "Submit all" or by
         // an upload finishing in the background, and this is what returns
-        // them to the list when it is.
+        // them to the list when it is. It reads _groups and Groups, both
+        // published above.
         SetQueueLocation(_queueLocation);
 
         Raise(nameof(IsEmpty));
@@ -1647,17 +1690,6 @@ public sealed class MainViewModel : INotifyPropertyChanged
         // is null on a freshly built QueueEntryViewModel, which reads as
         // pending. What follows only SCHEDULES the work; nothing here blocks
         // the draw on a daemon round trip.
-        //
-        // An id present before this call and absent now left the queue for
-        // good -- dismissed, submitted, expired, or superseded, all alike
-        // from here -- and its scheduled preview is cancelled. This is the
-        // queue's own membership diff, not a scroll signal: visibility
-        // (SetVisiblePreviewsAsync) is a completely separate axis that only
-        // ever affects build ORDER for ids still in this set.
-        IReadOnlyList<string> removed = PreviewCancellation.EntriesRemoved(_previousEntryIds, currentIds);
-        _previousEntryIds = currentIds;
-        _rowsByEntryId = rowsByEntryId;
-
         foreach (string entryId in removed)
         {
             _ = _host.CallAsync(DaemonProtocol.Methods.PreviewCancel, SubmitParams.ForEntry(entryId));
