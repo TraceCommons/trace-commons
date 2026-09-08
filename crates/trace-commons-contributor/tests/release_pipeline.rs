@@ -322,6 +322,111 @@ fn release_tags_are_checked_against_the_versions_the_binaries_report() {
     );
 }
 
+/// release-apps.yml gained the same pre-flight release-contributor.yml has
+/// had since it was written, but with its OWN credential list. Before it, a
+/// missing HOMEBREW_TAP_TOKEN first surfaced at the cask bump inside
+/// `publish` -- after a notarized DMG, a signed MSIX and two GCS buckets had
+/// already moved.
+///
+/// The list is not release-contributor's: this workflow never reads
+/// WINGET_PKGS_TOKEN, and its update manifests fetch their signing key from
+/// Secret Manager rather than from vars.TRACE_COMMONS_UPDATE_PUBLIC_KEY_HEX.
+/// Requiring either would fail releases over configuration nothing in the
+/// file consumes, so this test asserts their ABSENCE as firmly as it asserts
+/// the presence of the rest.
+#[test]
+fn the_app_release_checks_its_own_credentials_before_it_signs_anything() {
+    let apps = read(".github/workflows/release-apps.yml");
+    assert!(
+        apps.contains("missing configuration"),
+        "release-apps.yml must refuse a tag push with missing configuration"
+    );
+
+    // Comments stripped throughout: the pre-flight's own comment names the
+    // two credentials it deliberately excludes, and a naive `contains` would
+    // read that explanation as the violation it warns against.
+    let apps_code = executable_text(&apps);
+
+    // Every secret and variable release-apps.yml actually consumes.
+    for required in [
+        "MACOS_CERTIFICATE_P12_BASE64",
+        "MACOS_CERTIFICATE_PASSWORD",
+        "MACOS_SIGNING_IDENTITY",
+        "MACOS_NOTARY_ASC_KEY_P8_BASE64",
+        "MACOS_NOTARY_ASC_KEY_ID",
+        "MACOS_NOTARY_ASC_ISSUER_ID",
+        "SPARKLE_PUBLIC_ED_KEY",
+        "AZURE_SIGNING_CLIENT_ID",
+        "AZURE_SIGNING_TENANT_ID",
+        "AZURE_SIGNING_SUBSCRIPTION_ID",
+        "AZURE_SIGNING_ENDPOINT",
+        "AZURE_SIGNING_ACCOUNT",
+        "AZURE_SIGNING_PROFILE",
+        "GCP_WIF_PROVIDER",
+        "GCP_FLATPAK_PUBLISHER_SA",
+        "HOMEBREW_TAP_TOKEN",
+    ] {
+        // Twice at minimum: once in the pre-flight's env block, once where it
+        // is spent. A name that appears only at the point of use is a
+        // credential the pre-flight does not cover.
+        assert!(
+            apps_code.matches(required).count() >= 2,
+            "release-apps.yml spends {required} but its release-config \
+             pre-flight does not check for it"
+        );
+    }
+
+    for absent in ["WINGET_PKGS_TOKEN", "TRACE_COMMONS_UPDATE_PUBLIC_KEY_HEX"] {
+        assert!(
+            !apps_code.contains(absent),
+            "release-apps.yml must not require {absent} -- nothing in this \
+             workflow reads it, and demanding it would fail releases over \
+             configuration that belongs to release-contributor.yml"
+        );
+    }
+
+    // The AZURE_SIGNING_* values are environment variables on `release`, so a
+    // pre-flight job without the environment reads them as empty and refuses
+    // every release. This is the single line that keeps the pre-flight from
+    // being a permanent outage rather than a guard.
+    //
+    // Sliced out of apps_code, not apps: the job's own comment quotes
+    // `environment: release` while explaining why it is there, so the same
+    // assertion over the raw file would hold with the declaration deleted.
+    let config_start = apps_code
+        .find("  release-config:")
+        .expect("release-apps.yml must have a release-config job");
+    let config_job = &apps_code[config_start..];
+    let config_job = &config_job[..config_job.find("\n  version:").unwrap_or(config_job.len())];
+    assert!(
+        config_job.contains("environment: release"),
+        "the release-config job must declare `environment: release` or the \
+         AZURE_SIGNING_* variables read as empty and it refuses every release"
+    );
+
+    // Every job that signs or publishes waits for it.
+    for job in [
+        "  macos:",
+        "  windows:",
+        "  windows-app:",
+        "  linux-flatpak:",
+    ] {
+        let start = apps_code
+            .find(job)
+            .unwrap_or_else(|| panic!("missing job {job}"));
+        let body = &apps_code[start..];
+        let needs_line = body
+            .lines()
+            .find(|line| line.trim_start().starts_with("needs:"))
+            .unwrap_or_else(|| panic!("{job} has no needs:"));
+        assert!(
+            needs_line.contains("release-config"),
+            "{job} signs or publishes, so it must wait for release-config; \
+             its needs line is `{needs_line}`"
+        );
+    }
+}
+
 /// The publish job's gate allows a partial run (at least one platform
 /// succeeded), so the release notes must not unconditionally describe all
 /// three platforms -- otherwise a Linux-only or macOS-only run tells

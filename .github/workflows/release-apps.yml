@@ -44,6 +44,91 @@ permissions:
   attestations: write
 
 jobs:
+  # Every credential this workflow spends is checked here, before a single
+  # byte is signed or uploaded. Without it the first thing a missing
+  # HOMEBREW_TAP_TOKEN stops is the cask bump -- which runs in `publish`,
+  # after two signed artifacts exist and both GCS buckets have already
+  # moved. release-contributor.yml has had this shape since it was written;
+  # this is the same idea with this workflow's own credential list.
+  #
+  # The list is enumerated from what release-apps.yml actually reads, NOT
+  # copied from release-contributor.yml: this workflow never touches
+  # WINGET_PKGS_TOKEN, and its update manifests take their signing key from
+  # Secret Manager rather than from
+  # vars.TRACE_COMMONS_UPDATE_PUBLIC_KEY_HEX. Requiring either here would
+  # fail releases over configuration nothing in this file consumes.
+  #
+  # `environment: release` is load-bearing and not just symmetry with the
+  # signing jobs: the AZURE_SIGNING_* values are environment variables on
+  # `release`, so a job without the environment reads them as empty and this
+  # pre-flight would refuse every release. The environment carries no
+  # protection rules, so declaring it adds no approval step.
+  release-config:
+    name: verify release configuration
+    runs-on: ubuntu-latest
+    environment: release
+    timeout-minutes: 5
+    steps:
+      # Dispatch runs build and sign but never publish (every publication
+      # step in this file is guarded on `github.event_name == 'push'`), so
+      # they are not held to the publishing credentials.
+      - name: Confirm tag-release credentials are configured
+        if: github.event_name == 'push'
+        env:
+          # macOS: Developer ID signing, notarization, and the Sparkle
+          # public key make-release-dmg.sh refuses to build without.
+          MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+          MACOS_NOTARY_ASC_KEY_P8_BASE64: ${{ secrets.MACOS_NOTARY_ASC_KEY_P8_BASE64 }}
+          MACOS_NOTARY_ASC_KEY_ID: ${{ secrets.MACOS_NOTARY_ASC_KEY_ID }}
+          MACOS_NOTARY_ASC_ISSUER_ID: ${{ secrets.MACOS_NOTARY_ASC_ISSUER_ID }}
+          SPARKLE_PUBLIC_ED_KEY: ${{ secrets.SPARKLE_PUBLIC_ED_KEY }}
+          # Windows: Azure Trusted Signing, used by both the `windows` and
+          # `windows-app` jobs.
+          AZURE_SIGNING_CLIENT_ID: ${{ vars.AZURE_SIGNING_CLIENT_ID }}
+          AZURE_SIGNING_TENANT_ID: ${{ vars.AZURE_SIGNING_TENANT_ID }}
+          AZURE_SIGNING_SUBSCRIPTION_ID: ${{ vars.AZURE_SIGNING_SUBSCRIPTION_ID }}
+          AZURE_SIGNING_ENDPOINT: ${{ vars.AZURE_SIGNING_ENDPOINT }}
+          AZURE_SIGNING_ACCOUNT: ${{ vars.AZURE_SIGNING_ACCOUNT }}
+          AZURE_SIGNING_PROFILE: ${{ vars.AZURE_SIGNING_PROFILE }}
+          # GCS: the flatpak repo, the Windows .appinstaller feed, and the
+          # appcast all authenticate with these.
+          GCP_WIF_PROVIDER: ${{ secrets.GCP_WIF_PROVIDER }}
+          GCP_FLATPAK_PUBLISHER_SA: ${{ secrets.GCP_FLATPAK_PUBLISHER_SA }}
+          # Cross-repository: the cask bump in `publish`.
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          set -euo pipefail
+          missing=()
+          for name in \
+            MACOS_CERTIFICATE_P12_BASE64 \
+            MACOS_CERTIFICATE_PASSWORD \
+            MACOS_SIGNING_IDENTITY \
+            MACOS_NOTARY_ASC_KEY_P8_BASE64 \
+            MACOS_NOTARY_ASC_KEY_ID \
+            MACOS_NOTARY_ASC_ISSUER_ID \
+            SPARKLE_PUBLIC_ED_KEY \
+            AZURE_SIGNING_CLIENT_ID \
+            AZURE_SIGNING_TENANT_ID \
+            AZURE_SIGNING_SUBSCRIPTION_ID \
+            AZURE_SIGNING_ENDPOINT \
+            AZURE_SIGNING_ACCOUNT \
+            AZURE_SIGNING_PROFILE \
+            GCP_WIF_PROVIDER \
+            GCP_FLATPAK_PUBLISHER_SA \
+            HOMEBREW_TAP_TOKEN
+          do
+            # Indirect expansion, so the names above are the single list and
+            # cannot drift from the tests below them.
+            [ -n "${!name:-}" ] || missing+=("$name")
+          done
+          if [ ${#missing[@]} -ne 0 ]; then
+            printf 'refusing to release: missing configuration: %s\n' "${missing[*]}" >&2
+            exit 1
+          fi
+          echo "all 16 release credentials are present"
+
   version:
     name: resolve version
     runs-on: ubuntu-latest
@@ -102,7 +187,7 @@ jobs:
 
   macos:
     name: macOS signed DMG
-    needs: version
+    needs: [version, release-config]
     if: >-
       github.event_name == 'push' ||
       inputs.platform == 'all' || inputs.platform == 'macos'
@@ -196,7 +281,7 @@ jobs:
 
   windows:
     name: Windows signed binaries
-    needs: version
+    needs: [version, release-config]
     if: >-
       github.event_name == 'push' ||
       inputs.platform == 'all' || inputs.platform == 'windows'
@@ -608,7 +693,7 @@ jobs:
 
   windows-app:
     name: Windows signed MSIX
-    needs: version
+    needs: [version, release-config]
     if: >-
       github.event_name == 'push' ||
       inputs.platform == 'all' || inputs.platform == 'windows'
@@ -628,14 +713,14 @@ jobs:
       # the newest installed SDK regardless of what setup-dotnet put there,
       # and the runner image ships .NET 10, whose layout Windows App SDK 1.6
       # cannot build against.
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
         with:
           dotnet-version: '8.0.x'
       # MSBuild from Visual Studio, not `dotnet build`. A WinUI 3 project
       # invokes tasks from Microsoft.Build.AppxPackage.dll and
       # Microsoft.Build.Packaging.Pri.Tasks.dll, which are never part of the
       # .NET SDK.
-      - uses: microsoft/setup-msbuild@v2
+      - uses: microsoft/setup-msbuild@6fb02220983dee41ce7ae257b6f4d8f9bf5ed4ce # v2
       # No build cache in a release job, deliberately. A cache is a
       # write-target a lower-privilege job can poison, and this job holds
       # signing authority.
@@ -913,6 +998,25 @@ jobs:
       # Cache-Control matters more -- a cached .appinstaller is a release
       # nobody receives, so the feed is explicitly uncacheable while the
       # immutable, version-named package is cached hard.
+      #
+      # This runs BEFORE the `publish` job cuts the GitHub Release, and that
+      # ordering is deliberate (see #695). The .appinstaller's BaseUri is
+      # this bucket, not the Release, so an installed client's update path
+      # never reads a GitHub Release at all: a bucket newer than the Release
+      # page is a discovery inconsistency, while a Release page newer than
+      # the bucket would tell a contributor to expect a build the update
+      # channel does not yet serve. The second is the worse of the two, and
+      # it is what moving this after `publish` would create.
+      #
+      # `publish` is also deliberately `always()` and satisfied by any one
+      # of four platforms, so a partial release is a designed outcome.
+      # Making this step depend on it would put a signed, verified MSIX
+      # behind a job that is allowed to run with three platforms failed.
+      #
+      # Instead the step is re-runnable: `gcloud storage cp` overwrites
+      # unconditionally, the package name carries the version quad, and the
+      # package is uploaded before the feed that names it. Re-running the
+      # job converges the bucket rather than layering onto it.
       - name: Publish
         if: github.event_name == 'push'
         shell: pwsh
@@ -930,7 +1034,7 @@ jobs:
 
   linux-flatpak:
     name: Linux flatpak
-    needs: version
+    needs: [version, release-config]
     if: >-
       github.event_name == 'push' ||
       inputs.platform == 'all' || inputs.platform == 'linux'
@@ -1046,6 +1150,23 @@ jobs:
       # Tag pushes only. A dispatch run still builds and signs above, so the
       # path is provable, but publication never runs on a dispatch -- it
       # must not move what contributors' clients would actually pull.
+      #
+      # Like the Windows feed, this publishes before `publish` cuts the
+      # GitHub Release, and for the same reason (#695): `flatpak update`
+      # pulls from this OSTree repo and never consults a GitHub Release, so
+      # a repo ahead of the Release page is cosmetic while a Release page
+      # ahead of the repo silently hands Linux contributors the previous
+      # build under the new version's notes.
+      #
+      # Moving it would also mean shipping a whole signed OSTree repo across
+      # a job boundary as an artifact and re-importing the GPG private key
+      # in a second job to re-export its public half -- more signing-key
+      # exposure, not less.
+      #
+      # publish-repo.sh is written to be re-run: it rsyncs with
+      # --delete-unmatched-destination-objects, so the destination converges
+      # on the source rather than accumulating, and the flatpakref and
+      # public key are plain overwrites.
       - name: Publish
         if: github.event_name == 'push'
         env:
