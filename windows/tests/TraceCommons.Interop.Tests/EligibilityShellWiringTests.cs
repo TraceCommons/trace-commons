@@ -135,6 +135,65 @@ public class EligibilityShellWiringTests
         }
     }
 
+    /// <summary>
+    /// Both send paths re-check the gate AT THE ACTION, not only in markup.
+    /// </summary>
+    /// <remarks>
+    /// The GTK shell had a correction-refusal path that re-armed Contribute
+    /// by setting the widget directly, undoing a gate that had been applied
+    /// once at draw time. WinUI cannot reproduce that shape -- <c>x:Bind</c>
+    /// OneWay pulls from the getter, so every re-raise re-evaluates
+    /// <c>Entry.CanContribute</c> rather than pushing a stale value -- but a
+    /// send reached by any route OTHER than the button is the same defect,
+    /// and a rule that lives in one markup attribute is one caller away from
+    /// being bypassed. Both entry points assert it themselves.
+    /// </remarks>
+    [Fact]
+    public void BothSendPathsRecheckTheGateAtTheAction()
+    {
+        Assert.Matches(
+            new Regex(
+                @"public async Task SubmitEntryAsync\(QueueEntryViewModel entry\)\s*\{"
+                + @"(?:(?!ClearUndo|CallAsync).)*?if \(!entry\.CanContribute\)\s*\{\s*return;",
+                RegexOptions.Singleline),
+            ShellSource("TraceCommons.App/ViewModels/MainViewModel.cs"));
+
+        Assert.Matches(
+            new Regex(
+                @"public async Task ContributeAsync\(\)\s*\{"
+                + @"(?:(?!CallAsync).)*?if \(!CanContribute\)\s*\{\s*return;",
+                RegexOptions.Singleline),
+            ShellSource("TraceCommons.App/ViewModels/PreviewSheetViewModel.cs"));
+    }
+
+    /// <summary>
+    /// Nothing sets a send control's state imperatively.
+    /// </summary>
+    /// <remarks>
+    /// The direct check for the GTK shape. A control whose enabled or visible
+    /// state is assigned in code has escaped its binding, and the assignment
+    /// is free to disagree with the gate. Neither send control is even NAMED
+    /// in the markup, so nothing in code-behind can address one; this asserts
+    /// that stays true.
+    /// </remarks>
+    [Fact]
+    public void NoSendControlIsAddressableFromCode()
+    {
+        foreach (string markupPath in new[]
+        {
+            "TraceCommons.App/MainWindow.xaml",
+            "TraceCommons.App/Controls/PreviewSheet.xaml",
+        })
+        {
+            string markup = ShellSource(markupPath);
+            foreach (Match button in Regex.Matches(
+                markup, @"<Button\b[^>]*Content=""(?:Submit|Contribute)""[^>]*>", RegexOptions.Singleline))
+            {
+                Assert.DoesNotContain("x:Name", button.Value, StringComparison.Ordinal);
+            }
+        }
+    }
+
     private static string ShellSource(string relativePath)
     {
         string path = Path.Combine(

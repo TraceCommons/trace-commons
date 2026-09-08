@@ -866,6 +866,23 @@ public sealed class MainViewModel : INotifyPropertyChanged
     {
         ArgumentNullException.ThrowIfNull(entry);
 
+        // Re-checked here rather than trusted from the button's visibility,
+        // the same discipline PreviewSheetViewModel.ContributeAsync states:
+        // the gate is the invariant, and a control that is not drawn is only
+        // how it is usually expressed.
+        //
+        // Nothing reaches this today except the row's own button, which is
+        // hidden for an ineligible session. That is exactly why it is worth
+        // asserting here: the eligibility rule would otherwise live in a
+        // single markup attribute, and the next caller -- an accelerator, a
+        // context menu, a tray action, a retry -- would send a contributor's
+        // work and have it turned away, which is the defect this whole
+        // surface exists to remove.
+        if (!entry.CanContribute)
+        {
+            return;
+        }
+
         ClearUndo();
 
         DaemonResponse response = await _host
