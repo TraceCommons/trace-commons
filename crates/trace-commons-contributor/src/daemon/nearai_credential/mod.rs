@@ -207,10 +207,36 @@ pub fn handle_status(shared: &DaemonShared, req: &Request) -> Response {
     Response::ok(req.id, body)
 }
 
+/// Stop a sign-in that has not finished.
+///
+/// `attempt_id` is optional. A caller that names the attempt is answered as
+/// before; a caller that names none cancels whatever this machine has in
+/// flight. That second case is the ordinary one: the id is handed out once, by
+/// `start`, and a shell restarted while the daemon kept running holds none --
+/// yet `credential_state` still reports `obtaining` to it, because an
+/// in-flight sign-in is a fact about the machine rather than a secret.
+///
+/// Requiring an id here made that reported state unactionable. Every shell
+/// drew a Cancel the table told it to draw and could not send, and had to
+/// choose between a control that silently did nothing and one greyed out with
+/// no honest explanation -- both of which tell a contributor something untrue
+/// about a ceremony this daemon could stop on request.
+///
+/// **The id stays guarded, and that is the whole of what this preserves.** An
+/// unnamed cancel is answered with the lifecycle word alone. Echoing the
+/// attempt id back would turn this into a way to learn one, which is precisely
+/// what `handle_status` refuses to do, and the refusal would have been
+/// pointless if this method handed the same value to the same caller.
 pub fn handle_cancel(shared: &DaemonShared, req: &Request) -> Response {
-    let attempt = req.params.get("attempt_id").and_then(|v| v.as_str());
-    match ceremony::cancel(shared.store.dir(), attempt) {
-        Some(status) => Response::ok(req.id, serde_json::to_value(&status).unwrap_or_default()),
+    let named = req.params.get("attempt_id").and_then(|v| v.as_str());
+    match ceremony::cancel(shared.store.dir(), named) {
+        // Named the attempt: it already holds the id, so the full record adds
+        // nothing it did not have.
+        Some(status) if named.is_some() => {
+            Response::ok(req.id, serde_json::to_value(&status).unwrap_or_default())
+        }
+        // Named nothing: the outcome, and not the identity of what produced it.
+        Some(status) => Response::ok(req.id, serde_json::json!({ "status": status.status })),
         None => Response::err(req.id, ERR_BAD_PARAMS, "near_ai_credential_unknown"),
     }
 }

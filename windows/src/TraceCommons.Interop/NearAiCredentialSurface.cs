@@ -204,13 +204,20 @@ public static class NearAiCredentialSurface
             };
 
     /// <summary>
-    /// The <c>near_ai_credential_cancel</c> body. The attempt id is required:
-    /// the daemon refuses a cancel that does not name the attempt, so nothing
-    /// here can stop a ceremony this shell did not start.
+    /// The <c>near_ai_credential_cancel</c> body: the attempt id when this
+    /// shell holds one, the empty body when it does not.
     /// </summary>
-    public static string SerializeCancel(string attemptId) =>
-        JsonSerializer.Serialize(
-            new Dictionary<string, string> { [AttemptIdField] = attemptId });
+    /// <remarks>
+    /// The daemon accepts an unnamed cancel and stops whatever sign-in it is
+    /// running, so a shell that cannot name the attempt still sends one. The
+    /// field is OMITTED rather than sent empty -- an empty id names no running
+    /// attempt and would be refused exactly as a wrong one is.
+    /// </remarks>
+    public static string SerializeCancel(string? attemptId) =>
+        attemptId is { Length: > 0 }
+            ? JsonSerializer.Serialize(
+                new Dictionary<string, string> { [AttemptIdField] = attemptId })
+            : EmptyParams;
 
     /// <summary>
     /// The <c>near_ai_credential_status</c> body for a caller that can name
@@ -226,28 +233,6 @@ public static class NearAiCredentialSurface
             ? JsonSerializer.Serialize(
                 new Dictionary<string, string> { [AttemptIdField] = attemptId })
             : EmptyParams;
-
-    /// <summary>
-    /// Whether this shell can actually address the offered action to the
-    /// daemon.
-    /// </summary>
-    /// <remarks>
-    /// FALSE IS AN ORDINARY CASE, NOT AN EDGE ONE. `near_ai_credential_status`
-    /// resolves `obtaining` from the ceremony on disk with no attempt id, so a
-    /// shell that started after the ceremony did -- an app restarted while the
-    /// daemon kept running -- reads `obtaining` and is offered Cancel. But
-    /// `near_ai_credential_cancel` REQUIRES the attempt id, and this shell
-    /// does not have one to give.
-    ///
-    /// <para>
-    /// A control that is drawn live and silently does nothing is the worst of
-    /// the three answers, so a shell asks this and refuses to enable what it
-    /// cannot send. The honest fix is daemon-side: `_cancel` would have to
-    /// accept the current attempt without being told its id. See #728.
-    /// </para>
-    /// </remarks>
-    public static bool CanAddress(CredentialAction action, string? attemptId) =>
-        action != CredentialAction.Cancel || attemptId is { Length: > 0 };
 
     /// <summary>
     /// Whether the poll should keep going: the ceremony is still in flight.
