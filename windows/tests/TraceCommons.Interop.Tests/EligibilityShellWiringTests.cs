@@ -194,6 +194,147 @@ public class EligibilityShellWiringTests
         }
     }
 
+    /// <summary>
+    /// THE SHEET'S GATE READS THE LIVE QUEUE, NOT THE COPY IT OPENED WITH.
+    /// </summary>
+    /// <remarks>
+    /// The macOS shell held its entry as a value captured when the sheet
+    /// opened, computed the gate from it once, and never re-consulted the
+    /// queue -- so a session downgraded by a submit-time write-back went on
+    /// offering Contribute for as long as the sheet stayed up. No write undid
+    /// the gate; the gate read a copy that had stopped being true.
+    ///
+    /// <para>
+    /// Windows had the same shape: <c>MainViewModel.ReplacePending</c> clears
+    /// and refills rather than diffing, so every row object is replaced and
+    /// an open sheet keeps one nobody updates.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void TheSheetsGateReadsTheLiveEntry()
+    {
+        string source = ShellSource("TraceCommons.App/ViewModels/PreviewSheetViewModel.cs");
+
+        Assert.Matches(
+            new Regex(
+                @"public bool CanContribute =>[^;]*LiveEntry\.CanContribute",
+                RegexOptions.Singleline),
+            source);
+
+        // Every sentence beside the button too: a gate that closed while its
+        // explanation went on saying the old thing is its own dishonesty.
+        foreach (string live in new[]
+        {
+            "HasEligibilityText => LiveEntry.HasEligibilityText",
+            "EligibilityText => LiveEntry.EligibilityText",
+            "HasEligibilityReason => LiveEntry.HasEligibilityReason",
+            "EligibilityReasonText => LiveEntry.EligibilityReasonText",
+        })
+        {
+            Assert.Contains(live, source, StringComparison.Ordinal);
+        }
+
+        // And none of them reads the pinned copy any more.
+        foreach (string pinned in new[]
+        {
+            "&& Entry.CanContribute",
+            "=> Entry.HasEligibilityText",
+            "=> Entry.EligibilityText",
+            "=> Entry.HasEligibilityReason",
+            "=> Entry.EligibilityReasonText",
+        })
+        {
+            Assert.DoesNotContain(pinned, source, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>
+    /// The resolution falls back to the pinned copy, and reads the queue in
+    /// BOTH directions.
+    /// </summary>
+    /// <remarks>
+    /// Not "assume the worst": an entry the daemon upgrades becomes offerable
+    /// without closing the sheet, and an entry that has left the queue is not
+    /// evidence that it became ineligible. The rule is read the queue, and
+    /// fall back to what this sheet was handed when there is no queue to
+    /// read.
+    /// </remarks>
+    [Fact]
+    public void TheResolutionFallsBackToThePinnedCopy()
+    {
+        Assert.Matches(
+            new Regex(
+                @"private QueueEntryViewModel LiveEntry =>\s*"
+                + @"\(_liveEntry is null \? null : _liveEntry\(Entry\.EntryId\)\) \?\? Entry;",
+                RegexOptions.Singleline),
+            ShellSource("TraceCommons.App/ViewModels/PreviewSheetViewModel.cs"));
+
+        // The queue side returns null rather than a substitute when the entry
+        // is gone, which is what makes that fallback reachable.
+        Assert.Matches(
+            new Regex(
+                @"public QueueEntryViewModel\? LiveEntry\(string entryId\) =>\s*"
+                + @"_rowsByEntryId\.TryGetValue\(entryId, out QueueEntryViewModel\? row\) \? row : null;",
+                RegexOptions.Singleline),
+            ShellSource("TraceCommons.App/ViewModels/MainViewModel.cs"));
+    }
+
+    /// <summary>
+    /// What the sheet APPROVES still goes through the pinned entry.
+    /// </summary>
+    /// <remarks>
+    /// The entry id is identical either way, so this changes nothing a
+    /// contributor can observe -- which is the point. Reading the live copy
+    /// is for the gate and its sentences; the thing being sent must not move
+    /// under somebody mid-read.
+    /// </remarks>
+    [Fact]
+    public void WhatIsApprovedStillGoesThroughThePinnedEntry()
+    {
+        string source = ShellSource("TraceCommons.App/ViewModels/PreviewSheetViewModel.cs");
+        Assert.Contains(
+            "SubmitParams.ForEntry(Entry.EntryId, SelectedVerdict, CorrectionToSend)",
+            source,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain("LiveEntry.EntryId", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("SubmitParams.ForEntry(LiveEntry", source, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The sheet is TOLD when the queue changes.
+    /// </summary>
+    /// <remarks>
+    /// Resolving live is only half the fix. These properties are pull-bound,
+    /// so without a raise the footer keeps drawing the answer it last read.
+    /// <c>Pending</c> is cleared and refilled on every refresh, so its
+    /// CollectionChanged is the queue's own signal that the rows were
+    /// replaced -- and the handler is removed on close, so a sheet that has
+    /// gone cannot be kept alive by it.
+    /// </remarks>
+    [Fact]
+    public void TheSheetIsToldWhenTheQueueChanges()
+    {
+        string source = ShellSource("TraceCommons.App/MainWindow.xaml.cs");
+        Assert.Contains(
+            "new PreviewWindow(_host, entry, ViewModel.LiveEntry)",
+            source,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "ViewModel.Pending.CollectionChanged += OnQueueChanged;",
+            source,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "ViewModel.Pending.CollectionChanged -= OnQueueChanged;",
+            source,
+            StringComparison.Ordinal);
+
+        Assert.Matches(
+            new Regex(
+                @"public void QueueChanged\(\)\s*\{(?:(?!\}).)*Raise\(nameof\(CanContribute\)\)",
+                RegexOptions.Singleline),
+            ShellSource("TraceCommons.App/ViewModels/PreviewSheetViewModel.cs"));
+    }
+
     private static string ShellSource(string relativePath)
     {
         string path = Path.Combine(

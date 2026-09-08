@@ -135,6 +135,27 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public ObservableCollection<QueueEntryViewModel> Pending { get; } = new();
 
     /// <summary>
+    /// This entry as the queue describes it NOW, or null if it has left the
+    /// queue.
+    /// </summary>
+    /// <remarks>
+    /// For an open preview sheet, whose own copy stops being true the moment
+    /// the queue refreshes: <see cref="ReplacePending"/> clears and refills
+    /// rather than diffing, so every row object is replaced and the sheet
+    /// keeps one nobody updates. A submit-time failure writes its reason back
+    /// into the row, so a session can be downgraded while its sheet is on
+    /// screen. See <c>PreviewSheetViewModel.LiveEntry</c>.
+    ///
+    /// <para>
+    /// Null when the entry is gone, and the sheet then falls back to its
+    /// pinned copy rather than to a guess -- an entry that has left the queue
+    /// is not evidence that it became ineligible.
+    /// </para>
+    /// </remarks>
+    public QueueEntryViewModel? LiveEntry(string entryId) =>
+        _rowsByEntryId.TryGetValue(entryId, out QueueEntryViewModel? row) ? row : null;
+
+    /// <summary>
     /// The same queue, grouped by project. Rebuilt alongside <see cref="Pending"/>
     /// by <see cref="ReplacePending"/> from <see cref="QueueGrouping.ByProject"/> --
     /// the grouping rule itself (bucket key, order, whether "Submit all"

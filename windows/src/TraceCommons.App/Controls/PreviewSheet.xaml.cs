@@ -25,11 +25,14 @@ namespace TraceCommons.App.Controls;
 /// </summary>
 public sealed partial class PreviewSheet : UserControl, IDisposable
 {
-    public PreviewSheet(DaemonHost host, QueueEntryViewModel entry)
+    public PreviewSheet(
+        DaemonHost host,
+        QueueEntryViewModel entry,
+        Func<string, QueueEntryViewModel?>? liveEntry = null)
     {
         InitializeComponent();
 
-        ViewModel = new PreviewSheetViewModel(host, entry);
+        ViewModel = new PreviewSheetViewModel(host, entry, liveEntry);
         ViewModel.Decided += OnDecided;
 
         Loaded += OnFirstLoaded;

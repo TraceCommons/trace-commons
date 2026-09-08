@@ -20,11 +20,14 @@ public sealed class PreviewWindow : Window
 {
     private readonly PreviewSheet _sheet;
 
-    public PreviewWindow(DaemonHost host, QueueEntryViewModel entry)
+    public PreviewWindow(
+        DaemonHost host,
+        QueueEntryViewModel entry,
+        Func<string, QueueEntryViewModel?>? liveEntry = null)
     {
         Title = "Look inside";
 
-        _sheet = new PreviewSheet(host, entry);
+        _sheet = new PreviewSheet(host, entry, liveEntry);
         _sheet.Decided += OnDecided;
         _sheet.CloseRequested += Close;
         Content = _sheet;
@@ -38,6 +41,13 @@ public sealed class PreviewWindow : Window
     /// they land on rather than behind a sheet that has closed.
     /// </summary>
     public event Action<QueueEntryViewModel, PreviewDecision>? Decided;
+
+    /// <summary>
+    /// The queue changed underneath this window. Forwarded to the sheet,
+    /// whose gate is computed from the live entry rather than the copy it
+    /// opened with. See <c>PreviewSheetViewModel.LiveEntry</c>.
+    /// </summary>
+    public void QueueChanged() => _sheet.ViewModel.QueueChanged();
 
     private void OnDecided(QueueEntryViewModel entry, PreviewDecision decision) =>
         Decided?.Invoke(entry, decision);
