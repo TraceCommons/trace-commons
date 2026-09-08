@@ -34,9 +34,28 @@
 # still a hash somebody copies and pins, which is why there is none.
 #
 # `--check` regenerates into a temporary file and exits non-zero if it differs
-# from the committed one, without touching it. That is the form to run in CI or
-# before a deploy: it answers "is the manifest I am about to upload the one this
-# compose file describes", which is the question the drift above turns on.
+# from the committed one, without touching it. Run it before a deploy and after
+# every compose edit.
+#
+# BE PRECISE ABOUT WHAT IT ANSWERS. It compares two files in this repository and
+# nothing else: it says whether the committed manifest is the one this compose
+# file generates. It does NOT and cannot say whether either matches the running
+# CVM -- `phala deploy` never reads app-compose.json, so the committed manifest
+# is a record of intent and the deployed manifest is dstack's own. A green
+# `--check` beside a stale deployment is still a stale deployment; only
+# `phala cvms get <cvm-id> --json` answers that, and the current values are
+# recorded in "The production deployment" in README.md.
+#
+# The corollary matters more, because it is what makes the red case safe to act
+# on: regenerating this file CANNOT move a deployed measurement. Nothing in the
+# deploy path reads it. So a red `--check` is a bookkeeping failure to fix by
+# regenerating and committing -- it is never, on its own, a reason to redeploy,
+# and redeploying is what moves the measurement and forces every pin holder to
+# re-pin.
+#
+# `witness_manifest_matches_compose` in the server crate's test suite asserts
+# the same thing in CI, so this drift cannot go unnoticed again. #760 sat red on
+# `main` because five commits edited the compose without regenerating.
 
 set -euo pipefail
 
@@ -136,12 +155,25 @@ jq -S -n --rawfile compose "${compose}" '{
 
 if [[ "${check_only}" == true ]]; then
   if ! diff -u "${here}/app-compose.json" "${manifest}" >/dev/null 2>&1; then
-    echo "app-compose.json is stale: it does not match docker-compose.yml" >&2
-    echo "run $(basename "$0") and commit the result" >&2
+    echo "app-compose.json is stale: it is not what docker-compose.yml generates" >&2
+    echo >&2
+    echo "This is a bookkeeping failure between two files in this repository." >&2
+    echo "Fix it by running $(basename "$0") and committing the result." >&2
+    echo >&2
+    echo "It does NOT mean the deployment is wrong, and regenerating CANNOT" >&2
+    echo "move the deployed measurement: phala deploy never reads this file." >&2
+    echo "What the CVM is running comes from 'phala cvms get <cvm-id> --json'," >&2
+    echo "and is recorded in 'The production deployment' in README.md. If the" >&2
+    echo "compose file names an image the CVM is not running, that is a" >&2
+    echo "separate decision -- a redeploy moves the measurement and every pin" >&2
+    echo "holder must re-pin -- and it is not fixed by this script." >&2
+    echo >&2
     diff -u "${here}/app-compose.json" "${manifest}" >&2 || true
     exit 1
   fi
-  echo "app-compose.json matches docker-compose.yml"
+  echo "app-compose.json is what docker-compose.yml generates."
+  echo "This says nothing about the running CVM: phala deploy never reads this"
+  echo "file. Read the deployment with 'phala cvms get <cvm-id> --json'."
   exit 0
 fi
 
