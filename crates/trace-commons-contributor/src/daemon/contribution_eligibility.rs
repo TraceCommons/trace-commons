@@ -179,6 +179,47 @@ pub fn writeback_for(reason_label: &str) -> Option<Verdict> {
     }
 }
 
+/// Whether the eligibility question applies to this contributor at all.
+///
+/// **One rule, two callers, deliberately.** `entry_value` decides from this
+/// whether the wire carries an `eligibility` field, and `handle_approve`
+/// decides from this whether a group-level approve filters. If those could
+/// disagree, a shell would be shown seven sendable rows and told three were
+/// sent, with nothing in the response explaining the other four -- which is
+/// the defect this surface exists to remove, wearing a different hat.
+///
+/// A config that could not be read answers `false`: the wire suppresses the
+/// field in that case, so a queue the daemon declined to describe is one it
+/// must not silently filter either.
+#[must_use]
+pub fn evidence_flag(cfg: Option<&crate::config::ContributorConfig>) -> bool {
+    cfg.and_then(|c| c.witness.as_ref())
+        .is_some_and(|w| w.admission_evidence)
+}
+
+/// Whether a **group-level** submit may include this entry.
+///
+/// A group-level submit means "all eligible", never "all". The alternative
+/// either fails partway or succeeds at sending exactly what the surface just
+/// finished saying could not be sent -- and it is not reachable by the
+/// per-row gate at all, because a per-project approve has no row to check.
+/// The gate is the invariant; a disabled control is only how it is usually
+/// expressed.
+///
+/// A row with no recorded eligibility is excluded. It renders as `unknown`,
+/// which offers no control, so including it in a bulk send would send
+/// precisely the row a shell was told not to offer.
+///
+/// This is NOT applied to a single-entry approve. Naming one entry is an
+/// explicit act about a session the contributor is looking at, the shell's
+/// per-row gate already covers it, and the server decides admission either
+/// way. A daemon that refused a named entry would be enforcing an
+/// expectation as though it were the answer.
+#[must_use]
+pub fn contributable_in_a_group(eligibility: Option<&str>) -> bool {
+    eligibility == Some(STATE_ELIGIBLE)
+}
+
 /// Classify one session.
 ///
 /// `admission_evidence` is `WitnessSettings::admission_evidence` -- the signup

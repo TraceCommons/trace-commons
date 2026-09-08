@@ -1107,11 +1107,27 @@ render, not from anything the daemon left out.
       "mode": "notify_only",
       "added_at": null,
       "configured": false,
-      "is_unresolved_bucket": false
+      "is_unresolved_bucket": false,
+      "pending_count": 7,
+      "contributable_count": 3
     }
   ]
 }
 ```
+
+`pending_count` is how many `Pending` entries this project holds.
+`contributable_count` is how many of those a group-level `approve` would act
+on -- what a shell needs to draw "send the 3 of 7 that can be sent" without
+enumerating rows and classifying them itself.
+
+**`contributable_count` is ABSENT when eligibility does not apply**, on the
+same rule as an entry's `eligibility` field: an invited contributor has no
+"3 of 7" to be told about, and `pending_count` alone is their answer. Test
+for the key; it is never null.
+
+It is a count and not a promise. Entries can move between this call and the
+approve, and the expensive checks still run at submit -- see "Contribution
+eligibility" below.
 
 Every project the daemon knows about, in two kinds:
 
@@ -1210,9 +1226,35 @@ and must never echo the correction text or the detected value.
   "hold_until": "2026-08-08T12:00:10Z",
   "flagged": 1,
   "redactions": { "private_email": 2, "secret:openai_api_key": 1 },
-  "skipped": [ { "entry_id": "…", "reason_label": "not-enrolled" } ]
+  "skipped": [ { "entry_id": "…", "reason_label": "not-enrolled" } ],
+  "excluded_ineligible": 4
 }
 ```
+
+**A group-level `approve` means "all eligible", never "all".** Both group
+selectors -- `project_id` and `all` -- act only on entries whose
+`eligibility` is `eligible`. The alternative either fails partway or succeeds
+at sending exactly what the surface just finished saying could not be sent,
+and no shell can close it: a per-project approve has no row to check, so the
+per-row gate cannot reach it.
+
+`excluded_ineligible` is how many pending entries the selector left out for
+this reason, so a client can say what became of the rest rather than infer it
+from a count smaller than the one it drew a button for. Excluded entries do
+**not** appear in `skipped`: they were never selected, and `skipped` is the
+account of what this call was asked to act on.
+
+`excluded_ineligible` is **absent** when no filter ran -- an invited
+contributor, or a single `entry_id`. Absent, never zero: zero would read as
+"nothing was left out", which is a claim about a filter that did not run.
+
+An entry with no recorded eligibility renders `unknown`, which offers no
+control, so a group selector excludes it too.
+
+**A single `entry_id` is never filtered.** Naming one entry is an explicit act
+about a session the contributor is looking at, the shell's per-row gate
+already covers it, and the server decides admission either way. The daemon
+reports eligibility on a row; it enforces it only where a shell cannot.
 
 This is the whole signal a one-click submit needs: a client that never calls
 `preview` can still show "Sent -- scrubbing removed 3 things, 1 flagged.
@@ -1987,6 +2029,11 @@ another. `TC_CONTRIBUTION_CONTROL_NONE` (50) and
 this build cannot read is not evidence about a contributor's session, and
 saying it is would stop them offering work that is fine. Every shell carries
 a test for this.
+
+A shell does not have to apply this rule to a group control itself. Ask for
+the project and the daemon returns the honest subset; `list_projects` carries
+`contributable_count` so the button can name it before the press. See "What
+`approve` reports".
 
 `eligible` is a well-founded expectation and not a guarantee. The cheap
 checks -- the ones a list may run -- are answered here; the expensive ones,

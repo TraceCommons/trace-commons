@@ -1068,12 +1068,8 @@ impl DaemonShared {
     /// guess. `add_admission_setting` reports the same three-way answer on
     /// the wire.
     pub(crate) fn admission_evidence(&self) -> Option<bool> {
-        self.store
-            .load_config()
-            .ok()?
-            .and_then(|c| c.witness)
-            .map(|w| w.admission_evidence)
-            .or(Some(false))
+        let cfg = self.store.load_config().ok()?;
+        Some(super::contribution_eligibility::evidence_flag(cfg.as_ref()))
     }
 
     /// Source roots with the daemon's live routing ledger attached.
@@ -2011,8 +2007,51 @@ fn handle_list_pending(shared: &DaemonShared, req: &Request) -> Response {
 // contributor should read. Clients MUST NOT recognise this row by
 // label.
 fn handle_list_projects(shared: &DaemonShared, req: &Request) -> Response {
+    // What a group-level send would actually do, answerable before the
+    // press.
+    //
+    // A shell has to be able to say "send the 3 of 7 that can be sent"
+    // without enumerating rows and classifying them itself -- three shells
+    // reimplementing one filter is what put this hole here. It goes on the
+    // project row rather than into a dry-run reply because the row is
+    // already being fetched to draw the group, the answer has no side
+    // effects, and a dry run would cost a second round trip plus an
+    // approve-shaped call whose "I did nothing" has to be taken on trust.
+    //
+    // `contributable_count` is ABSENT when eligibility does not apply, on
+    // the same rule as the entry field: an invited contributor has no
+    // "3 of 7" to be told about, and `pending_count` alone is their answer.
+    let group_filters = super::contribution_eligibility::evidence_flag(
+        shared.store.load_config().ok().flatten().as_ref(),
+    );
     let policy = shared.policy.lock().expect("policy lock");
     let queue = shared.queue.lock().expect("queue lock");
+    let counts = |key: &str| {
+        let pending: Vec<&super::queue::QueueEntry> = queue
+            .pending()
+            .iter()
+            .copied()
+            .filter(|e| e.project_key == key)
+            .collect();
+        let contributable = pending
+            .iter()
+            .filter(|e| {
+                super::contribution_eligibility::contributable_in_a_group(e.eligibility.as_deref())
+            })
+            .count();
+        (pending.len(), group_filters.then_some(contributable))
+    };
+    // Inserted rather than written into the literal, so an inapplicable
+    // count is an ABSENT key and not a null. A client tests for the key,
+    // exactly as it does for `eligibility`; a null would be one more thing
+    // three shells each decide how to read.
+    let with_counts = |mut row: serde_json::Value, counts: (usize, Option<usize>)| {
+        row["pending_count"] = serde_json::Value::from(counts.0);
+        if let Some(contributable) = counts.1 {
+            row["contributable_count"] = serde_json::Value::from(contributable);
+        }
+        row
+    };
     let known = known_keys(&policy, queue.all().iter().map(|e| e.project_key.clone()));
     let discovered: std::collections::BTreeMap<String, Option<String>> = queue
         .all()
@@ -2025,7 +2064,8 @@ fn handle_list_projects(shared: &DaemonShared, req: &Request) -> Response {
         .iter()
         .map(|(key, entry)| {
             let shown = entry.display_path.as_deref().unwrap_or(key);
-            serde_json::json!({
+            with_counts(
+                serde_json::json!({
                 "project_id": project_id_for(key),
                 "project_label": disambiguated_label(key, entry.display_path.as_deref(), &known),
                 "project_path": display_path(shown),
@@ -2033,10 +2073,13 @@ fn handle_list_projects(shared: &DaemonShared, req: &Request) -> Response {
                 "added_at": entry.added_at,
                 "configured": true,
                 "is_unresolved_bucket": key == UNKNOWN_PROJECT_KEY,
-            })
+                }),
+                counts(key),
+            )
         })
         .chain(discovered.iter().map(|(key, shown)| {
-            serde_json::json!({
+            with_counts(
+                serde_json::json!({
                 "project_id": project_id_for(key),
                 "project_label": disambiguated_label(key, shown.as_deref(), &known),
                 "project_path": display_path(shown.as_deref().unwrap_or(key)),
@@ -2044,7 +2087,9 @@ fn handle_list_projects(shared: &DaemonShared, req: &Request) -> Response {
                 "added_at": serde_json::Value::Null,
                 "configured": false,
                 "is_unresolved_bucket": key == UNKNOWN_PROJECT_KEY,
-            })
+                }),
+                counts(key),
+            )
         }))
         .collect();
     Response::ok(req.id, serde_json::json!({ "projects": projects }))
@@ -2642,6 +2687,34 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
         };
         super::preview::input_fingerprint(c, near_ai.as_ref(), attested_bodies)
     });
+    // Whether a GROUP-level selector filters to what can actually be sent.
+    //
+    // `approve {project_id}` and `approve {all}` each offer one control that
+    // sends every pending session they name. A group holding one eligible
+    // and four permanently-ineligible rows would send all five: the per-row
+    // gate cannot reach it, because a group approve has no row to check. So
+    // "offer only the eligible ones" was true of rows and false of groups,
+    // and the shells could not fix it -- three shells enumerating and
+    // classifying rows themselves is three implementations of one filter,
+    // which is how this surface got here.
+    //
+    // A group-level submit therefore means "all eligible", never "all". The
+    // alternative either fails partway or succeeds at sending exactly what
+    // the surface just finished saying could not be sent.
+    //
+    // Read through the same rule `entry_value` reads, from the same `cfg`,
+    // so the filter cannot disagree with what the shell was shown. Off for
+    // an invited contributor: nothing is filtered and this path behaves
+    // exactly as it did.
+    //
+    // A single `entry_id` is deliberately NOT filtered -- see
+    // `contribution_eligibility::contributable_in_a_group`.
+    let group_filters = super::contribution_eligibility::evidence_flag(cfg.as_ref());
+    // How many pending entries a group selector left out for being
+    // ineligible. Reported so a shell can say what became of the rest rather
+    // than infer it from a count that came back smaller than the one it drew
+    // a button for.
+    let mut excluded_ineligible: u64 = 0;
     let project_id = req.params.get("project_id").and_then(|v| v.as_str());
     // Three mutually exclusive selectors; `all` wins over `project_id` wins
     // over `entry_id` when more than one is sent -- same precedence rule as
@@ -2654,7 +2727,13 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
     // `daemon-audit.jsonl` cannot be injected into.
     let (ids, project_audit_label): (Vec<Uuid>, Option<String>) = if all {
         let queue = shared.queue.lock().expect("queue lock");
-        (queue.pending().iter().map(|e| e.entry_id).collect(), None)
+        // `all` is the largest group there is and carries the same hole for
+        // the same reason. Filtering it here as well as the project path is
+        // deliberate: leaving it out would keep the defect alive behind a
+        // different button.
+        let (ids, excluded) = group_selection(queue.pending().iter().copied(), group_filters);
+        excluded_ineligible = excluded;
+        (ids, None)
     } else if let Some(pid) = project_id {
         // An id naming no project the daemon knows is refused, exactly as
         // `set_project_mode` refuses it on this same socket with this same
@@ -2679,12 +2758,15 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
         };
         // Only `Pending`: an entry already approved has had its terms
         // fixed, and a project-wide call must not silently re-pin them.
-        let ids = queue
-            .pending()
-            .iter()
-            .filter(|e| e.project_key == key)
-            .map(|e| e.entry_id)
-            .collect();
+        let (ids, excluded) = group_selection(
+            queue
+                .pending()
+                .iter()
+                .copied()
+                .filter(|e| e.project_key == key),
+            group_filters,
+        );
+        excluded_ineligible = excluded;
         // The unknown-cwd sentinel resolves here like any other project.
         // Approving what is already in that bucket is an ordinary consent
         // decision about entries the contributor can see; it is *arming*
@@ -3027,9 +3109,7 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
     // scrubbing removed N things, M flagged." Counts and labels only -- a
     // redaction count names a category, never the text it removed, and a
     // skip reason is a fixed label, never a path or trace content.
-    Response::ok(
-        req.id,
-        serde_json::json!({
+    let mut result = serde_json::json!({
             "approved": approved,
             "hold_secs": approval_hold_secs,
             "hold_until": hold_until,
@@ -3042,8 +3122,38 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
                     "reason_label": label,
                 }))
                 .collect::<Vec<_>>(),
-        }),
-    )
+    });
+    // Absent, not zero, for an invited contributor and for a single-entry
+    // approve. Zero would read as "nothing was left out", which is a claim
+    // about a filter that did not run.
+    if group_filters && (all || project_id.is_some()) {
+        result["excluded_ineligible"] = serde_json::Value::from(excluded_ineligible);
+    }
+    Response::ok(req.id, result)
+}
+
+/// The entries a group selector acts on, and how many it left out.
+///
+/// One implementation for both group selectors, so `all` and `project_id`
+/// cannot come to disagree about what a group means.
+fn group_selection<'a>(
+    entries: impl Iterator<Item = &'a super::queue::QueueEntry>,
+    filters: bool,
+) -> (Vec<Uuid>, u64) {
+    let mut ids = Vec::new();
+    let mut excluded = 0u64;
+    for entry in entries {
+        if filters
+            && !super::contribution_eligibility::contributable_in_a_group(
+                entry.eligibility.as_deref(),
+            )
+        {
+            excluded += 1;
+            continue;
+        }
+        ids.push(entry.entry_id);
+    }
+    (ids, excluded)
 }
 
 /// The socket's `"preview"` handler -- the queue-card summary.
@@ -5886,6 +5996,221 @@ mod tests {
         assert_eq!(
             audit::load(&s.store).unwrap()[0].project_label.as_deref(),
             Some("myproj")
+        );
+    }
+
+    /// Seed one pending entry carrying a recorded eligibility.
+    fn seed_entry_with_eligibility(
+        s: &DaemonShared,
+        project_key: &str,
+        eligibility: Option<&str>,
+    ) -> uuid::Uuid {
+        let entry_id = uuid::Uuid::new_v4();
+        let mut queue = s.queue.lock().unwrap();
+        queue
+            .upsert(
+                super::super::queue::QueueEntry {
+                    entry_id,
+                    session_hash: format!("sha256:{entry_id}"),
+                    source: "claude-code".to_string(),
+                    project_key: project_key.to_string(),
+                    project_label: super::super::policy::project_label_for(project_key),
+                    path: std::path::PathBuf::from("/tmp/seed.jsonl"),
+                    size_bytes: 1,
+                    discovered_at: Utc::now(),
+                    eligibility: eligibility.map(str::to_string),
+                    ..Default::default()
+                },
+                500,
+            )
+            .unwrap();
+        entry_id
+    }
+
+    /// Write a config that admits this contributor on evidence, which is
+    /// what makes a group selector filter at all.
+    fn admit_on_evidence(s: &DaemonShared) {
+        let cfg: crate::config::ContributorConfig = serde_json::from_value(serde_json::json!({
+            "schema_version": crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION,
+            "issuer_url": "https://issuer.example",
+            "ingest_url": "https://ingest.example",
+            "audience": "upload",
+            "tenant_id": format!("near-{}", "ab".repeat(32)),
+            "instance_id": "",
+            "user_subject": "device",
+            "device_key_id": "device",
+            "consent_scopes": ["debugging_evaluation"],
+            "witness": {
+                "url": "https://witness.example",
+                "signing_address": format!("0x{}", "ab".repeat(20)),
+                "expected_measurements": [format!("mrtd={}", "ab".repeat(48))],
+                "admission_evidence": true,
+            },
+        }))
+        .unwrap();
+        s.store.save_config(&cfg).unwrap();
+    }
+
+    /// Seed one eligible row and four that cannot be sent, in one project.
+    fn seed_mixed_project(s: &DaemonShared, key: &str) -> uuid::Uuid {
+        use crate::daemon::contribution_eligibility as ce;
+        let eligible = seed_entry_with_eligibility(s, key, Some(ce::STATE_ELIGIBLE));
+        seed_entry_with_eligibility(s, key, Some(ce::STATE_INELIGIBLE_PERMANENT));
+        seed_entry_with_eligibility(s, key, Some(ce::STATE_INELIGIBLE_PERMANENT));
+        seed_entry_with_eligibility(s, key, Some(ce::STATE_INELIGIBLE_CONFIGURATION));
+        // A row the daemon never evaluated. It renders `unknown`, which
+        // offers no control, so a bulk send must not include it either.
+        seed_entry_with_eligibility(s, key, None);
+        eligible
+    }
+
+    /// **The hole this closes.** A project holding one eligible row and four
+    /// that cannot be sent offered one control that sent all five.
+    ///
+    /// Observed on which entries the call SELECTED, not on how many it
+    /// approved: none of these seeds has a session file, so every selected
+    /// entry lands in `skipped` further down the pipeline. That is the point
+    /// -- `skipped` counts exactly what was chosen, and the four excluded
+    /// rows never enter it.
+    #[tokio::test]
+    async fn a_project_approve_selects_only_what_can_be_sent() {
+        let s = shared();
+        admit_on_evidence(&s);
+        let key = "/tmp/mixedproj";
+        let eligible = seed_mixed_project(&s, key);
+        let project_id = project_id_for(key);
+
+        let r = handle_request_async(
+            &s,
+            &req("approve", serde_json::json!({ "project_id": project_id })),
+        )
+        .await;
+        let result = r.result.expect("approve answers");
+
+        assert_eq!(
+            result["excluded_ineligible"], 4,
+            "four rows could not be sent: {result}"
+        );
+        let skipped = result["skipped"].as_array().expect("a skipped list");
+        assert_eq!(
+            skipped.len(),
+            1,
+            "only the eligible row was selected: {result}"
+        );
+        assert_eq!(skipped[0]["entry_id"], serde_json::json!(eligible));
+    }
+
+    /// **The regression that must not happen.** An invited contributor has
+    /// no eligibility question, so nothing is filtered and every pending row
+    /// in the project is still selected -- including rows carrying a
+    /// recorded label, which is exactly the state an upgrade can leave
+    /// behind when the flag is later turned off.
+    #[tokio::test]
+    async fn an_invited_contributors_project_approve_filters_nothing() {
+        let s = shared();
+        // No config at all: the flag cannot read true, and this is also the
+        // unreadable-config case, which must behave the same way.
+        let key = "/tmp/mixedproj";
+        seed_mixed_project(&s, key);
+        let project_id = project_id_for(key);
+
+        let r = handle_request_async(
+            &s,
+            &req("approve", serde_json::json!({ "project_id": project_id })),
+        )
+        .await;
+        let result = r.result.expect("approve answers");
+
+        assert!(
+            !result
+                .as_object()
+                .expect("an object")
+                .contains_key("excluded_ineligible"),
+            "no filter ran, so nothing may claim rows were left out: {result}"
+        );
+        assert_eq!(
+            result["skipped"].as_array().expect("a skipped list").len(),
+            5,
+            "every pending row must still be selected: {result}"
+        );
+    }
+
+    /// `all` is the largest group there is and carries the same hole.
+    #[tokio::test]
+    async fn approve_all_selects_only_what_can_be_sent() {
+        let s = shared();
+        admit_on_evidence(&s);
+        seed_mixed_project(&s, "/tmp/mixedproj");
+
+        let r = handle_request_async(&s, &req("approve", serde_json::json!({"all": true}))).await;
+        let result = r.result.expect("approve answers");
+
+        assert_eq!(result["excluded_ineligible"], 4, "{result}");
+        assert_eq!(result["skipped"].as_array().unwrap().len(), 1, "{result}");
+    }
+
+    /// A single `entry_id` is not filtered. Naming one entry is an explicit
+    /// act about a session the contributor is looking at; the daemon reports
+    /// eligibility there and does not enforce it, because an expectation is
+    /// not the answer and the server decides.
+    #[tokio::test]
+    async fn a_named_entry_is_not_filtered_by_its_eligibility() {
+        use crate::daemon::contribution_eligibility as ce;
+        let s = shared();
+        admit_on_evidence(&s);
+        let id = seed_entry_with_eligibility(&s, "/tmp/proj", Some(ce::STATE_INELIGIBLE_PERMANENT));
+
+        let r = handle_request_async(
+            &s,
+            &req("approve", serde_json::json!({ "entry_id": id.to_string() })),
+        )
+        .await;
+        let result = r.result.expect("approve answers");
+
+        assert!(
+            !result
+                .as_object()
+                .expect("an object")
+                .contains_key("excluded_ineligible"),
+            "a named entry is not a group: {result}"
+        );
+        assert_eq!(result["skipped"].as_array().unwrap().len(), 1, "{result}");
+    }
+
+    /// The count a shell draws its button from: "send the 1 of 5 that can be
+    /// sent", answerable from the row it already fetched to draw the group.
+    #[test]
+    fn a_project_row_says_how_many_of_its_sessions_can_be_sent() {
+        let s = shared();
+        admit_on_evidence(&s);
+        seed_mixed_project(&s, "/tmp/mixedproj");
+
+        let row = projects_of(&s)
+            .into_iter()
+            .find(|p| p["project_id"] == serde_json::json!(project_id_for("/tmp/mixedproj")))
+            .expect("the project is listed");
+        assert_eq!(row["pending_count"], 5, "{row}");
+        assert_eq!(row["contributable_count"], 1, "{row}");
+    }
+
+    /// And an invited contributor gets the pending count with no "of" --
+    /// the key is absent, not equal, so nothing renders a distinction that
+    /// does not exist for them.
+    #[test]
+    fn an_invited_contributors_project_row_carries_no_contributable_count() {
+        let s = shared();
+        seed_mixed_project(&s, "/tmp/mixedproj");
+
+        let row = projects_of(&s)
+            .into_iter()
+            .find(|p| p["project_id"] == serde_json::json!(project_id_for("/tmp/mixedproj")))
+            .expect("the project is listed");
+        assert_eq!(row["pending_count"], 5, "{row}");
+        assert!(
+            !row.as_object()
+                .expect("an object")
+                .contains_key("contributable_count"),
+            "the key must be absent, not null: {row}"
         );
     }
 
