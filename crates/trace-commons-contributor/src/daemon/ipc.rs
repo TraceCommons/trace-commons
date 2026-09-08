@@ -1623,6 +1623,30 @@ pub fn entry_value(
             value["eligibility_reason"] = serde_json::Value::from(reason);
         }
     }
+    // ALWAYS PRESENT, FOR EVERY CONTRIBUTOR.
+    //
+    // The opposite rule to `eligibility` above, and deliberately. That field
+    // answers whether this contributor may send this session, which is a
+    // question only an evidence-admitted contributor has. This one answers
+    // whether the session carries proof of the model call that produced it,
+    // which is a fact about the trace -- and there is no contributor for whom
+    // that is not worth knowing. It is about to be worth more than that: the
+    // credit scoring function is expected to weight attestations, and a
+    // contributor who cannot see which of their sessions carry one cannot act
+    // on it.
+    //
+    // A row the daemon never evaluated -- written before this field existed --
+    // is `unknown`. Unlike `eligibility` there is no absent case: the question
+    // is never inapplicable, so silence could only mean nobody worked the
+    // answer out, and `unknown` is what says that.
+    value["attestation"] = serde_json::Value::from(
+        e.attestation
+            .clone()
+            .unwrap_or_else(|| super::attestation_mark::MARK_UNKNOWN.to_string()),
+    );
+    if let Some(reason) = e.attestation_reason.as_deref() {
+        value["attestation_reason"] = serde_json::Value::from(reason);
+    }
     value
 }
 
@@ -7618,6 +7642,85 @@ mod tests {
 
         let v = entry_value(&e, Some(true));
         assert_eq!(v["eligibility"], ce::STATE_UNKNOWN);
+    }
+
+    /// **The rule the attestation mark exists for, and the exact opposite of
+    /// the eligibility rule above.** An invited contributor is handed no
+    /// eligibility field and IS handed the mark, for every flag value
+    /// including the unreadable-config one.
+    ///
+    /// A single assertion covering both fields, because the pair is the
+    /// contract: the same session, one question answered and the other
+    /// correctly silent.
+    #[test]
+    fn an_invited_contributor_is_still_handed_the_attestation_mark() {
+        use super::super::attestation_mark as am;
+        let mut e = card_entry();
+        e.attestation = Some(am::MARK_ATTESTED.to_string());
+
+        for flag in [Some(false), None] {
+            let v = entry_value(&e, flag);
+            let object = v.as_object().expect("an object");
+            assert!(
+                !object.contains_key("eligibility"),
+                "the permission question must stay unasked: {v}"
+            );
+            assert_eq!(
+                v["attestation"],
+                am::MARK_ATTESTED,
+                "the mark describes the trace and is owed to everyone: {v}"
+            );
+        }
+    }
+
+    /// The positive case crosses whole. Unlike eligibility, whose surface
+    /// only ever spoke up to explain a refusal, a session that IS attested
+    /// says so -- and says it with no reason beside it, because there is
+    /// nothing to explain.
+    #[test]
+    fn an_attested_row_says_so_and_explains_nothing() {
+        use super::super::attestation_mark as am;
+        let mut e = card_entry();
+        e.attestation = Some(am::MARK_ATTESTED.to_string());
+        e.attestation_reason = None;
+
+        let v = entry_value(&e, Some(true));
+        assert_eq!(v["attestation"], am::MARK_ATTESTED);
+        assert!(
+            !v.as_object()
+                .expect("an object")
+                .contains_key("attestation_reason"),
+            "an attested row must carry no reason: {v}"
+        );
+    }
+
+    /// An unattested row carries its own reason, and the reason is the
+    /// shared label rather than a second spelling of it.
+    #[test]
+    fn an_unattested_row_carries_its_reason() {
+        use super::super::attestation_mark as am;
+        let mut e = card_entry();
+        e.attestation = Some(am::MARK_UNATTESTED_PERMANENT.to_string());
+        e.attestation_reason = Some(am::REASON_NO_CALL.to_string());
+
+        let v = entry_value(&e, Some(true));
+        assert_eq!(v["attestation"], am::MARK_UNATTESTED_PERMANENT);
+        assert_eq!(v["attestation_reason"], am::REASON_NO_CALL);
+    }
+
+    /// A row written before the field existed is `unknown` and never absent.
+    /// The question is never inapplicable, so an absent key could only be a
+    /// shell's bug; `unknown` is the only honest silence.
+    #[test]
+    fn an_unevaluated_row_is_an_unknown_mark_rather_than_absent() {
+        use super::super::attestation_mark as am;
+        let e = card_entry();
+        assert!(e.attestation.is_none());
+
+        for flag in [Some(true), Some(false), None] {
+            let v = entry_value(&e, flag);
+            assert_eq!(v["attestation"], am::MARK_UNKNOWN, "{v}");
+        }
     }
 
     /// The origin has to cross the IPC boundary, not merely exist on the ref.
