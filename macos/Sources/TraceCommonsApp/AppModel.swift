@@ -465,10 +465,13 @@ final class AppModel: ObservableObject {
         return URL(string: attempt.browserURL)
     }
 
-    /// Stops waiting on the browser. Does nothing without an attempt id --
-    /// there is no cancel-whatever-is-running.
+    /// Stops waiting on the browser.
+    ///
+    /// Sent with no attempt id when this shell holds none: the daemon cancels
+    /// whatever sign-in it is running, so an app restarted mid-ceremony can
+    /// still stop the one it never started.
     func cancelNearAiCredential() {
-        guard let attemptID = credentialAttempt?.attemptID else { return }
+        let attemptID = credentialAttempt?.attemptID
         submitNearAiCredential { try $0.nearAiCredentialCancel(attemptID: attemptID) }
     }
 
