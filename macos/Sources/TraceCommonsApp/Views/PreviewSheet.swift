@@ -426,6 +426,7 @@ struct PreviewSheet: View {
             // on when they reach for Contribute is not a reason to stop
             // saying it.
             ScrubbingCaveatAtCommit()
+            admissibility
             gateStatement
             if model.witnessStateCode == 1 || witnessRequested || witnessWorking, let copy = model.witnessCopy?.review {
                 Text(copy.immutable).font(TC.Font_.meta).foregroundStyle(TC.inkSecondary)
@@ -476,6 +477,36 @@ struct PreviewSheet: View {
         TCConsentCopy.copyJSON().flatMap(ConsentCopy.decode(fromJSON:))
     }
 
+    /// This session's row AS THE QUEUE HOLDS IT NOW, not as it was when the
+    /// sheet opened.
+    ///
+    /// `entry` is a `let` captured at open time, and this sheet can stay up
+    /// across any number of snapshots -- including the one carrying a
+    /// submit-time failure written back into the row. Reading the opening
+    /// copy would apply the eligibility gate once and then never again,
+    /// which is the same defect as never applying it.
+    ///
+    /// ONLY the eligibility gate and its sentence read this. Everything the
+    /// sheet approves still goes through `entry`, whose id is the same
+    /// either way -- what a preview pinned must not start moving under a
+    /// contributor who is reading it.
+    private var liveEntry: QueueEntry {
+        EligibilitySurface.current(entry, in: model.awaitingDecision, id: \.entryID)
+    }
+
+    /// What the daemon said about contributing THIS session, or nothing at
+    /// all for a contributor who has no eligibility question.
+    private var eligibility: ContributionEligibility? { liveEntry.contributionEligibility }
+
+    /// Whether the shared table offers a send control for this session.
+    ///
+    /// Answers `true` for an entry that carried no `eligibility` key: an
+    /// invited contributor's queue is entirely contributable and the sheet is
+    /// the sheet they always had. Nothing here branches on a state string.
+    private var eligibilityOffersContribute: Bool {
+        EligibilitySurface.offersContribute(eligibility, calls: model.eligibilityCalls)
+    }
+
     private var canContribute: Bool {
         // `enrolled`, not `summary != nil`. An approval binds to the
         // envelope a preview pinned, and a preview built without an
@@ -485,7 +516,51 @@ struct PreviewSheet: View {
         // And no claim, no approval: the statement above the button is the
         // whole of what a contributor is told before pressing it, so a
         // build that cannot read it must not arm the button either.
+        //
+        // And the daemon's own answer about this session. DISARMED HERE
+        // RATHER THAN REMOVED, which is the opposite of the queue card: the
+        // sheet's Contribute is already on screen and under a person's
+        // cursor when the sentence above it is read, and a primary control
+        // that vanished mid-read is its own confusion. On the card the
+        // button is drawn fresh or not at all, so there is nothing to
+        // vanish. Both routes go through the same shared table.
         consent != nil && ReadGate.canContribute(hasPinnedPreview: summary?.enrolled == true)
+            && eligibilityOffersContribute
+    }
+
+    /// Whether this session can be contributed at all, above the statement
+    /// the sheet already makes.
+    ///
+    /// Drawn WHEREVER Contribute is disarmed for this reason and never
+    /// separated from it: a disarmed primary button with nothing beside it
+    /// is a contributor hunting for a setting that would arm it. Absent
+    /// entirely when the entry carried no `eligibility` key.
+    @ViewBuilder
+    private var admissibility: some View {
+        if let copy = model.privateInferenceCopy,
+           let line = EligibilitySurface.stateLine(
+               eligibility, copy: copy, calls: model.eligibilityCalls)
+        {
+            let tone = PrivateInferenceIndicator.palette(
+                EligibilitySurface.tone(eligibility, calls: model.eligibilityCalls)
+                    ?? .neutral)
+            VStack(alignment: .leading, spacing: TC.Space.xxs) {
+                Label(line, systemImage: tone.symbol)
+                    .font(TC.Font_.meta)
+                    .foregroundStyle(tone.textColor)
+                    .fixedSize(horizontal: false, vertical: true)
+                if let reason = EligibilitySurface.reasonLine(
+                    eligibility, calls: model.eligibilityCalls)
+                {
+                    Text(reason)
+                        .font(TC.Font_.meta)
+                        .foregroundStyle(TC.inkSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .accessibilityElement(children: .combine)
+        }
     }
 
     /// The tooltip that explains the current answer, chosen by the ABI.
@@ -556,6 +631,16 @@ struct PreviewSheet: View {
     /// the answers is "that correction contains a credential" and the
     /// contributor needs the text still in front of them to act on it.
     private func contribute() {
+        // THE PRESS DECIDES WHAT IS SENT. `canContribute` decided what was
+        // offered, at the last render; a snapshot landing between that
+        // render and this tap leaves the button acting on what was drawn.
+        // Asking again here costs nothing and closes the window. Declining
+        // leaves the sheet up, which repaints against the queue's current
+        // answer and says why.
+        guard EligibilitySurface.mayProceed(
+            entry, in: model.awaitingDecision, id: \.entryID,
+            eligibility: { $0.contributionEligibility }, calls: model.eligibilityCalls)
+        else { return }
         guard let text = correctionToSend else {
             model.approve(entry, verdict: verdict)
             dismiss()

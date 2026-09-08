@@ -39,6 +39,15 @@ public struct ApproveResponse: Decodable, Equatable, Sendable {
     public let skipped: [ApproveSkip]
     public let holdSecs: UInt64
     public let holdUntil: String?
+    /// How many pending entries a GROUP selector left out because they
+    /// cannot be contributed.
+    ///
+    /// **Absent, never zero, when no filter ran** -- an invited contributor,
+    /// or a single `entry_id`. Zero would read as "nothing was left out",
+    /// which is a claim about a filter that did not run. Excluded entries do
+    /// not appear in `skipped`: they were never selected, and `skipped` is
+    /// the account of what the call was asked to act on.
+    public let excludedIneligible: UInt64?
 
     public init(
         approved: UInt64,
@@ -46,7 +55,8 @@ public struct ApproveResponse: Decodable, Equatable, Sendable {
         redactions: [String: UInt32],
         skipped: [ApproveSkip],
         holdSecs: UInt64,
-        holdUntil: String?
+        holdUntil: String?,
+        excludedIneligible: UInt64? = nil
     ) {
         self.approved = approved
         self.flagged = flagged
@@ -54,6 +64,7 @@ public struct ApproveResponse: Decodable, Equatable, Sendable {
         self.skipped = skipped
         self.holdSecs = holdSecs
         self.holdUntil = holdUntil
+        self.excludedIneligible = excludedIneligible
     }
 
     enum CodingKeys: String, CodingKey {
@@ -63,6 +74,7 @@ public struct ApproveResponse: Decodable, Equatable, Sendable {
         case skipped
         case holdSecs = "hold_secs"
         case holdUntil = "hold_until"
+        case excludedIneligible = "excluded_ineligible"
     }
 
     /// Whether this response is the correction-credential refusal.

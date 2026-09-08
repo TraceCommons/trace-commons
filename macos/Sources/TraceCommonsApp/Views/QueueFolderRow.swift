@@ -22,6 +22,13 @@ import TCShellCore
 /// expired with the layout it was written for.
 struct QueueFolderRow: View {
     let group: QueueGroup<QueueEntry>
+    /// This project's `list_projects` row, when one has arrived. Carries
+    /// the two counts the group control is drawn from; nil before the call
+    /// answers, and for a project it does not list.
+    let project: ProjectRow?
+    /// The eligibility branch tables. Only the withheld sentence is read
+    /// through them here -- the counts are the daemon's.
+    let eligibilityCalls: EligibilityCalls
     let onOpen: () -> Void
     let onSubmitAll: () -> Void
     /// The opt-in bulk path: the same approval, carrying one verdict for
@@ -36,6 +43,25 @@ struct QueueFolderRow: View {
     /// Display only, and empty against a daemon that predates the field --
     /// in which case the row shows its label alone rather than a blank line.
     private var path: String { group.entries.first?.projectPath ?? "" }
+
+    /// What the group control offers, decided by the daemon's own counts.
+    ///
+    /// **A GROUP-LEVEL SUBMIT MEANS "ALL ELIGIBLE", NEVER "ALL"** -- and the
+    /// daemon enforces it now, so this is presentation rather than
+    /// protection. The count on the button is `contributable_count`, not
+    /// `group.count`: a button promising more than it sends is the same
+    /// press-then-discover shape the card's `Submit` was fixed for.
+    ///
+    /// `group.count` is the fallback for a project the queue is showing
+    /// before `list_projects` has answered for it. The folder is on screen
+    /// either way and must say something.
+    private var offer: GroupSubmitOffer {
+        EligibilitySurface.groupSubmit(
+            pendingCount: project?.pendingCount,
+            contributableCount: project?.contributableCount,
+            fallbackPending: group.count,
+            calls: eligibilityCalls)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: TC.Space.sm) {
@@ -72,26 +98,45 @@ struct QueueFolderRow: View {
                 // says Submit is availability, not a recommendation, and
                 // the accent on this row belongs to opening the folder --
                 // see `Open` at the trailing edge.
-                Button("Submit all (\(group.count))", action: onSubmitAll)
-                    .tint(.primary)
-                    .help("""
-                    Submits every session waiting in \(group.label). Each is scrubbed \
-                    the same way a single Submit would be, and flagged sessions are \
-                    included, not held back.
-                    """)
+                //
+                // REMOVED WHEN NOTHING CAN BE SENT, NOT DISABLED. Disabling
+                // was ratified and then reversed: the argument for it --
+                // that a folder with no control reads as broken rather than
+                // finished -- was made before the shared withheld line
+                // existed. Now the folder says in words that nothing here
+                // can be sent, and a dead button beside that sentence has
+                // nothing left to communicate. An inert control with its own
+                // explanation sitting next to it is the #728 shape with the
+                // proof of redundancy attached.
+                //
+                // Whether it may be pressed is the shared table's answer,
+                // never a comparison of the count to zero here.
+                if offer.offersContribute {
+                    Button("Submit all (\(offer.count))", action: onSubmitAll)
+                        .tint(.primary)
+                        .help("""
+                        Submits every session in \(group.label) that can be sent. Each is \
+                        scrubbed the same way a single Submit would be, and flagged \
+                        sessions are included, not held back.
+                        """)
                 // Beside `Submit all`, never in front of it: answering the
                 // outcome question for a whole folder is a choice a
                 // contributor opts into, and the common path must not grow a
                 // step because this exists. Never `.tcPrimaryAction()` --
                 // one primary action per row, and it is the plain button.
-                Menu(VerdictCopy.submitAllAs) {
-                    ForEach(ContributorVerdict.allCases, id: \.rawValue) { option in
-                        Button(option.label) { onSubmitAllAs(option) }
+                    // Inside the same condition as the plain button. This
+                    // is a second route to the same call, and a live menu
+                    // beside a button that is not there would send nothing
+                    // and say nothing.
+                    Menu(VerdictCopy.submitAllAs) {
+                        ForEach(ContributorVerdict.allCases, id: \.rawValue) { option in
+                            Button(option.label) { onSubmitAllAs(option) }
+                        }
                     }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                    .help(VerdictCopy.submitAllAsTooltip)
                 }
-                .menuStyle(.borderlessButton)
-                .fixedSize()
-                .help(VerdictCopy.submitAllAsTooltip)
                 Spacer(minLength: TC.Space.m)
                 // Never `.tcPrimaryAction()`: it sits beside a control that
                 // uploads the very traces this removes, and two adjacent
@@ -105,6 +150,17 @@ struct QueueFolderRow: View {
                 Button("Open", action: onOpen)
                     .tcPrimaryAction()
                     .help("Opens \(group.label) to look at each session before deciding.")
+            }
+
+            // Drawn WHEREVER the button's count is short of the folder's,
+            // and never separated from it: a button that says fewer
+            // sessions than the row does, with nothing explaining the gap,
+            // is its own small dishonesty.
+            if let withheldNote = offer.withheldLine {
+                Text(withheldNote)
+                    .font(TC.Font_.footnote)
+                    .foregroundStyle(TC.inkSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .padding(TC.Space.l)

@@ -42,7 +42,24 @@ final class HarnessSurfaceTests: XCTestCase {
          "credential_failed":"C-FAILED","credential_cancelled":"C-CANCELLED",
          "credential_present":"C-PRESENT","credential_unknown":"C-UNKNOWN",
          "credential_unreported":"C-UNREPORTED",
-         "harness_needs_credential":"H-NEEDS-CREDENTIAL"}
+         "harness_needs_credential":"H-NEEDS-CREDENTIAL",
+         "eligibility_eligible":"E-ELIGIBLE",
+         "eligibility_ineligible_permanent":"E-PERMANENT",
+         "eligibility_ineligible_configuration":"E-CONFIGURATION",
+         "eligibility_unknown":"E-UNKNOWN",
+         "eligibility_reason_no_call":"R-NO-CALL",
+         "eligibility_reason_capture_off":"R-CAPTURE-OFF",
+         "eligibility_reason_digest_absent":"R-DIGEST-ABSENT",
+         "eligibility_reason_upstream_id_absent":"R-UPSTREAM-ID-ABSENT",
+         "eligibility_reason_digest_mismatch":"R-DIGEST-MISMATCH",
+         "eligibility_reason_reference_malformed":"R-REFERENCE-MALFORMED",
+         "eligibility_reason_bodies_unreadable":"R-BODIES-UNREADABLE",
+         "eligibility_reason_body_not_utf8":"R-BODY-NOT-UTF8",
+         "eligibility_reason_body_too_large":"R-BODY-TOO-LARGE",
+         "eligibility_reason_evidence_capture_off":"R-EVIDENCE-CAPTURE-OFF",
+         "eligibility_reason_marker_absent":"R-MARKER-ABSENT",
+         "eligibility_reason_request_malformed":"R-REQUEST-MALFORMED",
+         "eligibility_reason_receipt_unavailable":"R-RECEIPT-UNAVAILABLE"}
         """
 
     /// Decoded once, in `setUpWithError`, so a fixture that stops decoding
