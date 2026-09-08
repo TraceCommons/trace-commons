@@ -213,7 +213,7 @@ struct OnboardingWelcomeContent: View {
                 Commons is a shared pool that isn't.
                 """)
                 .font(CommunityBrand.Font_.lede)
-                .lineSpacing(TC.Font_.LineHeight.spacing(for: 18, 1.3))
+                .lineSpacing(CommunityBrand.Font_.ledeLineSpacing)
                 .tracking(-0.18)
                 .foregroundStyle(CommunityBrand.ink)
                 .fixedSize(horizontal: false, vertical: true)
@@ -326,7 +326,7 @@ struct OnboardingWelcomeContent: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .font(CommunityBrand.Font_.body)
-        .lineSpacing(TC.Font_.LineHeight.spacing(for: 13, 1.45))
+        .lineSpacing(CommunityBrand.Font_.bodyLineSpacing)
         .foregroundStyle(CommunityBrand.ink)
         .fixedSize(horizontal: false, vertical: true)
         .padding(.horizontal, TC.Space.s)

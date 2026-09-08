@@ -662,8 +662,13 @@ final class AppModel: ObservableObject {
 
     /// A one-line statement about something that DID happen, as opposed to
     /// `lastActionError`, which is about something that did not. Kept apart
-    /// so the two never have to be told from each other by their wording:
-    /// the Waiting screen renders this one in its own voice.
+    /// so the two never have to be told from each other by their wording.
+    ///
+    /// Nothing here clears it on the way to somewhere else -- only two
+    /// actions ever assign it, so unlike `lastActionError` it is not
+    /// overwritten by the next thing that goes wrong. Its dismiss control on
+    /// the Waiting screen is therefore the only way out of it, which is why
+    /// it has one: see `ActionMessageBanner`.
     @Published var lastActionNotice: String?
 
     private var daemon: TCDaemon?

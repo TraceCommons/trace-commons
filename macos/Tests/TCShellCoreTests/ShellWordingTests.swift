@@ -63,7 +63,7 @@ final class ShellWordingTests: XCTestCase {
         "TraceCommonsApp/SelfTest.swift": 15,
 
         // The SwiftUI views, which carry their own labels and help text.
-        "TraceCommonsApp/Views/ActionErrorBanner.swift": 2,
+        "TraceCommonsApp/Views/ActionMessageBanner.swift": 2,
         "TraceCommonsApp/Views/BrandMark.swift": 1,
         "TraceCommonsApp/Views/ConsentScopesView.swift": 7,
         "TraceCommonsApp/Views/CreditRecordView.swift": 9,

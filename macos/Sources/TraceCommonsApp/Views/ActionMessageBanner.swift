@@ -1,7 +1,14 @@
 import SwiftUI
 
-/// Displays the existing action error verbatim with a local dismiss control.
-/// Dismissal does not retry the action or clear the daemon's health state.
+/// Displays one of the model's one-line action messages verbatim with a local
+/// dismiss control. Dismissal does not retry the action or clear the daemon's
+/// health state.
+///
+/// Both messages render through this one view. `lastActionError` -- what did
+/// not happen -- got the control in PR #639; `lastActionNotice` -- what did --
+/// is the same shape and gets the same control rather than a second answer to
+/// the same question. The banner is deliberately neutral in wording so it can
+/// carry either: it says "message", never "error".
 ///
 /// Dismissal clears the published value rather than setting a suppression
 /// flag: `AppModel.perform` re-assigns `lastActionError` on every later
@@ -11,7 +18,14 @@ import SwiftUI
 /// fixed label reproducible by re-running the action. Refusals are not
 /// reachable here: witness and health refusals render through their own
 /// surfaces, so dismissal can never become the way out of one.
-struct ActionErrorBanner: View {
+///
+/// A notice carries slightly more than an error does -- the project-ignore
+/// reconciliation names a count the contributor cannot recover by repeating
+/// the action -- so dismissal there is a deliberate act on a sentence the
+/// person has in front of them, which is the same bargain every banner
+/// makes. It is strictly better than the alternative it replaces, which was
+/// a sentence that stayed on screen for the rest of the session.
+struct ActionMessageBanner: View {
     let text: String
     let onDismiss: () -> Void
 

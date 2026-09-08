@@ -591,8 +591,7 @@ struct SettingsContent: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             Text(PublicProfileCopy.footnote)
-                .font(TC.Font_.caption)
-                .lineSpacing(TC.Font_.LineHeight.spacing(for: 11, TC.Font_.LineHeight.caption))
+                .tcType(TC.Font_.captionText)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             profileCopyDefects
@@ -1543,7 +1542,7 @@ struct SettingsContent: View {
         VStack(alignment: .leading, spacing: TC.Space.sm) {
             TCSectionHeader(title: "Projects")
             if let error = model.lastActionError {
-                ActionErrorBanner(text: error) { model.lastActionError = nil }
+                ActionMessageBanner(text: error) { model.lastActionError = nil }
             }
             if model.projects.isEmpty {
                 Text("No projects seen yet.").font(TC.Font_.body).foregroundStyle(.secondary)
