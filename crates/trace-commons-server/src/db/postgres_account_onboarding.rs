@@ -6,6 +6,7 @@ use crate::account_onboarding::{
     NativeProvisioningPending, ProvisionedNearAccount, VerifiedNearProvisioning,
 };
 use crate::db::NewSession;
+use crate::near_account_identity::{NearAccountIdentity, random_near_tenant_id};
 use base64::Engine;
 
 fn refused() -> DatabaseError {
@@ -53,16 +54,111 @@ impl PgBackend {
         }
     }
 
+    /// Map a blind index to the tenant that already holds it, with no tenant
+    /// context.
+    ///
+    /// The lookup must happen before a tenant exists to scope it to, because
+    /// under the salted scheme the tenant is no longer a function of the
+    /// account: a returning contributor is recognised by their index and by
+    /// nothing else. This runs on the narrow `trace_login_resolver` pool, the
+    /// same role V30 introduced for the unauthenticated redeem path, and is
+    /// safe without a tenant predicate for the same reason: `anchor_hash` is
+    /// globally UNIQUE, so at most one row exists across all tenants. The
+    /// caller re-enters an RLS-scoped transaction on the resolved tenant before
+    /// any write. Do not widen this role's grant to a non-unique column.
+    async fn near_anchor_tenant(&self, anchor_hash: &str) -> Result<Option<String>, DatabaseError> {
+        let pool = self.login_resolver_pool.as_ref().ok_or_else(|| {
+            DatabaseError::Pool("missing-control: login-resolver-pool-unconfigured".into())
+        })?;
+        let client = pool.get().await?;
+        let row = client
+            .query_opt(
+                "SELECT tenant_id FROM trace_near_account_anchors WHERE anchor_hash = $1",
+                &[&anchor_hash],
+            )
+            .await?;
+        Ok(row.map(|r| r.get::<_, String>(0)))
+    }
+
     pub(super) async fn near_provision(
         &self,
         proof: VerifiedNearProvisioning,
         session: NewSession<'_>,
+        identity: &NearAccountIdentity,
     ) -> Result<ProvisionedNearAccount, DatabaseError> {
         if session.client_kind != crate::account_native_auth::NATIVE_SESSION_CLIENT_KIND {
             return Err(refused());
         }
-        let anchor_hash = format!("sha256:{}", hex::encode(proof.anchor_hash()));
-        let tenant = format!("near-{}", hex::encode(proof.anchor_hash()));
+        // The anchor is now HMAC(pepper, network || account_name) and the sealed
+        // name is the only copy of that name we keep. Both come out of one call
+        // so the seal is bound to the index it is stored beside; see
+        // `NearAccountIdentity::context`.
+        let (anchor_hash, sealed_account_name) = identity
+            .seal(proof.network(), proof.account_id())
+            .map_err(|_| refused())?;
+        let sealed_json = serde_json::to_value(&sealed_account_name).map_err(|_| refused())?;
+        let pepper_ref = identity.pepper_ref_hash().to_string();
+        let key_ref = identity.key_ref_hash();
+        // A returning contributor keeps their existing tenant; a new one gets a
+        // tenant drawn from the OS RNG that is a function of no public input.
+        //
+        // Two concurrent first-logins for the same account both resolve to no
+        // tenant and both mint one. The advisory lock inside the transaction
+        // serializes them on the anchor, so the loser's `ON CONFLICT DO NOTHING`
+        // claims nothing, rolls its whole transaction back -- minted tenant
+        // included -- and reports the anchor as taken. One retry then resolves
+        // the winner's tenant and both requests land on the same account, which
+        // is the behaviour the unsalted derivation got for free by giving both
+        // racers the same tenant id. Bounded at one retry: a second failure to
+        // resolve means something other than a race.
+        let mut tenant = match self.near_anchor_tenant(&anchor_hash).await? {
+            Some(existing) => existing,
+            None => random_near_tenant_id(),
+        };
+        for attempt in 0..2 {
+            match self
+                .near_provision_in_tenant(
+                    &proof,
+                    &session,
+                    &tenant,
+                    &anchor_hash,
+                    &sealed_json,
+                    &pepper_ref,
+                    &key_ref,
+                )
+                .await?
+            {
+                Some(provisioned) => return Ok(provisioned),
+                None if attempt == 0 => {
+                    tenant = self
+                        .near_anchor_tenant(&anchor_hash)
+                        .await?
+                        .ok_or_else(refused)?;
+                }
+                None => return Err(refused()),
+            }
+        }
+        Err(refused())
+    }
+
+    /// One provisioning attempt against a decided tenant.
+    ///
+    /// `Ok(None)` means the anchor was claimed by a different tenant while this
+    /// transaction was waiting on the advisory lock; everything this attempt
+    /// wrote, including the tenant row it minted, is rolled back by dropping the
+    /// transaction unread. Every other failure is an error, not a retry.
+    #[allow(clippy::too_many_arguments)]
+    async fn near_provision_in_tenant(
+        &self,
+        proof: &VerifiedNearProvisioning,
+        session: &NewSession<'_>,
+        tenant: &str,
+        anchor_hash: &str,
+        sealed_json: &serde_json::Value,
+        pepper_ref: &str,
+        key_ref: &str,
+    ) -> Result<Option<ProvisionedNearAccount>, DatabaseError> {
+        let tenant = tenant.to_string();
         let device = trace_commons_protocol::onboarding::device_key_id_from_public_key_bytes(
             proof.device_public_key(),
         );
@@ -103,7 +199,14 @@ impl PgBackend {
                 &[&tenant, &id],
             )
             .await?;
-            tx.execute("INSERT INTO trace_near_account_anchors(tenant_id,anchor_hash,account_id) VALUES($1,$2,$3)", &[&tenant,&anchor_hash,&id]).await?;
+            // ON CONFLICT on the globally UNIQUE anchor rather than a bare
+            // INSERT: a bare insert would abort the transaction with an error
+            // indistinguishable from a real failure, and this case is a race
+            // with a legitimate concurrent first-login, not a fault.
+            let claimed = tx.execute("INSERT INTO trace_near_account_anchors(tenant_id,anchor_hash,account_id,sealed_account_name,index_pepper_ref,account_name_key_ref) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT (anchor_hash) DO NOTHING", &[&tenant,&anchor_hash,&id,&sealed_json,&pepper_ref,&key_ref]).await?;
+            if claimed == 0 {
+                return Ok(None);
+            }
             id
         };
         // Never move an existing key from another account, revive revocations,
@@ -118,12 +221,12 @@ impl PgBackend {
         tx.execute("INSERT INTO trace_sessions(tenant_id,session_id,account_id,token_hash,client_kind,expires_at) VALUES($1,$2,$3,$4,'native',$5)", &[&tenant,&Uuid::new_v4(),&account,&session.token_hash,&session.expires_at]).await?;
         tx.execute("INSERT INTO trace_account_audit(tenant_id,action,actor_ref,outcome,safe_metadata) VALUES($1,'near_account_provisioned',$2,'success',$3)", &[&tenant,&principal,&serde_json::json!({"identity":"near","admission":"not_granted"})]).await?;
         tx.commit().await?;
-        Ok(ProvisionedNearAccount {
+        Ok(Some(ProvisionedNearAccount {
             tenant_id: tenant,
             account_id: account,
             device_key_id: device,
-            anchor_hash,
-        })
+            anchor_hash: anchor_hash.to_string(),
+        }))
     }
 
     pub(super) async fn near_anchor_for_principal(

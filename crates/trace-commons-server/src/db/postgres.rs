@@ -1223,6 +1223,16 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "onboarding_retention",
         include_str!("../../../../migrations/V60__onboarding_retention.sql"),
     ),
+    // V61 salts the NEAR account anchor (#716): the anchor becomes a peppered
+    // blind index, the tenant id becomes random, and the account name is stored
+    // sealed so the pepper can be rotated. It refuses outright if pre-salting
+    // anchor rows exist, because their account names were never stored and the
+    // new index cannot be computed for them.
+    (
+        61,
+        "near_account_anchor_salting",
+        include_str!("../../../../migrations/V61__near_account_anchor_salting.sql"),
+    ),
 ];
 
 #[async_trait]
@@ -2980,8 +2990,9 @@ impl Database for PgBackend {
         &self,
         proof: crate::account_onboarding::VerifiedNearProvisioning,
         session: crate::db::NewSession<'_>,
+        identity: &crate::near_account_identity::NearAccountIdentity,
     ) -> Result<crate::account_onboarding::ProvisionedNearAccount, DatabaseError> {
-        self.near_provision(proof, session).await
+        self.near_provision(proof, session, identity).await
     }
     async fn get_near_provisioned_anchor(
         &self,

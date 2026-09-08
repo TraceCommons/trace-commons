@@ -80,6 +80,9 @@ use trace_commons_server::driver_liveness::{
     DriverFailureClass, DriverLivenessRegistry, DriverTickOutcome, LogAction,
 };
 use trace_commons_server::error::DatabaseError;
+use trace_commons_server::near_account_identity::{
+    NearAccountIdentity, TRACE_COMMONS_NEAR_ACCOUNT_INDEX_PEPPER,
+};
 use trace_commons_server::near_attestation::client::{
     API_KEY_CONTROL as NEAR_ATTESTATION_API_KEY_CONTROL,
     AttestationClient as NearAttestationClient,
@@ -1497,6 +1500,10 @@ struct AppState {
     near_provisioning_enabled: bool,
     near_provisioning_admission_ready: bool,
     near_provisioning_public_origin: Option<String>,
+    /// Pepper + account-name key for wallet provisioning. `None` only when
+    /// provisioning is disabled; when it is enabled, boot fails rather than
+    /// leaving this unset, so no request path can find it missing and improvise.
+    near_account_identity: Option<Arc<NearAccountIdentity>>,
     root: PathBuf,
     /// #438: per-driver liveness, so a background loop that has been failing
     /// for days is visible as such instead of only as a repeating WARN.
@@ -4154,6 +4161,7 @@ impl AppState {
             .ok(),
             near_provisioning_enabled: std::env::var("TRACE_COMMONS_NEAR_PROVISIONING_ENABLED")
                 .is_ok_and(|v| v == "true"),
+            near_account_identity: build_near_account_identity_from_env().await?,
             account_native_requests,
             account_native_codes,
             account_near_config,
@@ -7254,6 +7262,49 @@ async fn build_gcp_cloud_kms_provider(
     anyhow::bail!(
         "KekProviderUnavailable: gcp_cloud_kms wrapper requires the gcp-kms cargo feature"
     )
+}
+
+/// KEK master key used to seal NEAR account names. Deliberately its own key
+/// rather than the artifact-store or gate-service master key: the sealed names
+/// are the one thing rotation must read back, and giving them a separate key
+/// means the account-name key can be rotated without re-wrapping every stored
+/// artifact DEK.
+const TRACE_COMMONS_NEAR_ACCOUNT_NAME_KEK_KEY: &str = "TRACE_COMMONS_NEAR_ACCOUNT_NAME_KEK_KEY";
+
+/// Build the wallet-provisioning identity controls, or refuse to boot.
+///
+/// Returning `None` when provisioning is disabled is not a fallback: nothing
+/// downstream will call for an identity, because every provisioning route is
+/// already gated on `near_provisioning_enabled`. When provisioning IS enabled
+/// and either control is absent, this is an error and the process does not
+/// start. Degrading to an unsalted anchor here would silently restore the
+/// offline-enumeration defect on a deployment whose operator believed they had
+/// turned the feature on correctly; a boot failure naming the missing control
+/// is the only outcome that cannot be mistaken for success.
+async fn build_near_account_identity_from_env() -> anyhow::Result<Option<Arc<NearAccountIdentity>>>
+{
+    if !std::env::var("TRACE_COMMONS_NEAR_PROVISIONING_ENABLED").is_ok_and(|v| v == "true") {
+        return Ok(None);
+    }
+    let kek: Option<Arc<dyn KmsKeyWrapper>> =
+        match std::env::var(TRACE_COMMONS_NEAR_ACCOUNT_NAME_KEK_KEY) {
+            Ok(key) => {
+                let built: Arc<dyn KmsKeyWrapper + Send + Sync> =
+                    Arc::from(build_selected_kek_wrapper_async(SecretString::from(key)).await?);
+                Some(built)
+            }
+            Err(_) => None,
+        };
+    let identity = NearAccountIdentity::from_parts(
+        std::env::var(TRACE_COMMONS_NEAR_ACCOUNT_INDEX_PEPPER)
+            .ok()
+            .as_deref(),
+        kek,
+    )
+    // The label names the control and nothing else -- no key reference, no
+    // account, no tenant -- so this is safe to print at boot.
+    .map_err(|missing| anyhow::anyhow!("missing-control: {}", missing.label()))?;
+    Ok(Some(Arc::new(identity)))
 }
 
 fn build_sync_provider(
