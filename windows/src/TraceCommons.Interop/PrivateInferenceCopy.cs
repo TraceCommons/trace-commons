@@ -228,6 +228,99 @@ public sealed record PrivateInferenceCopy
     [JsonPropertyName("harness_plan_no_config_path")]
     public string HarnessPlanNoConfigPath { get; init; } = string.Empty;
 
+    // ---------------------------------------------------------------------
+    // The NEAR AI credential.
+    //
+    // A key minted at a third party and kept on this machine. NOTHING HERE
+    // CARRIES A HOLE FOR ONE: no sentence names a key, a prefix, an id or an
+    // account, and no shell may add a field that would.
+    // ---------------------------------------------------------------------
+
+    [JsonPropertyName("credential_title")]
+    public string CredentialTitle { get; init; } = string.Empty;
+
+    [JsonPropertyName("credential_what")]
+    public string CredentialWhat { get; init; } = string.Empty;
+
+    /// <summary>
+    /// What obtaining one costs, in all three of its consequences: a browser
+    /// opens, the contributor signs in with a company that is not this app,
+    /// and a key is minted and kept here.
+    /// </summary>
+    /// <remarks>
+    /// The counterpart of <see cref="OfferExposure"/> and held to the same
+    /// rule: it must be on screen wherever the obtain action is offered.
+    /// <c>NearAiCredentialSurface.ActionPreamble</c> is what pairs them, so
+    /// no shell decides for itself that a button may appear without it.
+    /// </remarks>
+    [JsonPropertyName("credential_cost")]
+    public string CredentialCost { get; init; } = string.Empty;
+
+    [JsonPropertyName("credential_obtain")]
+    public string CredentialObtain { get; init; } = string.Empty;
+
+    [JsonPropertyName("credential_cancel")]
+    public string CredentialCancel { get; init; } = string.Empty;
+
+    [JsonPropertyName("credential_forget")]
+    public string CredentialForget { get; init; } = string.Empty;
+
+    /// <summary>
+    /// That forgetting is local: the key stays valid at the service until the
+    /// contributor removes it in their own account there. Drawn wherever the
+    /// forget action is, for the same reason the cost sentence is drawn
+    /// wherever the obtain action is.
+    /// </summary>
+    [JsonPropertyName("credential_forget_explains")]
+    public string CredentialForgetExplains { get; init; } = string.Empty;
+
+    [JsonPropertyName("credential_absent")]
+    public string CredentialAbsent { get; init; } = string.Empty;
+
+    [JsonPropertyName("credential_obtaining")]
+    public string CredentialObtaining { get; init; } = string.Empty;
+
+    [JsonPropertyName("credential_failed")]
+    public string CredentialFailed { get; init; } = string.Empty;
+
+    [JsonPropertyName("credential_cancelled")]
+    public string CredentialCancelled { get; init; } = string.Empty;
+
+    [JsonPropertyName("credential_present")]
+    public string CredentialPresent { get; init; } = string.Empty;
+
+    /// <summary>
+    /// A state label this build has never heard of. It says the state could
+    /// not be read, and it must never degrade to
+    /// <see cref="CredentialAbsent"/>: that is a claim about what this
+    /// machine holds, and inventing it is how a contributor is invited to
+    /// sign in a second time.
+    /// </summary>
+    [JsonPropertyName("credential_unknown")]
+    public string CredentialUnknown { get; init; } = string.Empty;
+
+    /// <summary>
+    /// A daemon that does not answer the question at all. Distinct from
+    /// <see cref="CredentialUnknown"/> and, like it, not a claim that no key
+    /// is kept here.
+    /// </summary>
+    [JsonPropertyName("credential_unreported")]
+    public string CredentialUnreported { get; init; } = string.Empty;
+
+    /// <summary>
+    /// Why a connect control is not on offer: this app would host the
+    /// answering and holds no key.
+    /// </summary>
+    /// <remarks>
+    /// Drawn ONLY through <see cref="HarnessSurface.CredentialNotice"/> and
+    /// never on this shell's own reading of a boolean. The unread case is a
+    /// third fact rather than a false one: a daemon that predates the gate
+    /// connects tools without a sign-in, and telling somebody otherwise would
+    /// be false.
+    /// </remarks>
+    [JsonPropertyName("harness_needs_credential")]
+    public string HarnessNeedsCredential { get; init; } = string.Empty;
+
     /// <summary>Every sentence for the complete-payload check, not a rendering order.</summary>
     public string[] Sentences =>
         new[]
@@ -280,5 +373,20 @@ public sealed record PrivateInferenceCopy
             HarnessPlanNothingToChange,
             HarnessPlanEntryUnusable,
             HarnessPlanNoConfigPath,
+            CredentialTitle,
+            CredentialWhat,
+            CredentialCost,
+            CredentialObtain,
+            CredentialCancel,
+            CredentialForget,
+            CredentialForgetExplains,
+            CredentialAbsent,
+            CredentialObtaining,
+            CredentialFailed,
+            CredentialCancelled,
+            CredentialPresent,
+            CredentialUnknown,
+            CredentialUnreported,
+            HarnessNeedsCredential,
         };
 }
