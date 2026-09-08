@@ -17,3 +17,5 @@ pub mod privacy_filter_self_hosted;
     feature = "self-hosted-privacy-filter"
 ))]
 pub(crate) mod privacy_filter_spans;
+
+pub mod evidence_import;

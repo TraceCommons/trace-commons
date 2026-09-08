@@ -517,6 +517,39 @@ pub fn build_preview_raw_contribution(
     )
 }
 
+/// Rebuild preview-only identity, consent and metadata; imported claims are
+/// never enrollment, contributor feedback, or approval. Only trace events and
+/// the application's syntactic source label survive this normalization.
+pub(crate) fn build_import_preview_raw(
+    raw: &RawTraceContribution,
+    session_hash: &str,
+) -> RawTraceContribution {
+    let transcript = SessionTranscript {
+        source: raw
+            .ironclaw
+            .feature_flags
+            .get("agent")
+            .cloned()
+            .unwrap_or_default()
+            .into(),
+        session_hash: session_hash.into(),
+        ..Default::default()
+    };
+    let mut preview = build_preview_raw_contribution(
+        &transcript,
+        &crate::commands::unenrolled_preview_config(),
+        raw.created_at,
+    );
+    preview.events = raw.events.clone();
+    let presence = declared_content_presence(&preview.events);
+    preview.consent.message_text_included = presence.message_text;
+    preview.consent.tool_payloads_included = presence.tool_payloads;
+    preview.consent.routing_metadata_included = presence.routing_metadata;
+    preview.replay.replay_notes =
+        vec!["Imported local preview; execution and replay claims are unverified.".into()];
+    preview
+}
+
 fn build_raw_contribution_with_id(
     t: &SessionTranscript,
     cfg: &ContributorConfig,

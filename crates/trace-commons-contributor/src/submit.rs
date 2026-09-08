@@ -908,20 +908,22 @@ impl<'a> SubmitContext<'a> {
                     // Absent means the witness path is not entered at all, and
                     // this is byte for byte what it was before the feature
                     // existed.
-                    None => match redact_to_envelope(&redactor, raw).await {
-                        Ok(e) => {
-                            // Recorded, rather than left at whatever the
-                            // previous submission set: a shell asking "what
-                            // happened last time" must be told that the last
-                            // submission redacted locally, not handed a stale
-                            // certificate from before the witness was cleared.
-                            record_last_result(WitnessLastResult::LocalRedaction);
-                            e
+                    None => {
+                        match checked_local_redaction(&redactor, raw, self.canary_checked).await {
+                            Ok(e) => {
+                                // Recorded, rather than left at whatever the
+                                // previous submission set: a shell asking "what
+                                // happened last time" must be told that the last
+                                // submission redacted locally, not handed a stale
+                                // certificate from before the witness was cleared.
+                                record_last_result(WitnessLastResult::LocalRedaction);
+                                e
+                            }
+                            Err(label) => {
+                                return Ok(refused(label, &transcript.session_hash));
+                            }
                         }
-                        Err(_) => {
-                            return Ok(refused("redaction-failed", &transcript.session_hash));
-                        }
-                    },
+                    }
                     Some(settings) => {
                         // The pin is judged BEFORE the mint, which is before
                         // anything reaches the network. An unpinned client
@@ -1562,6 +1564,37 @@ pub async fn emit_scoped_attestation(
         tracing::warn!("score attestation not written: attestation-write-failed");
     }
     Some(attestation)
+}
+
+/// Shared local preview/submit redaction, including post-redaction checks.
+/// A submit batch may have already checked this same redactor; standalone
+/// previews always pass false. No state, credentials, or network are opened.
+pub(crate) async fn checked_local_redaction(
+    redactor: &trace_commons_protocol::trace_contribution::DeterministicTraceRedactor,
+    raw: RawTraceContribution,
+    canary_checked: bool,
+) -> std::result::Result<TraceContributionEnvelope, &'static str> {
+    if !canary_checked {
+        canary_self_test_async(redactor)
+            .await
+            .map_err(|_| PRECONDITION_CANARY_FAILED)?;
+    }
+    let envelope = redact_to_envelope(redactor, raw)
+        .await
+        .map_err(|_| "redaction-failed")?;
+    validate_local_envelope(redactor, &envelope)?;
+    Ok(envelope)
+}
+
+pub(crate) fn validate_local_envelope(
+    redactor: &trace_commons_protocol::trace_contribution::DeterministicTraceRedactor,
+    envelope: &TraceContributionEnvelope,
+) -> std::result::Result<(), &'static str> {
+    envelope_size_ok(envelope).map_err(|_| "session-too-large")?;
+    if envelope_has_residual_secret(redactor, envelope).map_err(|_| "secret-scan-failed")? {
+        return Err("secret-leak-detected");
+    }
+    Ok(())
 }
 
 /// Re-scan a finished envelope for a residual secret shape. Returns

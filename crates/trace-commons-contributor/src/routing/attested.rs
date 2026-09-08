@@ -217,6 +217,20 @@ impl std::fmt::Debug for AttestedCall {
 }
 
 impl AttestedCall {
+    /// Import only after bounded exact-byte validation; no proxy join is needed.
+    pub(crate) fn from_import(
+        call: &trace_commons_protocol::evidence_import::ImportedInference,
+    ) -> Result<Self, trace_commons_protocol::evidence_import::ImportError> {
+        call.validate()?;
+        Ok(Self {
+            request_body: call.request_body.clone(),
+            response_body: call.response_body.clone(),
+            upstream_id: call.upstream_id.clone(),
+            served_model: call.served_model.clone(),
+            status: call.status,
+            timestamp: call.timestamp,
+        })
+    }
     /// The request body exactly as it went upstream.
     #[must_use]
     pub fn request_body(&self) -> &str {
