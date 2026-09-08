@@ -45,13 +45,29 @@ final class PrivateInferenceSurfaceTests: XCTestCase {
          "harness_needs_credential":"H-NEEDS-CREDENTIAL"}
         """
 
-    private func copy() -> PrivateInferenceCopy {
-        guard let copy = PrivateInferenceCopy.decode(fromJSON: payload) else {
-            XCTFail("the fixture payload must decode")
-            fatalError("unreachable")
-        }
-        return copy
+    /// Decoded once, in `setUpWithError`, so a fixture that stops decoding
+    /// fails THIS TEST and lets the rest of the bundle run.
+    ///
+    /// It used to be `XCTFail` followed by `fatalError("unreachable")`, which
+    /// aborted the whole XCTest process at the first fixture failure: every
+    /// remaining test in every target simply never ran, no total was printed,
+    /// and the log carried one error line no matter how much was broken. A
+    /// red `macOS app tests` job was unreadable for that reason -- it looked
+    /// far emptier than a normal failing run, and its failure count was
+    /// always about one.
+    ///
+    /// A throw from `setUpWithError` is reported against each test in this
+    /// class in turn, which is honest: every one of them needs this payload.
+    private var decodedCopy: PrivateInferenceCopy!
+
+    override func setUpWithError() throws {
+        try super.setUpWithError()
+        decodedCopy = try XCTUnwrap(
+            PrivateInferenceCopy.decode(fromJSON: payload),
+            "the fixture payload must decode")
     }
+
+    private func copy() -> PrivateInferenceCopy { decodedCopy }
 
     private func calls(
         line: @escaping @Sendable (String) -> String? = { "LINE:\($0)" },
