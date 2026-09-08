@@ -617,6 +617,57 @@ char*       tc_private_inference_state_line(const char* state);
  */
 int32_t     tc_private_inference_state_tone(const char* state);
 
+/* What a shell may offer for one credential state.
+ *
+ * A range of its own, disjoint from every tone range for the reason those
+ * ranges are disjoint from each other: a shell that cross-wired an action onto
+ * a tone mapper would draw a button from a colour. There is no failure value.
+ * NONE is the safe direction, and not by analogy: OBTAIN opens a browser and
+ * mints a key at a third party, so drawing it for a state nobody could read is
+ * how a contributor ends up holding a second key.
+ */
+#define TC_CREDENTIAL_ACTION_NONE   30
+#define TC_CREDENTIAL_ACTION_OBTAIN 31
+#define TC_CREDENTIAL_ACTION_CANCEL 32
+#define TC_CREDENTIAL_ACTION_FORGET 33
+
+/* The sentence for one near_ai_credential_status state label.
+ *
+ * state is that method's state field: "absent", "obtaining", "failed",
+ * "cancelled" or "present".
+ *
+ * An empty, NULL or non-UTF-8 label reports that this daemon does not answer
+ * the question. An unfamiliar nonempty label reports that the state could not
+ * be read. NEITHER SAYS THAT NO KEY IS KEPT HERE: that is a claim about the
+ * machine, and a shell that made it up would invite a second sign-in.
+ *
+ * Returns an owned string; free it with tc_string_free. NULL only on a caught
+ * panic.
+ */
+char*       tc_near_ai_credential_state_line(const char* state);
+
+/* How firmly the sentence tc_near_ai_credential_state_line returned reads: one
+ * of the TC_PRIVATE_INFERENCE_TONE_* values.
+ *
+ * The same five values as the listener state row, because a shell maps those
+ * onto colours once and a second enum with the same five meanings is a second
+ * mapping to keep in agreement.
+ *
+ * "present" is the only label that answers _CLEAR. Everything else --
+ * including a label this build has never heard of, a NULL or non-UTF-8 state,
+ * and a caught panic -- answers TC_PRIVATE_INFERENCE_TONE_NEUTRAL.
+ */
+int32_t     tc_near_ai_credential_state_tone(const char* state);
+
+/* The one action a shell may offer for a credential state: one of the
+ * TC_CREDENTIAL_ACTION_* values.
+ *
+ * THE BRANCH TABLE CROSSES, NOT ONLY THE WORDS. Three shells each deciding
+ * which button belongs beside which state is three chances to draw "Sign in"
+ * next to a key that is already here, or next to a state nobody could read.
+ */
+int32_t     tc_near_ai_credential_action(const char* state);
+
 /* The reported local port, assembled without a readiness claim.
  *
  * port is private_inference_state's port field. A value outside 1..65535 --

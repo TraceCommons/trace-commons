@@ -250,6 +250,10 @@ pub const METHODS: &[&str] = &[
     "near_account_start",
     "near_account_status",
     "near_account_cancel",
+    "near_ai_credential_start",
+    "near_ai_credential_status",
+    "near_ai_credential_cancel",
+    "near_ai_credential_forget",
     "get_public_profile",
     "get_settings",
     "harness_commit",
@@ -1571,6 +1575,10 @@ const ASYNC_ONLY_METHODS: &[(&str, &str)] = &[
     ),
     ("near_account_start", "near-signup-requires-async"),
     ("near_account_capabilities", "near-signup-requires-async"),
+    (
+        "near_ai_credential_start",
+        "near-ai-credential-requires-async",
+    ),
     ("native_wallet_flow", "near-signup-requires-async"),
     ("witness_preview_request", "witness-review-requires-async"),
     ("preview_body", "preview-body-requires-async"),
@@ -6577,9 +6585,17 @@ mod tests {
     #[test]
     fn the_credential_ceremony_is_dispatched_and_forgetting_claims_nothing_extra() {
         let s = shared();
-        // An attempt nobody started is unknown, not an empty success.
+        // A machine with nothing on it says so, in one word, to a caller
+        // that names no attempt. It refused this once; a shell left to infer
+        // "no key here" from an error is a shell that eventually infers it
+        // wrongly and offers a second sign-in.
         let r = handle_request(&s, &req("near_ai_credential_status", serde_json::json!({})));
-        assert_eq!(r.error.unwrap().message, "near_ai_credential_unknown");
+        let body = r.result.expect("the resting state is not a secret");
+        assert_eq!(body["state"], "absent");
+        // And it still names no attempt to a caller that could not name one.
+        assert!(body.get("attempt_id").is_none(), "{body}");
+        assert!(body.get("attempt_status").is_none(), "{body}");
+        // Cancelling, which acts rather than reads, still refuses.
         let r = handle_request(
             &s,
             &req(
@@ -6599,6 +6615,15 @@ mod tests {
                 minted_at: chrono::Utc::now(),
             });
         s.settings.lock().unwrap().save(&s.store).unwrap();
+        // A stored key reads as present, and the state says so without the
+        // key, the prefix or an account of any kind crossing the socket.
+        let r = handle_request(&s, &req("near_ai_credential_status", serde_json::json!({})));
+        let body = r.result.unwrap();
+        assert_eq!(body["state"], "present");
+        assert!(
+            !serde_json::to_string(&body).unwrap().contains("sk-super"),
+            "{body}"
+        );
         let r = handle_request(&s, &req("near_ai_credential_forget", serde_json::json!({})));
         let body = r.result.unwrap();
         assert_eq!(body["removed"], true);
@@ -8513,7 +8538,7 @@ mod tests {
     #[test]
     fn every_async_only_method_is_advertised_and_refused_synchronously() {
         let s = shared();
-        assert_eq!(ASYNC_ONLY_METHODS.len(), 15);
+        assert_eq!(ASYNC_ONLY_METHODS.len(), 16);
         let mut seen = std::collections::BTreeSet::new();
         for &(method, label) in ASYNC_ONLY_METHODS {
             assert!(

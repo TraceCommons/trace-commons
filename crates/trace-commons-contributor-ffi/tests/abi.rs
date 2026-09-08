@@ -9,21 +9,23 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use trace_commons_contributor_ffi::{
-    TC_HARNESS_PLAN_CHANGES, TC_HARNESS_PLAN_ENTRY_UNUSABLE, TC_HARNESS_PLAN_NO_CONFIG_PATH,
-    TC_HARNESS_PLAN_NOOP, TC_HARNESS_PLAN_NOT_INSTALLED, TC_HARNESS_PLAN_UNKNOWN,
-    TC_HARNESS_PLAN_UNPARSEABLE, TC_HARNESS_STATE_ACTIVITY_SHARED, TC_HARNESS_STATE_ANSWERING,
-    TC_HARNESS_STATE_CONNECTED_NO_CALLS, TC_HARNESS_STATE_NOT_CONNECTED, TC_HARNESS_STATE_UNKNOWN,
-    TC_PRIVATE_INFERENCE_TONE_ATTENTION, TC_PRIVATE_INFERENCE_TONE_CLEAR,
-    TC_PRIVATE_INFERENCE_TONE_HELD, TC_PRIVATE_INFERENCE_TONE_NEUTRAL,
-    TC_PRIVATE_INFERENCE_TONE_REFUSED, TC_WITNESS_STATE_ABSENT, TC_WITNESS_STATE_NOT_ENROLLED,
-    TC_WITNESS_STATE_PINNED, TC_WITNESS_STATE_REFUSING_INFERENCE_RECEIPTS_MISSING,
-    TC_WITNESS_STATE_REFUSING_PIN_MALFORMED, TC_WITNESS_STATE_REFUSING_UNPINNED,
-    TC_WITNESS_STATE_UNREADABLE, TC_WITNESS_TONE_ATTENTION, TC_WITNESS_TONE_CLEAR,
-    TC_WITNESS_TONE_HELD, TC_WITNESS_TONE_NEUTRAL, TC_WITNESS_TONE_REFUSED, tc_call,
-    tc_consent_copy, tc_consent_gate_help, tc_daemon_start, tc_daemon_start_with_settings,
+    TC_CREDENTIAL_ACTION_CANCEL, TC_CREDENTIAL_ACTION_FORGET, TC_CREDENTIAL_ACTION_NONE,
+    TC_CREDENTIAL_ACTION_OBTAIN, TC_HARNESS_PLAN_CHANGES, TC_HARNESS_PLAN_ENTRY_UNUSABLE,
+    TC_HARNESS_PLAN_NO_CONFIG_PATH, TC_HARNESS_PLAN_NOOP, TC_HARNESS_PLAN_NOT_INSTALLED,
+    TC_HARNESS_PLAN_UNKNOWN, TC_HARNESS_PLAN_UNPARSEABLE, TC_HARNESS_STATE_ACTIVITY_SHARED,
+    TC_HARNESS_STATE_ANSWERING, TC_HARNESS_STATE_CONNECTED_NO_CALLS,
+    TC_HARNESS_STATE_NOT_CONNECTED, TC_HARNESS_STATE_UNKNOWN, TC_PRIVATE_INFERENCE_TONE_ATTENTION,
+    TC_PRIVATE_INFERENCE_TONE_CLEAR, TC_PRIVATE_INFERENCE_TONE_HELD,
+    TC_PRIVATE_INFERENCE_TONE_NEUTRAL, TC_PRIVATE_INFERENCE_TONE_REFUSED, TC_WITNESS_STATE_ABSENT,
+    TC_WITNESS_STATE_NOT_ENROLLED, TC_WITNESS_STATE_PINNED,
+    TC_WITNESS_STATE_REFUSING_INFERENCE_RECEIPTS_MISSING, TC_WITNESS_STATE_REFUSING_PIN_MALFORMED,
+    TC_WITNESS_STATE_REFUSING_UNPINNED, TC_WITNESS_STATE_UNREADABLE, TC_WITNESS_TONE_ATTENTION,
+    TC_WITNESS_TONE_CLEAR, TC_WITNESS_TONE_HELD, TC_WITNESS_TONE_NEUTRAL, TC_WITNESS_TONE_REFUSED,
+    tc_call, tc_consent_copy, tc_consent_gate_help, tc_daemon_start, tc_daemon_start_with_settings,
     tc_daemon_stop, tc_discover_sources, tc_handle, tc_handle_free, tc_invite_issuer_host,
-    tc_last_error, tc_preview, tc_preview_body, tc_preview_open, tc_preview_search,
-    tc_preview_summary_json, tc_preview_turns_json, tc_private_inference_copy,
+    tc_last_error, tc_near_ai_credential_action, tc_near_ai_credential_state_line,
+    tc_near_ai_credential_state_tone, tc_preview, tc_preview_body, tc_preview_open,
+    tc_preview_search, tc_preview_summary_json, tc_preview_turns_json, tc_private_inference_copy,
     tc_private_inference_quit_needs_notice, tc_private_inference_serving_line,
     tc_private_inference_should_offer, tc_private_inference_state_line,
     tc_private_inference_state_tone, tc_routing_copy, tc_routing_discovery_line,
@@ -3492,6 +3494,107 @@ fn the_private_inference_branch_tables_cross_the_abi() {
         take_owned(unsafe { tc_private_inference_state_line(std::ptr::null()) }),
         copy::STATE_UNREPORTED
     );
+}
+
+/// The credential row crosses whole: the sentence, the tone and the button.
+///
+/// Pinned against the Rust tables rather than against literals, so this
+/// cannot become a second place any of the three is decided.
+#[test]
+fn the_credential_state_crosses_with_its_tone_and_its_action() {
+    use trace_commons_contributor::private_inference_copy as copy;
+    let line = |state: &str| {
+        let state = cstr_str(state);
+        take_owned(unsafe { tc_near_ai_credential_state_line(state.as_ptr()) })
+    };
+    let action = |state: &str| {
+        let state = cstr_str(state);
+        unsafe { tc_near_ai_credential_action(state.as_ptr()) }
+    };
+    let tone = |state: &str| {
+        let state = cstr_str(state);
+        unsafe { tc_near_ai_credential_state_tone(state.as_ptr()) }
+    };
+
+    for state in [
+        "absent",
+        "obtaining",
+        "failed",
+        "cancelled",
+        "present",
+        "",
+        "PRESENT",
+        "a_state_from_a_later_daemon",
+    ] {
+        assert_eq!(line(state), copy::credential_state_line(state), "{state:?}");
+        let expected = match copy::credential_action(state) {
+            copy::CredentialAction::None => TC_CREDENTIAL_ACTION_NONE,
+            copy::CredentialAction::Obtain => TC_CREDENTIAL_ACTION_OBTAIN,
+            copy::CredentialAction::Cancel => TC_CREDENTIAL_ACTION_CANCEL,
+            copy::CredentialAction::Forget => TC_CREDENTIAL_ACTION_FORGET,
+        };
+        assert_eq!(action(state), expected, "{state:?}");
+    }
+
+    // A key that is here is the only settled state, and the only one whose
+    // button removes rather than mints.
+    assert_eq!(tone("present"), TC_PRIVATE_INFERENCE_TONE_CLEAR);
+    assert_eq!(action("present"), TC_CREDENTIAL_ACTION_FORGET);
+    assert_eq!(tone("obtaining"), TC_PRIVATE_INFERENCE_TONE_HELD);
+
+    // Nothing read offers the button that opens a browser, and no pointer at
+    // all is the same answer.
+    for unread in ["", "a_state_from_a_later_daemon"] {
+        assert_eq!(action(unread), TC_CREDENTIAL_ACTION_NONE, "{unread:?}");
+        assert_ne!(line(unread), copy::CREDENTIAL_ABSENT, "{unread:?}");
+        assert_ne!(line(unread), copy::CREDENTIAL_PRESENT, "{unread:?}");
+        assert_ne!(tone(unread), TC_PRIVATE_INFERENCE_TONE_CLEAR, "{unread:?}");
+    }
+    assert_eq!(
+        unsafe { tc_near_ai_credential_action(std::ptr::null()) },
+        TC_CREDENTIAL_ACTION_NONE
+    );
+    assert_eq!(
+        take_owned(unsafe { tc_near_ai_credential_state_line(std::ptr::null()) }),
+        copy::CREDENTIAL_UNREPORTED
+    );
+    assert_eq!(
+        unsafe { tc_near_ai_credential_state_tone(std::ptr::null()) },
+        TC_PRIVATE_INFERENCE_TONE_NEUTRAL
+    );
+}
+
+/// The action numbering shares no number with any tone that crosses this ABI.
+#[test]
+fn the_credential_actions_share_no_number_with_a_tone() {
+    for action in [
+        TC_CREDENTIAL_ACTION_NONE,
+        TC_CREDENTIAL_ACTION_OBTAIN,
+        TC_CREDENTIAL_ACTION_CANCEL,
+        TC_CREDENTIAL_ACTION_FORGET,
+    ] {
+        for tone in [
+            TONE_NEUTRAL,
+            TONE_HELD,
+            TONE_CLEAR,
+            TONE_ATTENTION,
+            TC_WITNESS_TONE_NEUTRAL,
+            TC_WITNESS_TONE_HELD,
+            TC_WITNESS_TONE_CLEAR,
+            TC_WITNESS_TONE_ATTENTION,
+            TC_WITNESS_TONE_REFUSED,
+            TC_PRIVATE_INFERENCE_TONE_NEUTRAL,
+            TC_PRIVATE_INFERENCE_TONE_HELD,
+            TC_PRIVATE_INFERENCE_TONE_CLEAR,
+            TC_PRIVATE_INFERENCE_TONE_ATTENTION,
+            TC_PRIVATE_INFERENCE_TONE_REFUSED,
+        ] {
+            assert_ne!(
+                action, tone,
+                "an action and a tone sharing a number is a button drawn from a colour"
+            );
+        }
+    }
 }
 
 /// The tone numbering is disjoint from the two that already cross this ABI.

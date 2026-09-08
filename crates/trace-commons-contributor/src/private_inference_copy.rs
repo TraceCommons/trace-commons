@@ -20,6 +20,21 @@
 //! them is the kind of `switch` that has historically been written out again
 //! in Swift, in C# and in Rust, and then disagreed in silence.
 //!
+//! # The sign-in row
+//!
+//! The destination can also hold a sign-in of its own, obtained by the
+//! ceremony in [`crate::daemon::nearai_credential`], and its words are here
+//! for the same reason the rest are: one row, three shells. Its branch
+//! tables are [`credential_state_line`], [`credential_state_tone`] and
+//! [`credential_action`], and the third of those is the one that matters
+//! most -- it decides which BUTTON a state gets, and one of the buttons
+//! opens a browser and mints a key at a company that is not this app.
+//!
+//! Two rules govern it. Nothing on it ever renders a key, a prefix, an id or
+//! an account name. And a state that could not be read gets its own sentence
+//! and NO action, rather than degrading to "no key here" -- which would
+//! invite a contributor who already has one to mint a second.
+//!
 //! # The words this surface may not use
 //!
 //! Swept by `the_offer_surface_says_nothing_it_should_not`: no vendor name,
@@ -477,6 +492,22 @@ pub struct PrivateInferenceCopy {
     pub harness_plan_nothing_to_change: &'static str,
     pub harness_plan_entry_unusable: &'static str,
     pub harness_plan_no_config_path: &'static str,
+    pub credential_title: &'static str,
+    pub credential_what: &'static str,
+    pub credential_cost: &'static str,
+    pub credential_obtain: &'static str,
+    pub credential_cancel: &'static str,
+    pub credential_forget: &'static str,
+    pub credential_forget_explains: &'static str,
+    pub credential_absent: &'static str,
+    pub credential_obtaining: &'static str,
+    pub credential_failed: &'static str,
+    pub credential_cancelled: &'static str,
+    pub credential_present: &'static str,
+    /// [`CREDENTIAL_UNKNOWN`]. An unread state, never a stand-in for
+    /// [`CREDENTIAL_ABSENT`].
+    pub credential_unknown: &'static str,
+    pub credential_unreported: &'static str,
 }
 
 /// The sentence the settings card shows once the control has moved out of it.
@@ -827,6 +858,207 @@ pub fn harness_spend_line(micros: Option<u64>) -> String {
     )
 }
 
+/// The heading over the sign-in card on the destination.
+///
+/// Names the machine for the reason [`OFFER_TITLE`] does: what changes is
+/// what this computer holds, and that is the only part a contributor can go
+/// and check.
+pub const CREDENTIAL_TITLE: &str = "A Private AI sign-in on this computer";
+
+/// Why the card is there at all.
+///
+/// Stops at what is missing and what can be done about it. It does not say
+/// that calls fail without one -- they do not; they are answered using
+/// whatever accounts a contributor's tools already had, which is what
+/// [`STATE_RUNNING_ANSWERED_ELSEWHERE`] says on the state row above.
+pub const CREDENTIAL_WHAT: &str = "For Private AI to answer your calls, this computer needs a sign-in of \
+     its own. This app can get one and keep it here.";
+
+/// What getting one actually costs. **Required, not optional.**
+///
+/// The counterpart of [`OFFER_EXPOSURE`], and it exists for the same reason:
+/// a button that opens a browser, signs somebody in to a company that is not
+/// this app, and mints a key this app then keeps, is not one frictionless
+/// tap, and a surface that draws it as one has decided on the contributor's
+/// behalf.
+///
+/// The last clause is the part a contributor needs later rather than now:
+/// the key is theirs, it is listed in their own account, and removing it
+/// there is the thing this app cannot do for them --
+/// [`CREDENTIAL_FORGET_EXPLAINS`] says so again at the moment it matters.
+pub const CREDENTIAL_COST: &str = "Getting one opens your browser, signs you in to Private AI, and makes a \
+     new key that this app then keeps on this computer. The sign-in is with \
+     a company that is not this app. The key is yours: it is listed in your \
+     own Private AI account, and you can remove it there.";
+
+/// The button that starts the ceremony.
+pub const CREDENTIAL_OBTAIN: &str = "Sign in to Private AI";
+
+/// The button shown while one is running.
+///
+/// Says what stops -- this computer's waiting -- and not "cancel the
+/// sign-in", which would suggest reaching into a browser tab this app does
+/// not control. Anything the contributor already finished over there stands.
+pub const CREDENTIAL_CANCEL: &str = "Stop waiting for the browser";
+
+/// The button that removes a stored key from this machine.
+pub const CREDENTIAL_FORGET: &str = "Forget this key";
+
+/// What forgetting does, and the larger part it does not do.
+///
+/// **Local only, and the sentence says so.** The key stays valid at the
+/// service until the contributor removes it there, and this app cannot do it
+/// for them: revoking needs the sign-in, and the sign-in was discarded the
+/// moment the key was minted. A confirmation that said "removed" and let it
+/// be read as "revoked" would be the claim this codebase does not make --
+/// `handle_forget` answers `revoked: false` for the same reason.
+pub const CREDENTIAL_FORGET_EXPLAINS: &str = "Forgetting removes the key from this computer and does nothing else. It \
+     keeps working until you remove it in your own Private AI account, and \
+     this app cannot do that for you: the sign-in that would be needed was \
+     thrown away as soon as the key was made.";
+
+/// `absent`.
+pub const CREDENTIAL_ABSENT: &str = "No key is kept here for Private AI, so nothing on this computer can ask \
+     it to answer a call.";
+
+/// `obtaining`.
+///
+/// Names the five minutes because the listener gives the browser exactly
+/// that long and then releases the port. A contributor who walked away and
+/// came back to a card still saying "waiting" would be waiting on nothing.
+pub const CREDENTIAL_OBTAINING: &str = "Waiting for you to finish signing in, in your browser. Nothing is kept \
+     here until you do, and this stops waiting after five minutes.";
+
+/// `failed`.
+///
+/// A refusal with a way out -- the rule every failure sentence on this
+/// surface follows. What went wrong is not named because the service's own
+/// refusal is a 400 with an empty body: there is nothing more specific to
+/// say that would be true, and a sentence that guessed would be carrying a
+/// guess into a contributor's head.
+pub const CREDENTIAL_FAILED: &str = "The sign-in did not finish, and nothing was kept here. Sign in again to \
+     try once more.";
+
+/// `cancelled`.
+///
+/// Not a fault and not phrased as one. Stopping was the contributor's own
+/// doing, and the sentence reports it and stops.
+pub const CREDENTIAL_CANCELLED: &str =
+    "You stopped the sign-in before it finished, and nothing was kept here.";
+
+/// `present`.
+///
+/// Says the key is here and that this screen will not show it. It does not
+/// say the key stays on this computer, which would be false: every call
+/// answered with it carries it to whoever answers.
+pub const CREDENTIAL_PRESENT: &str = "A key from Private AI is kept on this computer, and calls answered here \
+     can use it. The key itself is never shown on this screen.";
+
+/// A state this build has no words for, or a read that did not arrive.
+///
+/// **The tri-state sentence, and the reason there is one.** Not knowing must
+/// not degrade to [`CREDENTIAL_ABSENT`]: "there is no key here" in front of
+/// somebody who has one is an invitation to sign in again and end up holding
+/// a second key, in their own account, that nothing on this screen will ever
+/// mention again. So this says what was not read, and names the risk rather
+/// than leaving it to be discovered.
+///
+/// The same shape as [`STATE_RUNNING_DESTINATION_UNKNOWN`], for the same
+/// reason: an unread fact gets its own sentence rather than borrowing a
+/// known one.
+pub const CREDENTIAL_UNKNOWN: &str = "Whether a key is kept here could not be read just now. Check again \
+     before signing in, so you do not end up with a second key you did not \
+     mean to make.";
+
+/// A daemon that does not answer this at all.
+///
+/// Distinct from [`CREDENTIAL_UNKNOWN`] on purpose: one is a read that
+/// failed, the other is a build that was never asked to answer, and telling
+/// somebody to check again is useless advice for the second.
+pub const CREDENTIAL_UNREPORTED: &str =
+    "This daemon does not report whether a Private AI key is kept here.";
+
+/// What a shell may offer for one credential state.
+///
+/// ONE TABLE, NOT THREE. The alternative is each shell deciding from the
+/// state -- or worse, from two booleans -- which button to draw, and the
+/// button in question mints a key at a third party. [`Self::None`] for a
+/// state nobody could read is the whole point: offering `Obtain` there is
+/// how a contributor ends up with a second key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CredentialAction {
+    /// Draw no action. Nothing is known well enough to offer one.
+    None,
+    /// Start the ceremony. The only action that opens a browser, and the
+    /// sentence in front of it is [`CREDENTIAL_COST`].
+    Obtain,
+    /// Stop waiting on the browser.
+    Cancel,
+    /// Remove the stored key from this machine, with
+    /// [`CREDENTIAL_FORGET_EXPLAINS`] beside it.
+    Forget,
+}
+
+/// The sentence for one `near_ai_credential_status` state label.
+///
+/// Missing status is unreported; a label this build has never heard of is
+/// unavailable. NEITHER MAY DEGRADE TO [`CREDENTIAL_ABSENT`], which is a
+/// claim about what this machine holds and would be made up.
+#[must_use]
+pub fn credential_state_line(label: &str) -> &'static str {
+    match label {
+        "" => CREDENTIAL_UNREPORTED,
+        LABEL_CREDENTIAL_ABSENT => CREDENTIAL_ABSENT,
+        LABEL_CREDENTIAL_OBTAINING => CREDENTIAL_OBTAINING,
+        LABEL_CREDENTIAL_FAILED => CREDENTIAL_FAILED,
+        LABEL_CREDENTIAL_CANCELLED => CREDENTIAL_CANCELLED,
+        LABEL_CREDENTIAL_PRESENT => CREDENTIAL_PRESENT,
+        _ => CREDENTIAL_UNKNOWN,
+    }
+}
+
+/// The tone [`credential_state_line`]'s sentence is painted in.
+///
+/// Takes what the sentence takes, so the two stay in step by construction --
+/// the rule [`state_tone`] follows. The enum is shared with the state row
+/// deliberately: a shell already maps these five values onto colours once,
+/// and a second enum with the same five meanings is a second mapping to keep
+/// in agreement.
+///
+/// [`PrivateInferenceTone::Clear`] is `present` alone. `obtaining` is
+/// [`PrivateInferenceTone::Held`] -- work is under way and no outcome is
+/// claimed -- and everything unread is [`PrivateInferenceTone::Neutral`],
+/// the safe direction here for the reason it is safe on the state row: the
+/// dangerous value is the one that reads as settled.
+#[must_use]
+pub fn credential_state_tone(label: &str) -> PrivateInferenceTone {
+    match label {
+        LABEL_CREDENTIAL_PRESENT => PrivateInferenceTone::Clear,
+        LABEL_CREDENTIAL_OBTAINING => PrivateInferenceTone::Held,
+        LABEL_CREDENTIAL_FAILED => PrivateInferenceTone::Refused,
+        LABEL_CREDENTIAL_ABSENT | LABEL_CREDENTIAL_CANCELLED => PrivateInferenceTone::Neutral,
+        _ => PrivateInferenceTone::Neutral,
+    }
+}
+
+/// The one action a shell may offer for a credential state.
+///
+/// A state this build cannot read answers [`CredentialAction::None`]. Every
+/// other surface in this module treats an unknown label as "claim nothing";
+/// here it also means "offer nothing", because the offer is what mints the
+/// second key.
+#[must_use]
+pub fn credential_action(label: &str) -> CredentialAction {
+    match label {
+        LABEL_CREDENTIAL_ABSENT | LABEL_CREDENTIAL_FAILED | LABEL_CREDENTIAL_CANCELLED => {
+            CredentialAction::Obtain
+        }
+        LABEL_CREDENTIAL_OBTAINING => CredentialAction::Cancel,
+        LABEL_CREDENTIAL_PRESENT => CredentialAction::Forget,
+        _ => CredentialAction::None,
+    }
+}
+
 /// The payload, built from the constants above.
 #[must_use]
 pub fn private_inference_copy() -> PrivateInferenceCopy {
@@ -879,6 +1111,20 @@ pub fn private_inference_copy() -> PrivateInferenceCopy {
         harness_plan_nothing_to_change: HARNESS_PLAN_NOTHING_TO_CHANGE,
         harness_plan_entry_unusable: HARNESS_PLAN_ENTRY_UNUSABLE,
         harness_plan_no_config_path: HARNESS_PLAN_NO_CONFIG_PATH,
+        credential_title: CREDENTIAL_TITLE,
+        credential_what: CREDENTIAL_WHAT,
+        credential_cost: CREDENTIAL_COST,
+        credential_obtain: CREDENTIAL_OBTAIN,
+        credential_cancel: CREDENTIAL_CANCEL,
+        credential_forget: CREDENTIAL_FORGET,
+        credential_forget_explains: CREDENTIAL_FORGET_EXPLAINS,
+        credential_absent: CREDENTIAL_ABSENT,
+        credential_obtaining: CREDENTIAL_OBTAINING,
+        credential_failed: CREDENTIAL_FAILED,
+        credential_cancelled: CREDENTIAL_CANCELLED,
+        credential_present: CREDENTIAL_PRESENT,
+        credential_unknown: CREDENTIAL_UNKNOWN,
+        credential_unreported: CREDENTIAL_UNREPORTED,
     }
 }
 
@@ -890,6 +1136,13 @@ pub fn private_inference_copy() -> PrivateInferenceCopy {
 /// Imported rather than respelled: a label spelled twice is two labels that
 /// have not disagreed yet, and the failure mode of a typo here is a state that
 /// silently renders as unavailable.
+/// The credential state labels, re-exported from the daemon module that
+/// produces them -- the same rule the listener labels below follow, and for
+/// the same reason.
+pub use crate::daemon::nearai_credential::{
+    LABEL_CREDENTIAL_ABSENT, LABEL_CREDENTIAL_CANCELLED, LABEL_CREDENTIAL_FAILED,
+    LABEL_CREDENTIAL_OBTAINING, LABEL_CREDENTIAL_PRESENT,
+};
 pub use crate::daemon::private_inference::{
     LABEL_CRASHED, LABEL_OFF, LABEL_PORT_IN_USE, LABEL_RUNNING, LABEL_RUNNING_ANSWERED_ELSEWHERE,
     LABEL_RUNNING_DESTINATION_UNKNOWN, LABEL_RUNNING_ELSEWHERE, LABEL_RUNNING_NO_BACKENDS,
@@ -1503,6 +1756,214 @@ mod tests {
         assert_ne!(tiny, harness_spend_line(Some(0)));
     }
 
+    /// AN UNREAD CREDENTIAL STATE IS NOT AN ABSENT ONE, and this is the
+    /// assertion that keeps it that way.
+    ///
+    /// Both directions of the collapse are wrong and only one is obvious.
+    /// Rendering "no key is kept here" for a state nobody could read invites
+    /// a contributor who already has a key to mint a second one, at a third
+    /// party, that this app will never mention again. Rendering "a key is
+    /// kept here" is the other way to be confidently wrong.
+    #[test]
+    fn an_unread_credential_state_never_borrows_a_known_one() {
+        for label in ["", "a_state_from_a_later_daemon", "PRESENT", "  "] {
+            let line = credential_state_line(label);
+            assert_ne!(line, CREDENTIAL_ABSENT, "{label} claimed nothing is here");
+            assert_ne!(line, CREDENTIAL_PRESENT, "{label} claimed a key is here");
+            assert_ne!(line, CREDENTIAL_OBTAINING, "{label}");
+            assert!(
+                !credential_state_tone(label).reads_as_working(),
+                "{label} must not read as settled"
+            );
+            // And it offers nothing: the button in question mints a key.
+            assert_eq!(
+                credential_action(label),
+                CredentialAction::None,
+                "{label} offered an action nobody could justify"
+            );
+        }
+        // The two unread cases are told apart. A read that failed is worth
+        // checking again; a build that never answers is not.
+        assert_eq!(credential_state_line(""), CREDENTIAL_UNREPORTED);
+        assert_eq!(
+            credential_state_line("a_state_from_a_later_daemon"),
+            CREDENTIAL_UNKNOWN
+        );
+        assert_ne!(CREDENTIAL_UNKNOWN, CREDENTIAL_UNREPORTED);
+        // The unknown sentence names the risk rather than leaving it to be
+        // found out.
+        assert!(
+            CREDENTIAL_UNKNOWN.contains("second key"),
+            "the unknown sentence stopped naming the risk: {CREDENTIAL_UNKNOWN}"
+        );
+    }
+
+    /// Every state this daemon reports reaches its own sentence, and no two
+    /// share one.
+    #[test]
+    fn each_credential_state_reaches_its_own_sentence() {
+        let labels = [
+            LABEL_CREDENTIAL_ABSENT,
+            LABEL_CREDENTIAL_OBTAINING,
+            LABEL_CREDENTIAL_FAILED,
+            LABEL_CREDENTIAL_CANCELLED,
+            LABEL_CREDENTIAL_PRESENT,
+        ];
+        let mut seen: Vec<&str> = Vec::new();
+        for label in labels {
+            let line = credential_state_line(label);
+            assert_ne!(line, CREDENTIAL_UNKNOWN, "{label} fell through");
+            assert_ne!(line, CREDENTIAL_UNREPORTED, "{label} fell through");
+            assert!(!seen.contains(&line), "{label} borrows another sentence");
+            seen.push(line);
+        }
+        // Only a stored key reads as settled. Waiting on a browser does not.
+        assert!(credential_state_tone(LABEL_CREDENTIAL_PRESENT).reads_as_working());
+        for label in [
+            LABEL_CREDENTIAL_ABSENT,
+            LABEL_CREDENTIAL_OBTAINING,
+            LABEL_CREDENTIAL_FAILED,
+            LABEL_CREDENTIAL_CANCELLED,
+        ] {
+            assert!(
+                !credential_state_tone(label).reads_as_working(),
+                "{label} must not read as settled"
+            );
+        }
+        assert_eq!(
+            credential_state_tone(LABEL_CREDENTIAL_FAILED),
+            PrivateInferenceTone::Refused
+        );
+        assert_eq!(
+            credential_state_tone(LABEL_CREDENTIAL_OBTAINING),
+            PrivateInferenceTone::Held
+        );
+    }
+
+    /// One state, one action, decided here. A shell that branched on two
+    /// booleans instead would offer `Obtain` beside a key it already has,
+    /// and the three shells would each get it wrong differently.
+    #[test]
+    fn one_action_table_answers_for_every_shell() {
+        assert_eq!(
+            credential_action(LABEL_CREDENTIAL_ABSENT),
+            CredentialAction::Obtain
+        );
+        // A failed or a stopped attempt is offered the same way out: try
+        // again. Neither is a state to leave somebody stuck in.
+        assert_eq!(
+            credential_action(LABEL_CREDENTIAL_FAILED),
+            CredentialAction::Obtain
+        );
+        assert_eq!(
+            credential_action(LABEL_CREDENTIAL_CANCELLED),
+            CredentialAction::Obtain
+        );
+        assert_eq!(
+            credential_action(LABEL_CREDENTIAL_OBTAINING),
+            CredentialAction::Cancel
+        );
+        // Never `Obtain` beside a key that is already here.
+        assert_eq!(
+            credential_action(LABEL_CREDENTIAL_PRESENT),
+            CredentialAction::Forget
+        );
+    }
+
+    /// The consequence is stated where the decision is taken.
+    ///
+    /// The counterpart of `the_offer_says_what_it_exposes`. A button that
+    /// opens a browser, signs somebody in to a company that is not this app
+    /// and mints a key this app keeps is not one frictionless tap, and the
+    /// sentence in front of it has to say each of those three things.
+    #[test]
+    fn getting_a_key_says_what_it_costs() {
+        let copy = private_inference_copy();
+        for fragment in [
+            "browser",
+            "signs you in",
+            "makes a",
+            "keeps on this computer",
+        ] {
+            assert!(
+                copy.credential_cost.contains(fragment),
+                "the cost sentence stopped saying {fragment:?}: {}",
+                copy.credential_cost
+            );
+        }
+        // The key is the contributor's, and where to go for it is named.
+        assert!(
+            copy.credential_cost.contains("your own Private AI account"),
+            "the cost sentence stopped naming where the key lives: {}",
+            copy.credential_cost
+        );
+    }
+
+    /// Forgetting is local, and the sentence says so rather than letting
+    /// "removed" be read as "revoked". `handle_forget` answers
+    /// `revoked: false` for the same reason.
+    #[test]
+    fn forgetting_never_claims_a_revocation_it_cannot_perform() {
+        let explains = private_inference_copy().credential_forget_explains;
+        assert!(
+            explains.contains("from this computer"),
+            "the forget sentence stopped saying it is local: {explains}"
+        );
+        assert!(
+            explains.contains("keeps working"),
+            "the forget sentence stopped saying the key stays valid: {explains}"
+        );
+        assert!(
+            explains.contains("cannot do that for you"),
+            "the forget sentence stopped saying this app cannot revoke: {explains}"
+        );
+        for word in ["revoked", "cancelled", "deleted everywhere"] {
+            assert!(
+                !explains.to_lowercase().contains(word),
+                "the forget sentence reads as {word}: {explains}"
+            );
+        }
+    }
+
+    /// NOTHING ON THIS SURFACE RENDERS A KEY. Hash-only and label-only, in
+    /// copy as in logs: no sentence carries a key, a prefix, an id or an
+    /// account name, and none of them may grow a hole for one.
+    #[test]
+    fn no_credential_sentence_can_carry_a_value() {
+        let copy = private_inference_copy();
+        for text in [
+            copy.credential_title,
+            copy.credential_what,
+            copy.credential_cost,
+            copy.credential_obtain,
+            copy.credential_cancel,
+            copy.credential_forget,
+            copy.credential_forget_explains,
+            copy.credential_absent,
+            copy.credential_obtaining,
+            copy.credential_failed,
+            copy.credential_cancelled,
+            copy.credential_present,
+            copy.credential_unknown,
+            copy.credential_unreported,
+        ] {
+            assert!(!text.contains("sk-"), "a key prefix appears in: {text}");
+            for marker in ["{}", "{0}", "{key}", "{account}", "%@", "%s"] {
+                assert!(
+                    !text.contains(marker),
+                    "{text} carries {marker}, which a shell would fill with a value"
+                );
+            }
+        }
+        // The one that would be tempting to fill in says instead that it
+        // will not be.
+        assert!(
+            copy.credential_present.contains("never shown"),
+            "the present sentence stopped refusing to show the key: {}",
+            copy.credential_present
+        );
+    }
+
     /// Every field of the payload carries a finished sentence: no empties,
     /// and no template markers a shell would have to fill in.
     #[test]
@@ -1512,7 +1973,7 @@ mod tests {
         let fields = payload.as_object().expect("a JSON object");
         assert_eq!(
             fields.len(),
-            48,
+            62,
             "the payload's field count changed -- update the shells' decoders \
              and the tests that pin the set"
         );
@@ -1596,6 +2057,17 @@ mod tests {
             "a_state_from_a_later_daemon",
         ] {
             strings.push(state_line(label).to_string());
+        }
+        for label in [
+            LABEL_CREDENTIAL_ABSENT,
+            LABEL_CREDENTIAL_OBTAINING,
+            LABEL_CREDENTIAL_FAILED,
+            LABEL_CREDENTIAL_CANCELLED,
+            LABEL_CREDENTIAL_PRESENT,
+            "",
+            "a_credential_state_from_a_later_daemon",
+        ] {
+            strings.push(credential_state_line(label).to_string());
         }
         for outcome in [
             "changes",
