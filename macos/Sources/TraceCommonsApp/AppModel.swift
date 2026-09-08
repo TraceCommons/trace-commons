@@ -399,6 +399,16 @@ final class AppModel: ObservableObject {
 
     /// The three branch tables the credential card turns on, all decided in
     /// the Rust. This shell owns no `switch` on this surface either.
+    /// The four branch tables the queue's eligibility rows turn on, all
+    /// decided in the Rust. This shell owns no `switch` on this surface
+    /// either -- see `EligibilitySurface`.
+    let eligibilityCalls = EligibilityCalls(
+        stateLine: { TCContributionEligibility.stateLine(state: $0) },
+        stateTone: { TCContributionEligibility.stateTone(state: $0) },
+        control: { TCContributionEligibility.control(state: $0) },
+        reasonLine: { TCContributionEligibility.reasonLine(reason: $0) }
+    )
+
     let credentialCalls = CredentialCalls(
         stateLine: { TCNearAiCredential.stateLine(state: $0) },
         stateTone: { TCNearAiCredential.stateTone(state: $0) },
@@ -2018,7 +2028,12 @@ final class AppModel: ObservableObject {
             // dropped, so the card's extent line is absent and the capture
             // shows exactly what it showed before these fields existed.
             subagentCount: 0,
-            subagentsDropped: 0
+            subagentsDropped: 0,
+            // The screenshot fixture stands for an invited contributor: no
+            // eligibility field, so the capture shows the card exactly as it
+            // looked before this surface existed.
+            eligibility: nil,
+            eligibilityReason: nil
         )
         var offsets: [Int] = []
         if !needle.isEmpty {
