@@ -22,11 +22,13 @@ use trace_commons_contributor_ffi::{
     TC_WITNESS_STATE_REFUSING_PIN_MALFORMED, TC_WITNESS_STATE_REFUSING_UNPINNED,
     TC_WITNESS_STATE_UNREADABLE, TC_WITNESS_TONE_ATTENTION, TC_WITNESS_TONE_CLEAR,
     TC_WITNESS_TONE_HELD, TC_WITNESS_TONE_NEUTRAL, TC_WITNESS_TONE_REFUSED, tc_call,
-    tc_consent_copy, tc_consent_gate_help, tc_contribution_eligibility_control,
-    tc_contribution_eligibility_line, tc_contribution_eligibility_reason_line,
-    tc_contribution_eligibility_tone, tc_contribution_group_control, tc_contribution_withheld_line,
-    tc_daemon_start, tc_daemon_start_with_settings, tc_daemon_stop, tc_discover_sources, tc_handle,
-    tc_handle_free, tc_invite_issuer_host, tc_last_error, tc_near_ai_credential_action,
+    tc_consent_copy, tc_consent_gate_help, tc_contribution_attestation_line,
+    tc_contribution_attestation_reason_line, tc_contribution_attestation_tone,
+    tc_contribution_eligibility_control, tc_contribution_eligibility_line,
+    tc_contribution_eligibility_reason_line, tc_contribution_eligibility_tone,
+    tc_contribution_group_control, tc_contribution_withheld_line, tc_daemon_start,
+    tc_daemon_start_with_settings, tc_daemon_stop, tc_discover_sources, tc_handle, tc_handle_free,
+    tc_invite_issuer_host, tc_last_error, tc_near_ai_credential_action,
     tc_near_ai_credential_state_line, tc_near_ai_credential_state_tone, tc_preview,
     tc_preview_body, tc_preview_open, tc_preview_search, tc_preview_summary_json,
     tc_preview_turns_json, tc_private_inference_copy, tc_private_inference_quit_needs_notice,
@@ -3667,6 +3669,108 @@ fn the_eligibility_state_crosses_with_its_tone_its_control_and_its_reason() {
     }
     assert_eq!(
         take_owned(unsafe { tc_contribution_eligibility_reason_line(std::ptr::null()) }),
+        ""
+    );
+}
+
+/// The attestation mark crosses whole: the sentence, the tone and the reason.
+///
+/// Pinned against the Rust tables rather than against literals, so this
+/// cannot become a second place any of the three is decided. **There is no
+/// control accessor**, and that is the contract: the mark describes the trace
+/// and offers nothing to press. A shell that drew a button from it would be
+/// inventing an action out of a description.
+#[test]
+fn the_attestation_mark_crosses_with_its_tone_and_its_reason() {
+    use trace_commons_contributor::private_inference_copy as copy;
+    let line = |mark: &str| {
+        let mark = cstr_str(mark);
+        take_owned(unsafe { tc_contribution_attestation_line(mark.as_ptr()) })
+    };
+    let tone = |mark: &str| {
+        let mark = cstr_str(mark);
+        unsafe { tc_contribution_attestation_tone(mark.as_ptr()) }
+    };
+    let reason = |label: &str| {
+        let label = cstr_str(label);
+        take_owned(unsafe { tc_contribution_attestation_reason_line(label.as_ptr()) })
+    };
+
+    for mark in [
+        "attested",
+        "unattested_permanent",
+        "unattested_configuration",
+        "unknown",
+        "",
+        "ATTESTED",
+        "a_mark_from_a_later_daemon",
+    ] {
+        assert_eq!(line(mark), copy::attestation_state_line(mark), "{mark:?}");
+    }
+
+    // The positive case reads as good news, the configuration mark as the one
+    // with something to do, and a permanently unattested session is NOT
+    // painted as a failure.
+    assert_eq!(tone("attested"), TC_PRIVATE_INFERENCE_TONE_CLEAR);
+    assert_eq!(
+        tone("unattested_configuration"),
+        TC_PRIVATE_INFERENCE_TONE_ATTENTION
+    );
+    for neutral in ["unattested_permanent", "unknown"] {
+        assert_eq!(
+            tone(neutral),
+            TC_PRIVATE_INFERENCE_TONE_NEUTRAL,
+            "{neutral:?}"
+        );
+        assert_ne!(
+            tone(neutral),
+            TC_PRIVATE_INFERENCE_TONE_REFUSED,
+            "{neutral:?}"
+        );
+    }
+
+    // Nothing read borrows another mark's sentence, and a null pointer is the
+    // same answer.
+    for unread in ["", "a_mark_from_a_later_daemon"] {
+        assert_eq!(line(unread), copy::ATTESTATION_UNKNOWN, "{unread:?}");
+        assert_ne!(
+            line(unread),
+            copy::ATTESTATION_UNATTESTED_PERMANENT,
+            "{unread:?}"
+        );
+        assert_ne!(line(unread), copy::ATTESTATION_ATTESTED, "{unread:?}");
+        assert_ne!(tone(unread), TC_PRIVATE_INFERENCE_TONE_CLEAR, "{unread:?}");
+    }
+    assert_eq!(
+        take_owned(unsafe { tc_contribution_attestation_line(std::ptr::null()) }),
+        copy::ATTESTATION_UNKNOWN
+    );
+    assert_eq!(
+        unsafe { tc_contribution_attestation_tone(std::ptr::null()) },
+        TC_PRIVATE_INFERENCE_TONE_NEUTRAL
+    );
+
+    // Every reason the daemon can produce crosses, and none of them arrives
+    // as the eligibility surface's wording -- a shell calling the wrong
+    // accessor would tell an invited contributor their session cannot be
+    // sent.
+    for label in trace_commons_contributor::daemon::attestation_mark::ALL_REASONS {
+        assert_eq!(
+            reason(label),
+            copy::attestation_reason_line(label),
+            "{label}"
+        );
+        assert!(!reason(label).is_empty(), "{label}");
+        assert!(
+            !reason(label).to_lowercase().contains("be sent"),
+            "{label} speaks about sending"
+        );
+    }
+    for unknown in ["", "a_reason_from_a_later_daemon"] {
+        assert_eq!(reason(unknown), "", "{unknown:?}");
+    }
+    assert_eq!(
+        take_owned(unsafe { tc_contribution_attestation_reason_line(std::ptr::null()) }),
         ""
     );
 }

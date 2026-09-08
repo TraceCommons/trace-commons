@@ -2964,6 +2964,121 @@ pub unsafe extern "C" fn tc_contribution_eligibility_reason_line(
     })
 }
 
+/// The sentence for one queue entry's `attestation` label.
+///
+/// `mark` is that field from a `list_pending` entry: `attested`,
+/// `unattested_permanent`, `unattested_configuration` or `unknown`.
+///
+/// **EVERY SHELL CALLS THIS FOR EVERY ROW.** The opposite rule to
+/// [`tc_contribution_eligibility_line`], which must not be called when the
+/// wire carried no `eligibility` field. That field answers whether this
+/// contributor may send this session -- a question only an evidence-admitted
+/// contributor has. This one answers whether the session carries a checkable
+/// copy of the model call that produced it, which is a fact about the trace,
+/// and the field is always present.
+///
+/// **The positive case is the interesting one here.** A session that IS
+/// attested says so. A surface that only speaks up to explain what is missing
+/// teaches a contributor that the mark means bad news.
+///
+/// An empty, NULL, non-UTF-8 or unfamiliar `mark` reports that the answer has
+/// not been worked out. IT NEVER REPORTS AN UNATTESTED SESSION: a mark this
+/// build cannot read is not evidence about a contributor's work.
+///
+/// Returns an owned string; free it with [`tc_string_free`]. NULL only on a
+/// caught panic.
+///
+/// # Safety
+/// `mark`, if non-null, must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_contribution_attestation_line(mark: *const c_char) -> *mut c_char {
+    guarded_string_no_err(|| {
+        let mark = if mark.is_null() {
+            ""
+        } else {
+            unsafe { borrow_str(mark) }.unwrap_or("")
+        };
+        Ok(to_owned_cstring(
+            trace_commons_contributor::private_inference_copy::attestation_state_line(mark),
+        ))
+    })
+}
+
+/// How firmly the sentence [`tc_contribution_attestation_line`] returned
+/// reads: one of the `TC_PRIVATE_INFERENCE_TONE_*` values.
+///
+/// `attested` is `_CLEAR` -- the one mark on this surface that is good news --
+/// and `unattested_configuration` is `_ATTENTION`, the one with something to
+/// do about it. Everything else, including a mark this build has never heard
+/// of, a NULL or non-UTF-8 `mark` and a caught panic, is
+/// `TC_PRIVATE_INFERENCE_TONE_NEUTRAL`.
+///
+/// A permanently unattested session is deliberately NOT `_REFUSED`. Nothing
+/// was refused and nothing went wrong: most of a contributor's history was
+/// recorded before anything was keeping copies, and painting all of it as a
+/// failure -- on a surface they cannot act on -- is a judgement this has no
+/// business making.
+///
+/// # Safety
+/// `mark`, if non-null, must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_contribution_attestation_tone(mark: *const c_char) -> i32 {
+    use trace_commons_contributor::private_inference_copy::PrivateInferenceTone;
+    guard(|| {
+        let mark = if mark.is_null() {
+            ""
+        } else {
+            unsafe { borrow_str(mark) }.unwrap_or("")
+        };
+        Ok(
+            match trace_commons_contributor::private_inference_copy::attestation_state_tone(mark) {
+                PrivateInferenceTone::Neutral => TC_PRIVATE_INFERENCE_TONE_NEUTRAL,
+                PrivateInferenceTone::Held => TC_PRIVATE_INFERENCE_TONE_HELD,
+                PrivateInferenceTone::Clear => TC_PRIVATE_INFERENCE_TONE_CLEAR,
+                PrivateInferenceTone::Attention => TC_PRIVATE_INFERENCE_TONE_ATTENTION,
+                PrivateInferenceTone::Refused => TC_PRIVATE_INFERENCE_TONE_REFUSED,
+            },
+        )
+    })
+    .unwrap_or(TC_PRIVATE_INFERENCE_TONE_NEUTRAL)
+}
+
+/// The sentence for one queue entry's `attestation_reason` label.
+///
+/// **The EMPTY STRING for an absent, NULL, non-UTF-8 or unfamiliar reason**,
+/// and a shell renders nothing for it -- the same rule
+/// [`tc_contribution_eligibility_reason_line`] follows. An `attested` entry
+/// carries no reason at all: there is nothing to explain.
+///
+/// The reason labels are the SAME THIRTEEN the eligibility reason line takes,
+/// because a reason names a fact about the session rather than an answer to
+/// either question. **The sentences are not the same**, and a shell must not
+/// substitute one call for the other: five of the eligibility sentences say
+/// the session cannot be sent, which is true for an evidence-admitted
+/// contributor and false for an invited one, whose session sends perfectly
+/// well and merely arrives without a copy of its call.
+///
+/// Returns an owned string; free it with [`tc_string_free`]. NULL only on a
+/// caught panic.
+///
+/// # Safety
+/// `reason`, if non-null, must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_contribution_attestation_reason_line(
+    reason: *const c_char,
+) -> *mut c_char {
+    guarded_string_no_err(|| {
+        let reason = if reason.is_null() {
+            ""
+        } else {
+            unsafe { borrow_str(reason) }.unwrap_or("")
+        };
+        Ok(to_owned_cstring(
+            trace_commons_contributor::private_inference_copy::attestation_reason_line(reason),
+        ))
+    })
+}
+
 /// Whether a group's submit control may be offered: one of the
 /// `TC_CONTRIBUTION_CONTROL_*` values.
 ///
