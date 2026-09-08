@@ -1,0 +1,97 @@
+name: opencode qualification
+
+# The real seven-profile experiment behind the decision not to enable the
+# routing catalog for OpenCode.
+#
+# WHY THIS IS NOT IN ci.yml. It needs macOS -- the script requires
+# /usr/bin/sandbox-exec and deliberately refuses an unrestricted fallback,
+# because the whole point is that the profiles cannot reach the network. It
+# also needs an installed OpenCode binary, and it refuses any version but the
+# qualified one. So on a pull request that touches nothing related it would
+# spend a macOS runner re-proving an unchanging fact about a pinned binary.
+# The paths filter below is what makes it worth running: it fires exactly when
+# somebody edits the reader, the script, or the report -- the changes that can
+# invalidate the conclusion.
+#
+# The cheap half of this guard, which the paths filter would let slip past,
+# runs on every pull request as `opencode-pin-drift` in ci.yml.
+#
+# Advisory, not required. It installs a third-party binary from npm, so it can
+# fail for reasons that are not this repository's fault, and a required check
+# that can go red on somebody else's release is how re-running on red becomes a
+# habit. Read it; do not merge past it without reading it.
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "scripts/qualification/opencode-routing.py"
+      - "crates/trace-commons-contributor/src/source/opencode.rs"
+      - "docs/superpowers/reports/2026-09-07-opencode-export-qualification.md"
+      - ".github/workflows/opencode-qualification.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  routing-counterexample:
+    name: opencode routing counterexample
+    runs-on: macos-26
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Read the version the repository qualified
+        id: pin
+        run: |
+          v=$(sed -n 's/^pub const QUALIFIED_VERSION: &str = "\(.*\)";$/\1/p' \
+            crates/trace-commons-contributor/src/source/opencode.rs | head -1)
+          [ -n "$v" ] || { echo "could not read QUALIFIED_VERSION" >&2; exit 1; }
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "qualifying against OpenCode $v"
+
+      # Pinned to the exact version the reader accepts, never @latest. A
+      # floating install would qualify a binary the reader would refuse, and
+      # report a pass about software nobody here runs.
+      - name: Install the pinned OpenCode
+        run: npm install -g "opencode-ai@${{ steps.pin.outputs.version }}"
+
+      - name: Confirm the installed binary is the pinned one
+        run: |
+          bin=$(command -v opencode) || { echo "opencode not on PATH after install" >&2; exit 1; }
+          got=$("$bin" --version)
+          want="${{ steps.pin.outputs.version }}"
+          echo "binary=$bin version=$got"
+          [ "$got" = "$want" ] || { echo "installed $got, qualified $want" >&2; exit 1; }
+          echo "OPENCODE_BIN=$bin" >> "$GITHUB_ENV"
+
+      # The script asserts its own conclusions and exits non-zero if any
+      # profile disagrees, so a pass here is the counterexample still holding:
+      # a fresh or blank profile changes its default model when a provider
+      # block appears, and an explicit or recent selection survives. If this
+      # ever goes green with different results the script fails, not passes --
+      # that is the outcome to bring back to the catalog decision.
+      - name: Run the seven-profile experiment
+        run: |
+          python3 scripts/qualification/opencode-routing.py \
+            --opencode "$OPENCODE_BIN" | tee "${RUNNER_TEMP}/qualification.json"
+
+      - name: The conclusion is still REFUSED
+        run: |
+          got=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['catalog_enablement'])" \
+            "${RUNNER_TEMP}/qualification.json")
+          echo "catalog_enablement: $got"
+          case "$got" in
+            REFUSED*) echo "the counterexample still holds" ;;
+            *) echo "the experiment no longer refuses catalog enablement: $got" >&2
+               echo "that is a real change; take it to the catalog decision rather than to CI" >&2
+               exit 1 ;;
+          esac
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: opencode-qualification
+          path: ${{ runner.temp }}/qualification.json
+          if-no-files-found: warn

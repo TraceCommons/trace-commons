@@ -83,6 +83,31 @@ jobs:
           cargo run -q -p trace-commons-mark --example emit-verify -- "${RUNNER_TEMP}/mark-verify"
           python3 scripts/mark/verify-png.py "${RUNNER_TEMP}/mark-verify"
 
+  opencode-pin-drift:
+    name: opencode qualification pin agrees everywhere
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # The OpenCode version is pinned in three places and they have to agree:
+    # the reader refuses an export that does not declare it, the qualification
+    # script refuses a binary that is not it, and the report says which version
+    # the "do not enable the routing catalog" decision rests on.
+    #
+    # This is cheap and this is the one that matters day to day. The real
+    # experiment needs macOS and an installed binary and lives in
+    # opencode-qualification.yml; it cannot run on every pull request, and it
+    # re-proves an unchanging fact about a pinned binary when it does. What
+    # actually goes wrong is somebody bumping QUALIFIED_VERSION to accept a
+    # newer export without re-running the experiment -- at which point the
+    # catalog decision silently rests on evidence about a different release.
+    # Bumping one of these three without the others is that mistake, and it is
+    # detectable without a Mac.
+    steps:
+      - uses: actions/checkout@v6
+      - name: Pins and empty catalog, with mutation regressions
+        run: |
+          python3 scripts/qualification/check-opencode-qualification.py
+          python3 scripts/qualification/test-opencode-qualification.py
+
   cargo-clippy:
     name: cargo clippy
     runs-on: ubuntu-latest
