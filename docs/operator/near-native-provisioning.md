@@ -15,13 +15,70 @@ PostgreSQL mirror writes and tenant RLS readiness, plus these operator settings:
 - `TRACE_COMMONS_NEAR_PROVISIONING_AUDIENCE`: the configured upload-claim audience.
 - `TRACE_COMMONS_NEAR_PROVISIONING_WITNESS_JSON`: JSON containing `url` (HTTPS),
   `signing_address` (0x plus 40 hex characters), and `expected_measurements`
-  (nonempty array of attestation measurement pin strings).
+  (nonempty array of measurement pin strings). **This repo has two measurement
+  pin spellings and they are not interchangeable.** This field takes the
+  `ExpectedMeasurements` form -- `field=<96 hex>`, fields joined by commas:
+
+  ```json
+  {
+    "url": "https://witness.example",
+    "signing_address": "0xabababababababababababababababababababab",
+    "expected_measurements": [
+      "mrtd=<96 hex>,rtmr0=<96 hex>,rtmr1=<96 hex>,rtmr2=<96 hex>,rtmr3=<96 hex>"
+    ]
+  }
+  ```
+
+  The other spelling, `mrtd:<hex>+mrconfigid:<hex>`, is a `WitnessPin` and
+  belongs to `TRACE_COMMONS_WITNESS_EXPECTED_MEASUREMENTS` -- a different
+  variable, compared verbatim against a certificate. The two describe the same
+  witness at the same URL under the same signing address, which is exactly why
+  the wrong one looks right. Using it here leaves the JSON well formed and the
+  endpoint not ready; the boot warning names `witness_measurement_syntax` for
+  this case, distinct from `witness_json_malformed`.
 - `TRACE_COMMONS_NEAR_PROVISIONING_RECEIPT_ENDPOINT` (optional): the provider's
   receipt-service base URL, published to clients so a contributor never has to
   be told it out of band. HTTPS, with no credentials, query or fragment, or it
   is not published at all. A commons serving no attested inference leaves this
   unset and its contributors stay unattested, which is the behaviour they
   already had.
+
+### When the endpoint says not ready
+
+`GET /v1/account/near/provision/capabilities` answers
+`{"ready":false,"funding_available":false}` whenever any one of the gates above
+declines, and the response deliberately does not say which -- it is served to
+unauthenticated clients. The **log** says which: on the first refusal for each
+control the service warns once with a `control` field carrying a bare name and
+nothing else. The names, in the order they are checked:
+
+| `control` | What to look at |
+|---|---|
+| `near_provisioning_enabled` | `TRACE_COMMONS_NEAR_PROVISIONING_ENABLED` |
+| `near_provisioning_admission_ready` | Admission configuration; provisioning is gated behind it |
+| `witness_public_origin` | `..._PUBLIC_ORIGIN` absent, not HTTPS, or carrying a path, query, fragment or credentials |
+| `near_sign_in` | The NEAR sign-in configuration |
+| `account_registry_db` | The account-registry database handle |
+| `witness_json_absent` | `..._WITNESS_JSON` is unset |
+| `witness_json_malformed` | `..._WITNESS_JSON` is not valid JSON, or has unknown or missing fields |
+| `witness_url` | The `url` inside the witness JSON |
+| `witness_signing_address` | The `signing_address` inside it |
+| `witness_measurements_absent` | `expected_measurements` is an empty array |
+| `witness_measurement_syntax` | An entry is not the `field=<96 hex>` form -- see above |
+| `issuer` | `..._ISSUER_URL` / `..._AUDIENCE` |
+
+Each control is named once per process, and a control tripped after an earlier
+one is fixed is named in turn. No environment value, URL, signing address or
+measurement string ever appears in these lines.
+
+Read a line as **"this control declined at least once since boot"**, not "this
+control is declining now". The reported set lives for the process lifetime, so
+a control that declines, is named, is fixed, and later declines again — a
+database that goes away, say — does not warn a second time. Deliberate: a
+diagnostic path is not a health check, and the endpoint itself is the live
+answer. Restart the service to get a fresh set of warnings, or query
+`/v1/account/near/provision/capabilities` to see whether it is ready right
+now.
 
 The native daemon enforces a host allowlist for every request in this flow.
 It no longer requires a contributor to set one: with `TRACE_COMMONS_ALLOWED_HOSTS`
