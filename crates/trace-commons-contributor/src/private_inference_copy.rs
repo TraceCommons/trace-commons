@@ -1965,32 +1965,44 @@ pub fn private_inference_copy() -> PrivateInferenceCopy {
 /// contributor who read that would believe a step had happened that has not.
 /// Which reading of the certificate-held list this contributor gets.
 ///
-/// `invited` is the contributor's invite status, which every shell already
-/// holds: `get_settings` answers `admission_evidence_required`, and all
-/// three shells decode it and fail closed on the null a config-read failure
-/// produces. It is NOT a second question to the daemon and NOT the
-/// attestation mark.
+/// **`evidence_admitted` is `admission_evidence_required` verbatim, not its
+/// negation.** That flag is true for a contributor who signed up through
+/// NEAR -- who has no invite and is building a case for submission -- and
+/// false for one enrolled on an invite, whose contributions are already
+/// admitted. So the true arm is the CANDIDATE reading, which looks backwards
+/// until you know which way the flag points.
+///
+/// The parameter is named for the wire fact rather than for "invited" so
+/// that no shell has to negate anything. Three shells each writing `!flag`
+/// is three chances to swap the two readings, and a swapped reading either
+/// promises an attestation that has not happened or withholds one that has.
+/// Every shell passes the flag straight through.
+///
+/// Every shell already holds it: `get_settings` answers
+/// `admission_evidence_required`, and all three decode it and fail closed on
+/// the null a config-read failure produces. It is NOT a second question to
+/// the daemon and NOT the attestation mark.
 ///
 /// The pick lives here rather than in each shell for the reason the
 /// attestation table does: three shells choosing for themselves is three
 /// chances to promise an uninvited contributor an attestation that has not
 /// happened, or to withhold from an invited one the fact that it has.
 #[must_use]
-pub fn certificate_row_line(invited: bool) -> &'static str {
-    if invited {
-        CERTIFICATE_ROW_ATTESTED
-    } else {
+pub fn certificate_row_line(evidence_admitted: bool) -> &'static str {
+    if evidence_admitted {
         CERTIFICATE_ROW_CANDIDATE
+    } else {
+        CERTIFICATE_ROW_ATTESTED
     }
 }
 
 /// The list's heading, on the same split as [`certificate_row_line`].
 #[must_use]
-pub fn certificate_list_title(invited: bool) -> &'static str {
-    if invited {
-        CERTIFICATE_LIST_ATTESTED
-    } else {
+pub fn certificate_list_title(evidence_admitted: bool) -> &'static str {
+    if evidence_admitted {
         CERTIFICATE_LIST_CANDIDATE
+    } else {
+        CERTIFICATE_LIST_ATTESTED
     }
 }
 
@@ -3509,15 +3521,45 @@ mod tests {
     /// invited one. The pick is one function here and the shells call it.
     #[test]
     fn the_reading_follows_the_invite_and_nothing_else() {
-        assert_eq!(certificate_row_line(true), CERTIFICATE_ROW_ATTESTED);
-        assert_eq!(certificate_row_line(false), CERTIFICATE_ROW_CANDIDATE);
-        assert_eq!(certificate_list_title(true), CERTIFICATE_LIST_ATTESTED);
-        assert_eq!(certificate_list_title(false), CERTIFICATE_LIST_CANDIDATE);
+        // The argument is `admission_evidence_required` verbatim. True means
+        // signed up through NEAR, so no invite, so the CANDIDATE reading --
+        // which is the arm most likely to be written backwards.
+        assert_eq!(certificate_row_line(true), CERTIFICATE_ROW_CANDIDATE);
+        assert_eq!(certificate_row_line(false), CERTIFICATE_ROW_ATTESTED);
+        assert_eq!(certificate_list_title(true), CERTIFICATE_LIST_CANDIDATE);
+        assert_eq!(certificate_list_title(false), CERTIFICATE_LIST_ATTESTED);
 
         // The empty state is one sentence for both, because the reason the
         // list is empty does not differ between them. Asserted rather than
         // left implicit so a later split is a deliberate edit here.
         assert_eq!(certificate_list_empty(), CERTIFICATE_LIST_EMPTY);
+    }
+
+    /// The arm most likely to be written backwards, stated as an outcome.
+    ///
+    /// `admission_evidence_required` is TRUE for a contributor who signed up
+    /// through NEAR and therefore has NO invite. If the arms were ever
+    /// swapped, that contributor would be told their session is
+    /// cryptographically attested when nothing has attested it, and an
+    /// invited contributor would be told theirs is merely a candidate when
+    /// it is already admitted. Both are lies a person would act on.
+    #[test]
+    fn a_contributor_without_an_invite_is_never_told_it_is_attested() {
+        let uninvited = certificate_row_line(true);
+        assert!(
+            !uninvited.to_lowercase().contains("signed proof"),
+            "a contributor with no invite was promised signed proof: {uninvited}"
+        );
+        assert!(
+            uninvited.to_lowercase().contains("put forward"),
+            "a contributor with no invite was not told they can put it forward: {uninvited}"
+        );
+
+        let invited = certificate_row_line(false);
+        assert!(
+            invited.to_lowercase().contains("signed proof"),
+            "an invited contributor was not told what the certificate carries: {invited}"
+        );
     }
 
     /// The certificate-held list says the same fact two ways, and the two

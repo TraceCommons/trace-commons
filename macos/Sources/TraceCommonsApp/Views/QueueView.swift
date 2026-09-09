@@ -97,6 +97,11 @@ struct QueueContent: View {
                 ActionMessageBanner(text: notice) { model.lastActionNotice = nil }
             }
 
+            // The sessions a witness certificate is held for, gathered above
+            // the folders they are scattered across. Drawn on every render
+            // including when it is empty -- see `CertificateSection`.
+            CertificateSection(entries: model.awaitingDecision)
+
             // The offer to answer model calls on this computer, on the
             // screen this app opens on. Settings is where the switch LIVES;
             // Settings alone is the failure this offer exists to fix,

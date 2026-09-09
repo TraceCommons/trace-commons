@@ -2164,7 +2164,10 @@ final class AppModel: ObservableObject {
             // The same invited contributor still gets a mark: an attested
             // session, which is the state the capture is meant to show.
             attestation: "attested",
-            attestationReason: nil
+            attestationReason: nil,
+            // The capture shows a session a certificate is held for, which
+            // is the state the certificate-held list is drawn from.
+            holdsCertificateRaw: true
         )
         var offsets: [Int] = []
         if !needle.isEmpty {

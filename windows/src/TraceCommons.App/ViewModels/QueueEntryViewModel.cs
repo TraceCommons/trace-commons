@@ -236,6 +236,18 @@ public sealed class QueueEntryViewModel : INotifyPropertyChanged
     public string AttestationText => Attestation.MarkLine;
 
     /// <summary>
+    /// Whether a witness certificate is held for the bytes this row was
+    /// pinned to, true after either witness route.
+    /// </summary>
+    /// <remarks>
+    /// The row's own answer, straight off the entry. Not the attestation
+    /// mark above: that says whether the session carries a copy of the model
+    /// call that produced it, this says whether a certificate is held over
+    /// the reviewed bytes.
+    /// </remarks>
+    public bool HoldsCertificate => _entry.HoldsCertificate;
+
+    /// <summary>
     /// The one mark with something to do about it: a setting decides whether
     /// future sessions carry proof.
     /// </summary>
