@@ -169,27 +169,7 @@ async fn prepare(shared: &DaemonShared, params: Params) -> Result<i64> {
     }
     let device = DeviceIdentity::load(&shared.store)?
         .ok_or_else(|| anyhow!("admission_setup_device_missing"))?;
-    // The config's own hosts, when no operator list is configured. This gate
-    // stays exactly as fail-closed as it was -- a list that names nothing
-    // refuses everything -- but it is no longer unsatisfiable on a shipped
-    // application, which sets no `TRACE_COMMONS_ALLOWED_HOSTS` and whose
-    // signup writes no `allowed_hosts`.
-    let allowlist = config_allowlist(&cfg);
-    if !allowlist.is_enforcing() {
-        bail!("admission_setup_endpoint_untrusted");
-    }
-    for endpoint in [&cfg.issuer_url, &cfg.ingest_url] {
-        let url = reqwest::Url::parse(endpoint)?;
-        if url.scheme() != "https"
-            || !url.username().is_empty()
-            || url.password().is_some()
-            || url.query().is_some()
-            || url.fragment().is_some()
-        {
-            bail!("admission_setup_endpoint_untrusted");
-        }
-        allowlist.check(&url)?;
-    }
+    let allowlist = validated_endpoint_allowlist(&cfg)?;
     let issuer = IssuerClient::new(allowlist.clone())?;
     let signed = crate::identity::build_signed_claim_request(&cfg, &device, Utc::now())?;
     let claim = issuer.mint_claim(&cfg.issuer_url, &signed).await?;
@@ -260,6 +240,40 @@ async fn register_binding(
     }
     Ok(registered.expires_at)
 }
+/// The hosts this enrolled config may dial for admission, or a refusal.
+///
+/// Extracted from `prepare` so it can be tested. Inline, it sat downstream of
+/// a queue lookup and a session-file read, so no test could reach it without
+/// building a whole session -- and a mutation reverting it to
+/// `allowlist_for(cfg.allowed_hosts)`, which is the defect this PR fixes,
+/// survived the suite.
+///
+/// The gate itself is unchanged and just as fail-closed: a non-enforcing list
+/// refuses, and both endpoints must be clean HTTPS *and* on the list. What
+/// changed is only where the list comes from -- see
+/// [`crate::config::config_allowlist`].
+fn validated_endpoint_allowlist(
+    cfg: &ContributorConfig,
+) -> Result<trace_commons_operator_client::host_allowlist::HostAllowlist> {
+    let allowlist = config_allowlist(cfg);
+    if !allowlist.is_enforcing() {
+        bail!("admission_setup_endpoint_untrusted");
+    }
+    for endpoint in [&cfg.issuer_url, &cfg.ingest_url] {
+        let url = reqwest::Url::parse(endpoint)?;
+        if url.scheme() != "https"
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.query().is_some()
+            || url.fragment().is_some()
+        {
+            bail!("admission_setup_endpoint_untrusted");
+        }
+        allowlist.check(&url)?;
+    }
+    Ok(allowlist)
+}
+
 fn validate_challenge(
     challenge: &Challenge,
     tenant: &str,
@@ -370,8 +384,16 @@ mod tests {
             allowlist.is_enforcing(),
             "a signup-written config must yield an enforcing list, or every gate below refuses"
         );
-        // The gate that actually failed, driven exactly as `prepare` drives it.
+        // The two gates that actually failed, driven exactly as `prepare`
+        // drives them.
         require_receipt_endpoint(&cfg).expect("a signup-written receipt endpoint must be usable");
+        validated_endpoint_allowlist(&cfg)
+            .expect("a signup-written issuer and ingest must be dialable");
+        // A config whose endpoints are not clean HTTPS is still refused, and
+        // by the gate rather than by the list.
+        let mut credentialed = cfg.clone();
+        credentialed.issuer_url = "https://user@issuer.example".into();
+        assert!(validated_endpoint_allowlist(&credentialed).is_err());
 
         // Every host this config points at, including the receipt endpoint --
         // which is on the inference provider and not on the commons, and which
