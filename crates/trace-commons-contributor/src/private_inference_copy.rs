@@ -3656,6 +3656,100 @@ mod tests {
         }
     }
 
+    /// Enrolling with a NEAR AI login refuses in ten distinct ways, and a
+    /// contributor must be able to tell them apart.
+    ///
+    /// The three that happen BEFORE anything is spent are the ones that
+    /// matter most: no NEAR AI session, the commons unreachable, and the
+    /// commons not offering login enrolment. A contributor told "the commons
+    /// is unreachable" when they have simply never logged in will go and
+    /// debug their network. The daemon already fixed that confusion once on
+    /// its side by checking the session before reaching out; collapsing the
+    /// two into one sentence here would reintroduce it in the shell.
+    #[test]
+    fn every_enrolment_refusal_says_its_own_thing() {
+        let labels = [
+            NEAR_AI_ENROLL_ALREADY_ENROLLED,
+            NEAR_AI_ENROLL_NO_SESSION,
+            NEAR_AI_ENROLL_ENDPOINT_REFUSED,
+            NEAR_AI_ENROLL_TOKEN_UNAVAILABLE,
+            NEAR_AI_ENROLL_START_FAILED,
+            NEAR_AI_ENROLL_COMMONS_UNREACHABLE,
+            NEAR_AI_ENROLL_COMMONS_UNSUPPORTED,
+            NEAR_AI_ENROLL_INVALID,
+            NEAR_AI_ENROLL_VERIFICATION_FAILED,
+            NEAR_AI_ENROLL_UNAVAILABLE,
+        ];
+        let mut seen = std::collections::BTreeSet::new();
+        for label in labels {
+            let line = near_ai_enroll_line(label);
+            assert!(!line.is_empty(), "{label} reaches no sentence");
+            assert!(
+                seen.insert(line),
+                "{label} shares its sentence with another refusal"
+            );
+        }
+
+        // The three pre-spend classes, checked as outcomes rather than as a
+        // set difference: each must say the thing a contributor would act on.
+        let no_session = near_ai_enroll_line(NEAR_AI_ENROLL_NO_SESSION).to_lowercase();
+        assert!(
+            no_session.contains("log in"),
+            "the no-session refusal does not tell them to log in: {no_session}"
+        );
+        assert!(
+            !no_session.contains("unreachable") && !no_session.contains("network"),
+            "the no-session refusal blames the network: {no_session}"
+        );
+
+        let unreachable = near_ai_enroll_line(NEAR_AI_ENROLL_COMMONS_UNREACHABLE).to_lowercase();
+        assert!(
+            !unreachable.contains("log in"),
+            "an unreachable commons was reported as a login problem: {unreachable}"
+        );
+
+        let unsupported = near_ai_enroll_line(NEAR_AI_ENROLL_COMMONS_UNSUPPORTED).to_lowercase();
+        assert!(
+            !unsupported.contains("log in") && !unsupported.contains("unreachable"),
+            "a commons not offering this was reported as something else: {unsupported}"
+        );
+    }
+
+    /// An unfamiliar label reaches the generic sentence, never an empty
+    /// string and never another refusal's words.
+    ///
+    /// The daemon maps anything it does not recognise to
+    /// `near_ai_enroll_unavailable` already; a shell running against a newer
+    /// daemon can still meet a label this build has never seen.
+    #[test]
+    fn an_unknown_enrolment_label_claims_nothing_specific() {
+        let generic = near_ai_enroll_line(NEAR_AI_ENROLL_UNAVAILABLE);
+        for unknown in ["", "near_ai_enroll_from_the_future", "nonsense"] {
+            assert_eq!(
+                near_ai_enroll_line(unknown),
+                generic,
+                "{unknown:?} did not fall back to the generic sentence"
+            );
+        }
+    }
+
+    /// The offer says a wallet is not needed, because that is the whole point
+    /// of it existing and the thing a contributor is deciding.
+    #[test]
+    fn the_login_offer_says_no_wallet_is_needed() {
+        let copy = private_inference_copy();
+        let what = copy.near_ai_enroll_what.to_lowercase();
+        assert!(
+            what.contains("wallet"),
+            "the offer never mentions the wallet it saves them: {what}"
+        );
+        assert!(
+            !copy.near_ai_enroll_needs_login.is_empty(),
+            "a contributor who has not logged in is shown nothing"
+        );
+        assert_ne!(copy.near_ai_enroll_needs_login, copy.near_ai_enroll_what);
+    }
+
     /// Every field of the payload carries a finished sentence: no empties,
     /// and no template markers a shell would have to fill in.
     #[test]
