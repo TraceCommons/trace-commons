@@ -2409,6 +2409,67 @@ pub fn near_ai_enroll_tone(label: &str) -> PrivateInferenceTone {
     }
 }
 
+/// What the outcome list says about a contribution the commons refused.
+///
+/// **The one thing this must never say is that nothing was sent.** On this
+/// path the envelope was transmitted: `submit_with_retries` posts the body to
+/// `/v1/traces` and the gate declines it in the handler, after receiving it.
+/// The shells' own outcome tables have never been told these labels exist, so
+/// they fall through to their defaults -- "Held" on macOS, which is vague,
+/// and "Nothing was sent." on GTK, which is false about where a
+/// contributor's data went, on the one surface where that claim carries
+/// weight. See #810.
+///
+/// **Keyed off [`AdmissionRefusal`] rather than off re-typed strings, and
+/// that is the point.** These five labels reach a queue entry's
+/// `reason_label` in the server's wire spelling -- `admission_refused`, with
+/// an underscore -- while `daemon::health`'s constants for the same events
+/// are hyphenated. A table written against the wrong spelling would match
+/// nothing, fall through to the same default arm, and reproduce the exact bug
+/// while looking fixed. Matching on the enum takes the spelling from the
+/// protocol crate and makes the set exhaustive, so neither can drift.
+///
+/// `None` for anything that is not one of the five. The shells' existing
+/// tables still answer those, and claiming them here would silently take over
+/// wording that has not been moved into this crate yet -- see the follow-up
+/// for the rest of `queue_outcome_counts`.
+#[must_use]
+pub fn outcome_refusal_line(label: &str) -> Option<&'static str> {
+    use trace_commons_protocol::admission::AdmissionRefusal;
+    Some(match AdmissionRefusal::from_label(label)? {
+        AdmissionRefusal::Refused => OUTCOME_ADMISSION_REFUSED,
+        AdmissionRefusal::LimitReached => OUTCOME_ADMISSION_LIMIT_REACHED,
+        AdmissionRefusal::InProgress => OUTCOME_ADMISSION_IN_PROGRESS,
+        AdmissionRefusal::IdentityConflict => OUTCOME_ADMISSION_IDENTITY_CONFLICT,
+        AdmissionRefusal::EvidenceRefused => OUTCOME_ADMISSION_EVIDENCE_REFUSED,
+    })
+}
+
+/// `admission_refused`. Says the work arrived and was declined, because it
+/// did and it was.
+pub const OUTCOME_ADMISSION_REFUSED: &str = "Sent, and the commons declined it";
+
+/// `admission_limit_reached`. Not a judgement on the work: the account's
+/// allowance for this window is spent, and the window rolls over.
+pub const OUTCOME_ADMISSION_LIMIT_REACHED: &str = "Sent, and over the account's allowance for now";
+
+/// `admission_in_progress`. **Not a refusal**, and it must not read as one.
+/// Another attempt at the same submission holds the lease, which the next
+/// retry resolves on its own.
+pub const OUTCOME_ADMISSION_IN_PROGRESS: &str =
+    "Sent, and waiting on another attempt at the same session";
+
+/// `admission_identity_conflict`. The submission id is already bound to
+/// different bytes or a different account.
+pub const OUTCOME_ADMISSION_IDENTITY_CONFLICT: &str =
+    "Sent, and it did not match what that submission already holds";
+
+/// `admission_evidence_refused`. The witness declined the receipt behind an
+/// evidence-bearing request. Named separately from the plain refusal because
+/// what a contributor might do about it differs.
+pub const OUTCOME_ADMISSION_EVIDENCE_REFUSED: &str =
+    "Sent, and the proof attached to it was not accepted";
+
 // PRIVATE-INFERENCE-SURFACE-END
 
 // The daemon's control names for login enrolment. Below the marker on
