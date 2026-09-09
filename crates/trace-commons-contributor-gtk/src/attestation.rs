@@ -125,8 +125,8 @@ mod tests {
         "unknown",
     ];
 
-    /// The thirteen reason labels, shared with eligibility.
-    const REASONS: [&str; 13] = [
+    /// The fourteen reason labels, shared with eligibility.
+    const REASONS: [&str; 14] = [
         "no_inference_call",
         "capture_off",
         "digest_absent",
@@ -140,6 +140,7 @@ mod tests {
         "marker_absent",
         "request_malformed",
         "receipt_unavailable",
+        "receipt_not_issued",
     ];
 
     /// Build an entry the way the daemon does: through the real

@@ -24,7 +24,7 @@ private final class Recorder: @unchecked Sendable {
 }
 
 final class EligibilitySurfaceTests: XCTestCase {
-    /// The 17 fields this surface added, so a test can delete each in turn.
+    /// The 18 fields this surface added, so a test can delete each in turn.
     private static let eligibilityFields = [
         "eligibility_eligible", "eligibility_ineligible_permanent",
         "eligibility_ineligible_configuration", "eligibility_unknown",
@@ -34,7 +34,7 @@ final class EligibilitySurfaceTests: XCTestCase {
         "eligibility_reason_bodies_unreadable", "eligibility_reason_body_not_utf8",
         "eligibility_reason_body_too_large", "eligibility_reason_evidence_capture_off",
         "eligibility_reason_marker_absent", "eligibility_reason_request_malformed",
-        "eligibility_reason_receipt_unavailable",
+        "eligibility_reason_receipt_unavailable", "eligibility_reason_receipt_not_issued",
     ]
 
     /// The shared complete payload; see `PrivateInferenceCopyFixture`.

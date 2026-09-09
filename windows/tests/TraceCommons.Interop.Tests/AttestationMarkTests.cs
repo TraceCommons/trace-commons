@@ -229,9 +229,10 @@ public class AttestationMarkTests
             ("marker_absent", copy.AttestationReasonMarkerAbsent, copy.EligibilityReasonMarkerAbsent),
             ("request_malformed", copy.AttestationReasonRequestMalformed, copy.EligibilityReasonRequestMalformed),
             ("receipt_unavailable", copy.AttestationReasonReceiptUnavailable, copy.EligibilityReasonReceiptUnavailable),
+            ("receipt_not_issued", copy.AttestationReasonReceiptNotIssued, copy.EligibilityReasonReceiptNotIssued),
         };
 
-        Assert.Equal(13, pairs.Length);
+        Assert.Equal(14, pairs.Length);
 
         int discriminating = 0;
         foreach ((string label, string attestation, string eligibility) in pairs)

@@ -411,7 +411,11 @@ public sealed record PrivateInferenceCopy
     [JsonPropertyName("eligibility_reason_receipt_unavailable")]
     public string EligibilityReasonReceiptUnavailable { get; init; } = string.Empty;
 
-    // The four attestation marks and the thirteen attestation reasons.
+    /// <summary>The model that answered does not issue the proof -- permanent.</summary>
+    [JsonPropertyName("eligibility_reason_receipt_not_issued")]
+    public string EligibilityReasonReceiptNotIssued { get; init; } = string.Empty;
+
+    // The four attestation marks and the fourteen attestation reasons.
     //
     // Separate sentences from the Eligibility* properties above over the SAME
     // thirteen reason labels. Five of the eligibility sentences say the
@@ -512,6 +516,10 @@ public sealed record PrivateInferenceCopy
     /// <summary>The proof that goes with the final call could not be had.</summary>
     [JsonPropertyName("attestation_reason_receipt_unavailable")]
     public string AttestationReasonReceiptUnavailable { get; init; } = string.Empty;
+
+    /// <summary>The model that answered does not issue a copy-of-call proof -- permanent.</summary>
+    [JsonPropertyName("attestation_reason_receipt_not_issued")]
+    public string AttestationReasonReceiptNotIssued { get; init; } = string.Empty;
 
     /// <summary>The heading over the balance row.</summary>
     [JsonPropertyName("balance_title")]
@@ -638,6 +646,7 @@ public sealed record PrivateInferenceCopy
             CertificateListCandidate,
             CertificateListAttested,
             CertificateListEmpty,
+            EligibilityReasonReceiptNotIssued,
             AttestationAttested,
             AttestationUnattestedPermanent,
             AttestationUnattestedConfiguration,
@@ -655,6 +664,7 @@ public sealed record PrivateInferenceCopy
             AttestationReasonMarkerAbsent,
             AttestationReasonRequestMalformed,
             AttestationReasonReceiptUnavailable,
+            AttestationReasonReceiptNotIssued,
             BalanceTitle,
             BalanceWhat,
             BalanceNoSession,

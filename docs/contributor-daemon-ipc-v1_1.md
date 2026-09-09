@@ -1279,7 +1279,7 @@ a sentence and answers the **empty string** for zero. A button reading
 gap, is the same small dishonesty the rest of this surface removes. The
 sentence says how many and **not why**: the reason a particular session cannot
 be sent is that row's own sentence, one level in, and a summary here would
-stand for up to thirteen different reasons and say nothing true about any of
+stand for up to fourteen different reasons and say nothing true about any of
 them.
 
 **One reply, one deadline.** A group `approve` does not fan out. It takes one
@@ -2130,6 +2130,7 @@ beats a guess exactly where something true has already been said.
 | `marker_absent` | `eligibility_reason_marker_absent` | `ineligible_permanent` |
 | `request_malformed` | `eligibility_reason_request_malformed` | `ineligible_permanent` |
 | `receipt_unavailable` | `eligibility_reason_receipt_unavailable` | `unknown` |
+| `receipt_not_issued` | `eligibility_reason_receipt_not_issued` | `ineligible_permanent` |
 
 Only `ineligible_configuration` names a setting, and it is the only state
 painted `TC_PRIVATE_INFERENCE_TONE_ATTENTION`. `no_inference_call` has no
@@ -2244,7 +2245,7 @@ give.
 Nothing was refused and nothing went wrong: most of a contributor's history
 was recorded before anything was keeping copies.
 
-`attestation_reason` takes the **same thirteen labels** as
+`attestation_reason` takes the **same fourteen labels** as
 `eligibility_reason` -- a reason names a fact about the session, not an answer
 to either question -- and is rendered through
 `tc_contribution_attestation_reason_line`, which answers the **empty string**
@@ -2280,6 +2281,7 @@ copy of its call.
 | `marker_absent` | `attestation_reason_marker_absent` | `unattested_permanent` |
 | `request_malformed` | `attestation_reason_request_malformed` | `unattested_permanent` |
 | `receipt_unavailable` | `attestation_reason_receipt_unavailable` | `unknown` |
+| `receipt_not_issued` | `attestation_reason_receipt_not_issued` | `unattested_permanent` |
 
 A submission turned away for an admission reason writes back here exactly as
 it does to `eligibility`: a row still claiming its session carries proof,

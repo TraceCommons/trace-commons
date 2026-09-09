@@ -74,7 +74,7 @@ pub const STATE_INELIGIBLE_CONFIGURATION: &str = "ineligible_configuration";
 /// Not evaluated. Never a silent default -- see the module docs.
 pub const STATE_UNKNOWN: &str = "unknown";
 
-/// The thirteen reason labels, owned by [`attestation_mark`] and re-exported
+/// The fourteen reason labels, owned by [`attestation_mark`] and re-exported
 /// here unchanged.
 ///
 /// They are not split between the two questions, because they were never
@@ -88,8 +88,8 @@ pub const STATE_UNKNOWN: &str = "unknown";
 pub use attestation_mark::{
     ALL_REASONS, REASON_BODIES_UNREADABLE, REASON_BODY_NOT_UTF8, REASON_BODY_TOO_LARGE,
     REASON_CAPTURE_OFF, REASON_DIGEST_ABSENT, REASON_DIGEST_MISMATCH, REASON_EVIDENCE_CAPTURE_OFF,
-    REASON_MARKER_ABSENT, REASON_NO_CALL, REASON_RECEIPT_UNAVAILABLE, REASON_REFERENCE_MALFORMED,
-    REASON_REQUEST_MALFORMED, REASON_UPSTREAM_ID_ABSENT,
+    REASON_MARKER_ABSENT, REASON_NO_CALL, REASON_RECEIPT_NOT_ISSUED, REASON_RECEIPT_UNAVAILABLE,
+    REASON_REFERENCE_MALFORMED, REASON_REQUEST_MALFORMED, REASON_UPSTREAM_ID_ABSENT,
 };
 
 /// One entry's answer: a state label and, unless it is eligible, why.
@@ -265,7 +265,7 @@ mod tests {
             backend: "nearai".to_string(),
             requested_model: Some("a-model".to_string()),
             served_model: Some("a-model".to_string()),
-            upstream_id: Some("chatcmpl-1".to_string()),
+            upstream_id: Some("abcdef0123456789".to_string()),
             request_sha256: Some("00".repeat(32)),
             response_sha256: Some("11".repeat(32)),
             body_ref: Some("00000000000000000001-000000".to_string()),

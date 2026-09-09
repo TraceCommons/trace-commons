@@ -190,6 +190,69 @@ pub enum Unattestable {
     DigestMismatch,
 }
 
+/// Whose identifier a recorded `upstream_id` is, and therefore whether a
+/// receipt can exist for the call it names.
+///
+/// NEAR AI issues a receipt (`GET /v1/signature/{chat_id}`) only for a call
+/// it served from its own enclave, and it names such a call by an identifier
+/// of its own minting: bare hex. A call it passed on to Anthropic or OpenAI
+/// comes back under **that** provider's identifier -- `msg_…`, `chatcmpl-…`
+/// -- and the receipt endpoint answers 404 for it, permanently, because NEAR
+/// AI never ran the enclave that would have signed it.
+///
+/// Decided from the identifier's shape rather than from a list of model
+/// names, because the list moves -- models are added, retired and re-homed
+/// upstream without notice -- while the shape is a property of who minted the
+/// identifier, which is the fact that decides whether a receipt exists.
+///
+/// This is an attestation question, not a body-carrying one. A brokered
+/// call's bodies are as faithful as any other's and [`attested_final_call`]
+/// carries them; what they lack is a receipt. So the classification lives in
+/// [`crate::daemon::attestation_mark::evaluate`] and the receipt fetch, not
+/// in [`ledger_only_final_call`] -- the overlay still attaches the bodies,
+/// and the mark is what says nothing can attest them.
+///
+/// **Fails toward not claiming.** Only a shape known to be the provider's own
+/// reads as [`Self::Hosted`]; a shape known to be another provider's reads as
+/// [`Self::Foreign`]; anything else is [`Self::Unrecognised`], which is never
+/// promoted to attested by anything that reads it. A missed credit on an
+/// attestable call is recoverable; a promise of attestation on a call that
+/// cannot carry one is not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderIdentifier {
+    /// The provider's own identifier: bare hex, 16 to 64 lowercase digits.
+    /// A receipt may exist for this call.
+    Hosted,
+    /// Another provider's identifier. No receipt exists and none will.
+    Foreign,
+    /// A shape this build does not know. Not claimed either way.
+    Unrecognised,
+}
+
+/// Prefixes that name another provider's identifier. Anthropic's Messages
+/// API mints `msg_…`; OpenAI's Chat Completions API mints `chatcmpl-…`.
+const FOREIGN_IDENTIFIER_PREFIXES: [&str; 2] = ["msg_", "chatcmpl-"];
+
+/// Classify one recorded provider identifier. See [`ProviderIdentifier`].
+#[must_use]
+pub fn classify_upstream_id(upstream_id: &str) -> ProviderIdentifier {
+    if FOREIGN_IDENTIFIER_PREFIXES
+        .iter()
+        .any(|prefix| upstream_id.starts_with(prefix))
+    {
+        return ProviderIdentifier::Foreign;
+    }
+    let hosted = (16..=64).contains(&upstream_id.len())
+        && upstream_id
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+    if hosted {
+        ProviderIdentifier::Hosted
+    } else {
+        ProviderIdentifier::Unrecognised
+    }
+}
+
 /// The final call's verbatim bodies, ready to become an event.
 ///
 /// Deliberately no `Debug`, `Serialize` or `Clone` derive that would print or

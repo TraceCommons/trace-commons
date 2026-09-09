@@ -111,7 +111,7 @@ final class EligibilityExportTests: XCTestCase {
         XCTAssertEqual(control(""), ContributionControl.none)
     }
 
-    /// Each of the thirteen reason labels reaches its own sentence, and no
+    /// Each of the fourteen reason labels reaches its own sentence, and no
     /// two share one.
     func testEachReasonLabelReachesItsOwnSentence() throws {
         let copy = try XCTUnwrap(copy())
@@ -129,8 +129,9 @@ final class EligibilityExportTests: XCTestCase {
             ("marker_absent", copy.eligibilityReasonMarkerAbsent),
             ("request_malformed", copy.eligibilityReasonRequestMalformed),
             ("receipt_unavailable", copy.eligibilityReasonReceiptUnavailable),
+            ("receipt_not_issued", copy.eligibilityReasonReceiptNotIssued),
         ]
-        XCTAssertEqual(expected.count, 13)
+        XCTAssertEqual(expected.count, 14)
         for (label, sentence) in expected {
             XCTAssertFalse(sentence.isEmpty, label)
             XCTAssertEqual(
@@ -139,7 +140,7 @@ final class EligibilityExportTests: XCTestCase {
                     calls: calls()),
                 sentence, label)
         }
-        XCTAssertEqual(Set(expected.map(\.1)).count, 13, "no two reasons share a sentence")
+        XCTAssertEqual(Set(expected.map(\.1)).count, 14, "no two reasons share a sentence")
     }
 
     /// An unfamiliar reason renders NOTHING and borrows no sentence.
@@ -294,9 +295,9 @@ final class EligibilityExportTests: XCTestCase {
             copy.eligibilityReasonBodiesUnreadable, copy.eligibilityReasonBodyNotUtf8,
             copy.eligibilityReasonBodyTooLarge, copy.eligibilityReasonEvidenceCaptureOff,
             copy.eligibilityReasonMarkerAbsent, copy.eligibilityReasonRequestMalformed,
-            copy.eligibilityReasonReceiptUnavailable,
+            copy.eligibilityReasonReceiptUnavailable, copy.eligibilityReasonReceiptNotIssued,
         ]
-        XCTAssertEqual(sentences.count, 17)
+        XCTAssertEqual(sentences.count, 18)
         for sentence in sentences {
             XCTAssertFalse(sentence.isEmpty)
             for marker in ["{}", "{path}", "{reason}", "%@", "%s", "%d"] {

@@ -60,31 +60,25 @@ use trace_commons_protocol::trace_contribution::TraceContributionEnvelope;
 pub enum UploadDecision {
     Uploaded {
         submission_id: Uuid,
+        /// What the receipt fetch produced for this upload, so the daemon can
+        /// correct the attestation mark on a row whose receipt did not
+        /// arrive. See `attestation_mark::writeback_after_upload`.
+        receipt: crate::submit::ReceiptShipped,
     },
     /// Already delivered previously; nothing sent.
-    AlreadySubmitted {
-        submission_id: Uuid,
-    },
+    AlreadySubmitted { submission_id: Uuid },
     /// The session changed after it was offered. Nothing was sent, and
     /// `new_hash` describes what is on disk now.
-    Superseded {
-        new_hash: String,
-    },
+    Superseded { new_hash: String },
     /// The pipeline declined to send this, fail-closed.
-    Refused {
-        reason_label: String,
-    },
+    Refused { reason_label: String },
     /// The approval no longer covers what would be sent -- an
     /// envelope-determining input moved, or the envelope the pipeline built
     /// is not the one the contributor was shown. Nothing was sent; the
     /// entry goes back in front of the contributor under `reason_label`.
-    ApprovalStale {
-        reason_label: String,
-    },
+    ApprovalStale { reason_label: String },
     /// Network or auth failure.
-    Failed {
-        reason_label: String,
-    },
+    Failed { reason_label: String },
     /// A daily volume cap is in force.
     CapReached,
 }
@@ -211,7 +205,7 @@ pub fn budget_snapshot(
 
 /// Map a pipeline outcome onto a daemon decision, so the queue records a
 /// fixed label rather than pipeline internals.
-fn decision_for(outcome: SubmitOutcome) -> UploadDecision {
+fn decision_for(outcome: SubmitOutcome, receipt: crate::submit::ReceiptShipped) -> UploadDecision {
     match outcome {
         SubmitOutcome::Refused { reason_label, .. } | SubmitOutcome::Failed { reason_label }
             if matches!(
@@ -221,9 +215,10 @@ fn decision_for(outcome: SubmitOutcome) -> UploadDecision {
         {
             UploadDecision::ApprovalStale { reason_label }
         }
-        SubmitOutcome::Submitted { submission_id, .. } => {
-            UploadDecision::Uploaded { submission_id }
-        }
+        SubmitOutcome::Submitted { submission_id, .. } => UploadDecision::Uploaded {
+            submission_id,
+            receipt,
+        },
         SubmitOutcome::AlreadySubmitted { submission_id, .. } => {
             UploadDecision::AlreadySubmitted { submission_id }
         }
@@ -514,7 +509,7 @@ impl Uploader<'_, '_> {
                 return Err(e);
             }
         };
-        let decision = decision_for(outcome);
+        let decision = decision_for(outcome, self.ctx.last_receipt_shipped());
 
         match &decision {
             UploadDecision::Uploaded { .. } => {
@@ -797,6 +792,7 @@ mod tests {
     fn a_successful_upload_implies_no_health_failure() {
         let d = UploadDecision::Uploaded {
             submission_id: Uuid::nil(),
+            receipt: crate::submit::ReceiptShipped::NoCall,
         };
         assert_eq!(health_label_for(&d), None);
     }

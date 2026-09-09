@@ -715,8 +715,25 @@ async fn drain_approved(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<U
         let newly_uploaded = matches!(decision, uploader::UploadDecision::Uploaded { .. });
         let mut q = shared.queue.lock().expect("queue lock");
         match decision {
-            uploader::UploadDecision::Uploaded { submission_id }
-            | uploader::UploadDecision::AlreadySubmitted { submission_id } => {
+            uploader::UploadDecision::Uploaded {
+                submission_id,
+                receipt,
+            } => {
+                // The submission shipped; now make the attestation mark tell
+                // the truth about the receipt that did or did not come with
+                // it. Without this a hosted call whose receipt 404'd would go
+                // on reading `attested` -- the silent half of the defect, a
+                // person believing they contributed attested work that
+                // carried no proof. Only a mark that is currently `unknown`
+                // is promoted to attested; an unattested mark is never
+                // promoted, because it also answers for the marker and the
+                // bodies, which a receipt says nothing about.
+                let current = q.get(entry.entry_id).and_then(|e| e.attestation.clone());
+                if let Some(mark) =
+                    attestation_mark::writeback_after_upload(receipt, current.as_deref())
+                {
+                    q.record_attestation(entry.entry_id, mark.state, mark.reason);
+                }
                 q.set_state(entry.entry_id, queue::QueueState::Uploaded, None);
                 q.set_submission_id(entry.entry_id, submission_id);
                 uploaded_this_pass = true;
@@ -734,6 +751,11 @@ async fn drain_approved(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<U
                     policy.record_contribution(&entry.project_key);
                     let _ = policy.save(&shared.store);
                 }
+            }
+            uploader::UploadDecision::AlreadySubmitted { submission_id } => {
+                q.set_state(entry.entry_id, queue::QueueState::Uploaded, None);
+                q.set_submission_id(entry.entry_id, submission_id);
+                uploaded_this_pass = true;
             }
             uploader::UploadDecision::Superseded { new_hash } => {
                 let size = std::fs::metadata(&entry.path).map(|m| m.len()).unwrap_or(0);

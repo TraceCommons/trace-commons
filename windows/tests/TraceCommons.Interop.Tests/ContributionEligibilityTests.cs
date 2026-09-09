@@ -294,9 +294,10 @@ public class ContributionEligibilityTests
             ["marker_absent"] = copy.EligibilityReasonMarkerAbsent,
             ["request_malformed"] = copy.EligibilityReasonRequestMalformed,
             ["receipt_unavailable"] = copy.EligibilityReasonReceiptUnavailable,
+            ["receipt_not_issued"] = copy.EligibilityReasonReceiptNotIssued,
         };
 
-        Assert.Equal(13, expected.Count);
+        Assert.Equal(14, expected.Count);
         foreach (KeyValuePair<string, string> pair in expected)
         {
             string? drawn = ContributionEligibilitySurface.ReasonLine(pair.Key);

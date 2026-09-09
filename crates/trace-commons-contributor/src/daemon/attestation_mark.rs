@@ -54,7 +54,9 @@
 //! path, digest, identifier or anything a contributor wrote.
 
 use crate::routing::RoutedExchange;
-use crate::routing::attested::{AttestedCall, Unattestable, ledger_only_final_call};
+use crate::routing::attested::{
+    AttestedCall, ProviderIdentifier, Unattestable, classify_upstream_id, ledger_only_final_call,
+};
 
 /// The session carries a faithful copy of its final model call, marked for
 /// the receipt that goes with it.
@@ -106,6 +108,16 @@ pub const REASON_RECEIPT_UNAVAILABLE: &str = "receipt_unavailable";
 /// rather than retried, the same rule `submit::admission_profile_for_request`
 /// follows.
 pub const REASON_REQUEST_MALFORMED: &str = "request_malformed";
+/// No receipt exists for the call and none will. Two ways it is established,
+/// and the sentence covers both: a [`ProviderIdentifier::Foreign`] identifier
+/// at discovery -- the answer came back under another provider's identifier,
+/// so NEAR AI never ran the enclave that would have signed it -- and a
+/// definite 404 ([`ReceiptFetchError::ReceiptNotFound`]) from the receipt
+/// endpoint at submission. Permanent, because nothing on this machine and no
+/// setting anywhere reaches back to where those bytes were sent.
+///
+/// [`ReceiptFetchError::ReceiptNotFound`]: crate::routing::receipt::ReceiptFetchError::ReceiptNotFound
+pub const REASON_RECEIPT_NOT_ISSUED: &str = "receipt_not_issued";
 
 /// One session's attestation answer: a mark and, unless it is attested, why
 /// not.
@@ -162,6 +174,18 @@ impl Mark {
             reason: None,
         }
     }
+
+    /// Unknown, because the question has not been settled yet.
+    ///
+    /// The identifier the final call came back under is a shape this build
+    /// cannot place -- neither the provider's own nor one it knows to be
+    /// another provider's -- so whether a receipt exists is not known until
+    /// the submit path asks for one. The same wire value as
+    /// [`Self::retracted`], and deliberately: both mean "no answer of this
+    /// client's to offer", and a shell already renders it.
+    pub(super) fn unresolved() -> Self {
+        Self::retracted()
+    }
 }
 
 /// Classify one session's attestation, for every contributor.
@@ -203,9 +227,66 @@ pub fn evaluate(
     // reaches nobody who could attest it -- which is why it is part of this
     // answer and not only of the permission one.
     match crate::submit::admission_profile_for_request(true, Some(call.request_body())) {
-        Ok(true) => Mark::attested(),
-        Ok(false) => Mark::permanent(REASON_MARKER_ABSENT),
-        Err(_) => Mark::permanent(REASON_REQUEST_MALFORMED),
+        Ok(true) => {}
+        Ok(false) => return Mark::permanent(REASON_MARKER_ABSENT),
+        Err(_) => return Mark::permanent(REASON_REQUEST_MALFORMED),
+    }
+    // Last, and only after everything a receipt would need is in place: can a
+    // receipt exist for this call at all? The bodies can be faithful and the
+    // marker present and the answer still no, because NEAR AI signs only the
+    // calls it served itself, and it names those by its own identifier. A
+    // call it passed on to another provider carries that provider's
+    // identifier and 404s at the receipt endpoint forever. The mark used to
+    // read the row blind to this and told a person running Claude or GPT
+    // through NEAR AI that their trace carried proof it could never carry.
+    //
+    // Fails toward not claiming. A shape this build does not know is not
+    // refused -- the submit path still fetches, and `writeback_after_upload`
+    // records what it got -- but it is not promised either.
+    match classify_upstream_id(call.upstream_id()) {
+        ProviderIdentifier::Hosted => Mark::attested(),
+        ProviderIdentifier::Foreign => Mark::permanent(REASON_RECEIPT_NOT_ISSUED),
+        ProviderIdentifier::Unrecognised => Mark::unresolved(),
+    }
+}
+
+/// What the receipt fetch at submission proved about this entry's mark.
+///
+/// The second half of the defect. The receipt fetch used to fail into a debug
+/// log while the trace shipped anyway, and the row went on saying `attested`
+/// -- a person believed they had contributed attested work and had not. The
+/// submission still ships (an invited contributor's upload is valid without
+/// a receipt, and refusing it would withhold a whole contribution over a
+/// credit weighting), but the mark now records what actually went.
+///
+/// - Attached: the call carried a receipt. Resolves an [`MARK_UNKNOWN`]
+///   left by an unrecognised identifier; an already-attested row is
+///   unchanged and an unattested one is not promoted, because the mark also
+///   answers for the marker and the bodies, which a receipt says nothing
+///   about.
+/// - Not found: the endpoint answered and holds nothing. Permanent, for the
+///   reason [`REASON_RECEIPT_NOT_ISSUED`] gives.
+/// - Anything else: the endpoint was not reached, refused this machine, or
+///   served something unverifiable. [`MARK_UNKNOWN`] with
+///   [`REASON_RECEIPT_UNAVAILABLE`], the one reason whose sentence says it
+///   may work later -- never a permanent mark from a transient failure.
+///
+/// `None` when nothing changes: no attested call shipped, or the receipt
+/// arrived on a row that already said so.
+#[must_use]
+pub fn writeback_after_upload(
+    shipped: crate::submit::ReceiptShipped,
+    current_state: Option<&str>,
+) -> Option<Mark> {
+    use crate::routing::receipt::ReceiptFetchError;
+    use crate::submit::ReceiptShipped;
+    match shipped {
+        ReceiptShipped::NoCall => None,
+        ReceiptShipped::Attached => (current_state == Some(MARK_UNKNOWN)).then(Mark::attested),
+        ReceiptShipped::Omitted(ReceiptFetchError::ReceiptNotFound) => {
+            Some(Mark::permanent(REASON_RECEIPT_NOT_ISSUED))
+        }
+        ReceiptShipped::Omitted(_) => Some(Mark::unknown(REASON_RECEIPT_UNAVAILABLE)),
     }
 }
 
@@ -246,6 +327,7 @@ pub fn writeback_for(reason_label: &str) -> Option<Mark> {
     match reason_label {
         "admission_request_malformed" => Some(Mark::permanent(REASON_REQUEST_MALFORMED)),
         "admission_receipt_unavailable" => Some(Mark::unknown(REASON_RECEIPT_UNAVAILABLE)),
+        "admission_receipt_not_issued" => Some(Mark::permanent(REASON_RECEIPT_NOT_ISSUED)),
         // The two above are this client's own answers about bytes it read.
         // These two are the server's, about a send it turned away for want of
         // the proof -- and the row must stop claiming to carry any.
@@ -273,7 +355,7 @@ pub const ALL_MARKS: [&str; 4] = [
 ///
 /// Shared with `contribution_eligibility`, which re-exports it: the reasons
 /// are facts about a session, not answers to either question.
-pub const ALL_REASONS: [&str; 13] = [
+pub const ALL_REASONS: [&str; 14] = [
     REASON_NO_CALL,
     REASON_CAPTURE_OFF,
     REASON_DIGEST_ABSENT,
@@ -287,6 +369,7 @@ pub const ALL_REASONS: [&str; 13] = [
     REASON_MARKER_ABSENT,
     REASON_REQUEST_MALFORMED,
     REASON_RECEIPT_UNAVAILABLE,
+    REASON_RECEIPT_NOT_ISSUED,
 ];
 
 #[cfg(test)]
@@ -321,7 +404,7 @@ mod tests {
             backend: "nearai".to_string(),
             requested_model: Some("a-model".to_string()),
             served_model: Some("a-model".to_string()),
-            upstream_id: Some("chatcmpl-1".to_string()),
+            upstream_id: Some("abcdef0123456789".to_string()),
             request_sha256: Some("00".repeat(32)),
             response_sha256: Some("11".repeat(32)),
             body_ref: Some("00000000000000000001-000000".to_string()),
@@ -648,5 +731,58 @@ mod tests {
             let (mark, _) = both_answers(&case, true);
             assert_ne!(mark.state, MARK_UNKNOWN);
         }
+    }
+
+    /// The discovery path, end to end, for one ledger row: bodies on disk,
+    /// the full check run exactly as `RoutingEnrichedSource::load` runs it,
+    /// and the mark read off whichever half it produced.
+    fn discovered_mark(row: RoutedExchange) -> Mark {
+        use sha2::{Digest as _, Sha256};
+        let request = marked_request();
+        let response = "data: [DONE]\n\n";
+        let mut row = row;
+        let reference = row.body_ref.clone().expect("a reference");
+        row.request_sha256 = Some(format!("{:x}", Sha256::digest(request.as_bytes())));
+        row.response_sha256 = Some(format!("{:x}", Sha256::digest(response.as_bytes())));
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join(format!("{reference}.req")), &request).expect("req");
+        std::fs::write(dir.path().join(format!("{reference}.res")), response).expect("res");
+        let rows = vec![row];
+        let (call, refusal) = match crate::routing::attested::attested_final_call(&rows, dir.path())
+        {
+            Ok(call) => (Some(call), None),
+            Err(refusal) => (None, Some(refusal)),
+        };
+        evaluate(&rows, call.as_ref(), refusal)
+    }
+
+    /// The defect this exists to remove. NEAR AI answers
+    /// `GET /v1/signature/{chat_id}` only for calls it served from its own
+    /// enclave, and those carry its own bare-hex identifier. A call it passed
+    /// on to Anthropic or OpenAI comes back under THAT provider's identifier
+    /// -- `msg_…`, `chatcmpl-…` -- and 404s forever. The mark used to read
+    /// the row blind to this, and a person running Claude or GPT through
+    /// NEAR AI was told their trace carried proof it could never carry.
+    #[test]
+    fn a_call_answered_under_another_providers_identifier_is_never_attested() {
+        for foreign in ["msg_011CejCasYpbXmB5Zqu3fJsc", "chatcmpl-9x2Fz8Q"] {
+            let mut row = row();
+            row.upstream_id = Some(foreign.to_string());
+            let mark = discovered_mark(row);
+            assert_ne!(
+                mark.state, MARK_ATTESTED,
+                "{foreign}: a call NEAR AI did not serve was marked attested"
+            );
+        }
+    }
+
+    /// The positive control for the test above: the same row under NEAR AI's
+    /// own identifier IS attested, so the refusal is about the identifier and
+    /// not about the fixture.
+    #[test]
+    fn the_same_call_under_the_providers_own_identifier_is_attested() {
+        let mut row = row();
+        row.upstream_id = Some("ee64b242d74f4c7eb59b05b046f33f7b".to_string());
+        assert_eq!(discovered_mark(row).state, MARK_ATTESTED);
     }
 }
