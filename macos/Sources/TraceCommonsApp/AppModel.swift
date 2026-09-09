@@ -1392,6 +1392,30 @@ final class AppModel: ObservableObject {
         guard let client else { return nil }
         return await Task.detached { try? client.nativeWalletFlow(action: action, flowID: flowID, commons: commons, account: account) }.value
     }
+    /// Join with the NEAR AI login, reporting the daemon's own control name.
+    ///
+    /// The label is passed back untouched for `TCNearAiEnroll` to turn into a
+    /// sentence. This model does not know which of the ten refusals it is and
+    /// must not guess: a shell-side table would be an eleventh that agrees
+    /// with the shared one until it does not.
+    func nearAiAccountEnroll(commons: String) async -> NearAiEnrollOutcome {
+        guard let client else { return .refused("near_ai_enroll_unavailable") }
+        return await Task.detached(priority: .userInitiated) { () -> NearAiEnrollOutcome in
+            do {
+                return .joined(try client.nearAiAccountEnroll(commons: commons))
+            } catch let failure as DaemonClient.Failure {
+                // `message` is the daemon's control name -- the enrolment
+                // handler answers a label and nothing else, because the
+                // errors underneath can quote a remote body or a URL. Empty
+                // falls back to the generic label rather than to a blank.
+                return .refused(
+                    failure.message.isEmpty ? "near_ai_enroll_unavailable" : failure.message)
+            } catch {
+                return .refused("near_ai_enroll_unavailable")
+            }
+        }.value
+    }
+
     func enroll(invite: String, scopes: [String] = []) async -> EnrollOutcome {
         guard let client else { return .failed }
         return await Task.detached(priority: .userInitiated) { () -> EnrollOutcome in
