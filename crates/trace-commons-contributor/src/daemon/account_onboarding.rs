@@ -278,6 +278,11 @@ pub async fn handle_capabilities(_shared: &DaemonShared, req: &Request) -> Respo
 /// Which enrollment path is asking, and therefore which readiness flag in the
 /// capabilities response answers it.
 ///
+/// This type exists because of #839: readiness checks belonging to one
+/// onboarding path were silently gating the other, in three separate places.
+/// The rule it encodes is that a path's readiness is derived from what that
+/// path's own route requires, never mirrored from a neighbour.
+///
 /// The two paths have genuinely different preconditions: the wallet ceremony
 /// needs NEP-413 sign-in configuration and a public origin to redirect a
 /// browser to, and the login ceremony needs neither because it has no browser
@@ -290,15 +295,6 @@ pub(super) enum Path {
 }
 
 impl Path {
-    /// Whether this commons offers this path.
-    ///
-    /// The login path prefers `near_ai_login_ready` and falls back to `ready`
-    /// when it is absent, which is what makes the field additive in both
-    /// directions: a commons older than the field, and one offering both
-    /// paths, are both answered correctly by `ready`, while a login-only
-    /// commons publishes `near_ai_login_ready: true` alongside `ready: false`.
-    /// An explicit `false` wins over the fallback — a commons that says the
-    /// login path is off is not overruled because the wallet path is on.
     /// The path an already-enrolled config was enrolled by, read from the
     /// tenant namespace it holds.
     ///
@@ -314,6 +310,23 @@ impl Path {
         }
     }
 
+    /// Whether this commons offers this path.
+    ///
+    /// The login path prefers `near_ai_login_ready` and falls back to `ready`
+    /// when it is absent, which is what makes the field additive in both
+    /// directions: a commons older than the field, and one offering both
+    /// paths, are both answered correctly by `ready`, while a login-only
+    /// commons publishes `near_ai_login_ready: true` alongside `ready: false`.
+    ///
+    /// **An explicit `false` wins over the fallback, and that clause is not
+    /// redundant.** `unwrap_or` is doing two different jobs here: absent means
+    /// "this commons is older than the field, so ask the flag that existed",
+    /// and `Some(false)` means "this commons has been asked and says no". A
+    /// later reader may notice that a commons with `ready: true` is plainly
+    /// running and simplify this to `capability.ready ||
+    /// capability.near_ai_login_ready.unwrap_or(false)`. That would silently
+    /// re-enable the login path on every commons that turned it off
+    /// deliberately, and no test of the wallet path would notice. See #839.
     fn ready_for(self, capability: &Capability) -> bool {
         match self {
             Self::Wallet => capability.ready,
