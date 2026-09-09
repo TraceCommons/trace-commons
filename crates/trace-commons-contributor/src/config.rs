@@ -356,7 +356,100 @@ pub fn allowlist_for(allowed_hosts: Option<&str>) -> HostAllowlist {
     }
 }
 
-/// A hash-only record of a submitted trace. Never contains paths or content.
+/// Shape check for a wallet tenant id: the `near-` namespace plus 64 lowercase
+/// hex characters.
+///
+/// This used to be `tenant_id == format!("near-{}", &anchor_hash[7..])`, and it
+/// stopped being true when the server salted the anchor. The tenant id is now
+/// drawn from the OS RNG and is a function of nothing -- that is the point of
+/// the change, since the old binding let anyone who knew a NEAR account name
+/// compute its tenant id offline. The client cannot re-derive it, so shape is
+/// all there is to check here; the value is authenticated by the session token
+/// issued alongside it, not by its own contents.
+///
+/// Lives here, rather than beside either caller, because a second copy of a
+/// namespace rule is how the two callers come to disagree about what a wallet
+/// tenant is.
+#[must_use]
+pub fn is_near_tenant_id(tenant_id: &str) -> bool {
+    tenant_id.strip_prefix("near-").is_some_and(|suffix| {
+        suffix.len() == 64
+            && suffix
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    })
+}
+
+/// The allowlist to enforce for calls to hosts an enrolled config already
+/// names: ingest, issuer, witness, and the inference receipt endpoint.
+///
+/// [`allowlist_for`] returns a PERMISSIVE list when neither `allowed_hosts`
+/// nor `TRACE_COMMONS_ALLOWED_HOSTS` is set, and the paths that matter refuse
+/// on a non-enforcing list -- `admission_setup`'s endpoint gate and
+/// [`validate_inference_receipt_endpoint`] both do. No shipped application
+/// sets either, and wallet signup deliberately persists `allowed_hosts: None`,
+/// so a wallet-enrolled contributor could not prepare a bound session at all.
+///
+/// The fix is not a stored list. A stored list has to be maintained, and it
+/// drifts from the config the moment a host enters the config by another
+/// route -- a witness configured in Settings, a receipt endpoint set after
+/// enrollment. Instead the list is a FUNCTION of the config:
+///
+/// 1. `cfg.allowed_hosts` when it names anything -- operator or CLI, wins.
+/// 2. Otherwise `TRACE_COMMONS_ALLOWED_HOSTS` when set -- operator, wins.
+/// 3. Otherwise exactly the hosts this config already points at.
+///
+/// # Optional fields
+///
+/// `witness` and `inference_receipt_endpoint` are `Option`, and a field that
+/// is unset is **skipped**: it contributes no host and is not an error. A
+/// contributor with no witness configured has no witness to dial, so a shorter
+/// list is the correct list. The two things deliberately NOT done here are
+/// returning a non-enforcing list (which would make an unset optional field
+/// silently authorize every host) and refusing outright (which would break
+/// paths that work today because an optional field is unset). An unparseable
+/// or host-less value is skipped for the same reason -- it names no host to
+/// authorize -- and the endpoint gates that follow still refuse it on shape.
+///
+/// So it cannot drift: a host is on the list precisely because the config
+/// names it, and a host the config does not name was never going to be
+/// dialled. It widens only when the config widens, never because a server
+/// said so. And it never degrades to permissive -- [`HostAllowlist::from_hosts`]
+/// treats an empty set as "nothing", not "everything", so a config with no
+/// parseable host refuses everything rather than allowing everything.
+///
+/// Deliberately NOT a change to [`allowlist_for`], which keeps its current
+/// meaning for `--attest-post`. That flag refuses outright when no allowlist
+/// is configured, because its target comes from the command line rather than
+/// from enrollment; a config-derived fallback there would make `is_enforcing`
+/// true and silently permit a collector that happened to equal the ingest
+/// host.
+#[must_use]
+pub fn config_allowlist(cfg: &ContributorConfig) -> HostAllowlist {
+    derive_config_allowlist(&allowlist_for(cfg.allowed_hosts.as_deref()), cfg)
+}
+
+pub(crate) fn derive_config_allowlist(
+    configured: &HostAllowlist,
+    cfg: &ContributorConfig,
+) -> HostAllowlist {
+    if configured.is_enforcing() {
+        return configured.clone();
+    }
+    let named = [
+        Some(cfg.issuer_url.as_str()),
+        Some(cfg.ingest_url.as_str()),
+        cfg.witness.as_ref().map(|witness| witness.url.as_str()),
+        cfg.inference_receipt_endpoint.as_deref(),
+    ];
+    HostAllowlist::from_hosts(named.into_iter().flatten().filter_map(|url| {
+        reqwest::Url::parse(url)
+            .ok()
+            .and_then(|parsed| parsed.host_str().map(str::to_string))
+    }))
+}
+
+/// A hash-only record of a submitted trace. Never contains paths or content./// A hash-only record of a submitted trace. Never contains paths or content.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Receipt {
     pub submission_id: Uuid,

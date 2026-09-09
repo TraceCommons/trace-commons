@@ -20,7 +20,7 @@ use trace_commons_protocol::trace_contribution::{
     TraceSubmissionStatusUpdate,
 };
 
-use crate::config::{ConfigStore, ContributorConfig, Receipt, WitnessSettings, allowlist_for};
+use crate::config::{ConfigStore, ContributorConfig, Receipt, WitnessSettings, config_allowlist};
 use crate::envelope::{
     MAX_ENVELOPE_BYTES, NearAiSettings, apply_granted_scopes, build_deterministic_preview_redactor,
     build_preview_raw_contribution, build_raw_contribution_with_verdict, build_redactor_with,
@@ -406,8 +406,7 @@ impl<'a> SubmitContext<'a> {
         } else {
             Some(DeviceIdentity::load_or_generate(store).context("loading device identity")?)
         };
-        let issuer = IssuerClient::new(allowlist_for(cfg.allowed_hosts.as_deref()))
-            .context("building issuer client")?;
+        let issuer = IssuerClient::new(config_allowlist(cfg)).context("building issuer client")?;
         // An unenrolled preview has no enrollment and therefore no submission
         // history it can truthfully replay. Ignore stale receipts from torn
         // local state and run the preview pipeline for every selected session.
@@ -705,7 +704,7 @@ impl<'a> SubmitContext<'a> {
             self.effective_cfg.inference_receipt_endpoint.as_deref(),
             // The allowlist comes from the stored config, which is where
             // every other outbound call in this file reads it from.
-            &allowlist_for(self.cfg.allowed_hosts.as_deref()),
+            &config_allowlist(self.cfg),
             call,
             self.effective_cfg.inference_receipt_check_attestation,
         )
@@ -750,7 +749,7 @@ impl<'a> SubmitContext<'a> {
         let transport = HttpWitnessTransport::new(
             settings.url.clone(),
             self.cfg.ingest_url.clone(),
-            std::sync::Arc::new(allowlist_for(self.cfg.allowed_hosts.as_deref())),
+            std::sync::Arc::new(config_allowlist(self.cfg)),
             std::time::Duration::from_secs(120),
         )
         .map_err(|e| e.refusal_label())?
@@ -1188,8 +1187,7 @@ pub async fn status(
     let ids: Vec<Uuid> = receipts.iter().map(|r| r.submission_id).collect();
 
     let device = DeviceIdentity::load_or_generate(store).context("loading device identity")?;
-    let issuer = IssuerClient::new(allowlist_for(cfg.allowed_hosts.as_deref()))
-        .context("building issuer client")?;
+    let issuer = IssuerClient::new(config_allowlist(cfg)).context("building issuer client")?;
     // Mint with an empty scopes/uses request rather than the submit path's
     // consent_scopes: the issuer resolves an empty request to the caller's
     // full grant ceiling, so status read-back works regardless of what
@@ -1249,8 +1247,7 @@ pub async fn set_profile(
     bio: Option<&str>,
 ) -> Result<CommunityProfile> {
     let device = DeviceIdentity::load_or_generate(store).context("loading device identity")?;
-    let issuer = IssuerClient::new(allowlist_for(cfg.allowed_hosts.as_deref()))
-        .context("building issuer client")?;
+    let issuer = IssuerClient::new(config_allowlist(cfg)).context("building issuer client")?;
     // Same empty-scope mint as `status`: the issuer resolves it to this
     // caller's full grant ceiling, so claiming a handle does not depend on
     // whichever scopes were narrowed for the last submission.
@@ -1291,8 +1288,7 @@ pub async fn mint_account_login_link(
     cfg: &ContributorConfig,
 ) -> Result<String> {
     let device = DeviceIdentity::load_or_generate(store).context("loading device identity")?;
-    let issuer = IssuerClient::new(allowlist_for(cfg.allowed_hosts.as_deref()))
-        .context("building issuer client")?;
+    let issuer = IssuerClient::new(config_allowlist(cfg)).context("building issuer client")?;
     let token = mint_status_claim(&issuer, cfg, &device, Utc::now())
         .await
         .context("minting upload claim for account sign-in")?;
@@ -1311,8 +1307,7 @@ pub async fn mint_account_login_link(
 /// than only in a page they may never have been given access to.
 pub async fn clear_profile(store: &ConfigStore, cfg: &ContributorConfig) -> Result<()> {
     let device = DeviceIdentity::load_or_generate(store).context("loading device identity")?;
-    let issuer = IssuerClient::new(allowlist_for(cfg.allowed_hosts.as_deref()))
-        .context("building issuer client")?;
+    let issuer = IssuerClient::new(config_allowlist(cfg)).context("building issuer client")?;
     let token = mint_status_claim(&issuer, cfg, &device, Utc::now())
         .await
         .context("minting upload claim for profile withdrawal")?;
@@ -1387,8 +1382,7 @@ pub async fn fetch_score_attestation(
     cfg: &ContributorConfig,
 ) -> Result<String> {
     let device = DeviceIdentity::load_or_generate(store).context("loading device identity")?;
-    let issuer = IssuerClient::new(allowlist_for(cfg.allowed_hosts.as_deref()))
-        .context("building issuer client")?;
+    let issuer = IssuerClient::new(config_allowlist(cfg)).context("building issuer client")?;
     // Same empty-scope mint as `status`: the attestation is a read of scores
     // the server already holds, so it must not depend on whatever scopes were
     // narrowed for submission since the last login.
@@ -1519,8 +1513,7 @@ pub async fn await_scoped_score_attestation(
     poll_interval: StdDuration,
 ) -> Result<ScopedAttestation> {
     let device = DeviceIdentity::load_or_generate(store).context("loading device identity")?;
-    let issuer = IssuerClient::new(allowlist_for(cfg.allowed_hosts.as_deref()))
-        .context("building issuer client")?;
+    let issuer = IssuerClient::new(config_allowlist(cfg)).context("building issuer client")?;
     // Same empty-scope mint as `status` and the unscoped attestation: a read
     // of scores the server already holds must not depend on whatever scopes
     // were narrowed for submission since the last login.
@@ -1826,7 +1819,7 @@ fn build_ingest_client(
         "TRACE_COMMONS_CONTRIBUTOR_UNUSED_BEARER_ENV",
     )
     .bearer_token(&token.access_token)
-    .host_allowlist(allowlist_for(cfg.allowed_hosts.as_deref()))
+    .host_allowlist(config_allowlist(cfg))
     .build()
 }
 
@@ -5095,7 +5088,7 @@ mod tests {
         let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
         let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
         let cfg = cfg_for(&issuer_url, &ingest_url, &device.device_key_id);
-        let issuer = IssuerClient::new(allowlist_for(None)).unwrap();
+        let issuer = IssuerClient::new(crate::config::allowlist_for(None)).unwrap();
 
         let now = Utc::now();
         let mut initial = stub_claim(now);
@@ -5565,6 +5558,64 @@ mod attest_post_tests {
         let err = validate_attest_post_target("http://collector.example/hook", &allow)
             .expect_err("http must refuse");
         assert!(err.to_string().contains("https"), "unexpected error: {err}");
+    }
+
+    /// `--attest-post` must keep deriving its allowlist from `allowlist_for`,
+    /// never from the enrolled config.
+    ///
+    /// The hazard is a future refactor that "unifies" `allowlist_for` and
+    /// `config::config_allowlist`. That would make `is_enforcing()` true here
+    /// from the config's own hosts, silently retiring the deliberate "needs an
+    /// explicit host allowlist" refusal -- for a URL that arrives from the
+    /// command line carrying a signed statement about the contributor, and
+    /// permitting any collector that happened to equal the ingest host.
+    ///
+    /// Driven through `post_attestation`, the real call site, rather than
+    /// through the validator: passing a permissive list to the validator by
+    /// hand would still pass after exactly that refactor. A counting listener
+    /// separates "refused by the gate" from "dialled and failed" -- without it
+    /// both arms return `false` and the test proves nothing.
+    #[tokio::test]
+    async fn attest_post_is_not_authorized_by_the_enrolled_config() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&accepted);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                counter.fetch_add(1, Ordering::SeqCst);
+                drop(stream);
+            }
+        });
+
+        let target = reqwest::Url::parse(&format!("https://127.0.0.1:{port}/hook")).unwrap();
+        let attested = super::ScopedAttestation {
+            attestations: vec!["fixture.jws".into()],
+            requested: 1,
+            scored: 1,
+            pending: 0,
+        };
+
+        // No explicit allowlist: refused before anything is dialled. A
+        // signup-written config names hosts, but none of them authorize this.
+        assert!(!super::post_attestation(&target, &attested, None).await);
+        assert_eq!(
+            accepted.load(Ordering::SeqCst),
+            0,
+            "an unauthorized attest-post target must not be dialled at all"
+        );
+
+        // Named explicitly, the same target IS dialled -- TLS then fails
+        // against a bare TCP socket, so this still returns false. The
+        // difference between the two arms is the whole assertion.
+        assert!(!super::post_attestation(&target, &attested, Some("127.0.0.1")).await);
+        assert!(
+            accepted.load(Ordering::SeqCst) >= 1,
+            "an explicitly allowlisted target must actually be dialled"
+        );
     }
 
     #[test]

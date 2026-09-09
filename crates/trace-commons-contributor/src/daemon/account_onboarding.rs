@@ -704,23 +704,57 @@ fn published_witness(mut value: serde_json::Value) -> Result<WitnessSettings> {
     Ok(witness)
 }
 
-/// Shape check for a wallet tenant id: the `near-` namespace plus 64 lowercase
-/// hex characters.
+/// A config written by the real signup path, for tests in sibling modules
+/// that must otherwise hand-build one.
 ///
-/// This used to be `tenant_id == format!("near-{}", &anchor_hash[7..])`, and it
-/// stopped being true when the server salted the anchor. The tenant id is now
-/// drawn from the OS RNG and is a function of nothing -- that is the point of
-/// the change, since the old binding let anyone who knew a NEAR account name
-/// compute its tenant id offline. The client cannot re-derive it, so shape is
-/// all there is to check here; the value is authenticated by the session token
-/// issued alongside it, not by its own contents.
-fn is_near_tenant_id(tenant_id: &str) -> bool {
-    tenant_id.strip_prefix("near-").is_some_and(|suffix| {
-        suffix.len() == 64
-            && suffix
-                .bytes()
-                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
-    })
+/// `persist` is what produces it, so a test using this cannot pass by setting
+/// a field signup never sets. That is exactly how the `allowed_hosts: None`
+/// defect survived: every test that reached a host-allowlist gate constructed
+/// its own config and set `allowed_hosts` itself, so the gate was never asked
+/// the question a real enrollment asks it.
+#[cfg(test)]
+pub(super) fn signup_written_config(
+    dir: &std::path::Path,
+    receipt_endpoint: Option<String>,
+) -> ContributorConfig {
+    let store = ConfigStore::open(dir.to_path_buf()).expect("opening the fixture store");
+    let identity = DeviceIdentity::load_or_generate(&store).expect("device identity");
+    let options = Options {
+        account_id: "alice.near".into(),
+        ingest_url: "https://commons.example".into(),
+        issuer_url: "https://issuer.example".into(),
+        audience: "trace-commons-upload".into(),
+    };
+    let witness: WitnessSettings = serde_json::from_value(serde_json::json!({
+        "url": "https://witness.example",
+        "signing_address": format!("0x{}", "ab".repeat(20)),
+        "expected_measurements": [format!("mrtd={}", "ab".repeat(48))],
+        "admission_evidence": true,
+    }))
+    .expect("witness fixture");
+    let completed = Completed {
+        access_token: "tcn1_example".into(),
+        token_type: "Bearer".into(),
+        expires_in_secs: 3600,
+        account_id: "alice.near".into(),
+        tenant_id: format!("near-{}", "3c".repeat(32)),
+        device_key_id: identity.device_key_id.clone(),
+        anchor_hash: format!("sha256:{}", "ab".repeat(32)),
+    };
+    persist(
+        dir,
+        &options,
+        &identity,
+        completed,
+        "fixture",
+        witness,
+        receipt_endpoint,
+    )
+    .expect("signup persist");
+    store
+        .load_config()
+        .expect("reading back the written config")
+        .expect("signup must have written a config")
 }
 
 fn persist(
@@ -742,7 +776,7 @@ fn persist(
         || !result.anchor_hash[7..]
             .bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-        || !is_near_tenant_id(&result.tenant_id)
+        || !crate::config::is_near_tenant_id(&result.tenant_id)
     {
         bail!("near_signup_result_invalid")
     }
@@ -1226,16 +1260,37 @@ mod tests {
     }
     #[test]
     fn wallet_tenant_ids_are_accepted_on_shape_and_not_on_a_derivation() {
-        assert!(is_near_tenant_id(&format!("near-{}", "3c".repeat(32))));
-        assert!(is_near_tenant_id(&format!("near-{}", "ab".repeat(32))));
+        assert!(crate::config::is_near_tenant_id(&format!(
+            "near-{}",
+            "3c".repeat(32)
+        )));
+        assert!(crate::config::is_near_tenant_id(&format!(
+            "near-{}",
+            "ab".repeat(32)
+        )));
         // Upper-case hex, the wrong length, and the wrong namespace are all
         // rejected; the server emits lower-case hex in the `near-` namespace.
-        assert!(!is_near_tenant_id(&format!("near-{}", "AB".repeat(32))));
-        assert!(!is_near_tenant_id(&format!("near-{}", "ab".repeat(31))));
-        assert!(!is_near_tenant_id(&format!("near-{}", "ab".repeat(33))));
-        assert!(!is_near_tenant_id(&format!("tenant-{}", "ab".repeat(32))));
-        assert!(!is_near_tenant_id("near-"));
-        assert!(!is_near_tenant_id(&format!("near-{}", "gz".repeat(32))));
+        assert!(!crate::config::is_near_tenant_id(&format!(
+            "near-{}",
+            "AB".repeat(32)
+        )));
+        assert!(!crate::config::is_near_tenant_id(&format!(
+            "near-{}",
+            "ab".repeat(31)
+        )));
+        assert!(!crate::config::is_near_tenant_id(&format!(
+            "near-{}",
+            "ab".repeat(33)
+        )));
+        assert!(!crate::config::is_near_tenant_id(&format!(
+            "tenant-{}",
+            "ab".repeat(32)
+        )));
+        assert!(!crate::config::is_near_tenant_id("near-"));
+        assert!(!crate::config::is_near_tenant_id(&format!(
+            "near-{}",
+            "gz".repeat(32)
+        )));
     }
 
     #[test]

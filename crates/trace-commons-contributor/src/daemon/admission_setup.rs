@@ -3,7 +3,11 @@
 
 use super::ipc::{DaemonShared, ERR_BAD_PARAMS, ERR_UNAVAILABLE, Request, Response};
 use crate::{
-    config::{ContributorConfig, allowlist_for},
+    // `allowlist_for` and `config_allowlist` are both here on purpose.
+    // `adopt_receipt_endpoint` vets each source with the list that source's
+    // own author controls, so an operator-supplied value keeps being checked
+    // against the operator's own list; the gates below use the config's hosts.
+    config::{ContributorConfig, allowlist_for, config_allowlist},
     identity::DeviceIdentity,
     issuer_client::IssuerClient,
 };
@@ -131,20 +135,24 @@ async fn adopt_published_receipt_endpoint(
 /// that way would adopt an endpoint and then reject it one line later, moving
 /// the wall rather than removing it.
 ///
-/// The derived list is the commons's own published set, and an operator's
-/// list still governs whenever they set one.
+/// The list used here is [`crate::config::config_allowlist`]: the hosts this
+/// enrolled config already names, including the receipt endpoint itself, with
+/// an operator's own list still governing whenever they set one.
+///
+/// #787 reached the same conclusion for this gate by a different route,
+/// `account_onboarding::published_host_allowlist(env, ingest_url, endpoint)`,
+/// which derives `{ingest, endpoint}` per call. For validating the endpoint the
+/// two are equivalent -- both contain it, and both defer to a configured
+/// operator list -- so this call site uses the one the gate two lines below it
+/// uses, rather than keeping two derivations in one function. That wrapper
+/// remains the right thing at its other caller, inside the signup ceremony,
+/// where there is no enrolled config to read hosts from yet.
 fn require_receipt_endpoint(cfg: &ContributorConfig) -> Result<()> {
     let endpoint = cfg
         .inference_receipt_endpoint
         .as_deref()
         .ok_or(ReceiptEndpointSetupError::Required)?;
-    let allowlist = super::account_onboarding::published_host_allowlist(
-        &allowlist_for(cfg.allowed_hosts.as_deref()),
-        &cfg.ingest_url,
-        endpoint,
-    )
-    .map_err(|_| ReceiptEndpointSetupError::Invalid)?;
-    crate::config::validate_inference_receipt_endpoint(endpoint, &allowlist)
+    crate::config::validate_inference_receipt_endpoint(endpoint, &config_allowlist(cfg))
         .map_err(|_| ReceiptEndpointSetupError::Invalid)?;
     Ok(())
 }
@@ -260,22 +268,7 @@ async fn prepare(shared: &DaemonShared, params: Params) -> Result<i64> {
     }
     let device = DeviceIdentity::load(&shared.store)?
         .ok_or_else(|| anyhow!("admission_setup_device_missing"))?;
-    let allowlist = allowlist_for(cfg.allowed_hosts.as_deref());
-    if !allowlist.is_enforcing() {
-        bail!("admission_setup_endpoint_untrusted");
-    }
-    for endpoint in [&cfg.issuer_url, &cfg.ingest_url] {
-        let url = reqwest::Url::parse(endpoint)?;
-        if url.scheme() != "https"
-            || !url.username().is_empty()
-            || url.password().is_some()
-            || url.query().is_some()
-            || url.fragment().is_some()
-        {
-            bail!("admission_setup_endpoint_untrusted");
-        }
-        allowlist.check(&url)?;
-    }
+    let allowlist = validated_endpoint_allowlist(&cfg)?;
     let issuer = IssuerClient::new(allowlist.clone())?;
     let signed = crate::identity::build_signed_claim_request(&cfg, &device, Utc::now())?;
     let claim = issuer.mint_claim(&cfg.issuer_url, &signed).await?;
@@ -346,6 +339,40 @@ async fn register_binding(
     }
     Ok(registered.expires_at)
 }
+/// The hosts this enrolled config may dial for admission, or a refusal.
+///
+/// Extracted from `prepare` so it can be tested. Inline, it sat downstream of
+/// a queue lookup and a session-file read, so no test could reach it without
+/// building a whole session -- and a mutation reverting it to
+/// `allowlist_for(cfg.allowed_hosts)`, which is the defect this PR fixes,
+/// survived the suite.
+///
+/// The gate itself is unchanged and just as fail-closed: a non-enforcing list
+/// refuses, and both endpoints must be clean HTTPS *and* on the list. What
+/// changed is only where the list comes from -- see
+/// [`crate::config::config_allowlist`].
+fn validated_endpoint_allowlist(
+    cfg: &ContributorConfig,
+) -> Result<trace_commons_operator_client::host_allowlist::HostAllowlist> {
+    let allowlist = config_allowlist(cfg);
+    if !allowlist.is_enforcing() {
+        bail!("admission_setup_endpoint_untrusted");
+    }
+    for endpoint in [&cfg.issuer_url, &cfg.ingest_url] {
+        let url = reqwest::Url::parse(endpoint)?;
+        if url.scheme() != "https"
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.query().is_some()
+            || url.fragment().is_some()
+        {
+            bail!("admission_setup_endpoint_untrusted");
+        }
+        allowlist.check(&url)?;
+    }
+    Ok(allowlist)
+}
+
 fn validate_challenge(
     challenge: &Challenge,
     tenant: &str,
@@ -354,7 +381,21 @@ fn validate_challenge(
 ) -> Result<()> {
     let binding = AdmissionBinding::parse(&challenge.binding)
         .map_err(|_| anyhow!("admission_setup_binding_invalid"))?;
-    if tenant != format!("near-{}", binding.account_anchor_sha256)
+    // The tenant id is NOT derivable from the anchor. This used to require
+    // `tenant == format!("near-{}", binding.account_anchor_sha256)`, which V58
+    // held true with `CHECK (tenant_id = 'near-' || substring(anchor_hash from
+    // 8))`. V61 dropped that constraint on purpose -- `anchor_hash` became a
+    // keyed blind index and `tenant_id` 32 random bytes -- so the equality has
+    // been false for every real account since, and this refused every genuine
+    // challenge. See #785, which removed the same comparison on the server.
+    //
+    // What stays is the namespace discriminator: a challenge for this path
+    // belongs to a wallet tenant, and the anchor's own shape is already
+    // enforced by `AdmissionBinding::parse`, which round-trips through
+    // `encode` and so rejects anything that is not a lowercase hex digest.
+    // Nothing re-derives one value from the other, in either direction: that
+    // coupling is the offline-computability defect V61 fixed (#716).
+    if !crate::config::is_near_tenant_id(tenant)
         || binding.expires_at != challenge.expires_at
         || binding.expires_at <= now
         || binding.expires_at > now.saturating_add(max_lifetime.min(900))
@@ -395,18 +436,185 @@ mod tests {
         serde_json::from_value(serde_json::json!({
             "schema_version":crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION,
             "issuer_url":"https://issuer.example","ingest_url":"https://ingest.example",
-            "audience":"upload","tenant_id":format!("near-{}","ab".repeat(32)),
+            "audience":"upload","tenant_id":format!("near-{}",TENANT_SUFFIX),
             "instance_id":"","user_subject":"device","device_key_id":"device",
             "consent_scopes":["debugging_evaluation"],
             "witness":{"url":"https://witness.example","signing_address":format!("0x{}","ab".repeat(20)),"expected_measurements":[format!("mrtd={}","ab".repeat(48))],"admission_evidence":true}
         })).unwrap()
     }
+    /// A tenant id and an account anchor drawn independently, which is the
+    /// only shape V61 leaves possible: `tenant_id` became 32 random bytes and
+    /// `anchor_hash` a keyed blind index, and V58's
+    /// `CHECK (tenant_id = 'near-' || substring(anchor_hash from 8))` was
+    /// dropped. Every fixture in this file used to set them equal -- the one
+    /// shape a real account can no longer have -- so the fixture agreed with
+    /// the bug and the test passed while the application refused every
+    /// genuine challenge.
+    const TENANT_SUFFIX: &str = "3c9f21d8be4a07655c1e3fba8d02947613ae5c80f9d64b2718a350ecdb6f4192";
+    const ANCHOR: &str = "ab00c4d1e97f3625b8a01d4fce7382905b6ad3f1e0c95847a2b6f30d19e4c785";
+
+    /// The config here is written by `account_onboarding::persist` -- the real
+    /// signup path -- and never by hand. A hand-built config sets
+    /// `allowed_hosts` itself and so passes these gates before and after the
+    /// fix, which is why nothing caught that a wallet-enrolled contributor
+    /// could not prepare a bound session on any shipped application.
+    ///
+    /// Deliberately asserts on the two gates `prepare` reaches before it opens
+    /// a socket -- `require_receipt_endpoint` at line 109 and the enforcing
+    /// check on the issuer/ingest list -- rather than on a helper's return
+    /// value. An out-of-process test the way `daemon_wallet_signup_without_env`
+    /// does it is not available here: `persist` is private, and producing this
+    /// config in a spawned daemon would need a live HTTPS commons to sign up
+    /// against.
+    #[test]
+    fn a_config_written_by_signup_reaches_the_admission_gates() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = super::super::account_onboarding::signup_written_config(
+            dir.path(),
+            Some("https://receipts.example/v1".into()),
+        );
+        assert!(
+            cfg.allowed_hosts.is_none(),
+            "signup writes no host list; the list has to come from the config's own hosts"
+        );
+
+        let allowlist = config_allowlist(&cfg);
+        assert!(
+            allowlist.is_enforcing(),
+            "a signup-written config must yield an enforcing list, or every gate below refuses"
+        );
+        // The two gates that actually failed, driven exactly as `prepare`
+        // drives them.
+        require_receipt_endpoint(&cfg).expect("a signup-written receipt endpoint must be usable");
+        validated_endpoint_allowlist(&cfg)
+            .expect("a signup-written issuer and ingest must be dialable");
+        // A config whose endpoints are not clean HTTPS is still refused, and
+        // by the gate rather than by the list. Each of these names a host the
+        // derived list contains, so only the shape rules can refuse them.
+        for bad in [
+            "http://issuer.example",
+            "https://user@issuer.example",
+            "https://user:pw@issuer.example",
+            "https://issuer.example/?token=abc",
+            "https://issuer.example/#frag",
+        ] {
+            let mut broken = cfg.clone();
+            broken.issuer_url = bad.into();
+            assert!(
+                validated_endpoint_allowlist(&broken).is_err(),
+                "{bad} must be refused"
+            );
+        }
+
+        // And an endpoint absent from an operator's list is refused by the
+        // list, even though its shape is fine. This is the assertion that
+        // distinguishes checking the endpoints from merely building a list.
+        let mut operator_scoped = cfg.clone();
+        operator_scoped.allowed_hosts = Some("commons.example".into());
+        assert!(
+            validated_endpoint_allowlist(&operator_scoped).is_err(),
+            "the issuer is not on the operator's list and must be refused"
+        );
+
+        // Every host this config points at, including the receipt endpoint --
+        // which is on the inference provider and not on the commons, and which
+        // `submit.rs` needs for every receipt.
+        for url in [
+            cfg.issuer_url.as_str(),
+            cfg.ingest_url.as_str(),
+            cfg.witness.as_ref().unwrap().url.as_str(),
+            cfg.inference_receipt_endpoint.as_deref().unwrap(),
+        ] {
+            allowlist
+                .check(&reqwest::Url::parse(url).unwrap())
+                .unwrap_or_else(|_| panic!("{url} is named by the config and must be reachable"));
+        }
+        // And it is still a list, not a bypass.
+        for outside in ["https://elsewhere.example", "https://commons.example.evil"] {
+            assert!(
+                allowlist
+                    .check(&reqwest::Url::parse(outside).unwrap())
+                    .is_err(),
+                "{outside} is named by nothing and must not be reachable"
+            );
+        }
+    }
+
+    /// The derivation itself, with the configured list passed in rather than
+    /// read from the environment, so this says the same thing on a machine
+    /// that happens to have `TRACE_COMMONS_ALLOWED_HOSTS` set.
+    #[test]
+    fn an_operator_list_still_governs_and_an_empty_config_allows_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = super::super::account_onboarding::signup_written_config(dir.path(), None);
+
+        let operator = crate::config::derive_config_allowlist(
+            &trace_commons_operator_client::host_allowlist::HostAllowlist::from_csv(
+                "commons.example",
+            ),
+            &cfg,
+        );
+        operator
+            .check(&reqwest::Url::parse("https://commons.example").unwrap())
+            .unwrap();
+        assert!(
+            operator
+                .check(&reqwest::Url::parse("https://issuer.example").unwrap())
+                .is_err(),
+            "an operator who lists hosts keeps listing them; the config does not widen it"
+        );
+
+        // A receipt endpoint absent from the config is absent from the list.
+        let derived = crate::config::derive_config_allowlist(
+            &trace_commons_operator_client::host_allowlist::HostAllowlist::permissive(),
+            &cfg,
+        );
+        assert!(
+            derived
+                .check(&reqwest::Url::parse("https://receipts.example/v1").unwrap())
+                .is_err()
+        );
+
+        // A config naming no parseable host refuses everything rather than
+        // allowing everything.
+        let mut empty = cfg.clone();
+        empty.issuer_url = String::new();
+        empty.ingest_url = String::new();
+        empty.witness = None;
+        empty.inference_receipt_endpoint = None;
+        let nothing = crate::config::derive_config_allowlist(
+            &trace_commons_operator_client::host_allowlist::HostAllowlist::permissive(),
+            &empty,
+        );
+        assert!(nothing.is_enforcing());
+        assert!(
+            nothing
+                .check(&reqwest::Url::parse("https://anything.example").unwrap())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn a_v61_tenant_id_is_not_derivable_from_its_anchor() {
+        assert_ne!(TENANT_SUFFIX, ANCHOR, "the fixture must not restate V58");
+        assert_eq!(TENANT_SUFFIX.len(), 64);
+        assert_eq!(ANCHOR.len(), 64);
+        for value in [TENANT_SUFFIX, ANCHOR] {
+            assert!(
+                value
+                    .bytes()
+                    .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()),
+                "{value} is not a lowercase hex digest"
+            );
+        }
+    }
+
     #[test]
     fn challenge_is_canonical_account_bound_and_short_lived() {
-        let tenant = format!("near-{}", "ab".repeat(32));
+        let tenant = format!("near-{TENANT_SUFFIX}");
         let make = |expiry| Challenge {
             binding: AdmissionBinding {
-                account_anchor_sha256: "ab".repeat(32),
+                account_anchor_sha256: ANCHOR.to_string(),
                 nonce_hex: "cd".repeat(32),
                 expires_at: expiry,
             }
@@ -415,7 +623,32 @@ mod tests {
             expires_at: expiry,
         };
         assert!(validate_challenge(&make(1100), &tenant, 1000, 900).is_ok());
-        assert!(validate_challenge(&make(1100), "near-other", 1000, 900).is_err());
+        // A tenant that is not on the wallet path at all is refused: the
+        // `near-` namespace is a discriminator, and this is the only thing
+        // about the tenant a client can still check.
+        for outside in [
+            "near-other",
+            &format!("tenant-{TENANT_SUFFIX}"),
+            &format!("near-{}", TENANT_SUFFIX.to_ascii_uppercase()),
+            &format!("near-{}", &TENANT_SUFFIX[..63]),
+            "near-",
+        ] {
+            assert!(
+                validate_challenge(&make(1100), outside, 1000, 900).is_err(),
+                "{outside} is not a wallet tenant"
+            );
+        }
+        // And a DIFFERENT well-formed wallet tenant is accepted, deliberately.
+        // Post-V61 a client cannot tell one anchor's tenant from another's --
+        // that is what salting the anchor bought -- so this check is a
+        // namespace test and never an account binding. What binds a challenge
+        // to an account is the server's row lookup under the authenticated
+        // session that minted it (#785). Restoring a comparison here would
+        // reintroduce the offline-computability defect V61 fixed.
+        assert!(
+            validate_challenge(&make(1100), &format!("near-{ANCHOR}"), 1000, 900).is_ok(),
+            "a wallet tenant must not have to match the anchor"
+        );
         assert!(validate_challenge(&make(1000), &tenant, 1000, 900).is_err());
         assert!(validate_challenge(&make(1901), &tenant, 1000, 900).is_err());
         let mut mismatch = make(1100);
