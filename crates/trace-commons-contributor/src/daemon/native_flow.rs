@@ -511,4 +511,52 @@ mod tests {
             true
         );
     }
+
+    fn admission_message(label: &str) -> String {
+        admission_response(Response::err(1, "unavailable", label), 10)
+            .result
+            .expect("view")["view"]["message"]
+            .as_str()
+            .expect("message")
+            .to_string()
+    }
+
+    /// `admission_receipt_endpoint_required` is the one admission failure a
+    /// contributor can do nothing about by retrying, and the only one whose
+    /// cause is configuration rather than a session, a proxy or a permission.
+    /// Collapsed into the generic sentence it reads as "try again", which is
+    /// advice that can never work.
+    #[test]
+    fn a_missing_receipt_endpoint_does_not_borrow_the_generic_failure_sentence() {
+        let generic = admission_message("admission_setup_proxy_missing");
+        assert_eq!(
+            generic,
+            witness_copy().admission.failed,
+            "an ordinary admission failure still says the generic sentence"
+        );
+        assert_ne!(
+            admission_message("admission_receipt_endpoint_required"),
+            generic,
+            "a contributor whose commons published no receipt endpoint is told to retry \
+             a thing that cannot succeed until the endpoint arrives"
+        );
+    }
+
+    /// Its own sentence, not its own outcome: this is still a refusal, and a
+    /// distinct message must not leak into the `ready` flag, the state or the
+    /// tone.
+    #[test]
+    fn a_missing_receipt_endpoint_is_still_refused() {
+        let view = admission_response(
+            Response::err(1, "unavailable", "admission_receipt_endpoint_required"),
+            10,
+        )
+        .result
+        .expect("view")["view"]
+            .clone();
+        assert_eq!(view["ready"], false);
+        assert_eq!(view["state"], "Refused");
+        assert_eq!(view["tone"], witness_copy().admission.refused_tone);
+        assert_eq!(view["glyph"], witness_copy().admission.refused_glyph);
+    }
 }

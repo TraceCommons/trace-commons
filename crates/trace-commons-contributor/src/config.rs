@@ -247,6 +247,18 @@ pub fn inference_receipt_endpoint_from_env() -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+/// The receipt endpoint this config should start using, or `None` to leave it
+/// alone.
+#[allow(dead_code, unused_variables)] // Implemented in the commit after this one.
+pub(crate) fn receipt_endpoint_to_adopt(
+    configured: Option<&str>,
+    from_env: Option<&str>,
+    published: Option<&str>,
+    allowlist: &HostAllowlist,
+) -> Option<String> {
+    None
+}
+
 /// Validate an explicitly configured receipt service before trust-bootstrap
 /// persistence or admission preparation. No backend-derived URL is accepted.
 pub(crate) fn validate_inference_receipt_endpoint(
@@ -979,6 +991,106 @@ mod tests {
                 &HostAllowlist::permissive()
             )
             .is_err()
+        );
+    }
+
+    /// The endpoint a contributor has no basis to type arrives from the
+    /// commons, exactly as the witness already does. The environment stays
+    /// ahead of it so an operator running the daemon on a host they control
+    /// keeps the last word.
+    #[test]
+    fn an_operator_environment_endpoint_outranks_the_published_one() {
+        let allowed = HostAllowlist::from_csv("receipts.example,published.example");
+        assert_eq!(
+            receipt_endpoint_to_adopt(
+                None,
+                Some("https://receipts.example/v1"),
+                Some("https://published.example/v1"),
+                &allowed
+            )
+            .as_deref(),
+            Some("https://receipts.example/v1")
+        );
+    }
+
+    /// The whole point: a contributor who exported nothing still ends up with
+    /// an endpoint.
+    #[test]
+    fn a_published_endpoint_is_adopted_when_the_environment_says_nothing() {
+        let allowed = HostAllowlist::from_csv("published.example");
+        assert_eq!(
+            receipt_endpoint_to_adopt(None, None, Some("https://published.example/v1"), &allowed)
+                .as_deref(),
+            Some("https://published.example/v1")
+        );
+    }
+
+    /// A saved endpoint is a decision already taken -- by an operator, or by
+    /// an earlier signup. Adoption fills a hole; it does not overwrite an
+    /// answer.
+    #[test]
+    fn an_endpoint_already_saved_is_never_replaced() {
+        let allowed = HostAllowlist::from_csv("receipts.example,published.example");
+        assert_eq!(
+            receipt_endpoint_to_adopt(
+                Some("https://receipts.example/v1"),
+                Some("https://published.example/v1"),
+                Some("https://published.example/v1"),
+                &allowed
+            ),
+            None,
+            "nothing to adopt means nothing to write"
+        );
+    }
+
+    /// The commons publishes this value and the commons is not trusted to
+    /// pick it: a published endpoint runs the same gauntlet an operator's
+    /// does, against the same allowlist, or it is not adopted at all.
+    #[test]
+    fn a_published_endpoint_the_allowlist_refuses_is_not_adopted() {
+        let allowed = HostAllowlist::from_csv("published.example");
+        for refused in [
+            "http://published.example/v1",
+            "https://elsewhere.example/v1",
+            "https://user:secret@published.example/v1",
+            "https://published.example/v1?token=secret",
+            "https://published.example/v1#fragment",
+            "not a URL",
+            "",
+            "   ",
+        ] {
+            assert_eq!(
+                receipt_endpoint_to_adopt(None, None, Some(refused), &allowed),
+                None,
+                "{refused} was adopted"
+            );
+        }
+        assert_eq!(
+            receipt_endpoint_to_adopt(
+                None,
+                None,
+                Some("https://published.example/v1"),
+                &HostAllowlist::permissive()
+            ),
+            None,
+            "a client enforcing no allowlist adopts nothing"
+        );
+    }
+
+    /// An operator endpoint is validated too, and is refused rather than
+    /// silently falling through to the published one: a typo in an operator's
+    /// own variable must not quietly hand the choice back to the server.
+    #[test]
+    fn a_bad_environment_endpoint_does_not_fall_through_to_the_published_one() {
+        let allowed = HostAllowlist::from_csv("published.example");
+        assert_eq!(
+            receipt_endpoint_to_adopt(
+                None,
+                Some("http://typo.example/v1"),
+                Some("https://published.example/v1"),
+                &allowed
+            ),
+            None
         );
     }
 

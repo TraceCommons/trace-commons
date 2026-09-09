@@ -59,6 +59,11 @@ fn validate_witness(witness: &PublishedWitness) -> Option<()> {
     }
     Some(())
 }
+/// A receipt-service base URL fit to publish to clients.
+#[allow(dead_code, unused_variables)] // Implemented in the commit after this one.
+fn validate_receipt_endpoint(endpoint: &str) -> Option<()> {
+    None
+}
 fn published_issuer() -> Option<(String, String)> {
     let issuer = std::env::var("TRACE_COMMONS_NEAR_PROVISIONING_ISSUER_URL").ok()?;
     let audience = std::env::var("TRACE_COMMONS_NEAR_PROVISIONING_AUDIENCE").ok()?;
@@ -345,6 +350,28 @@ mod tests {
         value.url = "https://witness.example".into();
         value.signing_address = "0xinvalid".into();
         assert!(validate_witness(&value).is_none());
+    }
+    /// The receipt endpoint is published to clients that will call it with a
+    /// `chat_id` on the path and a model on the query, so a value carrying a
+    /// query, a fragment or credentials of its own is refused here rather
+    /// than left for every client to discover separately.
+    #[test]
+    fn a_published_receipt_endpoint_must_be_a_bare_https_origin() {
+        assert!(validate_receipt_endpoint("https://cloud-api.near.ai/v1").is_some());
+        for refused in [
+            "http://cloud-api.near.ai/v1",
+            "https://user@cloud-api.near.ai/v1",
+            "https://user:secret@cloud-api.near.ai/v1",
+            "https://cloud-api.near.ai/v1?model=x",
+            "https://cloud-api.near.ai/v1#fragment",
+            "not a url",
+            "",
+        ] {
+            assert!(
+                validate_receipt_endpoint(refused).is_none(),
+                "{refused} was published"
+            );
+        }
     }
     #[test]
     fn requests_reject_extra_fields_and_pkce_is_device_bound() {
