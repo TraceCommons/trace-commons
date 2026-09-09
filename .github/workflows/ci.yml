@@ -1169,10 +1169,12 @@ jobs:
     # the copy in the weston job can be removed.
     steps:
       - uses: actions/checkout@v6
+      # Through the hardened update, never a bare `apt-get update`: the
+      # runner image's vendor repositories would fail this job before it
+      # validated anything, which is the exposure the action exists to close.
+      - uses: ./.github/actions/apt-update-ubuntu-only
       - name: Install the validators
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends desktop-file-utils appstream
+        run: sudo apt-get install -y --no-install-recommends desktop-file-utils appstream
       - name: Validate the desktop entry and AppStream metainfo
         run: bash crates/trace-commons-contributor-gtk/scripts/validate-desktop-entry.sh
 
