@@ -2832,6 +2832,74 @@ pub unsafe extern "C" fn tc_near_ai_credential_action(state: *const c_char) -> i
 pub const TC_CONTRIBUTION_CONTROL_NONE: i32 = 50;
 pub const TC_CONTRIBUTION_CONTROL_CONTRIBUTE: i32 = 51;
 
+/// The sentence for one NEAR AI login-enrolment control name.
+///
+/// Ten labels, each with its own sentence, and anything else -- including a
+/// label from a newer daemon -- reaching the generic one. **Never the empty
+/// string**: a refusal this build cannot name is still a refusal a
+/// contributor has to be told about, unlike an attestation reason, where
+/// silence is honest.
+///
+/// The three that refuse before anything is spent must not be collapsed by a
+/// caller: `no_session` means sign in first, `commons_unreachable` means the
+/// network, and `commons_unsupported` means this commons does not offer the
+/// path at all. A contributor told the wrong one debugs the wrong thing.
+///
+/// Returns an owned string; free it with `tc_string_free`. NULL only on a
+/// caught panic.
+///
+/// # Safety
+/// `label`, if non-null, must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_near_ai_enroll_line(label: *const c_char) -> *mut c_char {
+    guarded_string_no_err(|| {
+        let label = if label.is_null() {
+            ""
+        } else {
+            unsafe { borrow_str(label) }.unwrap_or("")
+        };
+        Ok(to_owned_cstring(
+            trace_commons_contributor::private_inference_copy::near_ai_enroll_line(label),
+        ))
+    })
+}
+
+/// How firmly that sentence reads: one of the `TC_PRIVATE_INFERENCE_TONE_*`
+/// values.
+///
+/// `no_session` is `_ATTENTION` -- there is a step the contributor can take,
+/// and the surface should point at it rather than paint a wall.
+/// `already_enrolled` is `_CLEAR`, because nothing was refused: the device is
+/// joined, which is the outcome they wanted. Everything else, including an
+/// unknown label and a caught panic, is `_REFUSED`.
+///
+/// # Safety
+/// `label`, if non-null, must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_near_ai_enroll_tone(label: *const c_char) -> i32 {
+    use trace_commons_contributor::private_inference_copy::PrivateInferenceTone;
+    guard(|| {
+        let label = if label.is_null() {
+            ""
+        } else {
+            unsafe { borrow_str(label) }.unwrap_or("")
+        };
+        Ok(
+            match trace_commons_contributor::private_inference_copy::near_ai_enroll_tone(label) {
+                PrivateInferenceTone::Neutral => TC_PRIVATE_INFERENCE_TONE_NEUTRAL,
+                PrivateInferenceTone::Held => TC_PRIVATE_INFERENCE_TONE_HELD,
+                PrivateInferenceTone::Clear => TC_PRIVATE_INFERENCE_TONE_CLEAR,
+                PrivateInferenceTone::Attention => TC_PRIVATE_INFERENCE_TONE_ATTENTION,
+                PrivateInferenceTone::Refused => TC_PRIVATE_INFERENCE_TONE_REFUSED,
+            },
+        )
+    })
+    // A caught panic reads as refused rather than neutral, matching the
+    // generic sentence the line falls back to. Neutral would paint "not
+    // available right now" as though nothing were wrong.
+    .unwrap_or(TC_PRIVATE_INFERENCE_TONE_REFUSED)
+}
+
 /// The sentence for one row of the certificate-held list.
 ///
 /// `evidence_admitted` is the daemon's `admission_evidence_required`

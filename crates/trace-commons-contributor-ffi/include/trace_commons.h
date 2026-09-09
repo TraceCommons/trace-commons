@@ -697,6 +697,36 @@ int32_t     tc_near_ai_credential_action(const char* state);
 #define TC_CONTRIBUTION_CONTROL_NONE       50
 #define TC_CONTRIBUTION_CONTROL_CONTRIBUTE 51
 
+/* The sentence for one NEAR AI login-enrolment control name.
+ *
+ * Ten labels, each with its own sentence, and anything else -- including a
+ * label from a newer daemon, an empty string or NULL -- reaching the generic
+ * one. NEVER THE EMPTY STRING: a refusal this build cannot name is the whole
+ * of what a contributor is being told, unlike an attestation reason, where
+ * saying nothing is honest.
+ *
+ * The three that refuse before anything is spent must not be collapsed by a
+ * caller. near_ai_enroll_no_session means sign in first,
+ * near_ai_enroll_commons_unreachable means the network, and
+ * near_ai_enroll_commons_unsupported means this commons does not offer the
+ * path at all. A contributor told the wrong one debugs the wrong thing.
+ *
+ * Returns an owned string; free it with tc_string_free. NULL only on a caught
+ * panic.
+ */
+char*       tc_near_ai_enroll_line(const char* label);
+
+/* How firmly that sentence reads: one of the TC_PRIVATE_INFERENCE_TONE_*
+ * values.
+ *
+ * near_ai_enroll_no_session is _ATTENTION, because there is a step the
+ * contributor can take and the surface should point at it rather than paint a
+ * wall. near_ai_enroll_already_enrolled is _CLEAR, because nothing was
+ * refused: the device is joined, which is the outcome they wanted. Everything
+ * else, including an unknown label, a NULL and a caught panic, is _REFUSED.
+ */
+int32_t     tc_near_ai_enroll_tone(const char* label);
+
 /* The sentence for one row of the certificate-held list.
  *
  * evidence_admitted is the daemon's admission_evidence_required VERBATIM,
