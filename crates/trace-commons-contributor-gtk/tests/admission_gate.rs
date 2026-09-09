@@ -18,10 +18,9 @@ use std::path::Path;
 
 #[test]
 fn the_sheet_asks_the_enrolment_before_it_shows_the_preparation_control() {
-    let source = std::fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ui/preview.rs"),
-    )
-    .expect("preview.rs is readable");
+    let source =
+        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ui/preview.rs"))
+            .expect("preview.rs is readable");
 
     // Prose is stripped first. A guard that fails source for naming a symbol
     // in a doc comment teaches the next reader to delete the explanation.
