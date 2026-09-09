@@ -590,6 +590,30 @@ public sealed class QueueEntry
     /// </remarks>
     [JsonPropertyName("attestation_reason")]
     public string? AttestationReason { get; set; }
+
+    /// <summary>
+    /// Whether a witness certificate is held for the bytes this row was
+    /// pinned to. True after either witness route.
+    /// </summary>
+    /// <remarks>
+    /// <b>A missing key is silently false here</b>, because System.Text.Json
+    /// defaults it -- so a daemon that stopped sending it, or a key renamed
+    /// on one side only, yields an EMPTY certificate-held section, which is
+    /// exactly what a contributor with no certificates sees. The section's
+    /// empty sentence is what tells those two apart, and
+    /// <c>CertificateSurfaceTests</c> pins that the key decodes.
+    ///
+    /// The three shells disagree about an absent field and each is pinned
+    /// separately: GTK defaults it, this defaults it, and macOS would throw
+    /// and fail the whole list. They agree because they are each held to it,
+    /// not because they share a mechanism.
+    ///
+    /// Not <see cref="Attestation"/>. That says whether the session carries a
+    /// copy of the model call that produced it; this says whether a
+    /// certificate is held over the reviewed bytes.
+    /// </remarks>
+    [JsonPropertyName("holds_certificate")]
+    public bool HoldsCertificate { get; set; }
 }
 
 /// <summary>

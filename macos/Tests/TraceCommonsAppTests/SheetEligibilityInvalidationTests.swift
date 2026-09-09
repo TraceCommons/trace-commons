@@ -36,7 +36,7 @@ final class SheetEligibilityInvalidationTests: XCTestCase {
             // Every entry carries a mark, this fixture's included: the
             // eligibility question it is really about is the one that
             // varies, and the mark does not.
-            attestation: "attested", attestationReason: nil)
+            attestation: "attested", attestationReason: nil, holdsCertificateRaw: nil)
     }
 
     /// The signal exists: a queue republish fires the publisher every view

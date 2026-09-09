@@ -697,6 +697,37 @@ int32_t     tc_near_ai_credential_action(const char* state);
 #define TC_CONTRIBUTION_CONTROL_NONE       50
 #define TC_CONTRIBUTION_CONTROL_CONTRIBUTE 51
 
+/* The sentence for one row of the certificate-held list.
+ *
+ * evidence_admitted is the daemon's admission_evidence_required VERBATIM,
+ * never its negation. That flag is true for a contributor who signed up
+ * through NEAR and therefore has NO invite, and false for one enrolled on an
+ * invite. So a non-zero argument returns the CANDIDATE reading -- "you can
+ * put this forward" -- and zero returns the ATTESTED one. It looks backwards
+ * until you know which way the flag points, which is exactly why the choice
+ * is here and not in each shell: three shells each writing
+ * flag ? candidate : attested would be three chances to swap them, and a
+ * swapped reading tells a contributor with no invite that their session
+ * carries cryptographic proof when nothing has attested it.
+ *
+ * Any non-zero value is the flag set, so a shell may widen a native bool
+ * however its language does. A NEGATIVE VALUE IS A CALLER ERROR and resolves
+ * to the CANDIDATE reading, the one that claims less: a malformed argument
+ * must not be able to assert a security property.
+ *
+ * Returns an owned string; free it with tc_string_free. NULL only on a caught
+ * panic.
+ */
+char*       tc_certificate_row_line(int32_t evidence_admitted);
+
+/* The heading over that list, on the same split as tc_certificate_row_line
+ * and with the same argument.
+ *
+ * Returns an owned string; free it with tc_string_free. NULL only on a caught
+ * panic.
+ */
+char*       tc_certificate_list_title(int32_t evidence_admitted);
+
 /* The sentence for one queue entry's eligibility label.
  *
  * state is that field from a list_pending entry: "eligible",

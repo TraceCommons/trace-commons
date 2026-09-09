@@ -103,8 +103,9 @@ final class AttestationExportTests: XCTestCase {
             ("marker_absent", copy.attestationReasonMarkerAbsent),
             ("request_malformed", copy.attestationReasonRequestMalformed),
             ("receipt_unavailable", copy.attestationReasonReceiptUnavailable),
+            ("receipt_not_issued", copy.attestationReasonReceiptNotIssued),
         ]
-        XCTAssertEqual(expected.count, 13)
+        XCTAssertEqual(expected.count, 14)
         for (label, sentence) in expected {
             XCTAssertFalse(sentence.isEmpty, label)
             XCTAssertEqual(
@@ -113,7 +114,7 @@ final class AttestationExportTests: XCTestCase {
                     calls: calls()),
                 sentence, label)
         }
-        XCTAssertEqual(Set(expected.map(\.1)).count, 13, "two reasons share a sentence")
+        XCTAssertEqual(Set(expected.map(\.1)).count, 14, "two reasons share a sentence")
     }
 
     /// A reason this build has never heard of, and the empty string, both
@@ -208,6 +209,10 @@ final class AttestationExportTests: XCTestCase {
                 "marker_absent", copy.attestationReasonMarkerAbsent,
                 copy.eligibilityReasonMarkerAbsent
             ),
+            (
+                "receipt_not_issued", copy.attestationReasonReceiptNotIssued,
+                copy.eligibilityReasonReceiptNotIssued
+            ),
         ]
         for (label, mine, theirs) in divergent {
             XCTAssertNotEqual(
@@ -226,7 +231,7 @@ final class AttestationExportTests: XCTestCase {
         // that a later edit splitting one of them has to come back and say
         // which list it belongs in.
         //
-        // Eight, and the arithmetic is the point: 5 + 8 = 13, and a count
+        // Eight, and the arithmetic is the point: 6 + 8 = 14, and a count
         // that does not close is a parse that missed a constant rather than
         // a fact about the copy. `body_not_utf8` is the one most easily
         // dropped -- its label carries a digit, and its sentence puts the
@@ -236,8 +241,8 @@ final class AttestationExportTests: XCTestCase {
             "bodies_unreadable", "body_not_utf8", "request_malformed", "receipt_unavailable",
         ]
         XCTAssertEqual(
-            divergent.count + identical.count, 13,
-            "the two lists must account for all thirteen reason labels")
+            divergent.count + identical.count, 14,
+            "the two lists must account for all fourteen reason labels")
         for label in identical {
             let rendered = TCAttestation.reasonLine(reason: label)
             XCTAssertNotNil(rendered)

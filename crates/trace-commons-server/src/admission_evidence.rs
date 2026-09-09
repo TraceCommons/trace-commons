@@ -8,8 +8,8 @@ use crate::redaction_witness::verification::{VerifiedWitnessCertificate, Witness
 use crate::witness_service::{Signer, WitnessContributionResponse};
 use std::collections::BTreeSet;
 use trace_commons_protocol::admission::{
-    AdmissionBinding, AdmissionEvidence, EVIDENCE_DOMAIN, REQUEST_METADATA_KEY, hash_hex, is_hash,
-    receipt_identity,
+    AdmissionBinding, AdmissionEvidence, AdmissionSignatureKind, EVIDENCE_DOMAIN,
+    REQUEST_METADATA_KEY, hash_hex, is_hash, receipt_identity,
 };
 use trace_commons_protocol::trace_contribution::{
     RawTraceContribution, TraceContributionEventType,
@@ -53,14 +53,35 @@ impl AdmissionProviderTrust {
         let provider_tee_signers: BTreeSet<_> = provider_tee_keys.into_iter().collect();
         let gateway_signers: BTreeSet<_> = gateway_keys.into_iter().collect();
         let models: BTreeSet<_> = models.into_iter().collect();
-        if provider_tee_signers.is_empty()
+        // Neither signer set is required, but between them they must name at
+        // least one key -- a deployment trusting no signer admits nothing and
+        // is a configuration mistake, not a policy. A gateway-only deployment
+        // is expressible, and so is a provider-TEE-only one.
+        //
+        // `models` may now be empty, because after the kind split it only
+        // governs provider-TEE receipts. An operator running gateway-only has
+        // no list to write, and requiring one would mean writing a list that
+        // is never consulted.
+        if (provider_tee_signers.is_empty() && gateway_signers.is_empty())
             || provider_tee_signers
                 .union(&gateway_signers)
                 .any(|s| !is_hash(s))
             // A key in both sets is one key holding both roles, which is the
             // thing the split exists to make impossible to express.
             || provider_tee_signers.intersection(&gateway_signers).count() != 0
-            || models.is_empty()
+            // **Configure the list if and only if you accept the kind it
+            // governs.** An operator who pinned provider-TEE keys and no
+            // models has almost certainly forgotten `ACCEPTED_MODELS`, and
+            // the coherent reading of the empty list -- "no provider-TEE
+            // receipt is admissible" -- is a gateway-only posture they did
+            // not choose. Refusing here makes that a loud failure at
+            // configuration load rather than a silent change of policy.
+            //
+            // The empty list stays legal for a deployment with no provider-TEE
+            // signers, which is what makes gateway-only expressible.
+            || (!provider_tee_signers.is_empty() && models.is_empty())
+            // A list containing junk is a typo, and admitting it would
+            // silently refuse the model the operator meant to allow.
             || models
                 .iter()
                 .any(|s| s.is_empty() || s.len() > 256 || s.trim() != s)
@@ -85,16 +106,31 @@ impl AdmissionProviderTrust {
                 .map(str::to_string)
                 .collect::<Vec<_>>()
         };
+        // **Absent and empty are different, on all three lists.** An absent
+        // variable is "this deployment does not do that", and yields no
+        // entries. A variable set to the empty string yields one empty entry,
+        // which `new` refuses as the typo it almost always is -- an operator
+        // who wrote `ACCEPTED_MODELS=` meant to write something.
+        let optional = |suffix: &str| {
+            std::env::var(format!("{prefix}_{suffix}"))
+                .map(&split)
+                .unwrap_or_default()
+        };
         Self::new(
-            split(read("PROVIDER_SIGNERS")?),
+            // Optional so a gateway-only deployment is expressible here and
+            // not only through the constructor. `new` refuses a configuration
+            // that names no signer at all, so omitting both is still an error.
+            optional("PROVIDER_SIGNERS"),
             // Optional, and empty means "no gateway receipt is admissible".
             // That is the fail-closed reading and it is deliberate: an
             // operator who pinned provider-TEE keys did not thereby agree to
             // accept a receipt that binds no model.
-            std::env::var(format!("{prefix}_GATEWAY_SIGNERS"))
-                .map(split)
-                .unwrap_or_default(),
-            split(read("ACCEPTED_MODELS")?),
+            optional("GATEWAY_SIGNERS"),
+            // Optional only because a gateway-only deployment has no list to
+            // write. `new` refuses provider-TEE signers with no models, so a
+            // deployment that accepts the attested kind must still say which
+            // models it accepts.
+            optional("ACCEPTED_MODELS"),
             read("MIN_REQUEST_BYTES")?
                 .parse()
                 .map_err(|_| AdmissionEvidenceError)?,
@@ -111,6 +147,38 @@ impl AdmissionProviderTrust {
         };
         is_hash(signer) && signers.contains(signer)
     }
+    /// The kind this **signer** establishes, independent of anything the
+    /// caller claimed.
+    ///
+    /// `signature_kind` on the receipt is a wire label NEAR AI does not sign.
+    /// It is sound as a *selector* -- a wrong claim only sends the receipt at
+    /// a stricter set and fails -- and unsound as a *record*: writing it into
+    /// the evidence would have the witness signing a statement whose kind
+    /// field is attacker-chosen text that happened not to change the
+    /// accept/reject decision, and a consumer would read that as something the
+    /// witness vouched for.
+    ///
+    /// The signer answers it instead, and can, because
+    /// [`AdmissionProviderTrust::new`] refuses a key present in both sets. The
+    /// sets are therefore disjoint by construction, at most one contains any
+    /// signer, and the order of the two lookups below cannot matter.
+    ///
+    /// **Do not replace this with `receipt.signature_kind`.** It is the same
+    /// value in every accepted case, which is exactly what makes the
+    /// substitution look harmless.
+    pub fn established_kind(&self, signer: &str) -> Option<AdmissionSignatureKind> {
+        if !is_hash(signer) {
+            return None;
+        }
+        if self.provider_tee_signers.contains(signer) {
+            return Some(AdmissionSignatureKind::ProviderTee);
+        }
+        if self.gateway_signers.contains(signer) {
+            return Some(AdmissionSignatureKind::Gateway);
+        }
+        None
+    }
+
     /// Kind-agnostic membership, for the ingest-side re-check only.
     ///
     /// [`AdmissionEvidence`] carries no signature kind, so ingest cannot
@@ -123,8 +191,37 @@ impl AdmissionProviderTrust {
         is_hash(signer)
             && (self.provider_tee_signers.contains(signer) || self.gateway_signers.contains(signer))
     }
-    pub fn accepts_request(&self, model: &str, request_bytes: u64) -> bool {
-        self.models.contains(model) && request_bytes >= self.min_request_bytes
+    /// The size floor always; the accepted-model list only where the model is
+    /// attested.
+    ///
+    /// **The model list is not a control on a gateway receipt.** That
+    /// receipt's model string is read out of the request body the caller
+    /// supplied and nothing signed it, so checking it filters on the caller's
+    /// own claim -- it refuses an honest caller naming an unlisted model and
+    /// stops nobody who names a listed one. What it did do was refuse
+    /// frontier traffic, which is the opposite of the intent.
+    ///
+    /// On a provider-TEE receipt the model is inside the signed text, checked
+    /// by [`verify_receipt`] against a key attested for that model, so the
+    /// list means what it says and still applies.
+    ///
+    /// `MIN_REQUEST_BYTES` applies to both: it is a fact about the exchange
+    /// the receipt covers, not about anything the caller asserts.
+    pub fn accepts_request(
+        &self,
+        kind: ReceiptSignatureKind,
+        model: &str,
+        request_bytes: u64,
+    ) -> bool {
+        if request_bytes < self.min_request_bytes {
+            return false;
+        }
+        match kind {
+            ReceiptSignatureKind::ProviderTee => self.models.contains(model),
+            ReceiptSignatureKind::Gateway => true,
+            // Names no key source, so it is refused wherever one is needed.
+            ReceiptSignatureKind::Unrecognised => false,
+        }
     }
 }
 
@@ -161,6 +258,9 @@ pub struct VerifiedAdmissionCall {
     /// accessors rather than directly.
     model: String,
     model_attribution: ModelAttribution,
+    /// Which signature was checked. Recorded so [`Self::certify`] can put it
+    /// in the signed evidence rather than leaving a holder to re-derive it.
+    signature_kind: AdmissionSignatureKind,
     request_bytes: u64,
 }
 
@@ -197,8 +297,13 @@ pub fn verify_admission_call(
         .get("model")
         .and_then(|v| v.as_str())
         .unwrap_or_default();
+    // `signature_kind` is the caller's wire label here, and it can only ever
+    // narrow: claiming `ProviderTee` adds the model check, and claiming
+    // `Gateway` drops it but then requires a signer in the gateway set, which
+    // `accepts_kind` enforces below. A caller cannot use the label to escape
+    // a list its own signer is subject to.
     if receipt.signing_algo != ReceiptAlgo::Ed25519
-        || !trust.accepts_request(model, request.len() as u64)
+        || !trust.accepts_request(receipt.signature_kind, model, request.len() as u64)
     {
         return Err(AdmissionEvidenceError);
     }
@@ -212,6 +317,26 @@ pub fn verify_admission_call(
     if !trust.accepts_kind(receipt.signature_kind, &verified.signing_address) {
         return Err(AdmissionEvidenceError);
     }
+    // **`receipt.signature_kind` selects which check applies, and is never
+    // read after this point.** It has exactly two readers, both guards
+    // immediately above -- `accepts_request`, for whether the model list
+    // governs this receipt, and `accepts_kind`, for which signer set must
+    // contain the signer. Neither records it.
+    //
+    // That is a rule the next reader can check with `grep
+    // 'receipt.signature_kind'`: two guards and these comments. A third
+    // reader, or either of these two feeding a value that outlives the
+    // function, is reintroducing the defect.
+    //
+    // It is the caller's own label, carried through `verify_receipt`
+    // unchanged (`receipt.rs` assigns `payload.signature_kind` verbatim), so
+    // it is sound as a selector -- a wrong claim only sends the receipt at a
+    // stricter set and fails -- and unsound as anything else. From here on
+    // the kind is what the *signer* establishes, which the disjoint sets make
+    // well defined.
+    let signature_kind = trust
+        .established_kind(&verified.signing_address)
+        .ok_or(AdmissionEvidenceError)?;
     let binding = AdmissionBinding::parse(
         body.get("metadata")
             .and_then(|v| v.get(REQUEST_METADATA_KEY))
@@ -222,16 +347,21 @@ pub fn verify_admission_call(
     if now < 0 || binding.expires_at <= now {
         return Err(AdmissionEvidenceError);
     }
-    // Both conditions, and neither alone. `verdict.model` is `Some` only for
+    // Both conditions, and neither alone. `verified.model` is `Some` only for
     // the three-part text, so the signature covers the model -- but a gateway
     // key signing a three-part text still says nothing about which model
     // answered, because that one key vouches for every model behind the
-    // gateway. `ProviderTee` alone is not enough either: the kind is a wire
-    // label the signature does not cover, so on its own it would let a caller
-    // *claim* its way to an attributed model. Requiring both means the label
-    // can only ever narrow what this call is credited with.
-    let model_attribution = match (verified.signature_kind, verified.model.as_deref()) {
-        (ReceiptSignatureKind::ProviderTee, Some(_)) => ModelAttribution::ReceiptBound,
+    // gateway. The established kind alone is not enough either: a
+    // provider-TEE key can sign the two-part text, which commits to no model.
+    //
+    // The kind here is the established one, not the label. It was already
+    // sound with the label, because requiring both conditions meant the label
+    // could only narrow -- but a line reading the label beside a line reading
+    // the derived value is an attractive nuisance: the two agree in every
+    // accepted case, so a later "fix" of the inconsistency passes every test
+    // whichever direction it goes.
+    let model_attribution = match (signature_kind, verified.model.as_deref()) {
+        (AdmissionSignatureKind::ProviderTee, Some(_)) => ModelAttribution::ReceiptBound,
         _ => ModelAttribution::RequestAsserted,
     };
     Ok(VerifiedAdmissionCall {
@@ -241,6 +371,7 @@ pub fn verify_admission_call(
         response_hash: verified.response_sha256,
         model: model.to_string(),
         model_attribution,
+        signature_kind,
         request_bytes: request.len() as u64,
     })
 }
@@ -333,6 +464,7 @@ impl VerifiedAdmissionCall {
             account_anchor_sha256: self.binding.account_anchor_sha256.clone(),
             challenge_sha256: self.binding.digest().map_err(|_| AdmissionEvidenceError)?,
             provider_signer: self.provider_signer.clone(),
+            signature_kind: self.signature_kind,
             model: self.model,
             request_bytes: self.request_bytes,
             request_sha256: self.request_hash.clone(),
@@ -379,7 +511,17 @@ pub fn verify_admission_evidence(
         .map_err(|_| AdmissionEvidenceError)?;
     if !witness_pin.verifies_detached(&bytes, signature)
         || !provider_trust.accepts(&evidence.provider_signer)
-        || !provider_trust.accepts_request(&evidence.model, evidence.request_bytes)
+        // The kind is inside the bytes the witness pin signed, so this side
+        // can apply the same rule the witness did rather than the
+        // kind-agnostic one it was stuck with.
+        || !provider_trust.accepts_request(
+            match evidence.signature_kind {
+                AdmissionSignatureKind::ProviderTee => ReceiptSignatureKind::ProviderTee,
+                AdmissionSignatureKind::Gateway => ReceiptSignatureKind::Gateway,
+            },
+            &evidence.model,
+            evidence.request_bytes,
+        )
         || evidence.account_anchor_sha256 != account_anchor
         || evidence.artifact_sha256 != artifact.redacted_sha256()
         || evidence.witness_measurement != artifact.witness_measurement()
@@ -414,7 +556,13 @@ mod tests {
                 .is_err()
         );
         assert!(AdmissionProviderTrust::new([key.to_uppercase()], none(), good(), 1).is_err());
+        // An empty model list is a policy only for a deployment that does not
+        // accept the kind it governs. With provider-TEE keys pinned it is a
+        // forgotten variable and still refused; gateway-only is the case it
+        // was relaxed for. `accepting_the_attested_kind_requires_saying_which_models`
+        // is where that pair is pinned.
         assert!(AdmissionProviderTrust::new([key.clone()], none(), none(), 1).is_err());
+        assert!(AdmissionProviderTrust::new(none(), [key.clone()], none(), 1).is_ok());
         assert!(AdmissionProviderTrust::new([key.clone()], none(), ["".into()], 1).is_err());
         assert!(
             AdmissionProviderTrust::new([key.clone()], none(), [" padded ".into()], 1).is_err()
@@ -426,6 +574,176 @@ mod tests {
             AdmissionProviderTrust::new([key.clone()], ["not-a-hash".into()], good(), 1).is_err()
         );
         assert!(AdmissionProviderTrust::new([key.clone()], [key.clone()], good(), 1).is_err());
+    }
+
+    /// The accepted-model list is a control on an attested model and nothing
+    /// on an asserted one.
+    ///
+    /// A gateway receipt's model string is read out of the request body the
+    /// caller supplied, and no signature covers it. Filtering on it refused an
+    /// honest caller naming an unlisted model while stopping nobody who names
+    /// a listed one -- so all it did was turn away frontier traffic. The size
+    /// floor is a fact about the exchange the receipt covers and still
+    /// applies to both.
+    #[test]
+    fn a_gateway_receipt_is_not_filtered_by_the_model_list() {
+        let key = "a".repeat(64);
+        let trust = AdmissionProviderTrust::new(
+            [key.clone()],
+            [key.replace('a', "b")],
+            ["operator-approved-model".to_string()],
+            10,
+        )
+        .expect("a deployment trusting both kinds");
+
+        for kind in [
+            ReceiptSignatureKind::ProviderTee,
+            ReceiptSignatureKind::Gateway,
+        ] {
+            assert!(
+                trust.accepts_request(kind, "operator-approved-model", 10),
+                "a listed model at the floor is admissible either way"
+            );
+            assert!(
+                !trust.accepts_request(kind, "operator-approved-model", 9),
+                "the size floor is about the exchange, so it binds both kinds"
+            );
+        }
+        assert!(
+            trust.accepts_request(ReceiptSignatureKind::Gateway, "some-frontier-model", 10),
+            "an unlisted model on a gateway receipt was refused by a filter \
+             applied to the caller's own unattested string"
+        );
+        assert!(
+            !trust.accepts_request(ReceiptSignatureKind::ProviderTee, "some-frontier-model", 10),
+            "the list still governs the kind whose model the signature covers"
+        );
+        assert!(
+            !trust.accepts_request(
+                ReceiptSignatureKind::Unrecognised,
+                "operator-approved-model",
+                10
+            ),
+            "a kind naming no key source is refused wherever one is needed"
+        );
+    }
+
+    /// A deployment that trusts only gateway keys needs no model list, and one
+    /// with an empty list admits no provider-TEE receipt at all.
+    #[test]
+    fn an_empty_model_list_refuses_every_attested_model() {
+        let key = "a".repeat(64);
+        let trust = AdmissionProviderTrust::new([], [key], [], 1)
+            .expect("a gateway-only deployment is expressible");
+        assert!(trust.accepts_request(ReceiptSignatureKind::Gateway, "anything", 1));
+        assert!(!trust.accepts_request(ReceiptSignatureKind::ProviderTee, "anything", 1));
+    }
+
+    /// A mislabelled receipt is refused outright, never admitted under the
+    /// looser rule.
+    ///
+    /// This is what makes the kind-aware model check safe. A caller holding a
+    /// provider-TEE key whose model is not on the list could otherwise claim
+    /// `gateway` and skip the check. They cannot: the label only selects which
+    /// set the signer must be in, and a provider-TEE signer is not in the
+    /// gateway set, so the receipt is refused rather than taking the gateway
+    /// path.
+    ///
+    /// It rests entirely on the two sets being disjoint, which
+    /// [`AdmissionProviderTrust::new`] enforces. Remove that and this fails --
+    /// verified by mutation, not assumed: allowing a key in both sets makes
+    /// `accepts_kind(Gateway, provider_key)` true and the mislabelled receipt
+    /// is admitted.
+    #[test]
+    fn a_mislabelled_receipt_is_refused_rather_than_admitted_under_the_looser_rule() {
+        let provider = "a".repeat(64);
+        let gateway = "b".repeat(64);
+        let trust = AdmissionProviderTrust::new(
+            [provider.clone()],
+            [gateway.clone()],
+            ["operator-approved-model".to_string()],
+            1,
+        )
+        .expect("both kinds configured");
+
+        // The claim that would skip the model list, from a key that is not a
+        // gateway key.
+        assert!(
+            !trust.accepts_kind(ReceiptSignatureKind::Gateway, &provider),
+            "a provider-TEE signer claiming gateway would take the looser path"
+        );
+        // And the mirror: a gateway key cannot buy the attested reading.
+        assert!(!trust.accepts_kind(ReceiptSignatureKind::ProviderTee, &gateway));
+
+        // Whatever a caller claims, the recorded kind follows the signer.
+        assert_eq!(
+            trust.established_kind(&provider),
+            Some(AdmissionSignatureKind::ProviderTee)
+        );
+        assert_eq!(
+            trust.established_kind(&gateway),
+            Some(AdmissionSignatureKind::Gateway)
+        );
+        assert_eq!(trust.established_kind(&"c".repeat(64)), None);
+        assert_eq!(trust.established_kind("not-a-hash"), None);
+    }
+
+    /// The empty model list is a gateway-only policy, never a provider-TEE
+    /// deployment that forgot to configure one.
+    ///
+    /// Without this, an operator who pinned provider-TEE keys and omitted
+    /// `ACCEPTED_MODELS` would boot into a posture they did not choose --
+    /// admitting nothing on the kind they configured -- and the only symptom
+    /// would be refusals they would go looking for elsewhere. The list is
+    /// required exactly when the kind it governs is accepted, so a forgotten
+    /// variable is a loud failure at configuration load instead.
+    #[test]
+    fn accepting_the_attested_kind_requires_saying_which_models() {
+        let provider = "a".repeat(64);
+        let gateway = "b".repeat(64);
+        let model = || ["operator-approved-model".to_string()];
+
+        assert!(
+            AdmissionProviderTrust::new([provider.clone()], [], [], 1).is_err(),
+            "provider-TEE keys with no model list is a forgotten variable, \
+             not a policy"
+        );
+        assert!(
+            AdmissionProviderTrust::new([provider.clone()], [gateway.clone()], [], 1).is_err(),
+            "adding gateway keys does not excuse the list the other kind needs"
+        );
+        assert!(AdmissionProviderTrust::new([provider], [], model(), 1).is_ok());
+        assert!(AdmissionProviderTrust::new([], [gateway], [], 1).is_ok());
+    }
+
+    /// The two vocabularies must not drift.
+    ///
+    /// `AdmissionSignatureKind` lives in the protocol crate, which does not
+    /// depend on the attestation crate, so the wire spellings are written
+    /// twice. This is the only place both types are visible; without it a
+    /// rename on either side would leave evidence naming a kind the other
+    /// half cannot recognise, and the signature would still verify.
+    #[test]
+    fn the_signed_kind_spells_what_the_receipt_kind_spells() {
+        const AT_STAKE: &str = "the two spellings have drifted, so evidence now \
+             names a kind the other half cannot recognise -- under a witness \
+             signature that still verifies, because the signature covers the \
+             spelling and knows nothing about what it means";
+        assert_eq!(
+            AdmissionSignatureKind::Gateway.as_wire(),
+            ReceiptSignatureKind::Gateway.as_wire().expect("a spelling"),
+            "{AT_STAKE}"
+        );
+        assert_eq!(
+            AdmissionSignatureKind::ProviderTee.as_wire(),
+            ReceiptSignatureKind::ProviderTee
+                .as_wire()
+                .expect("a spelling"),
+            "{AT_STAKE}"
+        );
+        assert_eq!(ReceiptSignatureKind::Unrecognised.as_wire(), None);
+        assert!(AdmissionSignatureKind::ProviderTee.binds_model());
+        assert!(!AdmissionSignatureKind::Gateway.binds_model());
     }
 
     /// Selecting the pin set by `signature_kind` is the whole of the split.

@@ -6322,19 +6322,23 @@ mod tests {
         seed_entry_with_eligibility(s, key, Some(ce::STATE_INELIGIBLE_PERMANENT));
         seed_entry_with_eligibility(s, key, Some(ce::STATE_INELIGIBLE_PERMANENT));
         seed_entry_with_eligibility(s, key, Some(ce::STATE_INELIGIBLE_CONFIGURATION));
-        // A row the daemon never evaluated. It renders `unknown`, which
-        // offers no control, so a bulk send must not include it either.
+        // A row the daemon never evaluated. It renders `unknown`, which IS
+        // offered the control (the receipt fetch at submission is the only
+        // thing that can decide it), so a bulk send includes it alongside
+        // the eligible row.
         seed_entry_with_eligibility(s, key, None);
         eligible
     }
 
     /// **The hole this closes.** A project holding one eligible row and four
-    /// that cannot be sent offered one control that sent all five.
+    /// others offered one control that sent all five. Now it sends the two
+    /// that may be sent -- the eligible row and the unresolved one -- and
+    /// leaves the three ineligible rows behind.
     ///
     /// Observed on which entries the call SELECTED, not on how many it
     /// approved: none of these seeds has a session file, so every selected
     /// entry lands in `skipped` further down the pipeline. That is the point
-    /// -- `skipped` counts exactly what was chosen, and the four excluded
+    /// -- `skipped` counts exactly what was chosen, and the three excluded
     /// rows never enter it.
     #[tokio::test]
     async fn a_project_approve_selects_only_what_can_be_sent() {
@@ -6352,16 +6356,21 @@ mod tests {
         let result = r.result.expect("approve answers");
 
         assert_eq!(
-            result["excluded_ineligible"], 4,
-            "four rows could not be sent: {result}"
+            result["excluded_ineligible"], 3,
+            "three rows could not be sent: {result}"
         );
         let skipped = result["skipped"].as_array().expect("a skipped list");
         assert_eq!(
             skipped.len(),
-            1,
-            "only the eligible row was selected: {result}"
+            2,
+            "the eligible row and the unresolved row were selected: {result}"
         );
-        assert_eq!(skipped[0]["entry_id"], serde_json::json!(eligible));
+        assert!(
+            skipped
+                .iter()
+                .any(|s| s["entry_id"] == serde_json::json!(eligible)),
+            "the eligible row was selected: {result}"
+        );
     }
 
     /// **The regression that must not happen.** An invited contributor has
@@ -6409,8 +6418,10 @@ mod tests {
         let r = handle_request_async(&s, &req("approve", serde_json::json!({"all": true}))).await;
         let result = r.result.expect("approve answers");
 
-        assert_eq!(result["excluded_ineligible"], 4, "{result}");
-        assert_eq!(result["skipped"].as_array().unwrap().len(), 1, "{result}");
+        // The eligible row and the unresolved one are selected; the three
+        // ineligible rows are left behind.
+        assert_eq!(result["excluded_ineligible"], 3, "{result}");
+        assert_eq!(result["skipped"].as_array().unwrap().len(), 2, "{result}");
     }
 
     /// A single `entry_id` is not filtered. Naming one entry is an explicit
@@ -6506,8 +6517,10 @@ mod tests {
         }
     }
 
-    /// The count a shell draws its button from: "send the 1 of 5 that can be
+    /// The count a shell draws its button from: "send the 2 of 5 that can be
     /// sent", answerable from the row it already fetched to draw the group.
+    /// Two, not one: the eligible row and the unresolved one, which is
+    /// offered because only a send can decide it.
     #[test]
     fn a_project_row_says_how_many_of_its_sessions_can_be_sent() {
         let s = shared();
@@ -6519,7 +6532,7 @@ mod tests {
             .find(|p| p["project_id"] == serde_json::json!(project_id_for("/tmp/mixedproj")))
             .expect("the project is listed");
         assert_eq!(row["pending_count"], 5, "{row}");
-        assert_eq!(row["contributable_count"], 1, "{row}");
+        assert_eq!(row["contributable_count"], 2, "{row}");
     }
 
     /// And an invited contributor gets the pending count with no "of" --

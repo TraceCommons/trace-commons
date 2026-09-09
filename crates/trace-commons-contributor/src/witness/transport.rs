@@ -1337,6 +1337,11 @@ mod tests {
             account_anchor_sha256: account.into(),
             challenge_sha256: "22".repeat(32),
             provider_signer: "33".repeat(32),
+            // The kind the witness checked is part of the signed statement.
+            // A fixture has to say which one; these exercise signature and
+            // approval, not provider qualification, so the attested kind is
+            // the one that changes nothing about what they assert.
+            signature_kind: trace_commons_protocol::admission::AdmissionSignatureKind::ProviderTee,
             model: "test-model".into(),
             request_bytes: 1,
             request_sha256: "44".repeat(32),
@@ -1373,6 +1378,11 @@ mod tests {
             account_anchor_sha256: "11".repeat(32),
             challenge_sha256: "22".repeat(32),
             provider_signer: "33".repeat(32),
+            // The kind the witness checked is part of the signed statement.
+            // A fixture has to say which one; these exercise signature and
+            // approval, not provider qualification, so the attested kind is
+            // the one that changes nothing about what they assert.
+            signature_kind: trace_commons_protocol::admission::AdmissionSignatureKind::ProviderTee,
             model: "test-model".into(),
             request_bytes: 1,
             request_sha256: "44".repeat(32),
@@ -1438,6 +1448,11 @@ mod tests {
             account_anchor_sha256: binding.account_anchor_sha256.clone(),
             challenge_sha256: binding.digest().unwrap(),
             provider_signer: receipt.signing_address.clone(),
+            // The kind the witness checked is part of the signed statement.
+            // A fixture has to say which one; these exercise signature and
+            // approval, not provider qualification, so the attested kind is
+            // the one that changes nothing about what they assert.
+            signature_kind: trace_commons_protocol::admission::AdmissionSignatureKind::ProviderTee,
             model: "Qwen/Qwen3.6-27B-FP8".into(),
             request_bytes: request.len() as u64,
             request_sha256: hash_hex(request.as_bytes()),

@@ -74,7 +74,7 @@ pub const STATE_INELIGIBLE_CONFIGURATION: &str = "ineligible_configuration";
 /// Not evaluated. Never a silent default -- see the module docs.
 pub const STATE_UNKNOWN: &str = "unknown";
 
-/// The thirteen reason labels, owned by [`attestation_mark`] and re-exported
+/// The fourteen reason labels, owned by [`attestation_mark`] and re-exported
 /// here unchanged.
 ///
 /// They are not split between the two questions, because they were never
@@ -88,8 +88,8 @@ pub const STATE_UNKNOWN: &str = "unknown";
 pub use attestation_mark::{
     ALL_REASONS, REASON_BODIES_UNREADABLE, REASON_BODY_NOT_UTF8, REASON_BODY_TOO_LARGE,
     REASON_CAPTURE_OFF, REASON_DIGEST_ABSENT, REASON_DIGEST_MISMATCH, REASON_EVIDENCE_CAPTURE_OFF,
-    REASON_MARKER_ABSENT, REASON_NO_CALL, REASON_RECEIPT_UNAVAILABLE, REASON_REFERENCE_MALFORMED,
-    REASON_REQUEST_MALFORMED, REASON_UPSTREAM_ID_ABSENT,
+    REASON_MARKER_ABSENT, REASON_NO_CALL, REASON_RECEIPT_NOT_ISSUED, REASON_RECEIPT_UNAVAILABLE,
+    REASON_REFERENCE_MALFORMED, REASON_REQUEST_MALFORMED, REASON_UPSTREAM_ID_ABSENT,
 };
 
 /// One entry's answer: a state label and, unless it is eligible, why.
@@ -154,9 +154,14 @@ pub fn evidence_flag(cfg: Option<&crate::config::ContributorConfig>) -> bool {
 /// The gate is the invariant; a disabled control is only how it is usually
 /// expressed.
 ///
-/// A row with no recorded eligibility is excluded. It renders as `unknown`,
-/// which offers no control, so including it in a bulk send would send
-/// precisely the row a shell was told not to offer.
+/// `unknown` is included, and so is a row with no recorded verdict, which
+/// is what the wire renders as `unknown` for an evidence-admitted
+/// contributor. Both are offered the per-row control -- see
+/// `private_inference_copy::eligibility_control` for why: a session whose
+/// attestation could not be decided at discovery is decided by the receipt
+/// fetch at submission, and that cannot run on a row nobody can send. The
+/// group filter agrees with the row gate, so "Submit all" sends exactly the
+/// rows the surface offered and no other.
 ///
 /// This is NOT applied to a single-entry approve. Naming one entry is an
 /// explicit act about a session the contributor is looking at, the shell's
@@ -165,7 +170,10 @@ pub fn evidence_flag(cfg: Option<&crate::config::ContributorConfig>) -> bool {
 /// expectation as though it were the answer.
 #[must_use]
 pub fn contributable_in_a_group(eligibility: Option<&str>) -> bool {
-    eligibility == Some(STATE_ELIGIBLE)
+    matches!(
+        eligibility,
+        None | Some(STATE_ELIGIBLE) | Some(STATE_UNKNOWN)
+    )
 }
 
 /// Classify one session.
@@ -265,7 +273,7 @@ mod tests {
             backend: "nearai".to_string(),
             requested_model: Some("a-model".to_string()),
             served_model: Some("a-model".to_string()),
-            upstream_id: Some("chatcmpl-1".to_string()),
+            upstream_id: Some("abcdef0123456789".to_string()),
             request_sha256: Some("00".repeat(32)),
             response_sha256: Some("11".repeat(32)),
             body_ref: Some("00000000000000000001-000000".to_string()),
@@ -533,5 +541,43 @@ mod tests {
         for verdict in inputs.into_iter().flatten() {
             assert_ne!(verdict.state, STATE_UNKNOWN);
         }
+    }
+
+    /// An `unknown` row is offered the send control and included in a
+    /// group send; the two ineligible states are not.
+    ///
+    /// `unknown` is a session whose attestation could not be decided at
+    /// discovery -- every Responses-API call, which is all Codex speaks,
+    /// because a hosted and a brokered call come back under the same
+    /// identifier shape. The receipt fetch at submission is the only thing
+    /// that can decide it, and it cannot run if the row is never sent. The
+    /// daemon already let a single named `unknown` entry through on the
+    /// reasoning that the server decides; this brings the shell gate and
+    /// the group filter into line with that. The state still reads
+    /// `unknown` -- nothing is claimed, something unresolved is offered.
+    #[test]
+    fn an_unknown_row_is_sendable_and_the_ineligible_states_are_not() {
+        use crate::private_inference_copy::{ContributionControl, eligibility_control};
+        assert!(contributable_in_a_group(Some(STATE_ELIGIBLE)));
+        assert!(contributable_in_a_group(Some(STATE_UNKNOWN)));
+        // A row with no recorded verdict is what the wire renders as
+        // `unknown` for an evidence-admitted contributor, so the group
+        // filter must agree with what the row was shown as.
+        assert!(contributable_in_a_group(None));
+        assert!(!contributable_in_a_group(Some(STATE_INELIGIBLE_PERMANENT)));
+        assert!(!contributable_in_a_group(Some(
+            STATE_INELIGIBLE_CONFIGURATION
+        )));
+        assert!(!contributable_in_a_group(Some(
+            "a_state_from_a_later_daemon"
+        )));
+        assert_eq!(
+            eligibility_control(STATE_UNKNOWN),
+            ContributionControl::Contribute
+        );
+        assert_eq!(
+            eligibility_control(STATE_INELIGIBLE_PERMANENT),
+            ContributionControl::None
+        );
     }
 }

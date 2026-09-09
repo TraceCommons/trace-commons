@@ -174,6 +174,28 @@ pub enum SubmitOutcome {
     }, // network/auth after retries
 }
 
+/// What the inference-receipt fetch produced for a shipped submission.
+///
+/// The receipt fetch is best-effort on the ordinary witnessed path: a failure
+/// does not block the upload, because an unattested submission is an honest
+/// thing to send and the witness decides whether it is acceptable. But the
+/// failure used to vanish into a debug log while the attestation mark went on
+/// saying `attested`, so a person who ran a hosted model whose receipt 404'd
+/// believed they had contributed attested work. This records what actually
+/// happened so the mark can be corrected after the fact -- see
+/// [`crate::daemon::attestation_mark::writeback_after_upload`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReceiptShipped {
+    /// No attested call was carried, so no receipt was ever sought.
+    NoCall,
+    /// A receipt was fetched and accompanied the submission.
+    Attached,
+    /// An attested call was carried and its receipt could not be obtained.
+    /// The submission shipped without it; the reason says whether that is
+    /// permanent (a definite 404) or transient.
+    Omitted(crate::routing::receipt::ReceiptFetchError),
+}
+
 /// Default options leave optional overrides absent and all switches off.
 /// Enrollment and consent are still checked by the submission path; these
 /// defaults do not establish either. Tests can override the flags they exercise.
@@ -403,6 +425,10 @@ pub struct SubmitContext<'a> {
     canary_runs: u32,
     approved_envelope: Option<TraceContributionEnvelope>,
     approved_witness: Option<WitnessedEnvelope>,
+    /// What the last `submit_one`'s receipt fetch produced, for the daemon to
+    /// correct the attestation mark after an upload. Reset at the start of
+    /// each `submit_one`, set by `witness_envelope` when it runs.
+    last_receipt_shipped: ReceiptShipped,
     /// Stands in for a fetched provider receipt, tests only.
     ///
     /// `receipt_for_attested_call` refuses a plaintext endpoint before it
@@ -455,6 +481,7 @@ impl<'a> SubmitContext<'a> {
             canary_runs: 0,
             approved_envelope: None,
             approved_witness: None,
+            last_receipt_shipped: ReceiptShipped::NoCall,
             #[cfg(test)]
             receipt_override: None,
         })
@@ -577,7 +604,7 @@ impl<'a> SubmitContext<'a> {
         } else {
             None
         };
-        let (envelope, response, attested_inference) = self
+        let (envelope, response, attested_inference, shipped) = self
             .witness_envelope(&settings, raw, attested, &token, now)
             .await
             .map_err(anyhow::Error::msg)?;
@@ -591,6 +618,7 @@ impl<'a> SubmitContext<'a> {
         } else {
             attested_inference
         };
+        self.last_receipt_shipped = shipped;
         ensure_certified_grant(&envelope, &token, Utc::now())?;
         if envelope.submission_id != crate::source::submission_id_for(&transcript.session_hash) {
             anyhow::bail!("witness-review-source-mismatch");
@@ -728,10 +756,13 @@ impl<'a> SubmitContext<'a> {
     async fn inference_receipt_for(
         &self,
         call: &crate::routing::attested::AttestedCall,
-    ) -> Option<trace_commons_attestation::receipt::ReceiptPayload> {
+    ) -> std::result::Result<
+        trace_commons_attestation::receipt::ReceiptPayload,
+        crate::routing::receipt::ReceiptFetchError,
+    > {
         #[cfg(test)]
         if let Some(receipt) = self.receipt_override.clone() {
-            return Some(receipt);
+            return Ok(receipt);
         }
         let result = crate::routing::receipt::receipt_for_attested_call(
             // `effective_cfg`, which is `cfg` with the flag-level overrides
@@ -759,7 +790,7 @@ impl<'a> SubmitContext<'a> {
         if let Err(err) = &result {
             tracing::debug!("inference receipt omitted: {}", err.label());
         }
-        result.ok()
+        result
     }
 
     /// The witness's answer, and what it was handed to reach it.
@@ -782,6 +813,7 @@ impl<'a> SubmitContext<'a> {
             TraceContributionEnvelope,
             WitnessedEnvelope,
             InferenceAttestationRecord,
+            ReceiptShipped,
         ),
         &'static str,
     > {
@@ -808,9 +840,12 @@ impl<'a> SubmitContext<'a> {
         // The source-selected profile is already frozen. Optional legacy
         // receipt failures retain ordinary review; a bound admission call
         // must have its receipt and cannot switch to the window on failure.
-        let receipt = match attested {
-            Some(call) => self.inference_receipt_for(call).await,
-            None => None,
+        let (receipt, shipped) = match attested {
+            Some(call) => match self.inference_receipt_for(call).await {
+                Ok(receipt) => (Some(receipt), ReceiptShipped::Attached),
+                Err(err) => (None, ReceiptShipped::Omitted(err)),
+            },
+            None => (None, ReceiptShipped::NoCall),
         };
         if admission_profile && receipt.is_none() {
             return Err("admission_receipt_unavailable");
@@ -838,7 +873,18 @@ impl<'a> SubmitContext<'a> {
         .map_err(|e| e.refusal_label())?;
 
         let parsed = parse_witnessed_envelope(&response).map_err(|e| e.refusal_label())?;
-        Ok((parsed, response, attested_inference))
+        Ok((parsed, response, attested_inference, shipped))
+    }
+
+    /// What the most recent `submit_loaded` receipt fetch produced.
+    ///
+    /// Meaningful immediately after a submission returns `Submitted`: the
+    /// daemon reads it to correct the attestation mark on a shipped row whose
+    /// receipt did not arrive. `NoCall` on any path that carried no attested
+    /// call or did not run the witness.
+    #[must_use]
+    pub fn last_receipt_shipped(&self) -> ReceiptShipped {
+        self.last_receipt_shipped
     }
 
     pub async fn submit_one(
@@ -873,6 +919,10 @@ impl<'a> SubmitContext<'a> {
         &mut self,
         mut transcript: crate::source::SessionTranscript,
     ) -> Result<SubmitOutcome> {
+        // Reset before this submission, so a prior entry's fetch cannot be
+        // read as this one's. Left at `NoCall` unless `witness_envelope` runs
+        // and a call was carried.
+        self.last_receipt_shipped = ReceiptShipped::NoCall;
         let opts = self.opts;
         // Taken up front, not at the point it is used below: several paths
         // return before that point (already-submitted, an unavailable
@@ -1074,7 +1124,7 @@ impl<'a> SubmitContext<'a> {
                             // The record is dropped on this path: the CLI keeps
                             // no per-entry store to write it to. The daemon's
                             // review path is where it is kept.
-                            Ok((parsed, response, _attested_inference)) => {
+                            Ok((parsed, response, _attested_inference, shipped)) => {
                                 // `parse_witnessed_envelope` inside
                                 // `witness_envelope` is what verified this
                                 // certificate against the bytes that came
@@ -1083,6 +1133,7 @@ impl<'a> SubmitContext<'a> {
                                 record_last_result(WitnessLastResult::Certified {
                                     n_of_m: n_of_m_from_certificate(&response.certificate_json),
                                 });
+                                self.last_receipt_shipped = shipped;
                                 witnessed = Some(response);
                                 parsed
                             }
@@ -4852,17 +4903,19 @@ mod tests {
         let (call, _dir) = receipt_fixture_call();
 
         assert!(
-            ctx.inference_receipt_for(&call).await.is_none(),
+            ctx.inference_receipt_for(&call).await.is_err(),
             "an unconfigured endpoint must not produce a receipt"
         );
     }
 
-    /// And an endpoint the operator's allowlist excludes is an absent receipt
-    /// too -- never a refusal, and never a panic.
+    /// And an endpoint the operator's allowlist excludes yields no receipt
+    /// too -- an `Err`, never a panic. The `Err` is non-fatal: `witness_envelope`
+    /// turns it into a `ReceiptShipped::Omitted` and the submission still
+    /// ships unattested.
     ///
     /// This is the behaviour the whole design turns on: a receipt that cannot
     /// be obtained makes a submission unattested, and the witness decides
-    /// whether unattested is acceptable. A client-side refusal here would
+    /// whether unattested is acceptable. Failing the submission here would
     /// throw away a contribution over somebody else's outage.
     #[tokio::test]
     async fn an_unfetchable_receipt_is_an_absent_one_and_not_a_failure() {
@@ -4884,7 +4937,7 @@ mod tests {
         let (call, _dir) = receipt_fixture_call();
 
         assert!(
-            ctx.inference_receipt_for(&call).await.is_none(),
+            ctx.inference_receipt_for(&call).await.is_err(),
             "an unreachable or disallowed endpoint must yield no receipt, not an error"
         );
     }

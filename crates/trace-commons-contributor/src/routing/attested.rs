@@ -190,6 +190,90 @@ pub enum Unattestable {
     DigestMismatch,
 }
 
+/// Whose identifier a recorded `upstream_id` is, and therefore whether a
+/// receipt can exist for the call it names.
+///
+/// NEAR AI issues a receipt (`GET /v1/signature/{chat_id}`) only for a call
+/// it served from its own enclave, and it names such a call by an identifier
+/// of its own minting: bare hex. A **Chat Completions** call it passed on to
+/// Anthropic or OpenAI comes back under **that** provider's identifier --
+/// `msg_…`, `chatcmpl-…` -- and the receipt endpoint answers 404 for it,
+/// permanently, because NEAR AI never ran the enclave that would have signed
+/// it. (The Responses API is different: a brokered call there DOES get a
+/// `gateway` receipt, one that binds no model -- see [`Self::Hosted`].)
+///
+/// Decided from the identifier's shape rather than from a list of model
+/// names, because the list moves -- models are added, retired and re-homed
+/// upstream without notice -- while the shape is a property of who minted the
+/// identifier, which is the fact that decides whether a receipt exists.
+///
+/// This is an attestation question, not a body-carrying one. A brokered
+/// call's bodies are as faithful as any other's and [`attested_final_call`]
+/// carries them; what they lack is a receipt. So the classification lives in
+/// [`crate::daemon::attestation_mark::evaluate`] and the receipt fetch, not
+/// in [`ledger_only_final_call`] -- the overlay still attaches the bodies,
+/// and the mark is what says nothing can attest them.
+///
+/// **Fails toward not claiming.** Only a shape known to be the provider's own
+/// reads as [`Self::Hosted`]; a shape known to be another provider's reads as
+/// [`Self::Foreign`]; anything else is [`Self::Unrecognised`], which is never
+/// promoted to attested by anything that reads it. A missed credit on an
+/// attestable call is recoverable; a promise of attestation on a call that
+/// cannot carry one is not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderIdentifier {
+    /// The provider's own Chat Completions identifier: bare lowercase hex,
+    /// 16 to 64 digits. A `provider_tee` receipt may exist for this call.
+    ///
+    /// **A Responses-API identifier is never Hosted**, and this was learned
+    /// the hard way. NEAR AI mints `resp_` plus 32 lowercase hex for a
+    /// Responses call whether it served the model itself or brokered it --
+    /// verified live 2026-09-09: hosted `Qwen/Qwen3.8-27B` answered
+    /// `resp_32464c3bb3064e1ba888d5e5f7073fb3`, brokered `openai/gpt-5-nano`
+    /// answered `resp_43c46c526bdf4ffa8a4f936934f6d54c`, brokered
+    /// `anthropic/claude-haiku-4-5` answered
+    /// `resp_41a400ee0cd24d8ea9b7997251bf5708`. The API normalises the id on
+    /// both paths, so the mixed-case tell that separates brokered Chat
+    /// Completions ids does not survive it, and shape cannot discriminate a
+    /// Responses call on any evidence available at discovery. An arm that
+    /// read `resp_` + 32 hex as Hosted marked a brokered Claude or GPT call
+    /// attested -- the lie this classification exists to remove. So every
+    /// `resp_` id is [`Self::Unrecognised`], and the receipt fetch after
+    /// upload -- the only discriminator there is -- settles the mark.
+    Hosted,
+    /// Another provider's identifier. No receipt exists and none will.
+    Foreign,
+    /// A shape this build does not know. Not claimed either way.
+    Unrecognised,
+}
+
+/// Prefixes that name another provider's identifier. Anthropic's Messages
+/// API mints `msg_…`; OpenAI's Chat Completions API mints `chatcmpl-…`.
+const FOREIGN_IDENTIFIER_PREFIXES: [&str; 2] = ["msg_", "chatcmpl-"];
+
+/// Classify one recorded provider identifier. See [`ProviderIdentifier`].
+#[must_use]
+pub fn classify_upstream_id(upstream_id: &str) -> ProviderIdentifier {
+    if FOREIGN_IDENTIFIER_PREFIXES
+        .iter()
+        .any(|prefix| upstream_id.starts_with(prefix))
+    {
+        return ProviderIdentifier::Foreign;
+    }
+    // Deliberately no `resp_` arm. See the `Hosted` docs: a Responses-API
+    // identifier is the same shape whether NEAR AI served the call or
+    // brokered it, so it is Unrecognised and the receipt fetch decides.
+    let hosted = (16..=64).contains(&upstream_id.len())
+        && upstream_id
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+    if hosted {
+        ProviderIdentifier::Hosted
+    } else {
+        ProviderIdentifier::Unrecognised
+    }
+}
+
 /// The final call's verbatim bodies, ready to become an event.
 ///
 /// Deliberately no `Debug`, `Serialize` or `Clone` derive that would print or
@@ -870,5 +954,47 @@ mod tests {
 
         assert_eq!(event.tool_name.as_deref(), Some("http"));
         assert_eq!(event.event_type, TraceContributionEventType::HttpExchange);
+    }
+
+    /// The identifiers a live gateway handed back on 2026-09-09, by
+    /// (provider, API), plus the near-misses the bare-hex rule must refuse.
+    ///
+    /// Chat Completions discriminates: NEAR AI's own id is bare lowercase
+    /// hex and a brokered call carries the upstream provider's mixed-case
+    /// format. The Responses API does NOT: hosted and brokered calls alike
+    /// come back as `resp_` plus 32 lowercase hex -- three live ids below,
+    /// two brokered and one hosted, byte-for-byte the same shape. So every
+    /// `resp_` id is Unrecognised, whatever follows the prefix, and the
+    /// receipt fetch after upload is what decides it.
+    #[test]
+    fn provider_identifiers_are_classified_by_who_minted_them() {
+        use ProviderIdentifier::{Foreign, Hosted, Unrecognised};
+        let cases = [
+            // NEAR AI hosted, Chat Completions: bare hex, provider_tee receipt.
+            ("e795f9d441164d92aa0473ce333650be", Hosted),
+            // OpenAI brokered, Chat Completions.
+            ("chatcmpl-EM5nnYHpITuK3xv9EGfs2mEMXlVep", Foreign),
+            // Anthropic brokered, Chat Completions.
+            ("msg_011CesNLMGDZvYJFKoYt6EP1", Foreign),
+            // Responses API, all three the same shape: hosted Qwen/Qwen3.8-27B,
+            // brokered openai/gpt-5-nano and brokered anthropic/claude-haiku-4-5.
+            // Every one of them answers 200 with a `gateway` receipt -- brokered
+            // included, signed by the pinned gateway key -- and a gateway
+            // receipt binds no model, so the receipt cannot tell them apart
+            // either; the model behind it is only the body-asserted name.
+            // Shape cannot discriminate, so none is claimed at discovery.
+            ("resp_32464c3bb3064e1ba888d5e5f7073fb3", Unrecognised),
+            ("resp_43c46c526bdf4ffa8a4f936934f6d54c", Unrecognised),
+            ("resp_41a400ee0cd24d8ea9b7997251bf5708", Unrecognised),
+            ("resp_EM5nnYHpITuK3xv9EGfs2mEMXlVep", Unrecognised),
+            ("resp_", Unrecognised),
+            // Bare near-misses.
+            ("E795F9D441164D92AA0473CE333650BE", Unrecognised),
+            ("e795f9d4", Unrecognised),
+            ("", Unrecognised),
+        ];
+        for (id, expected) in cases {
+            assert_eq!(classify_upstream_id(id), expected, "{id:?}");
+        }
     }
 }
