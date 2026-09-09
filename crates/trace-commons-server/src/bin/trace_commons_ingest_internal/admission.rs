@@ -3,7 +3,8 @@
 
 use super::*;
 use trace_commons_protocol::admission::{
-    AdmissionBinding, AdmissionEvidence, EVIDENCE_HEADER, SIGNATURE_HEADER, hash_hex, is_hash,
+    AdmissionBinding, AdmissionEvidence, AdmissionRefusal, EVIDENCE_HEADER, SIGNATURE_HEADER,
+    hash_hex, is_hash,
 };
 use trace_commons_server::admission_evidence::{AdmissionProviderTrust, verify_admission_evidence};
 use trace_commons_server::admission_ledger::{
@@ -31,8 +32,14 @@ pub(super) fn config_from_env(
     Ok(Some(AdmissionConfig { limits, providers }))
 }
 
+/// The one refusal every fail-closed path here answers with.
+///
+/// Spelled from the protocol's own constant rather than a literal. A client
+/// separates a declined contribution from an expired credential by this
+/// label, so a rename that moved only one side would put that back into
+/// reading the status alone.
 fn denied() -> (StatusCode, Json<ApiError>) {
-    api_error(StatusCode::FORBIDDEN, "admission_refused")
+    api_error(StatusCode::FORBIDDEN, AdmissionRefusal::Refused.label())
 }
 
 /// This namespace is allocated only by verified NEAR provisioning. Both the
@@ -221,7 +228,7 @@ pub(super) async fn reserve(
         .acquire_admission_processing_lock(tenant.tenant_id(), submission)
         .await
         .map_err(|_| denied())?
-        .ok_or_else(|| api_error(StatusCode::CONFLICT, "admission_in_progress"))?;
+        .ok_or_else(|| api_error(StatusCode::CONFLICT, AdmissionRefusal::InProgress.label()))?;
     // Re-read under the lock: the check above was advisory and unserialized.
     if db
         .lookup_completed_submission_admission(tenant.tenant_id(), &anchor, submission, &body_hash)
@@ -296,18 +303,21 @@ pub(super) async fn reserve(
         AdmissionDecision::Reserved => false,
         AdmissionDecision::Completed => true,
         AdmissionDecision::Busy => {
-            return Err(api_error(StatusCode::CONFLICT, "admission_in_progress"));
+            return Err(api_error(
+                StatusCode::CONFLICT,
+                AdmissionRefusal::InProgress.label(),
+            ));
         }
         AdmissionDecision::Conflict => {
             return Err(api_error(
                 StatusCode::CONFLICT,
-                "admission_identity_conflict",
+                AdmissionRefusal::IdentityConflict.label(),
             ));
         }
         AdmissionDecision::Exhausted => {
             return Err(api_error(
                 StatusCode::TOO_MANY_REQUESTS,
-                "admission_limit_reached",
+                AdmissionRefusal::LimitReached.label(),
             ));
         }
         AdmissionDecision::Refused => return Err(denied()),

@@ -8,6 +8,90 @@ pub const SIGNATURE_HEADER: &str = "x-trace-admission-signature";
 pub const REQUEST_METADATA_KEY: &str = "trace_commons_admission";
 pub const EVIDENCE_DOMAIN: &str = "trace_commons_admission_evidence.v2";
 
+/// The refusals the hosted admission gates emit, as a closed set.
+///
+/// A refusal reaches a client as an HTTP status and a `{"error": "<label>"}`
+/// body, and a client that reads only the status cannot tell one apart from
+/// an outage: a `403` is an expired credential *or* a declined contribution,
+/// and every non-2xx from the witness is a malformed response *or* a receipt
+/// its trust configuration turned away. Both were reported as the wrong
+/// thing, so the vocabulary lives here, where the gate that sends it and the
+/// client that reads it share one spelling.
+///
+/// **The label is attacker-influenceable input.** Nothing here returns the
+/// caller's string: [`AdmissionRefusal::from_response`] matches it against
+/// this set and hands back a variant, and [`AdmissionRefusal::label`] returns
+/// this crate's own constant. A body that says something else is simply not
+/// recognised, which leaves the caller's existing behaviour in place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AdmissionRefusal {
+    /// The ingest gate declined this submission: no anchor for the
+    /// authenticated account, or evidence it would not accept.
+    Refused,
+    /// The account's admission budget for this window is spent.
+    LimitReached,
+    /// Another attempt at the same submission holds the lease.
+    InProgress,
+    /// This submission id is already bound to different bytes or a different
+    /// account.
+    IdentityConflict,
+    /// The witness declined the receipt behind an evidence-bearing request:
+    /// its signer, its model, or the size of the request it covers.
+    EvidenceRefused,
+}
+
+impl AdmissionRefusal {
+    /// Every refusal, for tests and exhaustive mappings.
+    pub const ALL: [AdmissionRefusal; 5] = [
+        AdmissionRefusal::Refused,
+        AdmissionRefusal::LimitReached,
+        AdmissionRefusal::InProgress,
+        AdmissionRefusal::IdentityConflict,
+        AdmissionRefusal::EvidenceRefused,
+    ];
+
+    /// The wire label, which is what a gate puts in the `error` field.
+    pub const fn label(self) -> &'static str {
+        match self {
+            AdmissionRefusal::Refused => "admission_refused",
+            AdmissionRefusal::LimitReached => "admission_limit_reached",
+            AdmissionRefusal::InProgress => "admission_in_progress",
+            AdmissionRefusal::IdentityConflict => "admission_identity_conflict",
+            AdmissionRefusal::EvidenceRefused => "admission_evidence_refused",
+        }
+    }
+
+    /// The status this refusal is sent with.
+    pub const fn status(self) -> u16 {
+        match self {
+            AdmissionRefusal::Refused | AdmissionRefusal::EvidenceRefused => 403,
+            AdmissionRefusal::LimitReached => 429,
+            AdmissionRefusal::InProgress | AdmissionRefusal::IdentityConflict => 409,
+        }
+    }
+
+    /// Recognise a refusal from a label alone.
+    ///
+    /// For a caller holding a label it has already recorded -- a queue row, a
+    /// refusal that has been through a `String` -- where the status is long
+    /// gone. Prefer [`AdmissionRefusal::from_response`] at the point a
+    /// response is read.
+    pub fn from_label(label: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|r| r.label() == label)
+    }
+
+    /// Recognise a refusal from a response, requiring the status and the
+    /// label to agree.
+    ///
+    /// Fail-closed on purpose. A label on a status it is never sent with is
+    /// not this refusal, and treating it as one would let a body decide how a
+    /// status is handled -- which on the ingest path means a `403` body could
+    /// talk a client out of reminting a genuinely expired claim.
+    pub fn from_response(status: u16, label: &str) -> Option<Self> {
+        Self::from_label(label).filter(|r| r.status() == status)
+    }
+}
+
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AdmissionEvidence {
@@ -236,5 +320,57 @@ mod tests {
             receipt_identity(&signer, &response, &request).unwrap()
         );
         assert!(receipt_identity("0x1234", &request, &response).is_err());
+    }
+
+    /// The labels are a wire contract with deployed clients, so they are
+    /// pinned literally here rather than derived from the enum. A rename that
+    /// only moves the constant changes what an older shell sees.
+    #[test]
+    fn every_refusal_keeps_its_wire_spelling_and_status() {
+        assert_eq!(
+            AdmissionRefusal::ALL.map(|r| (r.label(), r.status())),
+            [
+                ("admission_refused", 403),
+                ("admission_limit_reached", 429),
+                ("admission_in_progress", 409),
+                ("admission_identity_conflict", 409),
+                ("admission_evidence_refused", 403),
+            ]
+        );
+    }
+
+    /// A label is body content, and body content does not get to pick a code
+    /// path. Unrecognised labels and labels on the wrong status both answer
+    /// `None`, which leaves the caller doing whatever it did before.
+    #[test]
+    fn a_refusal_is_recognised_only_when_status_and_label_agree() {
+        for refusal in AdmissionRefusal::ALL {
+            assert_eq!(
+                AdmissionRefusal::from_response(refusal.status(), refusal.label()),
+                Some(refusal)
+            );
+            for other in AdmissionRefusal::ALL {
+                if other.status() != refusal.status() {
+                    assert_eq!(
+                        AdmissionRefusal::from_response(other.status(), refusal.label()),
+                        None,
+                        "{} was recognised on a {} it is never sent with",
+                        refusal.label(),
+                        other.status()
+                    );
+                }
+            }
+        }
+        for label in [
+            "",
+            "admission",
+            "admission_refused ",
+            "Admission_Refused",
+            "not_a_label",
+            "{\"error\":\"admission_refused\"}",
+        ] {
+            assert_eq!(AdmissionRefusal::from_label(label), None, "{label}");
+            assert_eq!(AdmissionRefusal::from_response(403, label), None, "{label}");
+        }
     }
 }

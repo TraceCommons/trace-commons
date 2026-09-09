@@ -183,6 +183,16 @@ pub enum WitnessTrustError {
     /// A witness response could not be read as a certificate and an envelope.
     #[error("the witness response was malformed")]
     WitnessResponseMalformed,
+    /// The witness declined the receipt behind an evidence-bearing request:
+    /// its signer, its model, or the size of the request it covers is outside
+    /// what that deployment accepts.
+    ///
+    /// A decision, not a fault. It is the refusal a rollout produces most
+    /// often -- a signer not yet trusted, a model not yet accepted -- and
+    /// folding it into [`Self::WitnessResponseMalformed`] made it read as the
+    /// witness being broken.
+    #[error("the witness declined the receipt behind this request")]
+    WitnessAdmissionEvidenceRefused,
     /// A claim is required for a witnessed submission and none was
     /// available.
     #[error("a claim is required before a session can be witnessed")]
@@ -238,6 +248,11 @@ impl WitnessTrustError {
             Self::WitnessResponseMalformed => "witness_response_malformed",
             Self::WitnessClaimUnavailable => "witness_claim_unavailable",
             Self::WitnessBodyNotStripped => "witness_body_not_stripped",
+            // The server's own spelling, passed through: one refusal, one
+            // name, wherever a contributor meets it.
+            Self::WitnessAdmissionEvidenceRefused => {
+                trace_commons_protocol::admission::AdmissionRefusal::EvidenceRefused.label()
+            }
         }
     }
 }
