@@ -60,7 +60,11 @@ public sealed class AdmissionPreparationTests
 
         Assert.Single(assignments);
         Assert.Contains("AdmissionPreparation.Available(", assignments[0], StringComparison.Ordinal);
-        Assert.Contains("DaemonSettingsSnapshot", assignments[0], StringComparison.Ordinal);
+        // A deserialized daemon reply, not a snapshot the sheet made up: a
+        // literal `new DaemonSettingsSnapshot { AdmissionEvidenceRequired =
+        // true }` would satisfy a check for the type name alone and offer
+        // the control to everyone.
+        Assert.Contains("ResultAs<DaemonSettingsSnapshot>", assignments[0], StringComparison.Ordinal);
     }
 
     /// <summary>
