@@ -534,6 +534,15 @@ public sealed class PrivateInferenceViewModel : INotifyPropertyChanged
         }
 
         RaiseCredential();
+
+        // And what is left in the account that key belongs to. Not while a
+        // ceremony is in flight: that path re-reads this every two seconds
+        // for up to five minutes, and there is no balance to read until the
+        // sign-in settles anyway. Every read that settles something gets one.
+        if (!NearAiCredentialSurface.AwaitingBrowser(_credential))
+        {
+            await LoadBalanceAsync().ConfigureAwait(true);
+        }
     }
 
     /// <summary>
@@ -701,6 +710,219 @@ public sealed class PrivateInferenceViewModel : INotifyPropertyChanged
         Raise(nameof(HasCredentialActionPreamble));
         Raise(nameof(HasCredentialAction));
         Raise(nameof(CredentialControlsEnabled));
+    }
+
+    // What is left in the NEAR AI account.
+    //
+    // A fact about an ACCOUNT and not about this computer, which is the one
+    // thing on this page that is. Other machines and a browser spend from the
+    // same account, and the heading says so.
+    //
+    // THIS PAGE JUDGES NO AMOUNT. There is no threshold, no low-balance
+    // colour and no warning: the tone means the read succeeded, and an
+    // account whose ceiling may not exist has no figure that could be called
+    // low. The one branch here is whether there is a figure at all, which the
+    // ABI answers with an empty string and never with a zero.
+    // ---------------------------------------------------------------------
+
+    private NearAiBalance _balance = NearAiBalance.Unreported;
+
+    public string BalanceTitle => _copy?.BalanceTitle ?? string.Empty;
+
+    public string BalanceWhat => _copy?.BalanceWhat ?? string.Empty;
+
+    /// <summary>
+    /// The sentence for whatever state the daemon last reported, or the
+    /// empty string on the one state whose row is figures.
+    /// </summary>
+    public string BalanceStateText => _copy is null
+        ? string.Empty
+        : NearAiBalanceSurface.StateLine(_balance, _copy);
+
+    /// <summary>
+    /// Whether there is a sentence to draw. <c>known</c> answers the empty
+    /// string, and an empty sentence must be no line rather than a blank one
+    /// above the figure.
+    /// </summary>
+    public bool HasBalanceStateText => BalanceStateText.Length > 0;
+
+    private PrivateInferenceTone BalanceTone => NearAiBalanceSurface.Tone(_balance);
+
+    // One flag per tone, the way the two rows above have them. The tone comes
+    // from the state and never from an amount, so none of these can be moved
+    // by how much money is in the account.
+
+    public bool BalanceIsNeutral => BalanceTone == PrivateInferenceTone.Neutral;
+
+    public bool BalanceIsHeld => BalanceTone == PrivateInferenceTone.Held;
+
+    public bool BalanceIsClear => BalanceTone == PrivateInferenceTone.Clear;
+
+    public bool BalanceIsAttention => BalanceTone == PrivateInferenceTone.Attention;
+
+    public bool BalanceIsRefused => BalanceTone == PrivateInferenceTone.Refused;
+
+    /// <summary>
+    /// The figure the heading names, or the empty string where there is none.
+    /// </summary>
+    /// <remarks>
+    /// AN EMPTY STRING IS NEVER $0.00. The scale it is formatted with is the
+    /// payload's own, so a daemon that changes the units does not make this
+    /// page wrong by a factor of a thousand.
+    /// </remarks>
+    public string BalanceAmountText =>
+        NearAiBalanceSurface.Amount(_balance.RemainingNanos, _balance.Scale);
+
+    /// <summary>
+    /// Whether a figure is drawn. Asked of the rendered amount rather than of
+    /// the number behind it, because the ABI's empty string is the one signal
+    /// that separates "no figure" from a real zero -- and a real zero takes
+    /// this arm exactly as $8.50 does.
+    /// </summary>
+    public bool HasBalanceAmount => BalanceAmountText.Length > 0;
+
+    /// <summary>
+    /// The sentence that stands where a figure would, or the empty string.
+    /// </summary>
+    /// <remarks>
+    /// An account nobody has capped reports no remaining figure at all, and
+    /// that is the ORDINARY case rather than an error. Its sentence says so
+    /// in words, which is what stops this page rendering a $0.00 nobody sent.
+    /// </remarks>
+    public string BalanceRemainingText =>
+        NearAiBalanceSurface.RemainingLine(_balance.RemainingNanos, _balance.Scale);
+
+    /// <summary>Drawn only where the figure itself is not, so the two never say it twice.</summary>
+    public bool HasBalanceRemainingText =>
+        !HasBalanceAmount && BalanceRemainingText.Length > 0;
+
+    public string BalanceLimitText =>
+        NearAiBalanceSurface.LimitLine(_balance.SpendLimitNanos, _balance.Scale);
+
+    public bool HasBalanceLimitText => BalanceLimitText.Length > 0;
+
+    public string BalanceSpentText =>
+        NearAiBalanceSurface.SpentLine(_balance.TotalSpentNanos, _balance.Scale);
+
+    public bool HasBalanceSpentText => BalanceSpentText.Length > 0;
+
+    /// <summary>When this computer last asked. Not when the service updated anything.</summary>
+    public string BalanceObservedText =>
+        NearAiBalanceSurface.ObservedLine(_balance.ObservedAt, DateTimeOffset.UtcNow);
+
+    public bool HasBalanceObservedText => BalanceObservedText.Length > 0;
+
+    /// <summary>The one action the shared table allows beside this state.</summary>
+    private CredentialAction BalanceOfferedAction => NearAiBalanceSurface.Action(_balance);
+
+    /// <summary>
+    /// The words on that action's button. THE SIGN-IN ROW'S WORDS, because it
+    /// is the sign-in row's action.
+    /// </summary>
+    public string BalanceActionText =>
+        NearAiCredentialSurface.ActionLabel(BalanceOfferedAction, _copy) ?? string.Empty;
+
+    /// <summary>What pressing it costs, from the same call that chose it.</summary>
+    public string BalanceActionPreamble =>
+        NearAiCredentialSurface.ActionPreamble(BalanceOfferedAction, _copy) ?? string.Empty;
+
+    /// <summary>
+    /// Drawn with the button and never without it. The consequence sentence
+    /// belongs beside the control it describes; standing alone it is a cost
+    /// quoted for something this card is not offering.
+    /// </summary>
+    public bool HasBalanceActionPreamble => HasBalanceAction && BalanceActionPreamble.Length > 0;
+
+    /// <summary>
+    /// Whether to draw it here at all.
+    /// </summary>
+    /// <remarks>
+    /// Withheld while the sign-in card above is already offering an action of
+    /// its own. Two Obtain buttons on one screen are two ways to mint the
+    /// same key, and the row that describes the key is the one that should
+    /// carry the button. When that row offers nothing -- a state this build
+    /// could not read, say -- this is the only way out on the page and is
+    /// drawn.
+    /// </remarks>
+    public bool HasBalanceAction =>
+        BalanceOfferedAction != CredentialAction.None
+        && !HasCredentialAction
+        && _copy is not null;
+
+    /// <summary>
+    /// Presses it. The same ceremony the sign-in row runs, not a parallel
+    /// one.
+    /// </summary>
+    /// <remarks>
+    /// Obtain is the only action this row can offer, and a refused session
+    /// gets it WITHOUT a forget first: the ceremony overwrites both stored
+    /// records, so forgetting would throw away a working key to fix an
+    /// unrelated sign-in.
+    /// </remarks>
+    public Task<NearAiCredentialAttempt?> PressBalanceAsync() =>
+        BalanceOfferedAction == CredentialAction.Obtain
+            ? StartCredentialAsync()
+            : Task.FromResult<NearAiCredentialAttempt?>(null);
+
+    /// <summary>
+    /// Reads the balance.
+    /// </summary>
+    /// <remarks>
+    /// The daemon never answers this with an IPC error: it has a named state
+    /// for every outcome, so that a shell renders one of several sentences
+    /// rather than one shrug. An error frame therefore means the CALL failed,
+    /// and that is unreported -- never a stale figure kept on screen, and
+    /// never a claim that the account is empty.
+    /// </remarks>
+    public async Task LoadBalanceAsync()
+    {
+        if (_copy is null)
+        {
+            return;
+        }
+
+        try
+        {
+            DaemonResponse response = await _host
+                .CallAsync(DaemonProtocol.Methods.NearAiBalance)
+                .ConfigureAwait(true);
+
+            _balance = response.IsError || response.Result is null
+                ? NearAiBalance.Unreported
+                : NearAiBalanceSurface.Parse(response.Result.Value.GetRawText());
+        }
+        catch
+        {
+            System.Diagnostics.Trace.TraceWarning(nameof(LoadBalanceAsync));
+            _balance = NearAiBalance.Unreported;
+        }
+
+        RaiseBalance();
+    }
+
+    private void RaiseBalance()
+    {
+        Raise(nameof(BalanceStateText));
+        Raise(nameof(HasBalanceStateText));
+        Raise(nameof(BalanceIsNeutral));
+        Raise(nameof(BalanceIsHeld));
+        Raise(nameof(BalanceIsClear));
+        Raise(nameof(BalanceIsAttention));
+        Raise(nameof(BalanceIsRefused));
+        Raise(nameof(BalanceAmountText));
+        Raise(nameof(HasBalanceAmount));
+        Raise(nameof(BalanceRemainingText));
+        Raise(nameof(HasBalanceRemainingText));
+        Raise(nameof(BalanceLimitText));
+        Raise(nameof(HasBalanceLimitText));
+        Raise(nameof(BalanceSpentText));
+        Raise(nameof(HasBalanceSpentText));
+        Raise(nameof(BalanceObservedText));
+        Raise(nameof(HasBalanceObservedText));
+        Raise(nameof(BalanceActionText));
+        Raise(nameof(BalanceActionPreamble));
+        Raise(nameof(HasBalanceActionPreamble));
+        Raise(nameof(HasBalanceAction));
     }
 
     private const int CredentialPollLimit = 150;
