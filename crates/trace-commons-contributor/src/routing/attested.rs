@@ -220,19 +220,24 @@ pub enum Unattestable {
 /// cannot carry one is not.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderIdentifier {
-    /// The provider's own identifier, in one of the two forms NEAR AI mints:
-    /// bare lowercase hex (Chat Completions) or `resp_` followed by exactly
-    /// 32 lowercase hex digits (the Responses API, which is all Codex
-    /// speaks). A receipt may exist for this call -- `provider_tee` for the
-    /// first form, `gateway` for the second.
+    /// The provider's own Chat Completions identifier: bare lowercase hex,
+    /// 16 to 64 digits. A `provider_tee` receipt may exist for this call.
     ///
-    /// The `resp_` form is deliberately exact. OpenAI's own Responses API
-    /// also mints `resp_…`, and whether a call NEAR AI brokers to OpenAI
-    /// comes back under that id is **untested** as of this writing. Every
-    /// NEAR-minted id observed is 32 lowercase hex; every brokered id
-    /// observed is mixed-case. So the digit rule is what separates them if
-    /// the prefix does not, and a `resp_` id that is not 32 lowercase hex
-    /// reads [`Self::Unrecognised`] rather than being claimed.
+    /// **A Responses-API identifier is never Hosted**, and this was learned
+    /// the hard way. NEAR AI mints `resp_` plus 32 lowercase hex for a
+    /// Responses call whether it served the model itself or brokered it --
+    /// verified live 2026-09-09: hosted `Qwen/Qwen3.8-27B` answered
+    /// `resp_32464c3bb3064e1ba888d5e5f7073fb3`, brokered `openai/gpt-5-nano`
+    /// answered `resp_43c46c526bdf4ffa8a4f936934f6d54c`, brokered
+    /// `anthropic/claude-haiku-4-5` answered
+    /// `resp_41a400ee0cd24d8ea9b7997251bf5708`. The API normalises the id on
+    /// both paths, so the mixed-case tell that separates brokered Chat
+    /// Completions ids does not survive it, and shape cannot discriminate a
+    /// Responses call on any evidence available at discovery. An arm that
+    /// read `resp_` + 32 hex as Hosted marked a brokered Claude or GPT call
+    /// attested -- the lie this classification exists to remove. So every
+    /// `resp_` id is [`Self::Unrecognised`], and the receipt fetch after
+    /// upload -- the only discriminator there is -- settles the mark.
     Hosted,
     /// Another provider's identifier. No receipt exists and none will.
     Foreign,
@@ -253,16 +258,13 @@ pub fn classify_upstream_id(upstream_id: &str) -> ProviderIdentifier {
     {
         return ProviderIdentifier::Foreign;
     }
-    let lowercase_hex = |s: &str| {
-        s.bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-    };
-    let hosted = match upstream_id.strip_prefix("resp_") {
-        // The Responses API form: exactly 32 lowercase hex after the prefix.
-        // See the `Hosted` docs for why "exactly".
-        Some(rest) => rest.len() == 32 && lowercase_hex(rest),
-        None => (16..=64).contains(&upstream_id.len()) && lowercase_hex(upstream_id),
-    };
+    // Deliberately no `resp_` arm. See the `Hosted` docs: a Responses-API
+    // identifier is the same shape whether NEAR AI served the call or
+    // brokered it, so it is Unrecognised and the receipt fetch decides.
+    let hosted = (16..=64).contains(&upstream_id.len())
+        && upstream_id
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
     if hosted {
         ProviderIdentifier::Hosted
     } else {
@@ -952,30 +954,34 @@ mod tests {
         assert_eq!(event.event_type, TraceContributionEventType::HttpExchange);
     }
 
-    /// The four identifiers a live gateway handed back on 2026-09-09, one
-    /// per (provider, API) pair, plus the near-misses the rule must refuse.
-    /// Every NEAR-minted id is 32 lowercase hex; every brokered one carries
-    /// the upstream provider's mixed-case format. The `resp_` arm is exact
-    /// on purpose: whether a brokered Responses call also comes back as
-    /// `resp_…` is untested, so a `resp_` id that is not 32 lowercase hex
-    /// is left unrecognised rather than claimed.
+    /// The identifiers a live gateway handed back on 2026-09-09, by
+    /// (provider, API), plus the near-misses the bare-hex rule must refuse.
+    ///
+    /// Chat Completions discriminates: NEAR AI's own id is bare lowercase
+    /// hex and a brokered call carries the upstream provider's mixed-case
+    /// format. The Responses API does NOT: hosted and brokered calls alike
+    /// come back as `resp_` plus 32 lowercase hex -- three live ids below,
+    /// two brokered and one hosted, byte-for-byte the same shape. So every
+    /// `resp_` id is Unrecognised, whatever follows the prefix, and the
+    /// receipt fetch after upload is what decides it.
     #[test]
     fn provider_identifiers_are_classified_by_who_minted_them() {
         use ProviderIdentifier::{Foreign, Hosted, Unrecognised};
         let cases = [
             // NEAR AI hosted, Chat Completions: bare hex, provider_tee receipt.
             ("e795f9d441164d92aa0473ce333650be", Hosted),
-            // NEAR AI hosted, Responses API: resp_ + 32 hex, gateway receipt.
-            ("resp_32464c3bb3064e1ba888d5e5f7073fb3", Hosted),
             // OpenAI brokered, Chat Completions.
             ("chatcmpl-EM5nnYHpITuK3xv9EGfs2mEMXlVep", Foreign),
-            // Anthropic brokered.
+            // Anthropic brokered, Chat Completions.
             ("msg_011CesNLMGDZvYJFKoYt6EP1", Foreign),
-            // resp_ near-misses: mixed case, wrong length, uppercase hex.
+            // Responses API, all three the same shape: hosted Qwen/Qwen3.8-27B
+            // (a gateway receipt exists), brokered openai/gpt-5-nano and
+            // brokered anthropic/claude-haiku-4-5 (no receipt). Shape cannot
+            // tell them apart, so none is claimed.
+            ("resp_32464c3bb3064e1ba888d5e5f7073fb3", Unrecognised),
+            ("resp_43c46c526bdf4ffa8a4f936934f6d54c", Unrecognised),
+            ("resp_41a400ee0cd24d8ea9b7997251bf5708", Unrecognised),
             ("resp_EM5nnYHpITuK3xv9EGfs2mEMXlVep", Unrecognised),
-            ("resp_32464c3bb3064e1ba888d5e5f7073fb", Unrecognised),
-            ("resp_32464c3bb3064e1ba888d5e5f7073fb3a", Unrecognised),
-            ("resp_32464C3BB3064E1BA888D5E5F7073FB3", Unrecognised),
             ("resp_", Unrecognised),
             // Bare near-misses.
             ("E795F9D441164D92AA0473CE333650BE", Unrecognised),

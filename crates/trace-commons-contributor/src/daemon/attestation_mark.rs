@@ -781,30 +781,53 @@ mod tests {
     /// not about the fixture.
     #[test]
     fn the_same_call_under_the_providers_own_identifier_is_attested() {
-        // Both forms NEAR AI mints: Chat Completions (bare hex) and the
-        // Responses API (`resp_` + 32 hex), which is all Codex speaks. The
-        // second was the case that would otherwise have left every Codex
-        // user's row `unknown`, and an unknown row offers no send control.
-        for hosted in [
-            "ee64b242d74f4c7eb59b05b046f33f7b",
-            "resp_32464c3bb3064e1ba888d5e5f7073fb3",
-        ] {
-            let mut row = row();
-            row.upstream_id = Some(hosted.to_string());
-            assert_eq!(discovered_mark(row).state, MARK_ATTESTED, "{hosted}");
-        }
+        let mut row = row();
+        row.upstream_id = Some("ee64b242d74f4c7eb59b05b046f33f7b".to_string());
+        assert_eq!(discovered_mark(row).state, MARK_ATTESTED);
     }
 
-    /// A `resp_` identifier that is not exactly 32 lowercase hex is a shape
-    /// this build will not vouch for: `unknown`, never attested, and the
-    /// receipt fetch after upload decides. This is the fail-safe for the
-    /// untested brokered-Responses case.
+    /// A Responses-API identifier reads `unknown` at discovery, never
+    /// attested -- whichever model answered.
+    ///
+    /// Three identifiers a live gateway handed back on 2026-09-09, and the
+    /// counterexample they are: the two brokered calls and the hosted one
+    /// are byte-for-byte the same shape, `resp_` plus 32 lowercase hex. The
+    /// Responses API normalises the identifier on both paths, so shape
+    /// cannot discriminate a Responses call on any evidence available at
+    /// discovery. A `resp_` arm that accepted this shape as hosted -- which
+    /// this branch briefly carried -- marked a brokered Claude or GPT call
+    /// attested, the exact lie the mark exists to remove. The receipt fetch
+    /// after upload is the only discriminator, and `writeback_after_upload`
+    /// settles the row from what it actually returned.
+    ///
+    /// Pinned by the literal identifiers, so the next person who reasons
+    /// about id shapes meets the counterexample here rather than deriving
+    /// the "brokered ids are mixed-case" table again.
     #[test]
-    fn a_resp_identifier_that_is_not_near_ais_own_is_left_unknown() {
-        let mut row = row();
-        row.upstream_id = Some("resp_EM5nnYHpITuK3xv9EGfs2mEMXlVep".to_string());
-        let mark = discovered_mark(row);
-        assert_eq!(mark.state, MARK_UNKNOWN);
-        assert_eq!(mark.reason, None);
+    fn a_responses_api_identifier_is_unknown_whichever_model_answered() {
+        for (id, model) in [
+            (
+                "resp_43c46c526bdf4ffa8a4f936934f6d54c",
+                "openai/gpt-5-nano, brokered",
+            ),
+            (
+                "resp_41a400ee0cd24d8ea9b7997251bf5708",
+                "anthropic/claude-haiku-4-5, brokered",
+            ),
+            (
+                "resp_32464c3bb3064e1ba888d5e5f7073fb3",
+                "Qwen/Qwen3.8-27B, hosted",
+            ),
+        ] {
+            let mut row = row();
+            row.upstream_id = Some(id.to_string());
+            let mark = discovered_mark(row);
+            assert_ne!(
+                mark.state, MARK_ATTESTED,
+                "{model}: {id} was claimed attested"
+            );
+            assert_eq!(mark.state, MARK_UNKNOWN, "{model}: {id}");
+            assert_eq!(mark.reason, None, "{model}: {id}");
+        }
     }
 }

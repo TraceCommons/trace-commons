@@ -90,7 +90,9 @@ public class ContributionEligibilityTests
         ContributionEligibilityDecision unknown = Decide(Unknown);
         Assert.True(unknown.IsAnswered);
         Assert.Equal(Copy().EligibilityUnknown, unknown.StateLine);
-        Assert.Equal(ContributionControl.None, unknown.Control);
+        // unknown is offered the control: only a send can resolve it, and
+        // the server decides. See eligibility_control in the shared crate.
+        Assert.Equal(ContributionControl.Contribute, unknown.Control);
 
         Assert.NotEqual(unknown, absent);
     }

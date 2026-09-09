@@ -154,9 +154,14 @@ pub fn evidence_flag(cfg: Option<&crate::config::ContributorConfig>) -> bool {
 /// The gate is the invariant; a disabled control is only how it is usually
 /// expressed.
 ///
-/// A row with no recorded eligibility is excluded. It renders as `unknown`,
-/// which offers no control, so including it in a bulk send would send
-/// precisely the row a shell was told not to offer.
+/// `unknown` is included, and so is a row with no recorded verdict, which
+/// is what the wire renders as `unknown` for an evidence-admitted
+/// contributor. Both are offered the per-row control -- see
+/// `private_inference_copy::eligibility_control` for why: a session whose
+/// attestation could not be decided at discovery is decided by the receipt
+/// fetch at submission, and that cannot run on a row nobody can send. The
+/// group filter agrees with the row gate, so "Submit all" sends exactly the
+/// rows the surface offered and no other.
 ///
 /// This is NOT applied to a single-entry approve. Naming one entry is an
 /// explicit act about a session the contributor is looking at, the shell's
@@ -165,7 +170,10 @@ pub fn evidence_flag(cfg: Option<&crate::config::ContributorConfig>) -> bool {
 /// expectation as though it were the answer.
 #[must_use]
 pub fn contributable_in_a_group(eligibility: Option<&str>) -> bool {
-    eligibility == Some(STATE_ELIGIBLE)
+    matches!(
+        eligibility,
+        None | Some(STATE_ELIGIBLE) | Some(STATE_UNKNOWN)
+    )
 }
 
 /// Classify one session.
@@ -533,5 +541,43 @@ mod tests {
         for verdict in inputs.into_iter().flatten() {
             assert_ne!(verdict.state, STATE_UNKNOWN);
         }
+    }
+
+    /// An `unknown` row is offered the send control and included in a
+    /// group send; the two ineligible states are not.
+    ///
+    /// `unknown` is a session whose attestation could not be decided at
+    /// discovery -- every Responses-API call, which is all Codex speaks,
+    /// because a hosted and a brokered call come back under the same
+    /// identifier shape. The receipt fetch at submission is the only thing
+    /// that can decide it, and it cannot run if the row is never sent. The
+    /// daemon already let a single named `unknown` entry through on the
+    /// reasoning that the server decides; this brings the shell gate and
+    /// the group filter into line with that. The state still reads
+    /// `unknown` -- nothing is claimed, something unresolved is offered.
+    #[test]
+    fn an_unknown_row_is_sendable_and_the_ineligible_states_are_not() {
+        use crate::private_inference_copy::{ContributionControl, eligibility_control};
+        assert!(contributable_in_a_group(Some(STATE_ELIGIBLE)));
+        assert!(contributable_in_a_group(Some(STATE_UNKNOWN)));
+        // A row with no recorded verdict is what the wire renders as
+        // `unknown` for an evidence-admitted contributor, so the group
+        // filter must agree with what the row was shown as.
+        assert!(contributable_in_a_group(None));
+        assert!(!contributable_in_a_group(Some(STATE_INELIGIBLE_PERMANENT)));
+        assert!(!contributable_in_a_group(Some(
+            STATE_INELIGIBLE_CONFIGURATION
+        )));
+        assert!(!contributable_in_a_group(Some(
+            "a_state_from_a_later_daemon"
+        )));
+        assert_eq!(
+            eligibility_control(STATE_UNKNOWN),
+            ContributionControl::Contribute
+        );
+        assert_eq!(
+            eligibility_control(STATE_INELIGIBLE_PERMANENT),
+            ContributionControl::None
+        );
     }
 }

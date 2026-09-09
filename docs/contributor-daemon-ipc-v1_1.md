@@ -1290,8 +1290,14 @@ reply's hold: an undo bar has to outlast every entry it offers to undo, and
 the first reply's deadline retires Undo while something it covers is still
 recoverable. Ask for the group and use the group's deadline.
 
-An entry with no recorded eligibility renders `unknown`, which offers no
-control, so a group selector excludes it too.
+An entry with no recorded eligibility renders `unknown`. `unknown` IS offered
+the control and IS included by a group selector: it is a session whose
+attestation could not be decided at discovery -- every Responses-API call,
+which is every Codex session, because a hosted and a brokered call come back
+under the same identifier shape -- and the receipt fetch at submission is the
+only thing that can decide it. Nothing is claimed; the state sentence still
+says it has not been worked out. The two `ineligible_*` states are the ones
+that offer nothing and are excluded.
 
 **A single `entry_id` is never filtered.** Naming one entry is an explicit act
 about a session the contributor is looking at, the shell's per-row gate

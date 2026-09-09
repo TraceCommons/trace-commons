@@ -106,7 +106,9 @@ final class EligibilityExportTests: XCTestCase {
         XCTAssertEqual(control("eligible"), .contribute)
         XCTAssertEqual(control("ineligible_permanent"), ContributionControl.none)
         XCTAssertEqual(control("ineligible_configuration"), ContributionControl.none)
-        XCTAssertEqual(control("unknown"), ContributionControl.none)
+        // `unknown` is offered: only a send can resolve it, and the server
+        // decides. See `eligibility_control` in the shared crate.
+        XCTAssertEqual(control("unknown"), .contribute)
         XCTAssertEqual(control("a_state_from_a_later_daemon"), ContributionControl.none)
         XCTAssertEqual(control(""), ContributionControl.none)
     }

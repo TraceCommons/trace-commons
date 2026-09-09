@@ -1466,13 +1466,26 @@ pub fn eligibility_state_tone(label: &str) -> PrivateInferenceTone {
 
 /// The one control a shell may offer for an eligibility state.
 ///
-/// `eligible` alone. Every other state -- including one this build has never
-/// heard of -- offers nothing, because the alternative is a send button on a
-/// session that cannot be sent, discovered on the press.
+/// `eligible` and `unknown`. The two ineligible states -- and any state this
+/// build has never heard of -- offer nothing, because the alternative is a
+/// send button on a session that cannot be sent, discovered on the press.
+///
+/// `unknown` is offered, and the reason is what `unknown` is: a session
+/// whose attestation could not be decided at discovery. Every Responses-API
+/// call is one -- which is every Codex session -- because a hosted and a
+/// brokered call come back under the same identifier shape, and the only
+/// thing that can decide it is the receipt fetch at submission, which cannot
+/// run on a row nobody can send. Nothing is claimed: the state line still
+/// says it has not been worked out, that is not the same as a no, and the
+/// button beside it offers to find out. The daemon already let a single
+/// named `unknown` entry through on the reasoning that the server decides;
+/// this brings the shell gate into line with it. A retracted row (`unknown`
+/// after a server refusal) becomes sendable too and earns the same refusal
+/// again -- one round trip, and the server was the authority anyway.
 #[must_use]
 pub fn eligibility_control(label: &str) -> ContributionControl {
     match label {
-        ELIGIBILITY_STATE_ELIGIBLE => ContributionControl::Contribute,
+        ELIGIBILITY_STATE_ELIGIBLE | ELIGIBILITY_STATE_UNKNOWN => ContributionControl::Contribute,
         _ => ContributionControl::None,
     }
 }
@@ -3414,6 +3427,8 @@ mod tests {
                     "{unknown:?} borrowed a known state's sentence"
                 );
             }
+            // An unfamiliar STATE offers nothing. (The `unknown` state proper
+            // does offer the control; see `eligibility_control`.)
             assert_eq!(eligibility_control(unknown), ContributionControl::None);
             assert_eq!(
                 eligibility_state_tone(unknown),
@@ -3432,19 +3447,21 @@ mod tests {
         }
     }
 
-    /// The send control is offered for `eligible` and for nothing else. This
-    /// is the safety property of the surface in one assertion: a control on
-    /// any other row is an action the transport cannot perform, discovered
-    /// on the press.
+    /// The send control is offered for `eligible` and `unknown`, and for
+    /// neither ineligible state. The safety property is the second half: a
+    /// control on an ineligible row is an action the transport cannot
+    /// perform, discovered on the press. `unknown` is the other case -- an
+    /// action the transport CAN perform and only the transport can decide.
     #[test]
-    fn only_an_eligible_session_is_offered() {
+    fn eligible_and_unknown_sessions_are_offered_and_ineligible_ones_are_not() {
         use crate::daemon::contribution_eligibility::ALL_STATES;
         for state in ALL_STATES {
-            let expected = if state == ELIGIBILITY_STATE_ELIGIBLE {
-                ContributionControl::Contribute
-            } else {
-                ContributionControl::None
-            };
+            let expected =
+                if state == ELIGIBILITY_STATE_ELIGIBLE || state == ELIGIBILITY_STATE_UNKNOWN {
+                    ContributionControl::Contribute
+                } else {
+                    ContributionControl::None
+                };
             assert_eq!(eligibility_control(state), expected, "{state}");
         }
     }
