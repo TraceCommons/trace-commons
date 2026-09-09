@@ -19,6 +19,7 @@
 
 pub mod client;
 pub mod drill;
+pub mod key_drift;
 pub mod measurements;
 pub mod signer_resolver;
 

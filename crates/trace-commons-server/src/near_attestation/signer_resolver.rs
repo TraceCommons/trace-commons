@@ -74,9 +74,8 @@ use std::sync::Mutex;
 
 use sha2::{Digest, Sha256};
 
-use super::client::AttestationClientError;
 use super::measurements::EXPECTED_MEASUREMENTS_CONTROL;
-use super::quote::{Collateral, QuoteVerifyError, VerifiedQuote, verify_quote};
+use super::quote::{QuoteVerifyError, VerifiedQuote, verify_quote};
 use super::receipt::{
     AttestedKeyError, ReceiptSignatureKind, gateway_ed25519_key, model_ed25519_keys,
 };
@@ -230,41 +229,20 @@ impl OperatorKeyPins {
     }
 }
 
-/// The two calls a resolver makes against the attestation endpoint.
+/// The endpoint seam this resolver fetches through.
 ///
-/// A trait so the resolver can be driven from captures. It is deliberately
-/// narrow: this seam may fetch a nonce-parameterised ed25519 report and
-/// collateral for a quote, and may do nothing else. In particular it cannot
-/// spend a completion, which is what keeps a refresh from being metered.
-#[async_trait::async_trait]
-pub trait AttestedReportSource: Send + Sync {
-    /// The model whose per-model attestation this source reads.
-    fn model(&self) -> &str;
-
-    /// `GET {base}/attestation/report?model=..&nonce=..&signing_algo=ed25519`,
-    /// raw body.
-    ///
-    /// The raw body, not a parsed [`super::AttestationReport`]: that type
-    /// models the single-enclave shape and carries no `model_attestations`
-    /// field at all, and the key readers take the report JSON as a string.
-    /// `signing_algo=ed25519` is load-bearing -- without it the endpoint
-    /// answers with ECDSA attestations, which carry no receipt-signing key.
-    async fn fetch_ed25519_report_json(
-        &self,
-        nonce: &str,
-    ) -> Result<String, AttestationClientError>;
-
-    /// Intel DCAP collateral for **this** quote.
-    ///
-    /// Per quote, not per endpoint. Collateral is platform-specific: the
-    /// checked-in gateway collateral does not verify a model enclave's quote
-    /// -- it fails with an invalid QE report signature, because the PCK chain
-    /// belongs to a different machine. Measured, not assumed; see the tests.
-    async fn fetch_collateral_for(
-        &self,
-        quote: &[u8],
-    ) -> Result<Collateral, AttestationClientError>;
-}
+/// Deliberately the **same** trait the attested-key drift probe uses rather
+/// than a second one beside it: the two make exactly the same two calls -- a
+/// nonce-parameterised `signing_algo=ed25519` report, and collateral fetched
+/// once per quote -- and a duplicate would be two places to keep the
+/// `signing_algo` parameter and the per-quote collateral rule correct.
+///
+/// It is narrow on purpose. Nothing reachable through it can spend a
+/// completion, which is what keeps a refresh from being metered, and its
+/// per-quote collateral method is what stops the resolver from verifying a
+/// model enclave's quote against the gateway platform's collateral -- measured
+/// in `key_drift`, and again in this module's tests.
+pub use super::client::AttestedKeyReportClient as AttestedReportSource;
 
 /// Where the challenge comes from.
 ///

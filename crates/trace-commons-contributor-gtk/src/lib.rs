@@ -20,6 +20,7 @@
 pub mod attestation;
 pub mod autostart;
 pub mod backend;
+pub mod balance;
 pub mod copy;
 pub mod eligibility;
 pub mod model;

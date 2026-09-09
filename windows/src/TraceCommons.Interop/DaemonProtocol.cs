@@ -179,6 +179,27 @@ public static class DaemonProtocol
         /// </remarks>
         public const string NearAiCredentialForget = "near_ai_credential_forget";
 
+        /// <summary>
+        /// What is left in the account this machine's key belongs to.
+        /// </summary>
+        /// <remarks>
+        /// NEVER AN IPC ERROR. The daemon answers a named state in every
+        /// outcome -- no session, a refused one, no organization, a read that
+        /// did not land, or a figure -- precisely so that a shell has four
+        /// different sentences to render rather than one shrug. An error
+        /// frame therefore means the call itself failed, and this shell reads
+        /// that as unreported: a daemon too old to answer, not an empty
+        /// account.
+        ///
+        /// <para>
+        /// This name is dispatched by the daemon but is NOT in its pinned
+        /// METHODS array, so <c>hello</c> does not advertise it. Nothing here
+        /// consults that array before calling, and an older daemon's refusal
+        /// lands on the same unreported path as any other failed read.
+        /// </para>
+        /// </remarks>
+        public const string NearAiBalance = "near_ai_balance";
+
         // History and withdrawal. Like the onboarding block above, every one
         // of these was already in the daemon's pinned METHODS array before
         // this app could call any of them -- the gap on Windows was never

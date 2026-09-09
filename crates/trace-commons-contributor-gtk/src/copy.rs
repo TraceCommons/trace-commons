@@ -2182,6 +2182,38 @@ pub use trace_commons_contributor::private_inference_copy::{
     credential_state_line, credential_state_tone, harness_credential_notice,
 };
 
+// --- What is left in the account ---------------------------------------
+//
+// Same rule as the block above, and it shares that block's enum: the one
+// control this row has ever needed is the sign-in row's own `Obtain`, on
+// `no_session` and `session_expired` and nothing else. A second enum whose
+// `Obtain` had to mean the same thing would be a second table to keep in
+// agreement with the button that opens a browser.
+//
+// The per-state sentences are NOT re-exported one by one, for
+// `credential_state_line`'s reason. `known` answers the EMPTY STRING, which
+// is the one arm a shell is likely to read as a missing case and fill in:
+// that state's row is figures, and a sentence above them announcing the read
+// succeeded is this app narrating itself.
+//
+// THE FOUR AMOUNT FUNCTIONS ARE ASSEMBLED THERE AND NOT HERE, and this is
+// the sharpest reason on this whole surface. The figures are SIGNED -- an
+// overdrawn account is negative -- so absence cannot ride on an out-of-range
+// integer, and each of the four folds it differently: a null remaining
+// figure is the no-limit sentence, a null limit and a null spend are the
+// empty string, and a real zero is "$0.00" in all three. A shell formatting
+// its own dollars has to make those choices itself, and the one it reaches
+// for is "$0.00" everywhere -- which would tell a contributor with an
+// uncapped account that they are out of money.
+//
+// `BALANCE_WHAT` IS re-exported, because it is a fixed sentence and not a
+// branch: it says the figures are the whole account rather than this
+// computer, and it is drawn beside them.
+pub use trace_commons_contributor::private_inference_copy::{
+    BALANCE_TITLE, BALANCE_WHAT, balance_action, balance_limit_line, balance_observed_line,
+    balance_remaining_line, balance_spent_line, balance_state_line, balance_state_tone,
+};
+
 // --- Whether a session can be contributed at all ------------------------
 //
 // Same rule as the block above, and the reason this surface exists at all:

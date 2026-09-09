@@ -26,8 +26,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use async_trait::async_trait;
 
 use super::*;
-use crate::near_attestation::client::AttestationStep;
-use crate::near_attestation::quote::parse_collateral;
+use crate::near_attestation::client::{AttestationClientError, AttestationStep};
+use crate::near_attestation::quote::{Collateral, parse_collateral};
 
 const COLLATERAL: &str = include_str!(
     "../../../trace-commons-attestation/tests/fixtures/near_ai_attestation_collateral.json"

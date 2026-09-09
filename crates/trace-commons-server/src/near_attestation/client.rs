@@ -411,17 +411,49 @@ impl AttestationClient for HttpAttestationClient {
     }
 }
 
-/// The live source behind the server-side signer resolver.
+/// The two calls the attested-key drift probe makes.
 ///
-/// Deliberately an implementation of a trait declared in
-/// [`super::signer_resolver`] rather than two more methods on
-/// [`AttestationClient`]. The ECDSA drill and the resolver fetch *different
-/// reports* -- `signing_algo=ed25519` is what makes the endpoint answer with
-/// `model_attestations` at all -- and one trait carrying both would let a
-/// caller mix them: derive a key from one report and check a nonce against the
-/// other.
+/// Deliberately a second trait rather than two more methods on
+/// [`AttestationClient`]. The ECDSA drill and the ed25519 probe fetch
+/// *different reports* -- `signing_algo=ed25519` is what makes the endpoint
+/// answer with `model_attestations` at all -- and a single trait carrying both
+/// would let a caller mix them: derive a key from one report and check a nonce
+/// against the other. Two traits, one live implementation, and each drill sees
+/// only the calls it is allowed to make.
+///
+/// [`Self::fetch_ed25519_report_json`] returns the **raw body**, not a parsed
+/// [`AttestationReport`]. `AttestationReport` models the single-enclave shape
+/// and has no `model_attestations` field at all, and the key readers in
+/// `trace_commons_attestation::receipt` take the report JSON as a string.
+/// Re-serializing a parsed form would also be the same class of mistake the
+/// completion path warns about.
 #[async_trait]
-impl super::signer_resolver::AttestedReportSource for HttpAttestationClient {
+pub trait AttestedKeyReportClient: Send + Sync {
+    /// The model whose per-model attestation the probe reads.
+    fn model(&self) -> &str;
+
+    /// `GET {base}/attestation/report?...&signing_algo=ed25519`, raw body.
+    async fn fetch_ed25519_report_json(
+        &self,
+        nonce: &str,
+    ) -> Result<String, AttestationClientError>;
+
+    /// Intel DCAP collateral for `quote`.
+    ///
+    /// Named separately from [`AttestationClient::fetch_collateral`] only so
+    /// this trait stands alone. The live implementation delegates to it, and
+    /// the probe must call this once per *model-entry* quote: collateral is
+    /// platform-specific, and the gateway enclave's collateral does not verify
+    /// a model enclave's quote. That is measured, not assumed -- see
+    /// `key_drift::tests::the_gateways_collateral_does_not_verify_a_model_quote`.
+    async fn fetch_collateral_for(
+        &self,
+        quote: &[u8],
+    ) -> Result<Collateral, AttestationClientError>;
+}
+
+#[async_trait]
+impl AttestedKeyReportClient for HttpAttestationClient {
     fn model(&self) -> &str {
         &self.model
     }
@@ -432,8 +464,9 @@ impl super::signer_resolver::AttestedReportSource for HttpAttestationClient {
     ) -> Result<String, AttestationClientError> {
         let step = AttestationStep::Report;
         // `signing_algo=ed25519` is the whole point of this call: without it
-        // the endpoint answers with the ECDSA attestations, which carry no
-        // per-model receipt-signing key.
+        // the endpoint answers with the ECDSA attestations and carries no
+        // per-model ed25519 key, which is how the per-model key came to be
+        // missed in the first place.
         let response = self
             .http
             .get(format!("{}/attestation/report", self.base_url))

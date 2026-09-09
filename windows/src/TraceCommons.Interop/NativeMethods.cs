@@ -378,6 +378,118 @@ internal static class NativeMethods
         [MarshalAs(UnmanagedType.LPUTF8Str)] string? state);
 
     /// <summary>
+    /// The sentence for one <c>near_ai_balance</c> state.
+    ///
+    /// An empty, NULL or non-UTF-8 state reports that this daemon does not
+    /// answer the question; a state this build has never heard of gets its
+    /// own sentence and BORROWS NOBODY'S. Neither may degrade to the one
+    /// saying no sign-in is kept here, which is a claim about this machine.
+    ///
+    /// <c>known</c> answers the EMPTY STRING, and the emptiness is the point:
+    /// that state's row is figures, and a sentence above them announcing that
+    /// the read succeeded is this app narrating itself. NULL only on a caught
+    /// panic.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    internal static extern IntPtr tc_near_ai_balance_state_line(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? state);
+
+    /// <summary>
+    /// How firmly that sentence reads, as a raw
+    /// <c>TC_PRIVATE_INFERENCE_TONE_*</c> value.
+    ///
+    /// <c>known</c> is the only clear one, and it means THE READ SUCCEEDED,
+    /// not that the balance is healthy. Nothing across this ABI judges an
+    /// amount, so a shell painting a low figure red would be inventing a
+    /// threshold nobody set, on an account whose ceiling may not exist at
+    /// all.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    internal static extern int tc_near_ai_balance_state_tone(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? state);
+
+    /// <summary>
+    /// The one action a shell may offer beside a balance state, as a raw
+    /// <c>TC_CREDENTIAL_ACTION_*</c> value.
+    ///
+    /// The sign-in row's enum and not a second one, because the only action
+    /// this row has ever needed is that row's obtain. Two states answer it,
+    /// and a refused session gets it WITHOUT a forget first: the ceremony
+    /// overwrites both records, and forgetting would throw away a working key
+    /// to fix an unrelated sign-in.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    internal static extern int tc_near_ai_balance_action(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? state);
+
+    /// <summary>
+    /// One balance figure as money.
+    ///
+    /// <paramref name="present"/> IS A SEPARATE ARGUMENT, DELIBERATELY. Every
+    /// other money export here encodes absence as an out-of-range integer;
+    /// this one cannot, because these amounts are SIGNED, and folding "null"
+    /// onto "negative" would render a real debt as no figure at all. 0 is the
+    /// wire's null and gives the EMPTY STRING.
+    ///
+    /// AN EMPTY STRING IS NEVER <c>$0.00</c>. A null here means we know we do
+    /// not know; a zero is a real balance and means the money is gone.
+    ///
+    /// <paramref name="scale"/> IS THE WIRE'S OWN <c>scale</c> FIELD, not a
+    /// constant. It is on the wire because a daemon may change it, and a
+    /// shell dividing by a billion of its own would then be wrong by a factor
+    /// of a thousand.
+    ///
+    /// Returns an owned string; free it with <see cref="tc_string_free"/>,
+    /// which <see cref="TakeOwnedString"/> does.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_near_ai_balance_amount(int present, long nanos, byte scale);
+
+    /// <summary>
+    /// What is left, as a finished sentence.
+    ///
+    /// <c>present == 0</c> DOES NOT GIVE THE EMPTY STRING HERE. It gives the
+    /// sentence for an account with no spending limit set, which is the
+    /// ordinary case for an account nobody has capped -- and that contributor
+    /// must not be told they have $0.00 left.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_near_ai_balance_remaining_line(
+        int present, long nanos, byte scale);
+
+    /// <summary>
+    /// The configured ceiling, as a finished sentence, or the EMPTY STRING.
+    ///
+    /// <c>present == 0</c> is empty and not a sentence: the remaining line
+    /// has already said the part that matters about an uncapped account, and
+    /// saying it twice is once too many.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_near_ai_balance_limit_line(
+        int present, long nanos, byte scale);
+
+    /// <summary>
+    /// What the WHOLE ACCOUNT has spent, as a finished sentence, or the empty
+    /// string. A zero is not that: an account that has spent nothing renders
+    /// $0.00, which is true.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_near_ai_balance_spent_line(
+        int present, long nanos, byte scale);
+
+    /// <summary>
+    /// How long ago THIS COMPUTER asked, assembled.
+    ///
+    /// ABSENCE IS AN OUT-OF-RANGE INTEGER, the convention
+    /// <see cref="tc_harness_last_call_line"/> uses: any negative value gives
+    /// the empty string. The timestamp behind it is the daemon's own clock at
+    /// the moment the service answered, so the sentence says when the
+    /// question was put and never that anything was updated then.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_near_ai_balance_observed_line(long secondsAgo);
+
+    /// <summary>
     /// The sentence for one queue entry's <c>eligibility</c> label.
     ///
     /// A ROW THAT CARRIED NO <c>eligibility</c> FIELD MUST NOT REACH HERE. An

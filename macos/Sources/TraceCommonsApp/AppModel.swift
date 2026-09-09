@@ -435,12 +435,30 @@ final class AppModel: ObservableObject {
         harnessNotice: { TCNearAiCredential.harnessNotice(credentialed: $0) ?? "" }
     )
 
+    let balanceCalls = BalanceCalls(
+        stateLine: { TCNearAiBalance.stateLine(state: $0) },
+        stateTone: { TCNearAiBalance.stateTone(state: $0) },
+        action: { TCNearAiBalance.action(state: $0) },
+        amount: { TCNearAiBalance.amount(present: $0, nanos: $1, scale: $2) },
+        remainingLine: { TCNearAiBalance.remainingLine(present: $0, nanos: $1, scale: $2) },
+        limitLine: { TCNearAiBalance.limitLine(present: $0, nanos: $1, scale: $2) },
+        spentLine: { TCNearAiBalance.spentLine(present: $0, nanos: $1, scale: $2) },
+        observedLine: { TCNearAiBalance.observedLine(secondsAgo: $0) }
+    )
+
     /// What this machine holds, from the daemon's own report.
     ///
     /// Seeded as unreported rather than absent: before the first poll
     /// answers, this shell has read nothing, and "no key is kept here" is a
     /// claim about the machine that would invite a second sign-in.
     @Published private(set) var credentialStatus: CredentialStatus = .unreported
+
+    /// What is left in the account, from the daemon's own report.
+    ///
+    /// Seeded as unreported for `credentialStatus`'s reason, and it matters
+    /// more here: every other seed value would be a claim about somebody's
+    /// money made before anything was read.
+    @Published private(set) var balanceStatus: BalanceStatus = .unreported
 
     /// The ceremony this shell started, while it is still going.
     ///
@@ -468,6 +486,20 @@ final class AppModel: ObservableObject {
             if CredentialSurface.action(status, calls: self.credentialCalls) != .cancel {
                 self.credentialAttempt = nil
             }
+        }
+        refreshNearAiBalance()
+    }
+
+    /// Re-read whenever the key is, because it is the key the balance is
+    /// read WITH: signing in, signing in again and forgetting all move this
+    /// row, and a card whose two halves disagreed about whether a session
+    /// exists would be worse than either half alone.
+    func refreshNearAiBalance() {
+        perform(
+            BalanceSurface.statusMethod,
+            work: { try $0.nearAiBalance() }
+        ) { status in
+            self.publishIfChanged(\.balanceStatus, status)
         }
     }
 

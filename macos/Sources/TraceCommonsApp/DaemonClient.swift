@@ -336,6 +336,18 @@ final class DaemonClient {
                 params: CredentialSurface.statusParams(attemptID: attemptID)))
     }
 
+    /// What is left in the account behind that key.
+    ///
+    /// Always ok by contract for `nearAiCredentialStatus`'s reason, and more
+    /// strongly here: the four ways a balance can fail to be read are four
+    /// different sentences, and collapsing them into a thrown error would
+    /// make all four read as the same shrug. An unreadable answer degrades to
+    /// the unreported state, which says the question was not answered and
+    /// claims nothing about the money.
+    func nearAiBalance() throws -> BalanceStatus {
+        BalanceStatus.parse(fromJSON: try rawResultJSON(BalanceSurface.statusMethod))
+    }
+
     /// Begins the ceremony and hands back where to open the browser.
     ///
     /// The URL is served ONCE, here. Nothing re-serves it, so a caller that

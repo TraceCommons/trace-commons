@@ -755,6 +755,47 @@ pub struct PrivateInferenceState {
     pub port: Option<u16>,
 }
 
+/// `near_ai_balance`'s answer: what is left in the account this computer
+/// answers model calls with.
+///
+/// The label is carried as the daemon's own string, for
+/// [`PrivateInferenceState`]'s reason, and handed to
+/// [`crate::balance::view`] rather than matched on here.
+///
+/// # Every amount is an `Option`, and that is the whole point
+///
+/// These figures are SIGNED -- an overdrawn account is a negative number --
+/// so absence cannot be folded onto an out-of-range integer the way the rest
+/// of this surface folds it. A bare `i64` defaulting to zero would collapse
+/// "we know we do not know" onto "the money is gone", and the collapsed
+/// value is the alarming one. `remaining_nanos` in particular is nullable
+/// even on a `known` read: that is the ordinary shape of an account nobody
+/// has capped.
+///
+/// `scale` is an `Option` for a different reason: it is the wire's own
+/// units, and a daemon that sends none leaves this shell with no way to
+/// render a figure. Defaulting it to a nine of this shell's own would print
+/// an amount wrong by a factor of a thousand rather than printing none.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct NearAiBalance {
+    #[serde(default)]
+    pub state: String,
+    /// The wire's own units. Never assumed; see the type note above.
+    #[serde(default)]
+    pub scale: Option<u8>,
+    #[serde(default)]
+    pub remaining_nanos: Option<i64>,
+    #[serde(default)]
+    pub spend_limit_nanos: Option<i64>,
+    #[serde(default)]
+    pub total_spent_nanos: Option<i64>,
+    /// The DAEMON'S clock at the moment the service answered, RFC 3339 --
+    /// not the service's own `updated_at`. What a shell may say with it is
+    /// how long ago the question was put, and nothing about bookkeeping.
+    #[serde(default)]
+    pub observed_at: Option<String>,
+}
+
 /// `harness_list`'s answer: the coding tools on this computer.
 ///
 /// `catalog_present` is a fact about this build, not about the machine. With
