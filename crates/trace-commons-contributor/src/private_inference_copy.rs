@@ -3410,6 +3410,25 @@ mod tests {
         );
     }
 
+    /// The lookup, not the shell, decides which reading a contributor gets.
+    ///
+    /// Three shells render this list. If each picked between the two
+    /// sentences itself, that would be three chances to hand an uninvited
+    /// contributor a promise of attestation, or to withhold it from an
+    /// invited one. The pick is one function here and the shells call it.
+    #[test]
+    fn the_reading_follows_the_invite_and_nothing_else() {
+        assert_eq!(certificate_row_line(true), CERTIFICATE_ROW_ATTESTED);
+        assert_eq!(certificate_row_line(false), CERTIFICATE_ROW_CANDIDATE);
+        assert_eq!(certificate_list_title(true), CERTIFICATE_LIST_ATTESTED);
+        assert_eq!(certificate_list_title(false), CERTIFICATE_LIST_CANDIDATE);
+
+        // The empty state is one sentence for both, because the reason the
+        // list is empty does not differ between them. Asserted rather than
+        // left implicit so a later split is a deliberate edit here.
+        assert_eq!(certificate_list_empty(), CERTIFICATE_LIST_EMPTY);
+    }
+
     /// The certificate-held list says the same fact two ways, and the two
     /// must not read as each other.
     ///
