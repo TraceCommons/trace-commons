@@ -669,6 +669,7 @@ fn visit_session(
         eligibility_reason: eligibility.and_then(|v| v.reason).map(str::to_string),
         attestation: Some(attestation.state.to_string()),
         attestation_reason: attestation.reason.map(str::to_string),
+        attested_inference: None,
     };
     let entry_id = entry.entry_id;
 
@@ -1718,7 +1719,7 @@ mod tests {
         crate::daemon::approved_envelope::save(&f.shared.store, entry_id, &envelope).unwrap();
         {
             let mut queue = f.shared.queue.lock().unwrap();
-            assert!(queue.record_previewed_envelope(entry_id, &summary.envelope_digest));
+            assert!(queue.record_previewed_envelope(entry_id, &summary.envelope_digest, None));
         }
         assert!(
             crate::daemon::approved_envelope::load(&f.shared.store, entry_id)

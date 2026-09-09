@@ -62,6 +62,7 @@
 use std::collections::HashSet;
 use std::time::{Duration, SystemTime};
 
+use crate::witness::inference_record::InferenceAttestationRecord;
 use crate::witness::transport::{WitnessedEnvelope, parse_witnessed_envelope, verify_certificate};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -125,6 +126,13 @@ pub struct WitnessReviewArtifact {
     verdict: Option<String>,
     correction_hash: Option<String>,
     response: WitnessedEnvelope,
+    /// Whether the witness was handed a receipt with the bodies it certified.
+    /// See `witness::inference_record`. `None` on a review written before
+    /// the record existed, and that reads as unknown -- `default` rather
+    /// than required, and never serialized when absent, so the pin digest
+    /// of every review a contributor already approved is unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    attested_inference: Option<InferenceAttestationRecord>,
 }
 
 const WITNESS_REVIEW_SCHEMA: &str = "trace_commons.witness_review.v1";
@@ -149,6 +157,7 @@ impl WitnessReviewArtifact {
         input_fingerprint: String,
         verdict: Option<&str>,
         correction: Option<&str>,
+        attested_inference: Option<InferenceAttestationRecord>,
     ) -> Self {
         Self {
             review_schema: WITNESS_REVIEW_SCHEMA.to_string(),
@@ -157,7 +166,15 @@ impl WitnessReviewArtifact {
             verdict: verdict.map(str::to_string),
             correction_hash: correction.map(correction_hash),
             response,
+            attested_inference,
         }
+    }
+
+    /// What the witness was handed alongside these bytes, or `None` when the
+    /// review predates the record. `None` is not an answer; see
+    /// `witness::inference_record` for why it must not become one.
+    pub fn attested_inference(&self) -> Option<&InferenceAttestationRecord> {
+        self.attested_inference.as_ref()
     }
 
     pub fn envelope(&self) -> Result<TraceContributionEnvelope> {
@@ -565,6 +582,7 @@ mod tests {
             "fingerprint".into(),
             None,
             None,
+            None,
         );
         let id = Uuid::new_v4();
         save_witnessed(&store, id, &artifact).unwrap();
@@ -601,6 +619,7 @@ mod tests {
             "fingerprint".into(),
             Some("worked"),
             Some("correction"),
+            None,
         );
         let id = Uuid::new_v4();
         save_witnessed(&store, id, &artifact).unwrap();
@@ -634,6 +653,7 @@ mod tests {
             response,
             "source-hash".into(),
             "fingerprint".into(),
+            None,
             None,
             None,
         );
@@ -917,5 +937,82 @@ mod tests {
         save(&store, id, &envelope().await).unwrap();
         store.wipe().unwrap();
         assert!(load(&store, id).unwrap().is_none());
+    }
+    #[test]
+    fn a_stored_review_that_predates_the_record_reads_as_unknown() {
+        // Absent is "we do not know", never "uncertified" and never
+        // "certified". A review written by a build before this field existed
+        // may have carried a verified receipt; nothing says either way.
+        let (response, _) = crate::witness::transport::signed_fixture(b"{}".to_vec());
+        let legacy = serde_json::json!({
+            "review_schema": WITNESS_REVIEW_SCHEMA,
+            "source_hash": "sha256:legacy",
+            "input_fingerprint": "fp",
+            "verdict": null,
+            "correction_hash": null,
+            "response": response,
+        });
+        let (_dir, store) = temp_store();
+        let id = Uuid::new_v4();
+        store
+            .write_daemon_file(&file_name(id), &serde_json::to_vec(&legacy).unwrap())
+            .unwrap();
+        let artifact = load_witnessed(&store, id).unwrap().unwrap();
+        assert_eq!(artifact.attested_inference(), None);
+    }
+
+    #[test]
+    fn a_review_without_a_record_serializes_exactly_as_before() {
+        // Existing pins are digests over the serialized artifact. A new
+        // optional field that serialized as `null` would move every one of
+        // them and refuse every review a contributor already approved.
+        let (response, _) = crate::witness::transport::signed_fixture(b"{}".to_vec());
+        let artifact =
+            WitnessReviewArtifact::new(response, "sha256:aa".into(), "fp".into(), None, None, None);
+        let json = serde_json::to_value(&artifact).unwrap();
+        assert!(
+            json.get("attested_inference").is_none(),
+            "an absent record must not appear on the wire: {json}"
+        );
+    }
+
+    #[test]
+    fn a_record_round_trips_and_is_covered_by_the_pin() {
+        use crate::witness::inference_record::{
+            InferenceAttestationRecord, REASON_RECEIPT_UNAVAILABLE,
+        };
+        let (response, _) = crate::witness::transport::signed_fixture(b"{}".to_vec());
+        let certified = WitnessReviewArtifact::new(
+            response.clone(),
+            "sha256:aa".into(),
+            "fp".into(),
+            None,
+            None,
+            Some(InferenceAttestationRecord::certified()),
+        );
+        let uncertified = WitnessReviewArtifact::new(
+            response,
+            "sha256:aa".into(),
+            "fp".into(),
+            None,
+            None,
+            Some(InferenceAttestationRecord::uncertified(
+                REASON_RECEIPT_UNAVAILABLE,
+            )),
+        );
+        assert_ne!(
+            certified.digest().unwrap(),
+            uncertified.digest().unwrap(),
+            "the pin must cover the record, or a file edit could promote a review"
+        );
+        let (_dir, store) = temp_store();
+        let id = Uuid::new_v4();
+        save_witnessed(&store, id, &certified).unwrap();
+        let restored = load_witnessed(&store, id).unwrap().unwrap();
+        assert_eq!(
+            restored.attested_inference(),
+            Some(&InferenceAttestationRecord::certified())
+        );
+        assert_eq!(restored.digest().unwrap(), certified.digest().unwrap());
     }
 }

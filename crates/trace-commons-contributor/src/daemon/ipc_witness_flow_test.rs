@@ -149,6 +149,30 @@ async fn provisioned_near_window_review_builds_over_http_and_uploads_exact_appro
         *calls.lock().unwrap(),
         vec!["claim", "attestation", "collateral", "witness"]
     );
+    // The stored review records what the witness was actually handed. This
+    // session joined no inference hop, so the honest answer is uncertified
+    // with the reason -- and the queue row carries the same record for as
+    // long as the review is pinned, absent everywhere else.
+    {
+        use crate::witness::inference_record::{
+            InferenceAttestationRecord, REASON_NO_ATTESTED_CALL,
+        };
+        let artifact = super::super::super::approved_envelope::load_witnessed(&s.store, id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            artifact.attested_inference(),
+            Some(&InferenceAttestationRecord::uncertified(
+                REASON_NO_ATTESTED_CALL
+            ))
+        );
+        let entry = s.queue.lock().unwrap().get(id).unwrap().clone();
+        let row = entry_value(&entry, s.admission_evidence());
+        assert_eq!(
+            row["attested_inference"],
+            serde_json::json!({"state": "uncertified", "reason": "no_attested_call"})
+        );
+    }
     let approved = handle_approve(&s, &req("approve", serde_json::json!({"entry_id":id}))).await;
     assert_eq!(approved.result.unwrap()["approved"], 1);
     let entry = s.queue.lock().unwrap().get(id).unwrap().clone();
