@@ -688,9 +688,26 @@ pub(crate) mod tests_support {
     /// over the evidence -- passed throughout, because its fixture supplied the
     /// coupled pair. Correcting the fixture was the whole of what made it fail.
     ///
-    /// The independence is asserted here rather than left to the caller, so it
-    /// is a check that closes rather than a convention that asks. If a test
-    /// ever appears to need the two related, that relationship is the bug.
+    /// # What the assertion below can and cannot catch
+    ///
+    /// Two independently drawn 32-byte values are never equal in practice, so
+    /// the check never fires on the values themselves. That is not what it is
+    /// for. It fires when a maintainer later edits **this function** to derive
+    /// one side from the other -- `format!("near-{anchor}")` being the obvious
+    /// and historically attested way to do it -- which is the mutation that
+    /// would silently re-couple every caller at once.
+    ///
+    /// It is containment rather than equality, matching
+    /// `near_account_identity::tenant_id_is_independent_of_every_public_input`
+    /// on the server side, so a tenant id that merely *embeds* the anchor is
+    /// caught too.
+    ///
+    /// It still cannot catch a derivation that transforms the anchor -- a
+    /// reversed or re-encoded digest would pass. Nothing cheap can, short of
+    /// the newtype in #794 that makes the coupling unrepresentable. So the
+    /// doc comment above, which names the sites and the failure, is doing more
+    /// of the work here than the assertion is; treat it as the primary control
+    /// and the assertion as the backstop, not the other way round.
     pub(crate) fn v61_account() -> (String, String) {
         let anchor = hex::encode(<[u8; 32]>::from(sha2::Sha256::digest(
             uuid::Uuid::new_v4().as_bytes(),
@@ -701,12 +718,45 @@ pub(crate) mod tests_support {
                 uuid::Uuid::new_v4().as_bytes()
             )))
         );
-        assert_ne!(
-            tenant.strip_prefix("near-"),
-            Some(anchor.as_str()),
-            "the fixture reproduced the pre-V61 coupling it exists to rule out"
+        assert!(
+            !tenant.contains(&anchor) && !anchor.contains(tenant.trim_start_matches("near-")),
+            "v61_account derived one side from the other; the whole point of \
+             this constructor is that a tenant id and an account anchor share \
+             no value. See #794."
         );
         (tenant, anchor)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        /// The constructor is a control, so it gets a test that can go red in
+        /// CI rather than only an assertion that fires if someone edits it.
+        ///
+        /// Modelled on the server's
+        /// `tenant_id_is_independent_of_every_public_input`: draw repeatedly,
+        /// and require that no draw repeats and that neither side ever
+        /// contains the other. A `v61_account` rewritten to couple the two
+        /// fails here, with a name that says what broke.
+        #[test]
+        fn v61_account_draws_the_two_halves_independently() {
+            let mut tenants = std::collections::BTreeSet::new();
+            let mut anchors = std::collections::BTreeSet::new();
+            for _ in 0..64 {
+                let (tenant, anchor) = super::v61_account();
+                let suffix = tenant
+                    .strip_prefix("near-")
+                    .expect("a wallet tenant id keeps the namespace consumers match on");
+                assert_eq!(suffix.len(), 64, "{tenant}");
+                assert_eq!(anchor.len(), 64, "{anchor}");
+                assert_ne!(suffix, anchor, "the two halves are the same value");
+                assert!(
+                    !tenant.contains(&anchor) && !anchor.contains(suffix),
+                    "one half embeds the other"
+                );
+                assert!(tenants.insert(tenant), "a tenant id repeated across draws");
+                assert!(anchors.insert(anchor), "an anchor repeated across draws");
+            }
+        }
     }
 }
 
