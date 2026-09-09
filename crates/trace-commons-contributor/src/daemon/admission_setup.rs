@@ -390,10 +390,32 @@ mod tests {
         validated_endpoint_allowlist(&cfg)
             .expect("a signup-written issuer and ingest must be dialable");
         // A config whose endpoints are not clean HTTPS is still refused, and
-        // by the gate rather than by the list.
-        let mut credentialed = cfg.clone();
-        credentialed.issuer_url = "https://user@issuer.example".into();
-        assert!(validated_endpoint_allowlist(&credentialed).is_err());
+        // by the gate rather than by the list. Each of these names a host the
+        // derived list contains, so only the shape rules can refuse them.
+        for bad in [
+            "http://issuer.example",
+            "https://user@issuer.example",
+            "https://user:pw@issuer.example",
+            "https://issuer.example/?token=abc",
+            "https://issuer.example/#frag",
+        ] {
+            let mut broken = cfg.clone();
+            broken.issuer_url = bad.into();
+            assert!(
+                validated_endpoint_allowlist(&broken).is_err(),
+                "{bad} must be refused"
+            );
+        }
+
+        // And an endpoint absent from an operator's list is refused by the
+        // list, even though its shape is fine. This is the assertion that
+        // distinguishes checking the endpoints from merely building a list.
+        let mut operator_scoped = cfg.clone();
+        operator_scoped.allowed_hosts = Some("commons.example".into());
+        assert!(
+            validated_endpoint_allowlist(&operator_scoped).is_err(),
+            "the issuer is not on the operator's list and must be refused"
+        );
 
         // Every host this config points at, including the receipt endpoint --
         // which is on the inference provider and not on the commons, and which
