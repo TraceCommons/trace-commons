@@ -538,17 +538,25 @@ async fn a_client_with_no_receipt_endpoint_refuses_before_contacting_the_proxy()
     );
 }
 
-/// A session recorded by a harness the admission path cannot address is
-/// refused -- and the caller learns only one word.
+/// Preparation refuses on an unsupported harness -- and the caller cannot
+/// tell that from any other refusal.
 ///
-/// The refusal itself is right: `exact_session_id` reads a session id out of
-/// the transcript's own metadata, and it knows how to do that for two
-/// harnesses. What this pins is the *reporting*: the specific reason
-/// (`admission_setup_source_unsupported`) is collapsed to
-/// `admission_setup_unavailable` before it reaches a person, so a
-/// contributor on Gemini CLI is told nothing about why.
+/// Read what this can and cannot show. `handle_prepare_admission_session`
+/// maps every reason but the two receipt-endpoint ones onto the single label
+/// `admission_setup_unavailable`, so from outside the daemon an unsupported
+/// harness, a session that could not be found, an absent proxy and an
+/// untrusted one are indistinguishable. This test therefore does NOT claim
+/// to observe which branch fired -- it could not -- and the discrimination
+/// itself is held by `admission_setup::extracts_source_metadata_not_queue_id_or_filename`,
+/// which calls `exact_session_id` directly.
+///
+/// What it does show is the collapse, by driving two materially different
+/// sessions -- one on a harness the path cannot address, one on a harness it
+/// can -- through the same entry point and getting the same word back. That
+/// is the thing a contributor actually experiences, and it is not visible
+/// from any unit test of the branches.
 #[tokio::test]
-async fn a_session_on_an_unsupported_harness_refuses_with_one_word() {
+async fn every_preparation_refusal_reaches_the_caller_as_the_same_word() {
     let account = V61Account::provision("erin.near");
     let key = fixture_signer("witness-fixture-only");
     let mut cfg = config_for(&account, &fixture_address(&key));
@@ -589,10 +597,171 @@ async fn a_session_on_an_unsupported_harness_refuses_with_one_word() {
         &prepare_request(entry_id),
     )
     .await;
-    let error = response.error.expect("refused");
     assert_eq!(
-        error.message, "admission_setup_unavailable",
-        "the harness-specific reason does not reach the caller; if this ever \
-         becomes a distinct label, say so here rather than deleting the test"
+        response.error.expect("refused").message,
+        "admission_setup_unavailable"
     );
+
+    // The other half of the collapse: a harness the path CAN address, whose
+    // preparation fails later and for an unrelated reason (no proxy is
+    // declared), reports the identical word.
+    let claude_root =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/claude-code");
+    let claude = trace_commons_contributor::source::claude_code::ClaudeCodeSource::new(
+        claude_root.clone(),
+    );
+    let claude_session = claude.discover().expect("discover").remove(0);
+    let claude_entry = uuid::Uuid::new_v4();
+    shared.settings.lock().expect("settings lock").claude_source = Some(
+        trace_commons_contributor::daemon::settings::SourceDeclaration::Watch { path: claude_root },
+    );
+    shared
+        .queue
+        .lock()
+        .expect("queue lock")
+        .upsert(
+            trace_commons_contributor::daemon::queue::QueueEntry {
+                entry_id: claude_entry,
+                source: "claude-code".into(),
+                path: claude_session.path.clone(),
+                ..Default::default()
+            },
+            16,
+        )
+        .expect("queue upsert");
+    let supported =
+        trace_commons_contributor::daemon::admission_setup::handle_prepare_admission_session(
+            &shared,
+            &prepare_request(claude_entry),
+        )
+        .await;
+    assert_eq!(
+        supported.error.expect("refused").message,
+        "admission_setup_unavailable",
+        "two unrelated failures must be reporting the same word, or this \
+         test is no longer about the collapse"
+    );
+}
+
+/// A contributor without the evidence flag takes the ordinary profile, and
+/// the wire shows it.
+///
+/// The server decides between `EvidencePlan::Verify` and
+/// `RefuseNewSubmission` from the presence of these two headers alone. This
+/// drives the real submit pipeline for a contributor with no witness
+/// configured and asserts that neither header is on the request -- i.e. that
+/// such a client lands on the branch that refuses a new submission, rather
+/// than one that offers half-formed evidence.
+///
+/// The issuer and the ingest are stubs here: the issuer returns a claim, the
+/// ingest records what arrived. Neither reproduces a decision the client
+/// makes. The claim-minting path itself is covered end to end against the
+/// real issuer router by `e2e_enroll_and_submit.rs`.
+#[tokio::test]
+async fn a_contributor_without_the_evidence_flag_sends_no_admission_headers() {
+    use axum::{Json, Router, routing::post};
+
+    let seen: std::sync::Arc<std::sync::Mutex<Vec<Vec<(String, String)>>>> = Default::default();
+    let sink = seen.clone();
+    let router = Router::new()
+        .route(
+            "/v1/traces",
+            post(move |headers: axum::http::HeaderMap, _: String| {
+                let sink = sink.clone();
+                async move {
+                    sink.lock().expect("sink").push(
+                        headers
+                            .iter()
+                            .map(|(name, value)| {
+                                (
+                                    name.as_str().to_ascii_lowercase(),
+                                    String::from_utf8_lossy(value.as_bytes()).into_owned(),
+                                )
+                            })
+                            .collect(),
+                    );
+                    Json(serde_json::json!({
+                        "status": "accepted",
+                        "credit_points_pending": 0.0,
+                        "explanation": [],
+                    }))
+                }
+            }),
+        )
+        .route(
+            "/v1/trace-upload-claim",
+            post(|| async move {
+                Json(serde_json::json!({
+                    "access_token": "stub-claim-token-for-this-test-only",
+                    "expires_at": chrono::Utc::now() + chrono::Duration::seconds(300),
+                    "consent_scopes": ["debugging_evaluation"],
+                    "allowed_uses": ["debugging"],
+                }))
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("listener");
+    let base = format!("http://{}", listener.local_addr().expect("addr"));
+    tokio::spawn(async move { axum::serve(listener, router).await.expect("serve") });
+
+    let account = V61Account::provision("frank.near");
+    let cfg: ContributorConfig = serde_json::from_value(serde_json::json!({
+        "schema_version": trace_commons_contributor::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION,
+        "issuer_url": base,
+        "ingest_url": format!("{base}/v1/traces"),
+        "audience": "trace-commons-upload",
+        "tenant_id": account.tenant_id,
+        "instance_id": "",
+        "user_subject": "frank@example.com",
+        "device_key_id": "device-e2e",
+        "consent_scopes": ["debugging_evaluation"],
+        "allowed_hosts": "127.0.0.1",
+        // No `witness` key at all: this contributor was never granted the
+        // evidence profile, which is the case under test.
+    }))
+    .expect("fixture config");
+    assert!(cfg.witness.is_none());
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = trace_commons_contributor::config::ConfigStore::open(dir.path().join("state"))
+        .expect("config store");
+    store.save_config(&cfg).expect("save config");
+
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/claude-code");
+    let source = trace_commons_contributor::source::claude_code::ClaudeCodeSource::new(root.clone());
+    let session = source.discover().expect("discover").remove(0);
+    let outcomes = trace_commons_contributor::submit::submit_sessions(
+        &store,
+        &cfg,
+        vec![(
+            Box::new(trace_commons_contributor::source::claude_code::ClaudeCodeSource::new(root))
+                as _,
+            session,
+        )],
+        &Default::default(),
+    )
+    .await
+    .expect("submit");
+    assert!(
+        matches!(
+            outcomes[0],
+            trace_commons_contributor::submit::SubmitOutcome::Submitted { .. }
+        ),
+        "{:?}",
+        outcomes[0]
+    );
+
+    let requests = seen.lock().expect("sink").clone();
+    assert_eq!(requests.len(), 1, "exactly one upload");
+    for name in [
+        trace_commons_protocol::admission::EVIDENCE_HEADER,
+        trace_commons_protocol::admission::SIGNATURE_HEADER,
+    ] {
+        assert!(
+            !requests[0].iter().any(|(header, _)| header == name),
+            "an ordinary-profile client must not offer {name}; the server \
+             reads exactly these two headers to choose its evidence plan"
+        );
+    }
 }
