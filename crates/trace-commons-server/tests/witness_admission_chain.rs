@@ -110,7 +110,6 @@ impl FixtureSigner {
         )
     }
     fn address(&self) -> String {
-        use k256::elliptic_curve::sec1::ToEncodedPoint as _;
         let point = self.0.verifying_key().to_encoded_point(false);
         format!(
             "0x{}",
@@ -121,8 +120,7 @@ impl FixtureSigner {
 
 impl Signer for FixtureSigner {
     fn sign_eip191(&self, message: &[u8]) -> Result<String, SeamUnavailable> {
-        let mut prefixed =
-            format!("\x19Ethereum Signed Message:\n{}", message.len()).into_bytes();
+        let mut prefixed = format!("\x19Ethereum Signed Message:\n{}", message.len()).into_bytes();
         prefixed.extend_from_slice(message);
         let (signature, recovery) = self
             .0
@@ -193,7 +191,10 @@ impl Provider {
     fn new(seed: [u8; 32]) -> Self {
         let keypair = Ed25519KeyPair::from_seed_unchecked(&seed).expect("fixture seed");
         let public_hex = hex::encode(keypair.public_key().as_ref());
-        Self { keypair, public_hex }
+        Self {
+            keypair,
+            public_hex,
+        }
     }
 
     /// A receipt over these exact bodies. `bound_model` present gives the
