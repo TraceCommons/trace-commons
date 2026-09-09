@@ -1413,6 +1413,59 @@ mod tests {
         }
     }
 
+    /// The one predicate behind the certificate-held list.
+    ///
+    /// Both witness routes -- `/v1/witness` and `/v1/witness/admission` --
+    /// return a certificate and are stored as the same
+    /// `WitnessReviewArtifact` under the same pin, so "did step 1 or step 2
+    /// happen" is a single question: is this entry pinned to a witnessed
+    /// preview. An ordinary preview pin is not that, and neither is no pin.
+    ///
+    /// This is deliberately NOT the attestation mark and NOT eligibility.
+    /// Holds-a-certificate, is-attestable and was-attested are three
+    /// different facts, and the mark answers a different one.
+    #[test]
+    fn only_a_witness_pin_says_the_entry_holds_a_certificate() {
+        let pinned = QueueEntry {
+            previewed_envelope_digest: Some(format!("{WITNESS_PIN_PREFIX}{}", "ab".repeat(32))),
+            ..entry("h", "2026-08-08T12:00:00Z")
+        };
+        assert!(pinned.holds_witness_certificate());
+
+        for pin in [
+            None,
+            // An ordinary preview pin. The bytes were shown and pinned, but
+            // nobody witnessed them, so there is no certificate.
+            Some(format!("sha256:{}", "ab".repeat(32))),
+            Some(String::new()),
+            // The prefix without its separator: a digest that merely starts
+            // with the same letters is not a witness pin.
+            Some("witness-sha256".to_string()),
+        ] {
+            let e = QueueEntry {
+                previewed_envelope_digest: pin.clone(),
+                ..entry("h", "2026-08-08T12:00:00Z")
+            };
+            assert!(
+                !e.holds_witness_certificate(),
+                "{pin:?} was read as holding a certificate"
+            );
+        }
+    }
+
+    /// A re-offer drops the pin, so it must also drop the claim. The
+    /// contributor is being shown the same session again because its bytes
+    /// moved; the certificate covered the old bytes.
+    #[test]
+    fn a_reoffered_entry_no_longer_holds_a_certificate() {
+        let pinned = QueueEntry {
+            previewed_envelope_digest: Some(format!("{WITNESS_PIN_PREFIX}{}", "ab".repeat(32))),
+            ..entry("h", "2026-08-08T12:00:00Z")
+        };
+        assert!(pinned.holds_witness_certificate());
+        assert!(!reoffered_from(pinned).holds_witness_certificate());
+    }
+
     fn queue_of(entries: Vec<QueueEntry>) -> Queue {
         let mut q = Queue::new();
         for e in entries {

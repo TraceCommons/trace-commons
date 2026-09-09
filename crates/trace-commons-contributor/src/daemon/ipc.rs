@@ -8006,6 +8006,44 @@ mod tests {
         assert!(!body.contains("/tmp/s.jsonl"), "path leaked: {body}");
     }
 
+    /// One predicate, two readings, and therefore one unconditional field.
+    ///
+    /// `eligibility` above is absent for an invited contributor because they
+    /// have no eligibility question. This is the opposite case: both
+    /// audiences have the question, they just read the answer differently --
+    /// a contributor without an invite reads it as "this one is a candidate
+    /// for submission", one with an invite reads it as "this one is
+    /// cryptographically attested". Same fact. So the daemon states it
+    /// once, unconditionally, and the shell chooses the wording using the
+    /// invite status it already holds for the eligibility surface.
+    ///
+    /// Emitting it only under `Some(true)` would leave invited contributors
+    /// -- the ones for whom it reads as attestation -- unable to see it at
+    /// all.
+    #[test]
+    fn every_contributor_is_told_which_entries_hold_a_certificate() {
+        let pinned = QueueEntry {
+            previewed_envelope_digest: Some(format!(
+                "{}{}",
+                super::super::approved_envelope::WITNESS_PIN_PREFIX,
+                "ab".repeat(32)
+            )),
+            ..card_entry()
+        };
+        for admission_evidence in [Some(true), Some(false), None] {
+            assert_eq!(
+                entry_value(&pinned, admission_evidence)["holds_certificate"],
+                serde_json::Value::Bool(true),
+                "a witnessed entry did not say so at {admission_evidence:?}"
+            );
+            assert_eq!(
+                entry_value(&card_entry(), admission_evidence)["holds_certificate"],
+                serde_json::Value::Bool(false),
+                "an unwitnessed entry did not say so at {admission_evidence:?}"
+            );
+        }
+    }
+
     #[test]
     fn a_bad_entry_id_is_a_param_error_not_a_panic() {
         let s = shared();
