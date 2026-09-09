@@ -1253,6 +1253,15 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "near_account_anchor_tenant_binding_drop",
         include_str!("../../../../migrations/V62__near_account_anchor_tenant_binding_drop.sql"),
     ),
+    // A NEAR AI login as a second source of the admission anchor (#836).
+    // Widens two `device_keys` CHECKs to admit a `near_ai` origin, and records
+    // on the anchor row which identity system minted it. The widening is
+    // add-then-drop so the table is never less constrained than before.
+    (
+        63,
+        "near_ai_login_provisioning",
+        include_str!("../../../../migrations/V63__near_ai_login_provisioning.sql"),
+    ),
 ];
 
 #[async_trait]
