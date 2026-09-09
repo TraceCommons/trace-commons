@@ -686,6 +686,48 @@ mod tests {
         ));
     }
 
+    /// The wiring itself: a config with no endpoint **does** ask its commons.
+    ///
+    /// This is the seam a mutation could previously gut without reddening
+    /// anything -- replacing the fetch with `None` left every test green,
+    /// because an unreachable commons and a commons never asked are
+    /// indistinguishable by outcome. Only a connection tells them apart.
+    ///
+    /// Testable without touching the process environment only because #786
+    /// made `client()` take its allowlist as a parameter: the list
+    /// `signup_allowlist` derives from the chosen origin is enforcing by
+    /// construction, so a loopback origin is dialable with no
+    /// `TRACE_COMMONS_ALLOWED_HOSTS` set and no cross-test coupling.
+    #[tokio::test]
+    async fn a_config_with_no_endpoint_actually_asks_its_commons() {
+        assert!(
+            std::env::var(crate::config::TRACE_COMMONS_INFERENCE_RECEIPT_ENDPOINT).is_err(),
+            "this proves nothing unless the environment is silent"
+        );
+        let (_dir, store) = crate::config::tests_support::temp_store();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut cfg = config();
+        assert!(cfg.allowed_hosts.is_none(), "what native signup persists");
+        cfg.ingest_url = format!("https://{}", listener.local_addr().unwrap());
+        store.save_config(&cfg).unwrap();
+        let shared = DaemonShared::load(store).unwrap();
+
+        let asked = tokio::spawn(async move { listener.accept().await.is_ok() });
+        adopt_published_receipt_endpoint(&shared, &mut cfg)
+            .await
+            .expect("a commons that answers nothing usable is not a failure");
+
+        assert!(
+            tokio::time::timeout(Duration::from_secs(5), asked)
+                .await
+                .expect("the commons was never contacted")
+                .expect("accept task"),
+            "the daemon has to ask before it can adopt"
+        );
+        // Nothing usable came back over that socket, so nothing is adopted.
+        assert!(cfg.inference_receipt_endpoint.is_none());
+    }
+
     /// An endpoint already saved is not re-fetched, and the check is the
     /// absence of a connection rather than the absence of a change: a commons
     /// asked on every prepare would be a new call on a path that does not
