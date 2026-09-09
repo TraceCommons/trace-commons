@@ -236,6 +236,58 @@ public sealed record PrivateInferenceCopy
     // account, and no shell may add a field that would.
     // ---------------------------------------------------------------------
 
+    /// <summary>
+    /// Enrolling this device with the NEAR AI login a contributor already has,
+    /// instead of a NEAR wallet. Both paths are offered; neither is removed.
+    /// </summary>
+    [JsonPropertyName("near_ai_enroll_title")]
+    public string NearAiEnrollTitle { get; init; } = string.Empty;
+
+    [JsonPropertyName("near_ai_enroll_what")]
+    public string NearAiEnrollWhat { get; init; } = string.Empty;
+
+    [JsonPropertyName("near_ai_enroll_action")]
+    public string NearAiEnrollAction { get; init; } = string.Empty;
+
+    [JsonPropertyName("near_ai_enroll_needs_login")]
+    public string NearAiEnrollNeedsLogin { get; init; } = string.Empty;
+
+    [JsonPropertyName("near_ai_enroll_working")]
+    public string NearAiEnrollWorking { get; init; } = string.Empty;
+
+    [JsonPropertyName("near_ai_enroll_done")]
+    public string NearAiEnrollDone { get; init; } = string.Empty;
+
+    [JsonPropertyName("near_ai_enroll_already_enrolled")]
+    public string NearAiEnrollAlreadyEnrolled { get; init; } = string.Empty;
+
+    [JsonPropertyName("near_ai_enroll_no_session")]
+    public string NearAiEnrollNoSession { get; init; } = string.Empty;
+
+    [JsonPropertyName("near_ai_enroll_endpoint_refused")]
+    public string NearAiEnrollEndpointRefused { get; init; } = string.Empty;
+
+    [JsonPropertyName("near_ai_enroll_token_unavailable")]
+    public string NearAiEnrollTokenUnavailable { get; init; } = string.Empty;
+
+    [JsonPropertyName("near_ai_enroll_start_failed")]
+    public string NearAiEnrollStartFailed { get; init; } = string.Empty;
+
+    [JsonPropertyName("near_ai_enroll_commons_unreachable")]
+    public string NearAiEnrollCommonsUnreachable { get; init; } = string.Empty;
+
+    [JsonPropertyName("near_ai_enroll_commons_unsupported")]
+    public string NearAiEnrollCommonsUnsupported { get; init; } = string.Empty;
+
+    [JsonPropertyName("near_ai_enroll_invalid")]
+    public string NearAiEnrollInvalid { get; init; } = string.Empty;
+
+    [JsonPropertyName("near_ai_enroll_verification_failed")]
+    public string NearAiEnrollVerificationFailed { get; init; } = string.Empty;
+
+    [JsonPropertyName("near_ai_enroll_unavailable")]
+    public string NearAiEnrollUnavailable { get; init; } = string.Empty;
+
     [JsonPropertyName("credential_title")]
     public string CredentialTitle { get; init; } = string.Empty;
 
@@ -641,6 +693,22 @@ public sealed record PrivateInferenceCopy
             EligibilityReasonMarkerAbsent,
             EligibilityReasonRequestMalformed,
             EligibilityReasonReceiptUnavailable,
+            NearAiEnrollTitle,
+            NearAiEnrollWhat,
+            NearAiEnrollAction,
+            NearAiEnrollNeedsLogin,
+            NearAiEnrollWorking,
+            NearAiEnrollDone,
+            NearAiEnrollAlreadyEnrolled,
+            NearAiEnrollNoSession,
+            NearAiEnrollEndpointRefused,
+            NearAiEnrollTokenUnavailable,
+            NearAiEnrollStartFailed,
+            NearAiEnrollCommonsUnreachable,
+            NearAiEnrollCommonsUnsupported,
+            NearAiEnrollInvalid,
+            NearAiEnrollVerificationFailed,
+            NearAiEnrollUnavailable,
             CertificateRowCandidate,
             CertificateRowAttested,
             CertificateListCandidate,
