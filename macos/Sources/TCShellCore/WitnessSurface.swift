@@ -522,6 +522,8 @@ public struct WalletCopy: Decodable, Equatable, Sendable {
     public let cancel: String
     public let available: String
     public let unavailable: String
+    public let addressRefused: String
+    public let unreachable: String
     public let opening: String
     public let waiting: String
     public let failed: String
@@ -538,6 +540,8 @@ public struct WalletCopy: Decodable, Equatable, Sendable {
         case cancel = "cancel"
         case available = "available"
         case unavailable = "unavailable"
+        case addressRefused = "address_refused"
+        case unreachable = "unreachable"
         case opening = "opening"
         case waiting = "waiting"
         case failed = "failed"

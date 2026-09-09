@@ -433,7 +433,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `preview_turns` | `entry_id`, `body_digest` (**required**) | `entry_id`, `body_digest`, `envelope_digest`, `turn_count`, `turns[]` | an index of turn boundaries **into the body `preview_body` returns**; the body itself is unchanged. See "`preview_turns`" below |
 | `prepare_admission_session` | `entry_id`, `backend`, `confirmed: true` | `status: "ready_for_next_inference"`, `expires_at`, `view` | consent-gated challenge registration for the next inference; no funding or routing changes |
 | `native_wallet_flow` | `action: open/check/start/wait/cancel`; `flow_id` after open; `ingest_url` for check/start; `account_id` for start | shared wallet view (see below) | owns capability checks, origin validation, polling cadence and cancellation; no new C ABI |
-| `near_account_capabilities` | `ingest_url` | validated `ready`, issuer, audience and witness settings | checks allowlisted HTTPS service; no signup or funding |
+| `near_account_capabilities` | `ingest_url` | validated `ready`, issuer, audience and witness settings; on `ready: false` a `reason` of `address_refused`, `unreachable` or `unsupported` | checks allowlisted HTTPS service; no signup or funding. With `TRACE_COMMONS_ALLOWED_HOSTS` unset the allowlist is derived from `ingest_url` plus the issuer and witness hosts that origin publishes |
 | `near_account_start` | `ingest_url`, `account_id` | `attempt_id`, `browser_url`, `status` | explicit wallet ceremony; keys and PKCE stay in daemon |
 | `near_account_status` | `attempt_id` | `attempt_id`, `status` | no account token or signing material |
 | `near_account_cancel` | `attempt_id` | cancellation state | cancels the matching local attempt |
