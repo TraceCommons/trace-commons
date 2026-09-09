@@ -175,6 +175,18 @@ enum QueueStateCopy {
 /// before an entry existed, and this UI does not claim otherwise.
 enum OutcomeCopy {
     static func sentence(for label: String) -> String {
+        // A contribution the commons refused, before the table below. Those
+        // five labels reach this surface verbatim from the server, this table
+        // has never known any of them, and its default is "Held" -- which
+        // reads as a transient state that will resolve, where a standing
+        // refusal will not. See #810.
+        //
+        // Asked across the ABI rather than answered here: one sentence serves
+        // all three shells, and `HealthCopy.swift` is pinned by the
+        // shell-wording ratchet, so new copy could not live here anyway.
+        if let refused = TCOutcome.refusalLine(label: label) {
+            return refused
+        }
         switch label {
         case "dismissed-by-contributor": return "You said no thanks"
         case "expired-without-decision": return "Waited too long without a decision"

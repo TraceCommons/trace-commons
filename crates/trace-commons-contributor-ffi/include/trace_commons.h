@@ -697,6 +697,26 @@ int32_t     tc_near_ai_credential_action(const char* state);
 #define TC_CONTRIBUTION_CONTROL_NONE       50
 #define TC_CONTRIBUTION_CONTROL_CONTRIBUTE 51
 
+/* What the outcome list says about a contribution the commons refused.
+ *
+ * THE EMPTY STRING MEANS "not one of these" and is the caller's signal to use
+ * its own outcome table, not a failure. Five labels are answered here;
+ * everything else on that surface is still each shell's own.
+ *
+ * The one thing a caller must not do with a non-empty answer is pair it with
+ * a sentence saying nothing was sent. On this path the envelope WAS
+ * transmitted and the gate declined it after receiving it, which is why the
+ * shells' own defaults are wrong here.
+ *
+ * label is the queue entry's reason_label in the server's own spelling, with
+ * underscores. The hyphenated constants in daemon::health name the same
+ * events for the health banner and are NOT what arrives here.
+ *
+ * Returns an owned string; free it with tc_string_free. NULL only on a caught
+ * panic.
+ */
+char*       tc_outcome_refusal_line(const char* label);
+
 /* The sentence for one NEAR AI login-enrolment control name.
  *
  * Ten labels, each with its own sentence, and anything else -- including a

@@ -52,3 +52,35 @@ public static class NearAiEnrollSurface
     public static PrivateInferenceTone Tone(string? label) =>
         PrivateInferenceSurface.FromAbiTone(NativeMethods.tc_near_ai_enroll_tone(label));
 }
+
+/// <summary>
+/// What the outcome list says about a contribution the commons refused.
+/// </summary>
+/// <remarks>
+/// <para>
+/// <b>Null means "not one of these"</b>, and the caller keeps its own
+/// rendering. Five labels are answered across the ABI; everything else on
+/// that surface is unchanged.
+/// </para>
+/// <para>
+/// This shell had no outcome sentence table at all: <c>OutcomeCountViewModel</c>
+/// showed the raw label with separators swapped, so a refusal read "admission
+/// refused". Machine-shaped, but it was the only one of the three shells that
+/// was not misleading -- macOS said "Held" and Linux said "Nothing was sent.",
+/// which on that path is false. See #810.
+/// </para>
+/// <para>
+/// The label is the queue entry's <c>reason_label</c> in the server's own
+/// spelling, with underscores. The hyphenated constants in
+/// <c>daemon::health</c> name the same events for the health banner and are
+/// not what arrives here.
+/// </para>
+/// </remarks>
+public static class OutcomeRefusalSurface
+{
+    public static string? Line(string? label)
+    {
+        string? line = NativeMethods.TakeOwnedString(NativeMethods.tc_outcome_refusal_line(label));
+        return string.IsNullOrEmpty(line) ? null : line;
+    }
+}
