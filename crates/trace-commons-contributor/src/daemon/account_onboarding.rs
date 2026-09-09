@@ -615,6 +615,59 @@ fn published_witness(mut value: serde_json::Value) -> Result<WitnessSettings> {
     Ok(witness)
 }
 
+/// A config written by the real signup path, for tests in sibling modules
+/// that must otherwise hand-build one.
+///
+/// `persist` is what produces it, so a test using this cannot pass by setting
+/// a field signup never sets. That is exactly how the `allowed_hosts: None`
+/// defect survived: every test that reached a host-allowlist gate constructed
+/// its own config and set `allowed_hosts` itself, so the gate was never asked
+/// the question a real enrollment asks it.
+#[cfg(test)]
+pub(super) fn signup_written_config(
+    dir: &std::path::Path,
+    receipt_endpoint: Option<String>,
+) -> ContributorConfig {
+    let store = ConfigStore::open(dir.to_path_buf()).expect("opening the fixture store");
+    let identity = DeviceIdentity::load_or_generate(&store).expect("device identity");
+    let options = Options {
+        account_id: "alice.near".into(),
+        ingest_url: "https://commons.example".into(),
+        issuer_url: "https://issuer.example".into(),
+        audience: "trace-commons-upload".into(),
+    };
+    let witness: WitnessSettings = serde_json::from_value(serde_json::json!({
+        "url": "https://witness.example",
+        "signing_address": format!("0x{}", "ab".repeat(20)),
+        "expected_measurements": [format!("mrtd={}", "ab".repeat(48))],
+        "admission_evidence": true,
+    }))
+    .expect("witness fixture");
+    let completed = Completed {
+        access_token: "tcn1_example".into(),
+        token_type: "Bearer".into(),
+        expires_in_secs: 3600,
+        account_id: "alice.near".into(),
+        tenant_id: format!("near-{}", "3c".repeat(32)),
+        device_key_id: identity.device_key_id.clone(),
+        anchor_hash: format!("sha256:{}", "ab".repeat(32)),
+    };
+    persist(
+        dir,
+        &options,
+        &identity,
+        completed,
+        "fixture",
+        witness,
+        receipt_endpoint,
+    )
+    .expect("signup persist");
+    store
+        .load_config()
+        .expect("reading back the written config")
+        .expect("signup must have written a config")
+}
+
 fn persist(
     dir: &std::path::Path,
     options: &Options,

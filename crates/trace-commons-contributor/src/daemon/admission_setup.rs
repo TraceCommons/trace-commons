@@ -338,6 +338,117 @@ mod tests {
     const TENANT_SUFFIX: &str = "3c9f21d8be4a07655c1e3fba8d02947613ae5c80f9d64b2718a350ecdb6f4192";
     const ANCHOR: &str = "ab00c4d1e97f3625b8a01d4fce7382905b6ad3f1e0c95847a2b6f30d19e4c785";
 
+    /// The config here is written by `account_onboarding::persist` -- the real
+    /// signup path -- and never by hand. A hand-built config sets
+    /// `allowed_hosts` itself and so passes these gates before and after the
+    /// fix, which is why nothing caught that a wallet-enrolled contributor
+    /// could not prepare a bound session on any shipped application.
+    ///
+    /// Deliberately asserts on the two gates `prepare` reaches before it opens
+    /// a socket -- `require_receipt_endpoint` at line 109 and the enforcing
+    /// check on the issuer/ingest list -- rather than on a helper's return
+    /// value. An out-of-process test the way `daemon_wallet_signup_without_env`
+    /// does it is not available here: `persist` is private, and producing this
+    /// config in a spawned daemon would need a live HTTPS commons to sign up
+    /// against.
+    #[test]
+    fn a_config_written_by_signup_reaches_the_admission_gates() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = super::super::account_onboarding::signup_written_config(
+            dir.path(),
+            Some("https://receipts.example/v1".into()),
+        );
+        assert!(
+            cfg.allowed_hosts.is_none(),
+            "signup writes no host list; the list has to come from the config's own hosts"
+        );
+
+        let allowlist = crate::config::config_allowlist(&cfg);
+        assert!(
+            allowlist.is_enforcing(),
+            "a signup-written config must yield an enforcing list, or every gate below refuses"
+        );
+        // The gate that actually failed, driven exactly as `prepare` drives it.
+        require_receipt_endpoint(&cfg).expect("a signup-written receipt endpoint must be usable");
+
+        // Every host this config points at, including the receipt endpoint --
+        // which is on the inference provider and not on the commons, and which
+        // `submit.rs` needs for every receipt.
+        for url in [
+            cfg.issuer_url.as_str(),
+            cfg.ingest_url.as_str(),
+            cfg.witness.as_ref().unwrap().url.as_str(),
+            cfg.inference_receipt_endpoint.as_deref().unwrap(),
+        ] {
+            allowlist
+                .check(&reqwest::Url::parse(url).unwrap())
+                .unwrap_or_else(|_| panic!("{url} is named by the config and must be reachable"));
+        }
+        // And it is still a list, not a bypass.
+        for outside in ["https://elsewhere.example", "https://commons.example.evil"] {
+            assert!(
+                allowlist
+                    .check(&reqwest::Url::parse(outside).unwrap())
+                    .is_err(),
+                "{outside} is named by nothing and must not be reachable"
+            );
+        }
+    }
+
+    /// The derivation itself, with the configured list passed in rather than
+    /// read from the environment, so this says the same thing on a machine
+    /// that happens to have `TRACE_COMMONS_ALLOWED_HOSTS` set.
+    #[test]
+    fn an_operator_list_still_governs_and_an_empty_config_allows_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = super::super::account_onboarding::signup_written_config(dir.path(), None);
+
+        let operator = crate::config::derive_config_allowlist(
+            &trace_commons_operator_client::host_allowlist::HostAllowlist::from_csv(
+                "commons.example",
+            ),
+            &cfg,
+        );
+        operator
+            .check(&reqwest::Url::parse("https://commons.example").unwrap())
+            .unwrap();
+        assert!(
+            operator
+                .check(&reqwest::Url::parse("https://issuer.example").unwrap())
+                .is_err(),
+            "an operator who lists hosts keeps listing them; the config does not widen it"
+        );
+
+        // A receipt endpoint absent from the config is absent from the list.
+        let derived = crate::config::derive_config_allowlist(
+            &trace_commons_operator_client::host_allowlist::HostAllowlist::permissive(),
+            &cfg,
+        );
+        assert!(
+            derived
+                .check(&reqwest::Url::parse("https://receipts.example/v1").unwrap())
+                .is_err()
+        );
+
+        // A config naming no parseable host refuses everything rather than
+        // allowing everything.
+        let mut empty = cfg.clone();
+        empty.issuer_url = String::new();
+        empty.ingest_url = String::new();
+        empty.witness = None;
+        empty.inference_receipt_endpoint = None;
+        let nothing = crate::config::derive_config_allowlist(
+            &trace_commons_operator_client::host_allowlist::HostAllowlist::permissive(),
+            &empty,
+        );
+        assert!(nothing.is_enforcing());
+        assert!(
+            nothing
+                .check(&reqwest::Url::parse("https://anything.example").unwrap())
+                .is_err()
+        );
+    }
+
     #[test]
     fn a_v61_tenant_id_is_not_derivable_from_its_anchor() {
         assert_ne!(TENANT_SUFFIX, ANCHOR, "the fixture must not restate V58");

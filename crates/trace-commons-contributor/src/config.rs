@@ -320,7 +320,64 @@ pub fn is_near_tenant_id(tenant_id: &str) -> bool {
     })
 }
 
-/// A hash-only record of a submitted trace. Never contains paths or content.
+/// The allowlist to enforce for calls to hosts an enrolled config already
+/// names: ingest, issuer, witness, and the inference receipt endpoint.
+///
+/// [`allowlist_for`] returns a PERMISSIVE list when neither `allowed_hosts`
+/// nor `TRACE_COMMONS_ALLOWED_HOSTS` is set, and the paths that matter refuse
+/// on a non-enforcing list -- `admission_setup`'s endpoint gate and
+/// [`validate_inference_receipt_endpoint`] both do. No shipped application
+/// sets either, and wallet signup deliberately persists `allowed_hosts: None`,
+/// so a wallet-enrolled contributor could not prepare a bound session at all.
+///
+/// The fix is not a stored list. A stored list has to be maintained, and it
+/// drifts from the config the moment a host enters the config by another
+/// route -- a witness configured in Settings, a receipt endpoint set after
+/// enrollment. Instead the list is a FUNCTION of the config:
+///
+/// 1. `cfg.allowed_hosts` when it names anything -- operator or CLI, wins.
+/// 2. Otherwise `TRACE_COMMONS_ALLOWED_HOSTS` when set -- operator, wins.
+/// 3. Otherwise exactly the hosts this config already points at.
+///
+/// So it cannot drift: a host is on the list precisely because the config
+/// names it, and a host the config does not name was never going to be
+/// dialled. It widens only when the config widens, never because a server
+/// said so. And it never degrades to permissive -- [`HostAllowlist::from_hosts`]
+/// treats an empty set as "nothing", not "everything", so a config with no
+/// parseable host refuses everything rather than allowing everything.
+///
+/// Deliberately NOT a change to [`allowlist_for`], which keeps its current
+/// meaning for `--attest-post`. That flag refuses outright when no allowlist
+/// is configured, because its target comes from the command line rather than
+/// from enrollment; a config-derived fallback there would make `is_enforcing`
+/// true and silently permit a collector that happened to equal the ingest
+/// host.
+#[must_use]
+pub fn config_allowlist(cfg: &ContributorConfig) -> HostAllowlist {
+    derive_config_allowlist(&allowlist_for(cfg.allowed_hosts.as_deref()), cfg)
+}
+
+pub(crate) fn derive_config_allowlist(
+    configured: &HostAllowlist,
+    cfg: &ContributorConfig,
+) -> HostAllowlist {
+    if configured.is_enforcing() {
+        return configured.clone();
+    }
+    let named = [
+        Some(cfg.issuer_url.as_str()),
+        Some(cfg.ingest_url.as_str()),
+        cfg.witness.as_ref().map(|witness| witness.url.as_str()),
+        cfg.inference_receipt_endpoint.as_deref(),
+    ];
+    HostAllowlist::from_hosts(named.into_iter().flatten().filter_map(|url| {
+        reqwest::Url::parse(url)
+            .ok()
+            .and_then(|parsed| parsed.host_str().map(str::to_string))
+    }))
+}
+
+/// A hash-only record of a submitted trace. Never contains paths or content./// A hash-only record of a submitted trace. Never contains paths or content.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Receipt {
     pub submission_id: Uuid,
