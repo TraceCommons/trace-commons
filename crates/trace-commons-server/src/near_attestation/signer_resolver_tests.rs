@@ -1148,6 +1148,180 @@ fn a_static_resolver_ignores_the_clock() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// `reconcile`, exercised directly
+// ---------------------------------------------------------------------------
+//
+// These are unit tests on the function rather than end-to-end runs, and that
+// is deliberate rather than a shortcut. No report fixture can reach these
+// branches: `attested_ed25519_key` derives the claimed key out of the entry's
+// own `intel_quote` at the same fixed offset the verified quote exposes, so
+// for any report the resolver gets this far with, the claimed set and the
+// verified set are equal by construction and every comparison below is
+// vacuously true. Mutating them away leaves an end-to-end suite green.
+//
+// That does not make the comparisons dead. They are what stands between the
+// resolver and a future change to either walk -- a dropped `model_name`
+// filter on one side, a JSON `report_data` echo trusted over the quote on the
+// other -- and the way to keep them honest is to feed them the disagreement
+// no capture can produce. The inputs here are hand-built; the *expectations*
+// are not restatements of the implementation but the four properties the
+// doc comment names.
+
+/// A `VerifiedQuote` committing to `key || nonce`, with placeholder registers.
+///
+/// Registers are placeholders because `reconcile` reads `report_data` and
+/// nothing else; a register that mattered here would be a coupling worth
+/// finding out about, and this fixture would not hide it.
+fn verified_quote_committing_to(key: &str, nonce: &str) -> VerifiedQuote {
+    let mut report_data = hex::decode(key).expect("key is hex");
+    report_data.extend(hex::decode(nonce).expect("nonce is hex"));
+    assert_eq!(report_data.len(), 64, "report_data is 32 + 32 bytes");
+    VerifiedQuote {
+        report_data,
+        mrtd: String::new(),
+        mr_config_id: String::new(),
+        rtmr: [String::new(), String::new(), String::new(), String::new()],
+        tcb_status: "UpToDate".to_string(),
+        advisory_ids: Vec::new(),
+    }
+}
+
+const OTHER_KEY: &str = "2222222222222222222222222222222222222222222222222222222222222222";
+
+#[test]
+fn reconcile_accepts_a_quote_that_commits_to_the_claimed_key_and_our_nonce() {
+    // The precondition every negative case below departs from by one property.
+    let quote = verified_quote_committing_to(FOREIGN_KEY, OUR_NONCE);
+    assert_eq!(
+        reconcile(&[FOREIGN_KEY.to_string()], &[quote], OUR_NONCE),
+        Ok(vec![FOREIGN_KEY.to_string()])
+    );
+}
+
+#[test]
+fn reconcile_refuses_a_quote_bound_to_a_nonce_we_did_not_send() {
+    let quote = verified_quote_committing_to(FOREIGN_KEY, &"a".repeat(64));
+    assert_eq!(
+        reconcile(&[FOREIGN_KEY.to_string()], &[quote], OUR_NONCE),
+        Err(RefreshRefusal::KeyNotInVerifiedQuote),
+        "a quote committing to somebody else's challenge is not fresh for us"
+    );
+}
+
+#[test]
+fn reconcile_refuses_a_verified_key_the_report_never_claimed() {
+    // The quote verifies and is bound to our nonce, but commits to a key the
+    // report's JSON did not name. Installing it would mean the resolver
+    // accepted a signer nothing in the report ever offered.
+    let quote = verified_quote_committing_to(OTHER_KEY, OUR_NONCE);
+    assert_eq!(
+        reconcile(&[FOREIGN_KEY.to_string()], &[quote], OUR_NONCE),
+        Err(RefreshRefusal::KeyNotInVerifiedQuote)
+    );
+}
+
+#[test]
+fn reconcile_refuses_a_claimed_key_no_verified_quote_carries() {
+    // The report claims two keys; one quote verifies. Answering with the
+    // sound half would let a report carry a forged entry through on the
+    // strength of a genuine one.
+    let quote = verified_quote_committing_to(FOREIGN_KEY, OUR_NONCE);
+    assert_eq!(
+        reconcile(
+            &[FOREIGN_KEY.to_string(), OTHER_KEY.to_string()],
+            &[quote],
+            OUR_NONCE
+        ),
+        Err(RefreshRefusal::KeyNotInVerifiedQuote)
+    );
+}
+
+#[test]
+fn reconcile_returns_the_verified_keys_in_quote_order_not_the_claimed_order() {
+    // What is installed comes from the quotes, not from the JSON. Asserted
+    // through the order, which is the only observable difference once the two
+    // sets are equal -- and it is the assertion that survives an edit turning
+    // the return into the claimed list.
+    let quotes = vec![
+        verified_quote_committing_to(OTHER_KEY, OUR_NONCE),
+        verified_quote_committing_to(FOREIGN_KEY, OUR_NONCE),
+    ];
+    assert_eq!(
+        reconcile(
+            // Claimed in the opposite order, so the two lists are equal as
+            // sets and distinguishable as sequences.
+            &[FOREIGN_KEY.to_string(), OTHER_KEY.to_string()],
+            &quotes,
+            OUR_NONCE
+        ),
+        Ok(vec![OTHER_KEY.to_string(), FOREIGN_KEY.to_string()])
+    );
+}
+
+#[test]
+fn reconcile_refuses_report_data_that_is_too_short_to_read() {
+    // `VerifiedQuote::report_data` is a `Vec<u8>` and this is a range read.
+    // A short one must be a named refusal rather than a panic.
+    let mut quote = verified_quote_committing_to(FOREIGN_KEY, OUR_NONCE);
+    quote.report_data.truncate(40);
+    assert_eq!(
+        reconcile(&[FOREIGN_KEY.to_string()], &[quote], OUR_NONCE),
+        Err(RefreshRefusal::KeyNotInVerifiedQuote)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// `model_entry_quotes`, exercised directly
+// ---------------------------------------------------------------------------
+
+#[test]
+fn model_entry_quotes_returns_only_the_entries_naming_this_model() {
+    let document = serde_json::json!({
+        "model_attestations": [
+            {"model_name": "a", "intel_quote": "aabb"},
+            {"model_name": "b", "intel_quote": "ccdd"},
+            {"model_name": "a", "intel_quote": "eeff"},
+        ]
+    });
+    assert_eq!(
+        model_entry_quotes(&document.to_string(), "a"),
+        Ok(vec![vec![0xaa, 0xbb], vec![0xee, 0xff]])
+    );
+}
+
+#[test]
+fn model_entry_quotes_refuses_a_model_with_no_entries() {
+    // Reachable only if `model_ed25519_keys` ever stops refusing first. The
+    // empty answer is the one that must never be `Ok(vec![])`: an empty quote
+    // list verifies vacuously.
+    let document = serde_json::json!({
+        "model_attestations": [{"model_name": "b", "intel_quote": "ccdd"}]
+    });
+    assert_eq!(
+        model_entry_quotes(&document.to_string(), "a"),
+        Err(RefreshRefusal::ModelNotAttested)
+    );
+}
+
+#[test]
+fn model_entry_quotes_refuses_an_entry_for_this_model_with_no_readable_quote() {
+    // A skip would leave the resolver verifying some other entry's quote and
+    // installing a key it never checked.
+    for entry in [
+        serde_json::json!({"model_name": "a"}),
+        serde_json::json!({"model_name": "a", "intel_quote": "not hex"}),
+    ] {
+        let document = serde_json::json!({
+            "model_attestations": [entry, {"model_name": "a", "intel_quote": "aabb"}]
+        });
+        assert_eq!(
+            model_entry_quotes(&document.to_string(), "a"),
+            Err(RefreshRefusal::ReportShape)
+        );
+    }
+}
+
 #[test]
 fn evidence_carries_digests_and_never_a_key() {
     let key = FOREIGN_KEY.to_string();
