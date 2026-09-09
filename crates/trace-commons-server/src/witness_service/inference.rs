@@ -268,8 +268,11 @@ use trace_commons_protocol::trace_contribution::{
 use std::collections::BTreeMap;
 
 use crate::near_attestation::receipt::{
-    ReceiptAlgo, ReceiptPayload, ReceiptSignatureKind, normalize_ed25519_key,
-    signer_is_attested_for_model, verify_receipt,
+    ReceiptAlgo, ReceiptPayload, normalize_ed25519_key, signer_is_attested_for_model,
+    verify_receipt,
+};
+use crate::near_attestation::signer_resolver::{
+    AttestedSignerResolver, OperatorKeyPins, StaticPinResolver,
 };
 
 use super::WitnessError;
@@ -630,6 +633,25 @@ impl InferenceAttestationPolicy {
     pub fn is_pinning(&self) -> bool {
         self.model_key_pins.is_some() || self.gateway_key_pins.is_some()
     }
+
+    /// This deployment's static pins, in the shape a resolver consumes.
+    ///
+    /// The same two sets [`Self::model_key_pins`] and
+    /// [`Self::gateway_key_pins`] return, carried across the seam so that
+    /// [`check_inference_attestation`] can reach them through a
+    /// [`StaticPinResolver`] and not by field access. Same disclosure rule:
+    /// public keys, but deployment configuration, so no caller may render one
+    /// except as a digest.
+    pub fn operator_key_pins(&self) -> OperatorKeyPins {
+        let mut pins = OperatorKeyPins::none();
+        if let Some(model) = &self.model_key_pins {
+            pins = pins.with_model_pins(model.clone());
+        }
+        if let Some(gateway) = &self.gateway_key_pins {
+            pins = pins.with_gateway_pins(gateway.clone());
+        }
+        pins
+    }
 }
 
 /// What the check established.
@@ -682,6 +704,43 @@ pub fn check_inference_attestation(
     policy: &InferenceAttestationPolicy,
     offered: Option<&ReceiptPayload>,
     session: &WitnessedSession<'_>,
+) -> Result<InferenceAttestationOutcome, WitnessError> {
+    // The default, and it is the pre-existing behaviour exactly: the accepted
+    // signer set is whatever the operator statically pinned, and a deployment
+    // that pinned nothing enforces nothing. Substituting a report-backed
+    // resolver here is a deliberate act by a caller of
+    // [`check_inference_attestation_with`]; no configuration reachable from
+    // this entry point does it.
+    let resolver = StaticPinResolver::new(policy.operator_key_pins());
+    // The clock a static resolver cannot consult. Passing zero rather than
+    // reading a clock keeps this path free of a time dependency it does not
+    // have -- and `StaticPinResolver` ignoring its clock argument is asserted,
+    // so this cannot quietly become load-bearing.
+    check_inference_attestation_with(policy, &resolver, offered, session, 0)
+}
+
+/// [`check_inference_attestation`], with the accepted signer set supplied by a
+/// resolver rather than read off the policy.
+///
+/// The seam a server-side resolver substitutes at. `resolver` is a trait
+/// object because the static-pin answer and the report-derived answer are the
+/// same decision reached two ways -- see
+/// [`crate::near_attestation::signer_resolver`] -- and a concrete type here
+/// could not participate in that substitution.
+///
+/// `now_unix` is wall-clock time, and it is the resolver's business what to do
+/// with it: a report-backed resolver ages its set out, a static one ignores it.
+///
+/// **Nothing in this repository calls this with a report-backed resolver
+/// today.** It exists so that switching admission onto server-checked evidence
+/// is a one-line change at a wiring site rather than a rewrite of this
+/// function, and so that the switch can be reviewed on its own.
+pub fn check_inference_attestation_with(
+    policy: &InferenceAttestationPolicy,
+    resolver: &dyn AttestedSignerResolver,
+    offered: Option<&ReceiptPayload>,
+    session: &WitnessedSession<'_>,
+    now_unix: u64,
 ) -> Result<InferenceAttestationOutcome, WitnessError> {
     let raw = match session {
         WitnessedSession::Contribution(raw) => raw,
@@ -806,7 +865,7 @@ pub fn check_inference_attestation(
     // rest of this module logs nothing -- the keys and the signer are
     // deployment configuration on one side and caller-visible data on the
     // other, and neither belongs on a per-request surface.
-    if policy.is_pinning() {
+    if resolver.is_enforcing() {
         // Which pin set applies is decided by the receipt's own
         // `signature_kind`, because NEAR AI signs with a different attested
         // key depending on the protocol the call used -- for the same hosted
@@ -824,20 +883,16 @@ pub fn check_inference_attestation(
         // That is the fail-closed reading and it is deliberate: an operator
         // who pinned model keys did not thereby agree to accept any
         // gateway-signed receipt from any signer.
-        let attested: &[String] = match verdict.signature_kind {
-            ReceiptSignatureKind::ProviderTee => verdict
-                .model
-                .as_deref()
-                .and_then(|model| policy.model_key_pins()?.get(model))
-                .map(Vec::as_slice)
-                .unwrap_or_default(),
-            ReceiptSignatureKind::Gateway => policy.gateway_key_pins().unwrap_or_default(),
-            // Names no key source, so there is nothing to check it against.
-            // Not a licence to try every pinned key.
-            ReceiptSignatureKind::Unrecognised => &[],
-        };
+        //
+        // Which of those the resolver applies is its own affair: the routing
+        // by `signature_kind`, the empty answer for an unrecognised kind, and
+        // the empty answer for an unpinned kind all live behind
+        // `keys_for`. What this function keeps is the rule that an empty
+        // answer refuses.
+        let attested =
+            resolver.keys_for(verdict.signature_kind, verdict.model.as_deref(), now_unix);
         let signed_by_a_pinned_key = verdict.signing_algo == ReceiptAlgo::Ed25519
-            && signer_is_attested_for_model(&verdict.signing_address, attested);
+            && signer_is_attested_for_model(&verdict.signing_address, &attested);
         if !signed_by_a_pinned_key {
             return Err(WitnessError::InferenceReceiptUnverified);
         }
@@ -1034,7 +1089,7 @@ pub(crate) fn exchange_bodies(event: &RawTraceContributionEvent) -> Option<(&str
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::near_attestation::receipt::ReceiptAlgo;
+    use crate::near_attestation::receipt::{ReceiptAlgo, ReceiptSignatureKind};
     use k256::ecdsa::SigningKey;
     use sha2::{Digest as _, Sha256};
     use sha3::Keccak256;

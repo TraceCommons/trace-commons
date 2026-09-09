@@ -20,6 +20,7 @@
 pub mod client;
 pub mod drill;
 pub mod measurements;
+pub mod signer_resolver;
 
 /// Receipt and quote verification moved to the permissive
 /// `trace-commons-attestation` crate so that client-side code can verify an

@@ -411,6 +411,55 @@ impl AttestationClient for HttpAttestationClient {
     }
 }
 
+/// The live source behind the server-side signer resolver.
+///
+/// Deliberately an implementation of a trait declared in
+/// [`super::signer_resolver`] rather than two more methods on
+/// [`AttestationClient`]. The ECDSA drill and the resolver fetch *different
+/// reports* -- `signing_algo=ed25519` is what makes the endpoint answer with
+/// `model_attestations` at all -- and one trait carrying both would let a
+/// caller mix them: derive a key from one report and check a nonce against the
+/// other.
+#[async_trait]
+impl super::signer_resolver::AttestedReportSource for HttpAttestationClient {
+    fn model(&self) -> &str {
+        &self.model
+    }
+
+    async fn fetch_ed25519_report_json(
+        &self,
+        nonce: &str,
+    ) -> Result<String, AttestationClientError> {
+        let step = AttestationStep::Report;
+        // `signing_algo=ed25519` is the whole point of this call: without it
+        // the endpoint answers with the ECDSA attestations, which carry no
+        // per-model receipt-signing key.
+        let response = self
+            .http
+            .get(format!("{}/attestation/report", self.base_url))
+            .query(&[
+                ("model", self.model.as_str()),
+                ("nonce", nonce),
+                ("signing_algo", "ed25519"),
+            ])
+            .bearer_auth(self.api_key.expose_secret())
+            .send()
+            .await
+            .map_err(|e| AttestationClientError::Transport {
+                step,
+                detail_hash: detail_hash(&e.to_string()),
+            })?;
+        success_body(step, response).await
+    }
+
+    async fn fetch_collateral_for(
+        &self,
+        quote: &[u8],
+    ) -> Result<Collateral, AttestationClientError> {
+        AttestationClient::fetch_collateral(self, quote).await
+    }
+}
+
 /// Read a response body, turning a non-success status into an error that
 /// names the status and nothing else.
 async fn success_body(
