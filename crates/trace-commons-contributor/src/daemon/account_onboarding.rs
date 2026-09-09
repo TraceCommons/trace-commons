@@ -615,25 +615,6 @@ fn published_witness(mut value: serde_json::Value) -> Result<WitnessSettings> {
     Ok(witness)
 }
 
-/// Shape check for a wallet tenant id: the `near-` namespace plus 64 lowercase
-/// hex characters.
-///
-/// This used to be `tenant_id == format!("near-{}", &anchor_hash[7..])`, and it
-/// stopped being true when the server salted the anchor. The tenant id is now
-/// drawn from the OS RNG and is a function of nothing -- that is the point of
-/// the change, since the old binding let anyone who knew a NEAR account name
-/// compute its tenant id offline. The client cannot re-derive it, so shape is
-/// all there is to check here; the value is authenticated by the session token
-/// issued alongside it, not by its own contents.
-fn is_near_tenant_id(tenant_id: &str) -> bool {
-    tenant_id.strip_prefix("near-").is_some_and(|suffix| {
-        suffix.len() == 64
-            && suffix
-                .bytes()
-                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
-    })
-}
-
 fn persist(
     dir: &std::path::Path,
     options: &Options,
@@ -653,7 +634,7 @@ fn persist(
         || !result.anchor_hash[7..]
             .bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-        || !is_near_tenant_id(&result.tenant_id)
+        || !crate::config::is_near_tenant_id(&result.tenant_id)
     {
         bail!("near_signup_result_invalid")
     }
@@ -1038,16 +1019,37 @@ mod tests {
     }
     #[test]
     fn wallet_tenant_ids_are_accepted_on_shape_and_not_on_a_derivation() {
-        assert!(is_near_tenant_id(&format!("near-{}", "3c".repeat(32))));
-        assert!(is_near_tenant_id(&format!("near-{}", "ab".repeat(32))));
+        assert!(crate::config::is_near_tenant_id(&format!(
+            "near-{}",
+            "3c".repeat(32)
+        )));
+        assert!(crate::config::is_near_tenant_id(&format!(
+            "near-{}",
+            "ab".repeat(32)
+        )));
         // Upper-case hex, the wrong length, and the wrong namespace are all
         // rejected; the server emits lower-case hex in the `near-` namespace.
-        assert!(!is_near_tenant_id(&format!("near-{}", "AB".repeat(32))));
-        assert!(!is_near_tenant_id(&format!("near-{}", "ab".repeat(31))));
-        assert!(!is_near_tenant_id(&format!("near-{}", "ab".repeat(33))));
-        assert!(!is_near_tenant_id(&format!("tenant-{}", "ab".repeat(32))));
-        assert!(!is_near_tenant_id("near-"));
-        assert!(!is_near_tenant_id(&format!("near-{}", "gz".repeat(32))));
+        assert!(!crate::config::is_near_tenant_id(&format!(
+            "near-{}",
+            "AB".repeat(32)
+        )));
+        assert!(!crate::config::is_near_tenant_id(&format!(
+            "near-{}",
+            "ab".repeat(31)
+        )));
+        assert!(!crate::config::is_near_tenant_id(&format!(
+            "near-{}",
+            "ab".repeat(33)
+        )));
+        assert!(!crate::config::is_near_tenant_id(&format!(
+            "tenant-{}",
+            "ab".repeat(32)
+        )));
+        assert!(!crate::config::is_near_tenant_id("near-"));
+        assert!(!crate::config::is_near_tenant_id(&format!(
+            "near-{}",
+            "gz".repeat(32)
+        )));
     }
 
     #[test]

@@ -296,6 +296,30 @@ pub fn allowlist_for(allowed_hosts: Option<&str>) -> HostAllowlist {
     }
 }
 
+/// Shape check for a wallet tenant id: the `near-` namespace plus 64 lowercase
+/// hex characters.
+///
+/// This used to be `tenant_id == format!("near-{}", &anchor_hash[7..])`, and it
+/// stopped being true when the server salted the anchor. The tenant id is now
+/// drawn from the OS RNG and is a function of nothing -- that is the point of
+/// the change, since the old binding let anyone who knew a NEAR account name
+/// compute its tenant id offline. The client cannot re-derive it, so shape is
+/// all there is to check here; the value is authenticated by the session token
+/// issued alongside it, not by its own contents.
+///
+/// Lives here, rather than beside either caller, because a second copy of a
+/// namespace rule is how the two callers come to disagree about what a wallet
+/// tenant is.
+#[must_use]
+pub fn is_near_tenant_id(tenant_id: &str) -> bool {
+    tenant_id.strip_prefix("near-").is_some_and(|suffix| {
+        suffix.len() == 64
+            && suffix
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    })
+}
+
 /// A hash-only record of a submitted trace. Never contains paths or content.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Receipt {

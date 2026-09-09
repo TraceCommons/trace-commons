@@ -266,7 +266,21 @@ fn validate_challenge(
 ) -> Result<()> {
     let binding = AdmissionBinding::parse(&challenge.binding)
         .map_err(|_| anyhow!("admission_setup_binding_invalid"))?;
-    if tenant != format!("near-{}", binding.account_anchor_sha256)
+    // The tenant id is NOT derivable from the anchor. This used to require
+    // `tenant == format!("near-{}", binding.account_anchor_sha256)`, which V58
+    // held true with `CHECK (tenant_id = 'near-' || substring(anchor_hash from
+    // 8))`. V61 dropped that constraint on purpose -- `anchor_hash` became a
+    // keyed blind index and `tenant_id` 32 random bytes -- so the equality has
+    // been false for every real account since, and this refused every genuine
+    // challenge. See #785, which removed the same comparison on the server.
+    //
+    // What stays is the namespace discriminator: a challenge for this path
+    // belongs to a wallet tenant, and the anchor's own shape is already
+    // enforced by `AdmissionBinding::parse`, which round-trips through
+    // `encode` and so rejects anything that is not a lowercase hex digest.
+    // Nothing re-derives one value from the other, in either direction: that
+    // coupling is the offline-computability defect V61 fixed (#716).
+    if !crate::config::is_near_tenant_id(tenant)
         || binding.expires_at != challenge.expires_at
         || binding.expires_at <= now
         || binding.expires_at > now.saturating_add(max_lifetime.min(900))
@@ -353,7 +367,32 @@ mod tests {
             expires_at: expiry,
         };
         assert!(validate_challenge(&make(1100), &tenant, 1000, 900).is_ok());
-        assert!(validate_challenge(&make(1100), "near-other", 1000, 900).is_err());
+        // A tenant that is not on the wallet path at all is refused: the
+        // `near-` namespace is a discriminator, and this is the only thing
+        // about the tenant a client can still check.
+        for outside in [
+            "near-other",
+            &format!("tenant-{TENANT_SUFFIX}"),
+            &format!("near-{}", TENANT_SUFFIX.to_ascii_uppercase()),
+            &format!("near-{}", &TENANT_SUFFIX[..63]),
+            "near-",
+        ] {
+            assert!(
+                validate_challenge(&make(1100), outside, 1000, 900).is_err(),
+                "{outside} is not a wallet tenant"
+            );
+        }
+        // And a DIFFERENT well-formed wallet tenant is accepted, deliberately.
+        // Post-V61 a client cannot tell one anchor's tenant from another's --
+        // that is what salting the anchor bought -- so this check is a
+        // namespace test and never an account binding. What binds a challenge
+        // to an account is the server's row lookup under the authenticated
+        // session that minted it (#785). Restoring a comparison here would
+        // reintroduce the offline-computability defect V61 fixed.
+        assert!(
+            validate_challenge(&make(1100), &format!("near-{ANCHOR}"), 1000, 900).is_ok(),
+            "a wallet tenant must not have to match the anchor"
+        );
         assert!(validate_challenge(&make(1000), &tenant, 1000, 900).is_err());
         assert!(validate_challenge(&make(1901), &tenant, 1000, 900).is_err());
         let mut mismatch = make(1100);
