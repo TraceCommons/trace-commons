@@ -908,6 +908,23 @@ const NEAR_AI_INTROSPECTION_TIMEOUT: std::time::Duration = std::time::Duration::
 /// configurable would create the very thing the allowlist exists for.
 const NEAR_AI_API_BASE_URL: &str = "https://cloud-api.near.ai/v1";
 
+/// The nonce as it goes on the wire: **standard base64**, matching the wallet
+/// ceremony on this same surface and matching what the client decodes.
+///
+/// Not hex, and the difference is not cosmetic. A 32-byte nonce in hex is 64
+/// characters, every one of which is in the base64 alphabet, and 64 is a
+/// multiple of four -- so a base64 decode of it **succeeds** and yields 48
+/// bytes. The failure surfaces one step later as a length mismatch, under a
+/// label that names nothing about encodings, and both halves' test suites stay
+/// green because each tests its own convention.
+///
+/// The stored `nonce_hex` is hex and stays hex: that is internal, never
+/// compared against anything the client sends, and hex is the readable choice
+/// for a value that appears in a stored payload.
+fn near_ai_nonce_wire(nonce: &[u8; 32]) -> String {
+    base64::engine::general_purpose::STANDARD.encode(nonce)
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct NearAiStartRequest {
@@ -994,7 +1011,7 @@ async fn near_ai_start(
         .ok()?;
     Some(response(serde_json::json!({
         "ceremony_id": ceremony_id,
-        "nonce": hex::encode(nonce),
+        "nonce": near_ai_nonce_wire(&nonce),
         "expires_at": expires_at,
         "device_signing_bytes": base64::engine::general_purpose::STANDARD.encode(&signing_bytes),
     })))
@@ -1157,6 +1174,56 @@ mod near_ai_login_tests {
                 "{smuggled} was accepted at start"
             );
         }
+    }
+
+    /// The wire nonce decodes, **the way the client decodes it**, to the 32
+    /// bytes the preimage needs.
+    ///
+    /// This is the test that was missing. Both halves were green while the
+    /// wire disagreed, because each tested its own convention: the server
+    /// checked that it encoded a nonce and the client checked that it decoded
+    /// one, and nothing checked that the two were the same encoding.
+    ///
+    /// It exercises the production encoder rather than a copy of it, so a
+    /// change there fails here.
+    #[test]
+    fn the_wire_nonce_decodes_to_thirty_two_bytes_as_the_client_reads_it() {
+        let nonce: [u8; 32] = std::array::from_fn(|i| i as u8);
+        let wire = near_ai_nonce_wire(&nonce);
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(&wire)
+            .expect("the client's decode succeeds");
+        assert_eq!(decoded, nonce, "the client reconstructs the nonce we sent");
+
+        // Why this test exists, kept as an assertion rather than a comment:
+        // hex is not merely a different encoding here, it is one that decodes
+        // *successfully* as base64 and gives the wrong length. A regression to
+        // hex would not fail at the decode, which is what made it survive both
+        // suites.
+        let as_hex = hex::encode(nonce);
+        let hex_through_base64 = base64::engine::general_purpose::STANDARD
+            .decode(&as_hex)
+            .expect("hex is valid base64, which is the whole trap");
+        assert_eq!(
+            hex_through_base64.len(),
+            48,
+            "the trap has changed shape; re-derive what a hex nonce decodes to"
+        );
+        assert_ne!(wire, as_hex, "the wire field regressed to hex");
+    }
+
+    /// One surface, one convention. The wallet ceremony on this same handler
+    /// file sends its nonce as standard base64, and a contributor's client
+    /// should not have to know which ceremony it is talking to in order to
+    /// read a field of the same name.
+    #[test]
+    fn both_ceremonies_encode_a_nonce_the_same_way() {
+        let nonce = [7u8; 32];
+        assert_eq!(
+            near_ai_nonce_wire(&nonce),
+            base64::engine::general_purpose::STANDARD.encode(nonce),
+            "the login ceremony diverged from the wallet ceremony's encoding"
+        );
     }
 
     /// The two ceremonies must not share a device-proof preimage, or a
