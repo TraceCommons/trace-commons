@@ -600,9 +600,15 @@ jobs:
             rustup toolchain install "$v" --profile minimal --no-self-update
           done
           rustup toolchain list
+      # Not a bare `apt-get update`: the runner image ships vendor apt
+      # repositories this project never installs from, and one bad vendor
+      # index fails the job before it compiles anything. The action removes
+      # them, asserts none remain, and fails loudly if Ubuntu's own archive
+      # is what is broken. A red check here that mentions apt is an
+      # infrastructure failure, not an MSRV or GTK regression.
+      - uses: ./.github/actions/apt-update-ubuntu-only
       - name: Install GTK dependencies
         run: |
-          sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
             pkg-config \
             libgtk-4-dev \
@@ -1153,9 +1159,15 @@ jobs:
       # while OCR finds no text at all. That is exactly the failure mode seen
       # on the first run with capture working -- a screenshot that looks fine
       # to a stddev test and contains nothing readable.
+      # Not a bare `apt-get update`: the runner image ships vendor apt
+      # repositories this project never installs from, and one bad vendor
+      # index fails the job before it compiles anything. The action removes
+      # them, asserts none remain, and fails loudly if Ubuntu's own archive
+      # is what is broken. A red check here that mentions apt is an
+      # infrastructure failure, not an MSRV or GTK regression.
+      - uses: ./.github/actions/apt-update-ubuntu-only
       - name: Install GTK/portal/compositor dependencies
         run: |
-          sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
             pkg-config \
             libgtk-4-dev \
