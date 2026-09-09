@@ -60,6 +60,13 @@ struct PreviewSheet: View {
     /// the body per keystroke, 17.5 MB at a time on a real session.
     @State private var document: TranscriptDocument?
     @State private var failure: String?
+    /// The daemon's sentence for a review it refused.
+    ///
+    /// Separate from `failure`, which also holds messages from the local
+    /// preview build -- including raw error text. Only a refusal the daemon
+    /// classified lands here, so the notice below can prefer it without
+    /// risking an internal string reaching a screen.
+    @State private var witnessRefusal: String?
     @State private var loading: Bool
 
     /// The contributor's answer to `VerdictCopy.question`, or `nil` for the
@@ -296,7 +303,16 @@ struct PreviewSheet: View {
             )
         } else if let failure {
             VStack(spacing: TC.Space.md) {
-                CenteredNotice(title: "This one can't be shown.", detail: witnessRequested ? (model.witnessCopy?.review?.failed ?? failure) : failure)
+                // A refusal the daemon classified wins; otherwise the one
+                // fixed sentence, which is also what a failure that is not a
+                // refusal gets -- `failure` can hold raw local error text and
+                // must not reach a screen on this path.
+                CenteredNotice(
+                    title: "This one can't be shown.",
+                    detail: witnessRequested
+                        ? (witnessRefusal ?? model.witnessCopy?.review?.failed ?? failure)
+                        : failure
+                )
                 if witnessSupported, model.witnessStateCode == 1, let copy = model.witnessCopy?.review {
                     Text(copy.disclosure).font(TC.Font_.caption)
                     Button(copy.action) { confirmingWitness = true }
@@ -777,10 +793,20 @@ struct PreviewSheet: View {
         witnessWorking = true
         summary = nil
         closePreview()
-        let succeeded = await model.requestWitnessReview(entryID: entry.entryID)
+        let outcome = await model.witnessReviewOutcome(entryID: entry.entryID)
         witnessWorking = false
-        if succeeded { await load() }
-        else { failure = model.witnessCopy?.review?.failed; loading = false }
+        if outcome.succeeded { await load() }
+        else {
+            // The daemon classifies the refusal and chooses the words; this
+            // used to render one sentence for all fourteen causes, so a
+            // receipt the reviewer declined read exactly like a reviewer that
+            // was down. `review.failed` remains the fallback for a response
+            // carrying no sentence -- a transport failure, or a daemon older
+            // than this shell.
+            witnessRefusal = outcome.sentence
+            failure = outcome.sentence ?? model.witnessCopy?.review?.failed
+            loading = false
+        }
     }
 
     private func load() async {
