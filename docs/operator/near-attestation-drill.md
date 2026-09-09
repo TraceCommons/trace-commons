@@ -68,8 +68,44 @@ Rollout-smoke evidence goes stale after 24 hours, so a deployment that keeps
 | `TRACE_COMMONS_NEAR_AI_MODEL` | yes | Model id. Shared with the scorer. |
 | `TRACE_COMMONS_NEAR_AI_API_KEY` | yes | Bearer token. Never logged, never on the CLI. Shared with the scorer. |
 | `TRACE_COMMONS_NEAR_AI_EXPECTED_MEASUREMENTS` | **yes, for the drill to mean anything** | Comma-separated `key=value` pins over `mrtd`, `rtmr0`, `rtmr1`, `rtmr2`, `rtmr3`. |
+| `TRACE_COMMONS_NEAR_AI_ATTESTATION_BASE_URL` | no | Where the **per-model attestation registry** is fetched from. Defaults to `https://cloud-api.near.ai/v1`, NEAR AI's gateway. Set this only if you front the gateway yourself. **Not** the completions host above -- see "Two hosts, two questions". |
 | `TRACE_COMMONS_NEAR_AI_PCCS_URL` | no | Collateral source. Defaults to Intel's own PCS, `https://api.trustedservices.intel.com`. |
 | `TRACE_COMMONS_NEAR_AI_TIMEOUT_SECONDS` | no | Per-call timeout, default 60. |
+
+### Two hosts, two questions
+
+The two drills on this page fetch reports from **different hosts**, and the
+distinction is the whole of issue #802.
+
+`TRACE_COMMONS_NEAR_AI_BASE_URL` is the *direct-completions* endpoint -- the
+host that actually scores traces, e.g.
+`https://qwen3-6-35b.completions.near.ai/v1`. Ask it for
+`/attestation/report` and it answers with **its own single-enclave
+attestation**: a document keyed `all_attestations`, with no
+`model_attestations` array and no `gateway_attestation`, whatever query
+parameters you send. That is the right report for the ECDSA drill, whose
+question is "is the host we score against the enclave we think it is", and it
+is the wrong report for the drift probe.
+
+The **per-model registry** -- the set of `provider_tee` ed25519 keys, one per
+hosted model -- is published only by the gateway,
+`https://cloud-api.near.ai/v1`, and only when the request carries
+`model=<model>` *and* `signing_algo=ed25519`. Drop either parameter and the
+response still looks entirely well formed while attesting nothing about the
+model: without `signing_algo` you get ECDSA attestations whose keys sign no
+receipt, and without `model=` you get no `model_attestations` at all.
+
+Pointing the probe at the completions host is what made it report
+`report_shape` with `model_entry_count: 0`. It now uses its own URL, and unset
+means the gateway, so no deployment needs to set anything for this to be
+right.
+
+A gateway-shaped report yields **no model keys, never the gateway key** --
+the gateway key signs no `provider_tee` receipt, and the code refuses rather
+than substituting it. So does a completions-host document: its entry is real
+and its key is sound, which is exactly why accepting it would be wrong, since
+a deployment pointed at the wrong host would look like it was reading the
+registry when it was reading one host's self-description.
 
 Any of the first three missing and the drill refuses with
 `missing_control:near_ai_base_url` / `near_ai_model` / `near_ai_api_key`. It

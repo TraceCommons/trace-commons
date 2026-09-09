@@ -477,6 +477,21 @@ const TRACE_COMMONS_NEAR_AI_MODEL: &str = "TRACE_COMMONS_NEAR_AI_MODEL";
 const TRACE_COMMONS_NEAR_AI_API_KEY: &str = "TRACE_COMMONS_NEAR_AI_API_KEY";
 #[allow(dead_code)]
 const TRACE_COMMONS_NEAR_AI_TIMEOUT_SECONDS: &str = "TRACE_COMMONS_NEAR_AI_TIMEOUT_SECONDS";
+// Where the per-model attestation registry is fetched from. OPTIONAL, and
+// deliberately a separate variable from TRACE_COMMONS_NEAR_AI_BASE_URL: that
+// one is the *direct-completions* endpoint (see `AppState::from_env`), e.g.
+// `https://qwen3-8-27b.completions.near.ai/v1`, and a completions host answers
+// /attestation/report with its own single-enclave document -- no
+// `model_attestations` array at all, whatever query parameters are sent.
+// Only the gateway publishes the registry. Reusing the one variable for both
+// services is what made the drift probe report `report_shape` with
+// `model_entry_count: 0`; see #802.
+//
+// Unset means `ATTESTATION_GATEWAY_BASE_URL`, which is the right answer for
+// every deployment that uses NEAR AI's hosted gateway -- including the pilot,
+// which sets no such variable today.
+const TRACE_COMMONS_NEAR_AI_ATTESTATION_BASE_URL: &str =
+    "TRACE_COMMONS_NEAR_AI_ATTESTATION_BASE_URL";
 // Intel PCS / caching-PCCS base URL for the attestation drill's collateral
 // fetch. Defaults to Intel's own service: the collateral is what a quote is
 // verified against, so the shorter the trust path to Intel the better.
@@ -4037,10 +4052,13 @@ impl AppState {
             None => None,
         };
 
-        // One client, two seams. Constructing it twice would let a future
-        // edit configure one half and not the other, which is the shape of a
-        // probe that silently observes a different endpoint than the one
-        // admission uses.
+        // One client, two seams, and deliberately two hosts inside it: the
+        // ECDSA drill proves the completions endpoint we score against is an
+        // enclave, while the ed25519 probe reads the per-model registry the
+        // gateway publishes. Constructing the client twice would let a future
+        // edit configure one half and not the other; `HttpAttestationClient`
+        // holds both URLs so the pair cannot drift apart. See #802 for what
+        // one URL serving both services cost.
         let near_attestation_endpoint = build_near_attestation_client_from_env()?;
         let near_attestation_client = near_attestation_endpoint
             .clone()
@@ -73262,6 +73280,7 @@ fn build_near_attestation_client_from_env() -> anyhow::Result<Option<Arc<HttpAtt
         SecretString::from(api_key),
         pccs_url,
         StdDuration::from_secs(timeout_seconds),
+        trimmed_env(TRACE_COMMONS_NEAR_AI_ATTESTATION_BASE_URL),
     )
     .map_err(|error| anyhow::anyhow!("{error}"))?;
     Ok(Some(Arc::new(client)))
