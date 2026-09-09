@@ -149,6 +149,19 @@ public struct PrivateInferenceCopy: Decodable, Equatable, Sendable {
     /// contributor and false for an invited one, whose session sends
     /// perfectly well and merely arrives without a copy of its call. Do not
     /// render one where the other belongs.
+    /// The certificate-held list, in both readings.
+    ///
+    /// The list is driven by the queue entry's `holds_certificate`, true
+    /// after either witness route. Which sentence a row gets follows the
+    /// contributor's invite status -- the same status this shell already
+    /// reads for the eligibility surface -- and NEVER the attestation mark
+    /// below, which answers whether the session carries a copy of its model
+    /// call. Holds-a-certificate and was-attested are different facts.
+    public let certificateRowCandidate: String
+    public let certificateRowAttested: String
+    public let certificateListCandidate: String
+    public let certificateListAttested: String
+    public let certificateListEmpty: String
     public let attestationAttested: String
     public let attestationUnattestedPermanent: String
     public let attestationUnattestedConfiguration: String
@@ -273,6 +286,11 @@ public struct PrivateInferenceCopy: Decodable, Equatable, Sendable {
         case eligibilityReasonMarkerAbsent = "eligibility_reason_marker_absent"
         case eligibilityReasonRequestMalformed = "eligibility_reason_request_malformed"
         case eligibilityReasonReceiptUnavailable = "eligibility_reason_receipt_unavailable"
+        case certificateRowCandidate = "certificate_row_candidate"
+        case certificateRowAttested = "certificate_row_attested"
+        case certificateListCandidate = "certificate_list_candidate"
+        case certificateListAttested = "certificate_list_attested"
+        case certificateListEmpty = "certificate_list_empty"
         case attestationAttested = "attestation_attested"
         case attestationUnattestedPermanent = "attestation_unattested_permanent"
         case attestationUnattestedConfiguration = "attestation_unattested_configuration"
