@@ -317,6 +317,26 @@ pub fn verify_admission_call(
     if !trust.accepts_kind(receipt.signature_kind, &verified.signing_address) {
         return Err(AdmissionEvidenceError);
     }
+    // **`receipt.signature_kind` selects which check applies, and is never
+    // read after this point.** It has exactly two readers, both guards
+    // immediately above -- `accepts_request`, for whether the model list
+    // governs this receipt, and `accepts_kind`, for which signer set must
+    // contain the signer. Neither records it.
+    //
+    // That is a rule the next reader can check with `grep
+    // 'receipt.signature_kind'`: two guards and these comments. A third
+    // reader, or either of these two feeding a value that outlives the
+    // function, is reintroducing the defect.
+    //
+    // It is the caller's own label, carried through `verify_receipt`
+    // unchanged (`receipt.rs` assigns `payload.signature_kind` verbatim), so
+    // it is sound as a selector -- a wrong claim only sends the receipt at a
+    // stricter set and fails -- and unsound as anything else. From here on
+    // the kind is what the *signer* establishes, which the disjoint sets make
+    // well defined.
+    let signature_kind = trust
+        .established_kind(&verified.signing_address)
+        .ok_or(AdmissionEvidenceError)?;
     let binding = AdmissionBinding::parse(
         body.get("metadata")
             .and_then(|v| v.get(REQUEST_METADATA_KEY))
@@ -327,26 +347,23 @@ pub fn verify_admission_call(
     if now < 0 || binding.expires_at <= now {
         return Err(AdmissionEvidenceError);
     }
-    // Both conditions, and neither alone. `verdict.model` is `Some` only for
+    // Both conditions, and neither alone. `verified.model` is `Some` only for
     // the three-part text, so the signature covers the model -- but a gateway
     // key signing a three-part text still says nothing about which model
     // answered, because that one key vouches for every model behind the
-    // gateway. `ProviderTee` alone is not enough either: the kind is a wire
-    // label the signature does not cover, so on its own it would let a caller
-    // *claim* its way to an attributed model. Requiring both means the label
-    // can only ever narrow what this call is credited with.
-    let model_attribution = match (verified.signature_kind, verified.model.as_deref()) {
-        (ReceiptSignatureKind::ProviderTee, Some(_)) => ModelAttribution::ReceiptBound,
+    // gateway. The established kind alone is not enough either: a
+    // provider-TEE key can sign the two-part text, which commits to no model.
+    //
+    // The kind here is the established one, not the label. It was already
+    // sound with the label, because requiring both conditions meant the label
+    // could only narrow -- but a line reading the label beside a line reading
+    // the derived value is an attractive nuisance: the two agree in every
+    // accepted case, so a later "fix" of the inconsistency passes every test
+    // whichever direction it goes.
+    let model_attribution = match (signature_kind, verified.model.as_deref()) {
+        (AdmissionSignatureKind::ProviderTee, Some(_)) => ModelAttribution::ReceiptBound,
         _ => ModelAttribution::RequestAsserted,
     };
-    // From the signer, never from `verified.signature_kind` -- which is the
-    // caller's own label carried through `verify_receipt` unchanged
-    // (`receipt.rs` assigns `payload.signature_kind` verbatim). The evidence
-    // below is signed by the witness, so what goes into it has to be
-    // something the server established.
-    let signature_kind = trust
-        .established_kind(&verified.signing_address)
-        .ok_or(AdmissionEvidenceError)?;
     Ok(VerifiedAdmissionCall {
         binding,
         provider_signer: verified.signing_address,
