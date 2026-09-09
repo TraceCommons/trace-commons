@@ -7621,6 +7621,18 @@ fn app(state: Arc<AppState>) -> Router {
             "/v1/account/near/provision/finish",
             post(near_provision_finish_handler),
         )
+        // The NEAR AI login ceremony (#836). A sibling of the wallet pair
+        // above, not a mode of it: it proves possession of a NEAR AI session
+        // rather than control of a wallet, and a commons may offer either.
+        // `capabilities` says which, in two separate flags.
+        .route(
+            "/v1/account/near-ai/provision/start",
+            post(near_ai_provision_start_handler),
+        )
+        .route(
+            "/v1/account/near-ai/provision/finish",
+            post(near_ai_provision_finish_handler),
+        )
         // Browser-facing redeem flow. Intentionally NOT under /v1 and
         // un-authenticated: the single-use code IS the credential. The mint URL
         // (`/account/login?code=...`) points here.
@@ -16713,7 +16725,10 @@ async fn native_authorize_start_handler(
 
 #[path = "trace_commons_ingest_internal/near_provisioning.rs"]
 mod near_provisioning;
-use near_provisioning::{near_provision_finish_handler, near_provision_start_handler};
+use near_provisioning::{
+    near_ai_provision_finish_handler, near_ai_provision_start_handler,
+    near_provision_finish_handler, near_provision_start_handler,
+};
 
 /// Complete the native half of a browser redeem: mint the one-time code and
 /// return the absolute loopback `Location` the browser should be sent to.

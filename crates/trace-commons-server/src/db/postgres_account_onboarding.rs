@@ -20,6 +20,24 @@ impl PgBackend {
         pending: NativeProvisioningPending,
         expires_at: i64,
     ) -> Result<(), DatabaseError> {
+        self.store_ceremony_payload(hash, &pending, expires_at)
+            .await
+    }
+
+    /// Store one ceremony, whatever its shape.
+    ///
+    /// `trace_near_provisioning_ceremonies` is a ceremony handle and an opaque
+    /// `payload`, so the row mechanics -- the GUC that the RLS policy reads,
+    /// the expiry, the single-use delete on take -- are the same for every
+    /// ceremony and are written once here. Two enrolment ceremonies with two
+    /// copies of the RLS handshake is a rule that eventually diverges, and the
+    /// half that diverges silently is whichever has the thinner tests.
+    async fn store_ceremony_payload<T: serde::Serialize>(
+        &self,
+        hash: &str,
+        pending: &T,
+        expires_at: i64,
+    ) -> Result<(), DatabaseError> {
         let payload = serde_json::to_value(pending).map_err(|_| refused())?;
         let mut client = self.trace_pool().get().await?;
         let tx = client.transaction().await?;
@@ -37,6 +55,38 @@ impl PgBackend {
         &self,
         hash: &str,
     ) -> Result<Option<NativeProvisioningPending>, DatabaseError> {
+        self.take_ceremony_payload(hash).await
+    }
+
+    /// Store a NEAR AI login ceremony (#836) in the same table.
+    pub(super) async fn near_ai_login_store_ceremony(
+        &self,
+        hash: &str,
+        pending: &crate::account_onboarding::NearAiLoginPending,
+        expires_at: i64,
+    ) -> Result<(), DatabaseError> {
+        self.store_ceremony_payload(hash, pending, expires_at).await
+    }
+
+    /// Consume a NEAR AI login ceremony. Single use and expiry-checked, by the
+    /// same delete-and-return the wallet ceremony uses.
+    pub(super) async fn near_ai_login_take_ceremony(
+        &self,
+        hash: &str,
+    ) -> Result<Option<crate::account_onboarding::NearAiLoginPending>, DatabaseError> {
+        self.take_ceremony_payload(hash).await
+    }
+
+    /// Consume one ceremony, whatever its shape. See
+    /// [`Self::store_ceremony_payload`].
+    ///
+    /// The delete and the liveness test are one statement on purpose: a
+    /// select-then-delete would let two racing finishes both read a live
+    /// ceremony, and a ceremony is single use.
+    async fn take_ceremony_payload<T: serde::de::DeserializeOwned>(
+        &self,
+        hash: &str,
+    ) -> Result<Option<T>, DatabaseError> {
         let mut client = self.trace_pool().get().await?;
         let tx = client.transaction().await?;
         tx.execute(
@@ -111,27 +161,61 @@ impl PgBackend {
         // is the behaviour the unsalted derivation got for free by giving both
         // racers the same tenant id. Bounded at one retry: a second failure to
         // resolve means something other than a race.
-        let mut tenant = match self.near_anchor_tenant(&anchor_hash).await? {
+        self.provision_against_anchor(&anchor_hash, random_near_tenant_id, |tenant| {
+            self.near_provision_in_tenant(
+                &proof,
+                &session,
+                tenant,
+                &anchor_hash,
+                &sealed_json,
+                &pepper_ref,
+                &key_ref,
+            )
+        })
+        .await
+    }
+
+    /// Resolve the tenant for an anchor, attempt a provisioning write, and
+    /// retry once if the anchor was claimed underneath.
+    ///
+    /// **The race this handles.** Two concurrent first-logins for the same
+    /// account both resolve to no tenant and both mint one. The advisory lock
+    /// inside the write serializes them on the anchor, so the loser's
+    /// `ON CONFLICT DO NOTHING` claims nothing, rolls its whole transaction
+    /// back -- minted tenant included -- and reports the anchor as taken. One
+    /// retry then resolves the winner's tenant and both requests land on the
+    /// same account, which is the behaviour the pre-V61 derivation got for free
+    /// by giving both racers the same tenant id.
+    ///
+    /// Bounded at one retry: a second failure to resolve means something other
+    /// than a race.
+    ///
+    /// Shared by both enrolment ceremonies (#836). The wallet and the login
+    /// write different rows, but they race identically, and this is the subtle
+    /// half -- a second copy would be the one to drift, and it would drift
+    /// silently because a race is not what a test reaches for first.
+    async fn provision_against_anchor<F, Fut>(
+        &self,
+        anchor_hash: &str,
+        mint_tenant: fn() -> String,
+        attempt: F,
+    ) -> Result<ProvisionedNearAccount, DatabaseError>
+    where
+        F: Fn(String) -> Fut,
+        Fut: std::future::Future<Output = Result<Option<ProvisionedNearAccount>, DatabaseError>>,
+    {
+        // A returning contributor keeps their existing tenant; a new one gets a
+        // tenant drawn from the OS RNG that is a function of no public input.
+        let mut tenant = match self.near_anchor_tenant(anchor_hash).await? {
             Some(existing) => existing,
-            None => random_near_tenant_id(),
+            None => mint_tenant(),
         };
-        for attempt in 0..2 {
-            match self
-                .near_provision_in_tenant(
-                    &proof,
-                    &session,
-                    &tenant,
-                    &anchor_hash,
-                    &sealed_json,
-                    &pepper_ref,
-                    &key_ref,
-                )
-                .await?
-            {
+        for round in 0..2 {
+            match attempt(tenant.clone()).await? {
                 Some(provisioned) => return Ok(provisioned),
-                None if attempt == 0 => {
+                None if round == 0 => {
                     tenant = self
-                        .near_anchor_tenant(&anchor_hash)
+                        .near_anchor_tenant(anchor_hash)
                         .await?
                         .ok_or_else(refused)?;
                 }
@@ -152,13 +236,12 @@ impl PgBackend {
         &self,
         proof: &VerifiedNearProvisioning,
         session: &NewSession<'_>,
-        tenant: &str,
+        tenant: String,
         anchor_hash: &str,
         sealed_json: &serde_json::Value,
         pepper_ref: &str,
         key_ref: &str,
     ) -> Result<Option<ProvisionedNearAccount>, DatabaseError> {
-        let tenant = tenant.to_string();
         let device = trace_commons_protocol::onboarding::device_key_id_from_public_key_bytes(
             proof.device_public_key(),
         );
@@ -220,6 +303,136 @@ impl PgBackend {
         tx.execute("INSERT INTO trace_near_provisioned_devices(tenant_id,principal_ref,account_id,device_key_id,anchor_hash) VALUES($1,$2,$3,$4,$5) ON CONFLICT(tenant_id,principal_ref) DO NOTHING", &[&tenant,&principal,&account,&device,&anchor_hash]).await?;
         tx.execute("INSERT INTO trace_sessions(tenant_id,session_id,account_id,token_hash,client_kind,expires_at) VALUES($1,$2,$3,$4,'native',$5)", &[&tenant,&Uuid::new_v4(),&account,&session.token_hash,&session.expires_at]).await?;
         tx.execute("INSERT INTO trace_account_audit(tenant_id,action,actor_ref,outcome,safe_metadata) VALUES($1,'near_account_provisioned',$2,'success',$3)", &[&tenant,&principal,&serde_json::json!({"identity":"near","admission":"not_granted"})]).await?;
+        tx.commit().await?;
+        Ok(Some(ProvisionedNearAccount {
+            tenant_id: tenant,
+            account_id: account,
+            device_key_id: device,
+            anchor_hash: anchor_hash.to_string(),
+        }))
+    }
+
+    /// Provision a contributor from a verified NEAR AI login (#836).
+    ///
+    /// The sibling of [`Self::near_provision`], and deliberately a sibling
+    /// rather than a shared function with branches: the wallet path is
+    /// unchanged by this work, and threading five flags through it to serve
+    /// two identity systems would put the change inside the path it was
+    /// supposed to leave alone.
+    ///
+    /// The race handling is **not** duplicated: both ceremonies go through
+    /// [`Self::provision_against_anchor`]. It was duplicated in the PR that
+    /// introduced this path and extracted here, in the PR that first makes the
+    /// path reachable -- extracting it while the login path was still inert
+    /// would have edited a live, deployed path for the benefit of code that
+    /// did not run.
+    pub(super) async fn near_ai_login_provision(
+        &self,
+        login: &crate::near_ai_login::VerifiedNearAiLogin,
+        device_public_key: &[u8; 32],
+        session: NewSession<'_>,
+        identity: &NearAccountIdentity,
+    ) -> Result<ProvisionedNearAccount, DatabaseError> {
+        if session.client_kind != crate::account_native_auth::NATIVE_SESSION_CLIENT_KIND {
+            return Err(refused());
+        }
+        // The anchor is HMAC(pepper, subject_id) under the *login* domain, and
+        // the sealed subject is the only copy of that id we keep -- the same
+        // shape the wallet path uses for an account name, so rotation reads
+        // both rows identically.
+        let anchor_hash = identity.login_index_label(login.subject_id());
+        let sealed_subject = identity
+            .seal_login_subject(login.subject_id())
+            .map_err(|_| refused())?;
+        let sealed_json = serde_json::to_value(&sealed_subject).map_err(|_| refused())?;
+        let pepper_ref = identity.pepper_ref_hash().to_string();
+        let key_ref = identity.key_ref_hash();
+        self.provision_against_anchor(
+            &anchor_hash,
+            crate::near_account_identity::random_near_ai_tenant_id,
+            |tenant| {
+                self.near_ai_login_provision_in_tenant(
+                    login,
+                    device_public_key,
+                    &session,
+                    tenant,
+                    &anchor_hash,
+                    &sealed_json,
+                    &pepper_ref,
+                    &key_ref,
+                )
+            },
+        )
+        .await
+    }
+
+    /// One login provisioning attempt against a decided tenant.
+    ///
+    /// `Ok(None)` means the anchor was claimed by another tenant while this
+    /// transaction waited on the advisory lock; everything written here,
+    /// including the minted tenant, is rolled back by dropping the transaction.
+    #[allow(clippy::too_many_arguments)]
+    async fn near_ai_login_provision_in_tenant(
+        &self,
+        login: &crate::near_ai_login::VerifiedNearAiLogin,
+        device_public_key: &[u8; 32],
+        session: &NewSession<'_>,
+        tenant: String,
+        anchor_hash: &str,
+        sealed_json: &serde_json::Value,
+        pepper_ref: &str,
+        key_ref: &str,
+    ) -> Result<Option<ProvisionedNearAccount>, DatabaseError> {
+        let device = trace_commons_protocol::onboarding::device_key_id_from_public_key_bytes(
+            device_public_key,
+        );
+        let principal = super::onboarding_device_principal_ref(&tenant, &device);
+        let public_key = base64::engine::general_purpose::STANDARD.encode(device_public_key);
+        let provider = login.auth_provider().to_string();
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, &tenant).await?;
+        tx.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended($1,0))",
+            &[&anchor_hash],
+        )
+        .await?;
+        tx.execute(
+            "INSERT INTO trace_tenants(tenant_id) VALUES($1) ON CONFLICT DO NOTHING",
+            &[&tenant],
+        )
+        .await?;
+        let existing = tx.query_opt("SELECT a.account_id FROM trace_near_account_anchors n JOIN trace_accounts a USING(tenant_id,account_id) WHERE n.anchor_hash=$1 AND a.closed_at IS NULL", &[&anchor_hash]).await?;
+        let account = if let Some(row) = existing {
+            row.get::<_, Uuid>(0)
+        } else {
+            let id = Uuid::new_v4();
+            tx.execute(
+                "INSERT INTO trace_accounts(tenant_id,account_id) VALUES($1,$2)",
+                &[&tenant, &id],
+            )
+            .await?;
+            // `identity_source` and `auth_provider` are what make this row
+            // distinguishable from a wallet anchor in the table that decides
+            // admission. The database enforces their pairing.
+            let claimed = tx.execute("INSERT INTO trace_near_account_anchors(tenant_id,anchor_hash,account_id,sealed_account_name,index_pepper_ref,account_name_key_ref,identity_source,auth_provider) VALUES($1,$2,$3,$4,$5,$6,'near_ai_login',$7) ON CONFLICT (anchor_hash) DO NOTHING", &[&tenant,&anchor_hash,&id,&sealed_json,&pepper_ref,&key_ref,&provider]).await?;
+            if claimed == 0 {
+                return Ok(None);
+            }
+            id
+        };
+        // No `trace_near_identities` row: that table binds a wallet public key
+        // to a NEAR account name, and this path has neither. A login proves an
+        // account, not a key.
+        tx.execute("INSERT INTO device_keys(device_key_id,tenant_id,public_key,invite_subject_hash,onboarding_origin) VALUES($1,$2,$3,NULL,'near_ai') ON CONFLICT(device_key_id) DO NOTHING", &[&device,&tenant,&public_key]).await?;
+        if tx.query_opt("SELECT 1 FROM device_keys WHERE tenant_id=$1 AND device_key_id=$2 AND public_key=$3 AND onboarding_origin='near_ai' AND revoked_at IS NULL", &[&tenant,&device,&public_key]).await?.is_none() { return Err(refused()); }
+        tx.execute("INSERT INTO trace_account_principals(tenant_id,account_id,principal_ref) VALUES($1,$2,$3) ON CONFLICT(tenant_id,principal_ref) DO NOTHING", &[&tenant,&account,&principal]).await?;
+        if tx.query_opt("SELECT 1 FROM trace_account_principals WHERE tenant_id=$1 AND account_id=$2 AND principal_ref=$3 AND unlinked_at IS NULL", &[&tenant,&account,&principal]).await?.is_none() { return Err(refused()); }
+        tx.execute("INSERT INTO trace_near_provisioned_devices(tenant_id,principal_ref,account_id,device_key_id,anchor_hash) VALUES($1,$2,$3,$4,$5) ON CONFLICT(tenant_id,principal_ref) DO NOTHING", &[&tenant,&principal,&account,&device,&anchor_hash]).await?;
+        tx.execute("INSERT INTO trace_sessions(tenant_id,session_id,account_id,token_hash,client_kind,expires_at) VALUES($1,$2,$3,$4,'native',$5)", &[&tenant,&Uuid::new_v4(),&account,&session.token_hash,&session.expires_at]).await?;
+        // Hash-only, like its wallet sibling: the audit row names the identity
+        // system and says admission was not granted here. No subject, no
+        // provider label that could narrow who this is, no token.
+        tx.execute("INSERT INTO trace_account_audit(tenant_id,action,actor_ref,outcome,safe_metadata) VALUES($1,'near_ai_login_provisioned',$2,'success',$3)", &[&tenant,&principal,&serde_json::json!({"identity":"near_ai_login","admission":"not_granted"})]).await?;
         tx.commit().await?;
         Ok(Some(ProvisionedNearAccount {
             tenant_id: tenant,

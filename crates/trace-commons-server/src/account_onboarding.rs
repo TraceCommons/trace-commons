@@ -130,6 +130,32 @@ pub struct NativeProvisioningPending {
     pub code_challenge: String,
 }
 
+/// A NEAR AI login ceremony between `start` and `finish` (#836).
+///
+/// Everything the finish step must check against, and **nothing the client
+/// supplies at finish**: the nonce and expiry are server-chosen, the device key
+/// and PKCE challenge are what start committed to. A finish request that names
+/// a different device or a different challenge is checked against this rather
+/// than trusted, which is what makes the ceremony a binding rather than a
+/// formality.
+///
+/// No account identifier of any kind. The account is whatever the introspected
+/// token's subject resolves to, decided at finish and never asserted by the
+/// caller -- which is the client-asserted identity #836 exists to prevent.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NearAiLoginPending {
+    /// Server-chosen, 32 bytes, hex. What makes the device proof unreplayable.
+    pub nonce_hex: String,
+    /// The S256 challenge from start; finish presents the verifier for it.
+    pub code_challenge: String,
+    /// The device public key this ceremony enrols, base64.
+    pub device_public_key: String,
+    /// Unix seconds. Enforced by the row's own expiry as well, so a stale
+    /// ceremony is unusable even if this field were ignored.
+    pub expires_at: i64,
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ProvisionedNearAccount {
     pub tenant_id: String,
