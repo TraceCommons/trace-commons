@@ -2290,6 +2290,57 @@ Both fields are additive; the schema version stays
 `trace_commons.daemon.v1_1`, and a client that ignores them behaves exactly
 as before.
 
+### The attested-inference record
+
+The attestation mark above is computed at discovery, before any receipt is
+fetched and before any witness is contacted. What happened *after* that --
+whether the witness that certified this entry's review was actually handed a
+receipt with the bodies -- was recorded nowhere: the certificate carries no
+such field, the receipt is discarded after the witness call, and ingest
+stores nothing about it. This field is the daemon's own record of that fact.
+
+| Field | Shape |
+|---|---|
+| `attested_inference` | `{"state": "certified"}` or `{"state": "uncertified", "reason": <label>}` |
+
+| `state` | Means |
+|---|---|
+| `certified` | a receipt was offered with the bodies and the witness issued a certificate over them |
+| `uncertified` | the review was certified without attested inference; `reason` says why |
+
+| `reason` | Means |
+|---|---|
+| `no_attested_call` | the session joined no inference hop, or the hop recorded no verbatim bodies |
+| `bodies_withheld` | the session carried an attested call and the review was requested without inference bodies |
+| `receipt_unavailable` | the session carried an attested call and no receipt could be obtained for it; the trace was certified without it |
+
+**`attested_inference` is PRESENT only while a witnessed review is pinned to
+the entry**, and then it is exactly what the stored review records. It is
+ABSENT -- not `unknown`, not null -- for an entry with no witnessed review, an
+entry whose review predates the record, and an entry whose pin is a local
+preview. Absent means *not known*, and a shell MUST render it as nothing: an
+older review may have carried a verified receipt, and nothing says either
+way. Flattening absence into `uncertified` tells a contributor their work is
+worth less than it may be; flattening it into `certified` is the lie this
+field exists to stop.
+
+**Written from the fact, not the intention.** `certified` is set only when a
+receipt was among what the witness was handed *and* the witness answered
+with a certificate. A session whose queue row says `attestation: attested`
+and whose receipt fetch then fails is `uncertified` with
+`receipt_unavailable` -- the mark describes what the session carries, this
+record describes what the witness was given. The two disagreeing is the
+case that matters, not a defect.
+
+What it does not say: whether the receipt's *signer* was one the witness
+pins. That is the witness's configuration, invisible to the client; a
+certificate from a pinning witness and one from a dormant witness read the
+same here.
+
+The record lives and dies with the pin: an undone approval, a released
+preview or a re-preview without a witness clears it, so a row can never
+inherit an answer from a review that is no longer the one it would send.
+
 ### The credential state
 
 `near_ai_credential_status` answers ONE label, and it is the only thing a

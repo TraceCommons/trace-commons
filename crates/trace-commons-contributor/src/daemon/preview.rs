@@ -800,7 +800,7 @@ pub async fn build_witnessed_preview(
     let mut context =
         crate::submit::SubmitContext::new(store, cfg, &submit_options, near_ai.clone())
             .map_err(|_| anyhow::anyhow!("witness-review-unavailable"))?;
-    let response = context
+    let (response, attested_inference) = context
         .prepare_witnessed_review(
             &transcript,
             options.correction,
@@ -819,6 +819,7 @@ pub async fn build_witnessed_preview(
         fingerprint.clone(),
         verdict,
         options.correction,
+        Some(attested_inference),
     );
     let envelope = artifact.validate(
         cfg,

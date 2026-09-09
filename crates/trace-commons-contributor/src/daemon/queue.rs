@@ -239,6 +239,13 @@ pub struct QueueEntry {
     /// fingerprint is what covers them.
     #[serde(default)]
     pub previewed_envelope_digest: Option<String>,
+    /// The stored review's attested-inference record, mirrored here so a
+    /// queue listing can say it without opening the file. Set only by
+    /// `record_previewed_envelope` from the artifact being pinned, cleared
+    /// wherever the pin is; `None` whenever there is no witnessed review to
+    /// describe, which reads as unknown rather than as uncertified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attested_inference: Option<crate::witness::inference_record::InferenceAttestationRecord>,
     /// When the contributor approved this entry, and therefore when its
     /// post-approval hold started.
     ///
@@ -504,6 +511,7 @@ fn reoffered_from(old: QueueEntry) -> QueueEntry {
         approved_inputs: None,
         approved_at: None,
         previewed_envelope_digest: None,
+        attested_inference: None,
         // The caller found content the watcher never observed (the
         // uploader's re-hash guard is the only path here), so this entry is
         // not made of any observation the poll loop can match against.
@@ -907,7 +915,12 @@ impl Queue {
     /// Only meaningful while the entry is still `Pending`: an entry already
     /// approved has had its terms fixed, and a later preview must not
     /// silently re-pin them to something else.
-    pub fn record_previewed_envelope(&mut self, entry_id: Uuid, digest: &str) -> bool {
+    pub fn record_previewed_envelope(
+        &mut self,
+        entry_id: Uuid,
+        digest: &str,
+        attested_inference: Option<crate::witness::inference_record::InferenceAttestationRecord>,
+    ) -> bool {
         let Some(e) = self.entries.iter_mut().find(|e| e.entry_id == entry_id) else {
             return false;
         };
@@ -915,6 +928,10 @@ impl Queue {
             return false;
         }
         e.previewed_envelope_digest = Some(digest.to_string());
+        // Replaced, never merged: the record describes exactly the review
+        // being pinned, and a local preview (no record) pinned over an
+        // earlier witnessed one must not keep the earlier answer.
+        e.attested_inference = attested_inference;
         true
     }
 
@@ -944,6 +961,7 @@ impl Queue {
             return false;
         }
         e.previewed_envelope_digest = None;
+        e.attested_inference = None;
         true
     }
 
@@ -1007,6 +1025,7 @@ impl Queue {
         // The artifact the contributor was shown is no longer the one that
         // would be sent, so the re-offer must be previewed afresh.
         e.previewed_envelope_digest = None;
+        e.attested_inference = None;
         true
     }
 
@@ -1344,6 +1363,7 @@ impl Queue {
         // is not premature: no path reads a `Pending` entry's stored
         // envelope.
         e.previewed_envelope_digest = None;
+        e.attested_inference = None;
         Ok(())
     }
 
@@ -2368,7 +2388,7 @@ mod tests {
         q.upsert(entry("sha256:aa", "2026-08-08T12:00:00Z"), 500)
             .unwrap();
         let id = entry_id_for("sha256:aa");
-        assert!(q.record_previewed_envelope(id, "sha256:envelope"));
+        assert!(q.record_previewed_envelope(id, "sha256:envelope", None));
         assert!(q.approve(id, &[], None, None, None, Some(at("2026-08-08T12:00:00Z"))));
         assert!(
             q.get(id).unwrap().previewed_envelope_digest.is_some(),
@@ -2388,6 +2408,48 @@ mod tests {
     }
 
     #[test]
+    fn the_attested_inference_record_lives_and_dies_with_the_pin() {
+        // The record describes the pinned review. When the pin goes -- an
+        // undone approval, a released preview -- the record it described
+        // goes with it, so a re-preview cannot inherit a stale answer.
+        use crate::witness::inference_record::InferenceAttestationRecord;
+        let mut q = Queue::new();
+        q.upsert(entry("sha256:aa", "2026-08-08T12:00:00Z"), 500)
+            .unwrap();
+        let id = entry_id_for("sha256:aa");
+        assert!(q.record_previewed_envelope(
+            id,
+            "witness-sha256:envelope",
+            Some(InferenceAttestationRecord::certified())
+        ));
+        assert_eq!(
+            q.get(id).unwrap().attested_inference,
+            Some(InferenceAttestationRecord::certified())
+        );
+        assert!(q.release_preview_pin(id));
+        assert_eq!(q.get(id).unwrap().attested_inference, None);
+
+        assert!(q.record_previewed_envelope(
+            id,
+            "witness-sha256:envelope",
+            Some(InferenceAttestationRecord::certified())
+        ));
+        assert!(q.approve(id, &[], None, None, None, Some(at("2026-08-08T12:00:00Z"))));
+        q.cancel(id).unwrap();
+        assert_eq!(q.get(id).unwrap().attested_inference, None);
+
+        // A local preview is not a certificate: pinning without a record
+        // clears whatever an earlier witnessed preview left.
+        assert!(q.record_previewed_envelope(
+            id,
+            "witness-sha256:envelope",
+            Some(InferenceAttestationRecord::certified())
+        ));
+        assert!(q.record_previewed_envelope(id, "sha256:local", None));
+        assert_eq!(q.get(id).unwrap().attested_inference, None);
+    }
+
+    #[test]
     fn release_preview_pin_drops_a_pending_entrys_pin() {
         // The pin is what keeps a redacted envelope on disk. Releasing it
         // on an entry nobody is waiting on is how the store stops growing;
@@ -2396,7 +2458,7 @@ mod tests {
         q.upsert(entry("sha256:aa", "2026-08-08T12:00:00Z"), 500)
             .unwrap();
         let id = entry_id_for("sha256:aa");
-        assert!(q.record_previewed_envelope(id, "sha256:envelope"));
+        assert!(q.record_previewed_envelope(id, "sha256:envelope", None));
         assert!(q.release_preview_pin(id));
         assert_eq!(q.get(id).unwrap().previewed_envelope_digest, None);
         assert!(!q.pinned_entry_ids().contains(&id));
@@ -2411,7 +2473,7 @@ mod tests {
         q.upsert(entry("sha256:aa", "2026-08-08T12:00:00Z"), 500)
             .unwrap();
         let id = entry_id_for("sha256:aa");
-        assert!(q.record_previewed_envelope(id, "sha256:envelope"));
+        assert!(q.record_previewed_envelope(id, "sha256:envelope", None));
         assert!(q.approve(id, &[], None, None, None, None));
         assert!(!q.release_preview_pin(id));
         assert!(q.get(id).unwrap().previewed_envelope_digest.is_some());

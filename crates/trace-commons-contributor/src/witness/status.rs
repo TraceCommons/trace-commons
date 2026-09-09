@@ -306,10 +306,20 @@ pub struct InferenceReceiptCount {
 
 /// Read `n_of_m` out of a witness certificate, if it carries one.
 ///
-/// Lenient by design: this build must accept a certificate from a witness
-/// that emits the field and one from a witness that does not, and the field
-/// is being added by other work in parallel. Both `{"n":3,"m":7}` and
-/// `[3,7]` are accepted.
+/// **No witness writes this field.** `CertificateDetails` on the server is
+/// verdict, policy version, measurement and timestamp, and the attested
+/// inference module there says outright that the certificate carries no
+/// attested-inference field -- adding one is a signing-domain change across
+/// every deployed witness and every verifying client. So this reader
+/// answers `None` for every certificate a real witness has ever issued, and
+/// a caller must not take that `None` as "no receipts". The fact it was
+/// written to read lives instead in `witness::inference_record`, recorded
+/// by the client at the moment the witness answered, beside the stored
+/// review and on the queue entry.
+///
+/// Kept, and kept lenient, so a witness that does one day emit the field is
+/// accepted alongside one that does not. Both `{"n":3,"m":7}` and `[3,7]`
+/// are accepted.
 ///
 /// `n > m` is read as no count rather than as a count. A certificate
 /// claiming more receipts than inferences is not a small error to render
