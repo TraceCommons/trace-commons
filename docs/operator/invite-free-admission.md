@@ -43,44 +43,56 @@ proves nothing about whether contributions are getting through.
 
 ## 1. Preconditions
 
-### 1.0 Blocking: the anchor check has not caught up with V61/V62
+### 1.0 Resolved: the anchor check has caught up with V61/V62
 
-**Do not run this procedure against a build at or after V61 until this is
-fixed.** It is a code defect, not a configuration one, and it makes every step
-below verify green and every contribution fail.
+**Nothing to do here. This section is kept because an earlier copy of this
+runbook told operators not to run the procedure at all, and anyone working
+from that copy needs to know the block is lifted.**
 
-`admission::anchor` decides an account's anchor by taking the authenticated
-tenant id, stripping `near-`, and requiring the remaining 64 hex characters to
-equal the stored provisioned anchor:
+`admission::anchor` used to take the authenticated tenant id, strip `near-`,
+and require the remaining 64 hex characters to equal the stored provisioned
+anchor. That equality held under V58, whose schema constrained
+`tenant_id = 'near-' || substring(anchor_hash from 8)`. V61 (#716) removed the
+derivation — the anchor became a keyed blind index and the tenant id 32 random
+bytes — and V62 dropped the constraint V61 had only appeared to drop. So the
+equality was false for every real account, and every submission from a
+`near-…` tenant was `403 admission_refused` whether admission was enabled or
+not.
 
-```rust
-// crates/trace-commons-server/src/bin/trace_commons_ingest_internal/admission.rs
-let stored = stored.strip_prefix("sha256:").ok_or_else(denied)?;
-if stored != candidate {
-    return Err(denied());
-}
-```
+It is gone, in four places:
 
-That equality held under V58, where the schema constrained
-`tenant_id = 'near-' || substring(anchor_hash from 8)`. V61 (#716) removed that
-derivation: the anchor became a keyed blind index and the tenant id became 32
-random bytes, and V62 dropped the constraint V61 had only appeared to drop.
-`near_account_identity::tenant_id_is_independent_of_every_public_input` now
-asserts that a tenant id never contains the blind index — which is exactly the
-equality the line above requires. V61 also refuses outright if pre-salting rows
-exist, so no deployment can hold a mix.
+| Where | Fixed by |
+|---|---|
+| `admission::anchor` (server) | #785 |
+| `daemon::approved_envelope` (client) | #793 |
+| `witness::transport` fixture (client) | #793 |
+| `daemon::admission_setup::validate_challenge` (client) | #807 |
 
-Consequences on such a build: every submission from a `near-…` tenant is
-`403 admission_refused` — with admission enabled *and* with it disabled, since
-`admission::reserve` calls `anchor()` before it consults
-`state.admission`. A fix belongs in that function, comparing against the stored
-anchor rather than against the tenant suffix.
+What replaced it in each case is a shape check, not a second derivation: a
+tenant still has to look like a `near-<64 lowercase hex>` tenant, it just no
+longer has to be computable from the anchor. What binds a request to its
+account is the row lookup, keyed on the authenticated tenant and principal
+together — which is what it always was. Do not reintroduce a relationship
+between `tenant_id` and `anchor_hash` in either direction, peppered or
+otherwise: that coupling is the offline-computability defect V61 fixed, and it
+let anyone who knew a NEAR account name compute its tenant id offline.
 
-This is a reading of the code, not a reproduction. The end-to-end matrix that
-would go red for it (`admission_pg_tests::actual_postgres_challenge_witness_ingest_and_terminal_retry`)
-needs an isolated PostgreSQL and is `#[ignore]`d, and the pure-function unit
-tests that do run in CI cover `evidence_binding`, not `anchor`. Confirm against
-your deployment before acting on it.
+An earlier version of this section also said the end-to-end matrix that would
+catch this is `#[ignore]`d and therefore does not run. **That was wrong when
+written.** `#[ignore]` is how the `postgres-suites` job *selects* these tests:
+they run on every PR via `cargo test --bin trace-commons-ingest
+admission_pg_tests -- --ignored`, and that job's `xact_commit` guard fails if
+they silently do not. Three tests cover this path —
+`actual_postgres_challenge_witness_ingest_and_terminal_retry`,
+`a_salted_anchor_resolves_for_its_provisioned_principal`, and
+`the_anchor_lookup_is_what_binds_a_request_to_its_account` (the last two added
+by #785, which provision an account in the post-V61 shape and assert the two
+values differ).
+
+The one caveat worth carrying: `postgres-suites` is **not** among the fourteen
+required status checks on `main`. It runs on every PR and it is real coverage,
+but it does not block a merge, so a red run there needs someone to look rather
+than being caught by branch protection.
 
 ### 1.1 The ingest is already a durable, RLS-forced, witness-trusting deployment
 
@@ -101,9 +113,10 @@ version is in the allowlist. Bring the witness up and prove it first.
 
 ### 1.2 Native NEAR provisioning is configured
 
-Only a tenant whose id is `near-<64 hex>` and whose stored provisioned anchor
-matches can reach the admission path at all (`admission::anchor`; see §1.0 for
-why that match currently cannot succeed). That
+Only a tenant whose id is `near-<64 hex>` with a stored provisioned anchor can
+reach the admission path at all (`admission::anchor`). The tenant id and the
+anchor are independent values since V61 and the lookup is what binds them — see
+§1.0, which used to say this match could not succeed. That
 namespace is allocated by [`./near-native-provisioning.md`](./near-native-provisioning.md),
 which needs `TRACE_COMMONS_NEAR_PROVISIONING_ENABLED=true` (compared against
 the literal string `true` — unlike the witness switch, `1` and `yes` do not
