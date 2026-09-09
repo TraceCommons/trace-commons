@@ -620,3 +620,197 @@ async fn actual_postgres_challenge_witness_ingest_and_terminal_retry() {
         .unwrap()
     );
 }
+
+/// A migrated admission database, connected as the owning role.
+///
+/// These two tests do not need the restricted `admission_ingest_runtime` role
+/// the end-to-end matrix above builds: `admission::anchor` reads one row
+/// through explicit tenant and principal predicates, and what they are about
+/// is which row it finds, not which grant reaches it.
+async fn admission_pg_admin() -> Arc<PgBackend> {
+    let url = std::env::var("TRACE_COMMONS_ADMISSION_INGEST_PG_TEST_URL")
+        .expect("explicit isolated URL required");
+    let parsed = reqwest::Url::parse(&url).unwrap();
+    assert_eq!(parsed.host_str(), Some("127.0.0.1"));
+    assert!(parsed.path().starts_with("/admission_test"));
+    let admin = PgBackend::new(&DatabaseConfig {
+        url: SecretString::from(url),
+        pool_size: 4,
+        ssl_mode: trace_commons_server::config::SslMode::Prefer,
+        login_resolver_url: None,
+        gate_driver_url: None,
+        pii_backstop_driver_url: None,
+        invite_registry_url: None,
+    })
+    .await
+    .unwrap();
+    admin.run_migrations().await.unwrap();
+    Arc::new(admin)
+}
+
+/// One synthetic provisioned NEAR account in the shape V61 leaves behind: a
+/// tenant id drawn at random by `random_near_tenant_id`, and an anchor that is
+/// a blind index with no arithmetic relationship to it. Provisioning itself is
+/// covered by `account_onboarding_pg`; this stands the rows up directly so the
+/// admission read can be examined on its own.
+///
+/// Returns the tenant id, the stored anchor without its `sha256:` prefix, and
+/// the device key id, so a caller can revoke the device.
+async fn provision_synthetic_near_account(
+    db: &PgBackend,
+    principal: &str,
+) -> (String, String, String) {
+    let tenant = trace_commons_server::near_account_identity::random_near_tenant_id();
+    let anchor = hash_hex(Uuid::new_v4().as_bytes());
+    let prefixed = format!("sha256:{anchor}");
+    assert_ne!(
+        tenant.strip_prefix("near-"),
+        Some(anchor.as_str()),
+        "the fixture must not reproduce the pre-V61 coupling it exists to rule out"
+    );
+    let account = Uuid::new_v4();
+    let device_bytes: [u8; 32] = sha2::Sha256::digest(Uuid::new_v4().as_bytes()).into();
+    let device =
+        trace_commons_protocol::onboarding::device_key_id_from_public_key_bytes(&device_bytes);
+    let client = db.raw_pool_for_tests_and_diagnostics().get().await.unwrap();
+    client
+        .execute(
+            "INSERT INTO trace_tenants(tenant_id) VALUES($1)",
+            &[&tenant],
+        )
+        .await
+        .unwrap();
+    client
+        .execute(
+            "INSERT INTO trace_accounts(tenant_id,account_id) VALUES($1,$2)",
+            &[&tenant, &account],
+        )
+        .await
+        .unwrap();
+    client.execute("INSERT INTO trace_near_account_anchors(tenant_id,anchor_hash,account_id,sealed_account_name,index_pepper_ref,account_name_key_ref) VALUES($1,$2,$3,$4,$5,$6)",&[&tenant,&prefixed,&account,&serde_json::json!({"fixture":"not a real seal"}),&"fixture-pepper-ref",&"fixture-key-ref"]).await.unwrap();
+    client.execute("INSERT INTO device_keys(device_key_id,tenant_id,public_key,invite_subject_hash,onboarding_origin) VALUES($1,$2,$3,NULL,'near')",&[&device,&tenant,&base64::engine::general_purpose::STANDARD.encode(device_bytes)]).await.unwrap();
+    client.execute("INSERT INTO trace_account_principals(tenant_id,account_id,principal_ref) VALUES($1,$2,$3)",&[&tenant,&account,&principal]).await.unwrap();
+    client.execute("INSERT INTO trace_near_provisioned_devices(tenant_id,principal_ref,account_id,device_key_id,anchor_hash) VALUES($1,$2,$3,$4,$5)",&[&tenant,&principal,&account,&device,&prefixed]).await.unwrap();
+    (tenant, anchor, device)
+}
+
+/// An `AppState` whose only relevant part is the mirror `admission::anchor`
+/// reads, plus a `TenantCtx` per configured token.
+fn anchor_state(
+    db: Arc<PgBackend>,
+    principals: &[(&str, &str)],
+) -> (tempfile::TempDir, Arc<AppState>, Vec<TenantCtx>) {
+    let mut tokens = BTreeMap::new();
+    for (tenant, token) in principals {
+        insert_token(&mut tokens, tenant, token, TokenRole::Contributor);
+    }
+    let contexts = principals
+        .iter()
+        .map(|(_, token)| TenantCtx::from_auth(tokens.get(*token).unwrap().clone()))
+        .collect();
+    let temp = tempfile::tempdir().unwrap();
+    let mut state = test_state_with_tokens(temp.path().to_path_buf(), tokens);
+    Arc::make_mut(&mut state).db_mirror = Some(db);
+    (temp, state, contexts)
+}
+
+fn principal_for(token: &str) -> String {
+    let mut tokens = BTreeMap::new();
+    insert_token(&mut tokens, "near-fixture", token, TokenRole::Contributor);
+    tokens.get(token).unwrap().principal_ref.clone()
+}
+
+/// #783. V58 made `tenant_id` a function of `anchor_hash` and `admission::anchor`
+/// asserted the two were equal. V61 deliberately destroyed that relationship --
+/// the tenant id is now random and the anchor a blind index -- which left the
+/// equality unsatisfiable and refused every `near-` tenant, so invite-free
+/// contribution could not be switched on at all.
+///
+/// This is the assertion the equality fails: an account provisioned in the
+/// post-V61 shape resolves to its own anchor.
+#[tokio::test]
+#[ignore = "requires isolated TRACE_COMMONS_ADMISSION_INGEST_PG_TEST_URL"]
+async fn a_salted_anchor_resolves_for_its_provisioned_principal() {
+    let db = admission_pg_admin().await;
+    let token = "anchor-fixture-owner-783";
+    let (tenant, anchor, _) = provision_synthetic_near_account(&db, &principal_for(token)).await;
+    let (_temp, state, contexts) = anchor_state(db, &[(tenant.as_str(), token)]);
+    assert_eq!(
+        admission::anchor(&state, &contexts[0])
+            .await
+            .map_err(|(status, _)| status)
+            .expect("a provisioned near- tenant must resolve its own anchor"),
+        Some(anchor),
+    );
+}
+
+/// What binds a request to an anchor, now that the equality is gone: the row
+/// is looked up by the authenticated tenant AND the authenticated principal,
+/// and only through an unrevoked `near`-origin device key on a linked
+/// principal of an open account. Nothing in the request body or headers
+/// selects it.
+///
+/// Delete that lookup -- return the tenant suffix, a constant, or any value
+/// not read from the row -- and this fails: two accounts would stop resolving
+/// to distinct anchors, a principal with no provisioning would be admitted,
+/// and revoking the device would no longer refuse.
+#[tokio::test]
+#[ignore = "requires isolated TRACE_COMMONS_ADMISSION_INGEST_PG_TEST_URL"]
+async fn the_anchor_lookup_is_what_binds_a_request_to_its_account() {
+    let db = admission_pg_admin().await;
+    let (first_token, second_token, stranger_token) = (
+        "anchor-binding-first-783",
+        "anchor-binding-second-783",
+        "anchor-binding-stranger-783",
+    );
+    let (first_tenant, first_anchor, first_device) =
+        provision_synthetic_near_account(&db, &principal_for(first_token)).await;
+    let (second_tenant, second_anchor, _) =
+        provision_synthetic_near_account(&db, &principal_for(second_token)).await;
+    assert_ne!(first_anchor, second_anchor);
+    let (_temp, state, contexts) = anchor_state(
+        db.clone(),
+        &[
+            (first_tenant.as_str(), first_token),
+            (second_tenant.as_str(), second_token),
+            // Authenticated in the first tenant, but never provisioned there.
+            (first_tenant.as_str(), stranger_token),
+        ],
+    );
+
+    assert_eq!(
+        admission::anchor(&state, &contexts[0])
+            .await
+            .map_err(|(status, _)| status)
+            .unwrap(),
+        Some(first_anchor),
+        "each tenant must resolve the anchor stored for it"
+    );
+    assert_eq!(
+        admission::anchor(&state, &contexts[1])
+            .await
+            .map_err(|(status, _)| status)
+            .unwrap(),
+        Some(second_anchor),
+        "a second account must not resolve to the first account's anchor"
+    );
+    assert!(
+        admission::anchor(&state, &contexts[2]).await.is_err(),
+        "a principal with no provisioned device in this tenant has no anchor"
+    );
+
+    db.raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .unwrap()
+        .execute(
+            "UPDATE device_keys SET revoked_at=now() WHERE device_key_id=$1",
+            &[&first_device],
+        )
+        .await
+        .unwrap();
+    assert!(
+        admission::anchor(&state, &contexts[0]).await.is_err(),
+        "revoking the provisioned device must withdraw the anchor"
+    );
+}
