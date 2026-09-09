@@ -12,6 +12,19 @@ final class DaemonClient {
     struct Failure: Error, CustomStringConvertible {
         let code: String
         let message: String
+        /// The sentence the daemon chose for this refusal, when it sent one.
+        ///
+        /// A refusal response carries `error` **and** a `result.view`: the
+        /// daemon classifies the cause and picks the words once, so the three
+        /// shells do not each keep a mapping that drifts. This bridge used to
+        /// throw on `error` without looking at `result`, so that sentence was
+        /// discarded before any view could read it and every refusal on such a
+        /// path fell back to one generic line.
+        ///
+        /// `nil` for a response with no view -- a transport failure, or a
+        /// daemon older than this shell -- and the caller keeps its own
+        /// fallback for that case.
+        var viewMessage: String? = nil
         var description: String { "\(code): \(message)" }
     }
 
@@ -95,6 +108,15 @@ final class DaemonClient {
         guard result["status"] as? String == "ready" else {
             throw Failure(code: "unavailable", message: "witness-review-incomplete")
         }
+    }
+
+    /// The daemon's sentence for a refused review, or `nil` if it sent none.
+    ///
+    /// Separate from [`requestWitnessReview`] rather than folded into it: that
+    /// call's `Bool` answer is what several callers want, and widening it
+    /// would make every one of them handle a sentence they do not render.
+    static func refusalSentence(from error: Error) -> String? {
+        (error as? Failure)?.viewMessage
     }
 
     func requestPreview(entryID: String) throws -> PreviewRequestResult {
@@ -812,9 +834,12 @@ final class DaemonClient {
             throw Failure(code: "unavailable", message: "unparseable-response")
         }
         if let error = object["error"] as? [String: Any] {
+            let view = (object["result"] as? [String: Any])?["view"] as? [String: Any]
+            let sentence = view?["message"] as? String
             throw Failure(
                 code: error["code"] as? String ?? "unavailable",
-                message: error["message"] as? String ?? "unknown"
+                message: error["message"] as? String ?? "unknown",
+                viewMessage: sentence.flatMap { $0.isEmpty ? nil : $0 }
             )
         }
         guard let result = object["result"] else {
