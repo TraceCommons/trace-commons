@@ -115,7 +115,13 @@ pub(super) async fn handle_enroll(shared: &DaemonShared, req: &Request) -> Respo
     let Some(ingest_url) = req.params.get("ingest_url").and_then(|v| v.as_str()) else {
         return Response::err(req.id, ERR_BAD_PARAMS, "near_ai_enroll_invalid");
     };
-    match enroll(shared, ingest_url).await {
+    let api = match CloudApi::live() {
+        Ok(api) => api,
+        Err(_) => {
+            return Response::err(req.id, ERR_UNAVAILABLE, "near_ai_enroll_token_unavailable");
+        }
+    };
+    match enroll(shared, &api, ingest_url).await {
         Ok(value) => Response::ok(req.id, value),
         // Label only. Every failure below already carries a control name, and
         // the errors underneath them can quote a remote body or a URL.
@@ -139,7 +145,16 @@ fn label(error: &anyhow::Error) -> &'static str {
     }
 }
 
-async fn enroll(shared: &DaemonShared, ingest_url: &str) -> Result<serde_json::Value> {
+/// `api` is a parameter rather than constructed here so a test can pass a
+/// double and observe whether the token exchange was reached at all. Without
+/// that, a test asserting "the refresh token was not spent" cannot tell a
+/// correct ordering from an exchange that merely failed for want of a network,
+/// and passes either way.
+async fn enroll(
+    shared: &DaemonShared,
+    api: &CloudApi,
+    ingest_url: &str,
+) -> Result<serde_json::Value> {
     if shared.store.load_config()?.is_some() {
         bail!("near_ai_enroll_already_enrolled")
     }
@@ -212,13 +227,9 @@ async fn enroll(shared: &DaemonShared, ingest_url: &str) -> Result<serde_json::V
 
     // Spend the refresh token as late as possible, for the reason above. The
     // rotation is persisted inside `exchange` before the JWT is used.
-    let access_token = super::nearai_credential::exchange(
-        shared,
-        &CloudApi::live().map_err(|_| anyhow!("near_ai_enroll_token_unavailable"))?,
-        &session,
-    )
-    .await
-    .map_err(|_| anyhow!("near_ai_enroll_token_unavailable"))?;
+    let access_token = super::nearai_credential::exchange(shared, api, &session)
+        .await
+        .map_err(|_| anyhow!("near_ai_enroll_token_unavailable"))?;
 
     let finished: Finished = commons
         .call_json(
@@ -365,6 +376,29 @@ mod tests {
             .map(|s| s.refresh_token)
     }
 
+    /// A cloud-api stub that records every request it receives, so a test can
+    /// assert the token exchange was never *attempted* rather than merely that
+    /// it did not succeed.
+    async fn counting_cloud_api() -> (CloudApi, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use std::sync::{Arc, atomic::AtomicUsize};
+        let hits = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&hits);
+        let app = axum::Router::new().fallback(axum::routing::any(move || {
+            let counter = Arc::clone(&counter);
+            async move {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                axum::Json(serde_json::json!({}))
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (
+            CloudApi::for_test(&format!("http://{address}")).unwrap(),
+            hits,
+        )
+    }
+
     /// A refused address must not cost the contributor their credential.
     ///
     /// The exchange retires the refresh token that authenticated it, so
@@ -380,7 +414,16 @@ mod tests {
             "not a url",
         ] {
             let shared = shared_with_session();
-            let error = enroll(&shared, address).await.unwrap_err();
+            let (api, hits) = counting_cloud_api().await;
+            let error = enroll(&shared, &api, address).await.unwrap_err();
+            // The assertion that actually pins the ordering: the exchange was
+            // never reached. Checking only that the stored token is unchanged
+            // passes just as well when the exchange ran and failed.
+            assert_eq!(
+                hits.load(std::sync::atomic::Ordering::SeqCst),
+                0,
+                "{address} reached the token exchange"
+            );
             assert_eq!(
                 label(&error),
                 "near_ai_enroll_endpoint_refused",
@@ -404,10 +447,12 @@ mod tests {
         let (dir, store) = crate::config::tests_support::temp_store();
         std::mem::forget(dir);
         let shared = DaemonShared::load(store).unwrap();
-        let error = enroll(&shared, "https://commons.example")
+        let (api, hits) = counting_cloud_api().await;
+        let error = enroll(&shared, &api, "https://commons.example")
             .await
             .unwrap_err();
         assert_eq!(label(&error), "near_ai_enroll_no_session");
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0);
         assert!(shared.store.load_config().unwrap().is_none());
     }
 
