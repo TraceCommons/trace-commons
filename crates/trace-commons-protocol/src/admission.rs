@@ -92,6 +92,53 @@ impl AdmissionRefusal {
     }
 }
 
+/// Which signature the witness checked before certifying this call.
+///
+/// Recorded in the signed statement because it is the difference between an
+/// attested model and a body-asserted one, and a holder of the evidence
+/// cannot otherwise tell: re-deriving it from signer-set membership needs the
+/// operator's configuration, which the holder does not have.
+///
+/// Only two values, deliberately. A receipt whose kind names no key source is
+/// refused before any evidence is made, so an "unrecognised" arm here would
+/// be a state this type can represent and the system cannot reach.
+///
+/// The wire spellings are NEAR AI's own, and
+/// `trace_commons_server::admission_evidence` pins them against
+/// `ReceiptSignatureKind::as_wire` so the two vocabularies cannot drift. This
+/// crate does not depend on the attestation crate for one enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum AdmissionSignatureKind {
+    /// The gateway's own attested key. Shared across every model behind it,
+    /// so it binds the bytes and names no model.
+    #[serde(rename = "gateway")]
+    Gateway,
+    /// The serving model's per-model attested key. The model is inside the
+    /// signed text.
+    #[serde(rename = "provider_tee")]
+    ProviderTee,
+}
+
+impl AdmissionSignatureKind {
+    /// The wire spelling, and what `signing_bytes` commits to.
+    #[must_use]
+    pub const fn as_wire(self) -> &'static str {
+        match self {
+            Self::Gateway => "gateway",
+            Self::ProviderTee => "provider_tee",
+        }
+    }
+
+    /// Whether a receipt of this kind evidences which model answered.
+    ///
+    /// The one question every consumer of this field actually asks. A gateway
+    /// key vouches for every model behind it, so it answers for none of them.
+    #[must_use]
+    pub const fn binds_model(self) -> bool {
+        matches!(self, Self::ProviderTee)
+    }
+}
+
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AdmissionEvidence {
@@ -99,6 +146,10 @@ pub struct AdmissionEvidence {
     pub account_anchor_sha256: String,
     pub challenge_sha256: String,
     pub provider_signer: String,
+    /// Which signature the witness checked. See [`AdmissionSignatureKind`];
+    /// [`AdmissionSignatureKind::binds_model`] is what [`Self::model`] must be
+    /// read through.
+    pub signature_kind: AdmissionSignatureKind,
     /// The model the admitted request **asked for**, which is what the
     /// operator's accepted-model list is checked against.
     ///
@@ -164,18 +215,23 @@ impl AdmissionEvidence {
             return Err(EvidenceMalformed);
         }
         let mut bytes = Vec::new();
+        // Fixed order, length-prefixed, and the kind sits beside the signer
+        // it qualifies. Both the witness that signs and the ingest that
+        // re-verifies walk this same list, so the only requirement is that it
+        // is deterministic -- which an array literal is.
         for part in [
-            &self.profile,
-            &self.account_anchor_sha256,
-            &self.challenge_sha256,
-            &self.provider_signer,
-            &self.model,
-            &self.request_sha256,
-            &self.response_sha256,
-            &self.receipt_sha256,
-            &self.artifact_sha256,
-            &self.witness_measurement,
-            &self.redaction_policy_version,
+            self.profile.as_str(),
+            self.account_anchor_sha256.as_str(),
+            self.challenge_sha256.as_str(),
+            self.provider_signer.as_str(),
+            self.signature_kind.as_wire(),
+            self.model.as_str(),
+            self.request_sha256.as_str(),
+            self.response_sha256.as_str(),
+            self.receipt_sha256.as_str(),
+            self.artifact_sha256.as_str(),
+            self.witness_measurement.as_str(),
+            self.redaction_policy_version.as_str(),
         ] {
             bytes.extend_from_slice(&(part.len() as u32).to_be_bytes());
             bytes.extend_from_slice(part.as_bytes());
@@ -259,6 +315,7 @@ mod tests {
             account_anchor_sha256: "a".repeat(64),
             challenge_sha256: "b".repeat(64),
             provider_signer: "c".repeat(64),
+            signature_kind: AdmissionSignatureKind::ProviderTee,
             model: "operator-approved-model".into(),
             request_bytes: 4096,
             request_sha256: "d".repeat(64),
@@ -320,6 +377,56 @@ mod tests {
             receipt_identity(&signer, &response, &request).unwrap()
         );
         assert!(receipt_identity("0x1234", &request, &response).is_err());
+    }
+
+    /// The kind is inside the bytes the witness signs.
+    ///
+    /// If it were outside them, a holder could rewrite `gateway` to
+    /// `provider_tee` on a signed statement and the signature would still
+    /// verify -- turning a body-asserted model into an attested one by
+    /// editing a field. That is the whole reason it is in the signed
+    /// statement rather than beside it.
+    #[test]
+    fn the_signature_kind_is_covered_by_the_signature() {
+        let base = AdmissionEvidence {
+            profile: EVIDENCE_DOMAIN.into(),
+            account_anchor_sha256: "a".repeat(64),
+            challenge_sha256: "b".repeat(64),
+            provider_signer: "c".repeat(64),
+            signature_kind: AdmissionSignatureKind::ProviderTee,
+            model: "operator-approved-model".into(),
+            request_bytes: 4096,
+            request_sha256: "d".repeat(64),
+            response_sha256: "e".repeat(64),
+            receipt_sha256: "f".repeat(64),
+            artifact_sha256: "0".repeat(64),
+            witness_measurement: "measurement".into(),
+            redaction_policy_version: "policy".into(),
+            issued_at: 1,
+            expires_at: 2,
+        };
+        let mut gateway = base.clone();
+        gateway.signature_kind = AdmissionSignatureKind::Gateway;
+        assert_ne!(
+            base.signing_bytes().unwrap(),
+            gateway.signing_bytes().unwrap(),
+            "the kind is not covered, so it can be rewritten under a valid signature"
+        );
+        // Deterministic across calls: the witness signs these bytes and ingest
+        // recomputes them, so an ordering that varied would fail at random.
+        assert_eq!(base.signing_bytes().unwrap(), base.signing_bytes().unwrap());
+        assert_eq!(
+            gateway.signing_bytes().unwrap(),
+            gateway.signing_bytes().unwrap()
+        );
+        // The spelling is what is committed to, not a discriminant that could
+        // change with the enum's declaration order.
+        let bytes = gateway.signing_bytes().unwrap();
+        let needle = AdmissionSignatureKind::Gateway.as_wire().as_bytes();
+        assert!(
+            bytes.windows(needle.len()).any(|w| w == needle),
+            "the wire spelling is not what the signature covers"
+        );
     }
 
     /// The labels are a wire contract with deployed clients, so they are
