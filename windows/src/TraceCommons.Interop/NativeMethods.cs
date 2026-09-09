@@ -576,6 +576,23 @@ internal static class NativeMethods
     /// therefore has NO invite, so a non-zero argument returns the candidate
     /// reading. Passing the negation would swap both readings and compile.
     /// </remarks>
+    /// <summary>
+    /// The sentence for one NEAR AI login-enrolment control name.
+    /// </summary>
+    /// <remarks>
+    /// Ten labels, ten sentences, and anything else reaching the generic one.
+    /// Never the empty string: a refusal this build cannot name is the whole
+    /// of what a contributor is being told.
+    /// </remarks>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    internal static extern IntPtr tc_near_ai_enroll_line(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? label);
+
+    /// <summary>How firmly that sentence reads.</summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    internal static extern int tc_near_ai_enroll_tone(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? label);
+
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
     internal static extern IntPtr tc_certificate_row_line(int evidenceAdmitted);
 

@@ -30,7 +30,14 @@ public sealed partial class OnboardingWindow : Window
 
         ViewModel = new OnboardingViewModel(host, state);
         ViewModel.Finished += OnFinished;
-        ((FrameworkElement)Content).Loaded += async (_, _) => await ViewModel.NearAccount.InitializeAsync();
+        ((FrameworkElement)Content).Loaded += async (_, _) =>
+        {
+            await ViewModel.NearAccount.InitializeAsync();
+            // Whether a NEAR AI sign-in exists, read before the screen offers
+            // a control that would otherwise only refuse. On load rather than
+            // on first click: the screen must be right when it appears.
+            await ViewModel.RefreshNearAiSignInAsync();
+        };
         Closed += async (_, _) => await (CloseCompletion = ViewModel.NearAccount.CloseAsync());
     }
 
@@ -80,6 +87,10 @@ public sealed partial class OnboardingWindow : Window
 
     private async void OnConnect(object sender, RoutedEventArgs e) =>
         await ViewModel.ConnectAsync();
+
+    /// <summary>Join with the NEAR AI login, the way in that needs no wallet.</summary>
+    private async void OnJoinWithNearAi(object sender, RoutedEventArgs e) =>
+        await ViewModel.JoinWithNearAiAsync();
 
     private async void OnCheckNearAccount(object sender, RoutedEventArgs e) => await ViewModel.NearAccount.CheckAsync();
     private async void OnStartNearAccount(object sender, RoutedEventArgs e) => await ViewModel.NearAccount.StartAsync();
