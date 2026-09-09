@@ -31,6 +31,42 @@ public sealed class AdmissionPreparationTests
     }
 
     /// <summary>
+    /// Only an explicit <c>true</c> on the wire is a yes.
+    /// </summary>
+    /// <remarks>
+    /// The test above hands <c>Available</c> snapshots built in memory. This
+    /// one comes through the deserializer the sheet actually uses, because
+    /// the refusing answers arrive as JSON: <c>add_admission_setting</c>
+    /// answers null when the daemon could not read its config, and a daemon
+    /// that predates the key answers nothing at all. An unreadable config
+    /// quietly becoming "evidence not required" is the same bug pointed the
+    /// other way. GTK and macOS hold this in their own suites.
+    /// </remarks>
+    [Fact]
+    public void AnUnreadableOrSilentDaemonIsNotAYes()
+    {
+        var hello = DaemonResponse.Parse("{\"result\":{\"methods\":[\"prepare_admission_session\"]}}");
+        static DaemonSettingsSnapshot? Wire(string admissionEvidence) =>
+            DaemonResponse
+                .Parse("{\"result\":{\"near_ai_configured\":false" + admissionEvidence + "}}")
+                .ResultAs<DaemonSettingsSnapshot>();
+
+        Assert.True(AdmissionPreparation.Available(hello, Wire(",\"admission_evidence_required\":true")));
+        foreach (string answer in new[]
+                 {
+                     ",\"admission_evidence_required\":false",
+                     ",\"admission_evidence_required\":null",
+                     "",
+                 })
+        {
+            Assert.NotEqual(true, Wire(answer)!.AdmissionEvidenceRequired);
+            Assert.False(
+                AdmissionPreparation.Available(hello, Wire(answer)),
+                $"the answer {(answer.Length == 0 ? "(absent)" : answer)} was read as eligibility");
+        }
+    }
+
+    /// <summary>
     /// The sheet has to reach <see cref="AdmissionPreparation.Available"/>
     /// carrying the daemon's settings, because that is the only place the
     /// enrolment is consulted.
