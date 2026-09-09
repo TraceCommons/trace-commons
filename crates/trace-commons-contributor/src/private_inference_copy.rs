@@ -3944,6 +3944,78 @@ mod tests {
         assert_ne!(copy.near_ai_enroll_needs_login, copy.near_ai_enroll_what);
     }
 
+    /// A refused contribution must never read as one that never left.
+    ///
+    /// This is the outcome list's half of #810. Five refusal labels reach a
+    /// queue entry's `reason_label` verbatim from the server, and the shells'
+    /// own outcome tables have never been told any of them: macOS falls
+    /// through to "Held", which is vague, and GTK to "Nothing was sent.",
+    /// which is **false** -- the envelope was transmitted and the gate
+    /// declined it after receiving it.
+    ///
+    /// Asserted as an OUTCOME rather than as a mapping. A test that checked
+    /// `line(label) == CONSTANT` would be the implementation restated and
+    /// would pass just as happily if every sentence claimed the work stayed
+    /// home.
+    #[test]
+    fn a_refused_contribution_never_reads_as_one_that_never_left() {
+        use trace_commons_protocol::admission::AdmissionRefusal;
+
+        for refusal in AdmissionRefusal::ALL {
+            let line = outcome_refusal_line(refusal.label())
+                .unwrap_or_else(|| panic!("{} reaches no sentence", refusal.label()));
+            let lower = line.to_lowercase();
+            assert!(
+                !lower.contains("nothing was sent")
+                    && !lower.contains("never sent")
+                    && !lower.contains("stayed"),
+                "{} tells a contributor their work never left: {line}",
+                refusal.label()
+            );
+            assert!(!line.is_empty());
+        }
+    }
+
+    /// `admission_in_progress` is not a refusal and must not read as one.
+    ///
+    /// It means another attempt at the same submission holds the lease, which
+    /// the next retry resolves. It is the label most likely to be swept in by
+    /// somebody doing this quickly.
+    #[test]
+    fn a_lease_another_attempt_holds_does_not_read_as_a_refusal() {
+        use trace_commons_protocol::admission::AdmissionRefusal;
+
+        let line = outcome_refusal_line(AdmissionRefusal::InProgress.label())
+            .expect("the in-progress label reaches a sentence");
+        let lower = line.to_lowercase();
+        for refused in ["declined", "refused", "turned away", "rejected"] {
+            assert!(
+                !lower.contains(refused),
+                "a lease another attempt holds reads as a refusal: {line}"
+            );
+        }
+    }
+
+    /// Every one of the five says its own thing, and a label that is not a
+    /// refusal is not claimed.
+    #[test]
+    fn each_refusal_says_its_own_thing_and_nothing_else_is_claimed() {
+        use trace_commons_protocol::admission::AdmissionRefusal;
+
+        let mut seen = std::collections::BTreeSet::new();
+        for refusal in AdmissionRefusal::ALL {
+            let line = outcome_refusal_line(refusal.label()).expect("a sentence");
+            assert!(seen.insert(line), "{} shares a sentence", refusal.label());
+        }
+
+        // Not this table's business. The shells' own outcome tables still
+        // answer these, and claiming them here would silently take over
+        // wording that has not been moved yet.
+        for other in ["dismissed-by-contributor", "queue-full", "", "nonsense"] {
+            assert_eq!(outcome_refusal_line(other), None, "{other:?} was claimed");
+        }
+    }
+
     /// Every field of the payload carries a finished sentence: no empties,
     /// and no template markers a shell would have to fill in.
     #[test]
