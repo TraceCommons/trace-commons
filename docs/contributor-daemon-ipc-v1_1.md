@@ -1988,7 +1988,8 @@ retained-shutdown producer confirms cleanup; a port alone is metadata, not
 proof that calls can be answered.
 
 The companion C ABI copy payload (`tc_private_inference_copy`, not a daemon
-settings key) supplies these 62 fixed string fields:
+settings key) supplies the fixed string fields for the destination, the proxy
+state, the harness rows and the credential row:
 
 - `destination`, `subtitle`;
 - `offer_title`, `offer_what`, `offer_exposure`, `offer_no_repoint`,
@@ -2019,6 +2020,19 @@ settings key) supplies these 62 fixed string fields:
 - `credential_absent`, `credential_obtaining`, `credential_failed`,
   `credential_cancelled`, `credential_present`, `credential_unknown`,
   `credential_unreported`.
+
+**Those are the fields for those rows, and not the whole payload.** The
+payload also carries a sentence for every state of every per-state family --
+the queue entry's `eligibility_*` and `attestation_*` sentences among them --
+and each family is written down in the section for the field it describes
+rather than repeated here. It grows a set whenever a family is added, and
+the list above is not extended when that happens. So do not read that list as
+an inventory of the payload: a key's absence from it is not evidence the key
+does not exist. The place that settles the question is `private_inference_copy`
+in `trace-commons-contributor`, whose `every_sentence_arrives_finished` pins
+the payload's field count and is what a shell's decoder is checked against.
+This document deliberately does not repeat that number: a count copied into
+prose goes stale in silence, and the test does not.
 
 ### Contribution eligibility
 
