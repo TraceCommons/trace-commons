@@ -235,8 +235,8 @@ pub fn evaluate(
     // receipt exist for this call at all? The bodies can be faithful and the
     // marker present and the answer still no, because NEAR AI signs only the
     // calls it served itself, and it names those by its own identifier. A
-    // call it passed on to another provider carries that provider's
-    // identifier and 404s at the receipt endpoint forever. The mark used to
+    // Chat Completions call it passed on to another provider carries that
+    // provider's identifier and 404s at the receipt endpoint forever. The mark used to
     // read the row blind to this and told a person running Claude or GPT
     // through NEAR AI that their trace carried proof it could never carry.
     //
@@ -758,9 +758,10 @@ mod tests {
 
     /// The defect this exists to remove. NEAR AI answers
     /// `GET /v1/signature/{chat_id}` only for calls it served from its own
-    /// enclave, and those carry its own bare-hex identifier. A call it passed
-    /// on to Anthropic or OpenAI comes back under THAT provider's identifier
-    /// -- `msg_…`, `chatcmpl-…` -- and 404s forever. The mark used to read
+    /// enclave, and those carry its own bare-hex identifier. A Chat
+    /// Completions call it passed on to Anthropic or OpenAI comes back under
+    /// THAT provider's identifier -- `msg_…`, `chatcmpl-…` -- and 404s
+    /// forever. The mark used to read
     /// the row blind to this, and a person running Claude or GPT through
     /// NEAR AI was told their trace carried proof it could never carry.
     #[test]

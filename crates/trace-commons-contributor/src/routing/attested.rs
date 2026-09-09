@@ -195,10 +195,12 @@ pub enum Unattestable {
 ///
 /// NEAR AI issues a receipt (`GET /v1/signature/{chat_id}`) only for a call
 /// it served from its own enclave, and it names such a call by an identifier
-/// of its own minting: bare hex. A call it passed on to Anthropic or OpenAI
-/// comes back under **that** provider's identifier -- `msg_…`, `chatcmpl-…`
-/// -- and the receipt endpoint answers 404 for it, permanently, because NEAR
-/// AI never ran the enclave that would have signed it.
+/// of its own minting: bare hex. A **Chat Completions** call it passed on to
+/// Anthropic or OpenAI comes back under **that** provider's identifier --
+/// `msg_…`, `chatcmpl-…` -- and the receipt endpoint answers 404 for it,
+/// permanently, because NEAR AI never ran the enclave that would have signed
+/// it. (The Responses API is different: a brokered call there DOES get a
+/// `gateway` receipt, one that binds no model -- see [`Self::Hosted`].)
 ///
 /// Decided from the identifier's shape rather than from a list of model
 /// names, because the list moves -- models are added, retired and re-homed
@@ -974,10 +976,13 @@ mod tests {
             ("chatcmpl-EM5nnYHpITuK3xv9EGfs2mEMXlVep", Foreign),
             // Anthropic brokered, Chat Completions.
             ("msg_011CesNLMGDZvYJFKoYt6EP1", Foreign),
-            // Responses API, all three the same shape: hosted Qwen/Qwen3.8-27B
-            // (a gateway receipt exists), brokered openai/gpt-5-nano and
-            // brokered anthropic/claude-haiku-4-5 (no receipt). Shape cannot
-            // tell them apart, so none is claimed.
+            // Responses API, all three the same shape: hosted Qwen/Qwen3.8-27B,
+            // brokered openai/gpt-5-nano and brokered anthropic/claude-haiku-4-5.
+            // Every one of them answers 200 with a `gateway` receipt -- brokered
+            // included, signed by the pinned gateway key -- and a gateway
+            // receipt binds no model, so the receipt cannot tell them apart
+            // either; the model behind it is only the body-asserted name.
+            // Shape cannot discriminate, so none is claimed at discovery.
             ("resp_32464c3bb3064e1ba888d5e5f7073fb3", Unrecognised),
             ("resp_43c46c526bdf4ffa8a4f936934f6d54c", Unrecognised),
             ("resp_41a400ee0cd24d8ea9b7997251bf5708", Unrecognised),
