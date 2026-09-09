@@ -5,8 +5,14 @@
 //! told it is cryptographically attested. The underlying fact is identical
 //! -- the daemon holds a witness certificate over the bytes this row was
 //! pinned to, which is true after either witness route -- so the wire says
-//! it once, on `holds_certificate`, and the reading follows the invite
-//! status this shell already holds for [`crate::eligibility`].
+//! it once, on `holds_certificate`, and the reading follows
+//! `admission_evidence_required`, which this shell already holds.
+//!
+//! **That flag is passed through, never negated.** It is true for a
+//! contributor who signed up through NEAR -- no invite, building a case for
+//! submission -- and false for one enrolled on an invite. So true selects the
+//! CANDIDATE reading, which looks backwards until you know which way the flag
+//! points. Every `!` written here would be a chance to swap the two readings.
 //!
 //! **This is not [`crate::attestation`], and the difference is the whole
 //! point.** The mark answers *does this session carry a checkable copy of
@@ -17,10 +23,10 @@
 //!
 //! Nothing here decides anything. Both sentences and the pick between them
 //! come from `trace_commons_contributor::private_inference_copy`, which
-//! macOS and Windows reach across the C ABI. There is no `if invited` in
-//! this shell and there must not be: three shells choosing for themselves is
-//! three chances to promise an uninvited contributor an attestation that has
-//! not happened.
+//! macOS and Windows reach across the C ABI. There is no branch on the flag
+//! in this shell and there must not be: three shells choosing for themselves
+//! is three chances to promise an uninvited contributor an attestation that
+//! has not happened.
 
 use crate::copy;
 use crate::model::QueueEntry;
@@ -49,8 +55,8 @@ pub fn held(entries: &[QueueEntry]) -> Vec<&QueueEntry> {
 
 /// The heading, in this contributor's reading.
 #[must_use]
-pub fn title(invited: bool) -> &'static str {
-    view_through(invited, &SHARED).title
+pub fn title(evidence_admitted: bool) -> &'static str {
+    view_through(evidence_admitted, &SHARED).title
 }
 
 /// What the list says with nothing in it.
@@ -66,9 +72,9 @@ pub fn empty() -> &'static str {
 
 /// One row's sentence.
 #[must_use]
-pub fn view(invited: bool) -> CertificateView {
+pub fn view(evidence_admitted: bool) -> CertificateView {
     CertificateView {
-        line: view_through(invited, &SHARED).row,
+        line: view_through(evidence_admitted, &SHARED).row,
     }
 }
 
@@ -100,10 +106,10 @@ struct Resolved {
 }
 
 /// Read one reading through a table. Every field is a lookup.
-fn view_through(invited: bool, table: &CertificateTable) -> Resolved {
+fn view_through(evidence_admitted: bool, table: &CertificateTable) -> Resolved {
     Resolved {
-        row: (table.row)(invited),
-        title: (table.title)(invited),
+        row: (table.row)(evidence_admitted),
+        title: (table.title)(evidence_admitted),
         empty: (table.empty)(),
     }
 }
@@ -139,25 +145,25 @@ mod tests {
     #[test]
     fn every_sentence_follows_the_table_and_not_this_shell() {
         const INVERSE: CertificateTable = CertificateTable {
-            row: |invited| {
-                if invited {
-                    "ROW-FOR-UNINVITED"
+            row: |evidence_admitted| {
+                if evidence_admitted {
+                    "ROW-WHEN-FLAG-SET"
                 } else {
-                    "ROW-FOR-INVITED"
+                    "ROW-WHEN-FLAG-CLEAR"
                 }
             },
-            title: |invited| {
-                if invited {
-                    "TITLE-FOR-UNINVITED"
+            title: |evidence_admitted| {
+                if evidence_admitted {
+                    "TITLE-WHEN-FLAG-SET"
                 } else {
-                    "TITLE-FOR-INVITED"
+                    "TITLE-WHEN-FLAG-CLEAR"
                 }
             },
             empty: || "EMPTY",
         };
-        assert_eq!(view_through(true, &INVERSE).row, "ROW-FOR-UNINVITED");
-        assert_eq!(view_through(false, &INVERSE).row, "ROW-FOR-INVITED");
-        assert_eq!(view_through(true, &INVERSE).title, "TITLE-FOR-UNINVITED");
+        assert_eq!(view_through(true, &INVERSE).row, "ROW-WHEN-FLAG-SET");
+        assert_eq!(view_through(false, &INVERSE).row, "ROW-WHEN-FLAG-CLEAR");
+        assert_eq!(view_through(true, &INVERSE).title, "TITLE-WHEN-FLAG-SET");
         assert_eq!(view_through(false, &INVERSE).empty, "EMPTY");
     }
 
