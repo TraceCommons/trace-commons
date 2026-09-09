@@ -25,7 +25,7 @@ use axum::{
 };
 use base64::Engine as _;
 use bytes::Bytes;
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Duration, SubsecRound, Utc};
 use jsonwebtoken::errors::ErrorKind as JwtErrorKind;
 use jsonwebtoken::{Algorithm, DecodingKey, Validation};
 use secrecy::{ExposeSecret, SecretString};
@@ -13325,7 +13325,7 @@ async fn submit_trace_handler(
         let received_at = remediating_prior
             .as_ref()
             .map(|prior| prior.received_at)
-            .unwrap_or_else(Utc::now);
+            .unwrap_or_else(db_mirrored_now);
         let expires_at = retention_policy
             .max_age_days
             .map(|days| received_at + Duration::days(i64::from(days)));
@@ -24303,7 +24303,7 @@ async fn credit_cycle_worker_run_handler(
         result_refs: Vec::new(),
         reason_counts: BTreeMap::new(),
         actor_principal_ref: tenant.principal_ref.clone(),
-        created_at: Utc::now(),
+        created_at: db_mirrored_now(),
         completed_at: None,
         last_error_hash: None,
     };
@@ -24450,7 +24450,7 @@ async fn credit_cycle_worker_run_handler(
     };
     update_credit_cycle_worker_run_from_response(&mut cycle_worker_run, &response);
     cycle_worker_run.status = TraceRankingWorkerRunStatus::Completed;
-    cycle_worker_run.completed_at = Some(Utc::now());
+    cycle_worker_run.completed_at = Some(db_mirrored_now());
     append_ranking_worker_run_with_db_mirror(state.as_ref(), &tenant, &cycle_worker_run)
         .await
         .map_err(internal_error)?;
@@ -26713,7 +26713,7 @@ async fn credit_hold_release_handler(
     if hold.released_at.is_some() {
         return Ok(Json(hold));
     }
-    hold.released_at = Some(Utc::now());
+    hold.released_at = Some(db_mirrored_now());
     let release_reason_hash = sha256_prefixed(reason_detail);
     let should_enqueue_near_unfreeze = state.credit_settlement_near_contract_id.is_some()
         && !active_credit_hold_exists_for_account(
@@ -28872,6 +28872,28 @@ async fn append_benchmark_registry_outbox_confirm_audit(
     .await
 }
 
+/// The clock for any timestamp that is written to both the file mirror and
+/// PostgreSQL.
+///
+/// `timestamptz` holds microseconds and nothing finer; the file mirror keeps
+/// whatever value it is handed. A `Utc::now()` split between the two sinks
+/// therefore lands as two different durable values, and the divergence is
+/// permanent -- the file copy holds digits the database cannot reproduce, so
+/// anything that later hashes, signs, digests or exports the file copy carries
+/// a value no query can match. `reconcile_db_mirror` reports it as drift,
+/// correctly by its own rules and uselessly in practice, on every released
+/// credit hold.
+///
+/// Truncating here, at the write site, is what keeps the two copies identical.
+/// Truncating at the comparison instead would leave the two values genuinely
+/// different on disk and only hide it.
+///
+/// Linux clocks carry nanoseconds and the pilot is Linux. macOS clocks are
+/// microsecond-granular, so a developer machine cannot show this. See #754.
+fn db_mirrored_now() -> DateTime<Utc> {
+    Utc::now().trunc_subsecs(6)
+}
+
 async fn append_utility_attestation_with_db_mirror(
     state: &AppState,
     tenant: &TenantAuth,
@@ -30437,7 +30459,7 @@ async fn ranking_model_promotion_worker_run_handler(
         result_refs: Vec::new(),
         reason_counts: BTreeMap::new(),
         actor_principal_ref: tenant.principal_ref.clone(),
-        created_at: Utc::now(),
+        created_at: db_mirrored_now(),
         completed_at: None,
         last_error_hash: None,
     };
@@ -30514,7 +30536,7 @@ async fn ranking_model_promotion_worker_run_handler(
 
     update_model_promotion_worker_run_from_response(&mut worker_run, &response);
     worker_run.status = TraceRankingWorkerRunStatus::Completed;
-    worker_run.completed_at = Some(Utc::now());
+    worker_run.completed_at = Some(db_mirrored_now());
     append_ranking_worker_run_with_db_mirror(state.as_ref(), &tenant, &worker_run)
         .await
         .map_err(internal_error)?;
@@ -31801,7 +31823,7 @@ async fn ranking_prediction_credit_run_handler(
         result_refs: Vec::new(),
         reason_counts: BTreeMap::new(),
         actor_principal_ref: tenant.principal_ref.clone(),
-        created_at: Utc::now(),
+        created_at: db_mirrored_now(),
         completed_at: None,
         last_error_hash: None,
     };
@@ -31939,7 +31961,7 @@ async fn ranking_prediction_credit_run_handler(
     };
     update_prediction_credit_worker_run_from_response(&mut worker_run, &response, &result_refs);
     worker_run.status = TraceRankingWorkerRunStatus::Completed;
-    worker_run.completed_at = Some(Utc::now());
+    worker_run.completed_at = Some(db_mirrored_now());
     append_ranking_worker_run_with_db_mirror(state.as_ref(), &tenant, &worker_run)
         .await
         .map_err(internal_error)?;
@@ -32093,7 +32115,7 @@ async fn finalize_failed_ranking_worker_run_with_db_mirror(
     public_error: &str,
 ) -> ApiResult<()> {
     worker_run.status = TraceRankingWorkerRunStatus::Failed;
-    worker_run.completed_at = Some(Utc::now());
+    worker_run.completed_at = Some(db_mirrored_now());
     worker_run.last_error_hash = Some(ranking_worker_run_error_hash(http_status, public_error));
     append_ranking_worker_run_with_db_mirror(state, tenant, worker_run)
         .await
@@ -33243,7 +33265,7 @@ async fn ranking_calibration_run_worker_handler(
         result_refs: Vec::new(),
         reason_counts: BTreeMap::new(),
         actor_principal_ref: tenant.principal_ref.clone(),
-        created_at: Utc::now(),
+        created_at: db_mirrored_now(),
         completed_at: None,
         last_error_hash: None,
     };
@@ -33324,7 +33346,7 @@ async fn ranking_calibration_run_worker_handler(
 
     update_calibration_worker_run_from_response(&mut worker_run, &response);
     worker_run.status = TraceRankingWorkerRunStatus::Completed;
-    worker_run.completed_at = Some(Utc::now());
+    worker_run.completed_at = Some(db_mirrored_now());
     append_ranking_worker_run_with_db_mirror(state.as_ref(), &tenant, &worker_run)
         .await
         .map_err(internal_error)?;
@@ -33406,7 +33428,7 @@ async fn recover_stale_ranking_worker_run_handler(
         ));
     }
     record.status = TraceRankingWorkerRunStatus::Failed;
-    record.completed_at = Some(Utc::now());
+    record.completed_at = Some(db_mirrored_now());
     let recovery_reason_hash = sha256_prefixed(&reason);
     record.last_error_hash = Some(ranking_worker_run_recovery_error_hash(&reason));
     append_ranking_worker_run_with_db_mirror(state.as_ref(), &tenant, &record)
@@ -37572,7 +37594,7 @@ async fn run_process_evaluation_worker(
         result_refs: Vec::new(),
         reason_counts: BTreeMap::new(),
         actor_principal_ref: tenant.principal_ref.clone(),
-        created_at: Utc::now(),
+        created_at: db_mirrored_now(),
         completed_at: None,
         last_error_hash: None,
     };
@@ -37783,7 +37805,7 @@ async fn run_process_evaluation_worker(
     }
     update_process_evaluation_worker_run_from_response(&mut worker_run, &response, &result_refs);
     worker_run.status = TraceRankingWorkerRunStatus::Completed;
-    worker_run.completed_at = Some(Utc::now());
+    worker_run.completed_at = Some(db_mirrored_now());
     append_ranking_worker_run_with_db_mirror(state, tenant, &worker_run)
         .await
         .map_err(internal_error)?;
@@ -49043,7 +49065,7 @@ async fn run_benchmark_conversion_job(
         },
         source_submission_ids,
         source_submission_ids_hash,
-        generated_at: Utc::now(),
+        generated_at: db_mirrored_now(),
         item_count: candidates.len(),
         candidates,
     };
@@ -69427,7 +69449,7 @@ impl TraceExportProvenanceManifest {
             purpose,
             source_submission_ids,
             source_submission_ids_hash,
-            generated_at: Utc::now(),
+            generated_at: db_mirrored_now(),
             invalidated_at: None,
             invalidation_reason: None,
         }
@@ -69464,7 +69486,7 @@ impl TraceReplayExportManifest {
                 .iter()
                 .flat_map(|item| item.consent_scopes.clone())
                 .collect(),
-            generated_at: Utc::now(),
+            generated_at: db_mirrored_now(),
             audit_event_id,
         }
     }

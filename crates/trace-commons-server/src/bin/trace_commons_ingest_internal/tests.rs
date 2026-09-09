@@ -52913,6 +52913,100 @@ async fn admin_credit_hold_release_unblocks_settlement() {
     assert_eq!(credit.credit_points_total, 1.25);
 }
 
+/// A released credit hold is written to two sinks that do not agree on
+/// precision: the file mirror keeps the value it is handed, and PostgreSQL's
+/// `timestamptz` truncates to microseconds. `reconcile_db_mirror` then compares
+/// the pair for exact equality, so a `released_at` carrying sub-microsecond
+/// digits makes every released hold report as drifted and destroys the only
+/// signal `credit_hold_release_mismatch_ids` exists to carry.
+///
+/// Linux clocks have nanosecond resolution and the pilot is Linux; macOS clocks
+/// are microsecond-granular, so a Mac cannot show this by observing the clock.
+/// The assertion is therefore on the property the write site must hold, not on
+/// what the local clock happens to produce. See #754.
+#[tokio::test]
+async fn credit_hold_release_timestamp_is_truncated_to_database_precision() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+    let mut envelope = sample_envelope().await;
+    make_metadata_only_low_risk(&mut envelope);
+    envelope.consent.scopes = vec![ConsentScope::ModelTraining];
+    envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
+    envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+    let submission_id = envelope.submission_id;
+
+    let _ = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        submit_body(envelope),
+    )
+    .await
+    .expect("submission succeeds");
+
+    let Json(event) = append_credit_event_handler(
+        State(state.clone()),
+        auth_headers("review-token-a"),
+        AxumPath(submission_id),
+        Json(TraceCreditLedgerAppendRequest {
+            event_type: TraceCreditLedgerEventType::TrainingUtility,
+            credit_points_delta: 1.25,
+            reason: Some("hold release precision".to_string()),
+            external_ref: Some("frontier:hold-release-precision".to_string()),
+        }),
+    )
+    .await
+    .expect("reviewer can append delayed utility credit");
+
+    let Json(hold) = credit_hold_handler(
+        State(state.clone()),
+        auth_headers("admin-token-a"),
+        Json(TraceCreditHoldRequest {
+            credit_account_ref: event.auth_principal_ref.clone(),
+            reason: StorageTraceCreditHoldReason::AttestationDispute,
+            reason_detail: "hold release precision check".to_string(),
+        }),
+    )
+    .await
+    .expect("admin can place credit hold");
+
+    let Json(released) = credit_hold_release_handler(
+        State(state),
+        auth_headers("admin-token-a"),
+        AxumPath(hold.hold_id),
+        Json(TraceCreditHoldReleaseRequest {
+            reason_detail: "hold released for precision check".to_string(),
+        }),
+    )
+    .await
+    .expect("admin can release credit hold");
+
+    let released_at = released.released_at.expect("release stamps released_at");
+    assert_eq!(
+        released_at,
+        released_at.trunc_subsecs(6),
+        "released_at must carry no digits finer than PostgreSQL timestamptz can \
+         hold, or the file mirror and the database disagree from the moment of \
+         the write"
+    );
+
+    let file_holds = read_all_credit_holds(temp.path(), "tenant-a").expect("tenant-a holds read");
+    assert_eq!(file_holds.len(), 1);
+    let file_released_at = file_holds[0]
+        .released_at
+        .expect("file mirror records the release");
+    assert_eq!(
+        file_released_at, released_at,
+        "the file mirror must hold the same value the database was handed"
+    );
+    assert_eq!(
+        file_released_at,
+        file_released_at.trunc_subsecs(6),
+        "the value durably on disk must be one PostgreSQL can reproduce exactly"
+    );
+}
+
 #[tokio::test]
 async fn admin_credit_hold_routes_are_tenant_scoped() {
     let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
