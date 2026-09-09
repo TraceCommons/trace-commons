@@ -1222,6 +1222,23 @@ fn reconcile_refuses_a_verified_key_the_report_never_claimed() {
 }
 
 #[test]
+fn reconcile_refuses_a_verified_key_beyond_the_claimed_set() {
+    // The claimed set is a strict *subset* of what the quotes carry, so the
+    // "every claimed key was verified" direction is satisfied and only the
+    // "every verified key was claimed" direction can refuse. Written this way
+    // deliberately: a single-key mismatch is caught by either direction, and a
+    // test that either one catches proves neither.
+    let quotes = vec![
+        verified_quote_committing_to(FOREIGN_KEY, OUR_NONCE),
+        verified_quote_committing_to(OTHER_KEY, OUR_NONCE),
+    ];
+    assert_eq!(
+        reconcile(&[FOREIGN_KEY.to_string()], &quotes, OUR_NONCE),
+        Err(RefreshRefusal::KeyNotInVerifiedQuote)
+    );
+}
+
+#[test]
 fn reconcile_refuses_a_claimed_key_no_verified_quote_carries() {
     // The report claims two keys; one quote verifies. Answering with the
     // sound half would let a report carry a forged entry through on the

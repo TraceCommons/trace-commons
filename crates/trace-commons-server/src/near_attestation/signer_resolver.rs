@@ -641,10 +641,23 @@ impl AttestedSignerResolver for ReportBackedResolver {
                 (state.gateway_installed_at, state.gateway_keys.clone())
             }
             // Names no key source, so there is nothing to answer with.
+            //
+            // No test can distinguish this early return from falling through
+            // to the staleness check, because the fall-through would answer
+            // with an empty set too -- both mutations of it are equivalent.
+            // It stays because the *reason* differs: an unrecognised kind is
+            // refused on the receipt's own declaration, not on a clock, and a
+            // later edit that made the fall-through answer with something
+            // would inherit the wrong behaviour silently.
             ReceiptSignatureKind::Unrecognised => return Vec::new(),
         };
         match installed_at {
             // Never installed: not "unchecked", refused.
+            //
+            // Also indistinguishable by test from serving `keys`, since
+            // `keys` is empty whenever nothing has been installed. Written
+            // out because the two are only accidentally equal, and the arm
+            // that says so is the one a reader needs.
             None => Vec::new(),
             // Past the ceiling the set reads empty rather than stale.
             Some(at) if now_unix.saturating_sub(at) > HARD_CEILING_SECS => Vec::new(),
