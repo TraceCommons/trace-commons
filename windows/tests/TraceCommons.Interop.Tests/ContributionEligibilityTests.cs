@@ -221,7 +221,7 @@ public class ContributionEligibilityTests
     /// away.
     /// </remarks>
     [Fact]
-    public void ControlComesFromTheAbiAndOnlyEligibleIsOffered()
+    public void ControlComesFromTheAbiAndEligibleAndUnknownAreOffered()
     {
         foreach (string state in new[]
         {
@@ -234,11 +234,18 @@ public class ContributionEligibilityTests
                 Decide(state).Control);
         }
 
-        Assert.Equal(ContributionControl.Contribute, Decide(Eligible).Control);
-        Assert.True(Decide(Eligible).OffersContribute);
+        // eligible and unknown are offered; unknown because only a send can
+        // resolve it and the server decides (eligibility_control in the
+        // shared crate). The two ineligible states and an unfamiliar one
+        // offer nothing.
+        foreach (string state in new[] { Eligible, Unknown })
+        {
+            Assert.Equal(ContributionControl.Contribute, Decide(state).Control);
+            Assert.True(Decide(state).OffersContribute);
+        }
         foreach (string state in new[]
         {
-            IneligiblePermanent, IneligibleConfiguration, Unknown, "unheard-of",
+            IneligiblePermanent, IneligibleConfiguration, "unheard-of",
         })
         {
             Assert.Equal(ContributionControl.None, Decide(state).Control);
@@ -307,7 +314,7 @@ public class ContributionEligibilityTests
             Assert.Equal(pair.Value, drawn);
         }
 
-        Assert.Equal(13, expected.Values.Distinct(StringComparer.Ordinal).Count());
+        Assert.Equal(14, expected.Values.Distinct(StringComparer.Ordinal).Count());
     }
 
     /// <summary>
