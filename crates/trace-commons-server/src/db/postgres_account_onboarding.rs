@@ -229,6 +229,14 @@ impl PgBackend {
         }))
     }
 
+    /// The provisioned admission anchor for one authenticated principal.
+    ///
+    /// Accepts either provisioning origin (#836): `near` is a wallet, `near_ai`
+    /// a NEAR AI login. The two are separate identity systems and their anchors
+    /// live in disjoint keyspaces, but both grant admission the same way, so
+    /// this reads either. The caller's tenant prefix already decided which
+    /// namespace the request is on, and a row is only ever written under the
+    /// matching one.
     pub(super) async fn near_anchor_for_principal(
         &self,
         tenant: &str,
@@ -236,7 +244,7 @@ impl PgBackend {
     ) -> Result<Option<String>, DatabaseError> {
         let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant).await?;
-        let row = tx.query_opt("SELECT n.anchor_hash FROM trace_near_provisioned_devices n JOIN device_keys d ON d.tenant_id=n.tenant_id AND d.device_key_id=n.device_key_id JOIN trace_account_principals p ON p.tenant_id=n.tenant_id AND p.account_id=n.account_id AND p.principal_ref=n.principal_ref JOIN trace_accounts a ON a.tenant_id=n.tenant_id AND a.account_id=n.account_id WHERE n.tenant_id=$1 AND n.principal_ref=$2 AND d.revoked_at IS NULL AND d.onboarding_origin='near' AND p.unlinked_at IS NULL AND a.closed_at IS NULL", &[&tenant,&principal]).await?;
+        let row = tx.query_opt("SELECT n.anchor_hash FROM trace_near_provisioned_devices n JOIN device_keys d ON d.tenant_id=n.tenant_id AND d.device_key_id=n.device_key_id JOIN trace_account_principals p ON p.tenant_id=n.tenant_id AND p.account_id=n.account_id AND p.principal_ref=n.principal_ref JOIN trace_accounts a ON a.tenant_id=n.tenant_id AND a.account_id=n.account_id WHERE n.tenant_id=$1 AND n.principal_ref=$2 AND d.revoked_at IS NULL AND d.onboarding_origin IN ('near','near_ai') AND p.unlinked_at IS NULL AND a.closed_at IS NULL", &[&tenant,&principal]).await?;
         tx.commit().await?;
         Ok(row.map(|r| r.get(0)))
     }

@@ -35,10 +35,14 @@ mod control {
     pub(super) const WITNESS_MEASUREMENTS_ABSENT: &str = "witness_measurements_absent";
     pub(super) const WITNESS_MEASUREMENT_SYNTAX: &str = "witness_measurement_syntax";
     pub(super) const ISSUER: &str = "issuer";
+    /// The index pepper and account-name KEK. Checked by the login readiness
+    /// (#836) and, today, by neither `published_witness` nor anything else
+    /// before the wallet's `finish` needs it -- see #838.
+    pub(super) const NEAR_ACCOUNT_IDENTITY: &str = "near_account_identity";
 
     /// Every label, for the tests that hold the label-only rule.
     #[cfg(test)]
-    pub(super) const ALL: [&str; 12] = [
+    pub(super) const ALL: [&str; 13] = [
         PROVISIONING_ENABLED,
         ADMISSION_READY,
         PUBLIC_ORIGIN,
@@ -51,6 +55,7 @@ mod control {
         WITNESS_MEASUREMENTS_ABSENT,
         WITNESS_MEASUREMENT_SYNTAX,
         ISSUER,
+        NEAR_ACCOUNT_IDENTITY,
     ];
 }
 
@@ -127,13 +132,83 @@ fn published_witness_named(state: &AppState) -> Result<PublishedWitness, &'stati
     }
     account_near_config(state).map_err(|_| control::NEAR_SIGN_IN)?;
     account_db(state).map_err(|_| control::ACCOUNT_REGISTRY_DB)?;
+    let witness = published_witness_material_named()?;
+    published_issuer().ok_or(control::ISSUER)?;
+    Ok(witness)
+}
+
+/// The published witness, with **no ceremony-specific preconditions**.
+///
+/// Factored out of [`published_witness_named`] rather than duplicated: the
+/// witness is a property of the commons, and both enrolment ceremonies need
+/// the same one. What differs is what *else* each requires, which is why the
+/// preconditions stayed with the callers.
+///
+/// Names the same controls #831 gave these gates, because they are the same
+/// gates -- an operator whose witness JSON is malformed should read that fact
+/// once, however they reached it.
+fn published_witness_material_named() -> Result<PublishedWitness, &'static str> {
     let raw = std::env::var("TRACE_COMMONS_NEAR_PROVISIONING_WITNESS_JSON")
         .map_err(|_| control::WITNESS_JSON_ABSENT)?;
     let witness: PublishedWitness =
         serde_json::from_str(&raw).map_err(|_| control::WITNESS_JSON_MALFORMED)?;
     validate_witness_named(&witness)?;
-    published_issuer().ok_or(control::ISSUER)?;
     Ok(witness)
+}
+
+/// Whether a NEAR AI login enrolment can actually complete here (#836).
+///
+/// **Deliberately not `published_witness`'s predicate.** That one refuses on
+/// two grounds belonging to the wallet mechanism: `account_near_config`, which
+/// is NEP-413 sign-in configuration, and `near_provisioning_public_origin`,
+/// which exists so the wallet ceremony can redirect a browser to its wallet
+/// page. The login ceremony has no browser redirect and never reads the
+/// sign-in config, so a commons offering only this path would have had its
+/// enrolments refused for reasons that are not about it -- which is the shape
+/// #836 exists to remove, appearing one layer above admission.
+///
+/// What it does require is what this path needs to leave a contributor able to
+/// upload, which is the failure worth preventing: enrolled, and then refused at
+/// their first submission.
+fn near_ai_login_ready(state: &AppState) -> bool {
+    match near_ai_login_ready_named(state) {
+        Ok(()) => true,
+        Err(control) => {
+            report_declined_control(control);
+            false
+        }
+    }
+}
+
+/// `near_ai_login_ready`, naming the control that declined.
+///
+/// **Shared controls keep their existing labels; only what is genuinely new
+/// gets a new one.** The provisioning switch, the admission gate, the account
+/// registry, the witness JSON and the issuer are properties of the commons,
+/// not of either ceremony, so reusing #831's labels for them is not a wallet
+/// label describing a login refusal -- it is one control with one name. The
+/// two wallet-specific labels, `NEAR_SIGN_IN` and `PUBLIC_ORIGIN`, are
+/// deliberately unreachable from here.
+///
+/// [`control::NEAR_ACCOUNT_IDENTITY`] is the one genuinely new refusal:
+/// `published_witness` never checks it, which is a gap on the wallet side
+/// rather than a difference in requirement -- the wallet's `finish` needs it
+/// too and fails at the last step without it. Filed as #838; checked here
+/// because this path needs it for the same reason.
+fn near_ai_login_ready_named(state: &AppState) -> Result<(), &'static str> {
+    if !state.near_provisioning_enabled {
+        return Err(control::PROVISIONING_ENABLED);
+    }
+    if !state.near_provisioning_admission_ready {
+        return Err(control::ADMISSION_READY);
+    }
+    account_db(state).map_err(|_| control::ACCOUNT_REGISTRY_DB)?;
+    if state.near_account_identity.is_none() {
+        return Err(control::NEAR_ACCOUNT_IDENTITY);
+    }
+    published_witness_material_named()?;
+    published_issuer().ok_or(control::ISSUER)?;
+    Ok(())
 }
 
 /// The original `Option` shape, kept as the reference the equivalence test
@@ -235,18 +310,39 @@ fn published_issuer() -> Option<(String, String)> {
     }
     Some((issuer, audience))
 }
+/// What this commons can enrol, and the properties both ceremonies need.
+///
+/// **Two readiness flags, one route.** `ready` is the wallet ceremony and its
+/// meaning is unchanged -- redefining it would silently alter behaviour for
+/// every deployed wallet client with no test failing. `near_ai_login_ready` is
+/// the login ceremony (#836). A commons may offer either, both or neither, and
+/// an older client simply ignores the field it does not know.
+///
+/// The witness, issuer, audience and receipt endpoint are properties of the
+/// commons rather than of either ceremony, so they are published whenever
+/// **either** path can use them. Withholding them from a login-only commons is
+/// what leaves a contributor enrolled and unable to upload -- the config is
+/// written with an empty issuer and fails at their first submission rather
+/// than at enrolment.
 pub(super) async fn capabilities(State(state): State<Arc<AppState>>) -> axum::response::Response {
-    match published_witness(&state) {
-        Some(witness) => {
-            let Some((issuer_url, audience)) = published_issuer() else {
-                return response(serde_json::json!({"ready":false,"funding_available":false}));
-            };
+    let wallet = published_witness(&state);
+    let login_ready = near_ai_login_ready(&state);
+    // The wallet's own answer, preserved exactly: witness AND issuer.
+    let wallet_ready = wallet.is_some() && published_issuer().is_some();
+    let witness = wallet.or_else(|| published_witness_material_named().ok());
+    match (witness, published_issuer()) {
+        (Some(witness), Some((issuer_url, audience))) if wallet_ready || login_ready => {
+            // Absent on a login-only commons, which is correct: it is the
+            // wallet sign-in network and there is no wallet here. Already
+            // `Option`, already serialised as null, and no consumer requires it.
             let network = account_near_config(&state).ok().map(|c| c.network.clone());
             response(
-                serde_json::json!({"ready":true,"network":network,"witness":witness,"issuer_url":issuer_url,"audience":audience,"inference_receipt_endpoint":published_receipt_endpoint(),"funding_available":false}),
+                serde_json::json!({"ready":wallet_ready,"near_ai_login_ready":login_ready,"network":network,"witness":witness,"issuer_url":issuer_url,"audience":audience,"inference_receipt_endpoint":published_receipt_endpoint(),"funding_available":false}),
             )
         }
-        None => response(serde_json::json!({"ready":false,"funding_available":false})),
+        _ => response(
+            serde_json::json!({"ready":false,"near_ai_login_ready":false,"funding_available":false}),
+        ),
     }
 }
 
