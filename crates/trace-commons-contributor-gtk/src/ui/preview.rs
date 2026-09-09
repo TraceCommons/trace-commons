@@ -690,11 +690,9 @@ impl Sheet {
         admission_button.connect_clicked(move |_| admission_sheet.confirm_admission());
         let admission_sheet = Rc::clone(&sheet);
         app.call("get_settings", serde_json::json!({}), move |_, result| {
-            admission_sheet.admission_required.set(
-                result
-                    .as_ref()
-                    .is_ok_and(|settings| admission_required_by_settings(settings)),
-            );
+            admission_sheet
+                .admission_required
+                .set(result.as_ref().is_ok_and(admission_required_by_settings));
             admission_sheet.sync_witness();
         });
         let witness_sheet = Rc::clone(&sheet);
