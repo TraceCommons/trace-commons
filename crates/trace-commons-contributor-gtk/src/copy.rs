@@ -2272,6 +2272,22 @@ pub use trace_commons_contributor::private_inference_copy::{
     attestation_reason_line, attestation_state_line, attestation_state_tone,
 };
 
+// --- The certificate-held list -----------------------------------------
+//
+// One fact with two readings: a contributor without an invite is told a
+// session is a candidate for submission, one with an invite that it is
+// cryptographically attested. The pick is `certificate_row_line`'s and
+// `certificate_list_title`'s, never this shell's, for the reason the
+// attestation trio above is shared -- three shells choosing for themselves
+// is three chances to promise an attestation that has not happened.
+//
+// NOT the attestation trio. That answers whether the session carries a copy
+// of its model call; this answers whether a certificate is held over the
+// reviewed bytes. Same row, different question.
+pub use trace_commons_contributor::private_inference_copy::{
+    certificate_list_empty, certificate_list_title, certificate_row_line,
+};
+
 // --- The redaction witness ---------------------------------------------
 //
 // Same rule as the Tools block above, for the same reason. The witness

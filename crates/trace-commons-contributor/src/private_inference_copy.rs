@@ -588,6 +588,28 @@ pub struct PrivateInferenceCopy {
     pub attestation_reason_marker_absent: &'static str,
     pub attestation_reason_request_malformed: &'static str,
     pub attestation_reason_receipt_unavailable: &'static str,
+    /// The certificate-held list: one fact, two readings.
+    ///
+    /// Driven by the queue entry's `holds_certificate`, which is true after
+    /// either witness route. The reading is chosen from the invite status
+    /// the shell already holds for the eligibility surface -- NOT from a
+    /// second question to the daemon, and NOT from the attestation mark,
+    /// which answers something else entirely.
+    ///
+    /// Flat fields, like everything else here: `every_sentence_arrives_finished`
+    /// calls `as_str()` on every value, so a sub-struct would panic rather
+    /// than fail.
+    pub certificate_row_candidate: &'static str,
+    /// [`CERTIFICATE_ROW_ATTESTED`].
+    pub certificate_row_attested: &'static str,
+    /// [`CERTIFICATE_LIST_CANDIDATE`].
+    pub certificate_list_candidate: &'static str,
+    /// [`CERTIFICATE_LIST_ATTESTED`].
+    pub certificate_list_attested: &'static str,
+    /// One sentence for both readings, because the reason the list is empty
+    /// does not differ between them: nothing has been through a witness yet.
+    /// [`CERTIFICATE_LIST_EMPTY`].
+    pub certificate_list_empty: &'static str,
     /// The balance row's heading. [`BALANCE_TITLE`].
     pub balance_title: &'static str,
     /// [`BALANCE_WHAT`].
@@ -1859,6 +1881,11 @@ pub fn private_inference_copy() -> PrivateInferenceCopy {
         eligibility_reason_marker_absent: ELIGIBILITY_REASON_MARKER_ABSENT,
         eligibility_reason_request_malformed: ELIGIBILITY_REASON_REQUEST_MALFORMED,
         eligibility_reason_receipt_unavailable: ELIGIBILITY_REASON_RECEIPT_UNAVAILABLE,
+        certificate_row_candidate: CERTIFICATE_ROW_CANDIDATE,
+        certificate_row_attested: CERTIFICATE_ROW_ATTESTED,
+        certificate_list_candidate: CERTIFICATE_LIST_CANDIDATE,
+        certificate_list_attested: CERTIFICATE_LIST_ATTESTED,
+        certificate_list_empty: CERTIFICATE_LIST_EMPTY,
         attestation_attested: ATTESTATION_ATTESTED,
         attestation_unattested_permanent: ATTESTATION_UNATTESTED_PERMANENT,
         attestation_unattested_configuration: ATTESTATION_UNATTESTED_CONFIGURATION,
@@ -1901,6 +1928,84 @@ pub fn private_inference_copy() -> PrivateInferenceCopy {
 /// States the fact and stops. No promise about what it is worth: that is
 /// decided elsewhere and can change, and a sentence anticipating it would be
 /// read as a commitment on the day it does.
+/// A row of the certificate-held list, read by a contributor without an
+/// invite.
+///
+/// What they are being told is that this one can go forward -- the reviewed
+/// bytes are covered and there is something to submit. Deliberately does not
+/// say "attested": nothing has attested anything to anyone yet, and a
+/// contributor who read that would believe a step had happened that has not.
+/// Which reading of the certificate-held list this contributor gets.
+///
+/// `invited` is the contributor's invite status, which every shell already
+/// holds: `get_settings` answers `admission_evidence_required`, and all
+/// three shells decode it and fail closed on the null a config-read failure
+/// produces. It is NOT a second question to the daemon and NOT the
+/// attestation mark.
+///
+/// The pick lives here rather than in each shell for the reason the
+/// attestation table does: three shells choosing for themselves is three
+/// chances to promise an uninvited contributor an attestation that has not
+/// happened, or to withhold from an invited one the fact that it has.
+#[must_use]
+pub fn certificate_row_line(invited: bool) -> &'static str {
+    if invited {
+        CERTIFICATE_ROW_ATTESTED
+    } else {
+        CERTIFICATE_ROW_CANDIDATE
+    }
+}
+
+/// The list's heading, on the same split as [`certificate_row_line`].
+#[must_use]
+pub fn certificate_list_title(invited: bool) -> &'static str {
+    if invited {
+        CERTIFICATE_LIST_ATTESTED
+    } else {
+        CERTIFICATE_LIST_CANDIDATE
+    }
+}
+
+/// What the list says with nothing in it.
+///
+/// One sentence for both readings: the reason the list is empty -- nothing
+/// has been through a witness yet -- does not differ between them, and a
+/// pair of sentences identical by construction is a maintenance trap.
+///
+/// Load-bearing rather than decoration. On the GTK shell every queue field
+/// decodes with `#[serde(default)]`, so a shell that failed to decode
+/// `holds_certificate` would render an empty list, which is indistinguishable
+/// from having no certificates. This sentence is what tells a contributor
+/// which one they are looking at.
+#[must_use]
+pub fn certificate_list_empty() -> &'static str {
+    CERTIFICATE_LIST_EMPTY
+}
+
+pub const CERTIFICATE_ROW_CANDIDATE: &str =
+    "A witness certificate is held for this session, so it can be put forward.";
+
+/// The same row, read by a contributor with an invite.
+///
+/// They are not deciding whether to put it forward -- they already may -- so
+/// the useful fact is what the certificate is: signed proof of the bytes
+/// that were reviewed, travelling with the contribution.
+pub const CERTIFICATE_ROW_ATTESTED: &str = "A witness certificate is held for this session, so what you send carries signed proof of the reviewed bytes.";
+
+/// The list's heading, without an invite.
+pub const CERTIFICATE_LIST_CANDIDATE: &str = "Sessions you can put forward";
+
+/// The list's heading, with one.
+pub const CERTIFICATE_LIST_ATTESTED: &str = "Sessions carrying a witness certificate";
+
+/// The list with nothing in it.
+///
+/// A list that is empty and says nothing reads as broken rather than as
+/// empty, and the contributor is left without the one thing that would
+/// change it. Says what puts a session in the list instead.
+pub const CERTIFICATE_LIST_EMPTY: &str =
+    "Nothing here yet. A session joins this list once your witness has reviewed it.";
+
 pub const ATTESTATION_ATTESTED: &str =
     "This session carries a checkable copy of the model call it came from.";
 
@@ -3352,6 +3457,119 @@ mod tests {
         );
     }
 
+    /// The lookup, not the shell, decides which reading a contributor gets.
+    ///
+    /// Three shells render this list. If each picked between the two
+    /// sentences itself, that would be three chances to hand an uninvited
+    /// contributor a promise of attestation, or to withhold it from an
+    /// invited one. The pick is one function here and the shells call it.
+    #[test]
+    fn the_reading_follows_the_invite_and_nothing_else() {
+        assert_eq!(certificate_row_line(true), CERTIFICATE_ROW_ATTESTED);
+        assert_eq!(certificate_row_line(false), CERTIFICATE_ROW_CANDIDATE);
+        assert_eq!(certificate_list_title(true), CERTIFICATE_LIST_ATTESTED);
+        assert_eq!(certificate_list_title(false), CERTIFICATE_LIST_CANDIDATE);
+
+        // The empty state is one sentence for both, because the reason the
+        // list is empty does not differ between them. Asserted rather than
+        // left implicit so a later split is a deliberate edit here.
+        assert_eq!(certificate_list_empty(), CERTIFICATE_LIST_EMPTY);
+    }
+
+    /// The certificate-held list says the same fact two ways, and the two
+    /// must not read as each other.
+    ///
+    /// A contributor without an invite is being told their session is a
+    /// candidate for submission. A contributor with one is being told it is
+    /// cryptographically attested. The underlying fact is identical -- a
+    /// witness certificate is held over the reviewed bytes -- but a shell
+    /// showing the invited reading to an uninvited contributor promises
+    /// something that has not happened, and the reverse withholds something
+    /// that has.
+    #[test]
+    fn the_certificate_list_reads_differently_for_each_audience() {
+        let copy = private_inference_copy();
+
+        // Not one sentence wearing two names.
+        assert_ne!(
+            copy.certificate_row_candidate,
+            copy.certificate_row_attested
+        );
+        assert_ne!(
+            copy.certificate_list_candidate,
+            copy.certificate_list_attested
+        );
+
+        // The uninvited reading must not claim attestation, and the invited
+        // reading must not demote a finished fact to a prospect.
+        assert!(
+            !copy
+                .certificate_row_candidate
+                .to_lowercase()
+                .contains("attest"),
+            "the candidate sentence claims attestation: {}",
+            copy.certificate_row_candidate
+        );
+        assert!(
+            !copy
+                .certificate_row_attested
+                .to_lowercase()
+                .contains("candidate"),
+            "the attested sentence reads as a prospect: {}",
+            copy.certificate_row_attested
+        );
+
+        // Every one of them states the fact the list is built on, so a row
+        // cannot be read as saying something about the model call instead.
+        for sentence in [
+            copy.certificate_row_candidate,
+            copy.certificate_row_attested,
+        ] {
+            assert!(
+                sentence.to_lowercase().contains("certificate"),
+                "a row sentence does not say what is held: {sentence}"
+            );
+        }
+    }
+
+    /// The list is about a held certificate and nothing else.
+    ///
+    /// Holds-a-certificate, is-attestable and was-attested are three
+    /// different facts, and this codebase conflates them today. A sentence
+    /// here that talked about the model call would put a shell on the wrong
+    /// input without any type noticing.
+    #[test]
+    fn no_certificate_sentence_describes_the_model_call() {
+        let copy = private_inference_copy();
+        for sentence in [
+            copy.certificate_row_candidate,
+            copy.certificate_row_attested,
+            copy.certificate_list_candidate,
+            copy.certificate_list_attested,
+            copy.certificate_list_empty,
+        ] {
+            let lower = sentence.to_lowercase();
+            for forbidden in ["model call", "attestable", "unattested"] {
+                assert!(
+                    !lower.contains(forbidden),
+                    "{sentence:?} describes {forbidden}, which is the attestation mark's question and not this list's"
+                );
+            }
+            // A sentence written across two source lines and joined with a
+            // trailing backslash reads correctly -- the escape eats the
+            // newline and the next line's indent. But `cargo fmt` rejoins
+            // such a literal when it fits on one line, and it materialises
+            // that indent as literal spaces INSIDE THE SENTENCE. It did
+            // exactly that to `CERTIFICATE_ROW_ATTESTED` here, silently, and
+            // no other test in this file would have noticed a contributor
+            // being shown a six-space gap mid-sentence.
+            assert!(
+                !sentence.contains("  "),
+                "{sentence:?} carries a run of spaces; a line continuation was flattened"
+            );
+        }
+    }
+
     /// Every field of the payload carries a finished sentence: no empties,
     /// and no template markers a shell would have to fill in.
     #[test]
@@ -3361,7 +3579,7 @@ mod tests {
         let fields = payload.as_object().expect("a JSON object");
         assert_eq!(
             fields.len(),
-            106,
+            111,
             "the payload's field count changed -- update the shells' decoders \
              and the tests that pin the set"
         );
@@ -3371,6 +3589,17 @@ mod tests {
             for marker in ["{}", "{0}", "{port}", "%@", "%s", "%d"] {
                 assert!(!text.contains(marker), "{field} carries {marker}: {text}");
             }
+            // A run of spaces inside a finished sentence is not a style
+            // question, it is a flattened line continuation. A sentence
+            // written across two lines and joined with a trailing backslash
+            // reads correctly, but `cargo fmt` rejoins that literal when it
+            // fits on one line and materialises the next line's indent as
+            // spaces in the middle of the sentence. It did that here, and
+            // nothing in this file noticed until this assertion existed.
+            assert!(
+                !text.contains("  "),
+                "{field} carries a run of spaces, so a line continuation was flattened: {text}"
+            );
         }
     }
 

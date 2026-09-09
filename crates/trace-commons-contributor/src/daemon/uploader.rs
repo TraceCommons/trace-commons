@@ -463,11 +463,7 @@ impl Uploader<'_, '_> {
         // pinned goes back in front of the contributor. It is never
         // silently rebuilt, because rebuilding is precisely how a
         // contributor ends up sending something they were never shown.
-        if entry
-            .previewed_envelope_digest
-            .as_deref()
-            .is_some_and(|pin| pin.starts_with("witness-sha256:"))
-        {
+        if entry.holds_witness_certificate() {
             let result = self.approved_witness_for(entry);
             match result {
                 Ok(artifact) => {
