@@ -188,9 +188,93 @@ pub fn near_provisioning_device_bytes(
     bytes
 }
 
+/// Device proof preimage for the NEAR AI login ceremony.
+///
+/// A separate domain string from [`near_provisioning_device_bytes`] on
+/// purpose. The two ceremonies enroll the same device key against the same
+/// commons, and both are signed by it; if they shared a preimage domain a
+/// signature captured from one could be presented as the other. The domain is
+/// the only thing standing between them, because every other field is either
+/// server-chosen or public.
+///
+/// Same length-prefixed shape as its wallet sibling, for the same reason: no
+/// field may absorb the next one by containing a separator. `ceremony_id` and
+/// `code_challenge` are ASCII in practice but are length-prefixed rather than
+/// trusted to be.
+pub fn near_ai_provisioning_device_bytes(
+    nonce: &[u8; 32],
+    ceremony_id: &str,
+    device: &[u8; 32],
+    code_challenge: &str,
+    expires_at: i64,
+) -> Vec<u8> {
+    let mut bytes = b"trace_commons.near_ai_provisioning_device.v1\n".to_vec();
+    for part in [
+        &nonce[..],
+        ceremony_id.as_bytes(),
+        &device[..],
+        code_challenge.as_bytes(),
+    ] {
+        bytes.extend_from_slice(&(part.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(part);
+    }
+    bytes.extend_from_slice(&expires_at.to_le_bytes());
+    bytes
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn near_ai_device_bytes_cannot_be_confused_with_the_wallet_ceremony() {
+        // Both ceremonies enroll the same device key against the same commons.
+        // If they shared a domain, a signature captured from one could be
+        // presented as the other.
+        let nonce = [7u8; 32];
+        let device = [9u8; 32];
+        let near_ai =
+            near_ai_provisioning_device_bytes(&nonce, "ceremony", &device, "challenge", 100);
+        let wallet = near_provisioning_device_bytes(&nonce, "ceremony", "challenge", &device, None);
+        assert_ne!(near_ai, wallet);
+        assert!(near_ai.starts_with(b"trace_commons.near_ai_provisioning_device.v1\n"));
+    }
+
+    #[test]
+    fn near_ai_device_bytes_are_unambiguous_across_field_boundaries() {
+        // Length prefixes exist so no field can absorb the next one. Moving a
+        // character from the ceremony id to the challenge must change the
+        // preimage, which a plain concatenation would not.
+        let nonce = [1u8; 32];
+        let device = [2u8; 32];
+        let a = near_ai_provisioning_device_bytes(&nonce, "ab", &device, "cd", 5);
+        let b = near_ai_provisioning_device_bytes(&nonce, "a", &device, "bcd", 5);
+        assert_ne!(a, b);
+
+        // And every input is actually bound: changing any one of them alone
+        // must move the bytes.
+        let base = near_ai_provisioning_device_bytes(&nonce, "ab", &device, "cd", 5);
+        assert_ne!(
+            base,
+            near_ai_provisioning_device_bytes(&[3u8; 32], "ab", &device, "cd", 5)
+        );
+        assert_ne!(
+            base,
+            near_ai_provisioning_device_bytes(&nonce, "zz", &device, "cd", 5)
+        );
+        assert_ne!(
+            base,
+            near_ai_provisioning_device_bytes(&nonce, "ab", &[4u8; 32], "cd", 5)
+        );
+        assert_ne!(
+            base,
+            near_ai_provisioning_device_bytes(&nonce, "ab", &device, "zz", 5)
+        );
+        assert_ne!(
+            base,
+            near_ai_provisioning_device_bytes(&nonce, "ab", &device, "cd", 6)
+        );
+    }
 
     #[test]
     fn onboard_request_round_trips() {
