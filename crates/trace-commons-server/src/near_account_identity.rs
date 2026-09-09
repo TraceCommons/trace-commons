@@ -77,6 +77,17 @@ pub const SEALED_NEAR_ACCOUNT_NAME_SCHEMA_V1: &str = "trace_commons.sealed_near_
 /// old, unsalted scheme can never be mistaken for one computed under this one.
 const BLIND_INDEX_DOMAIN: &[u8] = b"trace_commons.near_account_blind_index.v1\n";
 
+/// Domain separation for the **login** blind index (#836), which anchors a
+/// NEAR AI account id rather than a wallet account name.
+///
+/// A separate domain under the same pepper, so the two identity systems occupy
+/// disjoint keyspaces. Sharing a domain would mean a wallet account name and a
+/// NEAR AI subject id that happened to be equal as strings produced the same
+/// anchor -- one contributor's abuse budget silently spent by another, and two
+/// identity systems collapsed into one keyspace. Nothing about the pepper
+/// prevents that; only the domain does.
+const LOGIN_BLIND_INDEX_DOMAIN: &[u8] = b"trace_commons.near_ai_login_blind_index.v1\n";
+
 /// Domain separation for the pepper's own identifier, which is published in
 /// logs and stored beside each row so rotation can select rows still indexed
 /// under a superseded pepper. It is an HMAC under the pepper rather than a hash
@@ -165,6 +176,32 @@ impl NearAccountIndexPepper {
         let mut out = [0u8; 32];
         out.copy_from_slice(ctx.sign().as_ref());
         out
+    }
+
+    /// `HMAC-SHA256(pepper, framed(subject_id))` under the login domain.
+    ///
+    /// One field rather than two: a NEAR AI account id is already global, with
+    /// no network to qualify it. It is still length-prefixed, so the framing
+    /// stays unambiguous if a second field is ever added.
+    fn login_index(&self, subject_id: &str) -> [u8; 32] {
+        let mut ctx = hmac::Context::with_key(&self.key);
+        ctx.update(LOGIN_BLIND_INDEX_DOMAIN);
+        let field = subject_id.as_bytes();
+        ctx.update(&(field.len() as u64).to_le_bytes());
+        ctx.update(field);
+        let mut out = [0u8; 32];
+        out.copy_from_slice(ctx.sign().as_ref());
+        out
+    }
+
+    /// The login anchor as stored in `trace_near_account_anchors.anchor_hash`.
+    ///
+    /// Same `sha256:` prefix and same column as the wallet anchor: the storage
+    /// and wire shape are shared on purpose, so every consumer downstream of
+    /// the anchor keeps working unchanged. What is not shared is the preimage
+    /// domain, which is what keeps the two unconfusable.
+    pub fn login_index_label(&self, subject_id: &str) -> String {
+        format!("sha256:{}", hex::encode(self.login_index(subject_id)))
     }
 
     /// The blind index as stored in `trace_near_account_anchors.anchor_hash`.
@@ -258,6 +295,12 @@ impl NearAccountIdentity {
 
     pub fn index_label(&self, network: &str, account_name: &str) -> String {
         self.pepper.index_label(network, account_name)
+    }
+
+    /// The login anchor for a NEAR AI subject id (#836). Domain-separated from
+    /// [`Self::index_label`]; see [`NearAccountIndexPepper::login_index_label`].
+    pub fn login_index_label(&self, subject_id: &str) -> String {
+        self.pepper.login_index_label(subject_id)
     }
 
     /// Bind a sealed name to the row it belongs to.
@@ -385,6 +428,19 @@ pub fn random_near_tenant_id() -> String {
     let mut bytes = [0u8; 32];
     rand::RngCore::fill_bytes(&mut aes_gcm::aead::OsRng, &mut bytes);
     format!("near-{}", hex::encode(bytes))
+}
+
+/// The tenant namespace for a NEAR AI login (#836).
+///
+/// A distinct prefix from the wallet's `near-`, so the two identity systems
+/// are distinguishable at a glance and by `anchor()`'s namespace test. Random
+/// for the same reason V61 made the wallet one random: a tenant id derived
+/// from anything public is computable offline by anyone holding that public
+/// value (#716).
+pub fn random_near_ai_tenant_id() -> String {
+    let mut bytes = [0u8; 32];
+    rand::RngCore::fill_bytes(&mut aes_gcm::aead::OsRng, &mut bytes);
+    format!("nearai-{}", hex::encode(bytes))
 }
 
 #[cfg(test)]

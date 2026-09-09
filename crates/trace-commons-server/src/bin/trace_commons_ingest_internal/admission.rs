@@ -42,6 +42,14 @@ fn denied() -> (StatusCode, Json<ApiError>) {
     api_error(StatusCode::FORBIDDEN, AdmissionRefusal::Refused.label())
 }
 
+/// The tenant prefixes that carry a provisioned admission anchor.
+///
+/// Deliberately a list rather than a `starts_with("near")`: `nearai-` is not a
+/// sub-namespace of `near-`, and a prefix test that treated it as one would
+/// make the two identity systems substitutable at the only place that decides
+/// which of them a request is on.
+pub(super) const ANCHOR_NAMESPACES: [&str; 2] = ["near-", "nearai-"];
+
 /// This namespace is allocated only by verified NEAR provisioning. Both the
 /// tenant and the principal come from authentication, never envelope attribution.
 ///
@@ -58,10 +66,18 @@ fn denied() -> (StatusCode, Json<ApiError>) {
 /// random precisely so it no longer is (#716, #783). Reintroducing any
 /// relationship between the two would undo that migration.
 pub(super) async fn anchor(state: &AppState, tenant: &TenantCtx) -> ApiResult<Option<String>> {
-    if !tenant
-        .tenant_id()
-        .strip_prefix("near-")
-        .is_some_and(is_hash)
+    // Two namespaces, one lookup. `near-` is wallet provisioning; `nearai-` is
+    // a NEAR AI login (#836), which anchors an account the contributor already
+    // has because their receipts come from it. Both store the same row shape,
+    // so everything below this test is unchanged -- what differs is the
+    // preimage domain the anchor was computed under, which is what keeps a
+    // value from one from ever being a value from the other.
+    //
+    // A tenant in neither namespace is not refused, it is `None`: this is the
+    // invite-free path, and an invited tenant simply does not use it.
+    if !ANCHOR_NAMESPACES
+        .iter()
+        .any(|prefix| tenant.tenant_id().strip_prefix(prefix).is_some_and(is_hash))
     {
         return Ok(None);
     }
