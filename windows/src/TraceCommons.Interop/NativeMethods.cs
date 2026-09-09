@@ -567,6 +567,23 @@ internal static class NativeMethods
         [MarshalAs(UnmanagedType.LPUTF8Str)] string? mark);
 
     /// <summary>
+    /// The sentence for one row of the certificate-held list.
+    /// </summary>
+    /// <remarks>
+    /// <c>evidenceAdmitted</c> is the daemon's
+    /// <c>admission_evidence_required</c> VERBATIM, never its negation. That
+    /// flag is true for a contributor who signed up through NEAR and
+    /// therefore has NO invite, so a non-zero argument returns the candidate
+    /// reading. Passing the negation would swap both readings and compile.
+    /// </remarks>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    internal static extern IntPtr tc_certificate_row_line(int evidenceAdmitted);
+
+    /// <summary>The heading over that list, on the same argument.</summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    internal static extern IntPtr tc_certificate_list_title(int evidenceAdmitted);
+
+    /// <summary>
     /// How that sentence is painted, as a raw
     /// <c>TC_PRIVATE_INFERENCE_TONE_*</c> value.
     ///
