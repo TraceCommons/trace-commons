@@ -1020,6 +1020,18 @@ mod tests {
         );
         for sentence in &sentences {
             assert!(!sentence.is_empty());
+            // A sentence split across source lines and joined with a trailing
+            // backslash reads correctly as authored, and `cargo fmt`
+            // rejoins it when it fits -- materialising the continuation
+            // indent as literal spaces inside the string. It shipped as
+            // "carries      signed proof" elsewhere in this repo and no test
+            // caught it, because empties and template markers were what the
+            // copy tests looked for.
+            assert!(
+                !sentence.contains("  "),
+                "a run of spaces inside a sentence, which is what a rejoined \
+                 line continuation leaves behind: {sentence}"
+            );
         }
         sentences.sort_unstable();
         let before = sentences.len();
