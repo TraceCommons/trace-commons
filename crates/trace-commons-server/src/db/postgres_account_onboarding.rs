@@ -161,27 +161,61 @@ impl PgBackend {
         // is the behaviour the unsalted derivation got for free by giving both
         // racers the same tenant id. Bounded at one retry: a second failure to
         // resolve means something other than a race.
-        let mut tenant = match self.near_anchor_tenant(&anchor_hash).await? {
+        self.provision_against_anchor(&anchor_hash, random_near_tenant_id, |tenant| {
+            self.near_provision_in_tenant(
+                &proof,
+                &session,
+                tenant,
+                &anchor_hash,
+                &sealed_json,
+                &pepper_ref,
+                &key_ref,
+            )
+        })
+        .await
+    }
+
+    /// Resolve the tenant for an anchor, attempt a provisioning write, and
+    /// retry once if the anchor was claimed underneath.
+    ///
+    /// **The race this handles.** Two concurrent first-logins for the same
+    /// account both resolve to no tenant and both mint one. The advisory lock
+    /// inside the write serializes them on the anchor, so the loser's
+    /// `ON CONFLICT DO NOTHING` claims nothing, rolls its whole transaction
+    /// back -- minted tenant included -- and reports the anchor as taken. One
+    /// retry then resolves the winner's tenant and both requests land on the
+    /// same account, which is the behaviour the pre-V61 derivation got for free
+    /// by giving both racers the same tenant id.
+    ///
+    /// Bounded at one retry: a second failure to resolve means something other
+    /// than a race.
+    ///
+    /// Shared by both enrolment ceremonies (#836). The wallet and the login
+    /// write different rows, but they race identically, and this is the subtle
+    /// half -- a second copy would be the one to drift, and it would drift
+    /// silently because a race is not what a test reaches for first.
+    async fn provision_against_anchor<F, Fut>(
+        &self,
+        anchor_hash: &str,
+        mint_tenant: fn() -> String,
+        attempt: F,
+    ) -> Result<ProvisionedNearAccount, DatabaseError>
+    where
+        F: Fn(String) -> Fut,
+        Fut: std::future::Future<Output = Result<Option<ProvisionedNearAccount>, DatabaseError>>,
+    {
+        // A returning contributor keeps their existing tenant; a new one gets a
+        // tenant drawn from the OS RNG that is a function of no public input.
+        let mut tenant = match self.near_anchor_tenant(anchor_hash).await? {
             Some(existing) => existing,
-            None => random_near_tenant_id(),
+            None => mint_tenant(),
         };
-        for attempt in 0..2 {
-            match self
-                .near_provision_in_tenant(
-                    &proof,
-                    &session,
-                    &tenant,
-                    &anchor_hash,
-                    &sealed_json,
-                    &pepper_ref,
-                    &key_ref,
-                )
-                .await?
-            {
+        for round in 0..2 {
+            match attempt(tenant.clone()).await? {
                 Some(provisioned) => return Ok(provisioned),
-                None if attempt == 0 => {
+                None if round == 0 => {
                     tenant = self
-                        .near_anchor_tenant(&anchor_hash)
+                        .near_anchor_tenant(anchor_hash)
                         .await?
                         .ok_or_else(refused)?;
                 }
@@ -202,13 +236,12 @@ impl PgBackend {
         &self,
         proof: &VerifiedNearProvisioning,
         session: &NewSession<'_>,
-        tenant: &str,
+        tenant: String,
         anchor_hash: &str,
         sealed_json: &serde_json::Value,
         pepper_ref: &str,
         key_ref: &str,
     ) -> Result<Option<ProvisionedNearAccount>, DatabaseError> {
-        let tenant = tenant.to_string();
         let device = trace_commons_protocol::onboarding::device_key_id_from_public_key_bytes(
             proof.device_public_key(),
         );
@@ -287,13 +320,12 @@ impl PgBackend {
     /// two identity systems would put the change inside the path it was
     /// supposed to leave alone.
     ///
-    /// **The duplication is real and is the cost of that choice.** The race
-    /// handling below -- resolve the tenant, attempt, retry once on a lost
-    /// anchor claim -- is the subtle part and now exists twice. If the two
-    /// drift, the login path is the one that will drift silently, because the
-    /// wallet path has the older test coverage. Extracting the wrapper is the
-    /// obvious follow-up; it was not done here because it edits the wallet
-    /// path.
+    /// The race handling is **not** duplicated: both ceremonies go through
+    /// [`Self::provision_against_anchor`]. It was duplicated in the PR that
+    /// introduced this path and extracted here, in the PR that first makes the
+    /// path reachable -- extracting it while the login path was still inert
+    /// would have edited a live, deployed path for the benefit of code that
+    /// did not run.
     pub(super) async fn near_ai_login_provision(
         &self,
         login: &crate::near_ai_login::VerifiedNearAiLogin,
@@ -315,35 +347,23 @@ impl PgBackend {
         let sealed_json = serde_json::to_value(&sealed_subject).map_err(|_| refused())?;
         let pepper_ref = identity.pepper_ref_hash().to_string();
         let key_ref = identity.key_ref_hash();
-        let mut tenant = match self.near_anchor_tenant(&anchor_hash).await? {
-            Some(existing) => existing,
-            None => crate::near_account_identity::random_near_ai_tenant_id(),
-        };
-        for attempt in 0..2 {
-            match self
-                .near_ai_login_provision_in_tenant(
+        self.provision_against_anchor(
+            &anchor_hash,
+            crate::near_account_identity::random_near_ai_tenant_id,
+            |tenant| {
+                self.near_ai_login_provision_in_tenant(
                     login,
                     device_public_key,
                     &session,
-                    &tenant,
+                    tenant,
                     &anchor_hash,
                     &sealed_json,
                     &pepper_ref,
                     &key_ref,
                 )
-                .await?
-            {
-                Some(provisioned) => return Ok(provisioned),
-                None if attempt == 0 => {
-                    tenant = self
-                        .near_anchor_tenant(&anchor_hash)
-                        .await?
-                        .ok_or_else(refused)?;
-                }
-                None => return Err(refused()),
-            }
-        }
-        Err(refused())
+            },
+        )
+        .await
     }
 
     /// One login provisioning attempt against a decided tenant.
@@ -357,13 +377,12 @@ impl PgBackend {
         login: &crate::near_ai_login::VerifiedNearAiLogin,
         device_public_key: &[u8; 32],
         session: &NewSession<'_>,
-        tenant: &str,
+        tenant: String,
         anchor_hash: &str,
         sealed_json: &serde_json::Value,
         pepper_ref: &str,
         key_ref: &str,
     ) -> Result<Option<ProvisionedNearAccount>, DatabaseError> {
-        let tenant = tenant.to_string();
         let device = trace_commons_protocol::onboarding::device_key_id_from_public_key_bytes(
             device_public_key,
         );
