@@ -89939,9 +89939,14 @@ fn an_unconfigured_near_attestation_check_is_reported_not_applicable_not_passed(
         Utc::now(),
         false,
     );
+    // Both NEAR-AI-keyed drills, each named. A conditional check that fell
+    // out of this list would be indistinguishable from one quietly dropped.
     assert_eq!(
         summary.not_applicable_checks,
-        vec!["near_attestation".to_string()]
+        vec![
+            "near_attestation".to_string(),
+            "near_attestation_key_drift".to_string()
+        ]
     );
     assert!(
         !summary
