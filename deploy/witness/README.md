@@ -171,13 +171,35 @@ open redaction service, and an open quote oracle.
 | `Dockerfile` | Builds the witness image. Not reproducible; see below. |
 | `docker-compose.yml` | The application. **Measured** — every value in it is part of the enclave's identity. |
 | `app-compose.json` | dstack's manifest. Generated; embeds the compose file verbatim. |
-| `build-app-compose.sh` | Regenerates the manifest, and `--check` fails if it has drifted. |
+| `build-app-compose.sh` | Regenerates the manifest, and `--check` fails if it has drifted. Drift is also a CI test. |
 
 `docker-compose.yml` is the source of truth and `app-compose.json` is derived.
 **Run `./build-app-compose.sh` after every compose edit and commit both.**
-`./build-app-compose.sh --check` answers "is the manifest I am about to upload
-the one this compose file describes" without modifying anything; run it before
-a deploy.
+`./build-app-compose.sh --check` answers "is the committed manifest the one
+this compose file generates" without modifying anything; run it before a
+deploy.
+
+**Read that question narrowly.** It compares two files in this repository. It
+says nothing about the running CVM -- see the next section -- and a green
+`--check` beside a stale deployment is still a stale deployment. The converse
+is what makes a red one safe to act on: regenerating this file cannot move a
+deployed measurement, because nothing in the deploy path reads it. A red
+`--check` is a bookkeeping failure, fixed by regenerating and committing. It is
+never on its own a reason to redeploy, and a redeploy is what moves the
+measurement and forces every pin holder to re-pin.
+
+**It is enforced in CI**, by `witness_manifest_matches_compose` in the server
+crate's test suite, which asserts that the manifest embeds the current compose
+file. Before that existed the step was simply forgotten: five commits between
+#604 and #681 edited the compose without regenerating, leaving `--check` red on
+`main` and the committed manifest naming an image digest the CVM was not
+running (#760). A check that is always red is a check operators learn to
+ignore.
+
+**It prints no hash, and that is deliberate.** It once printed the SHA-256 of
+the manifest it writes; that value is not `compose_hash` and cannot be made
+into it, for the reason the next section gives. See "Reading the measurement"
+for where the pinnable value comes from.
 
 ### The manifest we write is not the manifest that deploys
 
@@ -217,12 +239,17 @@ model this README argues elsewhere:
   shell access. Nothing has been injected -- but the enclave's identity now
   admits it, and an operator who reads only our manifest would not know.
 
-**This also resolves the open question in `build-app-compose.sh`.** That script
-warns that the SHA-256 it prints may not equal the `compose_hash` dstack
-derives, and notes nobody had run the comparison. It has now been run and they
-differ: local `a12e930e...` against deployed `c2511a8b...`, which is the value
-inside the live certificate's MRCONFIGID. **The hash to pin is the instance's,
-never this script's.**
+**This also settled the open question in `build-app-compose.sh`.** That script
+used to print the SHA-256 of the manifest it writes, warning that the value
+might not equal the `compose_hash` dstack derives and noting nobody had run
+the comparison. It has been run and they differ: local `a12e930e...` against
+deployed `c2511a8b...`, which is the value inside the live certificate's
+MRCONFIGID. Because the deployer never reads the file being hashed, no local
+derivation can be authoritative — this is a property of the deploy path, not a
+bug in the hashing. **The script therefore prints no hash at all**: a wrong
+number carrying a caveat is still a number somebody copies into a pin, and a
+pin on a measurement no client presents refuses every attested submission.
+**Read `compose_hash` from the instance.**
 
 So the deploy procedure needs a step it does not yet have: after deploying,
 read back `compose_file` and diff it against the intended manifest, and pin
@@ -449,11 +476,13 @@ Three routes, in decreasing order of how much they prove:
    agent's `Info` method. If you are looking for MRCONFIGID in `tcb_info`, you
    will not find it, and its absence is not a fault.
 
-You can also derive the compose-hash half locally without a running instance:
-`./build-app-compose.sh` prints the SHA-256 of the manifest. **Compare it
-against a running instance's `tcb_info.compose_hash` before trusting it.**
-Nobody on this project has run that comparison against a live agent, so it is
-the derivation that is unconfirmed, not the value.
+**There is no way to derive the compose-hash half locally, and nothing in this
+repository offers one.** `build-app-compose.sh` used to print the SHA-256 of
+the manifest it writes; the comparison against a live agent has since been run
+and the values differ, because `phala deploy` never reads that file — it hashes
+a manifest of its own. The script no longer prints a hash for that reason.
+`compose_hash` comes from `phala cvms get <cvm-id> --json`, or from
+`tcb_info` on a running instance, and nowhere else.
 
 ### The server side has no configuration surface yet
 
@@ -1230,14 +1259,15 @@ deleted, because what they were wrong about is worth knowing.
   what you deployed, and the only honest reading is the manifest fetched back
   from the instance. This is why the deployment section tells you to pass
   `--no-public-logs --no-public-sysinfo` and re-read afterwards.
-- ~~**The compose-hash derivation is unconfirmed.**~~ **Confirmed, and it
-  disagrees.** `build-app-compose.sh` printed `bcbd152e` for the deployment
-  whose instance `compose_hash` is
+- ~~**The compose-hash derivation is unconfirmed.**~~ **Confirmed, it
+  disagreed, and it has been removed.** `build-app-compose.sh` printed
+  `bcbd152e` for the deployment whose instance `compose_hash` is
   `e848cac038d7a3181b0a9dbbd7ba63fbec3a2bed6aa6e58ad9309992eb9756eb`. That is
-  the previous item's consequence, not a hashing bug: the script hashes a
-  manifest the deployer never used. **Pin the instance's `compose_hash`, never
-  the script's output.** MRCONFIGID = `01` + the instance value + zero padding
-  is separately confirmed.
+  the previous item's consequence, not a hashing bug: the script hashed a
+  manifest the deployer never used, so no local derivation could be right. The
+  script now prints no hash. **`compose_hash` comes from the instance.**
+  MRCONFIGID = `01` + the instance value + zero padding is separately
+  confirmed.
 - ~~**The `full-pipeline` sibling-container topology has not been built.**~~
   **Superseded.** Production runs `full-pipeline` with the NEAR AI classifier.
   The performance number quoted for it is still a pilot-host measurement, not
@@ -1299,7 +1329,9 @@ would have invalidated every pin.
 **MRCONFIGID is `01` + the instance `compose_hash` + zero padding, confirmed.**
 `0168ecca83...` against a `compose_hash` of `68ecca83...`. So the two answers
 agree, and either can be used to check the other -- but both come from the
-instance. `build-app-compose.sh` printed `bcbd152e` for the same deployment.
+instance. Nothing in this repository derives that value; `build-app-compose.sh`
+once did, printed `bcbd152e` for this same deployment, and no longer prints a
+hash at all.
 
 **The visibility flags are set by `phala deploy` arguments, not by the
 manifest.** `--public-logs` and `--public-sysinfo` default to **true**, and
