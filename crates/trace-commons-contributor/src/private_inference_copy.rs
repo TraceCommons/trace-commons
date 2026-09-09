@@ -1943,8 +1943,7 @@ pub const CERTIFICATE_ROW_CANDIDATE: &str =
 /// They are not deciding whether to put it forward -- they already may -- so
 /// the useful fact is what the certificate is: signed proof of the bytes
 /// that were reviewed, travelling with the contribution.
-pub const CERTIFICATE_ROW_ATTESTED: &str =
-    "A witness certificate is held for this session, so what you send carries      signed proof of the bytes that were reviewed.";
+pub const CERTIFICATE_ROW_ATTESTED: &str = "A witness certificate is held for this session, so what you send carries signed proof of the reviewed bytes.";
 
 /// The list's heading, without an invite.
 pub const CERTIFICATE_LIST_CANDIDATE: &str = "Sessions you can put forward";
@@ -3426,25 +3425,40 @@ mod tests {
         let copy = private_inference_copy();
 
         // Not one sentence wearing two names.
-        assert_ne!(copy.certificate_row_candidate, copy.certificate_row_attested);
-        assert_ne!(copy.certificate_list_candidate, copy.certificate_list_attested);
+        assert_ne!(
+            copy.certificate_row_candidate,
+            copy.certificate_row_attested
+        );
+        assert_ne!(
+            copy.certificate_list_candidate,
+            copy.certificate_list_attested
+        );
 
         // The uninvited reading must not claim attestation, and the invited
         // reading must not demote a finished fact to a prospect.
         assert!(
-            !copy.certificate_row_candidate.to_lowercase().contains("attest"),
+            !copy
+                .certificate_row_candidate
+                .to_lowercase()
+                .contains("attest"),
             "the candidate sentence claims attestation: {}",
             copy.certificate_row_candidate
         );
         assert!(
-            !copy.certificate_row_attested.to_lowercase().contains("candidate"),
+            !copy
+                .certificate_row_attested
+                .to_lowercase()
+                .contains("candidate"),
             "the attested sentence reads as a prospect: {}",
             copy.certificate_row_attested
         );
 
         // Every one of them states the fact the list is built on, so a row
         // cannot be read as saying something about the model call instead.
-        for sentence in [copy.certificate_row_candidate, copy.certificate_row_attested] {
+        for sentence in [
+            copy.certificate_row_candidate,
+            copy.certificate_row_attested,
+        ] {
             assert!(
                 sentence.to_lowercase().contains("certificate"),
                 "a row sentence does not say what is held: {sentence}"
@@ -3472,9 +3486,21 @@ mod tests {
             for forbidden in ["model call", "attestable", "unattested"] {
                 assert!(
                     !lower.contains(forbidden),
-                    "{sentence:?} describes {forbidden}, which is the attestation mark's                      question and not this list's"
+                    "{sentence:?} describes {forbidden}, which is the attestation mark's question and not this list's"
                 );
             }
+            // A sentence written across two source lines and joined with a
+            // trailing backslash reads correctly -- the escape eats the
+            // newline and the next line's indent. But `cargo fmt` rejoins
+            // such a literal when it fits on one line, and it materialises
+            // that indent as literal spaces INSIDE THE SENTENCE. It did
+            // exactly that to `CERTIFICATE_ROW_ATTESTED` here, silently, and
+            // no other test in this file would have noticed a contributor
+            // being shown a six-space gap mid-sentence.
+            assert!(
+                !sentence.contains("  "),
+                "{sentence:?} carries a run of spaces; a line continuation was flattened"
+            );
         }
     }
 
@@ -3497,6 +3523,17 @@ mod tests {
             for marker in ["{}", "{0}", "{port}", "%@", "%s", "%d"] {
                 assert!(!text.contains(marker), "{field} carries {marker}: {text}");
             }
+            // A run of spaces inside a finished sentence is not a style
+            // question, it is a flattened line continuation. A sentence
+            // written across two lines and joined with a trailing backslash
+            // reads correctly, but `cargo fmt` rejoins that literal when it
+            // fits on one line and materialises the next line's indent as
+            // spaces in the middle of the sentence. It did that here, and
+            // nothing in this file noticed until this assertion existed.
+            assert!(
+                !text.contains("  "),
+                "{field} carries a run of spaces, so a line continuation was flattened: {text}"
+            );
         }
     }
 
