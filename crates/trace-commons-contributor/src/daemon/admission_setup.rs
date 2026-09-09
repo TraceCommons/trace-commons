@@ -99,6 +99,28 @@ fn adopt_receipt_endpoint(
     Ok(())
 }
 
+/// Ask this config's commons for a receipt endpoint, when it has none.
+///
+/// An account enrolled before its commons published a receipt service, or
+/// before a build that could read one, has nothing saved and no way to type
+/// a value in. This is where it is first needed, so this is where it is asked
+/// for -- once, and only when the answer is missing.
+///
+/// Never fatal. A commons that publishes nothing, is unreachable, or is no
+/// longer ready leaves the config alone and [`require_receipt_endpoint`] then
+/// refuses exactly as it did before -- an unreachable commons must not turn a
+/// clear "no receipt endpoint" into a transport error nobody can read.
+async fn adopt_published_receipt_endpoint(
+    shared: &DaemonShared,
+    cfg: &mut ContributorConfig,
+) -> Result<()> {
+    if cfg.inference_receipt_endpoint.is_some() {
+        return Ok(());
+    }
+    let published = super::account_onboarding::published_receipt_endpoint(&cfg.ingest_url).await;
+    adopt_receipt_endpoint(shared, cfg, published.as_deref())
+}
+
 /// A saved receipt endpoint this client will actually call.
 ///
 /// Vetted on the same basis it was adopted on, which is the only basis that
@@ -171,15 +193,7 @@ async fn prepare(shared: &DaemonShared, params: Params) -> Result<i64> {
         .ok_or_else(|| anyhow!("admission_setup_unenrolled"))?;
     let settings = shared.settings.lock().expect("settings lock").clone();
     check_consent(&cfg, settings.ironwire_attested_bodies, params.confirmed)?;
-    // An account enrolled before its commons published a receipt service, or
-    // before this build could read one, has no endpoint saved and no way to
-    // type one. Ask the commons once, here, where it is first needed. A
-    // commons that publishes nothing leaves the refusal below intact.
-    if cfg.inference_receipt_endpoint.is_none() {
-        let published =
-            super::account_onboarding::published_receipt_endpoint(&cfg.ingest_url).await;
-        adopt_receipt_endpoint(shared, &mut cfg, published.as_deref())?;
-    }
+    adopt_published_receipt_endpoint(shared, &mut cfg).await?;
     require_receipt_endpoint(&cfg)?;
     if params.backend.is_empty()
         || params.backend.len() > 128
@@ -641,6 +655,66 @@ mod tests {
                 .downcast_ref::<ReceiptEndpointSetupError>(),
             Some(ReceiptEndpointSetupError::Required)
         ));
+    }
+
+    /// A commons that cannot be reached is not an error, and does not become
+    /// one on the way out.
+    ///
+    /// This drives the real fetch -- `published_receipt_endpoint`, its client
+    /// construction and its validation -- against a commons that answers
+    /// nothing, and requires the refusal a contributor sees to still be the
+    /// readable `Required` rather than a transport failure wearing
+    /// `admission_setup_unavailable`.
+    #[tokio::test]
+    async fn an_unreachable_commons_leaves_the_readable_refusal_in_place() {
+        let (_dir, store) = crate::config::tests_support::temp_store();
+        let mut cfg = config();
+        cfg.allowed_hosts = Some("receipts.example,issuer.example,ingest.example".into());
+        store.save_config(&cfg).unwrap();
+        let shared = DaemonShared::load(store).unwrap();
+
+        adopt_published_receipt_endpoint(&shared, &mut cfg)
+            .await
+            .expect("an unreachable commons is not a failure to adopt");
+
+        assert!(cfg.inference_receipt_endpoint.is_none());
+        assert!(matches!(
+            require_receipt_endpoint(&cfg)
+                .unwrap_err()
+                .downcast_ref::<ReceiptEndpointSetupError>(),
+            Some(ReceiptEndpointSetupError::Required)
+        ));
+    }
+
+    /// An endpoint already saved is not re-fetched, and the check is the
+    /// absence of a connection rather than the absence of a change: a commons
+    /// asked on every prepare would be a new call on a path that does not
+    /// need one.
+    #[tokio::test]
+    async fn a_config_that_already_has_an_endpoint_does_not_call_its_commons() {
+        let (_dir, store) = crate::config::tests_support::temp_store();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut cfg = config();
+        cfg.allowed_hosts = Some("127.0.0.1".into());
+        cfg.ingest_url = format!("https://{}", listener.local_addr().unwrap());
+        cfg.inference_receipt_endpoint = Some("https://127.0.0.1/v1".into());
+        store.save_config(&cfg).unwrap();
+        let shared = DaemonShared::load(store).unwrap();
+
+        adopt_published_receipt_endpoint(&shared, &mut cfg)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            cfg.inference_receipt_endpoint.as_deref(),
+            Some("https://127.0.0.1/v1")
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), listener.accept())
+                .await
+                .is_err(),
+            "the commons was asked for an endpoint this config already had"
+        );
     }
 
     /// The commons is not trusted to pick this value: a published endpoint the

@@ -1084,6 +1084,41 @@ mod tests {
             wallet_refusal_line(None)
         );
     }
+
+    /// The receipt endpoint is read off the capability document under the name
+    /// the server publishes it as, and a commons that omits it publishes none
+    /// rather than failing to parse.
+    ///
+    /// The second case is also the compatibility check that matters in the
+    /// other direction: the extra keys it carries are ones `Capability` does
+    /// not name, and they are tolerated because the struct deliberately does
+    /// not `deny_unknown_fields`.
+    #[test]
+    fn a_capability_document_carries_the_published_receipt_endpoint() {
+        let published: Capability = serde_json::from_value(serde_json::json!({
+            "ready": true,
+            "witness": null,
+            "issuer_url": "https://issuer.example",
+            "audience": "upload",
+            "inference_receipt_endpoint": "https://cloud-api.near.ai/v1"
+        }))
+        .expect("a capability document");
+        assert_eq!(
+            published.inference_receipt_endpoint.as_deref(),
+            Some("https://cloud-api.near.ai/v1")
+        );
+
+        let silent: Capability = serde_json::from_value(serde_json::json!({
+            "ready": true,
+            "witness": null,
+            "issuer_url": "https://issuer.example",
+            "audience": "upload",
+            "network": "mainnet",
+            "funding_available": false
+        }))
+        .expect("a commons that publishes no receipt endpoint still parses");
+        assert!(silent.inference_receipt_endpoint.is_none());
+    }
     #[tokio::test]
     async fn callback_accepts_fragmented_http_headers() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
