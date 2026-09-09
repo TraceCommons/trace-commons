@@ -118,6 +118,47 @@ fn view_through(evidence_admitted: bool, table: &CertificateTable) -> Resolved {
 mod tests {
     use super::*;
 
+    /// The queue draws this section, asks this module for it, and spells no
+    /// sentence of its own.
+    ///
+    /// The same source guard `eligibility.rs` keeps over the same file, for
+    /// the same reason: a card that reached past this module would be a
+    /// second table, and a second table is a second chance to tell a
+    /// contributor with no invite that their session is attested.
+    ///
+    /// **The empty state is checked here too.** A filtered section that
+    /// renders nothing when nothing matches is indistinguishable from a
+    /// section that failed to load -- and on this shell a `holds_certificate`
+    /// that never arrived decodes to `false` on every row, which produces
+    /// exactly that. The contributor has to be told the category exists.
+    #[test]
+    fn the_queue_asks_this_module_for_the_section_and_writes_no_sentence() {
+        const QUEUE_SOURCE: &str = include_str!("ui/queue.rs");
+
+        for call in [
+            "crate::certificate::held(",
+            "crate::certificate::title(",
+            "crate::certificate::empty(",
+            "crate::certificate::view(",
+        ] {
+            assert!(
+                QUEUE_SOURCE.contains(call),
+                "the queue does not ask for {call}"
+            );
+        }
+
+        let production = QUEUE_SOURCE
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production code above the tests");
+        for authored in ["put forward", "signed proof", "witness certificate"] {
+            assert!(
+                !production.contains(authored),
+                "{authored:?} is written in the queue rather than coming from the shared copy"
+            );
+        }
+    }
+
     fn entry(id: &str, holds: bool) -> QueueEntry {
         QueueEntry {
             entry_id: id.into(),
