@@ -95,6 +95,28 @@ struct QueueEntry: Decodable, Identifiable, Hashable {
     /// `nil`. Absent on every `eligible` row -- there is nothing to explain
     /// -- and on a state a daemon sent without one.
     let eligibilityReason: String?
+    /// Whether this session carries a checkable copy of the model call that
+    /// produced it, as the daemon answered it: `attested`,
+    /// `unattested_permanent`, `unattested_configuration`, `unknown`, or a
+    /// label a later daemon grew.
+    ///
+    /// **THE DAEMON SENDS THIS ON EVERY ENTRY, INCLUDING AN INVITED
+    /// CONTRIBUTOR'S**, which is the opposite of `eligibility`'s rule.
+    /// Eligibility is a permission question and is absent when nobody is
+    /// asking; the mark is a fact about the trace and is owed to everyone.
+    /// `nil` here therefore means only one thing -- a daemon predating the
+    /// field -- and it still reaches a sentence, the unknown one, through
+    /// `attestationMark`.
+    let attestation: String?
+    /// Which of the thirteen reason labels stands behind that mark, or
+    /// `nil`.
+    ///
+    /// The thirteen are `eligibilityReason`'s thirteen and their SENTENCES
+    /// are different; the two must never be rendered through each other's
+    /// accessor. Absent on every `attested` row, present on both unattested
+    /// marks, and present on `unknown` only when a send was retracted for a
+    /// receipt the service could not supply.
+    let attestationReason: String?
 
     var id: String { entryID }
 
@@ -107,6 +129,18 @@ struct QueueEntry: Decodable, Identifiable, Hashable {
     var contributionEligibility: ContributionEligibility? {
         guard let eligibility else { return nil }
         return ContributionEligibility(state: eligibility, reason: eligibilityReason)
+    }
+
+    /// The proof mark this row carries. Always one.
+    ///
+    /// Built from the fields whether or not they arrived: an entry from a
+    /// daemon predating them carries the empty label, and the shared table
+    /// answers that with the unknown sentence rather than with silence.
+    /// Nothing in this file reads the mark string.
+    var attestationMark: AttestationMark {
+        AttestationMark(
+            mark: attestation ?? "",
+            reason: (attestationReason?.isEmpty ?? true) ? nil : attestationReason)
     }
 
     /// The card's extent line, or `nil` when there is nothing to report.
@@ -139,6 +173,8 @@ struct QueueEntry: Decodable, Identifiable, Hashable {
         case subagentsDropped = "subagents_dropped"
         case eligibility
         case eligibilityReason = "eligibility_reason"
+        case attestation
+        case attestationReason = "attestation_reason"
     }
 
     /// "Claude Code" / "Antigravity", never the raw source token.
@@ -777,7 +813,14 @@ extension QueueEntry {
             // sends, and an absent field is a contributor who has no
             // eligibility question at all.
             eligibility: try c.decodeIfPresent(String.self, forKey: .eligibility),
-            eligibilityReason: try c.decodeIfPresent(String.self, forKey: .eligibilityReason)
+            eligibilityReason: try c.decodeIfPresent(String.self, forKey: .eligibilityReason),
+            // Optional at the decoder for ONE reason only -- a daemon
+            // predating the field -- and not for the reason `eligibility` is.
+            // Every daemon that knows the field sends it on every entry, and
+            // an absent value here still draws a sentence: see
+            // `attestationMark`.
+            attestation: try c.decodeIfPresent(String.self, forKey: .attestation),
+            attestationReason: try c.decodeIfPresent(String.self, forKey: .attestationReason)
         )
     }
 }
