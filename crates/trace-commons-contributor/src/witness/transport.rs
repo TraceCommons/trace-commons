@@ -801,6 +801,41 @@ impl WitnessTransport for HttpWitnessTransport {
         witness: &VerifiedWitness,
         body: &[u8],
     ) -> Result<WitnessedEnvelope, WitnessTrustError> {
+        /// Read a non-success witness answer as the refusal it names.
+        ///
+        /// The status alone cannot separate "declined your receipt" from
+        /// "answered nonsense", and those are opposite instructions to a
+        /// contributor. The body is attacker-influenceable, so it selects
+        /// nothing: it is matched against the protocol's closed set, must
+        /// agree with the status, and anything else -- an unknown label, a
+        /// body that is not JSON, no body at all -- keeps the answer this
+        /// client gave before.
+        ///
+        /// Only the head of the body is read. A refusal envelope is a few
+        /// dozen bytes, and a witness that answers a refusal with megabytes
+        /// is not one whose body should be buffered whole.
+        async fn refusal_from(response: reqwest::Response) -> WitnessTrustError {
+            const REFUSAL_BODY_BOUND: usize = 4096;
+            let status = response.status().as_u16();
+            let Ok(body) = response.bytes().await else {
+                return WitnessTrustError::WitnessResponseMalformed;
+            };
+            let head = &body[..body.len().min(REFUSAL_BODY_BOUND)];
+            let label = serde_json::from_slice::<serde_json::Value>(head)
+                .ok()
+                .and_then(|value| value.get("error")?.as_str().map(str::to_string));
+            match label.as_deref().and_then(|label| {
+                trace_commons_protocol::admission::AdmissionRefusal::from_response(status, label)
+            }) {
+                Some(trace_commons_protocol::admission::AdmissionRefusal::EvidenceRefused) => {
+                    WitnessTrustError::WitnessAdmissionEvidenceRefused
+                }
+                // Every other refusal in that set belongs to the ingest gate,
+                // which is not what answered here.
+                _ => WitnessTrustError::WitnessResponseMalformed,
+            }
+        }
+
         let base = self.allowed(witness.url())?;
         let url = base
             .join(if self.admission_evidence {
@@ -818,7 +853,7 @@ impl WitnessTransport for HttpWitnessTransport {
             .await
             .map_err(|_| WitnessTrustError::WitnessAttestationUnavailable)?;
         if !response.status().is_success() {
-            return Err(WitnessTrustError::WitnessResponseMalformed);
+            return Err(refusal_from(response).await);
         }
         let headers = response.headers().clone();
         let read = |name: &str| {

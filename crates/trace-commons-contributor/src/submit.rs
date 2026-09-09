@@ -13,6 +13,7 @@ use uuid::Uuid;
 
 use std::collections::BTreeMap;
 use trace_commons_operator_client::{Client, Error as OcError};
+use trace_commons_protocol::admission::AdmissionRefusal;
 use trace_commons_protocol::trace_contribution::{
     ConsentMetadata, ConsentScope, RawTraceContribution, ResidualPiiRisk, TraceAllowedUse,
     TraceContributionEnvelope, TraceSubmissionReceipt, TraceSubmissionStatusRequest,
@@ -1936,7 +1937,17 @@ async fn upload_with_retry(
                 let delay_secs = if transport_attempts == 1 { 1 } else { 4 };
                 tokio::time::sleep(StdDuration::from_secs(delay_secs)).await;
             }
-            Err(e) if is_auth_failure(&e) => {
+            Err(e) => {
+                // A refusal the gate sent deliberately, before anything reads
+                // it as a credential problem. `label()` is this crate's own
+                // constant for the variant that was recognised, never the
+                // string the server sent.
+                if let Some(refusal) = admission_refusal(&e) {
+                    return Err(refusal.label().to_string());
+                }
+                if !is_auth_failure(&e) {
+                    return Err(e.kind().to_string());
+                }
                 if remint_attempted {
                     return Err("auth-failed".to_string());
                 }
@@ -1957,12 +1968,35 @@ async fn upload_with_retry(
                     Err(_) => return Err("auth-failed".to_string()),
                 }
             }
-            Err(e) => return Err(e.kind().to_string()),
         }
     }
 }
 
+/// The admission refusal this error carries, if the gate sent one.
+///
+/// Only a labelled body counts. [`OcError::HttpFailure`] is the shape a
+/// non-success answer takes when its body carried no `error` field at all,
+/// and something with no label is not a refusal this client can name.
+fn admission_refusal(e: &OcError) -> Option<AdmissionRefusal> {
+    match e {
+        OcError::ServerLabel { status, label, .. } => {
+            AdmissionRefusal::from_response(status.as_u16(), label)
+        }
+        _ => None,
+    }
+}
+
+/// Whether this is the expired credential a remint answers.
+///
+/// **Fail closed.** A `403` stays an authentication failure unless the body
+/// names a refusal this client recognises on that status. An unreadable body,
+/// an unknown label, or a known label on the wrong status all leave the
+/// remint in place: a genuinely expired claim must still be reminted, and a
+/// response body does not get to talk this client out of it.
 fn is_auth_failure(e: &OcError) -> bool {
+    if admission_refusal(e).is_some() {
+        return false;
+    }
     match e {
         OcError::ServerLabel { status, .. } | OcError::HttpFailure { status, .. } => {
             status.as_u16() == 401 || status.as_u16() == 403

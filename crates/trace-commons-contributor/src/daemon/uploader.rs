@@ -53,6 +53,7 @@ use crate::submit::{
     PRECONDITION_CANARY_FAILED, PRECONDITION_NEAR_AI_NOTICE_UNRECORDED, PRECONDITION_NOT_LOGGED_IN,
     SubmitContext, SubmitOutcome, SubmitPreconditionFailure,
 };
+use trace_commons_protocol::admission::AdmissionRefusal;
 use trace_commons_protocol::trace_contribution::TraceContributionEnvelope;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -246,7 +247,16 @@ pub fn health_label_for(decision: &UploadDecision) -> Option<&'static str> {
         },
         UploadDecision::Failed { reason_label } => match reason_label.as_str() {
             "claim-mint-failed" => Some(LABEL_CLAIM_MINT_FAILED),
-            _ => Some(LABEL_INGEST_UNREACHABLE),
+            // A refusal the commons sent on purpose, before the catch-all
+            // that reads everything else as an outage.
+            other => match AdmissionRefusal::from_label(other) {
+                Some(AdmissionRefusal::LimitReached) => Some(LABEL_ADMISSION_LIMIT_REACHED),
+                // A lease another attempt holds, which the next retry
+                // resolves. Nothing for a contributor to be told about.
+                Some(AdmissionRefusal::InProgress) => None,
+                Some(_) => Some(LABEL_ADMISSION_REFUSED),
+                None => Some(LABEL_INGEST_UNREACHABLE),
+            },
         },
         _ => None,
     }

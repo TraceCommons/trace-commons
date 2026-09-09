@@ -146,6 +146,22 @@ impl Mark {
             reason: Some(reason),
         }
     }
+
+    /// Unknown, with no reason of this client's to offer.
+    ///
+    /// The `REASON_*` labels are facts about a session, established by
+    /// reading it. A refusal from the commons is not one of those: what this
+    /// client learned is that its previous answer no longer stands, and the
+    /// reason it would have to invent belongs to a party that did not send
+    /// one. `unknown` with an absent reason is already on this wire -- a row
+    /// written before the field existed carries exactly this -- so every
+    /// shell renders it today.
+    pub(super) fn retracted() -> Self {
+        Self {
+            state: MARK_UNKNOWN,
+            reason: None,
+        }
+    }
 }
 
 /// Classify one session's attestation, for every contributor.
@@ -221,13 +237,26 @@ fn mark_for(refusal: Unattestable) -> Mark {
 /// the defect this surface removes -- now with the contributor's own attempt
 /// as the evidence against it.
 ///
-/// `None` for every other refusal label. A daily cap, an unreachable server
-/// and a filter outage say nothing whatever about what a session carries.
+/// `None` for every other refusal label. A daily cap, an unreachable server,
+/// a spent admission budget and a filter outage say nothing whatever about
+/// what a session carries.
 #[must_use]
 pub fn writeback_for(reason_label: &str) -> Option<Mark> {
+    use trace_commons_protocol::admission::AdmissionRefusal;
     match reason_label {
         "admission_request_malformed" => Some(Mark::permanent(REASON_REQUEST_MALFORMED)),
         "admission_receipt_unavailable" => Some(Mark::unknown(REASON_RECEIPT_UNAVAILABLE)),
+        // The two above are this client's own answers about bytes it read.
+        // These two are the server's, about a send it turned away for want of
+        // the proof -- and the row must stop claiming to carry any.
+        other
+            if matches!(
+                AdmissionRefusal::from_label(other),
+                Some(AdmissionRefusal::Refused | AdmissionRefusal::EvidenceRefused)
+            ) =>
+        {
+            Some(Mark::retracted())
+        }
         _ => None,
     }
 }
