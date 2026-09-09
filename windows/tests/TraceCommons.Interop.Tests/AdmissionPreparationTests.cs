@@ -124,6 +124,48 @@ public sealed class AdmissionPreparationTests
         Assert.DoesNotContain("IsEnabled=", button.Value, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// The control belongs in the sheet footer, drawn on every preview.
+    /// </summary>
+    /// <remarks>
+    /// It used to sit inside the panel bound to <c>HasFailed</c> -- a preview
+    /// that could not be opened or read. That is not the same condition as
+    /// "this session has no inference evidence": a session without evidence
+    /// previews perfectly well, because it is only a transcript, and the
+    /// refusal comes later. So a contributor who wanted evidence had to fail
+    /// first to discover the control that produces it. GTK has always drawn
+    /// it in the footer; this is that placement.
+    ///
+    /// The footer is the last row of the sheet, so everything after its
+    /// opening tag is inside it.
+    /// </remarks>
+    [Fact]
+    public void TheAdmissionControlIsDrawnInTheFooterAndNotOnlyOnAFailedPreview()
+    {
+        string markup = Regex.Replace(
+            Regex.Replace(Uncommented("PreviewSheet.xaml.txt"), "<!--.*?-->", " ", RegexOptions.Singleline),
+            @"\s+",
+            " ");
+
+        int footer = markup.IndexOf("<StackPanel Grid.Row=\"3\"", StringComparison.Ordinal);
+        Assert.True(footer >= 0, "the sheet no longer has a footer row to draw it in");
+
+        int failureNotice = markup.IndexOf("This one can't be shown.", StringComparison.Ordinal);
+        Assert.True(failureNotice >= 0, "the failed-preview notice was not found");
+
+        int control = markup.IndexOf("Click=\"OnPrepareAdmission\"", StringComparison.Ordinal);
+        Assert.True(control >= 0, "the preparation control was not found in the sheet markup");
+
+        Assert.True(
+            control > footer,
+            "the preparation control is drawn before the footer, which on this sheet means "
+            + "it is inside the failed-preview notice a contributor should not have to reach.");
+        Assert.True(
+            failureNotice < footer,
+            "the failed-preview notice moved into the footer; this test's ordering argument "
+            + "no longer holds and needs rewriting rather than adjusting.");
+    }
+
     private static string Uncommented(string file)
     {
         string path = Path.Combine(AppContext.BaseDirectory, file);

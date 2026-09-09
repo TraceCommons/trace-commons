@@ -227,12 +227,41 @@ pub const MAX_QUIESCE_TIMEOUT_SECS: u64 = 300;
 /// How often the drain is re-checked while waiting.
 const QUIESCE_POLL_MS: u64 = 200;
 
-/// Every method this version answers. `hello` reports this list, and the
-/// contract document is checked against it by test.
+/// Every method this version answers. `hello` reports this list.
+///
+/// **The membership rule is the union of the two dispatchers.** A method is
+/// a member if `handle_request` or `handle_request_async` has an arm for it;
+/// the async one falls through to the sync one, so a caller on the socket
+/// can reach either. `every_advertised_method_is_dispatched_and_the_reverse`
+/// checks that in both directions against this file's own source, and it is
+/// the reason a name cannot quietly go missing here again -- `near_ai_balance`
+/// was dispatched and unadvertised for the life of the credential surface
+/// (#777), which made `hello` deny a call the daemon demonstrably answers.
+///
+/// **Nothing on this list is deliberately unadvertised, and nothing
+/// dispatched is deliberately left off.** If that ever changes, name the
+/// method here and say why, because a reader who finds a dispatched method
+/// missing from this array has no way to tell an omission from a decision.
+///
+/// Advertised is not the same as reachable on the synchronous entry point:
+/// `ASYNC_ONLY_METHODS` names the ones that refuse there with a label saying
+/// so, and `approve`, `search_original` and `near_ai_balance` answer
+/// `unknown_method` there instead, because all three are dispatched only on
+/// the async path and none of them is on that list. Advertising them here is
+/// still right -- the socket reaches the async dispatcher -- but the sync
+/// refusal they give is "no such method" rather than "wrong entry point".
+/// That is a defect in `ASYNC_ONLY_METHODS`, not in this array, and it is
+/// deliberately not fixed here: it would change the wire answer for two
+/// methods that have shipped that way.
+///
 /// A slice rather than a fixed-size array: `serde` implements `Serialize`
 /// for arrays only up to 32 elements, and `hello` serializes this list
-/// directly. The length is still checked against the contract document by
-/// test.
+/// directly.
+///
+/// The contract document (`docs/contributor-daemon-ipc-v1_1.md`) is NOT
+/// checked against this array by any test, despite what this comment said
+/// until #777. Four members (`arming_suggestion`, `decline_arming`,
+/// `probe_routed_tools`, `search_original`) appear nowhere in it.
 pub const METHODS: &[&str] = &[
     "acknowledge_near_ai_notice",
     "approve",
@@ -254,6 +283,7 @@ pub const METHODS: &[&str] = &[
     "near_ai_credential_status",
     "near_ai_credential_cancel",
     "near_ai_credential_forget",
+    "near_ai_balance",
     "get_public_profile",
     "get_settings",
     "harness_commit",
@@ -9825,6 +9855,107 @@ mod tests {
         assert_eq!(PROBE_REACHABLE, "reachable");
         assert_eq!(PROBE_TOKEN_UNREADABLE, "token_unreadable");
         assert_eq!(PROBE_UNREACHABLE, "unreachable");
+    }
+
+    /// `hello`'s method list and the dispatchers are one contract, checked
+    /// here in BOTH directions against this file's own source.
+    ///
+    /// The expensive direction is an advertised name with no arm: that is a
+    /// promise the daemon cannot keep, and a negotiating client would call
+    /// it and get `unknown_method`. The other direction is what #777 was --
+    /// `near_ai_balance` dispatched and unadvertised, so `hello` denied a
+    /// call the daemon answers. Neither is visible by reading either list
+    /// alone, which is why this reads the source rather than a second
+    /// hand-written list: a hand-written expectation would be a copy of the
+    /// array that agrees with it by construction.
+    ///
+    /// The arm counts are pinned because set equality alone is blind to a
+    /// symmetric change. Delete a method from a dispatcher and from
+    /// `METHODS` in the same commit and the two sets still agree perfectly;
+    /// the counts are what notice that the dispatch surface moved at all.
+    /// They are a size check on what this scan sees, not a style check, so
+    /// adding an arm moves a count here and `METHODS` together. (A `"name"
+    /// =>` split across lines by rustfmt is still found -- the scan skips
+    /// whitespace before the arrow -- so that is not what these guard.)
+    #[test]
+    fn every_advertised_method_is_dispatched_and_the_reverse() {
+        /// The body of the first `match req.method.as_str()` after `marker`.
+        fn dispatcher_body<'a>(src: &'a str, marker: &str) -> &'a str {
+            let from = src.find(marker).expect("the dispatcher is in this file");
+            let m = src[from..]
+                .find("match req.method.as_str()")
+                .expect("the dispatcher matches on the method")
+                + from;
+            let open = src[m..].find('{').expect("a match body") + m;
+            let mut depth = 0usize;
+            for (i, c) in src[open..].char_indices() {
+                match c {
+                    '{' => depth += 1,
+                    '}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            return &src[open + 1..open + i];
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            panic!("unbalanced match body");
+        }
+
+        /// Every `"name" =>` literal in one match body.
+        fn arm_names(body: &str) -> std::collections::BTreeSet<String> {
+            let mut out = std::collections::BTreeSet::new();
+            let mut i = 0usize;
+            while let Some(open) = body[i..].find('"') {
+                let open = i + open;
+                let Some(close) = body[open + 1..].find('"') else {
+                    break;
+                };
+                let close = open + 1 + close;
+                let name = &body[open + 1..close];
+                let rest = body[close + 1..].trim_start();
+                if rest.starts_with("=>")
+                    && !name.is_empty()
+                    && name
+                        .bytes()
+                        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+                {
+                    out.insert(name.to_string());
+                }
+                i = close + 1;
+            }
+            out
+        }
+
+        let src = include_str!("ipc.rs");
+        let sync = arm_names(dispatcher_body(src, "pub fn handle_request(shared"));
+        let asy = arm_names(dispatcher_body(
+            src,
+            "pub async fn handle_request_async(shared",
+        ));
+        assert_eq!(sync.len(), 37, "synchronous dispatcher arms: {sync:?}");
+        assert_eq!(asy.len(), 23, "asynchronous dispatcher arms: {asy:?}");
+
+        let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();
+        let advertised: std::collections::BTreeSet<String> =
+            METHODS.iter().map(|m| (*m).to_string()).collect();
+        assert_eq!(
+            advertised.len(),
+            METHODS.len(),
+            "a duplicate member would make hello advertise the same call twice"
+        );
+
+        let promised_only: Vec<&String> = advertised.difference(&dispatched).collect();
+        assert!(
+            promised_only.is_empty(),
+            "hello advertises a method no dispatcher answers: {promised_only:?}"
+        );
+        let dispatched_only: Vec<&String> = dispatched.difference(&advertised).collect();
+        assert!(
+            dispatched_only.is_empty(),
+            "the daemon answers a method hello hides: {dispatched_only:?}"
+        );
     }
 
     /// A shell has to be able to reach all three, and `hello` is where it
