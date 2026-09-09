@@ -103,6 +103,9 @@ public sealed class PreviewSheetViewModel : INotifyPropertyChanged, IDisposable
     private readonly WitnessReviewCopy? _witnessCopy = WitnessSurface.Copy()?.Review;
     private bool _witnessSupported;
     private bool _witnessRequested;
+    /// The daemon's sentence for a review it refused, kept apart from
+    /// <see cref="FailureDetail"/> so only a classified refusal can be shown.
+    private string? _witnessRefusal;
     private bool _witnessWorking;
     private bool _witnessConfigured;
     private bool _admissionSupported;
@@ -134,7 +137,14 @@ public sealed class PreviewSheetViewModel : INotifyPropertyChanged, IDisposable
     public string WitnessAction => _witnessCopy?.Action ?? string.Empty;
     public string WitnessConfirm => _witnessCopy?.Confirm ?? string.Empty;
     public string WitnessCancel => _witnessCopy?.Cancel ?? string.Empty;
-    public string PreviewFailureDetail => _witnessRequested ? _witnessCopy?.Failed ?? FailureDetail : FailureDetail;
+    /// <summary>
+    /// A refusal the daemon classified wins; otherwise the one fixed
+    /// sentence. <see cref="FailureDetail"/> can hold local error text and
+    /// must not reach a screen once a witness was requested.
+    /// </summary>
+    public string PreviewFailureDetail => _witnessRequested
+        ? _witnessRefusal ?? _witnessCopy?.Failed ?? FailureDetail
+        : FailureDetail;
     public string LoadingTitle => _witnessWorking ? _witnessCopy?.Heading ?? string.Empty : LocalLoadingTitle;
     public string LoadingDetail => _witnessWorking ? _witnessCopy?.Working ?? string.Empty : LocalLoadingDetail;
     public bool CanRequestWitness => _witnessSupported && _witnessConfigured && !_witnessWorking && !_admissionBusy && _witnessCopy?.IsComplete == true;
@@ -145,6 +155,7 @@ public sealed class PreviewSheetViewModel : INotifyPropertyChanged, IDisposable
         if (!CanRequestWitness) return;
         _witnessRequested = true;
         _witnessWorking = true;
+        _witnessRefusal = null;
         Gate.SetPinnedPreview(false);
         IsLoading = true;
         HasFailed = false;
@@ -157,7 +168,12 @@ public sealed class PreviewSheetViewModel : INotifyPropertyChanged, IDisposable
         {
             var response = await _host.CallAsync(NativeWitnessReview.Method, NativeWitnessReview.ConfirmedRequest(Entry.EntryId)).ConfigureAwait(true);
             _witnessWorking = false;
-            if (!NativeWitnessReview.IsReady(response)) { Fail(); return; }
+            if (!NativeWitnessReview.IsReady(response))
+            {
+                _witnessRefusal = NativeWitnessReview.Refusal(response);
+                Fail();
+                return;
+            }
             await LoadAsync().ConfigureAwait(true);
         }
         catch { _witnessWorking = false; Fail(); }
