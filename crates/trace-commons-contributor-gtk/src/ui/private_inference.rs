@@ -84,6 +84,12 @@ pub struct PrivateInferenceView {
     /// what decides whether a tool on that list can be connected at all: the
     /// notice on the list points at the control in here.
     pub credential: super::credential::CredentialView,
+    /// What is left in the account that key spends from.
+    ///
+    /// Directly under the sign-in, because it is the other half of the same
+    /// fact: the key says whether this computer can answer a call, and the
+    /// balance says how many more it can pay for.
+    pub balance: super::balance::BalanceSection,
     /// What was asked for. Insensitive until the daemon's own answer has
     /// arrived, so a press cannot write a value nothing confirmed.
     switch: gtk::Switch,
@@ -129,6 +135,8 @@ impl PrivateInferenceView {
 
         let credential = super::credential::CredentialView::new();
         content.append(&credential.root);
+        let balance = super::balance::BalanceSection::new();
+        content.append(&balance.root);
 
         let card = style::card(gtk::Orientation::Vertical, space::M);
         style::append_body(&card, copy::PRIVATE_INFERENCE_OFFER_WHAT);
@@ -194,6 +202,7 @@ impl PrivateInferenceView {
             spend,
             harnesses,
             credential,
+            balance,
             switch,
             status,
             filling: std::cell::Cell::new(false),

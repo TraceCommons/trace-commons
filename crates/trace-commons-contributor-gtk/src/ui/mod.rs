@@ -5,6 +5,7 @@
 //! has a real one -- would only ever be a shortcut into it. Nothing in this
 //! application tells a contributor to install a shell extension.
 
+pub mod balance;
 pub mod community_brand;
 pub mod credential;
 mod css_contract;
