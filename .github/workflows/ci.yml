@@ -76,15 +76,21 @@ jobs:
     # Each would have failed at the commit that introduced it if this job had
     # existed.
     #
-    # ONE SUITE IS DELIBERATELY NOT RUN HERE, and it is now down to one test:
+    # `trace_corpus_pg_store` used to be excluded here for one test,
+    # `pg_store_list_dedup_signals_round_trips_the_stamp`, which wanted a
+    # gate-driver role the fixtures did not provision (#751). It runs below
+    # now. The resolution is worth keeping, because the obvious fix was wrong:
+    # the pool configures fine from TRACE_COMMONS_GATE_DRIVER_DATABASE_URL, and
+    # pointing it at this job's own URL turns the test green -- but that URL is
+    # the container superuser, which satisfies every column privilege, so the
+    # V45/V47/V48 column grants the test exists to check go unexercised. With
+    # `SELECT (dedup_signal_version)` revoked, the real `trace_gate_driver`
+    # role fails with "permission denied for table trace_gate_decisions" and a
+    # superuser pool passes in 0.14s.
     #
-    #   trace_corpus_pg_store     1 failing
-    #
-    # That one is `pg_store_list_dedup_signals_round_trips_the_stamp`, which
-    # wants a gate-driver role the fixtures do not provision. It is NOT the
-    # migration race, and pointing TRACE_COMMONS_GATE_DRIVER_DATABASE_URL at the
-    # same database does not satisfy it -- see #751. Fix that and the suite can
-    # join the four below and this comment can go.
+    # So the suite provisions the real role itself and refuses a privileged
+    # one, and this job sets no gate-driver variable at all. Two more tests in
+    # that suite skipped on the same unset variable and now run.
     #
     # Four suites used to be excluded here, at 84 failing between them, recorded
     # as pre-existing debt. Eighty-three of those 84 were a single defect in the
@@ -153,7 +159,7 @@ jobs:
       - name: Create one database per suite
         run: |
           set -euo pipefail
-          for db in onboarding ledger migration ingest invite merge rls; do
+          for db in onboarding ledger migration ingest invite merge rls store; do
             PGPASSWORD=trace createdb -h 127.0.0.1 -U trace "admission_test_$db"
           done
       # Each step carries only the variables its own suite reads, NOT a job-wide
@@ -211,6 +217,15 @@ jobs:
             echo "::error::trace_corpus_pg_rls never connected as its NOBYPASSRLS role; its raw-SQL assertions did not run"
             exit 1
           fi
+      # No TRACE_COMMONS_GATE_DRIVER_DATABASE_URL here on purpose: this suite
+      # builds that URL itself by rewriting the username to `trace_gate_driver`
+      # and asserts the role it reaches is not a superuser and holds no
+      # table-wide SELECT on trace_gate_decisions. Setting the variable to this
+      # job's own URL is precisely the vacuous pass #751 resolved.
+      - name: trace_corpus_pg_store
+        run: cargo test -p trace-commons-server --test trace_corpus_pg_store
+        env:
+          TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_store
       # `--ignored` is not optional for these three. Without it they report
       # `ignored`, the step passes having run nothing, and this job becomes the
       # thing it was built to replace.
@@ -236,7 +251,7 @@ jobs:
         run: |
           set -euo pipefail
           fail=0
-          for db in onboarding ledger migration ingest invite merge rls; do
+          for db in onboarding ledger migration ingest invite merge rls store; do
             n=$(PGPASSWORD=trace psql -qtA -h 127.0.0.1 -U trace postgres \
                   -c "SELECT xact_commit FROM pg_stat_database WHERE datname='admission_test_$db';")
             echo "admission_test_$db committed ${n:-0} transactions"

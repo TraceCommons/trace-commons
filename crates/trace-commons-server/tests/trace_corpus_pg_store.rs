@@ -73,6 +73,130 @@ async fn postgres_backend() -> Option<PgBackend> {
     }
 }
 
+/// The operator-provisioned role the gate-driver pool runs as.
+const GATE_DRIVER_ROLE: &str = "trace_gate_driver";
+
+/// A backend whose gate-driver pool is the REAL narrow `trace_gate_driver`
+/// role, provisioned here rather than named by an environment variable.
+///
+/// Pointing `TRACE_COMMONS_GATE_DRIVER_DATABASE_URL` at the suite's own URL
+/// does make these tests pass, which is what #751 could not decide between: it
+/// is not a defect in how `list_dedup_signals` resolves its pool -- the pool
+/// configures fine. It is worse than that. The suite's URL is the migration
+/// owner, the container superuser in CI, and a superuser satisfies every
+/// column privilege there is, so the tests would pass while the V45/V47/V48
+/// column-level grants they exist to check went unexercised. Measured, with
+/// `SELECT (dedup_signal_version)` revoked: as `trace_gate_driver` the
+/// enumeration fails with `permission denied for table trace_gate_decisions`;
+/// through a superuser gate-driver pool the same revoked grant passes in
+/// 0.14s. One of the three callers says so in its own doc comment already --
+/// "a superuser connection would authorize the read for the wrong reason and
+/// hide a policy regression" -- and then skipped instead.
+///
+/// So this does not read that environment variable at all. It builds the
+/// gate-driver URL from the suite's own, rewriting only the username, the way
+/// `account_onboarding_pg` does for `trace_login_resolver`. V36 creates the
+/// role NOLOGIN, so it needs LOGIN granted before anything can connect as it.
+/// Every step panics; there is nothing here a run may quietly decline to do.
+async fn gate_driver_backend() -> Option<PgBackend> {
+    let config = postgres_test_config()?;
+
+    let admin = match PgBackend::new(&config).await {
+        Ok(backend) => backend,
+        Err(e) => {
+            eprintln!("skipping: database unavailable ({e})");
+            return None;
+        }
+    };
+    admin
+        .run_migrations()
+        .await
+        .expect("run migrations before provisioning the gate-driver role");
+    admin
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("get a connection to provision the gate-driver role")
+        .batch_execute(&format!("ALTER ROLE {GATE_DRIVER_ROLE} LOGIN;"))
+        .await
+        .unwrap_or_else(|e| panic!("grant LOGIN to {GATE_DRIVER_ROLE}: {e}"));
+
+    let mut gate_driver_url =
+        reqwest::Url::parse(config.url()).expect("parse the test database URL");
+    gate_driver_url
+        .set_username(GATE_DRIVER_ROLE)
+        .unwrap_or_else(|()| panic!("rewrite the test database URL username"));
+    let gate_driver_url = gate_driver_url.to_string();
+
+    assert_gate_driver_pool_is_the_narrow_role(&gate_driver_url).await;
+
+    let backend = PgBackend::new(&DatabaseConfig {
+        gate_driver_url: Some(SecretString::from(gate_driver_url)),
+        ..config
+    })
+    .await
+    .expect("build a backend with the gate-driver pool configured");
+    Some(backend)
+}
+
+/// Refuse a gate-driver pool that is not the narrow role.
+///
+/// The failure this guards is not a skip, it is a vacuous pass: a superuser or
+/// a table-wide grant satisfies these queries without consulting one
+/// column-level privilege or one policy, so the tests stay green while the
+/// grants rot. The third assertion is the sharp one -- `trace_gate_driver`
+/// deliberately holds NO table-wide SELECT on `trace_gate_decisions`, only the
+/// per-column grants V45/V47/V48 issue, and it is exactly that narrowness
+/// which makes a missing `GRANT SELECT (dedup_signal_version)` a permission
+/// error rather than nothing at all.
+async fn assert_gate_driver_pool_is_the_narrow_role(gate_driver_url: &str) {
+    let (client, connection) = tokio_postgres::connect(gate_driver_url, tokio_postgres::NoTls)
+        .await
+        .unwrap_or_else(|e| panic!("connect to the gate-driver pool as {GATE_DRIVER_ROLE}: {e}"));
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+
+    let row = client
+        .query_one(
+            "SELECT
+                current_user::text AS role_name,
+                COALESCE((
+                    SELECT rolsuper OR rolbypassrls
+                    FROM pg_roles WHERE rolname = current_user
+                ), false) AS privileged,
+                has_table_privilege('trace_gate_decisions', 'SELECT') AS whole_table_select,
+                has_column_privilege(
+                    'trace_gate_decisions', 'dedup_signal_version', 'SELECT'
+                ) AS dedup_column_select",
+            &[],
+        )
+        .await
+        .expect("inspect the gate-driver role");
+
+    assert_eq!(
+        row.get::<_, String>("role_name"),
+        GATE_DRIVER_ROLE,
+        "the gate-driver pool must connect as {GATE_DRIVER_ROLE}"
+    );
+    assert!(
+        !row.get::<_, bool>("privileged"),
+        "the gate-driver pool is a superuser or BYPASSRLS role; it would satisfy every \
+         column privilege and every policy, and these tests would pass against no grants \
+         at all. See #751."
+    );
+    assert!(
+        !row.get::<_, bool>("whole_table_select"),
+        "{GATE_DRIVER_ROLE} holds table-wide SELECT on trace_gate_decisions; the \
+         column-level grants V45/V47/V48 issue would then gate nothing. See #751."
+    );
+    assert!(
+        row.get::<_, bool>("dedup_column_select"),
+        "{GATE_DRIVER_ROLE} is missing GRANT SELECT (dedup_signal_version) on \
+         trace_gate_decisions, which V57 issues"
+    );
+}
+
 fn sample_submission(tenant_id: &str, submission_id: Uuid) -> TraceSubmissionWrite {
     let mut redaction_counts = BTreeMap::new();
     redaction_counts.insert("secret".to_string(), 2);
@@ -4205,11 +4329,12 @@ async fn pg_store_list_dedup_signals_round_trips_the_stamp() {
     // grant does not surface as an error anywhere -- clustering simply finds
     // no candidates, every trace becomes a singleton, and
     // `dedup_cluster_size` silently stops dividing the duplicate penalty.
-    // This test is the thing that would fail instead.
-    let Some(backend) = postgres_backend().await else {
+    // This test is the thing that would fail instead -- but only on the real
+    // narrow role, which is why it takes `gate_driver_backend` rather than
+    // `postgres_backend`. See #751.
+    let Some(backend) = gate_driver_backend().await else {
         return;
     };
-    backend.run_migrations().await.expect("run migrations");
 
     let tenant_id = format!("pg-dedup-signals-{}", Uuid::new_v4());
     let submission_id = Uuid::new_v4();
@@ -4749,22 +4874,19 @@ async fn chunk_vector_entries_insert_atomically_and_list_by_submission() {
 /// a LEFT join from `trace_submissions`, and "an absent row means unscored, not
 /// unknown" is a claim about SQL, not about Rust.
 ///
-/// Requires a gate-driver pool, so it skips when
-/// `TRACE_COMMONS_GATE_DRIVER_DATABASE_URL` is unset -- the same condition the
-/// RLS suite documents. That connection matters: the query relies on the
-/// `trace_gate_driver` role's permissive cross-tenant SELECT policies, and a
-/// superuser connection would authorize the read for the wrong reason and hide
-/// a policy regression.
+/// Requires a gate-driver pool, and it used to skip when
+/// `TRACE_COMMONS_GATE_DRIVER_DATABASE_URL` was unset -- which no run set, so
+/// it never ran. That connection matters, exactly as this comment already
+/// said: the query relies on the `trace_gate_driver` role's permissive
+/// cross-tenant SELECT policies, and a superuser connection would authorize
+/// the read for the wrong reason and hide a policy regression. It takes
+/// `gate_driver_backend` now, which provisions that role and refuses a
+/// privileged one. See #751.
 #[tokio::test]
 async fn pg_store_scoped_scores_distinguish_unscored_from_unowned() {
-    let Some(backend) = postgres_backend().await else {
+    let Some(backend) = gate_driver_backend().await else {
         return;
     };
-    if std::env::var("TRACE_COMMONS_GATE_DRIVER_DATABASE_URL").is_err() {
-        eprintln!("skipping: TRACE_COMMONS_GATE_DRIVER_DATABASE_URL not configured");
-        return;
-    }
-    backend.run_migrations().await.expect("run migrations");
 
     let tenant = format!("pg-scoped-attest-{}", Uuid::new_v4());
     let mine = "principal:test-user";
@@ -4944,14 +5066,9 @@ async fn pg_store_invite_max_uses_binds_across_derived_tenants() {
 /// next attempt is due, and one at `max_attempts` is absent for good.
 #[tokio::test]
 async fn pg_store_backlog_count_agrees_with_the_work_enumeration() {
-    let Some(backend) = postgres_backend().await else {
+    let Some(backend) = gate_driver_backend().await else {
         return;
     };
-    if std::env::var("TRACE_COMMONS_GATE_DRIVER_DATABASE_URL").is_err() {
-        eprintln!("skipping: TRACE_COMMONS_GATE_DRIVER_DATABASE_URL not configured");
-        return;
-    }
-    backend.run_migrations().await.expect("run migrations");
 
     let now = chrono::Utc::now();
     let max_attempts = 5;
