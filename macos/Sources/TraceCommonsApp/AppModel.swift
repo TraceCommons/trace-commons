@@ -1345,9 +1345,47 @@ final class AppModel: ObservableObject {
     /// `failure.message`, and `enroll`'s failure message must never reach a
     /// screen -- `OnboardingConnectView` renders one fixed sentence for
     /// every failure of this call instead.
-    func prepareAdmissionSession(entryID: String, backend: String) async -> AdmissionPreparation? {
-        guard let client else { return nil }
-        return await Task.detached { try? client.prepareAdmissionSession(entryID: entryID, backend: backend) }.value
+    /// What a preparation did, and the words the daemon chose for it.
+    ///
+    /// This used to return `AdmissionPreparation?` through `try?`, which threw
+    /// the refusal away: the bridge now carries the daemon's sentence on the
+    /// `Failure` it raises, and `try?` discarded the whole error to get a
+    /// `nil` the view could only answer with one generic line. Sixteen causes
+    /// arrived here and left as the same sentence.
+    ///
+    /// The success sentence comes from the same `view`, so both outcomes are
+    /// the daemon's words rather than this shell's.
+    func prepareAdmissionSession(entryID: String, backend: String) async -> AdmissionOutcome {
+        guard let client else { return AdmissionOutcome(succeeded: false, sentence: nil) }
+        return await Task.detached(priority: .userInitiated) {
+            AppModel.admissionOutcome(from: client, entryID: entryID, backend: backend)
+        }.value
+    }
+
+    /// The whole decision, so the detached task above holds none of it.
+    ///
+    /// Split out because `client` is private and a test cannot reach this
+    /// arm through the model: without it the only reachable path is the
+    /// no-client guard, and dropping the daemon's sentence again would stay
+    /// green. Takes the client so a test can hand it one over a recording
+    /// transport and cross the real bridge and the real decode.
+    nonisolated static func admissionOutcome(
+        from client: DaemonClient,
+        entryID: String,
+        backend: String
+    ) -> AdmissionOutcome {
+        do {
+            let prepared = try client.prepareAdmissionSession(entryID: entryID, backend: backend)
+            return AdmissionOutcome(
+                succeeded: prepared.view?.ready == true,
+                sentence: prepared.view?.message
+            )
+        } catch {
+            return AdmissionOutcome(
+                succeeded: false,
+                sentence: DaemonClient.refusalSentence(from: error)
+            )
+        }
     }
 
     func nativeWalletFlow(action: String, flowID: String, commons: String, account: String) async -> NativeWalletView? {
@@ -2183,6 +2221,17 @@ final class AppModel: ObservableObject {
                 offsets: offsets
             )
         )
+    }
+
+    /// What a preparation did, and the words for it either way.
+    ///
+    /// The mirror of [`WitnessReviewOutcome`], for the same reason: a `Bool`
+    /// cannot carry why.
+    struct AdmissionOutcome: Sendable {
+        let succeeded: Bool
+        /// The daemon's classified sentence, or `nil` when it sent none and
+        /// the caller should keep its own fallback.
+        let sentence: String?
     }
 
     /// What a witness review did, and the words for it when it refused.
