@@ -915,6 +915,9 @@ mod tests {
         attestation: Option<serde_json::Value>,
         collateral: Option<String>,
         witness: Option<(String, String, Vec<u8>)>,
+        /// A status and an `{"error": ...}` label the witness answers with
+        /// instead of certifying. Takes precedence over `witness`.
+        witness_refusal: Option<(u16, &'static str)>,
     }
 
     struct LocalWitness {
@@ -952,6 +955,7 @@ mod tests {
         let collateral = answers.collateral.clone();
         let witness_seen = seen.clone();
         let witness = answers.witness.clone();
+        let witness_refusal = answers.witness_refusal;
 
         let app = Router::new()
             .route(
@@ -1009,7 +1013,14 @@ mod tests {
                             seen.routes.push("witness".to_string());
                             seen.witness_bodies.push(bytes.to_vec());
                         }
-                        witness_answer(answer)
+                        match witness_refusal {
+                            Some((status, label)) => (
+                                StatusCode::from_u16(status).expect("a legal status"),
+                                axum::Json(serde_json::json!({ "error": label })),
+                            )
+                                .into_response(),
+                            None => witness_answer(answer),
+                        }
                     }
                 }),
             );
@@ -1535,6 +1546,7 @@ mod tests {
             })),
             collateral: Some(COLLATERAL.to_string()),
             witness: Some(signed_answer(&signer, &envelope_bytes())),
+            witness_refusal: None,
         })
         .await;
         let transport = transport_for(&server.base, permissive());
@@ -1577,6 +1589,7 @@ mod tests {
             })),
             collateral: Some(COLLATERAL.to_string()),
             witness: Some(signed_answer(&signer, &envelope_bytes())),
+            witness_refusal: None,
         })
         .await;
         let transport = transport_for(&server.base, permissive());
@@ -1636,6 +1649,73 @@ mod tests {
             "an unpinned client still contacted the witness: {:?}",
             server.routes()
         );
+    }
+
+    /// A witness that declines a receipt is not a witness that answered
+    /// nonsense.
+    ///
+    /// The trust configuration this refusal comes from -- which signers,
+    /// which models, which minimum request size -- is exactly what changes
+    /// during a rollout, so this is the common refusal on that path and it
+    /// was reported as a malformed response, which every shell renders as a
+    /// failed review. Indistinguishable from the witness being down.
+    #[tokio::test]
+    async fn a_declined_receipt_is_not_a_malformed_response() {
+        use trace_commons_protocol::admission::AdmissionRefusal;
+        let signer = test_signer("witness");
+        let refusal = AdmissionRefusal::EvidenceRefused;
+        let server = local_witness(Answers {
+            witness_refusal: Some((refusal.status(), refusal.label())),
+            ..Answers::default()
+        })
+        .await;
+        let transport = transport_for(&server.base, permissive());
+        let witness =
+            crate::witness::verify::verified_witness_for_test(&server.base, &address_of(&signer));
+
+        let err = witness_contribution(&transport, &witness, raw_with_secret(), None, &granted())
+            .await
+            .expect_err("a declined receipt is still a refusal");
+        assert_ne!(
+            err,
+            WitnessTrustError::WitnessResponseMalformed,
+            "a deliberate refusal is still reported as a broken witness"
+        );
+        assert_eq!(err.refusal_label(), refusal.label());
+    }
+
+    /// The fail-closed half: a non-2xx that carries no label this client
+    /// knows is still what it always was.
+    #[tokio::test]
+    async fn an_unlabelled_failure_is_still_a_malformed_response() {
+        let signer = test_signer("witness");
+        for answer in [
+            // No body at all.
+            None,
+            // A label on a status it is never sent with.
+            Some((500, "admission_evidence_refused")),
+            Some((403, "something_else_entirely")),
+        ] {
+            let server = local_witness(Answers {
+                witness_refusal: answer,
+                ..Answers::default()
+            })
+            .await;
+            let transport = transport_for(&server.base, permissive());
+            let witness = crate::witness::verify::verified_witness_for_test(
+                &server.base,
+                &address_of(&signer),
+            );
+            let err =
+                witness_contribution(&transport, &witness, raw_with_secret(), None, &granted())
+                    .await
+                    .expect_err("a failed witness call is a refusal");
+            assert_eq!(
+                err,
+                WitnessTrustError::WitnessResponseMalformed,
+                "{answer:?}"
+            );
+        }
     }
 
     #[tokio::test]

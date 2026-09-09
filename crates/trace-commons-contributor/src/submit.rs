@@ -2483,6 +2483,78 @@ mod tests {
         )
     }
 
+    /// The hosted admission gate's refusal shape: a status, an
+    /// `{"error": ...}` label, and no receipt.
+    fn stub_ingest_refuses(status: u16, label: &'static str) -> Router {
+        Router::new().route(
+            "/v1/traces",
+            post(move || async move {
+                (
+                    axum::http::StatusCode::from_u16(status).expect("a legal status"),
+                    Json(serde_json::json!({ "error": label })),
+                )
+            }),
+        )
+    }
+
+    async fn refusal_from_ingest(status: u16, label: &'static str) -> String {
+        let issuer = spawn(stub_issuer()).await;
+        let ingest = spawn(stub_ingest_refuses(status, label)).await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
+        let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
+        let outcomes =
+            submit_sessions(&store, &cfg, fixture_selection(), &SubmitOptions::default())
+                .await
+                .unwrap();
+        refusal_label_of(&outcomes[0])
+    }
+
+    /// A refusal from the hosted admission gate is not an authentication
+    /// failure, and the label it carries is the one that reaches the queue.
+    ///
+    /// Before this, `403 admission_refused` was read as an expired claim: it
+    /// burned a remint and reported `auth-failed`, and the 409 and 429
+    /// refusals reported the transport's own `server-label`. The daemon then
+    /// rendered every one of them as an unreachable commons, so a contributor
+    /// who had spent their budget, or whose evidence was declined, was told
+    /// the service was down.
+    #[tokio::test]
+    async fn an_admission_refusal_is_reported_by_its_server_label() {
+        for refusal in trace_commons_protocol::admission::AdmissionRefusal::ALL {
+            // The witness gate sends this one, on a path that never reaches
+            // `/v1/traces`.
+            if refusal == trace_commons_protocol::admission::AdmissionRefusal::EvidenceRefused {
+                continue;
+            }
+            assert_eq!(
+                refusal_from_ingest(refusal.status(), refusal.label()).await,
+                refusal.label(),
+                "{} did not reach the queue as itself",
+                refusal.label()
+            );
+        }
+    }
+
+    /// The fail-closed half. A 403 this client cannot read as an admission
+    /// refusal is still treated as an expired claim, because it still is one
+    /// on every other path -- and a body is not permission to stop reminting.
+    #[tokio::test]
+    async fn an_unrecognised_refusal_still_reads_as_an_expired_claim() {
+        for (status, label) in [
+            (403, "not_a_label_this_client_knows"),
+            // The right label on a status it is never sent with.
+            (403, "admission_limit_reached"),
+        ] {
+            assert_eq!(
+                refusal_from_ingest(status, label).await,
+                "auth-failed",
+                "{status} {label}"
+            );
+        }
+    }
+
     fn fixture_selection() -> Vec<(
         Box<dyn crate::source::TraceSource>,
         crate::source::SessionRef,

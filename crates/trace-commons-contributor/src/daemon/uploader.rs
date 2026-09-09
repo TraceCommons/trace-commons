@@ -40,9 +40,9 @@ use serde::Serialize;
 use uuid::Uuid;
 
 use super::health::{
-    HealthState, LABEL_CANARY_FAILED, LABEL_CLAIM_MINT_FAILED, LABEL_DAILY_CAP_REACHED,
-    LABEL_INGEST_UNREACHABLE, LABEL_NEAR_AI_NOTICE_PENDING, LABEL_NOT_LOGGED_IN,
-    LABEL_PII_FILTER_UNAVAILABLE,
+    HealthState, LABEL_ADMISSION_LIMIT_REACHED, LABEL_ADMISSION_REFUSED, LABEL_CANARY_FAILED,
+    LABEL_CLAIM_MINT_FAILED, LABEL_DAILY_CAP_REACHED, LABEL_INGEST_UNREACHABLE,
+    LABEL_NEAR_AI_NOTICE_PENDING, LABEL_NOT_LOGGED_IN, LABEL_PII_FILTER_UNAVAILABLE,
 };
 use super::queue::QueueEntry;
 use super::settings::DaemonSettings;
@@ -742,6 +742,49 @@ mod tests {
             reason_label: "claim-mint-failed".into(),
         };
         assert_eq!(health_label_for(&d), Some(LABEL_CLAIM_MINT_FAILED));
+    }
+
+    /// A refusal the commons sent deliberately is not an outage.
+    ///
+    /// Every `Failed` label except the claim one used to become
+    /// `ingest-unreachable`, so a declined contribution and a spent budget
+    /// both told the contributor the service was down, in front of a queue
+    /// that would never drain by retrying.
+    #[test]
+    fn an_admission_refusal_is_not_an_outage() {
+        use trace_commons_protocol::admission::AdmissionRefusal;
+        for refusal in AdmissionRefusal::ALL {
+            let d = UploadDecision::Failed {
+                reason_label: refusal.label().into(),
+            };
+            assert_ne!(
+                health_label_for(&d),
+                Some(LABEL_INGEST_UNREACHABLE),
+                "{} is reported as an outage",
+                refusal.label()
+            );
+        }
+        assert_eq!(
+            health_label_for(&UploadDecision::Failed {
+                reason_label: AdmissionRefusal::Refused.label().into(),
+            }),
+            Some(LABEL_ADMISSION_REFUSED)
+        );
+        assert_eq!(
+            health_label_for(&UploadDecision::Failed {
+                reason_label: AdmissionRefusal::LimitReached.label().into(),
+            }),
+            Some(LABEL_ADMISSION_LIMIT_REACHED)
+        );
+        // A lease another attempt is holding is resolved by the retry that
+        // follows it. Reporting a condition for it would put a banner up for
+        // a race that clears itself.
+        assert_eq!(
+            health_label_for(&UploadDecision::Failed {
+                reason_label: AdmissionRefusal::InProgress.label().into(),
+            }),
+            None
+        );
     }
 
     #[test]

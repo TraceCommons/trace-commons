@@ -25,6 +25,17 @@ pub const LABEL_CLAIM_MINT_FAILED: &str = "claim-mint-failed";
 pub const LABEL_INGEST_UNREACHABLE: &str = "ingest-unreachable";
 /// A daily volume cap is in force until the UTC day rolls over.
 pub const LABEL_DAILY_CAP_REACHED: &str = "daily-cap-reached";
+/// The commons declined a contribution. A decision it made deliberately, not
+/// a failure to reach it: retrying changes nothing until something else does.
+///
+/// Distinct from [`LABEL_INGEST_UNREACHABLE`] because they call for opposite
+/// responses. An outage is waited out; a refusal is not, and telling someone
+/// whose evidence was declined that the service is down leaves them retrying
+/// a queue that will never drain.
+pub const LABEL_ADMISSION_REFUSED: &str = "admission-refused";
+/// The account's admission budget for this window is spent. The commons is
+/// working; it has taken as much from this account as the window allows.
+pub const LABEL_ADMISSION_LIMIT_REACHED: &str = "admission-limit-reached";
 /// The NEAR AI first-use notice has not been delivered interactively yet, so
 /// the daemon will not send anything through that filter.
 pub const LABEL_NEAR_AI_NOTICE_PENDING: &str = "near-ai-notice-not-acknowledged";
@@ -54,7 +65,12 @@ pub const LABEL_OPENCODE_EXPORT_VERSION_UNSUPPORTED: &str = "opencode-export-ver
 /// Labels describing a condition the contributor cannot resolve by making a
 /// decision about a trace. While one of these is in force, pending entries do
 /// not age out.
-const EXPIRY_BLOCKING_LABELS: [&str; 7] = [
+///
+/// Both admission conditions are here for that reason. A spent budget is the
+/// same kind of fact as a daily cap, and a refused contribution is a decision
+/// somewhere else that the contributor cannot argue with -- burning the clock
+/// on either would delete traces for a condition they had no move against.
+const EXPIRY_BLOCKING_LABELS: [&str; 9] = [
     LABEL_NOT_LOGGED_IN,
     LABEL_PII_FILTER_UNAVAILABLE,
     LABEL_CLAIM_MINT_FAILED,
@@ -62,6 +78,8 @@ const EXPIRY_BLOCKING_LABELS: [&str; 7] = [
     LABEL_DAILY_CAP_REACHED,
     LABEL_NEAR_AI_NOTICE_PENDING,
     LABEL_CANARY_FAILED,
+    LABEL_ADMISSION_REFUSED,
+    LABEL_ADMISSION_LIMIT_REACHED,
 ];
 
 /// Return the precedence of a health label, where lower values indicate higher
@@ -75,16 +93,23 @@ pub fn precedence(label: &str) -> u8 {
         LABEL_CANARY_FAILED => 2,
         LABEL_PII_FILTER_UNAVAILABLE => 3,
         LABEL_CLAIM_MINT_FAILED => 4,
-        LABEL_INGEST_UNREACHABLE => 5,
-        LABEL_QUEUE_FULL => 6,
-        LABEL_DAILY_CAP_REACHED => 7,
+        // Above an outage: a refusal is a standing decision, and a banner
+        // saying the commons is unreachable would send someone to wait for a
+        // service that is up.
+        LABEL_ADMISSION_REFUSED => 5,
+        LABEL_INGEST_UNREACHABLE => 6,
+        LABEL_QUEUE_FULL => 7,
+        // Beside the daily cap, which it is the server-side twin of: both are
+        // budgets that come back on their own.
+        LABEL_ADMISSION_LIMIT_REACHED => 8,
+        LABEL_DAILY_CAP_REACHED => 9,
         // Last, below every condition above it, because it is the only one
         // that is not about the daemon: everything else here stops the
         // whole pipeline, while this describes one file the contributor can
         // still work around by leaving it alone. It must never mask an
         // outage.
-        LABEL_SESSION_TOO_LARGE | LABEL_OPENCODE_EXPORT_VERSION_UNSUPPORTED => 8,
-        _ => 9,
+        LABEL_SESSION_TOO_LARGE | LABEL_OPENCODE_EXPORT_VERSION_UNSUPPORTED => 10,
+        _ => 11,
     }
 }
 

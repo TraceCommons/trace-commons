@@ -516,6 +516,48 @@ mod tests {
         }
     }
 
+    /// The server's own refusals, on the same rule.
+    ///
+    /// Before this, `writeback_for` knew only the two labels this client
+    /// raises itself, so a row went on saying a session carried proof after
+    /// the commons had turned that session away for want of it -- with the
+    /// contributor's own attempt as the evidence against the row.
+    ///
+    /// The retraction carries no reason. The `REASON_*` vocabulary is a
+    /// vocabulary of facts about a session, established by reading it, and a
+    /// refusal from somewhere else is not one of those: what the client
+    /// learned is that it no longer knows, which is exactly what `unknown`
+    /// with no reason already says on this wire.
+    #[test]
+    fn a_server_admission_refusal_retracts_the_mark() {
+        use trace_commons_protocol::admission::AdmissionRefusal;
+        for refusal in [AdmissionRefusal::Refused, AdmissionRefusal::EvidenceRefused] {
+            assert_eq!(
+                writeback_for(refusal.label()),
+                Some(Mark {
+                    state: MARK_UNKNOWN,
+                    reason: None,
+                }),
+                "{} left the row claiming its proof",
+                refusal.label()
+            );
+        }
+        // A spent budget, a held lease and a submission-id collision are
+        // facts about a request, not about what the session carries.
+        for refusal in [
+            AdmissionRefusal::LimitReached,
+            AdmissionRefusal::InProgress,
+            AdmissionRefusal::IdentityConflict,
+        ] {
+            assert_eq!(
+                writeback_for(refusal.label()),
+                None,
+                "{} invented an answer about the session",
+                refusal.label()
+            );
+        }
+    }
+
     /// The same rule on the write-back side: a submission turned away for
     /// want of the proof leaves the row unable to claim it carries any.
     #[test]
