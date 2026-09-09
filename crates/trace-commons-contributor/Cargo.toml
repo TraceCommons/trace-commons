@@ -469,7 +469,82 @@ hex = "0.4"
 # changed rev through `cargo metadata` alone was enough -- and the changed
 # lines of both lock diffs were grepped for non-ironwire movement, of which
 # there were zero (22 changed lines each, all of them the rev).
-ironwire_proxy = { git = "https://github.com/nearai/ironwire", rev = "06118ebdb3eac5fc30b1302246bc6af394627c92" }
+#
+# ADVANCE TO 74cd49c1. Two commits in the range, verified with
+# `git log --oneline 06118ebd..74cd49c1`: #56 installs upstream's packaging
+# tools from the Ubuntu archive alone and touches no library code at all, and
+# #55 records the model NEAR AI actually served. Both are upstream's own.
+#
+# COST. Zero, measured on both workspaces rather than assumed. Lock entries are
+# 930 root and 535 GTK before and after; `cargo metadata --locked` resolves 577
+# root packages and 535 GTK packages; this crate's `cargo tree -e normal` is
+# still 303 deduplicated names. Upstream changed no manifest and no lock in the
+# range -- `git diff --stat 06118ebd..74cd49c1 -- Cargo.toml Cargo.lock
+# '*/Cargo.toml'` is empty -- so no package entered either graph and no license
+# entered the audit. `cargo deny check licenses` passes on all four
+# configurations (default, near-ai-scorer, local-gpu-models, --all-features).
+#
+# MSRV. Unmoved, and checked rather than remembered: every `rust-version` in
+# the tree reads `1.96` (or inherits it) at BOTH revs. This advance does not
+# disturb the toolchain literals in the release workflows.
+#
+# SURFACE. Two of this crate's three imports did not move one byte --
+# `git diff --stat 06118ebd..74cd49c1 -- crates/ironwire_catalog` and the same
+# for `crates/ironwire_agents` are both EMPTY, so `ironwire_catalog::schema`
+# and the `ironwire_agents::tools` matches in `daemon::harness` are not at
+# risk. `ironwire_proxy` is the only crate that moved, and `embed.rs` is the
+# only file in it we compile against:
+#   * `EmbedOptions` GAINS a public `refuse_model_aliases: bool` and a
+#     `refusing_model_aliases` builder. Additive, and it does not break us for
+#     a reason that is checked and not inherited from the section above: this
+#     crate never writes an `EmbedOptions` struct literal. Both construction
+#     sites -- `embed_options` and the test at private_inference.rs:1178 --
+#     go through `EmbedOptions::default()` plus builders.
+#   * The rest of #55's new surface is `MODEL_ALIAS_RESOLVED_HEADER`,
+#     `NO_ALIASING_HEADER`, `model_alias_resolved()` and the ledger's
+#     `model_alias_resolved: Option<String>`. We name none of them: grep for
+#     all four across `crates/**/*.rs` returns zero.
+# Everything else we import -- `EmbedError`, `EmbeddedProxy`, `ExitError`,
+# `HostSecret`, `CredentialFiles`, `StartupProbes`, `UpdateChecks`, `start`,
+# `start_with_options` -- is unchanged.
+#
+# BEHAVIOUR, not just types. Nothing changes on a contributor's machine, and
+# the two reasons are separate:
+#   * `refuse_model_aliases` is opt-in and defaults false. `embed_options`
+#     does not set it, so the proxy keeps accepting a substituted model
+#     exactly as it did. Recording the substitution is unconditional;
+#     REFUSING it is not, and we have not asked for the refusal.
+#   * The ledger gains a nullable column through upstream's existing
+#     `ADDED_COLUMNS` path, and `add_missing_columns` runs inside
+#     `Ledger::init` on every open. An existing contributor's ledger file is
+#     migrated in place the first time the new binary opens it, and upstream's
+#     `a_row_written_before_the_alias_column_reads_back_through_the_new_reader`
+#     pins that a new reader opens an old file. NO LEDGER MIGRATION IS NEEDED
+#     ON OUR SIDE, and none is added here.
+#
+# PR #755'S RETRY STILL STAYS, for the reason the section above gives and not
+# because this advance re-examined it: #54 is already in the previous pin, so
+# this bump changes nothing about that removal's schedule.
+#
+# FLATPAK. `cargo-sources.json` was REGENERATED with flatpak-cargo-generator.py
+# against the new GTK lock -- surface 3 before surface 4, because the generator
+# reads the lock and a stale one yields a file that looks right and vendors the
+# old revision -- and the diff has exactly the shape the sections above warn
+# about. Thirteen entries move of 1073, fourteen lines in all: TWO carry the
+# 40-character revision (the git source's `commit` and the vendored-sources
+# `contents`) and TWELVE key on the SHORT hash, one `dest` and eleven
+# `cp --reflink` vendor lines, `flatpak-cargo/git/ironwire-06118eb` ->
+# `-74cd49c`. The remaining 1060 entries are byte-identical, no moved entry
+# mentions anything but ironwire, and `grep -c 06118eb` on the regenerated
+# file is 0.
+#
+# The IronClaw note above still applies and was re-checked rather than assumed:
+# both locks still name 6dccbfbcbddfdfb53c11d3876f94bf3e716b55f9. As with the
+# last advance, re-resolving the changed rev through `cargo metadata` alone was
+# enough, and the changed lines of both lock diffs were grepped for
+# non-ironwire movement, of which there were zero (22 changed lines each, all
+# of them the rev).
+ironwire_proxy = { git = "https://github.com/nearai/ironwire", rev = "74cd49c106b7dab9c35e82d92af6c14df27d594b" }
 # The same IronWire revision, two more of its crates, promoted from
 # transitive to direct. `ironwire_agents` is the crate whose entire purpose is
 # "which coding tools does this machine have, are they pointed at us, and how
@@ -483,8 +558,8 @@ ironwire_proxy = { git = "https://github.com/nearai/ironwire", rev = "06118ebdb3
 # crate does not reimplement, in a second place, the three config-editing
 # rules (never rewrite a file we cannot parse; fill an empty slot but report a
 # full one; remove only what we put there) that crate exists to hold.
-ironwire_agents = { git = "https://github.com/nearai/ironwire", rev = "06118ebdb3eac5fc30b1302246bc6af394627c92" }
-ironwire_catalog = { git = "https://github.com/nearai/ironwire", rev = "06118ebdb3eac5fc30b1302246bc6af394627c92" }
+ironwire_agents = { git = "https://github.com/nearai/ironwire", rev = "74cd49c106b7dab9c35e82d92af6c14df27d594b" }
+ironwire_catalog = { git = "https://github.com/nearai/ironwire", rev = "74cd49c106b7dab9c35e82d92af6c14df27d594b" }
 notify = "8.2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
 ring = "0.17"
