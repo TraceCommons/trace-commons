@@ -651,8 +651,10 @@ No port, token, or row content appears here.
 `subagent_count` and `subagents_dropped` also appear on every queue entry
 (`list_pending`, the `snapshot` event), as do `eligibility` and
 `eligibility_reason` -- see "Contribution eligibility" below -- and
-`attestation` and `attestation_reason`, see "The attestation mark" below.
-`attestation` is on EVERY entry; `eligibility` is not. All are
+`attestation` and `attestation_reason`, see "The attestation mark" below,
+and `holds_certificate`, see "The certificate a queue entry holds" below.
+`attestation` and `holds_certificate` are on EVERY entry; `eligibility` is
+not. All are
 additive; the schema version
 stays `trace_commons.daemon.v1_1`, and a client that ignores them behaves
 exactly as before.
@@ -2180,6 +2182,47 @@ before the field existed reports `unknown`, never an unattested mark.
 Sentence and tone come from `tc_contribution_attestation_line` and
 `tc_contribution_attestation_tone` -- never from shell-authored branching on
 the label.
+
+### The certificate a queue entry holds
+
+| Field | Values |
+|---|---|
+| `holds_certificate` | `true` \| `false` |
+
+True when a witness certificate is held for the bytes this entry was pinned
+to. Both witness routes produce one: `POST /v1/witness` returns a
+certificate, and `POST /v1/witness/admission` returns a certificate AND
+admission evidence. The daemon stores either as a single
+`trace_commons.witness_review.v1` artifact under a single pin, so "did the
+contributor complete step 1 or step 2" is not two questions.
+
+**`holds_certificate` is ALWAYS PRESENT, on every entry, for every
+contributor** -- the `attestation` rule, not the `eligibility` one, and for
+a reason of its own. This is one fact with two readings:
+
+| Contributor | Reads `true` as |
+|---|---|
+| without an invite | this session is a candidate for submission |
+| with an invite | this session is cryptographically attested |
+
+The fact does not differ between them; only the wording does. The shell
+picks the wording from the invite status it already holds for the
+eligibility surface, and MUST NOT ask the daemon a second question to get
+it. Emitting the field only under the signup flag would put the second
+reading out of reach of exactly the contributors it is written for.
+
+**This is not `attestation`, and the two must not be conflated.**
+`attestation` answers whether the session carries a checkable copy of the
+model call that produced it. `holds_certificate` answers whether a witness
+certificate is held over the reviewed bytes. A session can have either
+without the other, and *holds a certificate*, *is attestable* and *was
+attested* are three different facts. A shell deciding what to put in a
+certificate-held list MUST read `holds_certificate` and never the mark.
+
+Derived from the pin rather than stored, so it cannot drift from it: the
+artifact is written and the pin recorded under one queue lock. An entry
+re-offered because its bytes moved loses the pin and therefore the claim --
+the certificate covered the old bytes.
 
 **There is no control accessor, and that is the contract.** The mark
 describes the trace; it offers nothing to press. A shell that drew a button
