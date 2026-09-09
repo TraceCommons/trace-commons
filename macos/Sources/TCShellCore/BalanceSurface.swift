@@ -222,6 +222,24 @@ public enum BalanceSurface {
         return line.isEmpty ? nil : line
     }
 
+    /// Whether the figures are the row, or the sentence is.
+    ///
+    /// **They are alternatives, never both.** A state that has a sentence has
+    /// no reading behind it: `remaining_nanos` is null in every state but
+    /// `known`, and the sentence for a null remaining figure says the ACCOUNT
+    /// HAS NO CEILING -- which is true of an uncapped account and nonsense
+    /// beside "no sign-in is kept here". Drawing the figures unconditionally
+    /// is how a contributor who has never signed in gets told about their
+    /// spending limit.
+    ///
+    /// Derived from the shared table rather than from a label spelled here:
+    /// the empty sentence IS `known`, and a state a later daemon grows that
+    /// answers a sentence gets the sentence, which is the safe half. A caught
+    /// panic draws no figures either.
+    public static func showsFigures(_ status: BalanceStatus, calls: BalanceCalls) -> Bool {
+        calls.stateLine(status.state) == ""
+    }
+
     /// The tone the row is painted in.
     ///
     /// `PrivateInferenceTone` is reused rather than duplicated, which is what

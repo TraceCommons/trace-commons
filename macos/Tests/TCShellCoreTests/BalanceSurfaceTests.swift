@@ -330,6 +330,24 @@ final class BalanceSurfaceTests: XCTestCase {
         XCTAssertNotEqual(fallback, copy().balanceNoSession)
     }
 
+    /// The sentence and the figures are alternatives.
+    ///
+    /// Only `known` has a reading behind it. Drawing the figures beside a
+    /// state that has a sentence would tell somebody who has never signed in
+    /// that no spending limit is set on their account -- true of an uncapped
+    /// account, and nonsense here, because the null those figures are read
+    /// from means "nothing was read" rather than "nothing was configured".
+    func testTheFiguresAreDrawnOnlyWhereThereIsNoSentence() {
+        XCTAssertTrue(BalanceSurface.showsFigures(known(), calls: calls()))
+        for state in ["", "no_session", "session_expired", "unavailable", "a_state_from_2027"] {
+            XCTAssertFalse(
+                BalanceSurface.showsFigures(BalanceStatus(state: state), calls: calls()),
+                "\(state) has a sentence and must not also show figures")
+        }
+        // A caught panic draws no figures either.
+        XCTAssertFalse(BalanceSurface.showsFigures(known(), calls: calls(line: { _ in nil })))
+    }
+
     // MARK: - Tone
 
     /// The tone is the shared table's, decoded through the same five values
