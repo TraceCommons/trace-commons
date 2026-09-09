@@ -3147,6 +3147,246 @@ pub extern "C" fn tc_contribution_withheld_line(withheld: i64) -> *mut c_char {
     })
 }
 
+/// The sentence for one `near_ai_balance` `state`.
+///
+/// `state` is the `state` field of a `near_ai_balance` answer. A NULL or
+/// non-UTF-8 pointer is treated as a missing state and gets the "this daemon
+/// does not report a balance" sentence; a state this build has never heard of
+/// gets its own sentence and BORROWS NOBODY'S. Neither may degrade to the
+/// "no sign-in is kept here" sentence, which is a claim about this machine.
+///
+/// `known` answers the EMPTY STRING: that state's row is figures, and a
+/// sentence above them announcing the read succeeded is this app narrating
+/// itself.
+///
+/// Returns an owned string; free it with [`tc_string_free`]. NULL only on a
+/// caught panic.
+///
+/// # Safety
+/// `state`, if non-null, must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_near_ai_balance_state_line(state: *const c_char) -> *mut c_char {
+    guarded_string_no_err(|| {
+        let state = if state.is_null() {
+            ""
+        } else {
+            unsafe { borrow_str(state) }.unwrap_or("")
+        };
+        Ok(to_owned_cstring(
+            trace_commons_contributor::private_inference_copy::balance_state_line(state),
+        ))
+    })
+}
+
+/// How firmly the balance row reads: one of the `TC_PRIVATE_INFERENCE_TONE_*`
+/// values.
+///
+/// `known` is the only state that answers `_CLEAR`, and it means THE READ
+/// SUCCEEDED, not that the balance is healthy. Nothing across this ABI judges
+/// an amount. A shell that painted a low figure red would be inventing a
+/// threshold nobody set, on an account whose ceiling may not exist at all.
+///
+/// Everything else -- including a state this build has never heard of, a NULL
+/// or non-UTF-8 `state`, and a caught panic -- answers
+/// `TC_PRIVATE_INFERENCE_TONE_NEUTRAL`, except the two states with a settled
+/// meaning of their own.
+///
+/// # Safety
+/// `state`, if non-null, must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_near_ai_balance_state_tone(state: *const c_char) -> i32 {
+    use trace_commons_contributor::private_inference_copy::PrivateInferenceTone;
+    guard(|| {
+        let state = if state.is_null() {
+            ""
+        } else {
+            unsafe { borrow_str(state) }.unwrap_or("")
+        };
+        Ok(
+            match trace_commons_contributor::private_inference_copy::balance_state_tone(state) {
+                PrivateInferenceTone::Neutral => TC_PRIVATE_INFERENCE_TONE_NEUTRAL,
+                PrivateInferenceTone::Held => TC_PRIVATE_INFERENCE_TONE_HELD,
+                PrivateInferenceTone::Clear => TC_PRIVATE_INFERENCE_TONE_CLEAR,
+                PrivateInferenceTone::Attention => TC_PRIVATE_INFERENCE_TONE_ATTENTION,
+                PrivateInferenceTone::Refused => TC_PRIVATE_INFERENCE_TONE_REFUSED,
+            },
+        )
+    })
+    .unwrap_or(TC_PRIVATE_INFERENCE_TONE_NEUTRAL)
+}
+
+/// The one action a shell may offer beside a balance state: one of the
+/// `TC_CREDENTIAL_ACTION_*` values.
+///
+/// The sign-in row's enum and not a second one, because the only action this
+/// row has ever needed is that row's `OBTAIN`.
+///
+/// `no_session` and `session_expired` answer `TC_CREDENTIAL_ACTION_OBTAIN`,
+/// and those two only. A refused session gets it WITHOUT a forget first: the
+/// ceremony overwrites both records, and forgetting would throw away a
+/// working key to fix an unrelated sign-in. Everything else answers
+/// `TC_CREDENTIAL_ACTION_NONE`.
+///
+/// # Safety
+/// `state`, if non-null, must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_near_ai_balance_action(state: *const c_char) -> i32 {
+    use trace_commons_contributor::private_inference_copy::CredentialAction;
+    guard(|| {
+        let state = if state.is_null() {
+            ""
+        } else {
+            unsafe { borrow_str(state) }.unwrap_or("")
+        };
+        Ok(
+            match trace_commons_contributor::private_inference_copy::balance_action(state) {
+                CredentialAction::None => TC_CREDENTIAL_ACTION_NONE,
+                CredentialAction::Obtain => TC_CREDENTIAL_ACTION_OBTAIN,
+                CredentialAction::Cancel => TC_CREDENTIAL_ACTION_CANCEL,
+                CredentialAction::Forget => TC_CREDENTIAL_ACTION_FORGET,
+            },
+        )
+    })
+    .unwrap_or(TC_CREDENTIAL_ACTION_NONE)
+}
+
+/// Turn a `near_ai_balance` integer into money, once, for all three shells.
+///
+/// `scale` IS THE WIRE'S OWN `scale` FIELD, not a constant. It is on the wire
+/// because a daemon may change it, and a shell dividing by 1000000000 of its
+/// own would then be wrong by a factor of a thousand. Pass what arrived.
+///
+/// # `present` is a separate argument, deliberately
+///
+/// Every other money export here encodes absence as an out-of-range integer.
+/// This one cannot: these amounts are SIGNED, an overdrawn account is a
+/// negative figure, and folding "null" onto "negative" would render a real
+/// debt as no figure at all. So `present` is `0` for the wire's `null` and
+/// non-zero otherwise, and a `0` gives the EMPTY STRING.
+///
+/// **An empty string is never `$0.00`.** A `null` on this wire means "we know
+/// we do not know"; zero is a real balance and means the money is gone.
+///
+/// The rounding is DOWN, toward minus infinity, so a figure printed here is
+/// never larger than the figure that arrived. Half-up would let 9.996 dollars
+/// print as "$10.00", which is this ABI inventing somebody else's money. A
+/// nonzero amount under a cent is "less than $0.01" rather than "$0.00", for
+/// the same reason `tc_harness_spend_line` does it.
+///
+/// Returns an owned string; free it with [`tc_string_free`]. NULL only on a
+/// caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_near_ai_balance_amount(present: i32, nanos: i64, scale: u8) -> *mut c_char {
+    guarded_string_no_err(|| {
+        let text = if present == 0 {
+            String::new()
+        } else {
+            trace_commons_contributor::private_inference_copy::format_amount(nanos, scale)
+        };
+        Ok(to_owned_cstring(&text))
+    })
+}
+
+/// What is left, as a finished sentence.
+///
+/// `present`, `nanos` and `scale` are [`tc_near_ai_balance_amount`]'s, from
+/// `remaining_nanos` and `scale`.
+///
+/// **`present == 0` DOES NOT GIVE THE EMPTY STRING HERE.** It gives the
+/// sentence for an account with no spending limit set, because
+/// `remaining_nanos` is nullable even when `state` is `known` -- the ordinary
+/// case for an account nobody has capped -- and that contributor must not be
+/// told they have $0.00 left.
+///
+/// Returns an owned string; free it with [`tc_string_free`]. NULL only on a
+/// caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_near_ai_balance_remaining_line(
+    present: i32,
+    nanos: i64,
+    scale: u8,
+) -> *mut c_char {
+    guarded_string_no_err(|| {
+        let nanos = (present != 0).then_some(nanos);
+        Ok(to_owned_cstring(
+            &trace_commons_contributor::private_inference_copy::balance_remaining_line(
+                nanos, scale,
+            ),
+        ))
+    })
+}
+
+/// The configured ceiling, as a finished sentence, or the empty string.
+///
+/// From `spend_limit_nanos`. `present == 0` gives the EMPTY STRING and not a
+/// sentence: [`tc_near_ai_balance_remaining_line`] has already said the part
+/// that matters about an uncapped account, and saying it twice is once too
+/// many.
+///
+/// Returns an owned string; free it with [`tc_string_free`]. NULL only on a
+/// caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_near_ai_balance_limit_line(
+    present: i32,
+    nanos: i64,
+    scale: u8,
+) -> *mut c_char {
+    guarded_string_no_err(|| {
+        let nanos = (present != 0).then_some(nanos);
+        Ok(to_owned_cstring(
+            &trace_commons_contributor::private_inference_copy::balance_limit_line(nanos, scale),
+        ))
+    })
+}
+
+/// What the account has spent, as a finished sentence, or the empty string.
+///
+/// From `total_spent_nanos`. `present == 0` gives the empty string, drawn as
+/// no line at all. A zero is NOT that: an account that has spent nothing
+/// renders "$0.00", which is true.
+///
+/// The figure is the WHOLE ACCOUNT, not this computer -- the payload's
+/// `balance_what` says so, and it belongs beside this sentence.
+///
+/// Returns an owned string; free it with [`tc_string_free`]. NULL only on a
+/// caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_near_ai_balance_spent_line(
+    present: i32,
+    nanos: i64,
+    scale: u8,
+) -> *mut c_char {
+    guarded_string_no_err(|| {
+        let nanos = (present != 0).then_some(nanos);
+        Ok(to_owned_cstring(
+            &trace_commons_contributor::private_inference_copy::balance_spent_line(nanos, scale),
+        ))
+    })
+}
+
+/// How long ago THIS COMPUTER asked, assembled.
+///
+/// `seconds_ago` is now minus the answer's `observed_at`. ABSENCE IS AN
+/// OUT-OF-RANGE INTEGER, the convention [`tc_harness_last_call_line`] uses:
+/// any negative value -- which is what a shell passes for a `null`
+/// `observed_at` -- gives the empty string.
+///
+/// `observed_at` is the DAEMON'S clock at the moment the service answered,
+/// not the service's own `updated_at`, so the sentence says when the question
+/// was put and never that anything was updated then.
+///
+/// Returns an owned string; free it with [`tc_string_free`]. NULL only on a
+/// caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_near_ai_balance_observed_line(seconds_ago: i64) -> *mut c_char {
+    guarded_string_no_err(|| {
+        let seconds = u64::try_from(seconds_ago).ok();
+        Ok(to_owned_cstring(
+            &trace_commons_contributor::private_inference_copy::balance_observed_line(seconds),
+        ))
+    })
+}
+
 /// The reported local port, assembled without a readiness claim.
 ///
 /// `port` is the `port` field of `private_inference_state`. A value outside

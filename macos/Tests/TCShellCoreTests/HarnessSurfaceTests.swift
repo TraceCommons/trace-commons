@@ -76,7 +76,16 @@ final class HarnessSurfaceTests: XCTestCase {
          "attestation_reason_evidence_capture_off":"AR-EVIDENCE-CAPTURE-OFF",
          "attestation_reason_marker_absent":"AR-MARKER-ABSENT",
          "attestation_reason_request_malformed":"AR-REQUEST-MALFORMED",
-         "attestation_reason_receipt_unavailable":"AR-RECEIPT-UNAVAILABLE"}
+         "attestation_reason_receipt_unavailable":"AR-RECEIPT-UNAVAILABLE",
+         "balance_title":"BALANCE-TITLE",
+         "balance_what":"BALANCE-WHAT",
+         "balance_no_session":"BALANCE-NO-SESSION",
+         "balance_session_expired":"BALANCE-SESSION-EXPIRED",
+         "balance_no_organization":"BALANCE-NO-ORGANIZATION",
+         "balance_unavailable":"BALANCE-UNAVAILABLE",
+         "balance_unknown":"BALANCE-UNKNOWN",
+         "balance_unreported":"BALANCE-UNREPORTED",
+         "balance_no_remaining":"BALANCE-NO-REMAINING"}
         """
 
     /// Decoded once, in `setUpWithError`, so a fixture that stops decoding

@@ -488,6 +488,42 @@ public sealed record PrivateInferenceCopy
     [JsonPropertyName("attestation_reason_receipt_unavailable")]
     public string AttestationReasonReceiptUnavailable { get; init; } = string.Empty;
 
+    /// <summary>The heading over the balance row.</summary>
+    [JsonPropertyName("balance_title")]
+    public string BalanceTitle { get; init; } = string.Empty;
+
+    /// <summary>What the figures on the row are a fact about.</summary>
+    [JsonPropertyName("balance_what")]
+    public string BalanceWhat { get; init; } = string.Empty;
+
+    /// <summary>No sign-in is kept here, so there is nothing to read.</summary>
+    [JsonPropertyName("balance_no_session")]
+    public string BalanceNoSession { get; init; } = string.Empty;
+
+    /// <summary>The stored sign-in was not accepted. The one state with a recovery.</summary>
+    [JsonPropertyName("balance_session_expired")]
+    public string BalanceSessionExpired { get; init; } = string.Empty;
+
+    /// <summary>The account has no organization, and a balance belongs to one.</summary>
+    [JsonPropertyName("balance_no_organization")]
+    public string BalanceNoOrganization { get; init; } = string.Empty;
+
+    /// <summary>The read failed. A fact about the read, never about the money.</summary>
+    [JsonPropertyName("balance_unavailable")]
+    public string BalanceUnavailable { get; init; } = string.Empty;
+
+    /// <summary>A state this build has no words for. Never degrades to a known one.</summary>
+    [JsonPropertyName("balance_unknown")]
+    public string BalanceUnknown { get; init; } = string.Empty;
+
+    /// <summary>A daemon that does not answer this at all.</summary>
+    [JsonPropertyName("balance_unreported")]
+    public string BalanceUnreported { get; init; } = string.Empty;
+
+    /// <summary>What a null remaining figure says INSTEAD of $0.00.</summary>
+    [JsonPropertyName("balance_no_remaining")]
+    public string BalanceNoRemaining { get; init; } = string.Empty;
+
     /// <summary>Every sentence for the complete-payload check, not a rendering order.</summary>
     public string[] Sentences =>
         new[]
@@ -589,5 +625,14 @@ public sealed record PrivateInferenceCopy
             AttestationReasonMarkerAbsent,
             AttestationReasonRequestMalformed,
             AttestationReasonReceiptUnavailable,
+            BalanceTitle,
+            BalanceWhat,
+            BalanceNoSession,
+            BalanceSessionExpired,
+            BalanceNoOrganization,
+            BalanceUnavailable,
+            BalanceUnknown,
+            BalanceUnreported,
+            BalanceNoRemaining,
         };
 }

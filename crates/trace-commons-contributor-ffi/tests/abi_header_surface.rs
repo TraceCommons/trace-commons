@@ -87,6 +87,7 @@ fn rust_base_type_to_c(ty: &str) -> String {
         "u32" => "uint32_t",
         "i64" => "int64_t",
         "i32" => "int32_t",
+        "u8" => "uint8_t",
         "()" | "" => "void",
         other => panic!(
             "unmapped Rust type `{other}` on the C ABI surface -- add it to \

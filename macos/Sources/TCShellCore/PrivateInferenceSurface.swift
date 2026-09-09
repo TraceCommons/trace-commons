@@ -167,6 +167,27 @@ public struct PrivateInferenceCopy: Decodable, Equatable, Sendable {
     public let attestationReasonRequestMalformed: String
     public let attestationReasonReceiptUnavailable: String
 
+    /// The balance row: its heading, what it is a fact about, and the seven
+    /// sentences a state can reach.
+    ///
+    /// Never picked by a `switch` here: the sentence for a state comes back
+    /// from `tc_near_ai_balance_state_line`, and these are carried so a test
+    /// can pin what that table answered against the set this build was
+    /// compiled with. Nothing on this row judges an amount -- a shell that
+    /// painted a low balance as a warning would be inventing a claim the
+    /// Rust does not make.
+    public let balanceTitle: String
+    public let balanceWhat: String
+    public let balanceNoSession: String
+    public let balanceSessionExpired: String
+    public let balanceNoOrganization: String
+    public let balanceUnavailable: String
+    public let balanceUnknown: String
+    public let balanceUnreported: String
+    /// The sentence a `null` remaining figure gets INSTEAD of `$0.00`. An
+    /// unreported figure is not a spent-out account.
+    public let balanceNoRemaining: String
+
     /// `CaseIterable` so a test on the far side can compare the exported
     /// field set against the declared one in BOTH directions -- a field the
     /// Rust grows and this struct drops would sail past a test that only
@@ -269,6 +290,15 @@ public struct PrivateInferenceCopy: Decodable, Equatable, Sendable {
         case attestationReasonMarkerAbsent = "attestation_reason_marker_absent"
         case attestationReasonRequestMalformed = "attestation_reason_request_malformed"
         case attestationReasonReceiptUnavailable = "attestation_reason_receipt_unavailable"
+        case balanceTitle = "balance_title"
+        case balanceWhat = "balance_what"
+        case balanceNoSession = "balance_no_session"
+        case balanceSessionExpired = "balance_session_expired"
+        case balanceNoOrganization = "balance_no_organization"
+        case balanceUnavailable = "balance_unavailable"
+        case balanceUnknown = "balance_unknown"
+        case balanceUnreported = "balance_unreported"
+        case balanceNoRemaining = "balance_no_remaining"
     }
 
     /// All or nothing, for the reason on the type.

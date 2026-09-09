@@ -2567,6 +2567,64 @@ The call performs network I/O -- it may exchange the stored refresh token
 for an access token before making two management reads -- so it is on the
 async dispatch path and a client should not call it on a paint loop.
 
+#### A shell does not write these sentences, or this arithmetic
+
+Every word and every figure on this row is assembled in
+`trace-commons-contributor`'s `private_inference_copy` and reachable across
+the C ABI. A shell reads `state` and the numbers off this wire and passes
+them straight back; it does not branch on the state string to pick a
+sentence, and it does not divide by `10^scale` itself.
+
+| Call | What it takes | What it gives |
+|---|---|---|
+| `tc_near_ai_balance_state_line` | `state` | The sentence. `known` gives `""`; a state this build cannot read gets its own sentence and borrows nobody's. |
+| `tc_near_ai_balance_state_tone` | `state` | `TC_PRIVATE_INFERENCE_TONE_*`. `known` is the only `_CLEAR`, and it means the READ succeeded -- nothing judges the amount. |
+| `tc_near_ai_balance_action` | `state` | `TC_CREDENTIAL_ACTION_*`. `OBTAIN` for `no_session` and `session_expired`, `NONE` for everything else. |
+| `tc_near_ai_balance_amount` | `present`, `nanos`, `scale` | The bare amount, e.g. `$8.50`. |
+| `tc_near_ai_balance_remaining_line` | `present`, `nanos`, `scale` | `Left to spend: $8.50.`, or the no-limit sentence when `present == 0`. |
+| `tc_near_ai_balance_limit_line` | `present`, `nanos`, `scale` | The ceiling, or `""`. |
+| `tc_near_ai_balance_spent_line` | `present`, `nanos`, `scale` | What the account has spent, or `""`. |
+| `tc_near_ai_balance_observed_line` | `seconds_ago` | How long ago **this daemon** asked. Negative gives `""`. |
+
+`present` is `0` for a `null` on the wire and non-zero otherwise. It is a
+separate argument rather than the out-of-range-integer convention the other
+money exports use, because these amounts are **signed**: an overdrawn account
+is a negative figure, and folding `null` onto `negative` would render a real
+debt as no figure at all.
+
+The rounding is **down**, toward minus infinity, so a printed figure is never
+larger than the one that arrived; a nonzero amount under a cent is
+`less than $0.01` and not `$0.00`.
+
+#### Three neighbouring fields, three different meanings for a missing key
+
+Read this before writing a client that touches more than one of them. They
+share a wire and nothing else: each is an answer to its own question, and
+knowing one tells you nothing about the next.
+
+- **`attestation_reason`: branch on the key's presence, not on the mark.**
+  This is the one that catches people, because the mark does not determine
+  the shape. `attested` never carries a reason and both unattested marks
+  always do -- but `unknown` has two sources, and they differ: a row written
+  before the field existed has **no** reason, while a send refused with
+  `admission_receipt_unavailable` carries `receipt_unavailable`. The second
+  is a retraction rather than a refusal -- the receipt comes from a service
+  that can be down -- and that reason is the only thing telling the
+  contributor it may work later. Do not "simplify" it to always-absent.
+- **`eligibility`: an absent key means the question does not apply.** A
+  present `unknown` means the question applies and was not answered.
+- **`near_ai_balance`: every numeric key is present and `null`**, and the
+  `null` is load-bearing -- it means "this daemon knows it does not know". An
+  **absent** key here means only "this daemon is too old to answer", and a
+  client that treats it as a `null` is asserting a state the daemon never
+  reported. **A `null` must never be rendered as `0`.**
+
+Each of these answers its own question and they happen to share a wire.
+There is no convention here to generalise from: read the contract for the
+field you are touching, and do not carry a habit across from another one.
+A field added later is a fourth answer to a fourth question, not a fourth
+instance of a pattern.
+
 ### The public profile
 
 Three methods, one shape. `set_public_profile` and `clear_public_profile`

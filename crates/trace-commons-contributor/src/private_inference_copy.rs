@@ -35,6 +35,34 @@
 //! and NO action, rather than degrading to "no key here" -- which would
 //! invite a contributor who already has one to mint a second.
 //!
+//! # The balance row
+//!
+//! The same account can also say what is left in it, and those words are
+//! here for the reason the rest are. Its branch tables are
+//! [`balance_state_line`], [`balance_state_tone`] and [`balance_action`],
+//! and its arithmetic is [`format_amount`] -- which is in this crate and not
+//! in three shells, because three shells rounding money three ways is three
+//! answers to one question.
+//!
+//! Two rules govern it, and both are about not inventing a figure. The
+//! `scale` is read off the wire and never assumed, so a daemon that changes
+//! it cannot make three shells wrong by a factor of a thousand. And a `null`
+//! remaining figure -- which is what an account nobody capped reports -- is
+//! [`BALANCE_NO_REMAINING`] and never `$0.00`, because telling somebody they
+//! are out of money when nobody set a limit is the worst sentence this
+//! surface could produce.
+//!
+//! ## The null convention here inverts the eligibility contract's
+//!
+//! Worth knowing before writing a shell that reads both, because they are
+//! adjacent and they disagree on purpose. On the eligibility wire an
+//! **absent** key means "the question does not apply". On this one every
+//! numeric key is **present and null**, and the null is the message: it
+//! means "we know we do not know". An absent key here means only that the
+//! daemon is too old to answer, which is a different fact and gets a
+//! different sentence -- [`BALANCE_UNREPORTED`] rather than
+//! [`BALANCE_UNAVAILABLE`].
+//!
 //! # The words this surface may not use
 //!
 //! Swept by `the_offer_surface_says_nothing_it_should_not`: no vendor name,
@@ -560,6 +588,25 @@ pub struct PrivateInferenceCopy {
     pub attestation_reason_marker_absent: &'static str,
     pub attestation_reason_request_malformed: &'static str,
     pub attestation_reason_receipt_unavailable: &'static str,
+    /// The balance row's heading. [`BALANCE_TITLE`].
+    pub balance_title: &'static str,
+    /// [`BALANCE_WHAT`].
+    pub balance_what: &'static str,
+    /// [`BALANCE_NO_SESSION`].
+    pub balance_no_session: &'static str,
+    /// [`BALANCE_SESSION_EXPIRED`].
+    pub balance_session_expired: &'static str,
+    /// [`BALANCE_NO_ORGANIZATION`].
+    pub balance_no_organization: &'static str,
+    /// [`BALANCE_UNAVAILABLE`].
+    pub balance_unavailable: &'static str,
+    /// [`BALANCE_UNKNOWN`].
+    pub balance_unknown: &'static str,
+    /// [`BALANCE_UNREPORTED`].
+    pub balance_unreported: &'static str,
+    /// [`BALANCE_NO_REMAINING`]. The sentence a `null` remaining figure gets
+    /// INSTEAD of `$0.00`.
+    pub balance_no_remaining: &'static str,
 }
 
 /// The sentence the settings card shows once the control has moved out of it.
@@ -1424,6 +1471,310 @@ pub fn eligibility_reason_line(label: &str) -> &'static str {
     }
 }
 
+// ---------------------------------------------------------------------------
+// The balance row.
+// ---------------------------------------------------------------------------
+
+/// The heading over the balance row on the destination.
+///
+/// Names the account rather than this computer, which is the one place on
+/// this surface where that is the honest noun: everything else here is about
+/// what this machine holds, and a balance is not. It is a fact about an
+/// account that other computers, and a browser, spend from too.
+pub const BALANCE_TITLE: &str = "What is left in your Private AI account";
+
+/// What the figure covers, and what it therefore is not.
+///
+/// The counterpart of [`HARNESSES_SPEND_SCOPE`], and the opposite shape.
+/// That sentence exists because a per-machine figure invites being read as a
+/// total; this one exists because a total invites being read as a
+/// per-machine figure. Both failures are somebody planning around a number
+/// that means something else.
+pub const BALANCE_WHAT: &str = "This is the whole account, not just this computer. Calls answered \
+     anywhere you are signed in are already in these figures.";
+
+/// `no_session`.
+///
+/// Not phrased as a fault, for [`CREDENTIAL_ABSENT`]'s reason: it is the
+/// state of a fresh install, and the state of anyone who has forgotten a
+/// sign-in on purpose.
+pub const BALANCE_NO_SESSION: &str = "No Private AI sign-in is kept here, so there is no balance to read. Sign \
+     in to see one.";
+
+/// `session_expired`.
+///
+/// The one state on this row with a recovery, and the sentence has to carry
+/// the whole of it. Signing in again is enough; forgetting first is not
+/// required and is the wrong move, because the ceremony overwrites both the
+/// stored key and the stored sign-in, and forgetting first throws away a key
+/// that still works.
+///
+/// It does not say the sign-in was revoked, or that anything was deleted
+/// here. Nothing was: a refused refresh clears no stored token, precisely so
+/// that a service having a bad afternoon cannot log a contributor out.
+pub const BALANCE_SESSION_EXPIRED: &str = "The Private AI sign-in kept here was not accepted, so the balance could \
+     not be read. Sign in again to fix it. You do not need to forget \
+     anything first -- signing in replaces what is stored here.";
+
+/// `no_organization`.
+///
+/// A real state and not a theoretical one: the service creates the
+/// organization at signup best-effort, and logs rather than fails when it
+/// cannot. The way out is on the service's own site, which the sentence
+/// says, because this app has no way to create one.
+pub const BALANCE_NO_ORGANIZATION: &str = "This Private AI account has no organization yet, and a balance belongs \
+     to one. Open the account in your browser to finish setting it up.";
+
+/// `unavailable`.
+///
+/// Says what was not read and stops. The second clause is the whole point:
+/// a failed read is a fact about the read, and letting it be heard as a fact
+/// about the money is how a contributor comes away believing an account is
+/// empty.
+pub const BALANCE_UNAVAILABLE: &str = "The balance could not be read just now. That says nothing about what is \
+     in the account -- only that the answer did not arrive.";
+
+/// A `state` this build has no words for.
+///
+/// [`CREDENTIAL_UNKNOWN`]'s rule, applied to money: an unread state gets its
+/// own sentence and never borrows a known one. Borrowing [`BALANCE_NO_SESSION`]
+/// here would tell somebody who is signed in that they are not, and
+/// borrowing any of the others would put a reason in their head that nobody
+/// worked out.
+pub const BALANCE_UNKNOWN: &str = "The balance came back in a form this app does not know how to read. A \
+     newer version may understand it.";
+
+/// A daemon that does not answer this at all.
+///
+/// Distinct from [`BALANCE_UNKNOWN`] for [`CREDENTIAL_UNREPORTED`]'s reason:
+/// one is a read that failed and the other is a build that was never asked,
+/// and "a newer version may understand it" is advice about the wrong half.
+pub const BALANCE_UNREPORTED: &str = "This daemon does not report a Private AI balance.";
+
+/// `known`, with `remaining_nanos` null.
+///
+/// **The sentence that stops a null becoming `$0.00`.** The service's own
+/// schema makes the remaining figure nullable, and it is null when nobody
+/// ever configured a ceiling on the account -- which is the ordinary case
+/// for an account nobody has capped. Rendering that as zero tells a
+/// contributor with an uncapped account that they are out of money, which is
+/// both false and the most alarming thing this surface could say.
+pub const BALANCE_NO_REMAINING: &str = "No spending limit is set on this account, so there is no remaining \
+     figure to show. That is not the same as nothing left.";
+
+/// One amount, formatted once for all three shells.
+///
+/// # `scale` is read, never assumed
+///
+/// `scale` is the wire's own `scale` field, and it is on the wire so that a
+/// daemon that changes it does not make three shells wrong by a factor of a
+/// thousand. Nothing here hardcodes nine. A shell that divides by
+/// 1_000_000_000 itself is the defect this function exists to remove.
+///
+/// # It rounds DOWN, and that is a decision, not an accident
+///
+/// Floor, for both signs -- toward minus infinity, not toward zero. The only
+/// figure on this row a contributor might act on is what is left, and a
+/// half-up rounding can print more than is there: 9.996 dollars becoming
+/// "$10.00" is this surface inventing four tenths of a cent of somebody
+/// else's money. Flooring can only ever understate, in every field, in both
+/// directions. One rule for every amount, because two rules is a rule
+/// somebody applies to the wrong field.
+///
+/// # A nonzero amount below a cent is a phrase, not `$0.00`
+///
+/// [`harness_spend_line`]'s rule, for the same reason: an account with a
+/// tenth of a cent in it is not an empty account, and two cents of
+/// difference between those two sentences is the difference between "top up"
+/// and "you already did".
+///
+/// # What this does NOT decide
+///
+/// Whether there is an amount at all. `None` -- the wire's `null` -- has no
+/// rendering here and never gets one; it is the caller's branch, and the
+/// sentence for it on the remaining figure is [`BALANCE_NO_REMAINING`].
+#[must_use]
+pub fn format_amount(nanos: i64, scale: u8) -> String {
+    // 10^scale in the smallest unit per dollar. A scale past what a u128
+    // holds is not a scale this build can honour, and saturating would
+    // silently render every amount as sub-cent; refuse instead, which the
+    // callers turn into "no figure" rather than a wrong one.
+    let Some(divisor) = 10i128.checked_pow(u32::from(scale)) else {
+        return String::new();
+    };
+    let scaled = i128::from(nanos) * 100;
+    // Euclidean division floors for a positive divisor, which is what makes
+    // the rounding rule hold for a negative amount as well: an overdrawn
+    // account rounds further into the red, never back toward zero.
+    let cents = scaled.div_euclid(divisor);
+    if cents == 0 && nanos > 0 {
+        return "less than $0.01".to_string();
+    }
+    let sign = if cents < 0 { "-" } else { "" };
+    let magnitude = cents.unsigned_abs();
+    format!("{sign}${}.{:02}", magnitude / 100, magnitude % 100)
+}
+
+/// What is left, as a sentence, or the sentence for there being no figure.
+///
+/// `None` is the wire's `null`, and it reaches [`BALANCE_NO_REMAINING`]
+/// rather than a zero. THIS IS THE WHOLE FUNCTION. A shell that formatted
+/// its own amount would have to decide what a null looks like, and the
+/// decision every shell eventually makes is `$0.00`.
+#[must_use]
+pub fn balance_remaining_line(nanos: Option<i64>, scale: u8) -> String {
+    let Some(nanos) = nanos else {
+        return BALANCE_NO_REMAINING.to_string();
+    };
+    let amount = format_amount(nanos, scale);
+    if amount.is_empty() {
+        return BALANCE_UNKNOWN.to_string();
+    }
+    format!("Left to spend: {amount}.")
+}
+
+/// The configured ceiling, or nothing at all.
+///
+/// `None` produces the EMPTY STRING and not a sentence, because
+/// [`balance_remaining_line`] has already said the part that matters about
+/// an account with no ceiling. Two sentences saying it is one too many.
+#[must_use]
+pub fn balance_limit_line(nanos: Option<i64>, scale: u8) -> String {
+    let Some(nanos) = nanos else {
+        return String::new();
+    };
+    let amount = format_amount(nanos, scale);
+    if amount.is_empty() {
+        return String::new();
+    }
+    format!("Spending limit: {amount}.")
+}
+
+/// What the account has spent, all of it, everywhere.
+///
+/// `None` is the empty string, drawn as no line at all -- the rule
+/// [`harness_spend_line`] follows for a figure nobody could read. Zero is
+/// NOT that: an account that has spent nothing renders "$0.00", which is
+/// true.
+#[must_use]
+pub fn balance_spent_line(nanos: Option<i64>, scale: u8) -> String {
+    let Some(nanos) = nanos else {
+        return String::new();
+    };
+    let amount = format_amount(nanos, scale);
+    if amount.is_empty() {
+        return String::new();
+    }
+    format!("Spent on this account so far: {amount}.")
+}
+
+/// How long ago THIS COMPUTER asked, assembled on this side.
+///
+/// `observed_at` is the daemon's own clock at the moment the service
+/// answered, not the service's `updated_at`, so the only true thing a shell
+/// can say with it is when the question was put -- which is what this
+/// sentence says, in those words. "Last updated" would be a claim about the
+/// service's bookkeeping that nothing here supports.
+///
+/// The buckets are coarse for [`harness_last_call_line`]'s reason: a figure
+/// to the second invites being read as live, and all this line is for is
+/// settling whether the number on screen is from this minute or this
+/// morning.
+///
+/// `None` is the empty string. A figure with no age is drawn with no age,
+/// rather than with "just now" invented under it.
+#[must_use]
+pub fn balance_observed_line(seconds_ago: Option<u64>) -> String {
+    let Some(seconds) = seconds_ago else {
+        return String::new();
+    };
+    let minutes = seconds / 60;
+    let hours = minutes / 60;
+    let days = hours / 24;
+    let (count, unit) = if seconds < 60 {
+        return "Asked for just now.".to_string();
+    } else if minutes < 60 {
+        (minutes, "minute")
+    } else if hours < 24 {
+        (hours, "hour")
+    } else {
+        (days, "day")
+    };
+    let plural = if count == 1 { "" } else { "s" };
+    format!("Asked for {count} {unit}{plural} ago.")
+}
+
+/// The sentence for one `near_ai_balance` `state`.
+///
+/// Missing state is unreported; a state this build has never heard of is
+/// unknown. NEITHER MAY DEGRADE TO [`BALANCE_NO_SESSION`], which is a claim
+/// about what this machine holds, or to [`BALANCE_UNAVAILABLE`], which is a
+/// claim about what the service did.
+///
+/// `known` answers the EMPTY STRING. It is the one state whose row is
+/// numbers rather than prose, and a sentence above them saying the balance
+/// was read is this app narrating its own success.
+#[must_use]
+pub fn balance_state_line(label: &str) -> &'static str {
+    match label {
+        "" => BALANCE_UNREPORTED,
+        LABEL_BALANCE_KNOWN => "",
+        LABEL_BALANCE_NO_SESSION => BALANCE_NO_SESSION,
+        LABEL_BALANCE_SESSION_EXPIRED => BALANCE_SESSION_EXPIRED,
+        LABEL_BALANCE_NO_ORGANIZATION => BALANCE_NO_ORGANIZATION,
+        LABEL_BALANCE_UNAVAILABLE => BALANCE_UNAVAILABLE,
+        _ => BALANCE_UNKNOWN,
+    }
+}
+
+/// The tone the balance row is painted in.
+///
+/// The same five values the state row and the sign-in row use, for
+/// [`credential_state_tone`]'s reason: a shell maps them onto colours once.
+///
+/// [`PrivateInferenceTone::Clear`] is `known` alone, and it means the read
+/// succeeded -- NOT that the balance is healthy. Nothing on this row judges
+/// an amount. A shell that painted a low balance red would be inventing a
+/// threshold nobody set, on an account whose ceiling may not exist.
+///
+/// Everything unread is [`PrivateInferenceTone::Neutral`], the safe
+/// direction for the reason it is safe everywhere else here: the dangerous
+/// value is the one that reads as settled.
+#[must_use]
+pub fn balance_state_tone(label: &str) -> PrivateInferenceTone {
+    match label {
+        LABEL_BALANCE_KNOWN => PrivateInferenceTone::Clear,
+        LABEL_BALANCE_SESSION_EXPIRED => PrivateInferenceTone::Refused,
+        LABEL_BALANCE_NO_ORGANIZATION => PrivateInferenceTone::Attention,
+        _ => PrivateInferenceTone::Neutral,
+    }
+}
+
+/// The one action a shell may offer beside a balance state.
+///
+/// The sign-in row's enum, not a second one, because the only action this
+/// row has ever needed is that row's [`CredentialAction::Obtain`] -- and a
+/// second enum whose `Obtain` had to mean the same thing is a second table
+/// to keep in agreement with the button that opens a browser.
+///
+/// [`CredentialAction::Obtain`] for `no_session` and `session_expired`, and
+/// for those two only. `session_expired` gets it WITHOUT a forget first:
+/// [`BALANCE_SESSION_EXPIRED`] says so, and offering `Forget` here would
+/// throw away a working key to fix an unrelated sign-in.
+///
+/// Everything else answers [`CredentialAction::None`], including
+/// `no_organization` -- whose way out is on the service's own site and not a
+/// button this app can draw -- and including every state this build cannot
+/// read, for [`credential_action`]'s reason: the offer is what mints the
+/// second key.
+#[must_use]
+pub fn balance_action(label: &str) -> CredentialAction {
+    match label {
+        LABEL_BALANCE_NO_SESSION | LABEL_BALANCE_SESSION_EXPIRED => CredentialAction::Obtain,
+        _ => CredentialAction::None,
+    }
+}
+
 /// The payload, built from the constants above.
 #[must_use]
 pub fn private_inference_copy() -> PrivateInferenceCopy {
@@ -1525,6 +1876,15 @@ pub fn private_inference_copy() -> PrivateInferenceCopy {
         attestation_reason_marker_absent: ATTESTATION_REASON_MARKER_ABSENT,
         attestation_reason_request_malformed: ATTESTATION_REASON_REQUEST_MALFORMED,
         attestation_reason_receipt_unavailable: ATTESTATION_REASON_RECEIPT_UNAVAILABLE,
+        balance_title: BALANCE_TITLE,
+        balance_what: BALANCE_WHAT,
+        balance_no_session: BALANCE_NO_SESSION,
+        balance_session_expired: BALANCE_SESSION_EXPIRED,
+        balance_no_organization: BALANCE_NO_ORGANIZATION,
+        balance_unavailable: BALANCE_UNAVAILABLE,
+        balance_unknown: BALANCE_UNKNOWN,
+        balance_unreported: BALANCE_UNREPORTED,
+        balance_no_remaining: BALANCE_NO_REMAINING,
     }
 }
 
@@ -1760,6 +2120,12 @@ pub use crate::daemon::attestation_mark::{
     MARK_UNATTESTED_CONFIGURATION as ATTESTATION_MARK_UNATTESTED_CONFIGURATION,
     MARK_UNATTESTED_PERMANENT as ATTESTATION_MARK_UNATTESTED_PERMANENT,
     MARK_UNKNOWN as ATTESTATION_MARK_UNKNOWN,
+};
+/// The balance state labels, re-exported from the module that puts them on
+/// the wire, for the reason the credential labels above are.
+pub use crate::daemon::nearai_credential::balance::{
+    LABEL_BALANCE_KNOWN, LABEL_BALANCE_NO_ORGANIZATION, LABEL_BALANCE_NO_SESSION,
+    LABEL_BALANCE_SESSION_EXPIRED, LABEL_BALANCE_UNAVAILABLE,
 };
 /// The state labels this surface has words for, re-exported from the daemon
 /// module that produces them.
@@ -2995,7 +3361,7 @@ mod tests {
         let fields = payload.as_object().expect("a JSON object");
         assert_eq!(
             fields.len(),
-            97,
+            106,
             "the payload's field count changed -- update the shells' decoders \
              and the tests that pin the set"
         );
@@ -3006,6 +3372,289 @@ mod tests {
                 assert!(!text.contains(marker), "{field} carries {marker}: {text}");
             }
         }
+    }
+
+    /// The wire carries `scale`, and this reads it.
+    ///
+    /// Pinned because the whole reason `scale` is on the wire is that a
+    /// daemon may change it, and a shell -- or this formatter -- with `9`
+    /// baked in would then be wrong by a factor of a thousand in whichever
+    /// direction the change went. The same integer formatted at three scales
+    /// has to give three answers.
+    #[test]
+    fn the_scale_is_read_and_not_assumed() {
+        assert_eq!(format_amount(8_500_000_000, 9), "$8.50");
+        assert_eq!(format_amount(8_500_000_000, 6), "$8500.00");
+        // Scale 12 makes the same integer $0.0085 -- sub-cent, and so the
+        // phrase rather than a zero.
+        assert_eq!(format_amount(8_500_000_000, 12), "less than $0.01");
+        assert_eq!(format_amount(850, 2), "$8.50");
+        assert_eq!(format_amount(8, 0), "$8.00");
+        // A scale no power of ten fits in refuses rather than rendering
+        // every amount as sub-cent.
+        assert_eq!(format_amount(8_500_000_000, 200), "");
+        assert_eq!(
+            balance_remaining_line(Some(8_500_000_000), 200),
+            BALANCE_UNKNOWN
+        );
+    }
+
+    /// A `null` remaining figure is never a zero balance.
+    ///
+    /// The failure this row exists to prevent. `remaining_nanos` is nullable
+    /// in the service's own schema and is null on any account nobody capped;
+    /// `$0.00` in front of that contributor says they are out of money.
+    #[test]
+    fn a_null_remaining_figure_is_not_rendered_as_zero() {
+        let none = balance_remaining_line(None, 9);
+        assert_eq!(none, BALANCE_NO_REMAINING);
+        assert!(
+            !none.contains("$0.00"),
+            "a null must not render as zero: {none}"
+        );
+        assert!(
+            !none.contains('$'),
+            "a null must carry no amount at all: {none}"
+        );
+        // And a real zero is still shown, because a real zero is true.
+        assert_eq!(balance_remaining_line(Some(0), 9), "Left to spend: $0.00.");
+        assert_ne!(balance_remaining_line(Some(0), 9), none);
+    }
+
+    /// Nothing left and nothing measured are different sentences on every
+    /// field of the row, not only the remaining one.
+    #[test]
+    fn absence_and_zero_differ_on_every_figure() {
+        assert_eq!(balance_limit_line(None, 9), "");
+        assert_eq!(balance_spent_line(None, 9), "");
+        assert_eq!(balance_observed_line(None), "");
+        assert!(balance_limit_line(Some(0), 9).contains("$0.00"));
+        assert!(balance_spent_line(Some(0), 9).contains("$0.00"));
+        assert_ne!(balance_limit_line(Some(0), 9), balance_limit_line(None, 9));
+        assert_ne!(balance_spent_line(Some(0), 9), balance_spent_line(None, 9));
+    }
+
+    /// Rounding is down, in both directions, and never invents money.
+    ///
+    /// Half-up would print "$10.00" for 9.996 dollars, which is this surface
+    /// claiming four tenths of a cent that is not there. Flooring can only
+    /// understate.
+    #[test]
+    fn amounts_round_down_and_never_up() {
+        assert_eq!(format_amount(9_996_000_000, 9), "$9.99");
+        assert_eq!(format_amount(1_999_999_999, 9), "$1.99");
+        assert_eq!(format_amount(12_345_678_900, 9), "$12.34");
+        // An overdrawn account rounds further into the red, not back
+        // toward zero: the same rule, and the same safe direction.
+        assert_eq!(format_amount(-9_996_000_000, 9), "-$10.00");
+        assert_eq!(format_amount(-1_000_000, 9), "-$0.01");
+    }
+
+    /// A nonzero amount under a cent is not an empty account.
+    #[test]
+    fn a_sub_cent_amount_is_not_zero() {
+        let tiny = format_amount(1, 9);
+        assert_eq!(tiny, "less than $0.01");
+        assert_ne!(tiny, format_amount(0, 9));
+        assert_eq!(format_amount(0, 9), "$0.00");
+        assert!(balance_remaining_line(Some(1), 9).contains("less than $0.01"));
+    }
+
+    /// Every balance state reaches its own sentence, and an unrecognised one
+    /// borrows nobody's.
+    ///
+    /// The four failure states exist because they need four different
+    /// sentences; a fall-through would make all four read as the same shrug,
+    /// and a fall-through to `no_session` would tell a signed-in contributor
+    /// they are not signed in.
+    #[test]
+    fn each_balance_state_reaches_its_own_sentence() {
+        assert_eq!(
+            balance_state_line(LABEL_BALANCE_NO_SESSION),
+            BALANCE_NO_SESSION
+        );
+        assert_eq!(
+            balance_state_line(LABEL_BALANCE_SESSION_EXPIRED),
+            BALANCE_SESSION_EXPIRED
+        );
+        assert_eq!(
+            balance_state_line(LABEL_BALANCE_NO_ORGANIZATION),
+            BALANCE_NO_ORGANIZATION
+        );
+        assert_eq!(
+            balance_state_line(LABEL_BALANCE_UNAVAILABLE),
+            BALANCE_UNAVAILABLE
+        );
+        assert_eq!(balance_state_line(LABEL_BALANCE_KNOWN), "");
+        assert_eq!(balance_state_line(""), BALANCE_UNREPORTED);
+
+        let unknown = balance_state_line("a_balance_state_from_a_later_daemon");
+        assert_eq!(unknown, BALANCE_UNKNOWN);
+        for borrowed in [
+            BALANCE_NO_SESSION,
+            BALANCE_SESSION_EXPIRED,
+            BALANCE_NO_ORGANIZATION,
+            BALANCE_UNAVAILABLE,
+            BALANCE_UNREPORTED,
+            "",
+        ] {
+            assert_ne!(
+                unknown, borrowed,
+                "an unrecognised state borrowed another state's sentence"
+            );
+        }
+
+        let mut seen = std::collections::HashSet::new();
+        for label in [
+            LABEL_BALANCE_NO_SESSION,
+            LABEL_BALANCE_SESSION_EXPIRED,
+            LABEL_BALANCE_NO_ORGANIZATION,
+            LABEL_BALANCE_UNAVAILABLE,
+            "",
+            "a_balance_state_from_a_later_daemon",
+        ] {
+            assert!(
+                seen.insert(balance_state_line(label)),
+                "{label} shares a sentence with another state"
+            );
+        }
+    }
+
+    /// Only a read that succeeded reads as settled, and nothing on this row
+    /// judges the amount.
+    #[test]
+    fn only_a_read_balance_reads_as_settled() {
+        assert!(balance_state_tone(LABEL_BALANCE_KNOWN).reads_as_working());
+        for label in [
+            "",
+            LABEL_BALANCE_NO_SESSION,
+            LABEL_BALANCE_SESSION_EXPIRED,
+            LABEL_BALANCE_NO_ORGANIZATION,
+            LABEL_BALANCE_UNAVAILABLE,
+            "a_balance_state_from_a_later_daemon",
+        ] {
+            assert!(
+                !balance_state_tone(label).reads_as_working(),
+                "{label} must not read as settled"
+            );
+        }
+        assert_eq!(
+            balance_state_tone(LABEL_BALANCE_SESSION_EXPIRED),
+            PrivateInferenceTone::Refused
+        );
+        assert_eq!(
+            balance_state_tone(LABEL_BALANCE_NO_ORGANIZATION),
+            PrivateInferenceTone::Attention
+        );
+        // A read balance is Clear whatever the number is. Nothing here has a
+        // threshold, and an account with no ceiling has nothing to threshold.
+        assert_eq!(
+            balance_state_tone(LABEL_BALANCE_KNOWN),
+            PrivateInferenceTone::Clear
+        );
+    }
+
+    /// Two states offer the sign-in, and only two.
+    ///
+    /// `session_expired` is one of them, and it does NOT get `Forget` first:
+    /// forgetting throws away a working key to fix an unrelated sign-in, and
+    /// the ceremony overwrites both records anyway.
+    #[test]
+    fn only_a_missing_or_refused_session_offers_the_ceremony() {
+        assert_eq!(
+            balance_action(LABEL_BALANCE_NO_SESSION),
+            CredentialAction::Obtain
+        );
+        assert_eq!(
+            balance_action(LABEL_BALANCE_SESSION_EXPIRED),
+            CredentialAction::Obtain
+        );
+        for label in [
+            "",
+            LABEL_BALANCE_KNOWN,
+            LABEL_BALANCE_NO_ORGANIZATION,
+            LABEL_BALANCE_UNAVAILABLE,
+            "a_balance_state_from_a_later_daemon",
+        ] {
+            assert_eq!(
+                balance_action(label),
+                CredentialAction::None,
+                "{label} must offer no action"
+            );
+        }
+        assert!(
+            BALANCE_SESSION_EXPIRED.contains("forget"),
+            "the recovery sentence must say forgetting is not the step: {BALANCE_SESSION_EXPIRED}"
+        );
+    }
+
+    /// The age is about when WE asked.
+    ///
+    /// `observed_at` is this daemon's clock at the moment the service
+    /// answered, not the service's own `updated_at`, so the sentence may not
+    /// say the figure was updated then.
+    #[test]
+    fn the_age_says_when_we_asked() {
+        assert_eq!(balance_observed_line(Some(0)), "Asked for just now.");
+        assert_eq!(balance_observed_line(Some(59)), "Asked for just now.");
+        assert_eq!(balance_observed_line(Some(60)), "Asked for 1 minute ago.");
+        assert_eq!(balance_observed_line(Some(7_200)), "Asked for 2 hours ago.");
+        assert_eq!(
+            balance_observed_line(Some(172_800)),
+            "Asked for 2 days ago."
+        );
+        for seconds in [0, 60, 7_200, 172_800] {
+            let line = balance_observed_line(Some(seconds));
+            assert!(
+                !line.to_lowercase().contains("updated"),
+                "the age must not claim the service updated anything: {line}"
+            );
+        }
+    }
+
+    /// Three neighbouring fields mean three different things by a missing
+    /// key, and the payload has to carry the balance one where a shell
+    /// author reads it.
+    ///
+    /// The one that catches people is `attestation_reason`, because the mark
+    /// does not determine the shape: BRANCH ON THE KEY'S PRESENCE, NOT ON
+    /// THE MARK. `attested` never carries a reason and both unattested marks
+    /// always do, but `unknown` has two sources -- a row written before the
+    /// field existed carries none, while a send refused with
+    /// `admission_receipt_unavailable` carries `receipt_unavailable`. That
+    /// second one is a retraction rather than a refusal, and its reason is
+    /// the only thing saying it may work later.
+    ///
+    /// `eligibility` is simpler and different again: an absent key means the
+    /// question does not apply. And here, every numeric key is present and
+    /// `null`, because a `null` means "we know we do not know" while an
+    /// absent key would mean "this daemon is too old to answer".
+    ///
+    /// Each answers its own question and they happen to share a wire. There
+    /// is no convention here to generalise from, and a field added later is
+    /// a fourth answer to a fourth question rather than a fourth instance of
+    /// a pattern.
+    #[test]
+    fn the_balance_row_carries_its_own_words() {
+        let copy = private_inference_copy();
+        for field in [
+            copy.balance_title,
+            copy.balance_what,
+            copy.balance_no_session,
+            copy.balance_session_expired,
+            copy.balance_no_organization,
+            copy.balance_unavailable,
+            copy.balance_unknown,
+            copy.balance_unreported,
+            copy.balance_no_remaining,
+        ] {
+            assert!(!field.trim().is_empty());
+        }
+        assert!(
+            copy.balance_what.contains("whole account"),
+            "the scope sentence stopped saying the figure is not per-computer: {}",
+            copy.balance_what
+        );
     }
 
     /// Every string literal in the marked region, plus the sentences the
@@ -3127,6 +3776,31 @@ mod tests {
             .chain(["", "a_reason_from_a_later_daemon"])
         {
             strings.push(attestation_reason_line(label).to_string());
+        }
+        for label in [
+            LABEL_BALANCE_NO_SESSION,
+            LABEL_BALANCE_SESSION_EXPIRED,
+            LABEL_BALANCE_NO_ORGANIZATION,
+            LABEL_BALANCE_UNAVAILABLE,
+            LABEL_BALANCE_KNOWN,
+            "",
+            "a_balance_state_from_a_later_daemon",
+        ] {
+            strings.push(balance_state_line(label).to_string());
+        }
+        for nanos in [
+            None,
+            Some(0),
+            Some(1),
+            Some(-1_000_000),
+            Some(8_500_000_000),
+        ] {
+            strings.push(balance_remaining_line(nanos, 9));
+            strings.push(balance_limit_line(nanos, 9));
+            strings.push(balance_spent_line(nanos, 9));
+        }
+        for seconds in [None, Some(0), Some(60), Some(3_600), Some(86_400)] {
+            strings.push(balance_observed_line(seconds));
         }
         for outcome in [
             "changes",
