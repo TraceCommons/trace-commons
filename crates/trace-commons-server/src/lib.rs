@@ -27,6 +27,7 @@ pub mod error;
 pub mod inference_funding;
 pub mod instance_enroll_guard;
 pub mod near_account_identity;
+pub mod near_ai_login;
 pub mod near_attestation;
 pub mod near_credit;
 pub mod near_legion_claim;
