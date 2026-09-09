@@ -781,8 +781,30 @@ mod tests {
     /// not about the fixture.
     #[test]
     fn the_same_call_under_the_providers_own_identifier_is_attested() {
+        // Both forms NEAR AI mints: Chat Completions (bare hex) and the
+        // Responses API (`resp_` + 32 hex), which is all Codex speaks. The
+        // second was the case that would otherwise have left every Codex
+        // user's row `unknown`, and an unknown row offers no send control.
+        for hosted in [
+            "ee64b242d74f4c7eb59b05b046f33f7b",
+            "resp_32464c3bb3064e1ba888d5e5f7073fb3",
+        ] {
+            let mut row = row();
+            row.upstream_id = Some(hosted.to_string());
+            assert_eq!(discovered_mark(row).state, MARK_ATTESTED, "{hosted}");
+        }
+    }
+
+    /// A `resp_` identifier that is not exactly 32 lowercase hex is a shape
+    /// this build will not vouch for: `unknown`, never attested, and the
+    /// receipt fetch after upload decides. This is the fail-safe for the
+    /// untested brokered-Responses case.
+    #[test]
+    fn a_resp_identifier_that_is_not_near_ais_own_is_left_unknown() {
         let mut row = row();
-        row.upstream_id = Some("ee64b242d74f4c7eb59b05b046f33f7b".to_string());
-        assert_eq!(discovered_mark(row).state, MARK_ATTESTED);
+        row.upstream_id = Some("resp_EM5nnYHpITuK3xv9EGfs2mEMXlVep".to_string());
+        let mark = discovered_mark(row);
+        assert_eq!(mark.state, MARK_UNKNOWN);
+        assert_eq!(mark.reason, None);
     }
 }

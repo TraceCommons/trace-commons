@@ -220,8 +220,19 @@ pub enum Unattestable {
 /// cannot carry one is not.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderIdentifier {
-    /// The provider's own identifier: bare hex, 16 to 64 lowercase digits.
-    /// A receipt may exist for this call.
+    /// The provider's own identifier, in one of the two forms NEAR AI mints:
+    /// bare lowercase hex (Chat Completions) or `resp_` followed by exactly
+    /// 32 lowercase hex digits (the Responses API, which is all Codex
+    /// speaks). A receipt may exist for this call -- `provider_tee` for the
+    /// first form, `gateway` for the second.
+    ///
+    /// The `resp_` form is deliberately exact. OpenAI's own Responses API
+    /// also mints `resp_…`, and whether a call NEAR AI brokers to OpenAI
+    /// comes back under that id is **untested** as of this writing. Every
+    /// NEAR-minted id observed is 32 lowercase hex; every brokered id
+    /// observed is mixed-case. So the digit rule is what separates them if
+    /// the prefix does not, and a `resp_` id that is not 32 lowercase hex
+    /// reads [`Self::Unrecognised`] rather than being claimed.
     Hosted,
     /// Another provider's identifier. No receipt exists and none will.
     Foreign,
@@ -242,10 +253,16 @@ pub fn classify_upstream_id(upstream_id: &str) -> ProviderIdentifier {
     {
         return ProviderIdentifier::Foreign;
     }
-    let hosted = (16..=64).contains(&upstream_id.len())
-        && upstream_id
-            .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+    let lowercase_hex = |s: &str| {
+        s.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    };
+    let hosted = match upstream_id.strip_prefix("resp_") {
+        // The Responses API form: exactly 32 lowercase hex after the prefix.
+        // See the `Hosted` docs for why "exactly".
+        Some(rest) => rest.len() == 32 && lowercase_hex(rest),
+        None => (16..=64).contains(&upstream_id.len()) && lowercase_hex(upstream_id),
+    };
     if hosted {
         ProviderIdentifier::Hosted
     } else {
@@ -933,5 +950,40 @@ mod tests {
 
         assert_eq!(event.tool_name.as_deref(), Some("http"));
         assert_eq!(event.event_type, TraceContributionEventType::HttpExchange);
+    }
+
+    /// The four identifiers a live gateway handed back on 2026-09-09, one
+    /// per (provider, API) pair, plus the near-misses the rule must refuse.
+    /// Every NEAR-minted id is 32 lowercase hex; every brokered one carries
+    /// the upstream provider's mixed-case format. The `resp_` arm is exact
+    /// on purpose: whether a brokered Responses call also comes back as
+    /// `resp_…` is untested, so a `resp_` id that is not 32 lowercase hex
+    /// is left unrecognised rather than claimed.
+    #[test]
+    fn provider_identifiers_are_classified_by_who_minted_them() {
+        use ProviderIdentifier::{Foreign, Hosted, Unrecognised};
+        let cases = [
+            // NEAR AI hosted, Chat Completions: bare hex, provider_tee receipt.
+            ("e795f9d441164d92aa0473ce333650be", Hosted),
+            // NEAR AI hosted, Responses API: resp_ + 32 hex, gateway receipt.
+            ("resp_32464c3bb3064e1ba888d5e5f7073fb3", Hosted),
+            // OpenAI brokered, Chat Completions.
+            ("chatcmpl-EM5nnYHpITuK3xv9EGfs2mEMXlVep", Foreign),
+            // Anthropic brokered.
+            ("msg_011CesNLMGDZvYJFKoYt6EP1", Foreign),
+            // resp_ near-misses: mixed case, wrong length, uppercase hex.
+            ("resp_EM5nnYHpITuK3xv9EGfs2mEMXlVep", Unrecognised),
+            ("resp_32464c3bb3064e1ba888d5e5f7073fb", Unrecognised),
+            ("resp_32464c3bb3064e1ba888d5e5f7073fb3a", Unrecognised),
+            ("resp_32464C3BB3064E1BA888D5E5F7073FB3", Unrecognised),
+            ("resp_", Unrecognised),
+            // Bare near-misses.
+            ("E795F9D441164D92AA0473CE333650BE", Unrecognised),
+            ("e795f9d4", Unrecognised),
+            ("", Unrecognised),
+        ];
+        for (id, expected) in cases {
+            assert_eq!(classify_upstream_id(id), expected, "{id:?}");
+        }
     }
 }
