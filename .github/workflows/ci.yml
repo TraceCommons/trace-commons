@@ -177,18 +177,40 @@ jobs:
         run: cargo test -p trace-commons-server --test account_merge_pg
         env:
           TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_merge
-      # This suite has a skip inside its tests, not just around them: the raw
-      # SQL RLS assertion returns early when the connecting role bypasses RLS,
-      # and `trace` here is the container superuser, so it does return early.
-      # The tests around it still assert through the runtime roles, and the
-      # xact_commit guard below does NOT catch this -- the suite runs and
-      # commits, it just does not make that one assertion. Closing it means
-      # giving this job a NOBYPASSRLS role to connect as, the way other steps
-      # here already do. See #752.
+      # This suite used to have a skip INSIDE its tests, not just around them.
+      # Every raw-SQL RLS assertion detected a connecting role that bypasses
+      # RLS and returned early, and `trace` here is the container superuser, so
+      # on every run they all did -- seven of them, not the one #752 opened
+      # with -- while the suite reported `32 passed; 0 failed`. The xact_commit
+      # guard below cannot see it: the suite runs and commits normally, it just
+      # declines to make those assertions.
+      #
+      # The suite now provisions `trace_rls_assertion_runtime` for itself after
+      # the migrations have run -- NOBYPASSRLS, NOINHERIT, owning nothing --
+      # and connects as it for those assertions. A bypassing role fails them
+      # instead of skipping them. Closes #752.
+      #
+      # The URL still names `trace` on purpose: the migrations need an owner,
+      # and it is the assertions, not the suite, that change roles.
       - name: trace_corpus_pg_rls
         run: cargo test -p trace-commons-server --test trace_corpus_pg_rls
         env:
           TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_rls
+      # Nothing above proves the suite took that path. The role is created the
+      # first time it does, and nowhere else, so the role existing is the
+      # evidence that it did -- the same argument as the xact_commit guard, one
+      # level further in. A refactor that quietly goes back to asserting over
+      # the admin connection fails here rather than going green.
+      - name: Refuse an RLS run that never left the superuser
+        run: |
+          set -euo pipefail
+          found=$(PGPASSWORD=trace psql -qtA -h 127.0.0.1 -U trace postgres \
+                    -c "SELECT COUNT(*) FROM pg_roles WHERE rolname='trace_rls_assertion_runtime';")
+          echo "trace_rls_assertion_runtime present: ${found:-0}"
+          if [ "${found:-0}" != "1" ]; then
+            echo "::error::trace_corpus_pg_rls never connected as its NOBYPASSRLS role; its raw-SQL assertions did not run"
+            exit 1
+          fi
       # `--ignored` is not optional for these three. Without it they report
       # `ignored`, the step passes having run nothing, and this job becomes the
       # thing it was built to replace.
