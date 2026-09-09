@@ -1408,15 +1408,11 @@ mod tests {
             issued_at: 1,
             expires_at: 200,
         };
-        // Independent of the anchor, deliberately. This fixture used to be
-        // `format!("near-{}", binding.account_anchor_sha256)` -- the shape
-        // V58's database CHECK produced and V61 removed -- and while it read
-        // that way the "valid" case below could not fail for a real V61
-        // account, because the fixture was the only world in which the
-        // tenant id and the anchor were equal. A tenant id is now 32 random
-        // bytes and a function of nothing; if a test ever needs it related to
-        // an anchor again, that relationship is the bug.
-        let tenant = format!("near-{}", "5e".repeat(32));
+        // This fixture used to be `format!("near-{}",
+        // binding.account_anchor_sha256)`, and while it read that way the
+        // "valid" case below could not fail for a real V61 account. See
+        // `v61_account`, which names this site.
+        let (tenant, _anchor) = crate::config::tests_support::v61_account();
         assert_ne!(
             tenant.strip_prefix("near-"),
             Some(binding.account_anchor_sha256.as_str()),

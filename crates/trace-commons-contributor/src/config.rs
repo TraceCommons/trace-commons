@@ -652,11 +652,61 @@ impl ConfigStore {
 #[cfg(test)]
 pub(crate) mod tests_support {
     use super::ConfigStore;
+    use sha2::Digest as _;
 
     pub(crate) fn temp_store() -> (tempfile::TempDir, ConfigStore) {
         let dir = tempfile::tempdir().unwrap();
         let store = ConfigStore::open(dir.path().to_path_buf()).unwrap();
         (dir, store)
+    }
+
+    /// A wallet account in the shape V61 leaves behind: a tenant id and an
+    /// account anchor with no arithmetic relationship to each other.
+    ///
+    /// Returns `(tenant_id, anchor)`, where `anchor` is the 64 hex characters
+    /// an admission binding carries -- the stored `anchor_hash` without its
+    /// `sha256:` prefix.
+    ///
+    /// # Why this exists, and why writing the literal instead is a bug
+    ///
+    /// Four fixtures in this workspace built `format!("near-{}", anchor)`:
+    /// `daemon::approved_envelope`, `witness::transport`,
+    /// `daemon::admission_setup`, and `daemon::account_onboarding`. That is the
+    /// shape V58's `CHECK (tenant_id = 'near-' || substring(anchor_hash from
+    /// 8))` produced; V61 made the anchor a keyed blind index and the tenant id
+    /// 32 random bytes, and V62 dropped the constraint. Since then the two are
+    /// equal for no real account.
+    ///
+    /// A fixture in the old shape is not merely unrealistic -- it is the only
+    /// world in which the retired coupling holds, so a test written against it
+    /// **cannot fail** when production code still assumes that coupling. That
+    /// is not hypothetical: `verify_admission_context` read a tenant id as an
+    /// account anchor on the live upload path and refused every
+    /// admission-bearing submission, while
+    /// `signed_admission_must_match_our_account_challenge_and_exact_receipt` --
+    /// a test named for exactly that property, with a ten-field mutation matrix
+    /// over the evidence -- passed throughout, because its fixture supplied the
+    /// coupled pair. Correcting the fixture was the whole of what made it fail.
+    ///
+    /// The independence is asserted here rather than left to the caller, so it
+    /// is a check that closes rather than a convention that asks. If a test
+    /// ever appears to need the two related, that relationship is the bug.
+    pub(crate) fn v61_account() -> (String, String) {
+        let anchor = hex::encode(<[u8; 32]>::from(sha2::Sha256::digest(
+            uuid::Uuid::new_v4().as_bytes(),
+        )));
+        let tenant = format!(
+            "near-{}",
+            hex::encode(<[u8; 32]>::from(sha2::Sha256::digest(
+                uuid::Uuid::new_v4().as_bytes()
+            )))
+        );
+        assert_ne!(
+            tenant.strip_prefix("near-"),
+            Some(anchor.as_str()),
+            "the fixture reproduced the pre-V61 coupling it exists to rule out"
+        );
+        (tenant, anchor)
     }
 }
 
