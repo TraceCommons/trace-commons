@@ -250,6 +250,15 @@ final class AttestationSurfaceTests: XCTestCase {
 
     private static let payload = """
         {"destination":"DESTINATION","subtitle":"SUBTITLE",
+         "balance_title":"BALANCE-TITLE",
+         "balance_what":"BALANCE-WHAT",
+         "balance_no_session":"BALANCE-NO-SESSION",
+         "balance_session_expired":"BALANCE-SESSION-EXPIRED",
+         "balance_no_organization":"BALANCE-NO-ORGANIZATION",
+         "balance_unavailable":"BALANCE-UNAVAILABLE",
+         "balance_unknown":"BALANCE-UNKNOWN",
+         "balance_unreported":"BALANCE-UNREPORTED",
+         "balance_no_remaining":"BALANCE-NO-REMAINING",
          "offer_title":"T","offer_what":"WHAT","offer_exposure":"EXPOSURE",
          "offer_no_repoint":"NO-REPOINT","offer_accept":"ACCEPT",
          "offer_decline":"DECLINE","offer_asked_once":"ONCE",
