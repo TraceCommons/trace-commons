@@ -411,6 +411,23 @@ final class AppModel: ObservableObject {
         groupControl: { TCContributionEligibility.groupControl(pending: $0, contributable: $1) }
     )
 
+    /// The three branch tables the queue's attestation mark turns on, all
+    /// decided in the Rust -- see `AttestationSurface`.
+    ///
+    /// Three and not four. There is no control table here, because the mark
+    /// describes the trace and offers nothing to press; whether a session
+    /// may be sent stays `eligibilityCalls.control`'s question.
+    ///
+    /// The reason closure is `TCAttestation`'s, never
+    /// `TCContributionEligibility`'s. Both take the same thirteen labels and
+    /// answer different sentences, so the wrong one here would compile,
+    /// render, and tell a contributor their session had been refused.
+    let attestationCalls = AttestationCalls(
+        markLine: { TCAttestation.markLine(mark: $0) },
+        markTone: { TCAttestation.markTone(mark: $0) },
+        reasonLine: { TCAttestation.reasonLine(reason: $0) }
+    )
+
     let credentialCalls = CredentialCalls(
         stateLine: { TCNearAiCredential.stateLine(state: $0) },
         stateTone: { TCNearAiCredential.stateTone(state: $0) },
@@ -2095,7 +2112,11 @@ final class AppModel: ObservableObject {
             // eligibility field, so the capture shows the card exactly as it
             // looked before this surface existed.
             eligibility: nil,
-            eligibilityReason: nil
+            eligibilityReason: nil,
+            // The same invited contributor still gets a mark: an attested
+            // session, which is the state the capture is meant to show.
+            attestation: "attested",
+            attestationReason: nil
         )
         var offsets: [Int] = []
         if !needle.isEmpty {

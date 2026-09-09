@@ -13,7 +13,11 @@ final class PreviewSizingTests: XCTestCase {
             reasonLabel: nil, attempts: 0, subagentCount: nil, subagentsDropped: nil,
             // No eligibility field: this fixture stands for an invited
             // contributor, whose sheet is the sheet it always was.
-            eligibility: nil, eligibilityReason: nil)
+            eligibility: nil, eligibilityReason: nil,
+            // The same invited contributor still gets a mark. Absent
+            // eligibility and present attestation is the ordinary shape
+            // of an invited contributor's row, not a special case.
+            attestation: "attested", attestationReason: nil)
         let summary = PreviewSummary(wouldSendBytes: 80, rawSessionBytes: 100, eventCount: 2,
             openingPrompt: "Review a synthetic session", redactions: [:], redactionsDistinct: [:],
             piiLabelsPresent: [], consentScopes: [], residualRisk: "low")

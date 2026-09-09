@@ -248,6 +248,7 @@ struct QueueContent: View {
                 group: group,
                 copy: model.privateInferenceCopy,
                 eligibilityCalls: model.eligibilityCalls,
+                attestationCalls: model.attestationCalls,
                 summaries: model.summaries,
                 summaryErrors: model.summaryErrors,
                 tooLarge: model.tooLarge,
@@ -282,6 +283,10 @@ private struct ProjectQueueGroup: View {
     let copy: PrivateInferenceCopy?
     /// The eligibility branch tables, all four of them the Rust's.
     let eligibilityCalls: EligibilityCalls
+    /// The attestation mark's three tables, also the Rust's. Separate from
+    /// the four above because they answer a different question and their
+    /// reason sentences differ label for label.
+    let attestationCalls: AttestationCalls
     let summaries: [String: PreviewSummary]
     let summaryErrors: [String: String]
     let tooLarge: [String: PreviewTooLarge]
@@ -343,6 +348,7 @@ private struct ProjectQueueGroup: View {
                 entry: entry,
                 copy: copy,
                 eligibilityCalls: eligibilityCalls,
+                attestationCalls: attestationCalls,
                 summary: summaries[entry.entryID],
                 summaryError: summaryErrors[entry.entryID],
                 tooLarge: tooLarge[entry.entryID],
@@ -372,6 +378,9 @@ struct QueueRow: View {
     /// does NOT re-offer a control the ABI withheld; see `offersContribute`.
     let copy: PrivateInferenceCopy?
     let eligibilityCalls: EligibilityCalls
+    /// The attestation mark's three tables. Handed to every row, because
+    /// every row has a mark to draw.
+    let attestationCalls: AttestationCalls
     let summary: PreviewSummary?
     let summaryError: String?
     /// Set when the daemon's preview scheduler refused this session for
@@ -435,6 +444,39 @@ struct QueueRow: View {
     private var eligibilityTone: TC.Tone? {
         EligibilitySurface.tone(eligibility, calls: eligibilityCalls)
             .map(PrivateInferenceIndicator.palette)
+    }
+
+    // MARK: - Whether this session carries proof of the call it came from
+
+    /// The mark on the row, or none.
+    ///
+    /// `nil` ONLY when the copy payload would not decode, which is the same
+    /// hedge the eligibility line makes: the card says nothing rather than
+    /// saying it blankly. It is never `nil` for a want of a mark -- every
+    /// entry carries one, an invited contributor's included, which is the
+    /// difference between this line and its sibling above.
+    private var attestationLine: String? {
+        guard let copy else { return nil }
+        return AttestationSurface.markLine(
+            entry.attestationMark, copy: copy, calls: attestationCalls)
+    }
+
+    /// The reason under it, or none.
+    ///
+    /// Absent on every `attested` row, present on both unattested marks, and
+    /// present on `unknown` only sometimes -- a row nobody evaluated has
+    /// nothing to add, a send retracted for an unreachable receipt service
+    /// does. `AttestationSurface` branches on the key, never on the mark.
+    private var attestationReasonLine: String? {
+        AttestationSurface.reasonLine(entry.attestationMark, calls: attestationCalls)
+    }
+
+    /// The tone that sentence is painted in, from the ABI. Neutral for both
+    /// the unknown mark and a permanently unattested one, so an ordinary
+    /// older session reads as quietly as it should.
+    private var attestationTone: TC.Tone {
+        PrivateInferenceIndicator.palette(
+            AttestationSurface.tone(entry.attestationMark, calls: attestationCalls))
     }
 
     /// Whether `Submit` is drawn at all.
@@ -593,6 +635,7 @@ struct QueueRow: View {
                 }
                 extent
                 admissibility
+                attestation
             }
             Spacer(minLength: TC.Space.m)
             actions
@@ -666,6 +709,45 @@ struct QueueRow: View {
                     .fixedSize(horizontal: false, vertical: true)
                 if let eligibilityReasonLine {
                     Text(eligibilityReasonLine)
+                        .tcType(TC.Font_.footnoteText)
+                        .foregroundStyle(TC.inkSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .accessibilityElement(children: .combine)
+        }
+    }
+
+    /// Whether this session carries a checkable copy of the model call that
+    /// produced it.
+    ///
+    /// A SIBLING OF `admissibility`, NOT A PART OF IT, and drawn at the same
+    /// level for a reason: nesting it under the eligibility line would hide
+    /// it from exactly the contributors this exists for, since an invited
+    /// contributor's entry carries no eligibility question and every entry
+    /// carries a mark.
+    ///
+    /// One line on an attested row, which is the common one: `attested`
+    /// never carries a reason, and its tone is the settled one the card
+    /// already uses. The second line appears only where there is something
+    /// to explain -- both unattested marks, and the `unknown` row whose send
+    /// was retracted for a receipt that could not be fetched.
+    ///
+    /// Nothing here is pressable. The mark describes the trace; whether the
+    /// session may be sent is the eligibility control's question, one
+    /// section up.
+    @ViewBuilder
+    private var attestation: some View {
+        if let attestationLine {
+            VStack(alignment: .leading, spacing: TC.Space.xxs) {
+                // The glyph comes off the same tone as the colour, so the
+                // mark survives greyscale and a black-and-white screenshot.
+                Label(attestationLine, systemImage: attestationTone.symbol)
+                    .tcType(TC.Font_.footnoteText)
+                    .foregroundStyle(attestationTone.textColor)
+                    .fixedSize(horizontal: false, vertical: true)
+                if let attestationReasonLine {
+                    Text(attestationReasonLine)
                         .tcType(TC.Font_.footnoteText)
                         .foregroundStyle(TC.inkSecondary)
                         .fixedSize(horizontal: false, vertical: true)

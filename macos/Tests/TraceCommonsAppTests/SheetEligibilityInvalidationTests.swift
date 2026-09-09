@@ -32,7 +32,11 @@ final class SheetEligibilityInvalidationTests: XCTestCase {
             projectPath: "~/code/repo", sessionPath: nil, sizeBytes: 10,
             discoveredAt: Date(timeIntervalSince1970: 0), state: .pending,
             reasonLabel: nil, attempts: 0, subagentCount: nil, subagentsDropped: nil,
-            eligibility: eligibility, eligibilityReason: reason)
+            eligibility: eligibility, eligibilityReason: reason,
+            // Every entry carries a mark, this fixture's included: the
+            // eligibility question it is really about is the one that
+            // varies, and the mark does not.
+            attestation: "attested", attestationReason: nil)
     }
 
     /// The signal exists: a queue republish fires the publisher every view
