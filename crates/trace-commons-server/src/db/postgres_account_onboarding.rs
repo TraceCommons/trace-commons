@@ -20,6 +20,24 @@ impl PgBackend {
         pending: NativeProvisioningPending,
         expires_at: i64,
     ) -> Result<(), DatabaseError> {
+        self.store_ceremony_payload(hash, &pending, expires_at)
+            .await
+    }
+
+    /// Store one ceremony, whatever its shape.
+    ///
+    /// `trace_near_provisioning_ceremonies` is a ceremony handle and an opaque
+    /// `payload`, so the row mechanics -- the GUC that the RLS policy reads,
+    /// the expiry, the single-use delete on take -- are the same for every
+    /// ceremony and are written once here. Two enrolment ceremonies with two
+    /// copies of the RLS handshake is a rule that eventually diverges, and the
+    /// half that diverges silently is whichever has the thinner tests.
+    async fn store_ceremony_payload<T: serde::Serialize>(
+        &self,
+        hash: &str,
+        pending: &T,
+        expires_at: i64,
+    ) -> Result<(), DatabaseError> {
         let payload = serde_json::to_value(pending).map_err(|_| refused())?;
         let mut client = self.trace_pool().get().await?;
         let tx = client.transaction().await?;
@@ -37,6 +55,38 @@ impl PgBackend {
         &self,
         hash: &str,
     ) -> Result<Option<NativeProvisioningPending>, DatabaseError> {
+        self.take_ceremony_payload(hash).await
+    }
+
+    /// Store a NEAR AI login ceremony (#836) in the same table.
+    pub(super) async fn near_ai_login_store_ceremony(
+        &self,
+        hash: &str,
+        pending: &crate::account_onboarding::NearAiLoginPending,
+        expires_at: i64,
+    ) -> Result<(), DatabaseError> {
+        self.store_ceremony_payload(hash, pending, expires_at).await
+    }
+
+    /// Consume a NEAR AI login ceremony. Single use and expiry-checked, by the
+    /// same delete-and-return the wallet ceremony uses.
+    pub(super) async fn near_ai_login_take_ceremony(
+        &self,
+        hash: &str,
+    ) -> Result<Option<crate::account_onboarding::NearAiLoginPending>, DatabaseError> {
+        self.take_ceremony_payload(hash).await
+    }
+
+    /// Consume one ceremony, whatever its shape. See
+    /// [`Self::store_ceremony_payload`].
+    ///
+    /// The delete and the liveness test are one statement on purpose: a
+    /// select-then-delete would let two racing finishes both read a live
+    /// ceremony, and a ceremony is single use.
+    async fn take_ceremony_payload<T: serde::de::DeserializeOwned>(
+        &self,
+        hash: &str,
+    ) -> Result<Option<T>, DatabaseError> {
         let mut client = self.trace_pool().get().await?;
         let tx = client.transaction().await?;
         tx.execute(

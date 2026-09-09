@@ -3057,6 +3057,23 @@ impl Database for PgBackend {
     ) -> Result<crate::account_onboarding::ProvisionedNearAccount, DatabaseError> {
         self.near_provision(proof, session, identity).await
     }
+    async fn store_near_ai_login_ceremony(
+        &self,
+        ceremony_hash: &str,
+        pending: &crate::account_onboarding::NearAiLoginPending,
+        expires_at: i64,
+    ) -> Result<(), DatabaseError> {
+        self.near_ai_login_store_ceremony(ceremony_hash, pending, expires_at)
+            .await
+    }
+
+    async fn take_near_ai_login_ceremony(
+        &self,
+        ceremony_hash: &str,
+    ) -> Result<Option<crate::account_onboarding::NearAiLoginPending>, DatabaseError> {
+        self.near_ai_login_take_ceremony(ceremony_hash).await
+    }
+
     async fn provision_near_ai_login(
         &self,
         login: &crate::near_ai_login::VerifiedNearAiLogin,

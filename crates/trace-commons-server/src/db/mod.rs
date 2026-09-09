@@ -756,6 +756,30 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         Err(DatabaseError::Pool("near_provisioning_unconfigured".into()))
     }
 
+    /// Store a NEAR AI login ceremony (#836). Fail-closed by default, like
+    /// its wallet sibling.
+    async fn store_near_ai_login_ceremony(
+        &self,
+        _ceremony_hash: &str,
+        _pending: &crate::account_onboarding::NearAiLoginPending,
+        _expires_at: i64,
+    ) -> Result<(), DatabaseError> {
+        Err(DatabaseError::Pool(
+            "near_ai_login_provisioning_unconfigured".into(),
+        ))
+    }
+
+    /// Consume a NEAR AI login ceremony. Single use: a second take of the same
+    /// handle answers `None`.
+    async fn take_near_ai_login_ceremony(
+        &self,
+        _ceremony_hash: &str,
+    ) -> Result<Option<crate::account_onboarding::NearAiLoginPending>, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "near_ai_login_provisioning_unconfigured".into(),
+        ))
+    }
+
     /// Provision from a verified NEAR AI login (#836).
     ///
     /// The default refuses, like its wallet sibling: a backend that has not

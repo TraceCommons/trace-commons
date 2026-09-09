@@ -877,3 +877,326 @@ mod tests {
         assert!(!report_declined_control(second));
     }
 }
+
+// --- NEAR AI login enrolment (#836) ----------------------------------------
+//
+// The sibling ceremony to the wallet one above, and deliberately separate
+// handlers rather than a mode flag: the two prove different things, and a flag
+// would put the branch inside a path that currently has none.
+//
+// What the two share is the commons -- the same witness, issuer and audience,
+// published by the same `capabilities` -- and the same ceremony table. What
+// differs is what is proved: the wallet proves control of a NEAR account name
+// by signing NEP-413; this proves possession of a NEAR AI session by presenting
+// a token the server introspects. Neither proves the other.
+
+/// How long a login ceremony lives. The same bound the wallet ceremony uses:
+/// long enough for a person to complete a browser sign-in, short enough that a
+/// captured ceremony handle is worth little.
+const NEAR_AI_LOGIN_CEREMONY_TTL_SECONDS: i64 =
+    trace_commons_server::account_onboarding::PROVISIONING_TTL_SECONDS;
+
+/// Bound on the introspection call.
+///
+/// A hung dependency must not hang a request that is holding a pooled
+/// connection, and this path is not on the submission hot path -- it runs once
+/// per contributor per device -- so the bound can be short.
+const NEAR_AI_INTROSPECTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Where `GET /me` lives. A compiled-in constant with no environment override:
+/// there is nothing configurable for a host allowlist to protect, and making it
+/// configurable would create the very thing the allowlist exists for.
+const NEAR_AI_API_BASE_URL: &str = "https://cloud-api.near.ai/v1";
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct NearAiStartRequest {
+    device_public_key: String,
+    code_challenge: String,
+    code_challenge_method: String,
+}
+
+/// **No account identifier of any kind, and `deny_unknown_fields` is what
+/// enforces that.**
+///
+/// The account is whatever the introspected token's subject resolves to. A body
+/// carrying `account_id` is refused at the parse boundary rather than by a
+/// check inside the handler, so the guarantee cannot be removed by deleting a
+/// conditional -- accepting a client-asserted account is the sybil problem #836
+/// exists to prevent.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct NearAiFinishRequest {
+    ceremony_id: String,
+    code_verifier: String,
+    device_public_key: String,
+    device_signature: String,
+    /// The NEAR AI access token, introspected and then dropped. Never logged,
+    /// never stored, never returned.
+    access_token: String,
+}
+
+pub(super) async fn near_ai_provision_start_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Result<Json<NearAiStartRequest>, JsonRejection>,
+) -> axum::response::Response {
+    let began = std::time::Instant::now();
+    let result = near_ai_start(state, headers, body).await;
+    sleep_to_redeem_floor(began).await;
+    result.unwrap_or_else(native_generic_deny)
+}
+
+async fn near_ai_start(
+    state: Arc<AppState>,
+    headers: HeaderMap,
+    body: Result<Json<NearAiStartRequest>, JsonRejection>,
+) -> Option<axum::response::Response> {
+    // The login path's own readiness, not the wallet's: `published_witness`
+    // refuses without the NEP-413 sign-in config and the wallet redirect
+    // origin, neither of which this ceremony has or needs.
+    if !near_ai_login_ready(&state) || limited(&headers, "near-ai-start") {
+        return None;
+    }
+    let Json(body) = body.ok()?;
+    if body.code_challenge_method != "S256" || !challenge_is_wellformed(&body.code_challenge) {
+        return None;
+    }
+    let db = account_db(&state).ok()?;
+    let device = device_key(&body.device_public_key)?;
+    use rand::RngCore as _;
+    let mut nonce = [0u8; 32];
+    rand::rngs::OsRng.try_fill_bytes(&mut nonce).ok()?;
+    let ceremony_id = generate_login_code();
+    let expires_at = Utc::now()
+        .timestamp()
+        .checked_add(NEAR_AI_LOGIN_CEREMONY_TTL_SECONDS)?;
+    let pending = trace_commons_server::account_onboarding::NearAiLoginPending {
+        nonce_hex: hex::encode(nonce),
+        code_challenge: body.code_challenge.clone(),
+        device_public_key: base64::engine::general_purpose::STANDARD.encode(device),
+        expires_at,
+    };
+    // The bytes the device must sign, from the shared protocol function. The
+    // client computes the same preimage from the same function; nothing here
+    // reconstructs the layout, because two implementations of one byte layout
+    // agree in every test each side writes against itself and diverge in
+    // production.
+    let signing_bytes = trace_commons_protocol::onboarding::near_ai_provisioning_device_bytes(
+        &nonce,
+        &ceremony_id,
+        &device,
+        &body.code_challenge,
+        expires_at,
+    );
+    db.store_near_ai_login_ceremony(&hash_secret(&ceremony_id), &pending, expires_at)
+        .await
+        .ok()?;
+    Some(response(serde_json::json!({
+        "ceremony_id": ceremony_id,
+        "nonce": hex::encode(nonce),
+        "expires_at": expires_at,
+        "device_signing_bytes": base64::engine::general_purpose::STANDARD.encode(&signing_bytes),
+    })))
+}
+
+pub(super) async fn near_ai_provision_finish_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Result<Json<NearAiFinishRequest>, JsonRejection>,
+) -> axum::response::Response {
+    let began = std::time::Instant::now();
+    let result = near_ai_finish(state, headers, body).await;
+    sleep_to_redeem_floor(began).await;
+    result.unwrap_or_else(native_generic_deny)
+}
+
+async fn near_ai_finish(
+    state: Arc<AppState>,
+    headers: HeaderMap,
+    body: Result<Json<NearAiFinishRequest>, JsonRejection>,
+) -> Option<axum::response::Response> {
+    if !near_ai_login_ready(&state) || limited(&headers, "near-ai-finish") {
+        return None;
+    }
+    let Json(body) = body.ok()?;
+    if body.ceremony_id.len() > 64
+        || !verifier_is_wellformed(&body.code_verifier)
+        || body.device_signature.len() > 128
+        // Bounded before anything is done with it. A token past this length is
+        // not one NEAR AI issued, and refusing early keeps an unbounded value
+        // out of an outbound request.
+        || body.access_token.is_empty()
+        || body.access_token.len() > 8192
+    {
+        return None;
+    }
+    let db = account_db(&state).ok()?;
+    let device = device_key(&body.device_public_key)?;
+    let hash = hash_secret(&body.ceremony_id);
+    if !ACCOUNT_RATE_LIMITER.check(&format!("near-ai-provision-ceremony:{hash}"), 5) {
+        return None;
+    }
+    // Single use: the take deletes the row, so a replayed finish finds nothing.
+    let pending = db.take_near_ai_login_ceremony(&hash).await.ok()??;
+    // Everything below is checked against the ceremony, never against the
+    // request. A finish naming a different device or a different challenge is
+    // refused rather than believed.
+    if !secret_eq(
+        &pending.code_challenge,
+        &challenge_for_verifier(&body.code_verifier),
+    ) {
+        return None;
+    }
+    if !secret_eq(
+        &pending.device_public_key,
+        &base64::engine::general_purpose::STANDARD.encode(device),
+    ) {
+        return None;
+    }
+    let nonce: [u8; 32] = hex::decode(&pending.nonce_hex).ok()?.try_into().ok()?;
+    let signing_bytes = trace_commons_protocol::onboarding::near_ai_provisioning_device_bytes(
+        &nonce,
+        &body.ceremony_id,
+        &device,
+        &pending.code_challenge,
+        pending.expires_at,
+    );
+    let signature: [u8; 64] = base64::engine::general_purpose::STANDARD
+        .decode(&body.device_signature)
+        .ok()?
+        .try_into()
+        .ok()?;
+    ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, &device)
+        .verify(&signing_bytes, &signature)
+        .ok()?;
+    // Only now, with the device proven and the ceremony consumed, is the token
+    // spent. Introspection is the last step because it is the only one that
+    // leaves this machine, and a request that was going to be refused anyway
+    // should not reach NEAR AI.
+    let login = trace_commons_server::near_ai_login::introspect_login(
+        NEAR_AI_API_BASE_URL,
+        &secrecy::SecretString::from(body.access_token),
+        NEAR_AI_INTROSPECTION_TIMEOUT,
+    )
+    .await
+    .ok()?;
+    let identity = state.near_account_identity.as_ref()?;
+    let secret = generate_session_secret();
+    let token_hash = hash_secret(&secret);
+    let provisioned = db
+        .provision_near_ai_login(
+            &login,
+            &device,
+            trace_commons_server::db::NewSession {
+                token_hash: &token_hash,
+                client_kind: NATIVE_SESSION_CLIENT_KIND,
+                expires_at: Utc::now() + Duration::hours(NATIVE_SESSION_TTL_HOURS),
+            },
+            identity,
+        )
+        .await
+        .ok()?;
+    Some(response(serde_json::json!({
+        "access_token":native_token_value(&provisioned.tenant_id,&secret),"token_type":"Bearer",
+        "expires_in_secs":NATIVE_SESSION_TTL_HOURS*3600,"account_id":provisioned.account_id,
+        "tenant_id":provisioned.tenant_id,"device_key_id":provisioned.device_key_id,"anchor_hash":provisioned.anchor_hash
+    })))
+}
+
+#[cfg(test)]
+mod near_ai_login_tests {
+    use super::*;
+
+    /// **A client-asserted account is refused before the handler sees it.**
+    ///
+    /// The account on this path is whatever the introspected token's subject
+    /// resolves to. A request that names one is the sybil problem #836 exists
+    /// to prevent -- an attacker runs a modified client and asserts a fresh
+    /// account per submission -- so the refusal must not be a conditional
+    /// someone can delete. `deny_unknown_fields` makes it a parse failure: the
+    /// body never becomes a `NearAiFinishRequest` at all.
+    #[test]
+    fn a_finish_body_naming_an_account_is_refused_at_the_parse_boundary() {
+        let ok = serde_json::json!({
+            "ceremony_id": "c",
+            "code_verifier": "v",
+            "device_public_key": "d",
+            "device_signature": "s",
+            "access_token": "t",
+        });
+        serde_json::from_value::<NearAiFinishRequest>(ok.clone())
+            .expect("the shape without an account parses");
+
+        for smuggled in ["account_id", "near_account_id", "subject", "tenant_id"] {
+            let mut body = ok.clone();
+            body[smuggled] = serde_json::json!("attacker-chosen");
+            assert!(
+                serde_json::from_value::<NearAiFinishRequest>(body).is_err(),
+                "{smuggled} reached the handler instead of being refused"
+            );
+        }
+    }
+
+    /// The same guarantee on the other verb, and the reason it matters there
+    /// too: start decides what the ceremony commits to, so an extra field it
+    /// silently ignored would be one a client believed had been agreed.
+    #[test]
+    fn a_start_body_with_anything_extra_is_refused() {
+        let ok = serde_json::json!({
+            "device_public_key": "d",
+            "code_challenge": "c",
+            "code_challenge_method": "S256",
+        });
+        serde_json::from_value::<NearAiStartRequest>(ok.clone()).expect("the agreed shape parses");
+        for smuggled in ["account_id", "nonce", "expires_at"] {
+            let mut body = ok.clone();
+            body[smuggled] = serde_json::json!("attacker-chosen");
+            assert!(
+                serde_json::from_value::<NearAiStartRequest>(body).is_err(),
+                "{smuggled} was accepted at start"
+            );
+        }
+    }
+
+    /// The two ceremonies must not share a device-proof preimage, or a
+    /// signature captured from one could be presented as the other. Asserted
+    /// through the shared protocol function rather than against a description
+    /// of it -- this is the function both halves call.
+    #[test]
+    fn the_login_device_proof_is_not_the_wallet_one() {
+        let nonce = [3u8; 32];
+        let device = [4u8; 32];
+        let login = trace_commons_protocol::onboarding::near_ai_provisioning_device_bytes(
+            &nonce,
+            "ceremony",
+            &device,
+            "challenge",
+            99,
+        );
+        let wallet = trace_commons_protocol::onboarding::near_provisioning_device_bytes(
+            &nonce,
+            "ceremony",
+            "challenge",
+            &device,
+            None,
+        );
+        assert_ne!(login, wallet);
+        // And the ceremony's own fields are covered: change any one and the
+        // bytes move, so a signature is not transferable between ceremonies.
+        for (n, c, d, ch, e) in [
+            ([9u8; 32], "ceremony", device, "challenge", 99),
+            (nonce, "other", device, "challenge", 99),
+            (nonce, "ceremony", [9u8; 32], "challenge", 99),
+            (nonce, "ceremony", device, "other", 99),
+            (nonce, "ceremony", device, "challenge", 100),
+        ] {
+            assert_ne!(
+                login,
+                trace_commons_protocol::onboarding::near_ai_provisioning_device_bytes(
+                    &n, c, &d, ch, e
+                ),
+            );
+        }
+    }
+}
