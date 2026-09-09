@@ -37,14 +37,27 @@ fn denied() -> (StatusCode, Json<ApiError>) {
 
 /// This namespace is allocated only by verified NEAR provisioning. Both the
 /// tenant and the principal come from authentication, never envelope attribution.
+///
+/// The `near-` prefix says only which namespace the tenant is in; the stored
+/// row is the authorisation. It is reached by the authenticated tenant and the
+/// authenticated principal together, and only through an unrevoked
+/// `near`-origin device key on a linked principal of an open account, so a
+/// tenant with no such row -- or one whose device has since been revoked --
+/// has no anchor and is refused here.
+///
+/// The suffix is deliberately NOT compared against the anchor. V58 held them
+/// equal, which made a contributor's tenant id computable offline from a NEAR
+/// account name; V61 made `anchor_hash` a keyed blind index and the tenant id
+/// random precisely so it no longer is (#716, #783). Reintroducing any
+/// relationship between the two would undo that migration.
 pub(super) async fn anchor(state: &AppState, tenant: &TenantCtx) -> ApiResult<Option<String>> {
-    let Some(candidate) = tenant
+    if !tenant
         .tenant_id()
         .strip_prefix("near-")
-        .filter(|s| is_hash(s))
-    else {
+        .is_some_and(is_hash)
+    {
         return Ok(None);
-    };
+    }
     let db = state.db_mirror.as_ref().ok_or_else(denied)?;
     let stored = db
         .get_near_provisioned_anchor(tenant.tenant_id(), tenant.principal_ref())
@@ -52,7 +65,7 @@ pub(super) async fn anchor(state: &AppState, tenant: &TenantCtx) -> ApiResult<Op
         .map_err(|_| denied())?
         .ok_or_else(denied)?;
     let stored = stored.strip_prefix("sha256:").ok_or_else(denied)?;
-    if stored != candidate {
+    if !is_hash(stored) {
         return Err(denied());
     }
     Ok(Some(stored.to_string()))
