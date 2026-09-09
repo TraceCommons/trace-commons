@@ -3352,6 +3352,73 @@ mod tests {
         );
     }
 
+    /// The certificate-held list says the same fact two ways, and the two
+    /// must not read as each other.
+    ///
+    /// A contributor without an invite is being told their session is a
+    /// candidate for submission. A contributor with one is being told it is
+    /// cryptographically attested. The underlying fact is identical -- a
+    /// witness certificate is held over the reviewed bytes -- but a shell
+    /// showing the invited reading to an uninvited contributor promises
+    /// something that has not happened, and the reverse withholds something
+    /// that has.
+    #[test]
+    fn the_certificate_list_reads_differently_for_each_audience() {
+        let copy = private_inference_copy();
+
+        // Not one sentence wearing two names.
+        assert_ne!(copy.certificate_row_candidate, copy.certificate_row_attested);
+        assert_ne!(copy.certificate_list_candidate, copy.certificate_list_attested);
+
+        // The uninvited reading must not claim attestation, and the invited
+        // reading must not demote a finished fact to a prospect.
+        assert!(
+            !copy.certificate_row_candidate.to_lowercase().contains("attest"),
+            "the candidate sentence claims attestation: {}",
+            copy.certificate_row_candidate
+        );
+        assert!(
+            !copy.certificate_row_attested.to_lowercase().contains("candidate"),
+            "the attested sentence reads as a prospect: {}",
+            copy.certificate_row_attested
+        );
+
+        // Every one of them states the fact the list is built on, so a row
+        // cannot be read as saying something about the model call instead.
+        for sentence in [copy.certificate_row_candidate, copy.certificate_row_attested] {
+            assert!(
+                sentence.to_lowercase().contains("certificate"),
+                "a row sentence does not say what is held: {sentence}"
+            );
+        }
+    }
+
+    /// The list is about a held certificate and nothing else.
+    ///
+    /// Holds-a-certificate, is-attestable and was-attested are three
+    /// different facts, and this codebase conflates them today. A sentence
+    /// here that talked about the model call would put a shell on the wrong
+    /// input without any type noticing.
+    #[test]
+    fn no_certificate_sentence_describes_the_model_call() {
+        let copy = private_inference_copy();
+        for sentence in [
+            copy.certificate_row_candidate,
+            copy.certificate_row_attested,
+            copy.certificate_list_candidate,
+            copy.certificate_list_attested,
+            copy.certificate_list_empty,
+        ] {
+            let lower = sentence.to_lowercase();
+            for forbidden in ["model call", "attestable", "unattested"] {
+                assert!(
+                    !lower.contains(forbidden),
+                    "{sentence:?} describes {forbidden}, which is the attestation mark's                      question and not this list's"
+                );
+            }
+        }
+    }
+
     /// Every field of the payload carries a finished sentence: no empties,
     /// and no template markers a shell would have to fill in.
     #[test]
