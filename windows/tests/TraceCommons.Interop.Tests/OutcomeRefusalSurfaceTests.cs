@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
+using System.Linq;
 using TraceCommons.Interop;
 using Xunit;
 
@@ -76,4 +78,31 @@ public sealed class OutcomeRefusalSurfaceTests
 
     private static string? NearAiEnrollSurfaceProbe(string? label) =>
         OutcomeRefusalSurface.Line(label);
+
+    /// <summary>
+    /// The outcome row actually consults the shared table.
+    /// </summary>
+    /// <remarks>
+    /// Without this, every assertion above passes while the row still renders
+    /// a raw label: they exercise the interop surface, and the view model is
+    /// what decides whether that surface is ever asked. TraceCommons.App is
+    /// WinUI and cannot be referenced from a test assembly, so the view model
+    /// is read as the text the csproj copies beside us. Comment lines are
+    /// stripped first.
+    /// </remarks>
+    [Fact]
+    public void TheOutcomeRowAsksTheSharedTableBeforeShowingARawLabel()
+    {
+        string path = Path.Combine(AppContext.BaseDirectory, "HistoryViewModel.cs.txt");
+        Assert.True(File.Exists(path), $"the implementation source was not copied to {path}");
+        string source = string.Join(
+            "\n",
+            File.ReadAllText(path)
+                .Split('\n')
+                .Where(line => !line.TrimStart().StartsWith("//", StringComparison.Ordinal)));
+
+        Assert.Contains("OutcomeRefusalSurface.Line(label)", source, StringComparison.Ordinal);
+        // Still additive: the raw-label rendering remains for everything else.
+        Assert.Contains("label.Replace('-', ' ').Replace('_', ' ')", source, StringComparison.Ordinal);
+    }
 }
