@@ -21,7 +21,7 @@ final class BalanceExportTests: XCTestCase {
         "known", "no_session", "session_expired", "no_organization", "unavailable",
     ]
 
-    private func copy() throws -> PrivateInferenceCopy {
+    private func payload() throws -> PrivateInferenceCopy {
         let json = try XCTUnwrap(TCPrivateInference.copyJSON())
         return try XCTUnwrap(PrivateInferenceCopy.decode(fromJSON: json))
     }
@@ -59,9 +59,9 @@ final class BalanceExportTests: XCTestCase {
     /// pass.
     func testANullRendersNoFigureAndAZeroRendersRealMoney() throws {
         let absent = BalanceSurface.remaining(
-            status("known", remaining: nil), copy: try copy(), calls: calls())
+            status("known", remaining: nil), copy: try payload(), calls: calls())
         let zero = BalanceSurface.remaining(
-            status("known", remaining: 0), copy: try copy(), calls: calls())
+            status("known", remaining: 0), copy: try payload(), calls: calls())
 
         XCTAssertEqual(zero, .figure("$0.00"))
         XCTAssertNotEqual(absent, zero)
@@ -70,7 +70,7 @@ final class BalanceExportTests: XCTestCase {
         }
         // And the sentence it gets instead says the account is UNCAPPED --
         // not that it is empty.
-        XCTAssertEqual(absent, .sentence(try copy().balanceNoRemaining))
+        XCTAssertEqual(absent, .sentence(try payload().balanceNoRemaining))
     }
 
     /// `present == 0` on the remaining line is "no ceiling", the ordinary
@@ -78,7 +78,7 @@ final class BalanceExportTests: XCTestCase {
     func testAnUncappedAccountIsToldItHasNoLimitRatherThanNothingLeft() throws {
         let sentence = try XCTUnwrap(
             TCNearAiBalance.remainingLine(present: 0, nanos: 0, scale: 9))
-        XCTAssertEqual(sentence, try copy().balanceNoRemaining)
+        XCTAssertEqual(sentence, try payload().balanceNoRemaining)
         XCTAssertFalse(sentence.contains("$0.00"))
         XCTAssertFalse(sentence.isEmpty, "the remaining line does NOT drop out when absent")
     }
@@ -118,9 +118,9 @@ final class BalanceExportTests: XCTestCase {
         // one about an uncapped account.
         let row = BalanceSurface.remaining(
             status("known", remaining: 8_500_000_000, scale: BalanceStatus.unreadableScale),
-            copy: try copy(), calls: calls())
-        XCTAssertEqual(row, .sentence(try copy().balanceUnknown))
-        XCTAssertNotEqual(row, .sentence(try copy().balanceNoRemaining))
+            copy: try payload(), calls: calls())
+        XCTAssertEqual(row, .sentence(try payload().balanceUnknown))
+        XCTAssertNotEqual(row, .sentence(try payload().balanceNoRemaining))
     }
 
     /// The limit and spent lines take the OPPOSITE branch on absence, and
@@ -140,7 +140,7 @@ final class BalanceExportTests: XCTestCase {
 
     /// Every state gets the payload's own sentence, and `known` gets none.
     func testEveryStateGetsItsOwnSentenceAndKnownGetsNone() throws {
-        let copy = try copy()
+        let copy = try payload()
         let expected: [String: String?] = [
             "": copy.balanceUnreported,
             "known": nil,
@@ -160,7 +160,7 @@ final class BalanceExportTests: XCTestCase {
     /// written for it, and specifically not the claim that no sign-in is
     /// kept here, nor the claim that the service failed to answer.
     func testAnUnrecognisedStateGetsTheUnknownSentenceAndBorrowsNoOthers() throws {
-        let copy = try copy()
+        let copy = try payload()
         let line = try XCTUnwrap(
             BalanceSurface.stateLine(status("a_state_from_2027"), copy: copy, calls: calls()))
         XCTAssertEqual(line, copy.balanceUnknown)
@@ -174,7 +174,7 @@ final class BalanceExportTests: XCTestCase {
 
     /// An unread state and an unanswered question are different sentences.
     func testUnreportedAndUnknownAreNotTheSameSentence() throws {
-        let copy = try copy()
+        let copy = try payload()
         XCTAssertNotEqual(copy.balanceUnknown, copy.balanceUnreported)
     }
 
@@ -230,8 +230,8 @@ final class BalanceExportTests: XCTestCase {
     func testTheActionSharesTheCredentialRowsEnum() throws {
         let label = try XCTUnwrap(
             CredentialSurface.actionLabel(
-                BalanceSurface.action(status("no_session"), calls: calls()), copy: try copy()))
-        XCTAssertEqual(label, try copy().credentialObtain)
+                BalanceSurface.action(status("no_session"), calls: calls()), copy: try payload()))
+        XCTAssertEqual(label, try payload().credentialObtain)
     }
 
     // MARK: - When it was asked for

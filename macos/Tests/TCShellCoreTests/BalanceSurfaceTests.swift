@@ -312,9 +312,9 @@ final class BalanceSurfaceTests: XCTestCase {
     /// every other row on this destination uses.
     func testTheToneIsDecodedFromTheSharedTable() {
         XCTAssertEqual(
-            BalanceSurface.tone(known(), calls: calls(tone: { _ in 23 })), .clear)
+            BalanceSurface.tone(known(), calls: calls(tone: { _ in 22 })), .clear)
         XCTAssertEqual(
-            BalanceSurface.tone(known(), calls: calls(tone: { _ in 25 })), .refused)
+            BalanceSurface.tone(known(), calls: calls(tone: { _ in 24 })), .refused)
     }
 
     /// Nothing here judges an amount. An emptied account and a full one are
@@ -322,14 +322,15 @@ final class BalanceSurfaceTests: XCTestCase {
     /// claim nobody on this ABI made -- on an account whose ceiling may not
     /// exist.
     func testNoAmountChangesTheTone() {
-        var seen: Set<Int32> = []
-        let watcher = calls(tone: { _ in 23 })
-        for amount: Int64? in [nil, -5_000_000_000, 0, 1, 10_000_000_000] {
-            let tone = BalanceSurface.tone(known(remaining: amount), calls: watcher)
-            XCTAssertEqual(tone, .clear, "the amount must not move the tone")
-            seen.insert(0)
+        // The fake is told only the STATE, so a surface that wanted to move
+        // the tone with a figure would have to do it after the table
+        // answered -- which is exactly what must not happen.
+        let table = calls(tone: { _ in 22 })
+        let tones = [nil, Int64(-5_000_000_000), 0, 1, 10_000_000_000].map {
+            BalanceSurface.tone(known(remaining: $0), calls: table)
         }
-        XCTAssertEqual(seen, [0])
+        XCTAssertEqual(Set(tones).count, 1, "an amount moved the tone: \(tones)")
+        XCTAssertEqual(tones.first, .clear)
     }
 
     // MARK: - The one action
