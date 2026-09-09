@@ -712,11 +712,111 @@ impl ConfigStore {
 #[cfg(test)]
 pub(crate) mod tests_support {
     use super::ConfigStore;
+    use sha2::Digest as _;
 
     pub(crate) fn temp_store() -> (tempfile::TempDir, ConfigStore) {
         let dir = tempfile::tempdir().unwrap();
         let store = ConfigStore::open(dir.path().to_path_buf()).unwrap();
         (dir, store)
+    }
+
+    /// A wallet account in the shape V61 leaves behind: a tenant id and an
+    /// account anchor with no arithmetic relationship to each other.
+    ///
+    /// Returns `(tenant_id, anchor)`, where `anchor` is the 64 hex characters
+    /// an admission binding carries -- the stored `anchor_hash` without its
+    /// `sha256:` prefix.
+    ///
+    /// # Why this exists, and why writing the literal instead is a bug
+    ///
+    /// Four fixtures in this workspace built `format!("near-{}", anchor)`:
+    /// `daemon::approved_envelope`, `witness::transport`,
+    /// `daemon::admission_setup`, and `daemon::account_onboarding`. That is the
+    /// shape V58's `CHECK (tenant_id = 'near-' || substring(anchor_hash from
+    /// 8))` produced; V61 made the anchor a keyed blind index and the tenant id
+    /// 32 random bytes, and V62 dropped the constraint. Since then the two are
+    /// equal for no real account.
+    ///
+    /// A fixture in the old shape is not merely unrealistic -- it is the only
+    /// world in which the retired coupling holds, so a test written against it
+    /// **cannot fail** when production code still assumes that coupling. That
+    /// is not hypothetical: `verify_admission_context` read a tenant id as an
+    /// account anchor on the live upload path and refused every
+    /// admission-bearing submission, while
+    /// `signed_admission_must_match_our_account_challenge_and_exact_receipt` --
+    /// a test named for exactly that property, with a ten-field mutation matrix
+    /// over the evidence -- passed throughout, because its fixture supplied the
+    /// coupled pair. Correcting the fixture was the whole of what made it fail.
+    ///
+    /// # What the assertion below can and cannot catch
+    ///
+    /// Two independently drawn 32-byte values are never equal in practice, so
+    /// the check never fires on the values themselves. That is not what it is
+    /// for. It fires when a maintainer later edits **this function** to derive
+    /// one side from the other -- `format!("near-{anchor}")` being the obvious
+    /// and historically attested way to do it -- which is the mutation that
+    /// would silently re-couple every caller at once.
+    ///
+    /// It is containment rather than equality, matching
+    /// `near_account_identity::tenant_id_is_independent_of_every_public_input`
+    /// on the server side, so a tenant id that merely *embeds* the anchor is
+    /// caught too.
+    ///
+    /// It still cannot catch a derivation that transforms the anchor -- a
+    /// reversed or re-encoded digest would pass. Nothing cheap can, short of
+    /// the newtype in #794 that makes the coupling unrepresentable. So the
+    /// doc comment above, which names the sites and the failure, is doing more
+    /// of the work here than the assertion is; treat it as the primary control
+    /// and the assertion as the backstop, not the other way round.
+    pub(crate) fn v61_account() -> (String, String) {
+        let anchor = hex::encode(<[u8; 32]>::from(sha2::Sha256::digest(
+            uuid::Uuid::new_v4().as_bytes(),
+        )));
+        let tenant = format!(
+            "near-{}",
+            hex::encode(<[u8; 32]>::from(sha2::Sha256::digest(
+                uuid::Uuid::new_v4().as_bytes()
+            )))
+        );
+        assert!(
+            !tenant.contains(&anchor) && !anchor.contains(tenant.trim_start_matches("near-")),
+            "v61_account derived one side from the other; the whole point of \
+             this constructor is that a tenant id and an account anchor share \
+             no value. See #794."
+        );
+        (tenant, anchor)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        /// The constructor is a control, so it gets a test that can go red in
+        /// CI rather than only an assertion that fires if someone edits it.
+        ///
+        /// Modelled on the server's
+        /// `tenant_id_is_independent_of_every_public_input`: draw repeatedly,
+        /// and require that no draw repeats and that neither side ever
+        /// contains the other. A `v61_account` rewritten to couple the two
+        /// fails here, with a name that says what broke.
+        #[test]
+        fn v61_account_draws_the_two_halves_independently() {
+            let mut tenants = std::collections::BTreeSet::new();
+            let mut anchors = std::collections::BTreeSet::new();
+            for _ in 0..64 {
+                let (tenant, anchor) = super::v61_account();
+                let suffix = tenant
+                    .strip_prefix("near-")
+                    .expect("a wallet tenant id keeps the namespace consumers match on");
+                assert_eq!(suffix.len(), 64, "{tenant}");
+                assert_eq!(anchor.len(), 64, "{anchor}");
+                assert_ne!(suffix, anchor, "the two halves are the same value");
+                assert!(
+                    !tenant.contains(&anchor) && !anchor.contains(suffix),
+                    "one half embeds the other"
+                );
+                assert!(tenants.insert(tenant), "a tenant id repeated across draws");
+                assert!(anchors.insert(anchor), "an anchor repeated across draws");
+            }
+        }
     }
 }
 
