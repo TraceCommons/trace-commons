@@ -70,6 +70,12 @@ pub struct QueueView {
     undo_undo: gtk::Button,
     undo_let_it_send: gtk::Button,
     heading: gtk::Label,
+    /// The certificate-held section: heading, then either the sessions a
+    /// certificate is held for or the sentence saying there are none yet.
+    ///
+    /// Rebuilt with the queue rather than persisted, because its contents
+    /// are a filter over the same rows.
+    certificates: gtk::Box,
     list: gtk::Box,
     disclosure: gtk::Box,
     week: gtk::Box,
@@ -254,12 +260,18 @@ impl QueueView {
             steps.append(&label);
         }
         first_contribution.set_child(Some(&steps));
+        let certificates = gtk::Box::new(gtk::Orientation::Vertical, space::S);
+        certificates.set_margin_start(space::XL);
+        certificates.set_margin_end(space::XL);
+        certificates.set_margin_top(space::M);
+
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
         root.add_css_class("tc-root");
         root.append(&private_inference_clamp);
         root.append(&arming_clamp);
         root.append(&undo_clamp);
         root.append(&first_contribution);
+        root.append(&certificates);
         root.append(&empty);
         root.append(&scroller);
 
@@ -274,6 +286,7 @@ impl QueueView {
             undo_undo,
             undo_let_it_send,
             heading,
+            certificates,
             list,
             disclosure,
             week,
@@ -411,6 +424,9 @@ pub fn render(app: &Rc<App>) {
 
     let entries = app.entries.borrow();
     let pending: Vec<&QueueEntry> = entries.iter().filter(|e| e.state == "pending").collect();
+    // The certificate section filters the same rows, and `certificate::held`
+    // takes a slice so it can be tested without a window.
+    let pending_owned: Vec<QueueEntry> = pending.iter().map(|e| (*e).clone()).collect();
 
     // The two facts the count cannot carry, both read off the previews the
     // cards already hold: a session scrubbing matched NOTHING in, and one
@@ -443,6 +459,52 @@ pub fn render(app: &Rc<App>) {
     // whatever order the cards are drawn in. `queue_folders::group` is what
     // guarantees that, and `members_keep_their_flat_pending_index` is what
     // guards it.
+    // The sessions a witness certificate is held for, drawn together above
+    // the folders they are scattered across. Both witness routes produce one,
+    // so this is one question rather than two -- see `holds_certificate`.
+    //
+    // ALWAYS DRAWN, heading and all, even with nothing in it. A filtered
+    // section that renders as nothing when nothing matches cannot be told
+    // apart from one that failed to load, and on this shell a
+    // `holds_certificate` that never arrived decodes to `false` on every row
+    // and produces exactly that. The empty sentence is what says which.
+    //
+    // Nothing here chooses a sentence. `evidence_admitted` is the daemon's
+    // flag verbatim and every word comes back from `crate::certificate`.
+    clear(&view.certificates);
+    {
+        let evidence_admitted = app.evidence_admitted.get();
+        let title = gtk::Label::builder()
+            .label(crate::certificate::title(evidence_admitted))
+            .wrap(true)
+            .xalign(0.0)
+            .build();
+        title.add_css_class("tc-card-title");
+        view.certificates.append(&title);
+
+        let held = crate::certificate::held(&pending_owned);
+        if held.is_empty() {
+            let none = style::caveat(crate::certificate::empty());
+            none.add_css_class("tc-tertiary");
+            view.certificates.append(&none);
+        } else {
+            let line = crate::certificate::view(evidence_admitted).line;
+            for entry in held {
+                let row = gtk::Box::new(gtk::Orientation::Vertical, 0);
+                let label = gtk::Label::builder()
+                    .label(&entry.project_label)
+                    .wrap(true)
+                    .xalign(0.0)
+                    .build();
+                row.append(&label);
+                let meaning = style::caveat(line);
+                meaning.add_css_class("tc-tertiary");
+                row.append(&meaning);
+                view.certificates.append(&row);
+            }
+        }
+    }
+
     let folders = crate::queue_folders::group(&pending);
     // Resolved on every render rather than mutated on every queue change: a
     // folder can be pulled out from under the person standing in it by an

@@ -147,10 +147,18 @@ mod tests {
             );
         }
 
-        let production = QUEUE_SOURCE
+        // Prose is stripped before the sweep. A guard that fails source for
+        // naming a sentence in a comment teaches the next reader to delete
+        // the comment, and the comments here are what say why the section is
+        // drawn even when empty.
+        let production: String = QUEUE_SOURCE
             .split("#[cfg(test)]")
             .next()
-            .expect("production code above the tests");
+            .expect("production code above the tests")
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
         for authored in ["put forward", "signed proof", "witness certificate"] {
             assert!(
                 !production.contains(authored),
