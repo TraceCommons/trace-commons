@@ -692,12 +692,8 @@ impl Sheet {
         app.call("get_settings", serde_json::json!({}), move |_, result| {
             admission_sheet.admission_required.set(
                 result
-                    .ok()
-                    .and_then(|v| {
-                        v.get("admission_evidence_required")
-                            .and_then(|v| v.as_bool())
-                    })
-                    .unwrap_or(false),
+                    .as_ref()
+                    .is_ok_and(|settings| admission_required_by_settings(settings)),
             );
             admission_sheet.sync_witness();
         });
@@ -861,9 +857,11 @@ impl Sheet {
     /// summary fetched minutes ago would be approving something the daemon
     /// is no longer holding.
     fn sync_witness(&self) {
-        self.admission_button.set_visible(
-            self.admission_required.get() && self.admission_supported.get() && !self.pinned.get(),
-        );
+        self.admission_button.set_visible(admission_control_visible(
+            self.admission_required.get(),
+            self.admission_supported.get(),
+            self.pinned.get(),
+        ));
         self.admission_button
             .set_sensitive(!self.admission_busy.get() && !self.witness_busy.get());
         let configured = super::settings::witness_read(&self.app.worker.dir).state
@@ -2259,6 +2257,34 @@ fn context_around(body: &str, byte_start: usize, byte_end: usize) -> Excerpt {
         text: format!("{lead}{head}{hit}{tail}\u{2026}"),
         hit: hit_start..hit_start + hit.len(),
     }
+}
+
+/// Whether this contributor's enrolment admits evidence-bearing
+/// contribution, read out of a `get_settings` reply.
+///
+/// `admission_evidence_required` is the daemon's own answer, and it is not a
+/// preference: it is true for a contributor who signed up through NEAR and
+/// false for one who came in on an invite. Anything but an explicit `true` is
+/// a no -- the daemon answers null when it could not read the config, and an
+/// older daemon does not answer at all.
+fn admission_required_by_settings(settings: &serde_json::Value) -> bool {
+    settings
+        .get("admission_evidence_required")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+}
+
+/// Whether the preparation control belongs on the sheet at all.
+///
+/// Withheld rather than shown refused, which is what macOS does: it omits
+/// `AdmissionPreparationView` outright for a contributor whose enrolment
+/// cannot use it. A disabled button with nothing beside it to say why is
+/// worse than no button.
+fn admission_control_visible(required: bool, supported: bool, pinned: bool) -> bool {
+    // `required` is the enrolment, `supported` the daemon advertising the
+    // method, `pinned` this sheet having already committed the bytes -- after
+    // which there is nothing left to prepare.
+    required && supported && !pinned
 }
 
 fn admission_ready(value: &serde_json::Value) -> bool {
