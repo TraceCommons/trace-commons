@@ -390,6 +390,27 @@ pub struct AdmissionCopy {
     /// way to know which one is right, and this app would not take one from
     /// them anyway.
     pub failed_receipt_endpoint: &'static str,
+    /// A receipt endpoint is configured that this client will not call.
+    pub failed_receipt_endpoint_invalid: &'static str,
+    /// The permission that lets captured inference bodies be used has not
+    /// been given, or this session was not confirmed.
+    pub failed_permission: &'static str,
+    /// No enrolled account or device key on this computer.
+    pub failed_not_enrolled: &'static str,
+    /// The chosen session cannot be read back.
+    pub failed_session_unreadable: &'static str,
+    /// The session came from an agent this build cannot read.
+    pub failed_source_unsupported: &'static str,
+    /// IronWire is not running, or cannot capture request bodies.
+    pub failed_proxy_missing: &'static str,
+    /// IronWire is running but its control token failed a trust check.
+    pub failed_proxy_untrusted: &'static str,
+    /// The host allowlist refuses one of the addresses this step must call.
+    pub failed_hosts_untrusted: &'static str,
+    /// The named backend is not one this can prepare against.
+    pub failed_backend: &'static str,
+    /// The commons or the proxy declined this attempt, and another may work.
+    pub failed_try_again: &'static str,
     pub refused_glyph: &'static str,
     pub refused_tone: &'static str,
 }
@@ -445,6 +466,54 @@ pub fn wallet_refusal_line(reason: Option<&str>) -> &'static str {
         Some("address_refused") => wallet.address_refused,
         Some("unreachable") => wallet.unreachable,
         _ => wallet.unavailable,
+    }
+}
+
+/// The sentence for one refusal.
+///
+/// Grouped by **what the person must do differently**, which is the only
+/// distinction a sentence earns. Nineteen labels reach here and several are the
+/// same situation from the person's side -- a session that is missing, one that
+/// will not parse and one whose id is unknown are all "this session cannot be
+/// read", and there is nothing a person could do with the difference. Causes
+/// with different remedies are kept apart even when they look alike in the
+/// code: a proxy that is not running is a thing to start, while a proxy whose
+/// control file failed its trust check is a thing to stop and ask about.
+///
+/// An unrecognised label is the generic sentence, which is honest -- this build
+/// does not know what went wrong, so "try again" is all it can say. Every label
+/// the daemon actually raises is classified, and
+/// `daemon::admission_setup::every_admission_label_is_classified` fails if one
+/// is not.
+///
+/// Shared rather than private to the daemon: the GTK shell reaches a refusal as
+/// a bare label string and has no `view` to read, so it maps the same label
+/// through the same function. Two mappings would drift.
+#[must_use]
+pub fn admission_refusal_line(label: Option<&str>) -> &'static str {
+    let copy = witness_copy().admission;
+    match label {
+        Some("admission_receipt_endpoint_required") => copy.failed_receipt_endpoint,
+        Some("admission_receipt_endpoint_invalid") => copy.failed_receipt_endpoint_invalid,
+        Some("admission_setup_consent_required") => copy.failed_permission,
+        Some("admission_setup_unenrolled") | Some("admission_setup_device_missing") => {
+            copy.failed_not_enrolled
+        }
+        Some("admission_setup_session_missing")
+        | Some("admission_setup_session_invalid")
+        | Some("admission_setup_session_unknown") => copy.failed_session_unreadable,
+        Some("admission_setup_source_unsupported") => copy.failed_source_unsupported,
+        Some("admission_setup_proxy_missing") | Some("admission_setup_proxy_unsupported") => {
+            copy.failed_proxy_missing
+        }
+        Some("admission_setup_proxy_untrusted") => copy.failed_proxy_untrusted,
+        Some("admission_setup_endpoint_untrusted") => copy.failed_hosts_untrusted,
+        Some("admission_setup_invalid") => copy.failed_backend,
+        Some("admission_setup_claim_expired")
+        | Some("admission_setup_state_changed")
+        | Some("admission_setup_registration_refused")
+        | Some("admission_setup_binding_invalid") => copy.failed_try_again,
+        _ => copy.failed,
     }
 }
 
@@ -515,6 +584,16 @@ pub fn witness_copy() -> WitnessCopy {
             ready: "Ready. Continue this session in your agent, then review the updated session.",
             failed: "This session could not be prepared. Check your supported agent, backend, and capture settings, then try again.",
             failed_receipt_endpoint: "This session could not be prepared, and nothing in your settings will fix it. Your commons has not published a receipt service, so there is nowhere to collect the provider's signature for this inference. Ask the operator of your commons to publish one. You can still contribute existing history without it.",
+            failed_receipt_endpoint_invalid: "This session could not be prepared. The receipt service configured for this computer is not an address this app will call, so the provider's signature cannot be collected. Whoever set it up needs to correct it. You can still contribute existing history without it.",
+            failed_permission: "This session could not be prepared, because sending captured inference bodies has not been permitted. Open Settings and give that permission, then confirm this session again. Nothing is sent until you do.",
+            failed_not_enrolled: "This session could not be prepared, because this computer is not connected to a commons yet. Finish joining, then come back to this session.",
+            failed_session_unreadable: "This session could not be prepared, because its file could not be read back. It may have been moved, deleted, or still be in use by the agent. Pick another session, or close the agent and try again.",
+            failed_source_unsupported: "This session could not be prepared, because it was produced by an agent this app cannot read yet. Use a supported agent for the task you want to contribute. Sessions from other agents are left alone.",
+            failed_proxy_missing: "This session could not be prepared, because the local proxy that records model calls is not running or is not capturing them. Start it and turn on body capture, then confirm this session again.",
+            failed_proxy_untrusted: "This session could not be prepared, because the local proxy's control file did not pass its safety check. Nothing was sent. Restart the proxy so it writes a fresh one, and if it keeps happening, ask for help before retrying.",
+            failed_hosts_untrusted: "This session could not be prepared, because one of the addresses it must call is not on the allowed-hosts list for this computer. Whoever set this computer up needs to allow it. Nothing left the machine.",
+            failed_backend: "This session could not be prepared, because the backend name given for it cannot be used. Choose a backend from the list and confirm again.",
+            failed_try_again: "This session could not be prepared this time. Your commons or the local proxy declined the attempt, which is usually temporary. Confirm the session again in a moment.",
             refused_glyph: "⊘",
             refused_tone: "refused",
         },
@@ -772,6 +851,51 @@ mod tests {
             obtained, never,
             "a witness that answered with a certificate that does not hold is a different \
              fact from one that never answered"
+        );
+    }
+
+    /// `AdmissionCopy` is nested, and the pin above counts only the top level,
+    /// so until now a sentence could be added here that no test had seen. That
+    /// mattered little while the struct held one failure sentence; it is about
+    /// to hold eleven, and more are coming, so it gets its own count.
+    ///
+    /// Two sentences that are identical would also mean two causes a person
+    /// must act on differently were given the same words, which is the defect
+    /// this struct exists to remove -- so they are required to be distinct.
+    #[test]
+    fn every_admission_sentence_is_counted_and_distinct() {
+        let json = serde_json::to_value(witness_copy().admission).unwrap();
+        let object = json.as_object().unwrap();
+        assert_eq!(
+            object.len(),
+            23,
+            "a field added to AdmissionCopy must be counted here, or a shell is handed \
+             a sentence no test has read"
+        );
+
+        let mut failures: Vec<&str> = object
+            .iter()
+            .filter(|(key, _)| key.starts_with("failed"))
+            .map(|(_, value)| value.as_str().expect("a sentence"))
+            .collect();
+        assert_eq!(
+            failures.len(),
+            12,
+            "every refusal sentence is a failed_* field"
+        );
+        for sentence in &failures {
+            assert!(
+                !sentence.is_empty(),
+                "a shell renders a blank and writes its own"
+            );
+        }
+        failures.sort_unstable();
+        let before = failures.len();
+        failures.dedup();
+        assert_eq!(
+            failures.len(),
+            before,
+            "two refusals share wording, so they are one sentence wearing two names"
         );
     }
 

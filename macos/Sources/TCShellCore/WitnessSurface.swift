@@ -562,6 +562,16 @@ public struct AdmissionCopy: Decodable, Equatable, Sendable {
     public let ready: String
     public let failed: String
     public let failedReceiptEndpoint: String
+    public let failedReceiptEndpointInvalid: String
+    public let failedPermission: String
+    public let failedNotEnrolled: String
+    public let failedSessionUnreadable: String
+    public let failedSourceUnsupported: String
+    public let failedProxyMissing: String
+    public let failedProxyUntrusted: String
+    public let failedHostsUntrusted: String
+    public let failedBackend: String
+    public let failedTryAgain: String
     public let refusedGlyph: String
     public let refusedTone: String
     enum CodingKeys: String, CodingKey {
@@ -576,6 +586,16 @@ public struct AdmissionCopy: Decodable, Equatable, Sendable {
         case ready = "ready"
         case failed = "failed"
         case failedReceiptEndpoint = "failed_receipt_endpoint"
+        case failedReceiptEndpointInvalid = "failed_receipt_endpoint_invalid"
+        case failedPermission = "failed_permission"
+        case failedNotEnrolled = "failed_not_enrolled"
+        case failedSessionUnreadable = "failed_session_unreadable"
+        case failedSourceUnsupported = "failed_source_unsupported"
+        case failedProxyMissing = "failed_proxy_missing"
+        case failedProxyUntrusted = "failed_proxy_untrusted"
+        case failedHostsUntrusted = "failed_hosts_untrusted"
+        case failedBackend = "failed_backend"
+        case failedTryAgain = "failed_try_again"
         case refusedGlyph = "refused_glyph"
         case refusedTone = "refused_tone"
     }

@@ -910,12 +910,12 @@ impl Sheet {
             let result_sheet = sheet.clone();
             let prepared_entry = entry.entry_id.clone();
             sheet.app.call("prepare_admission_session", serde_json::json!({"entry_id":entry.entry_id,"backend":backend.text().trim(),"confirmed":true}), move |_, result| {
-                let ready = result.ok().is_some_and(|v| admission_ready(&v));
+                let ready = result.as_ref().ok().is_some_and(admission_ready);
                 result_sheet.admission_busy.set(false);
                 if result_sheet.current().is_none_or(|entry| entry.entry_id != prepared_entry) { result_sheet.sync_witness(); return; }
                 let copy = trace_commons_contributor::witness_copy::witness_copy().admission;
                 if ready { result_sheet.admission_message.remove_css_class("tc-refused"); result_sheet.admission_message.set_label(copy.ready); }
-                else { result_sheet.admission_message.add_css_class("tc-refused"); result_sheet.admission_message.set_label(&format!("{} {}",copy.refused_glyph,copy.failed)); }
+                else { result_sheet.admission_message.add_css_class("tc-refused"); result_sheet.admission_message.set_label(&format!("{} {}",copy.refused_glyph,admission_refusal(&result))); }
                 result_sheet.sync_witness();
             });
         });
@@ -2283,6 +2283,20 @@ fn admission_control_visible(required: bool, supported: bool, pinned: bool) -> b
     // method, `pinned` this sheet having already committed the bytes -- after
     // which there is nothing left to prepare.
     required && supported && !pinned
+}
+
+/// The sentence for a refused preparation.
+///
+/// This shell reaches a refusal as a bare label string -- `Backend::call`
+/// turns `error.message` into the `Err` side, and the daemon's `view` object
+/// does not survive that -- so it maps the label itself rather than reading
+/// `view.message` the way the macOS shell does. Same function, same words:
+/// a second mapping here would drift from the one the daemon uses.
+///
+/// The label is a fixed string by IPC contract, which is what makes forwarding
+/// it safe; it is used to *choose* a sentence and is never displayed.
+fn admission_refusal(result: &Result<serde_json::Value, String>) -> &'static str {
+    trace_commons_contributor::witness_copy::admission_refusal_line(result.as_ref().err().map(String::as_str))
 }
 
 fn admission_ready(value: &serde_json::Value) -> bool {
