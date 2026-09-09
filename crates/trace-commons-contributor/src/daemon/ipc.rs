@@ -2569,7 +2569,9 @@ pub async fn handle_request_async(shared: &DaemonShared, req: &Request) -> Respo
             super::account_onboarding::handle_capabilities(shared, req).await
         }
         "set_settings" => handle_set_settings_async(shared, req).await,
-        "witness_preview_request" => handle_witness_preview_request(shared, req).await,
+        "witness_preview_request" => {
+            witness_review_response(handle_witness_preview_request(shared, req).await)
+        }
         "approve" => handle_approve(shared, req).await,
         "preview" => handle_preview(shared, req).await,
         "preview_body" => handle_preview_body(shared, req).await,
@@ -3232,6 +3234,28 @@ async fn handle_witness_preview_request(shared: &DaemonShared, req: &Request) ->
         None,
     )
     .await
+}
+
+/// Attach the refusal's sentence to a review response.
+///
+/// The mirror of `native_flow::admission_response`, and it is here for the
+/// same reason: **the daemon chooses the words, not the shells.** Three shells
+/// each mapping the same label would be three mappings, and
+/// `witness_copy::witness_refusal_line`'s own doc says why that is the thing
+/// to avoid. GTK reaches the same function directly because it is Rust and has
+/// no `view` to read.
+///
+/// Written onto `result` even though this is an error response, exactly as
+/// `admission_response` does: `result` and `error` both serialize, and a shell
+/// too old to look for the view simply does not find one.
+fn witness_review_response(mut response: Response) -> Response {
+    let Some(error) = response.error.as_ref() else {
+        return response;
+    };
+    let message = crate::witness_copy::witness_refusal_line(Some(error.message.as_str()));
+    let value = response.result.get_or_insert_with(|| serde_json::json!({}));
+    value["view"] = serde_json::json!({"state": "Refused", "message": message});
+    response
 }
 
 /// The word a refused review is reported under.
@@ -5013,6 +5037,79 @@ mod tests {
                 artifact,
             },
         )
+    }
+
+    /// The sentence a refused review carries, chosen once in the daemon.
+    ///
+    /// Before this, every witness refusal reached the shells as the same word
+    /// and each shell rendered its single `review.failed` sentence, so a
+    /// receipt the reviewer declined and a reviewer that was simply down were
+    /// the same event on every platform. Carrying the label was not enough on
+    /// its own -- all three views substitute the constant and never read it --
+    /// so the daemon selects the words the way it already does for admission
+    /// preparation.
+    #[test]
+    fn a_refused_review_carries_the_sentence_for_its_own_refusal() {
+        use crate::witness::WitnessTrustError;
+        let review = crate::witness_copy::witness_copy().review;
+        for (label, expected) in [
+            ("admission_evidence_refused", review.failed_receipt_declined),
+            ("witness_body_not_stripped", review.failed_bodies_returned),
+            ("witness_quote_replayed", review.failed_unproven),
+            ("witness_attestation_unavailable", review.failed_unreachable),
+        ] {
+            let response = witness_review_response(Response::err(1, ERR_UNAVAILABLE, label));
+            assert_eq!(
+                response
+                    .result
+                    .as_ref()
+                    .and_then(|value| value.get("view"))
+                    .and_then(|view| view.get("message"))
+                    .and_then(|message| message.as_str()),
+                Some(expected),
+                "{label} did not carry its own sentence"
+            );
+            assert_eq!(
+                response.error.as_ref().map(|e| e.message.as_str()),
+                Some(label),
+                "{label} lost the label a shell may still key on"
+            );
+        }
+        // Every refusal the client can raise is classified, so none of them
+        // reaches a contributor as the sentence for an unclassified one.
+        for label in WitnessTrustError::ALL_REFUSAL_LABELS {
+            let response = witness_review_response(Response::err(1, ERR_UNAVAILABLE, label));
+            let message = response
+                .result
+                .as_ref()
+                .and_then(|value| value.get("view"))
+                .and_then(|view| view.get("message"))
+                .and_then(|message| message.as_str())
+                .expect("a refusal carries a sentence");
+            assert_ne!(message, review.failed, "{label} fell through");
+            assert!(!message.contains(label), "{label} was rendered raw");
+        }
+    }
+
+    /// A response that is not a refusal is left exactly as it was, and a
+    /// refusal this build cannot classify gets the sentence that admits so.
+    #[test]
+    fn a_review_that_did_not_refuse_is_left_alone() {
+        let ok = witness_review_response(Response::ok(1, serde_json::json!({"a":1})));
+        assert!(ok.error.is_none());
+        assert_eq!(ok.result, Some(serde_json::json!({"a":1})));
+
+        let unknown =
+            witness_review_response(Response::err(1, ERR_UNAVAILABLE, "witness-review-failed"));
+        assert_eq!(
+            unknown
+                .result
+                .as_ref()
+                .and_then(|value| value.get("view"))
+                .and_then(|view| view.get("message"))
+                .and_then(|message| message.as_str()),
+            Some(crate::witness_copy::witness_copy().review.failed)
+        );
     }
 
     /// A review that the witness refused reaches the shell under its own
