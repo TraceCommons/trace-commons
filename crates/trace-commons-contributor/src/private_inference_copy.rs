@@ -1935,6 +1935,53 @@ pub fn private_inference_copy() -> PrivateInferenceCopy {
 /// bytes are covered and there is something to submit. Deliberately does not
 /// say "attested": nothing has attested anything to anyone yet, and a
 /// contributor who read that would believe a step had happened that has not.
+/// Which reading of the certificate-held list this contributor gets.
+///
+/// `invited` is the contributor's invite status, which every shell already
+/// holds: `get_settings` answers `admission_evidence_required`, and all
+/// three shells decode it and fail closed on the null a config-read failure
+/// produces. It is NOT a second question to the daemon and NOT the
+/// attestation mark.
+///
+/// The pick lives here rather than in each shell for the reason the
+/// attestation table does: three shells choosing for themselves is three
+/// chances to promise an uninvited contributor an attestation that has not
+/// happened, or to withhold from an invited one the fact that it has.
+#[must_use]
+pub fn certificate_row_line(invited: bool) -> &'static str {
+    if invited {
+        CERTIFICATE_ROW_ATTESTED
+    } else {
+        CERTIFICATE_ROW_CANDIDATE
+    }
+}
+
+/// The list's heading, on the same split as [`certificate_row_line`].
+#[must_use]
+pub fn certificate_list_title(invited: bool) -> &'static str {
+    if invited {
+        CERTIFICATE_LIST_ATTESTED
+    } else {
+        CERTIFICATE_LIST_CANDIDATE
+    }
+}
+
+/// What the list says with nothing in it.
+///
+/// One sentence for both readings: the reason the list is empty -- nothing
+/// has been through a witness yet -- does not differ between them, and a
+/// pair of sentences identical by construction is a maintenance trap.
+///
+/// Load-bearing rather than decoration. On the GTK shell every queue field
+/// decodes with `#[serde(default)]`, so a shell that failed to decode
+/// `holds_certificate` would render an empty list, which is indistinguishable
+/// from having no certificates. This sentence is what tells a contributor
+/// which one they are looking at.
+#[must_use]
+pub fn certificate_list_empty() -> &'static str {
+    CERTIFICATE_LIST_EMPTY
+}
+
 pub const CERTIFICATE_ROW_CANDIDATE: &str =
     "A witness certificate is held for this session, so it can be put forward.";
 

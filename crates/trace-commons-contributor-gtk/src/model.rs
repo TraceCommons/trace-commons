@@ -231,6 +231,24 @@ pub struct QueueEntry {
     /// `crate::copy::attestation_reason_line`.
     #[serde(default)]
     pub attestation_reason: Option<String>,
+    /// Whether a witness certificate is held for the bytes this entry was
+    /// pinned to. True after either witness route.
+    ///
+    /// **`#[serde(default)]` here is a hazard, not a convenience**, and the
+    /// reason `certificate::view` is tested against a decode. Every field on
+    /// this struct defaults, so a daemon that did not send the key -- or a
+    /// key renamed on one side only -- decodes to `false` on every row and
+    /// renders an EMPTY LIST. An empty list is exactly what a contributor
+    /// with no certificates sees, so the failure is invisible. The empty
+    /// state says which one it is, and
+    /// `a_decoded_entry_carrying_the_key_differs_from_one_without_it` is
+    /// what keeps the key itself honest.
+    ///
+    /// Not the attestation mark above: that says whether the session carries
+    /// a copy of the model call, this says whether a certificate is held
+    /// over the reviewed bytes.
+    #[serde(default)]
+    pub holds_certificate: bool,
 }
 
 impl QueueEntry {
