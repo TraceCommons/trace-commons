@@ -231,6 +231,30 @@ final class BalanceSurfaceTests: XCTestCase {
         XCTAssertNotEqual(row, .sentence(""))
     }
 
+    /// A Rust that answered nothing at all still does not produce a figure.
+    ///
+    /// Both halves of `remaining` can come back empty -- a caught panic
+    /// gives `nil`, and a scale this build cannot honour gives `""` from the
+    /// formatter -- and the row then falls to the sentence that says the
+    /// answer could not be read. **It must not fall to `$0.00`.** This is
+    /// the one path the real ABI cannot be made to take from a test, so a
+    /// fake takes it: without this, a fallback of `.figure("$0.00")` sits
+    /// here unnoticed, because every reachable input routes around it.
+    func testAnUnanswerableFigureFallsToTheUnknownSentenceAndNeverToZero() {
+        for (amount, remaining) in [(nil, nil), ("", nil), (nil, ""), ("", "")]
+            as [(String?, String?)]
+        {
+            let row = BalanceSurface.remaining(
+                known(), copy: copy(),
+                calls: calls(amount: { _, _, _ in amount }, remaining: { _, _, _ in remaining }))
+            XCTAssertEqual(row, .sentence(copy().balanceUnknown))
+            XCTAssertNotEqual(row, .figure("$0.00"))
+            if case .figure(let figure) = row {
+                XCTFail("an unanswerable figure rendered \(figure)")
+            }
+        }
+    }
+
     /// The other two money lines DO drop out when absent -- the opposite of
     /// the remaining line, and the asymmetry is the contract's.
     func testTheLimitAndSpentLinesDropOutWhenAbsentButNotWhenZero() {
