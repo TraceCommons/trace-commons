@@ -249,8 +249,10 @@ async fn stored_admission_artifact(
         expires_at: timestamp + 600,
     };
     let evidence_json = serde_json::to_string(&evidence).expect("evidence json");
-    let evidence_signature =
-        sign_eip191(key, &evidence.signing_bytes().expect("evidence signing bytes"));
+    let evidence_signature = sign_eip191(
+        key,
+        &evidence.signing_bytes().expect("evidence signing bytes"),
+    );
 
     use base64::Engine as _;
     let artifact = serde_json::from_value(serde_json::json!({
@@ -391,10 +393,13 @@ async fn the_evidence_a_client_carries_is_admitted_by_the_servers_own_verifier()
          from its tenant id"
     );
 
-    let pin = WitnessPin::new(&address, [certificate["witness_measurement"]
-        .as_str()
-        .expect("measurement")
-        .to_string()])
+    let pin = WitnessPin::new(
+        &address,
+        [certificate["witness_measurement"]
+            .as_str()
+            .expect("measurement")
+            .to_string()],
+    )
     .expect("witness pin");
     let verified = verify_witness_certificate(
         WitnessCertificate::from_wire(
@@ -468,7 +473,10 @@ async fn the_evidence_a_client_carries_is_admitted_by_the_servers_own_verifier()
 // The preparation path's refusals, through the real IPC entry point.
 // ---------------------------------------------------------------------------
 
-fn daemon_with(cfg: &ContributorConfig, dir: &std::path::Path) -> trace_commons_contributor::daemon::ipc::DaemonShared {
+fn daemon_with(
+    cfg: &ContributorConfig,
+    dir: &std::path::Path,
+) -> trace_commons_contributor::daemon::ipc::DaemonShared {
     let store = trace_commons_contributor::config::ConfigStore::open(dir.join("state"))
         .expect("config store");
     store.save_config(cfg).expect("save config");
@@ -521,11 +529,12 @@ async fn a_client_with_no_receipt_endpoint_refuses_before_contacting_the_proxy()
         );
     }
 
-    let response = trace_commons_contributor::daemon::admission_setup::handle_prepare_admission_session(
-        &shared,
-        &prepare_request(uuid::Uuid::new_v4()),
-    )
-    .await;
+    let response =
+        trace_commons_contributor::daemon::admission_setup::handle_prepare_admission_session(
+            &shared,
+            &prepare_request(uuid::Uuid::new_v4()),
+        )
+        .await;
     assert_eq!(
         response.error.expect("refused").message,
         "admission_receipt_endpoint_required"
@@ -592,11 +601,12 @@ async fn every_preparation_refusal_reaches_the_caller_as_the_same_word() {
         )
         .expect("queue upsert");
 
-    let response = trace_commons_contributor::daemon::admission_setup::handle_prepare_admission_session(
-        &shared,
-        &prepare_request(entry_id),
-    )
-    .await;
+    let response =
+        trace_commons_contributor::daemon::admission_setup::handle_prepare_admission_session(
+            &shared,
+            &prepare_request(entry_id),
+        )
+        .await;
     assert_eq!(
         response.error.expect("refused").message,
         "admission_setup_unavailable"
@@ -607,9 +617,8 @@ async fn every_preparation_refusal_reaches_the_caller_as_the_same_word() {
     // declared), reports the identical word.
     let claude_root =
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/claude-code");
-    let claude = trace_commons_contributor::source::claude_code::ClaudeCodeSource::new(
-        claude_root.clone(),
-    );
+    let claude =
+        trace_commons_contributor::source::claude_code::ClaudeCodeSource::new(claude_root.clone());
     let claude_session = claude.discover().expect("discover").remove(0);
     let claude_entry = uuid::Uuid::new_v4();
     shared.settings.lock().expect("settings lock").claude_source = Some(
@@ -729,7 +738,8 @@ async fn a_contributor_without_the_evidence_flag_sends_no_admission_headers() {
     store.save_config(&cfg).expect("save config");
 
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/claude-code");
-    let source = trace_commons_contributor::source::claude_code::ClaudeCodeSource::new(root.clone());
+    let source =
+        trace_commons_contributor::source::claude_code::ClaudeCodeSource::new(root.clone());
     let session = source.discover().expect("discover").remove(0);
     let outcomes = trace_commons_contributor::submit::submit_sessions(
         &store,
