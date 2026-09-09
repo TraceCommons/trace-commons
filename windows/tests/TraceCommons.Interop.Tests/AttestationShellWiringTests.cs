@@ -114,10 +114,12 @@ public class AttestationShellWiringTests
         string source = ShellSource("TraceCommons.App/ViewModels/QueueEntryViewModel.cs");
         Assert.DoesNotContain(
             "attestation_control", source, StringComparison.OrdinalIgnoreCase);
-        Assert.DoesNotContain(
-            "tc_contribution_attestation_control",
-            ShellSource("TraceCommons.Interop/NativeMethods.cs"),
-            StringComparison.Ordinal);
+        // No declaration of one either. Matched as a declaration rather than
+        // as a mention, so the prose explaining why it does not exist does
+        // not read as the thing existing.
+        Assert.DoesNotMatch(
+            new Regex(@"extern\s+\w+\s+tc_contribution_attestation_control\b"),
+            ShellSource("TraceCommons.Interop/NativeMethods.cs"));
     }
 
     /// <summary>

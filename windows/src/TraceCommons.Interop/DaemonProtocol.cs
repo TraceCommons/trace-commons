@@ -527,6 +527,48 @@ public sealed class QueueEntry
     /// </remarks>
     [JsonPropertyName("eligibility_reason")]
     public string? EligibilityReason { get; set; }
+
+    /// <summary>
+    /// Whether this session carries proof of the model call that produced it:
+    /// <c>attested</c>, <c>unattested_permanent</c>,
+    /// <c>unattested_configuration</c> or <c>unknown</c>.
+    /// </summary>
+    /// <remarks>
+    /// <b>ALWAYS SENT, AND THAT IS THE OPPOSITE RULE TO
+    /// <see cref="Eligibility"/>.</b> Eligibility asks whether this
+    /// contributor may send this session, and says nothing at all when nobody
+    /// asked. The mark states a fact about the trace, which is owed to
+    /// everybody -- an invited contributor's queue carries marks even though
+    /// it carries no eligibility.
+    ///
+    /// <para>
+    /// So there is no "absent" case to render here. A null means a daemon
+    /// predating the field, and the shared table answers <c>unknown</c> for
+    /// it: not being told is not evidence that a session carries no proof.
+    /// Every decision that follows from this value is made in
+    /// <see cref="AttestationMarkSurface"/>; nothing here or above it
+    /// branches on the string.
+    /// </para>
+    /// </remarks>
+    [JsonPropertyName("attestation")]
+    public string? Attestation { get; set; }
+
+    /// <summary>
+    /// A stable label naming why, or null. The same thirteen labels
+    /// <see cref="EligibilityReason"/> takes, with <b>different sentences</b>.
+    /// </summary>
+    /// <remarks>
+    /// <b>ITS PRESENCE VARIES WITHIN A SINGLE MARK.</b> <c>attested</c> never
+    /// carries one and both unattested marks always do, so a shell can look
+    /// right while deciding from the mark. <c>unknown</c> is where that
+    /// breaks: absent when the row was never evaluated, and
+    /// <c>receipt_unavailable</c> when a send was refused because the receipt
+    /// service was down -- a retraction rather than a refusal, and the only
+    /// signal saying the session may attest later. Branch on the key, never
+    /// on the mark.
+    /// </remarks>
+    [JsonPropertyName("attestation_reason")]
+    public string? AttestationReason { get; set; }
 }
 
 /// <summary>

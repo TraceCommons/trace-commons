@@ -1321,6 +1321,103 @@
                                                        TextWrapping="Wrap" />
 
                                             <!--
+                                                Whether this session carries
+                                                proof of the model call that
+                                                produced it.
+
+                                                A SIBLING OF THE LINE ABOVE,
+                                                NOT A CONSEQUENCE OF IT. The
+                                                two are easy to read as one
+                                                surface, and the opposite
+                                                rules are the point: the line
+                                                above answers "may I send
+                                                this" and is absent when
+                                                nobody asked, while this one
+                                                states a fact about the trace
+                                                and is owed to everybody. An
+                                                invited contributor's rows
+                                                carry no eligibility line at
+                                                all and carry this one, which
+                                                is the case the mark exists
+                                                for: the credit their work
+                                                earns is expected to turn on
+                                                it, and a session they cannot
+                                                see the mark of is one they
+                                                cannot act on.
+
+                                                Same weight as its sibling, on
+                                                purpose. This line is on every
+                                                row, so anything heavier turns
+                                                the whole queue into chrome.
+                                                One line for an attested
+                                                session, which is the common
+                                                case and says so quietly; the
+                                                reason below adds a second
+                                                only where there is something
+                                                to name.
+
+                                                NO CONTROL IS DRAWN FROM IT,
+                                                and that absence is the
+                                                contract: there is no
+                                                attestation control in the
+                                                shared table because a mark
+                                                describes and does not offer.
+                                                Submit stays the eligibility
+                                                line's question.
+
+                                                Three arms because the tone
+                                                comes from the ABI and this
+                                                shell paints it, exactly as
+                                                the eligibility row does.
+                                                Mode=OneWay throughout: a
+                                                submit refused for an
+                                                unavailable receipt writes a
+                                                mark back into the row while a
+                                                contributor is reading it.
+                                            -->
+                                            <TextBlock Text="{x:Bind AttestationText, Mode=OneWay}"
+                                                       Visibility="{x:Bind AttestationIsPlain, Mode=OneWay}"
+                                                       Style="{StaticResource TcCaptionSmallTextStyle}"
+                                                       Foreground="{ThemeResource TcInkSecondaryBrush}"
+                                                       TextWrapping="Wrap" />
+                                            <TextBlock Text="{x:Bind AttestationText, Mode=OneWay}"
+                                                       Visibility="{x:Bind AttestationIsClear, Mode=OneWay}"
+                                                       Style="{StaticResource TcCaptionSmallTextStyle}"
+                                                       Foreground="{ThemeResource TcGreenTextBrush}"
+                                                       TextWrapping="Wrap" />
+                                            <TextBlock Text="{x:Bind AttestationText, Mode=OneWay}"
+                                                       Visibility="{x:Bind AttestationIsAttention, Mode=OneWay}"
+                                                       Style="{StaticResource TcCaptionSmallTextStyle}"
+                                                       Foreground="{ThemeResource TcGoldTextBrush}"
+                                                       TextWrapping="Wrap" />
+
+                                            <!--
+                                                Why, when there is a reason
+                                                worth naming.
+
+                                                BOUND TO THE REASON'S OWN
+                                                PRESENCE, NEVER TO THE MARK.
+                                                An attested session carries
+                                                none and both unattested marks
+                                                always carry one, so a rule
+                                                written off the mark looks
+                                                right until "unknown", which
+                                                carries none when the row was
+                                                never looked at and carries
+                                                one when a send was turned
+                                                back because the receipt
+                                                service was down. That second
+                                                one is the only thing telling
+                                                a contributor the session may
+                                                yet attest.
+                                            -->
+                                            <TextBlock Text="{x:Bind AttestationReasonText, Mode=OneWay}"
+                                                       Visibility="{x:Bind HasAttestationReason, Mode=OneWay}"
+                                                       Style="{StaticResource TcCaptionSmallTextStyle}"
+                                                       Foreground="{ThemeResource TcInkTertiaryBrush}"
+                                                       TextWrapping="Wrap" />
+
+                                            <!--
                                                 The card's own preview, requested through the
                                                 daemon's bounded scheduler (preview_request) rather
                                                 than driven in process here, see

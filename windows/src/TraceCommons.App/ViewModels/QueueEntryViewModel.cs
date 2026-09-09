@@ -210,6 +210,74 @@ public sealed class QueueEntryViewModel : INotifyPropertyChanged
     /// <summary>That sentence, from the shared crate.</summary>
     public string EligibilityReasonText => Eligibility.ReasonLine ?? string.Empty;
 
+    /// <summary>
+    /// Whether this session carries proof of the model call that produced it,
+    /// and everything the row draws about it: the sentence, and its tone.
+    /// </summary>
+    /// <remarks>
+    /// <b>ANSWERED FOR EVERY ROW, unlike <see cref="Eligibility"/>.</b> The
+    /// two sentences sit together and read as siblings, which makes it
+    /// natural to hang this off the eligibility line's presence. Doing so
+    /// would blank it for exactly the contributors it was added for: an
+    /// invited contributor has no eligibility question, so their rows carry
+    /// no eligibility line at all, and the mark is the fact about their trace
+    /// that the credit it earns will turn on.
+    ///
+    /// <para>
+    /// Resolved through the shared crate, and a load-time fact on the entry
+    /// exactly as <see cref="Eligibility"/> is, so it is as true while the
+    /// card still reads "Loading preview..." as after one lands.
+    /// </para>
+    /// </remarks>
+    private AttestationMarkDecision Attestation =>
+        AttestationMarkSurface.Decide(_entry);
+
+    /// <summary>The sentence itself, from the shared crate.</summary>
+    public string AttestationText => Attestation.MarkLine;
+
+    /// <summary>
+    /// The one mark with something to do about it: a setting decides whether
+    /// future sessions carry proof.
+    /// </summary>
+    public bool AttestationIsAttention =>
+        Attestation.HasMarkLine && Attestation.Tone == PrivateInferenceTone.Attention;
+
+    /// <summary>This session carries a checkable copy of its model call.</summary>
+    public bool AttestationIsClear =>
+        Attestation.HasMarkLine && Attestation.Tone == PrivateInferenceTone.Clear;
+
+    /// <summary>
+    /// Everything else, drawn in the ordinary ink.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately the COMPLEMENT of the other two rather than a test for
+    /// <see cref="PrivateInferenceTone.Neutral"/>, for the reason
+    /// <see cref="EligibilityIsPlain"/> is: a later ABI answering a tone this
+    /// build draws no arm for would otherwise leave the row saying nothing
+    /// about a question every row is supposed to answer.
+    /// </remarks>
+    public bool AttestationIsPlain =>
+        Attestation.HasMarkLine && !AttestationIsAttention && !AttestationIsClear;
+
+    /// <summary>
+    /// Whether a second sentence naming the reason belongs under it.
+    /// </summary>
+    /// <remarks>
+    /// THE KEY'S PRESENCE DECIDES THIS, NOT THE MARK. An attested session
+    /// never carries a reason and both unattested marks always do, so
+    /// deciding from the mark looks right until <c>unknown</c>: it carries
+    /// none when the row was never evaluated, and carries one when a send was
+    /// refused because the receipt service was down. The shared crate answers
+    /// nothing for an absent or unfamiliar label, so asking it is the branch.
+    /// </remarks>
+    public bool HasAttestationReason => Attestation.HasReasonLine;
+
+    /// <summary>
+    /// That sentence, from the shared crate. Never the eligibility reason
+    /// sentence for the same label, which says a request was refused.
+    /// </summary>
+    public string AttestationReasonText => Attestation.ReasonLine ?? string.Empty;
+
     private void Raise(string name) => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
 
     /// <summary>The daemon's identifier for this entry; used to open a preview.</summary>

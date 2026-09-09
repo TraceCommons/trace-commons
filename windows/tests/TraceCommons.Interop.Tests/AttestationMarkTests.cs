@@ -196,11 +196,19 @@ public class AttestationMarkTests
     /// THE MARK'S REASON SENTENCES ARE NOT THE ELIGIBILITY ONES.
     /// </summary>
     /// <remarks>
-    /// The thirteen labels are shared; the sentences written about them are
-    /// not. Eligibility's read as refusals of a request, and for an invited
-    /// contributor nothing was requested. Substituting one accessor for the
-    /// other compiles, returns a plausible sentence, and tells a contributor
-    /// their session was turned down when it was not.
+    /// The thirteen labels are shared and the two accessors are not.
+    /// Substituting one for the other compiles and returns a plausible
+    /// sentence, which is what makes it worth pinning.
+    ///
+    /// <para>
+    /// Most of the shared labels name a property of the recorded session and
+    /// are worded identically on both sides, so equality proves nothing about
+    /// which accessor was reached. The labels where the vocabularies diverge
+    /// are the ones that do: eligibility's read as refusals of a request, and
+    /// for an invited contributor nothing was requested. The test asserts the
+    /// attestation wording on every one of those, and fails loudly rather
+    /// than silently passing if a copy change ever leaves none of them.
+    /// </para>
     /// </remarks>
     [Fact]
     public void NoReasonSentenceIsBorrowedFromEligibility()
@@ -224,15 +232,30 @@ public class AttestationMarkTests
         };
 
         Assert.Equal(13, pairs.Length);
+
+        int discriminating = 0;
         foreach ((string label, string attestation, string eligibility) in pairs)
         {
             Assert.False(string.IsNullOrWhiteSpace(attestation));
-            Assert.NotEqual(eligibility, attestation);
 
-            // And the surface really reaches the attestation accessor, not
-            // the eligibility one that takes the same label.
+            // The surface reaches the attestation accessor for every label.
             Assert.Equal(attestation, Decide(Unknown, label).ReasonLine);
+
+            // On the labels the two vocabularies word differently, that is a
+            // real discrimination rather than a coincidence.
+            if (!string.Equals(attestation, eligibility, StringComparison.Ordinal))
+            {
+                discriminating++;
+                Assert.NotEqual(eligibility, Decide(Unknown, label).ReasonLine);
+            }
         }
+
+        // If a copy change ever made all thirteen identical, the loop above
+        // would stop proving anything and would go on passing. Fail instead.
+        Assert.True(
+            discriminating > 0,
+            "no shared reason label is worded differently, so nothing here "
+            + "distinguishes the attestation accessor from the eligibility one");
     }
 
     /// <summary>
