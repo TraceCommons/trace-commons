@@ -2271,6 +2271,54 @@ fn admission_ready(value: &serde_json::Value) -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// The control that prepares an evidence-bearing session is offered on
+    /// the strength of `admission_evidence_required` -- a consequence of how
+    /// the contributor enrolled, not a preference anyone sets. A contributor
+    /// who came in on an invite cannot use it, and must not be shown it: the
+    /// only thing pressing it could do is refuse them. This is the condition
+    /// macOS reads at `PreviewSheet.swift`, and the daemon's own answer at
+    /// `add_admission_setting`.
+    ///
+    /// Both directions, because a test that only proves the control appears
+    /// for an eligible contributor says nothing about the bug.
+    #[test]
+    fn admission_preparation_is_offered_only_where_the_enrolment_allows_it() {
+        assert!(super::admission_required_by_settings(
+            &serde_json::json!({"admission_evidence_required": true})
+        ));
+        assert!(!super::admission_required_by_settings(
+            &serde_json::json!({"admission_evidence_required": false})
+        ));
+
+        // `add_admission_setting` answers null when it could not read the
+        // config, and an older daemon does not answer at all. Neither is a
+        // yes.
+        for value in [
+            serde_json::json!({"admission_evidence_required": serde_json::Value::Null}),
+            serde_json::json!({}),
+            serde_json::json!({"admission_evidence_required": "true"}),
+            serde_json::json!({"admission_evidence_required": 1}),
+        ] {
+            assert!(
+                !super::admission_required_by_settings(&value),
+                "an unreadable answer was read as eligibility: {value}"
+            );
+        }
+    }
+
+    /// The three conditions the sheet actually multiplies together, held
+    /// apart so each one can be shown to matter on its own. `supported` is
+    /// the daemon advertising the method; `pinned` is this sheet having
+    /// already committed the bytes, after which there is nothing left to
+    /// prepare.
+    #[test]
+    fn every_condition_on_the_admission_control_can_withhold_it() {
+        assert!(super::admission_control_visible(true, true, false));
+        assert!(!super::admission_control_visible(false, true, false));
+        assert!(!super::admission_control_visible(true, false, false));
+        assert!(!super::admission_control_visible(true, true, true));
+    }
+
     #[test]
     fn admission_preparation_requires_fresh_explicit_success() {
         let future = chrono::Utc::now().timestamp() + 600;
