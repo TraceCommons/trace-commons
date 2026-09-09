@@ -307,18 +307,44 @@ mod tests {
         serde_json::from_value(serde_json::json!({
             "schema_version":crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION,
             "issuer_url":"https://issuer.example","ingest_url":"https://ingest.example",
-            "audience":"upload","tenant_id":format!("near-{}","ab".repeat(32)),
+            "audience":"upload","tenant_id":format!("near-{}",TENANT_SUFFIX),
             "instance_id":"","user_subject":"device","device_key_id":"device",
             "consent_scopes":["debugging_evaluation"],
             "witness":{"url":"https://witness.example","signing_address":format!("0x{}","ab".repeat(20)),"expected_measurements":[format!("mrtd={}","ab".repeat(48))],"admission_evidence":true}
         })).unwrap()
     }
+    /// A tenant id and an account anchor drawn independently, which is the
+    /// only shape V61 leaves possible: `tenant_id` became 32 random bytes and
+    /// `anchor_hash` a keyed blind index, and V58's
+    /// `CHECK (tenant_id = 'near-' || substring(anchor_hash from 8))` was
+    /// dropped. Every fixture in this file used to set them equal -- the one
+    /// shape a real account can no longer have -- so the fixture agreed with
+    /// the bug and the test passed while the application refused every
+    /// genuine challenge.
+    const TENANT_SUFFIX: &str = "3c9f21d8be4a07655c1e3fba8d02947613ae5c80f9d64b2718a350ecdb6f4192";
+    const ANCHOR: &str = "ab00c4d1e97f3625b8a01d4fce7382905b6ad3f1e0c95847a2b6f30d19e4c785";
+
+    #[test]
+    fn a_v61_tenant_id_is_not_derivable_from_its_anchor() {
+        assert_ne!(TENANT_SUFFIX, ANCHOR, "the fixture must not restate V58");
+        assert_eq!(TENANT_SUFFIX.len(), 64);
+        assert_eq!(ANCHOR.len(), 64);
+        for value in [TENANT_SUFFIX, ANCHOR] {
+            assert!(
+                value
+                    .bytes()
+                    .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()),
+                "{value} is not a lowercase hex digest"
+            );
+        }
+    }
+
     #[test]
     fn challenge_is_canonical_account_bound_and_short_lived() {
-        let tenant = format!("near-{}", "ab".repeat(32));
+        let tenant = format!("near-{TENANT_SUFFIX}");
         let make = |expiry| Challenge {
             binding: AdmissionBinding {
-                account_anchor_sha256: "ab".repeat(32),
+                account_anchor_sha256: ANCHOR.to_string(),
                 nonce_hex: "cd".repeat(32),
                 expires_at: expiry,
             }
