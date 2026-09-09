@@ -71,6 +71,15 @@ Each control is named once per process, and a control tripped after an earlier
 one is fixed is named in turn. No environment value, URL, signing address or
 measurement string ever appears in these lines.
 
+Read a line as **"this control declined at least once since boot"**, not "this
+control is declining now". The reported set lives for the process lifetime, so
+a control that declines, is named, is fixed, and later declines again — a
+database that goes away, say — does not warn a second time. Deliberate: a
+diagnostic path is not a health check, and the endpoint itself is the live
+answer. Restart the service to get a fresh set of warnings, or query
+`/v1/account/near/provision/capabilities` to see whether it is ready right
+now.
+
 The native daemon enforces a host allowlist for every request in this flow.
 It no longer requires a contributor to set one: with `TRACE_COMMONS_ALLOWED_HOSTS`
 unset, the daemon derives an enforcing allowlist per signup step from the
