@@ -1601,30 +1601,86 @@ mod tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         write_pointer(home.path(), listener.local_addr().unwrap().port());
+        // The child, not a clock, decides when waiting is pointless.
+        //
+        // This loop used to stop after a hard ten seconds measured from before
+        // the child was even spawned, so the budget covered process creation,
+        // the Windows loader, libtest startup over ~1700 test names and the
+        // tokio runtime build -- and only its last two seconds covered the
+        // probe being measured. On a loaded windows-latest runner the setup
+        // consumed it, the listener was dropped while the child was still
+        // starting, and the child's probe was then refused by a socket that no
+        // longer existed. The test could not tell its own timeout apart from
+        // the regression it exists to catch, and reported the regression. See
+        // #780.
+        //
+        // Waiting for the child instead is bounded without being timed: the
+        // child's probe carries PROBE_TIMEOUT, so it always exits. A slow
+        // runner keeps it alive and cannot fail this test; a child that reached
+        // a proxy instead of loopback gets an immediate refusal from
+        // 127.0.0.1:1, exits, and ends the wait at once. Nothing here needs to
+        // guess how long a runner takes to start a process.
+        //
+        // Note this removes no protection against a child that hangs forever:
+        // the parent's wait below is unbounded and always was, so the old
+        // deadline never bounded the suite's runtime. It only decided when to
+        // stop listening, which is the whole defect.
+        let finished = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let child_finished = std::sync::Arc::clone(&finished);
         let responder = std::thread::spawn(move || {
             use std::io::Write;
-            let deadline = std::time::Instant::now() + Duration::from_secs(10);
-            loop {
-                if let Ok((mut stream, _)) = listener.accept() {
+            let answer = |listener: &std::net::TcpListener| match listener.accept() {
+                Ok((mut stream, _)) => {
+                    // A socket accepted from a non-blocking listener inherits
+                    // O_NONBLOCK on macOS and the BSDs. That made the read
+                    // timeout below inert and the read return WouldBlock the
+                    // instant the connection completed -- which is at the
+                    // handshake, before the child has put its GET on the wire.
+                    // Answering there and returning dropped the stream and
+                    // closed the connection under a request still being sent,
+                    // so the child's send() failed, existing_instance returned
+                    // None, and the test reported the regression it exists to
+                    // catch. Under load the child is slower to write and the
+                    // window widens. Blocking mode makes the timeout real, so
+                    // the request is waited for rather than raced. See #780.
+                    stream.set_nonblocking(false).unwrap();
                     stream
                         .set_read_timeout(Some(Duration::from_secs(2)))
                         .unwrap();
-                    let mut request = [0; 1024];
-                    let _ = stream.read(&mut request);
+                    // Answer a whole request head, not whatever happens to
+                    // have arrived: a partial read is the same race one buffer
+                    // further along.
+                    let mut request = Vec::new();
+                    let mut chunk = [0; 1024];
+                    while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        match stream.read(&mut chunk) {
+                            Ok(0) | Err(_) => break,
+                            Ok(read) => request.extend_from_slice(&chunk[..read]),
+                        }
+                    }
                     stream
                         .write_all(
                             b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
                         )
                         .unwrap();
+                    true
+                }
+                Err(_) => false,
+            };
+            loop {
+                if answer(&listener) {
                     return true;
                 }
-                if std::time::Instant::now() >= deadline {
-                    return false;
+                if child_finished.load(std::sync::atomic::Ordering::SeqCst) {
+                    // The kernel keeps a completed connection in the backlog
+                    // after its peer is gone, so the last poll has to happen
+                    // after the exit is observed rather than before it.
+                    return answer(&listener);
                 }
                 std::thread::sleep(Duration::from_millis(10));
             }
         });
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "daemon::private_inference::tests::discovery_probe_ignores_environment_proxy_in_isolated_process", "--nocapture"])
             .env(CHILD, home.path())
             .env("HTTP_PROXY", "http://127.0.0.1:1")
@@ -1633,7 +1689,12 @@ mod tests {
             .env("all_proxy", "http://127.0.0.1:1")
             .env("NO_PROXY", "")
             .env("no_proxy", "")
-            .output().unwrap();
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        finished.store(true, std::sync::atomic::Ordering::SeqCst);
         let answered = responder.join().unwrap();
         assert!(
             output.status.success(),
