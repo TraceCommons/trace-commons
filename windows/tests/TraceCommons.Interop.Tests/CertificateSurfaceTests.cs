@@ -1,4 +1,8 @@
+using System;
+using System.IO;
+using System.Linq;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using TraceCommons.Interop;
 using Xunit;
 
@@ -59,5 +63,74 @@ public sealed class CertificateSurfaceTests
         var without = JsonSerializer.Deserialize<QueueEntry>("{\"entry_id\":\"a\"}")!;
         Assert.True(with.HoldsCertificate, "the key decoded into nothing");
         Assert.False(without.HoldsCertificate);
+    }
+
+    /// <summary>
+    /// The queue asks the shared surface and writes no sentence of its own.
+    /// </summary>
+    /// <remarks>
+    /// TraceCommons.App is WinUI and cannot be referenced from a test
+    /// assembly, so the view model and the markup are read as the text the
+    /// csproj copies beside us. Comment lines are stripped first: a guard
+    /// that fails source for naming a sentence in prose teaches the next
+    /// reader to delete the prose, and these comments are what say why the
+    /// section is drawn when empty.
+    /// </remarks>
+    [Fact]
+    public void TheQueueAsksTheSharedSurfaceAndAuthorsNoSentence()
+    {
+        string source = Uncommented("MainViewModel.cs.txt");
+
+        Assert.Contains("CertificateSurface.ListTitle(_evidenceAdmitted)", source, StringComparison.Ordinal);
+        Assert.Contains("CertificateSurface.RowLine(_evidenceAdmitted)", source, StringComparison.Ordinal);
+
+        // The flag reaches the surface unnegated. It is true for a
+        // contributor with NO invite, so a negation here would tell them
+        // their session carries cryptographic proof when nothing has
+        // attested it.
+        Assert.Contains("_evidenceAdmitted = settings.AdmissionEvidenceRequired == true;", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("ListTitle(!_evidenceAdmitted)", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("RowLine(!_evidenceAdmitted)", source, StringComparison.Ordinal);
+
+        // Membership is the row's own answer and takes no reading.
+        Assert.Contains("row.HoldsCertificate", source, StringComparison.Ordinal);
+
+        foreach (string authored in new[] { "put forward", "signed proof", "witness certificate" })
+        {
+            Assert.DoesNotContain(authored, source, StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
+    /// <summary>
+    /// The section is drawn even with nothing in it.
+    /// </summary>
+    /// <remarks>
+    /// An empty filtered section that renders as nothing is indistinguishable
+    /// from one that failed to load, and a missing <c>holds_certificate</c>
+    /// defaults to false on every row, producing exactly that.
+    /// </remarks>
+    [Fact]
+    public void TheEmptySectionStillSaysSomething()
+    {
+        string markup = Regex.Replace(
+            Regex.Replace(Uncommented("MainWindow.xaml.txt"), "<!--.*?-->", " ", RegexOptions.Singleline),
+            @"\s+",
+            " ");
+
+        Assert.Contains("ViewModel.CertificateHeldTitle", markup, StringComparison.Ordinal);
+        Assert.Contains("ViewModel.CertificateHeldEmptyText", markup, StringComparison.Ordinal);
+        Assert.Contains("ViewModel.CertificateHeldIsEmpty", markup, StringComparison.Ordinal);
+        Assert.Contains("ViewModel.CertificateHeld,", markup, StringComparison.Ordinal);
+    }
+
+    private static string Uncommented(string file)
+    {
+        string path = Path.Combine(AppContext.BaseDirectory, file);
+        Assert.True(File.Exists(path), $"the implementation source was not copied to {path}");
+        return string.Join(
+            "\n",
+            File.ReadAllText(path)
+                .Split('\n')
+                .Where(line => !line.TrimStart().StartsWith("//", StringComparison.Ordinal)));
     }
 }
