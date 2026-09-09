@@ -1053,10 +1053,16 @@ jobs:
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
+      # Ubuntu-archive packages only, so the runner image's vendor apt
+      # sources are pure exposure. A bare `apt-get update` here fetches
+      # Chrome's index among others, and a bad vendor index fails the job
+      # having compiled nothing -- which on this workflow would happen
+      # AFTER the tag exists, since nothing else triggers it.
+      - uses: ./.github/actions/apt-update-ubuntu-only
+
       - name: Install flatpak and the GNOME SDK
         run: |
           set -euo pipefail
-          sudo apt-get update
           # ostree is a SEPARATE package: flatpak and flatpak-builder depend
           # only on libostree-1-1, so the verification step below would fail
           # with "ostree: command not found" after a full successful build.

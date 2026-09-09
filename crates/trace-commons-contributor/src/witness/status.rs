@@ -306,10 +306,20 @@ pub struct InferenceReceiptCount {
 
 /// Read `n_of_m` out of a witness certificate, if it carries one.
 ///
-/// Lenient by design: this build must accept a certificate from a witness
-/// that emits the field and one from a witness that does not, and the field
-/// is being added by other work in parallel. Both `{"n":3,"m":7}` and
-/// `[3,7]` are accepted.
+/// **No witness writes this field.** `CertificateDetails` on the server is
+/// verdict, policy version, measurement and timestamp, and the attested
+/// inference module there says outright that the certificate carries no
+/// attested-inference field -- adding one is a signing-domain change across
+/// every deployed witness and every verifying client. So this reader
+/// answers `None` for every certificate a real witness has ever issued, and
+/// a caller must not take that `None` as "no receipts". The fact it was
+/// written to read lives instead in `witness::inference_record`, recorded
+/// by the client at the moment the witness answered, beside the stored
+/// review and on the queue entry.
+///
+/// Kept, and kept lenient, so a witness that does one day emit the field is
+/// accepted alongside one that does not. Both `{"n":3,"m":7}` and `[3,7]`
+/// are accepted.
 ///
 /// `n > m` is read as no count rather than as a count. A certificate
 /// claiming more receipts than inferences is not a small error to render
@@ -843,5 +853,73 @@ mod tests {
         .to_json();
         assert_eq!(json["n_of_m"], serde_json::json!({"n": 3, "m": 7}));
         assert_eq!(json["certificate_verified"], serde_json::json!(true));
+    }
+}
+
+/// The recognised-label set and the enum must not drift.
+///
+/// `refusal_label_from` is what decides whether a refusal that has been
+/// through a `String` reaches a shell as itself or collapses to the fixed
+/// word, so a variant missing from `ALL_REFUSAL_LABELS` is a refusal that
+/// silently keeps the old single-word behaviour. Every variant is named here
+/// rather than a sample: the whole point of the list is to be complete.
+#[cfg(test)]
+mod refusal_label_set_tests {
+    use crate::witness::{WITNESS_EXPECTED_MEASUREMENT_CONTROL, WitnessTrustError};
+
+    #[test]
+    fn every_refusal_label_is_recognised() {
+        let every = [
+            WitnessTrustError::WitnessHostNotAllowed,
+            WitnessTrustError::WitnessAttestationUnavailable,
+            WitnessTrustError::WitnessCollateralUnavailable,
+            WitnessTrustError::WitnessQuoteUnverified,
+            WitnessTrustError::WitnessQuoteReplayed,
+            WitnessTrustError::WitnessSignerUnexpected,
+            WitnessTrustError::WitnessMeasurementUnpinned {
+                control: WITNESS_EXPECTED_MEASUREMENT_CONTROL,
+                reported: None,
+            },
+            WitnessTrustError::WitnessPayloadTooLarge,
+            WitnessTrustError::WitnessCertificateMismatched,
+            WitnessTrustError::WitnessCertificateUnverified,
+            WitnessTrustError::WitnessResponseMalformed,
+            WitnessTrustError::WitnessClaimUnavailable,
+            WitnessTrustError::WitnessBodyNotStripped,
+            WitnessTrustError::WitnessAdmissionEvidenceRefused,
+        ];
+        assert_eq!(
+            every.len(),
+            WitnessTrustError::ALL_REFUSAL_LABELS.len(),
+            "a variant was added or removed without moving ALL_REFUSAL_LABELS"
+        );
+        for error in every {
+            let label = error.refusal_label();
+            assert_eq!(
+                WitnessTrustError::refusal_label_from(label),
+                Some(label),
+                "{label} is produced but not recognised, so it still collapses"
+            );
+        }
+    }
+
+    /// The other half: nothing is recognised that no refusal produces, and a
+    /// string that merely looks like one is not.
+    #[test]
+    fn nothing_unrecognised_crosses() {
+        for value in [
+            "",
+            "witness_response_malformed ",
+            "Witness_Response_Malformed",
+            "secret-leak-detected",
+            "witness-review-failed",
+            "admission_refused",
+        ] {
+            assert_eq!(
+                WitnessTrustError::refusal_label_from(value),
+                None,
+                "{value} was let through"
+            );
+        }
     }
 }

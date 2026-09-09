@@ -1674,6 +1674,22 @@ pub fn entry_value(
     // witness certificate over the reviewed bytes. A session can have either
     // without the other.
     value["holds_certificate"] = serde_json::Value::Bool(e.holds_witness_certificate());
+    // What the witness was HANDED when it issued the certificate above:
+    // whether a receipt was among the bodies it certified. Present only
+    // while a witnessed review is pinned to this entry, and then exactly as
+    // the stored review records it: `{"state", "reason"}`. So it is present
+    // only when `holds_certificate` is true; the converse does not hold,
+    // because a review written before the record existed holds a
+    // certificate and says nothing about this. Absent is "not known" -- no
+    // review, a review that predates the record, or a local preview -- and a
+    // shell must render it as nothing rather than as either answer. Not a
+    // third reading of `holds_certificate`: that says a certificate exists,
+    // this says whether attested inference was inside it. See
+    // `witness::inference_record`.
+    if let Some(record) = &e.attested_inference {
+        value["attested_inference"] =
+            serde_json::to_value(record).expect("a label-only record serializes");
+    }
     // ALWAYS PRESENT, FOR EVERY CONTRIBUTOR.
     //
     // The opposite rule to `eligibility` above, and deliberately. That field
@@ -2590,7 +2606,9 @@ pub async fn handle_request_async(shared: &DaemonShared, req: &Request) -> Respo
             super::account_onboarding::handle_capabilities(shared, req).await
         }
         "set_settings" => handle_set_settings_async(shared, req).await,
-        "witness_preview_request" => handle_witness_preview_request(shared, req).await,
+        "witness_preview_request" => {
+            witness_review_response(handle_witness_preview_request(shared, req).await)
+        }
         "approve" => handle_approve(shared, req).await,
         "preview" => handle_preview(shared, req).await,
         "preview_body" => handle_preview_body(shared, req).await,
@@ -3253,12 +3271,55 @@ async fn handle_witness_preview_request(shared: &DaemonShared, req: &Request) ->
     .await
 }
 
+/// Attach the refusal's sentence to a review response.
+///
+/// The mirror of `native_flow::admission_response`, and it is here for the
+/// same reason: **the daemon chooses the words, not the shells.** Three shells
+/// each mapping the same label would be three mappings, and
+/// `witness_copy::witness_refusal_line`'s own doc says why that is the thing
+/// to avoid. GTK reaches the same function directly because it is Rust and has
+/// no `view` to read.
+///
+/// Written onto `result` even though this is an error response, exactly as
+/// `admission_response` does: `result` and `error` both serialize, and a shell
+/// too old to look for the view simply does not find one.
+fn witness_review_response(mut response: Response) -> Response {
+    let Some(error) = response.error.as_ref() else {
+        return response;
+    };
+    let message = crate::witness_copy::witness_refusal_line(Some(error.message.as_str()));
+    let value = response.result.get_or_insert_with(|| serde_json::json!({}));
+    value["view"] = serde_json::json!({"state": "Refused", "message": message});
+    response
+}
+
+/// The word a refused review is reported under.
+///
+/// A witness refusal passes through under its own name; everything else
+/// collapses to the fixed word.
+///
+/// **The message is not forwarded.** Errors on this path are internal strings
+/// -- `secret-leak-detected`, `pii-filter-unavailable`, whatever a future
+/// `bail!` adds -- and a route that handed `anyhow`'s message to a shell would
+/// put them in front of a contributor and break the never-name-the-mechanism
+/// rule by the shortest route available. `refusal_label_from` matches against
+/// the closed set and returns that crate's own constant, so the only strings
+/// that can cross are ones a shell has words for.
+fn witness_review_refusal(error: &anyhow::Error) -> &'static str {
+    crate::witness::WitnessTrustError::refusal_label_from(&error.to_string())
+        .unwrap_or("witness-review-failed")
+}
+
 async fn handle_witness_preview_request_inner(
     shared: &DaemonShared,
     req: &Request,
     // Recorded signed responses exercise persistence/approval without pretending
     // that local fixtures are Intel-signed quotes. Absent from production builds.
-    #[cfg(test)] recorded: Option<super::preview::WitnessPreview>,
+    //
+    // A `Result`, not a `WitnessPreview`: the refusal branch below decides what
+    // word a shell is given, and a seam that can only inject success leaves
+    // that decision with no way to be tested at all.
+    #[cfg(test)] recorded: Option<anyhow::Result<super::preview::WitnessPreview>>,
 ) -> Response {
     if req
         .params
@@ -3347,14 +3408,16 @@ async fn handle_witness_preview_request_inner(
     );
     #[cfg(test)]
     let built = match recorded {
-        Some(review) => Ok(review),
+        Some(review) => review,
         None => build.await,
     };
     #[cfg(not(test))]
     let built = build.await;
     let review = match built {
         Ok(review) => review,
-        Err(_) => return Response::err(req.id, ERR_UNAVAILABLE, "witness-review-failed"),
+        Err(error) => {
+            return Response::err(req.id, ERR_UNAVAILABLE, witness_review_refusal(&error));
+        }
     };
     // The async network operation is over. Recheck identity, consent and source
     // before either persistent write, and keep the queue locked through both.
@@ -3385,8 +3448,11 @@ async fn handle_witness_preview_request_inner(
         return Response::err(req.id, ERR_UNAVAILABLE, "witness-review-save-failed");
     }
     let previous_queue = queue.clone();
-    if !queue.record_previewed_envelope(id, &review.summary.envelope_digest)
-        || queue.save(&shared.store).is_err()
+    if !queue.record_previewed_envelope(
+        id,
+        &review.summary.envelope_digest,
+        review.artifact.attested_inference().cloned(),
+    ) || queue.save(&shared.store).is_err()
     {
         *queue = previous_queue;
         return Response::err(req.id, ERR_UNAVAILABLE, "witness-review-save-failed");
@@ -4160,7 +4226,7 @@ fn pin_previewed_envelope(
     if super::approved_envelope::save(&shared.store, entry_id, envelope).is_err() {
         return;
     }
-    if queue.record_previewed_envelope(entry_id, &summary.envelope_digest) {
+    if queue.record_previewed_envelope(entry_id, &summary.envelope_digest, None) {
         // A failed queue write leaves the pin in memory and the bytes on
         // disk -- consistent with each other, and the next queue save
         // persists it. Nothing is removed here: the bytes are what the
@@ -4972,6 +5038,7 @@ mod tests {
             super::super::preview::input_fingerprint(&cfg, None, false),
             None,
             None,
+            None,
         );
         let transcript = source.load(&reference).unwrap();
         let (summary, body, _) = super::super::preview::summarize_witnessed_preview(
@@ -4995,6 +5062,143 @@ mod tests {
         )
     }
 
+    /// The sentence a refused review carries, chosen once in the daemon.
+    ///
+    /// Before this, every witness refusal reached the shells as the same word
+    /// and each shell rendered its single `review.failed` sentence, so a
+    /// receipt the reviewer declined and a reviewer that was simply down were
+    /// the same event on every platform. Carrying the label was not enough on
+    /// its own -- all three views substitute the constant and never read it --
+    /// so the daemon selects the words the way it already does for admission
+    /// preparation.
+    #[test]
+    fn a_refused_review_carries_the_sentence_for_its_own_refusal() {
+        use crate::witness::WitnessTrustError;
+        let review = crate::witness_copy::witness_copy().review;
+        for (label, expected) in [
+            ("admission_evidence_refused", review.failed_receipt_declined),
+            ("witness_body_not_stripped", review.failed_bodies_returned),
+            ("witness_quote_replayed", review.failed_unproven),
+            ("witness_attestation_unavailable", review.failed_unreachable),
+        ] {
+            let response = witness_review_response(Response::err(1, ERR_UNAVAILABLE, label));
+            assert_eq!(
+                response
+                    .result
+                    .as_ref()
+                    .and_then(|value| value.get("view"))
+                    .and_then(|view| view.get("message"))
+                    .and_then(|message| message.as_str()),
+                Some(expected),
+                "{label} did not carry its own sentence"
+            );
+            assert_eq!(
+                response.error.as_ref().map(|e| e.message.as_str()),
+                Some(label),
+                "{label} lost the label a shell may still key on"
+            );
+        }
+        // Every refusal the client can raise is classified, so none of them
+        // reaches a contributor as the sentence for an unclassified one.
+        for label in WitnessTrustError::ALL_REFUSAL_LABELS {
+            let response = witness_review_response(Response::err(1, ERR_UNAVAILABLE, label));
+            let message = response
+                .result
+                .as_ref()
+                .and_then(|value| value.get("view"))
+                .and_then(|view| view.get("message"))
+                .and_then(|message| message.as_str())
+                .expect("a refusal carries a sentence");
+            assert_ne!(message, review.failed, "{label} fell through");
+            assert!(!message.contains(label), "{label} was rendered raw");
+        }
+    }
+
+    /// A response that is not a refusal is left exactly as it was, and a
+    /// refusal this build cannot classify gets the sentence that admits so.
+    #[test]
+    fn a_review_that_did_not_refuse_is_left_alone() {
+        let ok = witness_review_response(Response::ok(1, serde_json::json!({"a":1})));
+        assert!(ok.error.is_none());
+        assert_eq!(ok.result, Some(serde_json::json!({"a":1})));
+
+        let unknown =
+            witness_review_response(Response::err(1, ERR_UNAVAILABLE, "witness-review-failed"));
+        assert_eq!(
+            unknown
+                .result
+                .as_ref()
+                .and_then(|value| value.get("view"))
+                .and_then(|view| view.get("message"))
+                .and_then(|message| message.as_str()),
+            Some(crate::witness_copy::witness_copy().review.failed)
+        );
+    }
+
+    /// A review that the witness refused reaches the shell under its own
+    /// name.
+    ///
+    /// Every witness refusal used to arrive as the single word
+    /// `witness-review-failed`: this route discarded the label with `Err(_)`,
+    /// so a receipt whose signer was not yet trusted and a witness that was
+    /// simply down were the same event to every shell. The label is already
+    /// in hand here -- `submit.rs` maps the transport error through
+    /// `refusal_label()` and `.map_err(anyhow::Error::msg)` carries it -- so
+    /// this route was throwing away something it had.
+    ///
+    /// The injected label is taken from the variant rather than typed, so a
+    /// rename cannot leave this test asserting a word nothing produces.
+    #[tokio::test]
+    async fn a_refused_review_reaches_the_shell_under_its_own_name() {
+        let (s, id, _dir, _review) = recorded_witness_review().await;
+        let refusal =
+            crate::witness::WitnessTrustError::WitnessAdmissionEvidenceRefused.refusal_label();
+        let response = handle_witness_preview_request_inner(
+            &s,
+            &req(
+                "witness_preview_request",
+                serde_json::json!({"entry_id":id,"raw_session_confirmed":true}),
+            ),
+            Some(Err(anyhow::anyhow!(refusal))),
+        )
+        .await;
+        assert_eq!(
+            response.error.as_ref().map(|e| e.message.as_str()),
+            Some(refusal),
+            "the refusal was replaced with a word that names nothing"
+        );
+    }
+
+    /// The fail-closed half. A failure that is not a witness refusal keeps the
+    /// fixed word: the messages on this path are internal strings, and a route
+    /// that forwarded whatever `anyhow` happened to hold would put them in
+    /// front of a contributor.
+    #[tokio::test]
+    async fn a_failure_that_is_not_a_witness_refusal_keeps_the_fixed_word() {
+        for message in [
+            "secret-leak-detected",
+            "pii-filter-unavailable",
+            "witness-review-source-changed",
+            "some internal string nobody should read",
+        ] {
+            let (s, id, _dir, _review) = recorded_witness_review().await;
+            let response = handle_witness_preview_request_inner(
+                &s,
+                &req(
+                    "witness_preview_request",
+                    serde_json::json!({"entry_id":id,"raw_session_confirmed":true}),
+                ),
+                Some(Err(anyhow::anyhow!(message))),
+            )
+            .await;
+            assert_eq!(
+                response.error.as_ref().map(|e| e.message.as_str()),
+                Some("witness-review-failed"),
+                "{message} was forwarded to a shell"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn recorded_witness_request_reopens_and_approves_the_same_persisted_artifact() {
         let (s, id, _dir, review) = recorded_witness_review().await;
@@ -5006,7 +5210,7 @@ mod tests {
                 "witness_preview_request",
                 serde_json::json!({"entry_id":id,"raw_session_confirmed":true}),
             ),
-            Some(review),
+            Some(Ok(review)),
         )
         .await;
         assert!(response.error.is_none(), "{:?}", response.error);
@@ -5059,7 +5263,7 @@ mod tests {
                 "witness_preview_request",
                 serde_json::json!({"entry_id":id,"raw_session_confirmed":true}),
             ),
-            Some(review),
+            Some(Ok(review)),
         )
         .await;
         assert_eq!(response.error.unwrap().message, "witness-review-stale");
@@ -5117,7 +5321,7 @@ mod tests {
         s.queue
             .lock()
             .unwrap()
-            .record_previewed_envelope(id, "witness-sha256:missing");
+            .record_previewed_envelope(id, "witness-sha256:missing", None);
         assert!(open_preview(&s, id).await.is_err());
         assert!(resolve_preview_envelope(&s, id).await.is_err());
         let response = handle_request_async(
@@ -6260,7 +6464,7 @@ mod tests {
         {
             let mut queue = s.queue.lock().unwrap();
             for id in ids {
-                assert!(queue.record_previewed_envelope(id, "sha256:pinned"));
+                assert!(queue.record_previewed_envelope(id, "sha256:pinned", None));
             }
         }
 

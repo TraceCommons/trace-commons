@@ -1261,9 +1261,15 @@ impl Sheet {
         self.sync_contribute();
         self.sync_witness();
         let sentence = if self.witness_requested.get() {
-            trace_commons_contributor::witness_copy::witness_copy()
-                .review
-                .failed
+            // The same function the daemon selects with for the other two
+            // shells. GTK reaches it directly because it is Rust and has no
+            // `view` to read -- two mappings would drift, which is what
+            // `witness_refusal_line`'s own doc says it is shared to avoid.
+            //
+            // Before this the label was discarded here, so a reviewer that
+            // declined a receipt and a reviewer that was simply down were the
+            // same sentence.
+            trace_commons_contributor::witness_copy::witness_refusal_line(Some(label))
         } else {
             match label {
                 "preview-failed" | "unavailable" => {
