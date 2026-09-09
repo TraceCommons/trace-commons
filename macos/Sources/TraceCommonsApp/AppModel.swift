@@ -2065,12 +2065,28 @@ final class AppModel: ObservableObject {
     }
 
     func requestWitnessReview(entryID: String) async -> Bool {
-        guard let client else { return false }
+        await witnessReviewOutcome(entryID: entryID).succeeded
+    }
+
+    /// A refused review and the sentence the daemon chose for it.
+    ///
+    /// The `Bool` above is kept for callers that only need to know whether to
+    /// reload. This one is for the sheet, which has to say *why*: before it,
+    /// every refusal -- a receipt the reviewer declined, a reviewer that was
+    /// simply down, one that could not prove itself -- rendered the same
+    /// single sentence.
+    func witnessReviewOutcome(entryID: String) async -> WitnessReviewOutcome {
+        guard let client else { return WitnessReviewOutcome(succeeded: false, sentence: nil) }
         return await Task.detached(priority: .userInitiated) {
             do {
                 try client.requestWitnessReview(entryID: entryID)
-                return true
-            } catch { return false }
+                return WitnessReviewOutcome(succeeded: true, sentence: nil)
+            } catch {
+                return WitnessReviewOutcome(
+                    succeeded: false,
+                    sentence: DaemonClient.refusalSentence(from: error)
+                )
+            }
         }.value
     }
 
@@ -2170,6 +2186,14 @@ final class AppModel: ObservableObject {
                 offsets: offsets
             )
         )
+    }
+
+    /// What a witness review did, and the words for it when it refused.
+    struct WitnessReviewOutcome: Sendable {
+        let succeeded: Bool
+        /// The daemon's classified sentence, or `nil` when it sent none and
+        /// the caller should keep its own fallback.
+        let sentence: String?
     }
 
     enum PreviewOutcome {
