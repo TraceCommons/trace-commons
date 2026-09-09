@@ -60,11 +60,33 @@ host you control, and it outranks the published value. Set to something invalid
 it refuses outright rather than falling through to the server, so a typo cannot
 quietly hand the choice back.
 
-Either value is validated the same way: HTTPS, an enforcing host allowlist, and
-no URL credentials, query or fragment. A published endpoint is checked against
-the client's own allowlist too -- the commons publishes this and is not trusted
-to pick it. The client never guesses a receipt URL from the selected inference
-backend.
+Both values face the same address rules -- HTTPS, no URL credentials, query or
+fragment -- but **each is vetted by the list its own source controls**, and the
+distinction is load-bearing:
+
+- An endpoint from `TRACE_COMMONS_INFERENCE_RECEIPT_ENDPOINT` is checked against
+  the operator allowlist. It came from an operator, so it is checked at the
+  operator's trust level.
+- A **published** endpoint is checked against the list derived from the origin
+  the person chose, alongside that origin's issuer and witness. It is *not*
+  checked against the operator allowlist: native signup persists
+  `allowed_hosts: null`, so that list is the environment's, and it is permissive
+  on every machine where nobody set `TRACE_COMMONS_ALLOWED_HOSTS`. Vetting a
+  server-supplied host with a permissive list is vetting it with nothing.
+
+The same derived list is what admits the saved endpoint later, when a bound
+session is prepared. Gating it against a permissive list there would refuse it
+as invalid one line after adopting it.
+
+Neither path degrades to permissive: a non-enforcing list refuses outright
+rather than waving a value through. When an operator *has* set an allowlist,
+that list governs both, and a published endpoint outside it is refused. The
+client never guesses a receipt URL from the selected inference backend.
+
+A published endpoint that is not a dialable address is **dropped, not fatal**.
+Enrollment still succeeds and the contributor contributes unattested; a commons
+naming a receipt service this client will not call must not cost anyone their
+account.
 
 An absent endpoint still allows identity enrollment and window-based history
 contributions; preparing a new bound inference session requires one, and says
