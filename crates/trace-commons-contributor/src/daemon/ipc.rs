@@ -1674,6 +1674,22 @@ pub fn entry_value(
     // witness certificate over the reviewed bytes. A session can have either
     // without the other.
     value["holds_certificate"] = serde_json::Value::Bool(e.holds_witness_certificate());
+    // What the witness was HANDED when it issued the certificate above:
+    // whether a receipt was among the bodies it certified. Present only
+    // while a witnessed review is pinned to this entry, and then exactly as
+    // the stored review records it: `{"state", "reason"}`. So it is present
+    // only when `holds_certificate` is true; the converse does not hold,
+    // because a review written before the record existed holds a
+    // certificate and says nothing about this. Absent is "not known" -- no
+    // review, a review that predates the record, or a local preview -- and a
+    // shell must render it as nothing rather than as either answer. Not a
+    // third reading of `holds_certificate`: that says a certificate exists,
+    // this says whether attested inference was inside it. See
+    // `witness::inference_record`.
+    if let Some(record) = &e.attested_inference {
+        value["attested_inference"] =
+            serde_json::to_value(record).expect("a label-only record serializes");
+    }
     // ALWAYS PRESENT, FOR EVERY CONTRIBUTOR.
     //
     // The opposite rule to `eligibility` above, and deliberately. That field
@@ -3385,8 +3401,11 @@ async fn handle_witness_preview_request_inner(
         return Response::err(req.id, ERR_UNAVAILABLE, "witness-review-save-failed");
     }
     let previous_queue = queue.clone();
-    if !queue.record_previewed_envelope(id, &review.summary.envelope_digest)
-        || queue.save(&shared.store).is_err()
+    if !queue.record_previewed_envelope(
+        id,
+        &review.summary.envelope_digest,
+        review.artifact.attested_inference().cloned(),
+    ) || queue.save(&shared.store).is_err()
     {
         *queue = previous_queue;
         return Response::err(req.id, ERR_UNAVAILABLE, "witness-review-save-failed");
@@ -4160,7 +4179,7 @@ fn pin_previewed_envelope(
     if super::approved_envelope::save(&shared.store, entry_id, envelope).is_err() {
         return;
     }
-    if queue.record_previewed_envelope(entry_id, &summary.envelope_digest) {
+    if queue.record_previewed_envelope(entry_id, &summary.envelope_digest, None) {
         // A failed queue write leaves the pin in memory and the bytes on
         // disk -- consistent with each other, and the next queue save
         // persists it. Nothing is removed here: the bytes are what the
@@ -4972,6 +4991,7 @@ mod tests {
             super::super::preview::input_fingerprint(&cfg, None, false),
             None,
             None,
+            None,
         );
         let transcript = source.load(&reference).unwrap();
         let (summary, body, _) = super::super::preview::summarize_witnessed_preview(
@@ -5117,7 +5137,7 @@ mod tests {
         s.queue
             .lock()
             .unwrap()
-            .record_previewed_envelope(id, "witness-sha256:missing");
+            .record_previewed_envelope(id, "witness-sha256:missing", None);
         assert!(open_preview(&s, id).await.is_err());
         assert!(resolve_preview_envelope(&s, id).await.is_err());
         let response = handle_request_async(
@@ -6260,7 +6280,7 @@ mod tests {
         {
             let mut queue = s.queue.lock().unwrap();
             for id in ids {
-                assert!(queue.record_previewed_envelope(id, "sha256:pinned"));
+                assert!(queue.record_previewed_envelope(id, "sha256:pinned", None));
             }
         }
 

@@ -33,6 +33,7 @@ use crate::identity::{
 };
 use crate::issuer_client::{ClaimToken, IssuerClient};
 use crate::source::{SessionRef, TraceSource};
+use crate::witness::inference_record::{self, InferenceAttestationRecord};
 use crate::witness::status::{
     WitnessLastResult, certificate_obtained_for, n_of_m_from_certificate, record_last_result,
 };
@@ -47,6 +48,30 @@ use crate::witness::{WITNESS_EXPECTED_MEASUREMENT_CONTROL, witness_session};
 /// still uses ordinary signed review; the server independently requires invite
 /// eligibility for that path. A present marker (even malformed/expired) must
 /// never become an ordinary-profile retry.
+/// What a witnessed review's attested-inference record says, decided from
+/// what was actually offered to the witness.
+///
+/// Pure, and deliberately narrow: `attested` is the call whose bodies went
+/// in the request, `receipt` is the receipt that went with them. A call
+/// without a receipt is the failure this record exists to name -- the fetch
+/// was attempted and nothing came back -- and a receipt without a call has
+/// nothing to bind. Only both together is attested inference, and even then
+/// the caller may say so only once the witness has certified the request.
+pub(crate) fn inference_attestation_for(
+    attested: Option<&crate::routing::attested::AttestedCall>,
+    receipt: Option<&trace_commons_attestation::receipt::ReceiptPayload>,
+) -> InferenceAttestationRecord {
+    match (attested, receipt) {
+        (Some(_), Some(_)) => InferenceAttestationRecord::certified(),
+        (Some(_), None) => {
+            InferenceAttestationRecord::uncertified(inference_record::REASON_RECEIPT_UNAVAILABLE)
+        }
+        (None, _) => {
+            InferenceAttestationRecord::uncertified(inference_record::REASON_NO_ATTESTED_CALL)
+        }
+    }
+}
+
 pub(crate) fn admission_profile_for_request(
     enabled: bool,
     request_body: Option<&str>,
@@ -501,7 +526,7 @@ impl<'a> SubmitContext<'a> {
         transcript: &crate::source::SessionTranscript,
         correction: Option<&str>,
         include_inference_bodies: bool,
-    ) -> Result<WitnessedEnvelope> {
+    ) -> Result<(WitnessedEnvelope, InferenceAttestationRecord)> {
         let settings = self
             .cfg
             .witness
@@ -552,10 +577,20 @@ impl<'a> SubmitContext<'a> {
         } else {
             None
         };
-        let (envelope, response) = self
+        let (envelope, response, attested_inference) = self
             .witness_envelope(&settings, raw, attested, &token, now)
             .await
             .map_err(anyhow::Error::msg)?;
+        // `witness_envelope` saw no call because this review withheld the
+        // bodies, not because the session has none. Say which.
+        let attested_inference = if !include_inference_bodies
+            && transcript.attested_call.is_some()
+            && !attested_inference.is_certified()
+        {
+            InferenceAttestationRecord::uncertified(inference_record::REASON_BODIES_WITHHELD)
+        } else {
+            attested_inference
+        };
         ensure_certified_grant(&envelope, &token, Utc::now())?;
         if envelope.submission_id != crate::source::submission_id_for(&transcript.session_hash) {
             anyhow::bail!("witness-review-source-mismatch");
@@ -569,7 +604,7 @@ impl<'a> SubmitContext<'a> {
         if residual_secret_refusal(&redactor, &envelope, &transcript.session_hash)?.is_some() {
             anyhow::bail!("secret-leak-detected");
         }
-        Ok(response)
+        Ok((response, attested_inference))
     }
 
     /// The effective contributor config this pipeline stamps onto
@@ -727,6 +762,14 @@ impl<'a> SubmitContext<'a> {
         result.ok()
     }
 
+    /// The witness's answer, and what it was handed to reach it.
+    ///
+    /// The third element is the only place
+    /// [`InferenceAttestationRecord::certified`] is ever built, and it is
+    /// built after `witness_session` returned a certificate for a request
+    /// that carried a receipt -- the fact, not the intention. A receipt that
+    /// could not be fetched leaves `receipt` as `None` below, and the record
+    /// says so by name; nothing upstream of here may promote it.
     async fn witness_envelope(
         &self,
         settings: &WitnessSettings,
@@ -734,7 +777,14 @@ impl<'a> SubmitContext<'a> {
         attested: Option<&crate::routing::attested::AttestedCall>,
         token: &ClaimToken,
         now: DateTime<Utc>,
-    ) -> std::result::Result<(TraceContributionEnvelope, WitnessedEnvelope), &'static str> {
+    ) -> std::result::Result<
+        (
+            TraceContributionEnvelope,
+            WitnessedEnvelope,
+            InferenceAttestationRecord,
+        ),
+        &'static str,
+    > {
         // A malformed pin and an absent one are different operator mistakes,
         // and a contributor who mistyped a measurement should not be told they
         // configured none.
@@ -765,6 +815,7 @@ impl<'a> SubmitContext<'a> {
         if admission_profile && receipt.is_none() {
             return Err("admission_receipt_unavailable");
         }
+        let attested_inference = inference_attestation_for(attested, receipt.as_ref());
         let attested = attested.map(|call| crate::witness::transport::AttestedInference {
             call,
             receipt: receipt.as_ref(),
@@ -787,7 +838,7 @@ impl<'a> SubmitContext<'a> {
         .map_err(|e| e.refusal_label())?;
 
         let parsed = parse_witnessed_envelope(&response).map_err(|e| e.refusal_label())?;
-        Ok((parsed, response))
+        Ok((parsed, response, attested_inference))
     }
 
     pub async fn submit_one(
@@ -1020,7 +1071,10 @@ impl<'a> SubmitContext<'a> {
                             )
                             .await
                         {
-                            Ok((parsed, response)) => {
+                            // The record is dropped on this path: the CLI keeps
+                            // no per-entry store to write it to. The daemon's
+                            // review path is where it is kept.
+                            Ok((parsed, response, _attested_inference)) => {
                                 // `parse_witnessed_envelope` inside
                                 // `witness_envelope` is what verified this
                                 // certificate against the bytes that came
@@ -2132,6 +2186,7 @@ mod tests {
             fingerprint,
             None,
             None,
+            None,
         );
         (transcript, artifact)
     }
@@ -2159,6 +2214,7 @@ mod tests {
             fingerprint.clone(),
             None,
             None,
+            None,
         );
         artifact
             .validate(&cfg, &transcript.session_hash, &fingerprint, None, None)
@@ -2169,6 +2225,7 @@ mod tests {
             changed,
             transcript.session_hash.clone(),
             fingerprint.clone(),
+            None,
             None,
             None,
         );
@@ -4499,6 +4556,34 @@ mod tests {
             admission_profile_for_request(false, Some("not JSON")),
             Ok(false),
             "invited configuration keeps its existing policy"
+        );
+    }
+
+    #[test]
+    fn the_inference_record_is_written_from_what_was_offered_not_what_was_wanted() {
+        use crate::witness::inference_record::{
+            InferenceAttestationRecord, REASON_NO_ATTESTED_CALL, REASON_RECEIPT_UNAVAILABLE,
+        };
+        let (call, _dir) = receipt_fixture_call();
+        let receipt = stand_in_receipt();
+        assert_eq!(
+            inference_attestation_for(None, None),
+            InferenceAttestationRecord::uncertified(REASON_NO_ATTESTED_CALL)
+        );
+        // The failure mode this exists for: an attested call whose receipt
+        // could not be fetched used to ship with every surface reading
+        // "attested". It is uncertified, by name.
+        assert_eq!(
+            inference_attestation_for(Some(&call), None),
+            InferenceAttestationRecord::uncertified(REASON_RECEIPT_UNAVAILABLE)
+        );
+        assert_eq!(
+            inference_attestation_for(Some(&call), Some(&receipt)),
+            InferenceAttestationRecord::certified()
+        );
+        assert!(
+            !inference_attestation_for(None, Some(&receipt)).is_certified(),
+            "a receipt with no call to bind it is not attested inference"
         );
     }
 
