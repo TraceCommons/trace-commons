@@ -2143,4 +2143,195 @@ mod tests {
             assert_eq!(verdict.signature_kind, kind);
         }
     }
+
+    // ---------------------------------------------------------------------
+    // The container NEAR AI actually serves per-model entries under (#802).
+    //
+    // Captured 2026-09-08 from the live per-model host, with a nonce
+    // generated for the capture. On today's provider deployment the entries
+    // arrive under `all_attestations`; `model_attestations` is absent, and so
+    // is `gateway_attestation` -- a per-model host serves no gateway entry.
+    // ---------------------------------------------------------------------
+
+    const LIVE_ALL_ATTESTATIONS_REPORT: &str =
+        include_str!("../tests/fixtures/near_ai_all_attestations_report_ed25519.json");
+
+    fn all_attestations_nonce() -> String {
+        serde_json::from_str::<serde_json::Value>(LIVE_ALL_ATTESTATIONS_REPORT).unwrap()
+            ["_fixture_nonce"]
+            .as_str()
+            .expect("the capture records the nonce it was taken with")
+            .to_string()
+    }
+
+    /// The precondition, asserted rather than described: this capture really
+    /// does carry the entries under the other name. If a future recapture
+    /// arrives with `model_attestations` again, this fails and says so,
+    /// rather than letting the fallback silently become the only path tested.
+    #[test]
+    fn the_live_capture_uses_all_attestations_and_carries_no_gateway_entry() {
+        let document: serde_json::Value =
+            serde_json::from_str(LIVE_ALL_ATTESTATIONS_REPORT).expect("the capture parses");
+        assert!(
+            document.get("all_attestations").is_some(),
+            "the capture must carry the container this test exists for"
+        );
+        assert!(
+            document.get("model_attestations").is_none(),
+            "a capture carrying both names would not pin anything"
+        );
+        // A per-model host serves no gateway entry at all. Worth pinning
+        // because it is why the drill's gateway step cannot pass against this
+        // host, which is a separate question from the model keys.
+        assert!(document.get("gateway_attestation").is_none());
+    }
+
+    /// The symptom from #802, as an assertion: the per-model key is derivable
+    /// from what the provider serves today.
+    #[test]
+    fn the_per_model_key_is_read_from_the_all_attestations_container() {
+        let nonce = all_attestations_nonce();
+        let keys = model_ed25519_keys(LIVE_ALL_ATTESTATIONS_REPORT, &nonce, MODEL_B)
+            .expect("the live capture attests this model");
+
+        assert_eq!(keys, vec![MODEL_B_KEY.to_string()]);
+        assert!(signer_is_attested_for_model(MODEL_B_KEY, &keys));
+    }
+
+    /// And the binding really came out of the quote, not out of a JSON echo.
+    /// A live entry has no `report_data` field at all, so a key returned above
+    /// can only have been read at the v4 TDX offset of the entry's own quote.
+    #[test]
+    fn the_all_attestations_entry_binds_through_its_quote_with_no_report_data_field() {
+        let document: serde_json::Value =
+            serde_json::from_str(LIVE_ALL_ATTESTATIONS_REPORT).unwrap();
+        let entry = &document["all_attestations"][0];
+        assert!(
+            entry.get("report_data").is_none(),
+            "a live entry carries no report_data field; see receipt.rs"
+        );
+        assert!(entry.get("intel_quote").is_some());
+
+        let nonce = all_attestations_nonce();
+        assert_eq!(
+            attested_ed25519_key(entry, &nonce).expect("the entry binds"),
+            MODEL_B_KEY
+        );
+        // The same entry against a nonce nobody sent must not bind, or the
+        // check above proves only that the fixture is self-consistent.
+        assert_eq!(
+            attested_ed25519_key(entry, &"f".repeat(64)),
+            Err(AttestedKeyError::NonceMismatch)
+        );
+    }
+
+    /// The binding discipline is not relaxed by the container rename: an
+    /// entry naming this model that fails to bind is refused outright, and the
+    /// sound sibling beside it does not rescue the report.
+    #[test]
+    fn a_forged_entry_beside_a_sound_one_still_refuses_the_whole_report() {
+        let nonce = all_attestations_nonce();
+        let mut document: serde_json::Value =
+            serde_json::from_str(LIVE_ALL_ATTESTATIONS_REPORT).unwrap();
+        let mut forged = document["all_attestations"][0].clone();
+        // Same model, a key the quote does not commit to.
+        forged["signing_address"] = serde_json::json!("11".repeat(32));
+        document["all_attestations"]
+            .as_array_mut()
+            .unwrap()
+            .push(forged);
+
+        assert_eq!(
+            model_ed25519_keys(&document.to_string(), &nonce, MODEL_B),
+            Err(AttestedKeyError::ReportDataMismatch),
+            "answering with the sound half is the failure this refusal prevents"
+        );
+    }
+
+    /// An entry for another model under the new container is skipped, not
+    /// returned. Exact match on `model_name` survives the rename.
+    #[test]
+    fn another_models_entry_under_the_new_container_is_not_returned() {
+        let nonce = all_attestations_nonce();
+        let mut document: serde_json::Value =
+            serde_json::from_str(LIVE_ALL_ATTESTATIONS_REPORT).unwrap();
+        document["all_attestations"][0]["model_name"] = serde_json::json!(MODEL_A);
+
+        assert_eq!(
+            model_ed25519_keys(&document.to_string(), &nonce, MODEL_B),
+            Err(AttestedKeyError::ModelNotAttested)
+        );
+    }
+
+    /// **The one that matters most.** A gateway-shaped report yields no model
+    /// keys at all -- never the gateway key. The gateway key signs no
+    /// `provider_tee` receipt, and returning it here would silently restore
+    /// the exact confusion this function was written to prevent.
+    #[test]
+    fn a_gateway_only_report_yields_no_model_keys_and_never_the_gateway_key() {
+        let gateway_only = format!(
+            r#"{{"gateway_attestation":{{"signing_address":"{LIVE_GATEWAY_KEY}","signing_algo":"ed25519","request_nonce":"{REPORT_NONCE}","report_data":"{LIVE_GATEWAY_KEY}{REPORT_NONCE}"}},"ohttp_attestation":{{}}}}"#
+        );
+        // Precondition: the gateway half of this report is genuinely sound,
+        // so a failure below is the model lookup refusing and not the report
+        // being unreadable.
+        assert_eq!(
+            gateway_ed25519_key(&gateway_only, REPORT_NONCE).expect("the gateway binds"),
+            LIVE_GATEWAY_KEY
+        );
+
+        let error = model_ed25519_keys(&gateway_only, REPORT_NONCE, MODEL_B)
+            .expect_err("a gateway-only report attests no model");
+        assert_eq!(error, AttestedKeyError::Malformed);
+    }
+
+    /// An empty container is `ModelNotAttested`, not a silent empty success.
+    /// An empty key set would make `signer_is_attested_for_model` answer
+    /// `false` for everything, which reads as a refusal but is really "we
+    /// never looked".
+    #[test]
+    fn an_empty_all_attestations_container_is_not_a_silent_pass() {
+        let empty = r#"{"all_attestations":[]}"#;
+        assert_eq!(
+            model_ed25519_keys(empty, REPORT_NONCE, MODEL_B),
+            Err(AttestedKeyError::ModelNotAttested)
+        );
+    }
+
+    /// The fallback is a fallback, not a replacement: the older container
+    /// still works. The observation window for the rename is one provider
+    /// deployment on one day, and a rename that went one way can go back.
+    #[test]
+    fn the_older_model_attestations_container_still_works() {
+        let keys =
+            model_ed25519_keys(&live_report(), REPORT_NONCE, MODEL_A).expect("still attested");
+        assert_eq!(keys, vec![MODEL_A_KEY.to_string()]);
+    }
+
+    /// And where a report somehow carries both, the newer container is the
+    /// one read -- with the older one holding an entry that would bind, so a
+    /// reader that consulted the wrong container would pass rather than fail.
+    #[test]
+    fn all_attestations_wins_when_a_report_carries_both_containers() {
+        let nonce = all_attestations_nonce();
+        let mut document: serde_json::Value =
+            serde_json::from_str(LIVE_ALL_ATTESTATIONS_REPORT).unwrap();
+        // A bindable entry for the same model, under the older name, carrying
+        // a different key. Whichever container is consulted, a key comes back
+        // -- so the assertion below is about *which*, not about success.
+        let decoy_key = "22".repeat(32);
+        document["model_attestations"] = serde_json::json!([{
+            "model_name": MODEL_B,
+            "signing_address": decoy_key,
+            "signing_algo": "ed25519",
+            "request_nonce": nonce,
+            "report_data": format!("{decoy_key}{nonce}"),
+        }]);
+
+        assert_eq!(
+            model_ed25519_keys(&document.to_string(), &nonce, MODEL_B),
+            Ok(vec![MODEL_B_KEY.to_string()]),
+            "the live container must win over the legacy one"
+        );
+    }
 }
