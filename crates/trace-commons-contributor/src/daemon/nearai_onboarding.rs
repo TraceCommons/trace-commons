@@ -139,6 +139,8 @@ fn label(error: &anyhow::Error) -> &'static str {
         "near_ai_enroll_endpoint_refused" => "near_ai_enroll_endpoint_refused",
         "near_ai_enroll_token_unavailable" => "near_ai_enroll_token_unavailable",
         "near_ai_enroll_start_failed" => "near_ai_enroll_start_failed",
+        "near_ai_enroll_commons_unreachable" => "near_ai_enroll_commons_unreachable",
+        "near_ai_enroll_commons_unsupported" => "near_ai_enroll_commons_unsupported",
         "near_ai_enroll_invalid" => "near_ai_enroll_invalid",
         "near_ai_enroll_verification_failed" => "near_ai_enroll_verification_failed",
         _ => "near_ai_enroll_unavailable",
@@ -175,6 +177,36 @@ async fn enroll(
         .near_ai_session
         .clone()
         .ok_or_else(|| anyhow!("near_ai_enroll_no_session"))?;
+
+    // Fetched after the session presence check above, which is a local read
+    // that spends nothing: a contributor who never logged in should be told
+    // that, not that the commons is unreachable.
+    //
+    // The commons's own facts, from the same route and the same validator the
+    // wallet ceremony uses. `issuer_url` and `audience` are what `submit`
+    // mints upload claims with, so an enrollment without them is enrolled and
+    // unable to upload -- a config that fails at the contributor's first
+    // submission rather than here, where they could still act on it.
+    //
+    // This also extends the derived allowlist with the issuer, witness and
+    // receipt hosts this origin publishes, which nothing on this path would
+    // otherwise ask for. Before the session is read and well before the token
+    // is spent: a commons that is unreachable or not offering enrollment must
+    // not cost the contributor their refresh token either.
+    let (issuer_url, audience, witness, receipt_endpoint) =
+        super::account_onboarding::validated_capability(ingest_url)
+            .await
+            .map_err(|refusal| match refusal {
+                super::account_onboarding::SignupRefusal::AddressRefused => {
+                    anyhow!("near_ai_enroll_endpoint_refused")
+                }
+                super::account_onboarding::SignupRefusal::Unreachable => {
+                    anyhow!("near_ai_enroll_commons_unreachable")
+                }
+                super::account_onboarding::SignupRefusal::Unsupported => {
+                    anyhow!("near_ai_enroll_commons_unsupported")
+                }
+            })?;
 
     let identity = DeviceIdentity::load_or_generate(&shared.store)?;
     let verifier = random()?;
@@ -250,7 +282,18 @@ async fn enroll(
         .await
         .map_err(|_| anyhow!("near_ai_enroll_verification_failed"))?;
 
-    persist(shared, ingest_url, &identity, finished)
+    persist(
+        shared,
+        Commons {
+            ingest_url,
+            issuer_url: &issuer_url,
+            audience: &audience,
+            witness,
+            receipt_endpoint,
+        },
+        &identity,
+        finished,
+    )
 }
 
 fn random() -> Result<String> {
@@ -267,9 +310,19 @@ fn random() -> Result<String> {
 /// enrolled client that cannot authenticate and cannot re-enroll, because
 /// `enroll` refuses once a config exists. So the session is written first and
 /// the config is linked into place last, exactly as the wallet ceremony does.
+/// The commons facts an enrollment is written against, so `persist` takes one
+/// argument for them rather than five positional strings that can be swapped.
+struct Commons<'a> {
+    ingest_url: &'a str,
+    issuer_url: &'a str,
+    audience: &'a str,
+    witness: crate::config::WitnessSettings,
+    receipt_endpoint: Option<String>,
+}
+
 fn persist(
     shared: &DaemonShared,
-    ingest_url: &str,
+    commons: Commons<'_>,
     identity: &DeviceIdentity,
     result: Finished,
 ) -> Result<serde_json::Value> {
@@ -300,9 +353,9 @@ fn persist(
 
     let config = ContributorConfig {
         schema_version: CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
-        issuer_url: String::new(),
-        ingest_url: ingest_url.to_string(),
-        audience: String::new(),
+        issuer_url: commons.issuer_url.to_string(),
+        ingest_url: commons.ingest_url.to_string(),
+        audience: commons.audience.to_string(),
         tenant_id: result.tenant_id.clone(),
         instance_id: String::new(),
         user_subject: identity.device_key_id.clone(),
@@ -313,8 +366,8 @@ fn persist(
         display_handle: None,
         public_bio: None,
         public_since: None,
-        witness: None,
-        inference_receipt_endpoint: None,
+        witness: Some(commons.witness),
+        inference_receipt_endpoint: commons.receipt_endpoint,
         inference_receipt_check_attestation: true,
     };
 
@@ -456,6 +509,22 @@ mod tests {
         assert!(shared.store.load_config().unwrap().is_none());
     }
 
+    fn commons() -> Commons<'static> {
+        Commons {
+            ingest_url: "https://commons.example",
+            issuer_url: "https://issuer.example",
+            audience: "trace-commons-upload",
+            witness: serde_json::from_value(serde_json::json!({
+                "url": "https://witness.example",
+                "signing_address": format!("0x{}", "ab".repeat(20)),
+                "expected_measurements": [format!("mrtd={}", "ab".repeat(48))],
+                "admission_evidence": true,
+            }))
+            .unwrap(),
+            receipt_endpoint: Some("https://receipts.example/v1".into()),
+        }
+    }
+
     fn finished() -> Finished {
         Finished {
             access_token: "tcn1_fixture".into(),
@@ -477,7 +546,7 @@ mod tests {
         let mut result = finished();
         result.device_key_id = identity.device_key_id.clone();
 
-        let reply = persist(&shared, "https://commons.example", &identity, result).unwrap();
+        let reply = persist(&shared, commons(), &identity, result).unwrap();
         let rendered = serde_json::to_string(&reply).unwrap();
         for secret in ["tcn1_fixture", REFRESH, "rt_"] {
             assert!(
@@ -486,6 +555,21 @@ mod tests {
             );
         }
         assert_eq!(reply["enrolled"], true);
+
+        // The fields `submit` mints upload claims with. Empty ones produce a
+        // config that is enrolled and cannot upload, which fails at the
+        // contributor's first submission rather than here.
+        let written = shared.store.load_config().unwrap().unwrap();
+        assert_eq!(written.issuer_url, "https://issuer.example");
+        assert_eq!(written.audience, "trace-commons-upload");
+        assert_eq!(
+            written.witness.as_ref().map(|w| w.url.as_str()),
+            Some("https://witness.example")
+        );
+        assert_eq!(
+            written.inference_receipt_endpoint.as_deref(),
+            Some("https://receipts.example/v1")
+        );
 
         let config = std::fs::read_to_string(shared.store.dir().join("contributor.json")).unwrap();
         for secret in ["tcn1_fixture", REFRESH, "rt_"] {
@@ -547,7 +631,7 @@ mod tests {
             let mut result = good();
             mutate(&mut result);
             assert!(
-                persist(&shared, "https://commons.example", &identity, result).is_err(),
+                persist(&shared, commons(), &identity, result).is_err(),
                 "{name} was accepted"
             );
             assert!(
@@ -557,7 +641,7 @@ mod tests {
         }
         // And the unmutated fixture is accepted, so the cases above fail for
         // their own reason rather than because the fixture never worked.
-        assert!(persist(&shared, "https://commons.example", &identity, good()).is_ok());
+        assert!(persist(&shared, commons(), &identity, good()).is_ok());
     }
 
     #[test]

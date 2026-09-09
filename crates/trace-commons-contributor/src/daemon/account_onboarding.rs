@@ -264,7 +264,7 @@ pub async fn handle_capabilities(_shared: &DaemonShared, req: &Request) -> Respo
     }
 }
 
-async fn validated_capability(
+pub(super) async fn validated_capability(
     url: &str,
 ) -> std::result::Result<(String, String, WitnessSettings, Option<String>), SignupRefusal> {
     let origin_only = signup_allowlist(url, &[]).map_err(|_| SignupRefusal::AddressRefused)?;
