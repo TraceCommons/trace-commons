@@ -297,9 +297,6 @@ struct PreviewSheet: View {
         } else if let failure {
             VStack(spacing: TC.Space.md) {
                 CenteredNotice(title: "This one can't be shown.", detail: witnessRequested ? (model.witnessCopy?.review?.failed ?? failure) : failure)
-                if model.daemonSettings?.admissionEvidenceOffered == true {
-                    AdmissionPreparationView(entryID: entry.entryID)
-                }
                 if witnessSupported, model.witnessStateCode == 1, let copy = model.witnessCopy?.review {
                     Text(copy.disclosure).font(TC.Font_.caption)
                     Button(copy.action) { confirmingWitness = true }
@@ -434,6 +431,19 @@ struct PreviewSheet: View {
             verdictQuestion.disabled(model.witnessStateCode == 1 || witnessRequested || witnessWorking)
             if correctionIsOffered {
                 correctionField.disabled(model.witnessStateCode == 1 || witnessRequested || witnessWorking)
+            }
+            // Drawn on every preview, in the place GTK has always drawn it,
+            // rather than only where one failed. It arms this session's NEXT
+            // call -- "continue the agent task and return here to review" --
+            // so it is something a contributor comes here to do, not a
+            // remedy for the sheet in front of them. Reaching it used to
+            // require a witness review that failed first.
+            //
+            // Still gated on the enrolment, and gated nowhere else: an
+            // invited contributor has no evidence-bearing path, so the
+            // control could only refuse them and is absent instead.
+            if model.daemonSettings?.admissionEvidenceOffered == true {
+                AdmissionPreparationView(entryID: entry.entryID)
             }
             HStack(spacing: TC.Space.s) {
                 // Outlined like "Close", never filled: it must not read as a

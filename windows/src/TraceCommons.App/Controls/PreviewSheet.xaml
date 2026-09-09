@@ -173,13 +173,6 @@
                            Style="{StaticResource TcCaptionTextStyle}"
                            TextWrapping="Wrap"
                            TextAlignment="Center" />
-                <Button Content="{x:Bind ViewModel.AdmissionHeading}" Click="OnPrepareAdmission"
-                        Visibility="{x:Bind ViewModel.CanPrepareAdmission, Mode=OneWay}" />
-                <Grid ColumnDefinitions="Auto,*" ColumnSpacing="6">
-                    <TextBlock Grid.Column="0" Text="{x:Bind ViewModel.AdmissionGlyph, Mode=OneWay}" Style="{StaticResource TcHeadingAlertTextStyle}" />
-                    <TextBlock Grid.Column="1" Text="{x:Bind ViewModel.AdmissionRefusalMessage, Mode=OneWay}" Style="{StaticResource TcHeadingAlertTextStyle}" TextWrapping="Wrap" />
-                    <TextBlock Grid.Column="1" Text="{x:Bind ViewModel.AdmissionNeutralMessage, Mode=OneWay}" TextWrapping="Wrap" />
-                </Grid>
                 <Button Content="{x:Bind ViewModel.WitnessAction}" Click="OnWitnessReview"
                         Visibility="{x:Bind ViewModel.CanRequestWitness, Mode=OneWay}" />
             </StackPanel>
@@ -736,6 +729,32 @@
                            Foreground="{ThemeResource TcInkSecondaryBrush}"
                            TextWrapping="Wrap" />
             </StackPanel>
+
+            <!--
+                Admission preparation, drawn on every preview in the place the
+                Linux shell has always drawn it, rather than only where a
+                preview failed.
+
+                It arms this session's NEXT call; the copy says so, and asks
+                the contributor to continue the agent task and come back. So
+                it is a thing someone opens the sheet to do, not a remedy for
+                a sheet that broke. While it lived in the failed-preview
+                notice, the only route to it was a witness review that failed
+                first.
+
+                CanPrepareAdmission is false unless the daemon says this
+                contributor's enrolment admits evidence-bearing contribution,
+                so an invited contributor, whom it could only refuse, is not
+                offered it at all. Visibility, not IsEnabled: absent, not
+                present and refusing.
+            -->
+            <Button Content="{x:Bind ViewModel.AdmissionHeading}" Click="OnPrepareAdmission"
+                    Visibility="{x:Bind ViewModel.CanPrepareAdmission, Mode=OneWay}" />
+            <Grid ColumnDefinitions="Auto,*" ColumnSpacing="6">
+                <TextBlock Grid.Column="0" Text="{x:Bind ViewModel.AdmissionGlyph, Mode=OneWay}" Style="{StaticResource TcHeadingAlertTextStyle}" />
+                <TextBlock Grid.Column="1" Text="{x:Bind ViewModel.AdmissionRefusalMessage, Mode=OneWay}" Style="{StaticResource TcHeadingAlertTextStyle}" TextWrapping="Wrap" />
+                <TextBlock Grid.Column="1" Text="{x:Bind ViewModel.AdmissionNeutralMessage, Mode=OneWay}" TextWrapping="Wrap" />
+            </Grid>
 
             <Grid ColumnDefinitions="Auto,*,Auto,Auto" ColumnSpacing="8">
                 <!-- Outlined like Close, never filled: it must not read as a
