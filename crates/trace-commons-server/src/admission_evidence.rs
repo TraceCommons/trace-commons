@@ -69,9 +69,19 @@ impl AdmissionProviderTrust {
             // A key in both sets is one key holding both roles, which is the
             // thing the split exists to make impossible to express.
             || provider_tee_signers.intersection(&gateway_signers).count() != 0
-            // An empty list is "no provider-TEE receipt is admissible", which
-            // is coherent. A list containing junk is a typo, and admitting it
-            // would silently refuse the model the operator meant to allow.
+            // **Configure the list if and only if you accept the kind it
+            // governs.** An operator who pinned provider-TEE keys and no
+            // models has almost certainly forgotten `ACCEPTED_MODELS`, and
+            // the coherent reading of the empty list -- "no provider-TEE
+            // receipt is admissible" -- is a gateway-only posture they did
+            // not choose. Refusing here makes that a loud failure at
+            // configuration load rather than a silent change of policy.
+            //
+            // The empty list stays legal for a deployment with no provider-TEE
+            // signers, which is what makes gateway-only expressible.
+            || (!provider_tee_signers.is_empty() && models.is_empty())
+            // A list containing junk is a typo, and admitting it would
+            // silently refuse the model the operator meant to allow.
             || models
                 .iter()
                 .any(|s| s.is_empty() || s.len() > 256 || s.trim() != s)
@@ -96,16 +106,31 @@ impl AdmissionProviderTrust {
                 .map(str::to_string)
                 .collect::<Vec<_>>()
         };
+        // **Absent and empty are different, on all three lists.** An absent
+        // variable is "this deployment does not do that", and yields no
+        // entries. A variable set to the empty string yields one empty entry,
+        // which `new` refuses as the typo it almost always is -- an operator
+        // who wrote `ACCEPTED_MODELS=` meant to write something.
+        let optional = |suffix: &str| {
+            std::env::var(format!("{prefix}_{suffix}"))
+                .map(&split)
+                .unwrap_or_default()
+        };
         Self::new(
-            split(read("PROVIDER_SIGNERS")?),
+            // Optional so a gateway-only deployment is expressible here and
+            // not only through the constructor. `new` refuses a configuration
+            // that names no signer at all, so omitting both is still an error.
+            optional("PROVIDER_SIGNERS"),
             // Optional, and empty means "no gateway receipt is admissible".
             // That is the fail-closed reading and it is deliberate: an
             // operator who pinned provider-TEE keys did not thereby agree to
             // accept a receipt that binds no model.
-            std::env::var(format!("{prefix}_GATEWAY_SIGNERS"))
-                .map(split)
-                .unwrap_or_default(),
-            split(read("ACCEPTED_MODELS")?),
+            optional("GATEWAY_SIGNERS"),
+            // Optional only because a gateway-only deployment has no list to
+            // write. `new` refuses provider-TEE signers with no models, so a
+            // deployment that accepts the attested kind must still say which
+            // models it accepts.
+            optional("ACCEPTED_MODELS"),
             read("MIN_REQUEST_BYTES")?
                 .parse()
                 .map_err(|_| AdmissionEvidenceError)?,
@@ -514,12 +539,12 @@ mod tests {
                 .is_err()
         );
         assert!(AdmissionProviderTrust::new([key.to_uppercase()], none(), good(), 1).is_err());
-        // An empty model list is now a policy, not a mistake: after the kind
-        // split it governs provider-TEE receipts only, so a gateway-only
-        // deployment has no list to write. It means "no provider-TEE receipt
-        // is admissible", which `a_gateway_receipt_is_not_filtered_by_the_model_list`
-        // pins.
-        assert!(AdmissionProviderTrust::new([key.clone()], none(), none(), 1).is_ok());
+        // An empty model list is a policy only for a deployment that does not
+        // accept the kind it governs. With provider-TEE keys pinned it is a
+        // forgotten variable and still refused; gateway-only is the case it
+        // was relaxed for. `accepting_the_attested_kind_requires_saying_which_models`
+        // is where that pair is pinned.
+        assert!(AdmissionProviderTrust::new([key.clone()], none(), none(), 1).is_err());
         assert!(AdmissionProviderTrust::new(none(), [key.clone()], none(), 1).is_ok());
         assert!(AdmissionProviderTrust::new([key.clone()], none(), ["".into()], 1).is_err());
         assert!(
@@ -646,6 +671,34 @@ mod tests {
         assert_eq!(trust.established_kind("not-a-hash"), None);
     }
 
+    /// The empty model list is a gateway-only policy, never a provider-TEE
+    /// deployment that forgot to configure one.
+    ///
+    /// Without this, an operator who pinned provider-TEE keys and omitted
+    /// `ACCEPTED_MODELS` would boot into a posture they did not choose --
+    /// admitting nothing on the kind they configured -- and the only symptom
+    /// would be refusals they would go looking for elsewhere. The list is
+    /// required exactly when the kind it governs is accepted, so a forgotten
+    /// variable is a loud failure at configuration load instead.
+    #[test]
+    fn accepting_the_attested_kind_requires_saying_which_models() {
+        let provider = "a".repeat(64);
+        let gateway = "b".repeat(64);
+        let model = || ["operator-approved-model".to_string()];
+
+        assert!(
+            AdmissionProviderTrust::new([provider.clone()], [], [], 1).is_err(),
+            "provider-TEE keys with no model list is a forgotten variable, \
+             not a policy"
+        );
+        assert!(
+            AdmissionProviderTrust::new([provider.clone()], [gateway.clone()], [], 1).is_err(),
+            "adding gateway keys does not excuse the list the other kind needs"
+        );
+        assert!(AdmissionProviderTrust::new([provider], [], model(), 1).is_ok());
+        assert!(AdmissionProviderTrust::new([], [gateway], [], 1).is_ok());
+    }
+
     /// The two vocabularies must not drift.
     ///
     /// `AdmissionSignatureKind` lives in the protocol crate, which does not
@@ -655,15 +708,21 @@ mod tests {
     /// half cannot recognise, and the signature would still verify.
     #[test]
     fn the_signed_kind_spells_what_the_receipt_kind_spells() {
+        const AT_STAKE: &str = "the two spellings have drifted, so evidence now \
+             names a kind the other half cannot recognise -- under a witness \
+             signature that still verifies, because the signature covers the \
+             spelling and knows nothing about what it means";
         assert_eq!(
             AdmissionSignatureKind::Gateway.as_wire(),
-            ReceiptSignatureKind::Gateway.as_wire().expect("a spelling")
+            ReceiptSignatureKind::Gateway.as_wire().expect("a spelling"),
+            "{AT_STAKE}"
         );
         assert_eq!(
             AdmissionSignatureKind::ProviderTee.as_wire(),
             ReceiptSignatureKind::ProviderTee
                 .as_wire()
-                .expect("a spelling")
+                .expect("a spelling"),
+            "{AT_STAKE}"
         );
         assert_eq!(ReceiptSignatureKind::Unrecognised.as_wire(), None);
         assert!(AdmissionSignatureKind::ProviderTee.binds_model());
