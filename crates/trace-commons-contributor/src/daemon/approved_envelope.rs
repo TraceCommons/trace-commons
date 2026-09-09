@@ -464,7 +464,13 @@ mod tests {
         let (_dir, store) = temp_store();
         let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
         let source_hash = "pre-inference-history";
-        let tenant = format!("near-{}", "ab".repeat(32));
+        // Deliberately NOT `near-{anchor}`. That shape is what V58's
+        // `CHECK (tenant_id = 'near-' || substring(anchor_hash from 8))`
+        // produced, V61 removed it, and a fixture still building it cannot
+        // express any post-V61 failure -- which is exactly how the account
+        // check in `validate_stored` above stayed broken. A wallet tenant id
+        // is now 32 random bytes and a function of nothing.
+        let tenant = format!("near-{}", "3f".repeat(32));
         let mut envelope = envelope().await;
         envelope.submission_id = crate::source::submission_id_for(source_hash);
         envelope.contributor.tenant_scope_ref = Some(tenant.clone());
