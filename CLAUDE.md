@@ -74,10 +74,19 @@ The protocol crate is `crates/trace-commons-protocol`; the server crate is
 ## CI
 
 Every job in `.github/workflows/ci.yml` runs on every PR. There are
-twenty-one as of 2026-09-07; the list below covers the long-standing ones and
+twenty-four as of 2026-09-09; the list below covers the long-standing ones and
 is not a full inventory -- read the workflow for that. (It said "nine" while the
 file held fifteen, and "eighteen" while it held twenty, so treat any count
 here as stale until re-checked.)
+
+Every job that caches `target` ends with `./.github/actions/trim-cargo-cache`,
+which deletes linked test and bin executables and `incremental/` before
+actions/cache saves. The repository's caches were over GitHub's 10 GB
+ceiling and a main-written cache was evicted within minutes; a job that
+adds a `target` cache must end with that step too, or it re-creates the
+churn. Push-to-main runs are exempt from `cancel-in-progress` for the same
+reason: a cancelled job saves no cache, and on 2026-09-09 22 of 40 main runs
+were cancelled by the next merge.
 
 Running is not the same as blocking. **Fourteen** of the twenty-one are required
 status checks on `main`, and only those block a merge -- `README.md` lists
@@ -119,6 +128,11 @@ receives them times out of the queue instead of merging.
   dependency bump left `main` green and failed all four
   `contributor-v0.10.0` release jobs. Logic lives in
   `scripts/ci/msrv-floor.sh`.
+- `linux-shell desktop entry and metainfo` — `desktop-file-validate`,
+  `appstreamcli validate`, the icon-name pair and the metainfo-vs-crate
+  version pin, from `crates/trace-commons-contributor-gtk/scripts/validate-desktop-entry.sh`,
+  in about a minute. **Not yet a required check**; the weston job runs the
+  same script and stays the blocking copy until this one is promoted.
 - `macOS app tests` — `swift test` in `macos/`, on `macos-26`. The only
   thing that runs the Swift suite; before it existed those tests gated
   nothing. Needs `cargo build -p trace-commons-contributor-ffi` first,
