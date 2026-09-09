@@ -2211,6 +2211,35 @@ pub use trace_commons_contributor::private_inference_copy::{
     eligibility_state_tone, group_control, group_withheld_line,
 };
 
+// --- Whether a session carries proof of its model call ------------------
+//
+// The block above answers "may I send this?", and says nothing at all when
+// nobody is asking. This one answers a different question that every
+// contributor has all of the time: does this session carry a checkable copy
+// of the model call that produced it? That is a fact about the trace, not a
+// permission, so it is stated on EVERY row -- an invited contributor's
+// included.
+//
+// `attestation_state_line` picks the sentence, `attestation_state_tone`
+// paints it, and `attestation_reason_line` adds the detail underneath. All
+// three take the same label and are used as one.
+//
+// There is no control in this trio, and its absence is the design: the mark
+// describes the trace and offers nothing to press. Sendability stays the
+// eligibility question above.
+//
+// `attestation_reason_line` is NOT `eligibility_reason_line` and must never
+// be substituted for it. The thirteen labels are shared, because each names
+// one property of the recorded session; the sentences are not, because the
+// eligibility ones say "cannot be sent", which is false for an invited
+// contributor whose session sends perfectly well.
+//
+// An unread mark answers the `unknown` sentence and `Neutral` -- never an
+// unattested mark, which would be evidence this build does not have.
+pub use trace_commons_contributor::private_inference_copy::{
+    attestation_reason_line, attestation_state_line, attestation_state_tone,
+};
+
 // --- The redaction witness ---------------------------------------------
 //
 // Same rule as the Tools block above, for the same reason. The witness
