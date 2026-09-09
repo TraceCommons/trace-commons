@@ -24,6 +24,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::config::{ConfigStore, DAEMON_QUEUE_FILE};
+use crate::daemon::approved_envelope::WITNESS_PIN_PREFIX;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -372,6 +373,29 @@ pub struct QueueEntry {
 }
 
 impl QueueEntry {
+    /// Whether a witness certificate is held for the bytes this entry was
+    /// pinned to.
+    ///
+    /// True after either witness route: `/v1/witness` returns a certificate,
+    /// and `/v1/witness/admission` returns a certificate AND admission
+    /// evidence. Both are stored as one [`WitnessReviewArtifact`] under one
+    /// pin, so "step 1 or step 2" is this single question.
+    ///
+    /// Derived from the pin rather than stored as a field of its own, which
+    /// is deliberate: the artifact is written and the pin recorded under the
+    /// same queue lock, so a second field could only ever agree with this or
+    /// be wrong. It is also cheap enough to ask for every row of a list,
+    /// which loading and validating the artifact is not.
+    ///
+    /// NOT the attestation mark and NOT eligibility. Holds-a-certificate,
+    /// is-attestable and was-attested are three different facts about a
+    /// session, and this is only the first.
+    pub fn holds_witness_certificate(&self) -> bool {
+        self.previewed_envelope_digest
+            .as_deref()
+            .is_some_and(|pin| pin.starts_with(WITNESS_PIN_PREFIX))
+    }
+
     /// The instant this entry's post-approval hold ends, i.e. the deadline a
     /// client counts down to and the instant `drain_approved` becomes
     /// willing to upload it.

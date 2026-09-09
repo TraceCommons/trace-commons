@@ -1653,6 +1653,27 @@ pub fn entry_value(
             value["eligibility_reason"] = serde_json::Value::from(reason);
         }
     }
+    // ALSO ALWAYS PRESENT, AND FOR A DIFFERENT REASON THAN `attestation`.
+    //
+    // One predicate with two readings. A contributor without an invite reads
+    // it as "this one is a candidate for submission"; a contributor with one
+    // reads it as "this one is cryptographically attested". The fact is the
+    // same either way -- a witness certificate is held for the bytes this
+    // entry was pinned to -- so the daemon states it once and the shell
+    // picks the wording from the invite status it already holds for the
+    // eligibility surface. Two fields, or one field emitted only under the
+    // signup flag, would put the second reading out of reach of exactly the
+    // contributors it is written for.
+    //
+    // Both witness routes produce it: `/v1/witness` returns a certificate
+    // and `/v1/witness/admission` returns a certificate and admission
+    // evidence, stored as one artifact under one pin.
+    //
+    // This is NOT `attestation` below. That says whether the session carries
+    // proof of the model call that produced it; this says whether we hold a
+    // witness certificate over the reviewed bytes. A session can have either
+    // without the other.
+    value["holds_certificate"] = serde_json::Value::Bool(e.holds_witness_certificate());
     // ALWAYS PRESENT, FOR EVERY CONTRIBUTOR.
     //
     // The opposite rule to `eligibility` above, and deliberately. That field
@@ -3076,12 +3097,10 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
             skipped.push((id, label));
             continue;
         }
-        if let Some(entry) = queue.get(id).filter(|entry| {
-            entry
-                .previewed_envelope_digest
-                .as_deref()
-                .is_some_and(|pin| pin.starts_with("witness-sha256:"))
-        }) {
+        if let Some(entry) = queue
+            .get(id)
+            .filter(|entry| entry.holds_witness_certificate())
+        {
             let valid = cfg
                 .as_ref()
                 .zip(inputs.as_deref())
@@ -3297,11 +3316,7 @@ async fn handle_witness_preview_request_inner(
         }
     };
     // Repeated requests must not replace an existing certified artifact.
-    if entry
-        .previewed_envelope_digest
-        .as_deref()
-        .is_some_and(|pin| pin.starts_with("witness-sha256:"))
-    {
+    if entry.holds_witness_certificate() {
         return Response::err(req.id, ERR_BAD_PARAMS, "witness-review-already-pinned");
     }
     let cfg = match shared.store.load_config() {
@@ -3385,11 +3400,7 @@ async fn handle_witness_preview_request_inner(
 async fn handle_preview(shared: &DaemonShared, req: &Request) -> Response {
     let id = try_response!(entry_id_param(req));
     let entry = try_response!(entry_by_id(shared, req, id));
-    if entry
-        .previewed_envelope_digest
-        .as_deref()
-        .is_some_and(|pin| pin.starts_with("witness-sha256:"))
-    {
+    if entry.holds_witness_certificate() {
         return match open_preview(shared, id).await {
             Ok((summary, _)) => {
                 let mut value =
@@ -3623,11 +3634,7 @@ async fn build_and_pin_preview(
     let sources = crate::source::all_sources(&source_roots);
     let (source, session_ref) =
         super::find_session(&sources, entry).ok_or((ERR_BAD_PARAMS, "session-file-vanished"))?;
-    if entry
-        .previewed_envelope_digest
-        .as_deref()
-        .is_some_and(|pin| pin.starts_with("witness-sha256:"))
-    {
+    if entry.holds_witness_certificate() {
         let unavailable = (
             ERR_UNAVAILABLE,
             super::preview::REASON_APPROVED_ENVELOPE_UNAVAILABLE,
@@ -4086,11 +4093,7 @@ async fn resolve_preview_envelope(
             .cloned()
             .ok_or((ERR_BAD_PARAMS, ERR_UNKNOWN_ENTRY_ID))?
     };
-    if entry
-        .previewed_envelope_digest
-        .as_deref()
-        .is_some_and(|pin| pin.starts_with("witness-sha256:"))
-    {
+    if entry.holds_witness_certificate() {
         let cfg = shared.store.load_config().ok().flatten();
         let (summary, _, envelope) =
             build_and_pin_preview(shared, entry_id, &entry, cfg.as_ref(), None).await?;

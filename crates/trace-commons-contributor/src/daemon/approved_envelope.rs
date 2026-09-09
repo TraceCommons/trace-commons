@@ -128,6 +128,18 @@ pub struct WitnessReviewArtifact {
 }
 
 const WITNESS_REVIEW_SCHEMA: &str = "trace_commons.witness_review.v1";
+
+/// What marks a queue pin as covering a witnessed preview rather than an
+/// ordinary one.
+///
+/// Produced by [`WitnessReviewArtifact::digest`] and read by
+/// [`crate::daemon::queue::QueueEntry::holds_witness_certificate`]. It was
+/// spelled as a literal in seven places, which is one definition and six
+/// chances to disagree with it.
+///
+/// An ordinary preview pin is `sha256:`, which does not start with this, so
+/// the two are distinguishable in either direction.
+pub const WITNESS_PIN_PREFIX: &str = "witness-sha256:";
 const MAX_STORED_ARTIFACT_BYTES: usize = MAX_ENVELOPE_BYTES * 2;
 
 impl WitnessReviewArtifact {
@@ -157,7 +169,7 @@ impl WitnessReviewArtifact {
     pub fn digest(&self) -> Result<String> {
         let bytes =
             serde_json::to_vec(self).map_err(|_| anyhow::anyhow!("witness-artifact-malformed"))?;
-        Ok(format!("witness-sha256:{:x}", Sha256::digest(bytes)))
+        Ok(format!("{WITNESS_PIN_PREFIX}{:x}", Sha256::digest(bytes)))
     }
 
     pub(crate) fn response(&self) -> &WitnessedEnvelope {
