@@ -40,7 +40,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use trace_commons_operator_client::Client;
 
-use crate::config::{ACCOUNT_SESSION_FILE, ConfigStore, ContributorConfig, allowlist_for};
+use crate::config::{ACCOUNT_SESSION_FILE, ConfigStore, ContributorConfig, config_allowlist};
 
 /// The loopback path the server accepts, and the ONLY one it accepts. Pinned
 /// here and cross-checked against the server's own constant by
@@ -175,7 +175,7 @@ fn native_client(cfg: &ContributorConfig) -> Result<Client> {
         "TRACE_COMMONS_CONTRIBUTOR_UNUSED_BEARER_ENV",
     )
     .bearer_token(UNAUTHENTICATED_PLACEHOLDER)
-    .host_allowlist(allowlist_for(cfg.allowed_hosts.as_deref()))
+    .host_allowlist(config_allowlist(cfg))
     .build()
     .context("building the ingest client for native sign-in")
 }
@@ -379,7 +379,7 @@ pub async fn sign_out(store: &ConfigStore, cfg: &ContributorConfig) -> Result<()
                 "TRACE_COMMONS_CONTRIBUTOR_UNUSED_BEARER_ENV",
             )
             .bearer_token(token)
-            .host_allowlist(allowlist_for(cfg.allowed_hosts.as_deref()))
+            .host_allowlist(config_allowlist(cfg))
             .build()
             .context("building the ingest client for sign-out")?;
             client

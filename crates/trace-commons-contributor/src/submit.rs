@@ -19,7 +19,7 @@ use trace_commons_protocol::trace_contribution::{
     TraceSubmissionStatusUpdate,
 };
 
-use crate::config::{ConfigStore, ContributorConfig, Receipt, WitnessSettings, allowlist_for};
+use crate::config::{ConfigStore, ContributorConfig, Receipt, WitnessSettings, config_allowlist};
 use crate::envelope::{
     MAX_ENVELOPE_BYTES, NearAiSettings, apply_granted_scopes, build_deterministic_preview_redactor,
     build_preview_raw_contribution, build_raw_contribution_with_verdict, build_redactor_with,
@@ -405,8 +405,7 @@ impl<'a> SubmitContext<'a> {
         } else {
             Some(DeviceIdentity::load_or_generate(store).context("loading device identity")?)
         };
-        let issuer = IssuerClient::new(allowlist_for(cfg.allowed_hosts.as_deref()))
-            .context("building issuer client")?;
+        let issuer = IssuerClient::new(config_allowlist(cfg)).context("building issuer client")?;
         // An unenrolled preview has no enrollment and therefore no submission
         // history it can truthfully replay. Ignore stale receipts from torn
         // local state and run the preview pipeline for every selected session.
@@ -704,7 +703,7 @@ impl<'a> SubmitContext<'a> {
             self.effective_cfg.inference_receipt_endpoint.as_deref(),
             // The allowlist comes from the stored config, which is where
             // every other outbound call in this file reads it from.
-            &allowlist_for(self.cfg.allowed_hosts.as_deref()),
+            &config_allowlist(&self.cfg),
             call,
             self.effective_cfg.inference_receipt_check_attestation,
         )
@@ -749,7 +748,7 @@ impl<'a> SubmitContext<'a> {
         let transport = HttpWitnessTransport::new(
             settings.url.clone(),
             self.cfg.ingest_url.clone(),
-            std::sync::Arc::new(allowlist_for(self.cfg.allowed_hosts.as_deref())),
+            std::sync::Arc::new(config_allowlist(&self.cfg)),
             std::time::Duration::from_secs(120),
         )
         .map_err(|e| e.refusal_label())?
@@ -1187,8 +1186,7 @@ pub async fn status(
     let ids: Vec<Uuid> = receipts.iter().map(|r| r.submission_id).collect();
 
     let device = DeviceIdentity::load_or_generate(store).context("loading device identity")?;
-    let issuer = IssuerClient::new(allowlist_for(cfg.allowed_hosts.as_deref()))
-        .context("building issuer client")?;
+    let issuer = IssuerClient::new(config_allowlist(cfg)).context("building issuer client")?;
     // Mint with an empty scopes/uses request rather than the submit path's
     // consent_scopes: the issuer resolves an empty request to the caller's
     // full grant ceiling, so status read-back works regardless of what
@@ -1248,8 +1246,7 @@ pub async fn set_profile(
     bio: Option<&str>,
 ) -> Result<CommunityProfile> {
     let device = DeviceIdentity::load_or_generate(store).context("loading device identity")?;
-    let issuer = IssuerClient::new(allowlist_for(cfg.allowed_hosts.as_deref()))
-        .context("building issuer client")?;
+    let issuer = IssuerClient::new(config_allowlist(cfg)).context("building issuer client")?;
     // Same empty-scope mint as `status`: the issuer resolves it to this
     // caller's full grant ceiling, so claiming a handle does not depend on
     // whichever scopes were narrowed for the last submission.
@@ -1290,8 +1287,7 @@ pub async fn mint_account_login_link(
     cfg: &ContributorConfig,
 ) -> Result<String> {
     let device = DeviceIdentity::load_or_generate(store).context("loading device identity")?;
-    let issuer = IssuerClient::new(allowlist_for(cfg.allowed_hosts.as_deref()))
-        .context("building issuer client")?;
+    let issuer = IssuerClient::new(config_allowlist(cfg)).context("building issuer client")?;
     let token = mint_status_claim(&issuer, cfg, &device, Utc::now())
         .await
         .context("minting upload claim for account sign-in")?;
@@ -1310,8 +1306,7 @@ pub async fn mint_account_login_link(
 /// than only in a page they may never have been given access to.
 pub async fn clear_profile(store: &ConfigStore, cfg: &ContributorConfig) -> Result<()> {
     let device = DeviceIdentity::load_or_generate(store).context("loading device identity")?;
-    let issuer = IssuerClient::new(allowlist_for(cfg.allowed_hosts.as_deref()))
-        .context("building issuer client")?;
+    let issuer = IssuerClient::new(config_allowlist(cfg)).context("building issuer client")?;
     let token = mint_status_claim(&issuer, cfg, &device, Utc::now())
         .await
         .context("minting upload claim for profile withdrawal")?;
@@ -1386,8 +1381,7 @@ pub async fn fetch_score_attestation(
     cfg: &ContributorConfig,
 ) -> Result<String> {
     let device = DeviceIdentity::load_or_generate(store).context("loading device identity")?;
-    let issuer = IssuerClient::new(allowlist_for(cfg.allowed_hosts.as_deref()))
-        .context("building issuer client")?;
+    let issuer = IssuerClient::new(config_allowlist(cfg)).context("building issuer client")?;
     // Same empty-scope mint as `status`: the attestation is a read of scores
     // the server already holds, so it must not depend on whatever scopes were
     // narrowed for submission since the last login.
@@ -1518,8 +1512,7 @@ pub async fn await_scoped_score_attestation(
     poll_interval: StdDuration,
 ) -> Result<ScopedAttestation> {
     let device = DeviceIdentity::load_or_generate(store).context("loading device identity")?;
-    let issuer = IssuerClient::new(allowlist_for(cfg.allowed_hosts.as_deref()))
-        .context("building issuer client")?;
+    let issuer = IssuerClient::new(config_allowlist(cfg)).context("building issuer client")?;
     // Same empty-scope mint as `status` and the unscoped attestation: a read
     // of scores the server already holds must not depend on whatever scopes
     // were narrowed for submission since the last login.
@@ -1825,7 +1818,7 @@ fn build_ingest_client(
         "TRACE_COMMONS_CONTRIBUTOR_UNUSED_BEARER_ENV",
     )
     .bearer_token(&token.access_token)
-    .host_allowlist(allowlist_for(cfg.allowed_hosts.as_deref()))
+    .host_allowlist(config_allowlist(cfg))
     .build()
 }
 
@@ -4989,7 +4982,7 @@ mod tests {
         let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
         let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
         let cfg = cfg_for(&issuer_url, &ingest_url, &device.device_key_id);
-        let issuer = IssuerClient::new(allowlist_for(None)).unwrap();
+        let issuer = IssuerClient::new(crate::config::allowlist_for(None)).unwrap();
 
         let now = Utc::now();
         let mut initial = stub_claim(now);
