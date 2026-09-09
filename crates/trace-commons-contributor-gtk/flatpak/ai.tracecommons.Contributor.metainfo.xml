@@ -62,6 +62,15 @@
   </provides>
 
   <releases>
+    <release version="0.12.0" date="2026-09-08">
+      <description>
+        <p>Every session in the list now says, before you press send, whether it can be contributed at all. A session that cannot says which of its own facts stands in the way, and stays in the list rather than disappearing: it is present, not offered. Until now the only way to find out was to submit one and read the refusal that came back.</p>
+        <p>Approving a group sends the ones that are eligible and tells you how many it left behind. A group control that would send nothing is not offered.</p>
+        <p>OpenCode sessions are read, where OpenCode has been asked to export them. Only an export it was explicitly told to write is imported; nothing is taken from its working files. A session recorded in a format this version does not understand says so rather than being skipped in silence.</p>
+        <p>Signing in for Private AI can now be reached from the app. The sentence in front of the button says what pressing it does before you press it: it opens a browser, signs you in to a company that is not this app, and mints a key this app then keeps. Signing out removes the key from this computer and nothing else -- it does not revoke anything at the other end, and the screen says so.</p>
+        <p>A sign-in that is under way can be cancelled, and cancelling stops the attempt this computer is running rather than leaving it to time out.</p>
+      </description>
+    </release>
     <release version="0.11.0" date="2026-09-07">
       <description>
         <p>Answering model calls on this computer now has its own screen, called Private AI, rather than a setting buried under Tools. It lists the coding tools on this computer and says, for each one, whether it is connected, whether anything has arrived from it, and whether it is actually answering. A settings file with the right value in it only proves a file has a value in it; until now there was no way to tell whether a single call had ever come through.</p>
