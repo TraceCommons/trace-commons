@@ -1,0 +1,111 @@
+name: apt-get update against Ubuntu's own archive only
+description: >-
+  Removes every third-party apt source the runner image ships, asserts none
+  remains, then runs `apt-get update` loudly. Use in place of a bare
+  `sudo apt-get update` in any job that installs Ubuntu-archive packages.
+#
+# Why. The hosted ubuntu-* images come with vendor repositories configured
+# -- Google Chrome, Microsoft Edge, Mono, Heroku, and more -- and a plain
+# `apt-get update` fetches all of their indexes before it will install
+# anything. On 2026-09-09 `builds at the declared MSRV floor` went red twice
+# on a tag PR with
+#
+#     E: Failed to fetch https://dl.google.com/linux/chrome-stable/deb/dists/stable/main/binary-amd64/Packages.gz  Hash Sum mismatch
+#
+# having compiled nothing: a required check failed on a repository this
+# project has never installed a package from. Every job here installs only
+# Ubuntu-archive packages, so a vendor repository on the image is pure
+# exposure with no benefit, and the next one to publish a bad index would
+# do the same thing. Deleting one named list file would fix today's break
+# and leave that exposure in place, so this removes them all, by what they
+# point at rather than by filename.
+#
+# What is NOT done, deliberately:
+#   - No `|| true` and no `-qq`. A broken index that falls back to a stale
+#     cache installs the wrong package versions and passes; that is worse
+#     than red. If `apt-get update` fails AFTER the vendor sources are gone,
+#     Ubuntu's own archive is the problem and the job should fail saying so.
+#   - No `Acquire::Retries`. A hash-sum mismatch is a corrupt index, not a
+#     dropped packet; a retry re-fetches the same bad file.
+#   - No silent `rm -f` of a guessed path. A removal of a path that does not
+#     exist succeeds and leaves the failure in place, which reads as a fix
+#     until it recurs. The step lists what it found, what it removed, and
+#     asserts afterwards that nothing outside Ubuntu's archive remains.
+inputs:
+  sources-dir:
+    description: The apt sources.list.d directory. Only overridden by the action's own tests.
+    default: /etc/apt/sources.list.d
+runs:
+  using: composite
+  steps:
+    - name: Remove third-party apt sources, then apt-get update
+      shell: bash
+      env:
+        SOURCES_DIR: ${{ inputs.sources-dir }}
+      run: |
+        set -euo pipefail
+        # Ubuntu's own archive, in the forms the image spells it: the
+        # deb822 `ubuntu.sources` points at `mirror+file:/etc/apt/apt-mirrors.txt`
+        # (a mirror list of azure.archive.ubuntu.com), security updates at
+        # security.ubuntu.com, and ports at ports.ubuntu.com. Anything else
+        # is a vendor.
+        ubuntu='^(mirror\+file:|https?://([a-z0-9-]+\.)*ubuntu\.com([/:]|$))'
+        uris_of() {
+          # Both the one-line `deb ... URL suite comp` form and the deb822
+          # `URIs: URL URL` form; commented lines are not sources.
+          grep -hE '^[[:space:]]*(deb|deb-src)[[:space:]]|^[[:space:]]*URIs:' "$1" 2>/dev/null \
+            | grep -oE '(mirror\+file:|[a-z]+://)[^[:space:]]+' || true
+        }
+        echo "apt sources on this runner:"
+        found=0; removed=0
+        for f in "$SOURCES_DIR"/*; do
+          [ -f "$f" ] || continue
+          found=$((found+1))
+          uris="$(uris_of "$f")"
+          if [ -z "$uris" ]; then
+            echo "  keep    $f (declares no source)"
+            continue
+          fi
+          if printf '%s\n' "$uris" | grep -qvE "$ubuntu"; then
+            echo "  REMOVE  $f -> $(printf '%s ' $uris)"
+            sudo rm -f -- "$f"
+            removed=$((removed+1))
+          else
+            echo "  keep    $f -> $(printf '%s ' $uris)"
+          fi
+        done
+        echo "found $found source files, removed $removed third-party"
+        # The legacy one-line file. On 24.04 it is a comment-only stub, but
+        # it is checked rather than assumed.
+        if [ -f "$SOURCES_DIR/../sources.list" ]; then
+          legacy="$(uris_of "$SOURCES_DIR/../sources.list")"
+          if [ -n "$legacy" ] && printf '%s\n' "$legacy" | grep -qvE "$ubuntu"; then
+            echo "::error::/etc/apt/sources.list names a non-Ubuntu source: $legacy"
+            exit 1
+          fi
+        fi
+        # The assertion that closes: nothing outside Ubuntu's archive is
+        # left for apt to consult. A removal that silently missed a file
+        # fails here rather than at the next bad vendor index.
+        leftover=""
+        for f in "$SOURCES_DIR"/*; do
+          [ -f "$f" ] || continue
+          if printf '%s\n' "$(uris_of "$f")" | grep -qvE "^$|$ubuntu"; then
+            leftover="$leftover $f"
+          fi
+        done
+        if [ -n "$leftover" ]; then
+          echo "::error::third-party apt sources remain after removal:$leftover"
+          exit 1
+        fi
+        if [ "${APT_UPDATE_DRY_RUN:-}" = "1" ]; then
+          echo "dry run: not calling apt-get update"
+          exit 0
+        fi
+        if ! sudo apt-get update; then
+          echo "::error::apt-get update failed against Ubuntu's own archive." \
+               "Every third-party source had already been removed ($removed of them)," \
+               "so this is archive.ubuntu.com / security.ubuntu.com or the runner's mirror," \
+               "not a vendor repository. Do not add '|| true'; a stale index installs the wrong packages and passes."
+          exit 1
+        fi
