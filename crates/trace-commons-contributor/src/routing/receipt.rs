@@ -733,6 +733,57 @@ mod tests {
         );
     }
 
+    /// The outcome the adoption path exists to produce, checked at the layer
+    /// that used to refuse.
+    ///
+    /// `NotConfigured` was unescapable for a contributor who never exported
+    /// `TRACE_COMMONS_INFERENCE_RECEIPT_ENDPOINT`, because nothing else could
+    /// ever put a value in the config. Here the endpoint comes from what a
+    /// commons published, goes through the same adoption decision the daemon
+    /// makes, and the fetch that follows gets as far as calling the provider.
+    ///
+    /// The variable is asserted absent rather than set: a test that exported
+    /// it would be re-testing the one path that already worked.
+    #[tokio::test]
+    async fn an_endpoint_adopted_from_a_published_capability_is_one_a_fetch_will_use() {
+        assert!(
+            std::env::var(crate::config::TRACE_COMMONS_INFERENCE_RECEIPT_ENDPOINT).is_err(),
+            "this proves nothing unless the environment is silent"
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("a loopback port");
+        let address = listener.local_addr().expect("an address");
+        drop(listener); // Deterministic connection refusal; no provider is called.
+
+        let allowlist = HostAllowlist::from_csv("127.0.0.1");
+        let published = format!("https://{address}/v1");
+        let adopted = crate::config::receipt_endpoint_to_adopt(
+            None,
+            None,
+            &HostAllowlist::permissive(),
+            Some(&published),
+            &allowlist,
+        )
+        .expect("a published endpoint is adopted when nothing is configured");
+
+        let (call, _dir) = attestable_call(Some("Qwen/Qwen3.6-27B-FP8"));
+        let error = receipt_for_attested_call(Some(&adopted), &allowlist, &call, false)
+            .await
+            .unwrap_err();
+        assert_ne!(
+            error,
+            ReceiptFetchError::NotConfigured,
+            "the contributor still has no receipt endpoint, which is the whole bug"
+        );
+        assert_eq!(
+            error,
+            ReceiptFetchError::Unreachable,
+            "the fetch reached the network and found nothing listening, which is as far \
+             as a test without a provider can go"
+        );
+    }
+
     /// A row with no served model cannot name the query parameter the
     /// endpoint requires, and a model this client invented would be looked up
     /// against and produce a receipt for nothing.
