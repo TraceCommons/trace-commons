@@ -561,6 +561,7 @@ public struct AdmissionCopy: Decodable, Equatable, Sendable {
     public let working: String
     public let ready: String
     public let failed: String
+    public let failedReceiptEndpoint: String
     public let refusedGlyph: String
     public let refusedTone: String
     enum CodingKeys: String, CodingKey {
@@ -574,6 +575,7 @@ public struct AdmissionCopy: Decodable, Equatable, Sendable {
         case working = "working"
         case ready = "ready"
         case failed = "failed"
+        case failedReceiptEndpoint = "failed_receipt_endpoint"
         case refusedGlyph = "refused_glyph"
         case refusedTone = "refused_tone"
     }

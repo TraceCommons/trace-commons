@@ -374,7 +374,15 @@ pub fn admission_response(mut response: Response, now: i64) -> Response {
             .and_then(Value::as_i64)
             .is_some_and(|expiry| expiry > now);
     let copy = witness_copy().admission;
-    value["view"] = json!({"ready":ready,"state":if ready{"Ready"}else{"Refused"},"message":if ready{copy.ready}else{copy.failed},"tone":if ready{"neutral"}else{copy.refused_tone},"glyph":if ready{""}else{copy.refused_glyph}});
+    // Eighteen other labels reach this point and share `copy.failed`, which
+    // tells a contributor to check settings and retry. That is right for all
+    // of them and wrong for exactly one: a commons that published no receipt
+    // service is not a setting, and retrying cannot clear it.
+    let refused = match response.error.as_ref().map(|error| error.message.as_str()) {
+        Some("admission_receipt_endpoint_required") => copy.failed_receipt_endpoint,
+        _ => copy.failed,
+    };
+    value["view"] = json!({"ready":ready,"state":if ready{"Ready"}else{"Refused"},"message":if ready{copy.ready}else{refused},"tone":if ready{"neutral"}else{copy.refused_tone},"glyph":if ready{""}else{copy.refused_glyph}});
     response
 }
 
@@ -539,6 +547,12 @@ mod tests {
             generic,
             "a contributor whose commons published no receipt endpoint is told to retry \
              a thing that cannot succeed until the endpoint arrives"
+        );
+        assert_eq!(
+            admission_message("admission_receipt_endpoint_required"),
+            witness_copy().admission.failed_receipt_endpoint,
+            "the sentence comes from the shared copy, so the three shells say the same \
+             thing this one does"
         );
     }
 
