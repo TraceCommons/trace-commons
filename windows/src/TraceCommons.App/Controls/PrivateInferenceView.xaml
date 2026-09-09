@@ -118,6 +118,128 @@
                 </Border>
 
                 <!--
+                    What is left in that account, and it sits directly beneath
+                    the sign-in it describes.
+
+                    THIS CARD JUDGES NO AMOUNT. There is no threshold here, no
+                    low balance colour and no warning: a figure this app
+                    painted red would be inventing a limit nobody set, on an
+                    account whose ceiling may not exist at all. The colours on
+                    this card come from the state, and they say whether the
+                    READ succeeded, never whether the money is comfortable.
+
+                    The figure and its absence are two different things. An
+                    empty amount is never zero: the account with no ceiling is
+                    the ordinary one, it reports no remaining figure, and the
+                    sentence in its place says so in words rather than letting
+                    a contributor read $0.00 and top up money they still have.
+
+                    On the one state that carries figures the state sentence
+                    is deliberately empty, so nothing is drawn above the
+                    number except the heading naming what it is.
+                -->
+                <Border Background="{ThemeResource TcSurfaceCardBrush}"
+                        BorderBrush="{ThemeResource TcHairlineBrush}"
+                        BorderThickness="1"
+                        CornerRadius="{StaticResource TcCardCornerRadius}"
+                        Padding="14,12"
+                        Visibility="{x:Bind ViewModel.Available, Mode=OneWay}">
+                    <StackPanel Spacing="10">
+                        <TextBlock Text="{x:Bind ViewModel.BalanceTitle, Mode=OneWay}"
+                                   Style="{StaticResource TcTitleSectionTextStyle}"
+                                   TextWrapping="Wrap" />
+                        <!--
+                            The figure the heading just named. No Foreground
+                            of its own, deliberately: the ink is the card's,
+                            and nothing here reads the number back to pick a
+                            colour from it.
+                        -->
+                        <TextBlock Text="{x:Bind ViewModel.BalanceAmountText, Mode=OneWay}"
+                                   Visibility="{x:Bind ViewModel.HasBalanceAmount, Mode=OneWay}"
+                                   Style="{StaticResource TcMetricValueTextStyle}" />
+                        <!--
+                            And where there is no figure, the sentence that
+                            explains why there is not. Drawn only when the
+                            figure is not, so the two never say it twice.
+                        -->
+                        <TextBlock Text="{x:Bind ViewModel.BalanceRemainingText, Mode=OneWay}"
+                                   Visibility="{x:Bind ViewModel.HasBalanceRemainingText, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   TextWrapping="Wrap" />
+                        <TextBlock Text="{x:Bind ViewModel.BalanceWhat, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   TextWrapping="Wrap" />
+                        <!--
+                            One line per tone, chosen from the tone and never
+                            from the text, exactly as the two cards around it
+                            are. The whole group is absent on the state whose
+                            sentence is empty, so a card of figures never
+                            opens with a blank line.
+                        -->
+                        <StackPanel Spacing="0"
+                                    Visibility="{x:Bind ViewModel.HasBalanceStateText, Mode=OneWay}">
+                            <TextBlock Text="{x:Bind ViewModel.BalanceStateText, Mode=OneWay}"
+                                       Visibility="{x:Bind ViewModel.BalanceIsNeutral, Mode=OneWay}"
+                                       Style="{StaticResource TcCaptionTextStyle}"
+                                       TextWrapping="Wrap" />
+                            <TextBlock Text="{x:Bind ViewModel.BalanceStateText, Mode=OneWay}"
+                                       Visibility="{x:Bind ViewModel.BalanceIsHeld, Mode=OneWay}"
+                                       Style="{StaticResource TcCaptionTextStyle}"
+                                       Foreground="{ThemeResource TcBlueBrandBrush}"
+                                       TextWrapping="Wrap" />
+                            <TextBlock Text="{x:Bind ViewModel.BalanceStateText, Mode=OneWay}"
+                                       Visibility="{x:Bind ViewModel.BalanceIsClear, Mode=OneWay}"
+                                       Style="{StaticResource TcCaptionTextStyle}"
+                                       Foreground="{ThemeResource TcGreenTextBrush}"
+                                       TextWrapping="Wrap" />
+                            <TextBlock Text="{x:Bind ViewModel.BalanceStateText, Mode=OneWay}"
+                                       Visibility="{x:Bind ViewModel.BalanceIsAttention, Mode=OneWay}"
+                                       Style="{StaticResource TcCaptionTextStyle}"
+                                       Foreground="{ThemeResource TcGoldTextBrush}"
+                                       TextWrapping="Wrap" />
+                            <TextBlock Text="{x:Bind ViewModel.BalanceStateText, Mode=OneWay}"
+                                       Visibility="{x:Bind ViewModel.BalanceIsRefused, Mode=OneWay}"
+                                       Style="{StaticResource TcCaptionTextStyle}"
+                                       Foreground="{ThemeResource TcCoralTextBrush}"
+                                       TextWrapping="Wrap" />
+                        </StackPanel>
+                        <TextBlock Text="{x:Bind ViewModel.BalanceLimitText, Mode=OneWay}"
+                                   Visibility="{x:Bind ViewModel.HasBalanceLimitText, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   TextWrapping="Wrap" />
+                        <TextBlock Text="{x:Bind ViewModel.BalanceSpentText, Mode=OneWay}"
+                                   Visibility="{x:Bind ViewModel.HasBalanceSpentText, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   TextWrapping="Wrap" />
+                        <!--
+                            When THIS COMPUTER asked. Not when the service
+                            updated anything, which is a claim about its
+                            bookkeeping that nothing here supports.
+                        -->
+                        <TextBlock Text="{x:Bind ViewModel.BalanceObservedText, Mode=OneWay}"
+                                   Visibility="{x:Bind ViewModel.HasBalanceObservedText, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionSmallTextStyle}"
+                                   TextWrapping="Wrap" />
+                        <!--
+                            The way back in, and it is the sign-in card's own
+                            action: the same words, the same cost sentence and
+                            the same ceremony. Withheld while that card is
+                            already offering one, because two buttons that
+                            mint the same key are one button too many.
+                        -->
+                        <TextBlock Text="{x:Bind ViewModel.BalanceActionPreamble, Mode=OneWay}"
+                                   Visibility="{x:Bind ViewModel.HasBalanceActionPreamble, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   TextWrapping="Wrap" />
+                        <Button Content="{x:Bind ViewModel.BalanceActionText, Mode=OneWay}"
+                                Visibility="{x:Bind ViewModel.HasBalanceAction, Mode=OneWay}"
+                                IsEnabled="{x:Bind ViewModel.CredentialControlsEnabled, Mode=OneWay}"
+                                HorizontalAlignment="Left"
+                                Click="OnBalanceAction" />
+                    </StackPanel>
+                </Border>
+
+                <!--
                     The tools on this computer, and they come FIRST. Connecting
                     one is what a contributor came here to do; the switch below
                     is the kill switch over all of them, not the first question.

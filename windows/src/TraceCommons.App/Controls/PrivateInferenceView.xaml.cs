@@ -114,6 +114,44 @@ public sealed partial class PrivateInferenceView : UserControl
     }
 
     /// <summary>
+    /// The balance card's one button.
+    /// </summary>
+    /// <remarks>
+    /// THE SAME CEREMONY, not a parallel one. The view model answers with the
+    /// sign-in card's own started attempt, so everything below this line is
+    /// that card's handling: open the URL the daemon served once, cancel the
+    /// ceremony nobody can finish when no browser opened, and wait for it to
+    /// settle.
+    /// </remarks>
+    private async void OnBalanceAction(object sender, RoutedEventArgs e)
+    {
+        NearAiCredentialAttempt? attempt = await ViewModel.PressBalanceAsync();
+        if (attempt is not { BrowserUrl.Length: > 0 } started)
+        {
+            return;
+        }
+
+        bool opened;
+        try
+        {
+            opened = await Windows.System.Launcher.LaunchUriAsync(new Uri(started.BrowserUrl));
+        }
+        catch (UriFormatException)
+        {
+            System.Diagnostics.Trace.TraceWarning(nameof(OnBalanceAction));
+            opened = false;
+        }
+
+        if (!opened)
+        {
+            await ViewModel.CancelCredentialAsync();
+            return;
+        }
+
+        await ViewModel.AwaitCredentialAsync();
+    }
+
+    /// <summary>
     /// "Send this tool's calls here", for one row.
     /// </summary>
     /// <remarks>
