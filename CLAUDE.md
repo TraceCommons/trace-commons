@@ -251,6 +251,22 @@ in `license_boundary.rs` to match your diff -- those sets are the specification.
   removed. See `crates/trace-commons-server/src/bin/pilot_bootstrap/hf_dataset.rs`.
 - `trace-commons-ingest.rs` test module is extracted to
   `trace_commons_ingest_internal/tests.rs` via `#[path = ...]`.
+- `cargo test -p <crate>` compiles none of a module behind a non-default
+  feature, then reports a green run of the tests it did build. Measured on
+  `main`: `-p trace-commons-attestation` runs 35 tests, `--features receipt`
+  runs 98 -- the 63 in `receipt.rs` never built. Two more crates have the same
+  shape: `trace-commons-gate-enclave` 99 -> 136 under `near-ai-scorer`, and
+  `trace-commons-protocol` 251 -> 289 under `near-ai-privacy-filter`. Pass
+  `--features`, or use `cargo test --workspace`, which is what CI runs and
+  which reaches them through feature unification.
+- The shell test projects copy the FFI dylib only `Condition="Exists(...)"`
+  (`windows/tests/TraceCommons.Interop.Tests/*.csproj`), so a stale or absent
+  artifact fails nothing and the suite tests whatever ABI it last built. CI
+  builds `trace-commons-contributor-ffi` before running them; a local run does
+  not. The exported-vs-declared assertions do not catch it, because both halves
+  move together -- an old dylib compared against a shell that has not added the
+  new fields agrees with itself. Rebuild the dylib before trusting a shell
+  suite result, green or red.
 
 ## Memory
 
