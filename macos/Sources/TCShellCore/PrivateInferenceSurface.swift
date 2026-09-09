@@ -72,6 +72,28 @@ public struct PrivateInferenceCopy: Decodable, Equatable, Sendable {
     public let harnessPlanNoConfigPath: String
 
     /// The heading over the sign-in card.
+    /// Enrolling this device with the NEAR AI login a contributor already
+    /// has, instead of a NEAR wallet. Both paths are offered; neither is
+    /// removed. The ten refusals are the daemon's own control names and each
+    /// says its own thing -- the three that refuse before anything is spent
+    /// especially, since a contributor told the wrong one debugs the wrong
+    /// thing.
+    public let nearAiEnrollTitle: String
+    public let nearAiEnrollWhat: String
+    public let nearAiEnrollAction: String
+    public let nearAiEnrollNeedsLogin: String
+    public let nearAiEnrollWorking: String
+    public let nearAiEnrollDone: String
+    public let nearAiEnrollAlreadyEnrolled: String
+    public let nearAiEnrollNoSession: String
+    public let nearAiEnrollEndpointRefused: String
+    public let nearAiEnrollTokenUnavailable: String
+    public let nearAiEnrollStartFailed: String
+    public let nearAiEnrollCommonsUnreachable: String
+    public let nearAiEnrollCommonsUnsupported: String
+    public let nearAiEnrollInvalid: String
+    public let nearAiEnrollVerificationFailed: String
+    public let nearAiEnrollUnavailable: String
     public let credentialTitle: String
     /// What holding a key of one's own changes about this destination.
     public let credentialWhat: String
@@ -256,6 +278,22 @@ public struct PrivateInferenceCopy: Decodable, Equatable, Sendable {
         case harnessPlanNothingToChange = "harness_plan_nothing_to_change"
         case harnessPlanEntryUnusable = "harness_plan_entry_unusable"
         case harnessPlanNoConfigPath = "harness_plan_no_config_path"
+        case nearAiEnrollTitle = "near_ai_enroll_title"
+        case nearAiEnrollWhat = "near_ai_enroll_what"
+        case nearAiEnrollAction = "near_ai_enroll_action"
+        case nearAiEnrollNeedsLogin = "near_ai_enroll_needs_login"
+        case nearAiEnrollWorking = "near_ai_enroll_working"
+        case nearAiEnrollDone = "near_ai_enroll_done"
+        case nearAiEnrollAlreadyEnrolled = "near_ai_enroll_already_enrolled"
+        case nearAiEnrollNoSession = "near_ai_enroll_no_session"
+        case nearAiEnrollEndpointRefused = "near_ai_enroll_endpoint_refused"
+        case nearAiEnrollTokenUnavailable = "near_ai_enroll_token_unavailable"
+        case nearAiEnrollStartFailed = "near_ai_enroll_start_failed"
+        case nearAiEnrollCommonsUnreachable = "near_ai_enroll_commons_unreachable"
+        case nearAiEnrollCommonsUnsupported = "near_ai_enroll_commons_unsupported"
+        case nearAiEnrollInvalid = "near_ai_enroll_invalid"
+        case nearAiEnrollVerificationFailed = "near_ai_enroll_verification_failed"
+        case nearAiEnrollUnavailable = "near_ai_enroll_unavailable"
         case credentialTitle = "credential_title"
         case credentialWhat = "credential_what"
         case credentialCost = "credential_cost"

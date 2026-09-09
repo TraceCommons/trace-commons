@@ -859,6 +859,36 @@ extension QueueEntry {
     }
 }
 
+/// How a join attempt ended.
+///
+/// The refusal carries the daemon's **control name**, not a sentence: the
+/// words are `TCNearAiEnroll`'s, from the shared table, and a model that
+/// carried prose would be a second place those ten sentences live.
+enum NearAiEnrollOutcome: Sendable, Equatable {
+    case joined(NearAiEnrollment)
+    case refused(String)
+}
+
+/// What `near_ai_account_enroll` answers when it succeeds.
+///
+/// The account is whatever the commons resolved the daemon's NEAR AI token
+/// to -- this shell never sends one and never asserts one. `enrolled` is
+/// decoded rather than assumed from the absence of an error: a success
+/// response that did not say so is not one this shell should celebrate.
+struct NearAiEnrollment: Decodable, Sendable, Equatable {
+    let enrolled: Bool
+    let tenantID: String
+    let accountID: String
+    let deviceKeyID: String
+
+    enum CodingKeys: String, CodingKey {
+        case enrolled
+        case tenantID = "tenant_id"
+        case accountID = "account_id"
+        case deviceKeyID = "device_key_id"
+    }
+}
+
 /// An extension rather than a member so that `PreviewSummary` keeps its
 /// memberwise initializer, which the debug capture screens build fixtures
 /// with. Written out so `redactionsDistinct` can be absent without failing

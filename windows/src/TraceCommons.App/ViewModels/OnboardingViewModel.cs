@@ -33,6 +33,12 @@ namespace TraceCommons.App.ViewModels;
 public sealed class OnboardingViewModel : INotifyPropertyChanged
 {
     private static readonly OnboardingCopy? SharedOnboardingCopy = OnboardingCopy.Load();
+
+    /// The shared payload, for the login-enrolment offer's own sentences.
+    /// Loaded once for the same reason the onboarding copy is: these are
+    /// facts about the build, not about a running daemon.
+    private static readonly PrivateInferenceCopy? SharedPrivateInferenceCopy =
+        PrivateInferenceSurface.Copy();
     public string WelcomeBody => SharedOnboardingCopy?.WelcomeBody ?? "";
     public string DoneBody => SharedOnboardingCopy?.DoneBody ?? "";
     /// <summary>
@@ -108,6 +114,150 @@ public sealed class OnboardingViewModel : INotifyPropertyChanged
             Raise(nameof(IsWatch));
             Raise(nameof(IsDone));
         }
+    }
+
+    // --- Joining with a NEAR AI login -----------------------------------
+    //
+    // The way in that needs no wallet, drawn beside the wallet ceremony and
+    // replacing none of it. A contributor cannot produce an admissible
+    // receipt without a NEAR AI account in the first place, so requiring a
+    // wallet as well is a second onboarding for an identity they already
+    // hold.
+    //
+    // Nothing here authors a sentence and nothing branches on a control name.
+    // The ten refusals reach NearAiEnrollSurface, which asks the shared table.
+
+    private string _nearAiCommons = string.Empty;
+    private bool _nearAiPending;
+    private bool _nearAiJoined;
+    private string? _nearAiRefusal;
+
+    /// <summary>
+    /// Whether the daemon reports a usable NEAR AI sign-in.
+    /// </summary>
+    /// <remarks>
+    /// False until the first status read answers, which is the reading that
+    /// claims less: a card that has not been told yet must not offer a
+    /// control whose only outcome is <c>near_ai_enroll_no_session</c>.
+    /// </remarks>
+    private bool _nearAiSignedIn;
+
+    public string NearAiCommons
+    {
+        get => _nearAiCommons;
+        set
+        {
+            if (_nearAiCommons == value) return;
+            _nearAiCommons = value;
+            Raise(nameof(NearAiCommons));
+            Raise(nameof(CanJoinWithNearAi));
+        }
+    }
+
+    public string NearAiTitle => SharedPrivateInferenceCopy?.NearAiEnrollTitle ?? string.Empty;
+    public string NearAiWhat => SharedPrivateInferenceCopy?.NearAiEnrollWhat ?? string.Empty;
+    public string NearAiAction => SharedPrivateInferenceCopy?.NearAiEnrollAction ?? string.Empty;
+    public string NearAiWorking => _nearAiPending ? SharedPrivateInferenceCopy?.NearAiEnrollWorking ?? string.Empty : string.Empty;
+    public string NearAiDone => _nearAiJoined ? SharedPrivateInferenceCopy?.NearAiEnrollDone ?? string.Empty : string.Empty;
+
+    /// <summary>
+    /// The step to take when there is no sign-in yet. Not a refusal: nothing
+    /// went wrong and nothing was attempted.
+    /// </summary>
+    public string NearAiNeedsLogin =>
+        _nearAiSignedIn || _nearAiJoined ? string.Empty : SharedPrivateInferenceCopy?.NearAiEnrollNeedsLogin ?? string.Empty;
+
+    /// <summary>The daemon's refusal, in the shared table's words.</summary>
+    public string NearAiRefusalMessage =>
+        _nearAiRefusal is null ? string.Empty : NearAiEnrollSurface.Line(_nearAiRefusal) ?? string.Empty;
+
+    /// <summary>
+    /// The control is OFFERED only where it can succeed, and hidden rather
+    /// than disabled otherwise.
+    /// </summary>
+    public bool CanOfferNearAiJoin => _nearAiSignedIn && !_nearAiJoined;
+
+    public bool CanJoinWithNearAi =>
+        CanOfferNearAiJoin && !_nearAiPending && !string.IsNullOrWhiteSpace(_nearAiCommons);
+
+    /// <summary>
+    /// Reads whether a sign-in exists before offering a control that would
+    /// otherwise only refuse.
+    /// </summary>
+    public async Task RefreshNearAiSignInAsync()
+    {
+        DaemonResponse response = await _host.CallAsync("near_ai_credential_status").ConfigureAwait(true);
+        bool present = !response.IsError
+            && response.Result is { ValueKind: System.Text.Json.JsonValueKind.Object } value
+            && value.TryGetProperty("state", out var state)
+            && state.ValueKind == System.Text.Json.JsonValueKind.String
+            && state.GetString() == NearAiEnrollSurface.CredentialStatePresent;
+        _nearAiSignedIn = present;
+        RaiseNearAi();
+    }
+
+    /// <summary>
+    /// Joins with the retained NEAR AI login.
+    /// </summary>
+    /// <remarks>
+    /// The refusal is stored as the daemon's control name, never as a
+    /// sentence: this view model does not know which of the ten it is and
+    /// must not guess.
+    /// </remarks>
+    public async Task JoinWithNearAiAsync()
+    {
+        if (!CanJoinWithNearAi) return;
+        _nearAiPending = true;
+        _nearAiRefusal = null;
+        RaiseNearAi();
+        try
+        {
+            DaemonResponse response = await _host
+                .CallAsync("near_ai_account_enroll", NearAiEnrollRequest(_nearAiCommons.Trim()))
+                .ConfigureAwait(true);
+            if (response.IsError)
+            {
+                // `message` is the daemon's control name -- the enrolment
+                // handler answers a label and nothing else, because the
+                // errors underneath can quote a remote body or a URL.
+                string label = response.Error?.Message ?? string.Empty;
+                _nearAiRefusal = string.IsNullOrEmpty(label)
+                    ? NearAiEnrollSurface.Unavailable
+                    : label;
+            }
+            else
+            {
+                // Read from the answer rather than assumed from the absence
+                // of an error: a response that never said it enrolled is not
+                // one to celebrate.
+                _nearAiJoined = response.Result is { ValueKind: System.Text.Json.JsonValueKind.Object } ok
+                    && ok.TryGetProperty("enrolled", out var enrolled)
+                    && enrolled.ValueKind == System.Text.Json.JsonValueKind.True;
+                if (_nearAiJoined) OnNearAccountCompleted();
+            }
+        }
+        catch
+        {
+            _nearAiRefusal = NearAiEnrollSurface.Unavailable;
+        }
+        finally
+        {
+            _nearAiPending = false;
+            RaiseNearAi();
+        }
+    }
+
+    private static string NearAiEnrollRequest(string commons) =>
+        System.Text.Json.JsonSerializer.Serialize(new { ingest_url = commons });
+
+    private void RaiseNearAi()
+    {
+        Raise(nameof(CanOfferNearAiJoin));
+        Raise(nameof(CanJoinWithNearAi));
+        Raise(nameof(NearAiNeedsLogin));
+        Raise(nameof(NearAiRefusalMessage));
+        Raise(nameof(NearAiWorking));
+        Raise(nameof(NearAiDone));
     }
 
     public bool IsWelcome => Step == OnboardingStep.Welcome;

@@ -171,6 +171,18 @@
     <None Include="$(MSBuildThisFileDirectory)../../src/TraceCommons.App/Controls/PreviewSheet.xaml"
           Link="PreviewSheet.xaml.txt"
           CopyToOutputDirectory="PreserveNewest" />
+    <!--
+      The onboarding screen and its view model, for the login-enrolment guard.
+      TraceCommons.App is WinUI and cannot be referenced from a test assembly,
+      so the only way to hold "no shell spells a control name" is to read the
+      source as text.
+    -->
+    <None Include="$(MSBuildThisFileDirectory)../../src/TraceCommons.App/ViewModels/OnboardingViewModel.cs"
+          Link="OnboardingViewModel.cs.txt"
+          CopyToOutputDirectory="PreserveNewest" />
+    <None Include="$(MSBuildThisFileDirectory)../../src/TraceCommons.App/OnboardingWindow.xaml"
+          Link="OnboardingWindow.xaml.txt"
+          CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <ItemGroup>

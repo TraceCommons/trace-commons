@@ -12,6 +12,7 @@ mod css_contract;
 pub mod history;
 pub mod mark;
 pub mod onboarding;
+mod onboarding_nearai;
 mod onboarding_wallet;
 pub mod preview;
 pub mod private_inference;

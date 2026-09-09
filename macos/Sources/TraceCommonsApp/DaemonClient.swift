@@ -66,6 +66,17 @@ final class DaemonClient {
         try call("native_wallet_flow", params: ["action": action, "flow_id": flowID, "ingest_url": commons, "account_id": account], as: NativeWalletView.self)
     }
 
+    /// Join a commons with the NEAR AI login this daemon already holds.
+    ///
+    /// Takes no account id and no token, deliberately: the account is
+    /// whatever the commons resolves the daemon's own short-lived JWT to, and
+    /// a client-asserted id would be worthless -- an attacker running a
+    /// modified client would assert a fresh one per submission. There is no
+    /// parameter for either and this shell must never invent one.
+    func nearAiAccountEnroll(commons: String) throws -> NearAiEnrollment {
+        try call("near_ai_account_enroll", params: ["ingest_url": commons], as: NearAiEnrollment.self)
+    }
+
     func prepareAdmissionSession(entryID: String, backend: String) throws -> AdmissionPreparation {
         try call("prepare_admission_session", params: ["entry_id": entryID, "backend": backend, "confirmed": true], as: AdmissionPreparation.self)
     }

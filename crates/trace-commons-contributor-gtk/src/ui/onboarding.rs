@@ -632,6 +632,13 @@ fn connect_page(app: &Rc<App>, onboarding: &Rc<Onboarding>) -> gtk::Box {
         }
     });
 
+    // The way in that needs no wallet, above the wallet ceremony rather than
+    // below it. Both are offered and neither replaces the other; this one is
+    // first because it is the shorter road for a contributor who already has
+    // the NEAR AI account the receipts come from anyway.
+    let near_ai = super::onboarding_nearai::build(app, onboarding);
+    body.append(&near_ai);
+
     let wallet = super::onboarding_wallet::build(app, onboarding);
     body.append(&wallet);
 

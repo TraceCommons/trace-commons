@@ -144,6 +144,18 @@ public struct CredentialCalls: Sendable {
 /// decision that draws a button which mints a key at a third party.
 public enum CredentialSurface {
     /// The IPC methods, named once.
+    /// The one `state` value that means a usable sign-in is kept here.
+    ///
+    /// Held beside the method names above, which are wire strings this shell
+    /// already spells, and for the same reason: one place rather than one per
+    /// call site. `daemon::nearai_credential::LABEL_CREDENTIAL_PRESENT` is
+    /// the definition; this is the shell's single mirror of it.
+    ///
+    /// Read only to decide whether a control that REQUIRES a sign-in can be
+    /// offered. The sentence and the tone for the credential row itself still
+    /// come from the shared table -- this is not a second copy of those.
+    public static let statePresent = "present"
+
     public static let statusMethod = "near_ai_credential_status"
     public static let startMethod = "near_ai_credential_start"
     public static let cancelMethod = "near_ai_credential_cancel"

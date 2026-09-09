@@ -95,6 +95,39 @@
             <Button Content="Connect" HorizontalAlignment="Right"
                     IsEnabled="{x:Bind ViewModel.CanConnect, Mode=OneWay}"
                     Click="OnConnect" />
+            <!--
+                Joining with a NEAR AI login: the way in that needs no wallet.
+
+                Above the wallet ceremony rather than below it. Both are
+                offered and neither replaces the other; this one is first
+                because it is the shorter road for a contributor who already
+                has the NEAR AI account the receipts come from anyway.
+
+                With no sign-in the join control is ABSENT rather than
+                present and refusing, and the sentence beneath says the step
+                to take. A button whose only outcome is
+                near_ai_enroll_no_session teaches somebody the feature is
+                broken rather than that they have something to do.
+
+                Every word is bound. Ten refusals reach ten sentences through
+                NearAiEnrollSurface, and nothing is typed out here.
+            -->
+            <StackPanel Spacing="12">
+                <TextBlock Text="{x:Bind ViewModel.NearAiTitle}" Style="{StaticResource TcTitleCardTextStyle}" TextWrapping="Wrap" />
+                <TextBlock Text="{x:Bind ViewModel.NearAiWhat}" TextWrapping="Wrap" />
+                <TextBox Text="{x:Bind ViewModel.NearAiCommons, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                         IsEnabled="{x:Bind ViewModel.CanUseWallet, Mode=OneWay}" />
+                <Button Content="{x:Bind ViewModel.NearAiAction}"
+                        Click="OnJoinWithNearAi"
+                        Visibility="{x:Bind ViewModel.CanOfferNearAiJoin, Mode=OneWay}"
+                        IsEnabled="{x:Bind ViewModel.CanJoinWithNearAi, Mode=OneWay}" />
+                <TextBlock Text="{x:Bind ViewModel.NearAiNeedsLogin, Mode=OneWay}" TextWrapping="Wrap" />
+                <TextBlock Text="{x:Bind ViewModel.NearAiWorking, Mode=OneWay}" TextWrapping="Wrap" />
+                <TextBlock Text="{x:Bind ViewModel.NearAiDone, Mode=OneWay}" TextWrapping="Wrap" />
+                <TextBlock Text="{x:Bind ViewModel.NearAiRefusalMessage, Mode=OneWay}"
+                           Style="{StaticResource TcHeadingAlertTextStyle}" TextWrapping="Wrap" />
+            </StackPanel>
+
             <ContentControl Visibility="{x:Bind ViewModel.NearAccount.Supported, Mode=OneWay}"
                             IsEnabled="{x:Bind ViewModel.CanUseWallet, Mode=OneWay}"
                             HorizontalContentAlignment="Stretch">

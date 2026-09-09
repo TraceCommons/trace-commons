@@ -29,18 +29,18 @@ use trace_commons_contributor_ffi::{
     tc_contribution_eligibility_tone, tc_contribution_group_control, tc_contribution_withheld_line,
     tc_daemon_start, tc_daemon_start_with_settings, tc_daemon_stop, tc_discover_sources, tc_handle,
     tc_handle_free, tc_invite_issuer_host, tc_last_error, tc_near_ai_credential_action,
-    tc_near_ai_credential_state_line, tc_near_ai_credential_state_tone, tc_preview,
-    tc_preview_body, tc_preview_open, tc_preview_search, tc_preview_summary_json,
-    tc_preview_turns_json, tc_private_inference_copy, tc_private_inference_quit_needs_notice,
-    tc_private_inference_serving_line, tc_private_inference_should_offer,
-    tc_private_inference_state_line, tc_private_inference_state_tone, tc_routing_copy,
-    tc_routing_discovery_line, tc_routing_last_checked, tc_routing_state_line,
-    tc_routing_state_tone, tc_routing_token_line, tc_routing_tool_tone, tc_routing_tool_word,
-    tc_routing_unreachable_line, tc_scrub_detector_names, tc_search_original, tc_source_check_line,
-    tc_string_free, tc_subscribe, tc_unsubscribe, tc_witness_clear, tc_witness_configure,
-    tc_witness_copy, tc_witness_last_result_json, tc_witness_last_result_line,
-    tc_witness_last_result_tone, tc_witness_state_line, tc_witness_state_tone,
-    tc_witness_status_json, tc_witness_trust_state,
+    tc_near_ai_credential_state_line, tc_near_ai_credential_state_tone, tc_near_ai_enroll_line,
+    tc_near_ai_enroll_tone, tc_preview, tc_preview_body, tc_preview_open, tc_preview_search,
+    tc_preview_summary_json, tc_preview_turns_json, tc_private_inference_copy,
+    tc_private_inference_quit_needs_notice, tc_private_inference_serving_line,
+    tc_private_inference_should_offer, tc_private_inference_state_line,
+    tc_private_inference_state_tone, tc_routing_copy, tc_routing_discovery_line,
+    tc_routing_last_checked, tc_routing_state_line, tc_routing_state_tone, tc_routing_token_line,
+    tc_routing_tool_tone, tc_routing_tool_word, tc_routing_unreachable_line,
+    tc_scrub_detector_names, tc_search_original, tc_source_check_line, tc_string_free,
+    tc_subscribe, tc_unsubscribe, tc_witness_clear, tc_witness_configure, tc_witness_copy,
+    tc_witness_last_result_json, tc_witness_last_result_line, tc_witness_last_result_tone,
+    tc_witness_state_line, tc_witness_state_tone, tc_witness_status_json, tc_witness_trust_state,
 };
 use trace_commons_contributor_ffi::{
     tc_harness_action_available, tc_harness_last_call_line, tc_harness_outcome_line,
@@ -4535,4 +4535,103 @@ fn the_certificate_reading_is_chosen_behind_the_abi_and_never_by_a_shell() {
             "a malformed argument produced the reading that asserts attestation"
         );
     }
+}
+
+/// The ten login-enrolment refusals reach ten sentences, and none is silent.
+///
+/// **Unlike an attestation reason, the empty string is never right here.** A
+/// reason this build cannot name has nothing honest to add to a mark that
+/// already said the true thing; a refusal this build cannot name is the whole
+/// of what the contributor is being told, and silence would leave a control
+/// that did nothing and said nothing.
+#[test]
+fn every_login_enrolment_refusal_reaches_its_own_sentence() {
+    use trace_commons_contributor::private_inference_copy as copy;
+    let labels = [
+        copy::NEAR_AI_ENROLL_ALREADY_ENROLLED,
+        copy::NEAR_AI_ENROLL_NO_SESSION,
+        copy::NEAR_AI_ENROLL_ENDPOINT_REFUSED,
+        copy::NEAR_AI_ENROLL_TOKEN_UNAVAILABLE,
+        copy::NEAR_AI_ENROLL_START_FAILED,
+        copy::NEAR_AI_ENROLL_COMMONS_UNREACHABLE,
+        copy::NEAR_AI_ENROLL_COMMONS_UNSUPPORTED,
+        copy::NEAR_AI_ENROLL_INVALID,
+        copy::NEAR_AI_ENROLL_VERIFICATION_FAILED,
+        copy::NEAR_AI_ENROLL_UNAVAILABLE,
+    ];
+    let mut seen = std::collections::BTreeSet::new();
+    for label in labels {
+        let line = take_owned(unsafe {
+            std::ffi::CString::new(label)
+                .map(|c| tc_near_ai_enroll_line(c.as_ptr()))
+                .unwrap()
+        });
+        assert!(
+            !line.is_empty(),
+            "{label} reached no sentence across the ABI"
+        );
+        assert!(
+            seen.insert(line),
+            "{label} shares a sentence with another refusal"
+        );
+    }
+
+    // A NULL, an empty label and one this build has never seen all reach the
+    // generic sentence rather than nothing.
+    let generic = take_owned(unsafe {
+        std::ffi::CString::new(copy::NEAR_AI_ENROLL_UNAVAILABLE)
+            .map(|c| tc_near_ai_enroll_line(c.as_ptr()))
+            .unwrap()
+    });
+    assert_eq!(
+        take_owned(unsafe { tc_near_ai_enroll_line(std::ptr::null()) }),
+        generic
+    );
+    for unknown in ["", "near_ai_enroll_from_a_newer_daemon"] {
+        let c = std::ffi::CString::new(unknown).unwrap();
+        assert_eq!(
+            take_owned(unsafe { tc_near_ai_enroll_line(c.as_ptr()) }),
+            generic
+        );
+    }
+}
+
+/// The one refusal with a step to take reads as such, and the one that
+/// refused nothing does not read as a refusal.
+#[test]
+fn the_login_enrolment_tones_point_at_the_step_rather_than_the_wall() {
+    use trace_commons_contributor::private_inference_copy as copy;
+    let tone = |label: &str| {
+        let c = std::ffi::CString::new(label).unwrap();
+        unsafe { tc_near_ai_enroll_tone(c.as_ptr()) }
+    };
+
+    // Not signed in yet: something to do, so it must not be painted as a wall.
+    assert_eq!(
+        tone(copy::NEAR_AI_ENROLL_NO_SESSION),
+        TC_PRIVATE_INFERENCE_TONE_ATTENTION,
+        "a contributor who has simply not signed in was shown a refusal"
+    );
+    // Already joined: the outcome they wanted.
+    assert_eq!(
+        tone(copy::NEAR_AI_ENROLL_ALREADY_ENROLLED),
+        TC_PRIVATE_INFERENCE_TONE_CLEAR,
+        "being already joined was painted as a failure"
+    );
+    for refused in [
+        copy::NEAR_AI_ENROLL_COMMONS_UNREACHABLE,
+        copy::NEAR_AI_ENROLL_COMMONS_UNSUPPORTED,
+        copy::NEAR_AI_ENROLL_VERIFICATION_FAILED,
+    ] {
+        assert_eq!(
+            tone(refused),
+            TC_PRIVATE_INFERENCE_TONE_REFUSED,
+            "{refused}"
+        );
+    }
+    // A NULL label claims nothing good.
+    assert_eq!(
+        unsafe { tc_near_ai_enroll_tone(std::ptr::null()) },
+        TC_PRIVATE_INFERENCE_TONE_REFUSED
+    );
 }
