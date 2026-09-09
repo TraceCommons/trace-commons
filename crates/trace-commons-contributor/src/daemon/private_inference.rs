@@ -1631,11 +1631,33 @@ mod tests {
             use std::io::Write;
             let answer = |listener: &std::net::TcpListener| match listener.accept() {
                 Ok((mut stream, _)) => {
+                    // A socket accepted from a non-blocking listener inherits
+                    // O_NONBLOCK on macOS and the BSDs. That made the read
+                    // timeout below inert and the read return WouldBlock the
+                    // instant the connection completed -- which is at the
+                    // handshake, before the child has put its GET on the wire.
+                    // Answering there and returning dropped the stream and
+                    // closed the connection under a request still being sent,
+                    // so the child's send() failed, existing_instance returned
+                    // None, and the test reported the regression it exists to
+                    // catch. Under load the child is slower to write and the
+                    // window widens. Blocking mode makes the timeout real, so
+                    // the request is waited for rather than raced. See #780.
+                    stream.set_nonblocking(false).unwrap();
                     stream
                         .set_read_timeout(Some(Duration::from_secs(2)))
                         .unwrap();
-                    let mut request = [0; 1024];
-                    let _ = stream.read(&mut request);
+                    // Answer a whole request head, not whatever happens to
+                    // have arrived: a partial read is the same race one buffer
+                    // further along.
+                    let mut request = Vec::new();
+                    let mut chunk = [0; 1024];
+                    while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        match stream.read(&mut chunk) {
+                            Ok(0) | Err(_) => break,
+                            Ok(read) => request.extend_from_slice(&chunk[..read]),
+                        }
+                    }
                     stream
                         .write_all(
                             b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
