@@ -339,6 +339,18 @@ pub fn is_near_tenant_id(tenant_id: &str) -> bool {
 /// 2. Otherwise `TRACE_COMMONS_ALLOWED_HOSTS` when set -- operator, wins.
 /// 3. Otherwise exactly the hosts this config already points at.
 ///
+/// # Optional fields
+///
+/// `witness` and `inference_receipt_endpoint` are `Option`, and a field that
+/// is unset is **skipped**: it contributes no host and is not an error. A
+/// contributor with no witness configured has no witness to dial, so a shorter
+/// list is the correct list. The two things deliberately NOT done here are
+/// returning a non-enforcing list (which would make an unset optional field
+/// silently authorize every host) and refusing outright (which would break
+/// paths that work today because an optional field is unset). An unparseable
+/// or host-less value is skipped for the same reason -- it names no host to
+/// authorize -- and the endpoint gates that follow still refuse it on shape.
+///
 /// So it cannot drift: a host is on the list precisely because the config
 /// names it, and a host the config does not name was never going to be
 /// dialled. It widens only when the config widens, never because a server

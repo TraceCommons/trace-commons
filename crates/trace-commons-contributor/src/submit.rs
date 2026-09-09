@@ -703,7 +703,7 @@ impl<'a> SubmitContext<'a> {
             self.effective_cfg.inference_receipt_endpoint.as_deref(),
             // The allowlist comes from the stored config, which is where
             // every other outbound call in this file reads it from.
-            &config_allowlist(&self.cfg),
+            &config_allowlist(self.cfg),
             call,
             self.effective_cfg.inference_receipt_check_attestation,
         )
@@ -748,7 +748,7 @@ impl<'a> SubmitContext<'a> {
         let transport = HttpWitnessTransport::new(
             settings.url.clone(),
             self.cfg.ingest_url.clone(),
-            std::sync::Arc::new(config_allowlist(&self.cfg)),
+            std::sync::Arc::new(config_allowlist(self.cfg)),
             std::time::Duration::from_secs(120),
         )
         .map_err(|e| e.refusal_label())?
@@ -5452,6 +5452,64 @@ mod attest_post_tests {
         let err = validate_attest_post_target("http://collector.example/hook", &allow)
             .expect_err("http must refuse");
         assert!(err.to_string().contains("https"), "unexpected error: {err}");
+    }
+
+    /// `--attest-post` must keep deriving its allowlist from `allowlist_for`,
+    /// never from the enrolled config.
+    ///
+    /// The hazard is a future refactor that "unifies" `allowlist_for` and
+    /// `config::config_allowlist`. That would make `is_enforcing()` true here
+    /// from the config's own hosts, silently retiring the deliberate "needs an
+    /// explicit host allowlist" refusal -- for a URL that arrives from the
+    /// command line carrying a signed statement about the contributor, and
+    /// permitting any collector that happened to equal the ingest host.
+    ///
+    /// Driven through `post_attestation`, the real call site, rather than
+    /// through the validator: passing a permissive list to the validator by
+    /// hand would still pass after exactly that refactor. A counting listener
+    /// separates "refused by the gate" from "dialled and failed" -- without it
+    /// both arms return `false` and the test proves nothing.
+    #[tokio::test]
+    async fn attest_post_is_not_authorized_by_the_enrolled_config() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&accepted);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                counter.fetch_add(1, Ordering::SeqCst);
+                drop(stream);
+            }
+        });
+
+        let target = reqwest::Url::parse(&format!("https://127.0.0.1:{port}/hook")).unwrap();
+        let attested = super::ScopedAttestation {
+            attestations: vec!["fixture.jws".into()],
+            requested: 1,
+            scored: 1,
+            pending: 0,
+        };
+
+        // No explicit allowlist: refused before anything is dialled. A
+        // signup-written config names hosts, but none of them authorize this.
+        assert!(!super::post_attestation(&target, &attested, None).await);
+        assert_eq!(
+            accepted.load(Ordering::SeqCst),
+            0,
+            "an unauthorized attest-post target must not be dialled at all"
+        );
+
+        // Named explicitly, the same target IS dialled -- TLS then fails
+        // against a bare TCP socket, so this still returns false. The
+        // difference between the two arms is the whole assertion.
+        assert!(!super::post_attestation(&target, &attested, Some("127.0.0.1")).await);
+        assert!(
+            accepted.load(Ordering::SeqCst) >= 1,
+            "an explicitly allowlisted target must actually be dialled"
+        );
     }
 
     #[test]
