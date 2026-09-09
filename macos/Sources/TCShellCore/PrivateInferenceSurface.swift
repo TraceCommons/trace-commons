@@ -139,6 +139,7 @@ public struct PrivateInferenceCopy: Decodable, Equatable, Sendable {
     public let eligibilityReasonMarkerAbsent: String
     public let eligibilityReasonRequestMalformed: String
     public let eligibilityReasonReceiptUnavailable: String
+    public let eligibilityReasonReceiptNotIssued: String
 
     /// The four `attestation` marks a queue entry can carry, and the thirteen
     /// `attestation_reason` sentences.
@@ -179,6 +180,7 @@ public struct PrivateInferenceCopy: Decodable, Equatable, Sendable {
     public let attestationReasonMarkerAbsent: String
     public let attestationReasonRequestMalformed: String
     public let attestationReasonReceiptUnavailable: String
+    public let attestationReasonReceiptNotIssued: String
 
     /// The balance row: its heading, what it is a fact about, and the seven
     /// sentences a state can reach.
@@ -291,6 +293,7 @@ public struct PrivateInferenceCopy: Decodable, Equatable, Sendable {
         case certificateListCandidate = "certificate_list_candidate"
         case certificateListAttested = "certificate_list_attested"
         case certificateListEmpty = "certificate_list_empty"
+        case eligibilityReasonReceiptNotIssued = "eligibility_reason_receipt_not_issued"
         case attestationAttested = "attestation_attested"
         case attestationUnattestedPermanent = "attestation_unattested_permanent"
         case attestationUnattestedConfiguration = "attestation_unattested_configuration"
@@ -308,6 +311,7 @@ public struct PrivateInferenceCopy: Decodable, Equatable, Sendable {
         case attestationReasonMarkerAbsent = "attestation_reason_marker_absent"
         case attestationReasonRequestMalformed = "attestation_reason_request_malformed"
         case attestationReasonReceiptUnavailable = "attestation_reason_receipt_unavailable"
+        case attestationReasonReceiptNotIssued = "attestation_reason_receipt_not_issued"
         case balanceTitle = "balance_title"
         case balanceWhat = "balance_what"
         case balanceNoSession = "balance_no_session"

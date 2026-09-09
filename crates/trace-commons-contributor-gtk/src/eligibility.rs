@@ -268,8 +268,10 @@ mod tests {
     }
 
     /// And `unknown` on the wire is a real state, told apart from the
-    /// absent key by more than its own name: it draws a sentence and takes
-    /// the control away, which the absent key does neither of.
+    /// absent key by more than its own name: it draws a sentence, which the
+    /// absent key does not. Both offer the send control -- the absent key
+    /// because an invited contributor has no eligibility question, `unknown`
+    /// because only a send can resolve it.
     #[test]
     fn an_unknown_state_on_the_wire_is_not_the_absent_key() {
         let unknown = wire(serde_json::json!({ "eligibility": "unknown" }));
@@ -278,7 +280,7 @@ mod tests {
         assert_eq!(unknown.eligibility.as_deref(), Some("unknown"));
         let view = view(&unknown).expect("`unknown` is a state and renders as one");
         assert!(!view.state_line.trim().is_empty());
-        assert!(!offers_send(&unknown), "`unknown` offers no send control");
+        assert!(offers_send(&unknown), "`unknown` offers the send control");
 
         assert!(super::view(&absent).is_none());
         assert_ne!(
@@ -395,14 +397,20 @@ mod tests {
         }
     }
 
-    /// The send control is offered for `eligible` and for nothing else --
-    /// the safety property of this surface in one assertion.
+    /// The send control is offered for `eligible` and `unknown`, and for
+    /// neither ineligible state -- the safety property of this surface in
+    /// one assertion. `unknown` is offered because only a send can decide
+    /// it; the shared crate's `eligibility_control` says why.
     #[test]
-    fn only_an_eligible_entry_is_offered() {
+    fn eligible_and_unknown_entries_are_offered_and_ineligible_ones_are_not() {
         use trace_commons_contributor::daemon::contribution_eligibility::ALL_STATES;
         for state in ALL_STATES {
             let entry = wire(serde_json::json!({ "eligibility": state }));
-            assert_eq!(offers_send(&entry), state == "eligible", "{state}");
+            assert_eq!(
+                offers_send(&entry),
+                state == "eligible" || state == "unknown",
+                "{state}"
+            );
         }
     }
 
@@ -1051,7 +1059,10 @@ mod tests {
             wire(serde_json::json!({ "entry_id": "b", "eligibility": "ineligible_permanent" })),
             wire(serde_json::json!({ "entry_id": "c", "eligibility": "unknown" })),
         ];
-        assert_eq!(sendable_ids(rows.iter()), vec!["a".to_string()]);
+        assert_eq!(
+            sendable_ids(rows.iter()),
+            vec!["a".to_string(), "c".to_string()]
+        );
 
         // An invited contributor's rows are all candidates.
         let invited = [
@@ -1243,7 +1254,7 @@ mod tests {
             (Some("eligible"), "p1", true),
             (Some("ineligible_permanent"), "p1", false),
             (Some("ineligible_configuration"), "p1", false),
-            (Some("unknown"), "p1", false),
+            (Some("unknown"), "p1", true),
             (Some("a_state_from_a_later_daemon"), "p1", false),
             (None, "p1", true),
         ];
@@ -1266,7 +1277,9 @@ mod tests {
                 ineligible += 1;
             }
         }
-        assert_eq!((eligible, ineligible), (2, 4));
+        // eligible, unknown and the absent key are sendable; the two
+        // ineligible states and an unfamiliar one are not.
+        assert_eq!((eligible, ineligible), (3, 3));
     }
 
     // -- the rendering rule ---------------------------------------------

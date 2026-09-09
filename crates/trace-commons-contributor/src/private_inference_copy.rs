@@ -562,7 +562,8 @@ pub struct PrivateInferenceCopy {
     pub eligibility_reason_marker_absent: &'static str,
     pub eligibility_reason_request_malformed: &'static str,
     pub eligibility_reason_receipt_unavailable: &'static str,
-    /// The four `attestation` marks a queue entry can carry, and the thirteen
+    pub eligibility_reason_receipt_not_issued: &'static str,
+    /// The four `attestation` marks a queue entry can carry, and the fourteen
     /// `attestation_reason` sentences. Rendered through
     /// [`attestation_state_line`] and [`attestation_reason_line`]; carried
     /// here as well so a test on the far side can pin the set it was built
@@ -610,6 +611,7 @@ pub struct PrivateInferenceCopy {
     /// does not differ between them: nothing has been through a witness yet.
     /// [`CERTIFICATE_LIST_EMPTY`].
     pub certificate_list_empty: &'static str,
+    pub attestation_reason_receipt_not_issued: &'static str,
     /// The balance row's heading. [`BALANCE_TITLE`].
     pub balance_title: &'static str,
     /// [`BALANCE_WHAT`].
@@ -1335,6 +1337,16 @@ pub const ELIGIBILITY_REASON_REQUEST_MALFORMED: &str = "The last model call in t
 pub const ELIGIBILITY_REASON_RECEIPT_UNAVAILABLE: &str = "The proof that goes with this session's last model call could not be \
      fetched just now. It may work later.";
 
+/// `receipt_not_issued`.
+///
+/// Permanent, and the reason it reads that way: the model that answered this
+/// session does not issue the proof a contribution is accepted on. A call to
+/// a model the provider runs itself can carry that proof; one the provider
+/// only passes along to someone else cannot, and no setting changes that.
+pub const ELIGIBILITY_REASON_RECEIPT_NOT_ISSUED: &str = "The model that answered this session does not provide the proof a \
+     contribution is accepted on. Using a model the provider runs itself, \
+     rather than one it only passes along, is what produces that proof.";
+
 /// How many sessions a group submit is leaving behind.
 ///
 /// **A button reading "Submit all (2)" above a folder showing five rows, with
@@ -1454,13 +1466,26 @@ pub fn eligibility_state_tone(label: &str) -> PrivateInferenceTone {
 
 /// The one control a shell may offer for an eligibility state.
 ///
-/// `eligible` alone. Every other state -- including one this build has never
-/// heard of -- offers nothing, because the alternative is a send button on a
-/// session that cannot be sent, discovered on the press.
+/// `eligible` and `unknown`. The two ineligible states -- and any state this
+/// build has never heard of -- offer nothing, because the alternative is a
+/// send button on a session that cannot be sent, discovered on the press.
+///
+/// `unknown` is offered, and the reason is what `unknown` is: a session
+/// whose attestation could not be decided at discovery. Every Responses-API
+/// call is one -- which is every Codex session -- because a hosted and a
+/// brokered call come back under the same identifier shape, and the only
+/// thing that can decide it is the receipt fetch at submission, which cannot
+/// run on a row nobody can send. Nothing is claimed: the state line still
+/// says it has not been worked out, that is not the same as a no, and the
+/// button beside it offers to find out. The daemon already let a single
+/// named `unknown` entry through on the reasoning that the server decides;
+/// this brings the shell gate into line with it. A retracted row (`unknown`
+/// after a server refusal) becomes sendable too and earns the same refusal
+/// again -- one round trip, and the server was the authority anyway.
 #[must_use]
 pub fn eligibility_control(label: &str) -> ContributionControl {
     match label {
-        ELIGIBILITY_STATE_ELIGIBLE => ContributionControl::Contribute,
+        ELIGIBILITY_STATE_ELIGIBLE | ELIGIBILITY_STATE_UNKNOWN => ContributionControl::Contribute,
         _ => ContributionControl::None,
     }
 }
@@ -1489,6 +1514,7 @@ pub fn eligibility_reason_line(label: &str) -> &'static str {
         REASON_MARKER_ABSENT => ELIGIBILITY_REASON_MARKER_ABSENT,
         REASON_REQUEST_MALFORMED => ELIGIBILITY_REASON_REQUEST_MALFORMED,
         REASON_RECEIPT_UNAVAILABLE => ELIGIBILITY_REASON_RECEIPT_UNAVAILABLE,
+        REASON_RECEIPT_NOT_ISSUED => ELIGIBILITY_REASON_RECEIPT_NOT_ISSUED,
         _ => "",
     }
 }
@@ -1886,6 +1912,7 @@ pub fn private_inference_copy() -> PrivateInferenceCopy {
         certificate_list_candidate: CERTIFICATE_LIST_CANDIDATE,
         certificate_list_attested: CERTIFICATE_LIST_ATTESTED,
         certificate_list_empty: CERTIFICATE_LIST_EMPTY,
+        eligibility_reason_receipt_not_issued: ELIGIBILITY_REASON_RECEIPT_NOT_ISSUED,
         attestation_attested: ATTESTATION_ATTESTED,
         attestation_unattested_permanent: ATTESTATION_UNATTESTED_PERMANENT,
         attestation_unattested_configuration: ATTESTATION_UNATTESTED_CONFIGURATION,
@@ -1903,6 +1930,7 @@ pub fn private_inference_copy() -> PrivateInferenceCopy {
         attestation_reason_marker_absent: ATTESTATION_REASON_MARKER_ABSENT,
         attestation_reason_request_malformed: ATTESTATION_REASON_REQUEST_MALFORMED,
         attestation_reason_receipt_unavailable: ATTESTATION_REASON_RECEIPT_UNAVAILABLE,
+        attestation_reason_receipt_not_issued: ATTESTATION_REASON_RECEIPT_NOT_ISSUED,
         balance_title: BALANCE_TITLE,
         balance_what: BALANCE_WHAT,
         balance_no_session: BALANCE_NO_SESSION,
@@ -2110,6 +2138,16 @@ pub const ATTESTATION_REASON_REQUEST_MALFORMED: &str = "The last model call in t
 pub const ATTESTATION_REASON_RECEIPT_UNAVAILABLE: &str = "The proof that goes with this session's last model call could not be \
      fetched just now. It may work later.";
 
+/// `receipt_not_issued`.
+///
+/// Permanent. The model that answered this session does not issue the proof
+/// an attested contribution carries -- a model the provider only passes along
+/// to someone else cannot be attested by the provider, and no setting reaches
+/// back to change where the call went.
+pub const ATTESTATION_REASON_RECEIPT_NOT_ISSUED: &str = "The model that answered this session does not provide a copy-of-call \
+     proof. A model the provider runs itself can; one it only passes along \
+     cannot.";
+
 /// The sentence for one queue entry's `attestation` label.
 ///
 /// **Every shell calls this for every row**, unlike
@@ -2178,6 +2216,7 @@ pub fn attestation_reason_line(label: &str) -> &'static str {
         REASON_MARKER_ABSENT => ATTESTATION_REASON_MARKER_ABSENT,
         REASON_REQUEST_MALFORMED => ATTESTATION_REASON_REQUEST_MALFORMED,
         REASON_RECEIPT_UNAVAILABLE => ATTESTATION_REASON_RECEIPT_UNAVAILABLE,
+        REASON_RECEIPT_NOT_ISSUED => ATTESTATION_REASON_RECEIPT_NOT_ISSUED,
         _ => "",
     }
 }
@@ -2198,6 +2237,7 @@ pub use crate::daemon::contribution_eligibility::{
     REASON_EVIDENCE_CAPTURE_OFF,
     REASON_MARKER_ABSENT,
     REASON_NO_CALL,
+    REASON_RECEIPT_NOT_ISSUED,
     REASON_RECEIPT_UNAVAILABLE,
     REASON_REFERENCE_MALFORMED,
     REASON_REQUEST_MALFORMED,
@@ -3387,6 +3427,8 @@ mod tests {
                     "{unknown:?} borrowed a known state's sentence"
                 );
             }
+            // An unfamiliar STATE offers nothing. (The `unknown` state proper
+            // does offer the control; see `eligibility_control`.)
             assert_eq!(eligibility_control(unknown), ContributionControl::None);
             assert_eq!(
                 eligibility_state_tone(unknown),
@@ -3405,19 +3447,21 @@ mod tests {
         }
     }
 
-    /// The send control is offered for `eligible` and for nothing else. This
-    /// is the safety property of the surface in one assertion: a control on
-    /// any other row is an action the transport cannot perform, discovered
-    /// on the press.
+    /// The send control is offered for `eligible` and `unknown`, and for
+    /// neither ineligible state. The safety property is the second half: a
+    /// control on an ineligible row is an action the transport cannot
+    /// perform, discovered on the press. `unknown` is the other case -- an
+    /// action the transport CAN perform and only the transport can decide.
     #[test]
-    fn only_an_eligible_session_is_offered() {
+    fn eligible_and_unknown_sessions_are_offered_and_ineligible_ones_are_not() {
         use crate::daemon::contribution_eligibility::ALL_STATES;
         for state in ALL_STATES {
-            let expected = if state == ELIGIBILITY_STATE_ELIGIBLE {
-                ContributionControl::Contribute
-            } else {
-                ContributionControl::None
-            };
+            let expected =
+                if state == ELIGIBILITY_STATE_ELIGIBLE || state == ELIGIBILITY_STATE_UNKNOWN {
+                    ContributionControl::Contribute
+                } else {
+                    ContributionControl::None
+                };
             assert_eq!(eligibility_control(state), expected, "{state}");
         }
     }
@@ -3579,7 +3623,7 @@ mod tests {
         let fields = payload.as_object().expect("a JSON object");
         assert_eq!(
             fields.len(),
-            111,
+            113,
             "the payload's field count changed -- update the shells' decoders \
              and the tests that pin the set"
         );
