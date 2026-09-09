@@ -265,6 +265,7 @@ public sealed record AdmissionCopy
     [JsonPropertyName("working")] public string Working { get; init; } = "";
     [JsonPropertyName("ready")] public string Ready { get; init; } = "";
     [JsonPropertyName("failed")] public string Failed { get; init; } = "";
+    [JsonPropertyName("failed_receipt_endpoint")] public string FailedReceiptEndpoint { get; init; } = "";
     [JsonPropertyName("refused_glyph")] public string RefusedGlyph { get; init; } = "";
     [JsonPropertyName("refused_tone")] public string RefusedTone { get; init; } = "";
 }

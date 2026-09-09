@@ -620,6 +620,14 @@ struct DaemonSettingsView: Decodable, Equatable {
     let ironwire: IronWireDeclarationView?
     /// Older daemons omit this independent, default-off consent.
     var admissionEvidenceRequired: Bool? = nil
+    /// Whether to offer the admission-preparation control at all.
+    ///
+    /// Not a preference: the daemon answers true for a contributor who
+    /// signed up through NEAR and false for one who came in on an invite,
+    /// so the control can only refuse an invited contributor. It is also
+    /// null when the daemon could not read its config, and absent from a
+    /// daemon that predates the key -- neither of which is a yes.
+    var admissionEvidenceOffered: Bool { admissionEvidenceRequired == true }
     var ironwireAttestedBodies: Bool? = nil
     var inferenceEvidenceEnabled: Bool { ironwireAttestedBodies == true }
     /// Whether this daemon was asked to answer model calls itself. What was

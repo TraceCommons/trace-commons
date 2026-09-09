@@ -47,7 +47,7 @@
 //! different places. Collapsing them into "the drill went red" is the failure
 //! mode this exists to avoid.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use trace_commons_attestation::receipt::{
     AttestedKeyError, gateway_ed25519_key, model_ed25519_keys,
@@ -68,7 +68,7 @@ use super::quote::{QuoteVerifyError, VerifiedQuote, verify_quote};
 pub const REQUIRED_TCB_STATUS: &str = super::drill::REQUIRED_TCB_STATUS;
 
 /// A step of the probe, in run order.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AttestedKeyDriftStep {
     /// The endpoint served an `signing_algo=ed25519` report for our nonce.
@@ -117,7 +117,7 @@ impl AttestedKeyDriftStep {
 
 /// How a step ended. `NotRun` is deliberately not `Passed`; see
 /// [`super::drill::NearAttestationStepStatus`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AttestedKeyDriftStatus {
     Passed,
@@ -126,13 +126,13 @@ pub enum AttestedKeyDriftStatus {
 }
 
 /// One step's outcome. A stable label, never a message.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttestedKeyDriftStepResult {
     pub step: AttestedKeyDriftStep,
     pub status: AttestedKeyDriftStatus,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub missing_control: Option<String>,
 }
 
@@ -143,7 +143,7 @@ pub struct AttestedKeyDriftStepResult {
 /// from a wrong one, only that the endpoint refused authorization. It exists
 /// because "does our existing API key reach the report endpoint, or does that
 /// need a different credential" is otherwise unanswerable without a live run.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReportCredentialVerdict {
     /// The endpoint served the report with the credential we sent.
@@ -156,7 +156,7 @@ pub enum ReportCredentialVerdict {
 
 /// What the model quote carried, once verified. Registers are public image
 /// identifiers and appear in full, exactly as in [`super::drill`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttestedKeyQuoteEvidence {
     pub tcb_status: String,
     pub advisory_ids: Vec<String>,
@@ -166,13 +166,13 @@ pub struct AttestedKeyQuoteEvidence {
 }
 
 /// What the measurement check saw. Same shape as the ECDSA drill's.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttestedKeyMeasurementEvidence {
     /// `pinned`, `mismatch`, or `refused`.
     pub verdict: String,
     pub checked_fields: Vec<String>,
     pub mismatched_fields: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub missing_control: Option<String>,
 }
 
@@ -183,7 +183,7 @@ pub struct AttestedKeyMeasurementEvidence {
 /// generated it and put it in a query string. Register values appear in full
 /// because they are public image identifiers and a mismatch is useless without
 /// them.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttestedKeyDriftOutcome {
     /// The nonce **we** generated.
     pub nonce: String,
@@ -194,16 +194,16 @@ pub struct AttestedKeyDriftOutcome {
     pub steps: Vec<AttestedKeyDriftStepResult>,
     pub credential: ReportCredentialVerdict,
     /// Digest of the gateway key. Never the key.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gateway_key_ref: Option<String>,
     /// Digests of the per-model keys, in the order the report listed them.
     pub model_key_refs: Vec<String>,
     /// How many entries named this model. More than one means the model is
     /// served by several enclaves.
     pub model_entry_count: usize,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quote: Option<AttestedKeyQuoteEvidence>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub measurements: Option<AttestedKeyMeasurementEvidence>,
 }
 
@@ -663,7 +663,7 @@ fn finish(mut outcome: AttestedKeyDriftOutcome, log: StepLog) -> AttestedKeyDrif
 /// rotation is NEAR AI re-keying, a measurement move is a redeployed image,
 /// and a verification regression is either an expired collateral window or
 /// something worse.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "drift", rename_all = "snake_case")]
 pub enum AttestedKeyDrift {
     /// The report could not be fetched this time but could before.

@@ -374,7 +374,15 @@ pub fn admission_response(mut response: Response, now: i64) -> Response {
             .and_then(Value::as_i64)
             .is_some_and(|expiry| expiry > now);
     let copy = witness_copy().admission;
-    value["view"] = json!({"ready":ready,"state":if ready{"Ready"}else{"Refused"},"message":if ready{copy.ready}else{copy.failed},"tone":if ready{"neutral"}else{copy.refused_tone},"glyph":if ready{""}else{copy.refused_glyph}});
+    // Eighteen other labels reach this point and share `copy.failed`, which
+    // tells a contributor to check settings and retry. That is right for all
+    // of them and wrong for exactly one: a commons that published no receipt
+    // service is not a setting, and retrying cannot clear it.
+    let refused = match response.error.as_ref().map(|error| error.message.as_str()) {
+        Some("admission_receipt_endpoint_required") => copy.failed_receipt_endpoint,
+        _ => copy.failed,
+    };
+    value["view"] = json!({"ready":ready,"state":if ready{"Ready"}else{"Refused"},"message":if ready{copy.ready}else{refused},"tone":if ready{"neutral"}else{copy.refused_tone},"glyph":if ready{""}else{copy.refused_glyph}});
     response
 }
 
@@ -510,5 +518,59 @@ mod tests {
             .unwrap()["view"]["ready"],
             true
         );
+    }
+
+    fn admission_message(label: &str) -> String {
+        admission_response(Response::err(1, "unavailable", label), 10)
+            .result
+            .expect("view")["view"]["message"]
+            .as_str()
+            .expect("message")
+            .to_string()
+    }
+
+    /// `admission_receipt_endpoint_required` is the one admission failure a
+    /// contributor can do nothing about by retrying, and the only one whose
+    /// cause is configuration rather than a session, a proxy or a permission.
+    /// Collapsed into the generic sentence it reads as "try again", which is
+    /// advice that can never work.
+    #[test]
+    fn a_missing_receipt_endpoint_does_not_borrow_the_generic_failure_sentence() {
+        let generic = admission_message("admission_setup_proxy_missing");
+        assert_eq!(
+            generic,
+            witness_copy().admission.failed,
+            "an ordinary admission failure still says the generic sentence"
+        );
+        assert_ne!(
+            admission_message("admission_receipt_endpoint_required"),
+            generic,
+            "a contributor whose commons published no receipt endpoint is told to retry \
+             a thing that cannot succeed until the endpoint arrives"
+        );
+        assert_eq!(
+            admission_message("admission_receipt_endpoint_required"),
+            witness_copy().admission.failed_receipt_endpoint,
+            "the sentence comes from the shared copy, so the three shells say the same \
+             thing this one does"
+        );
+    }
+
+    /// Its own sentence, not its own outcome: this is still a refusal, and a
+    /// distinct message must not leak into the `ready` flag, the state or the
+    /// tone.
+    #[test]
+    fn a_missing_receipt_endpoint_is_still_refused() {
+        let view = admission_response(
+            Response::err(1, "unavailable", "admission_receipt_endpoint_required"),
+            10,
+        )
+        .result
+        .expect("view")["view"]
+            .clone();
+        assert_eq!(view["ready"], false);
+        assert_eq!(view["state"], "Refused");
+        assert_eq!(view["tone"], witness_copy().admission.refused_tone);
+        assert_eq!(view["glyph"], witness_copy().admission.refused_glyph);
     }
 }

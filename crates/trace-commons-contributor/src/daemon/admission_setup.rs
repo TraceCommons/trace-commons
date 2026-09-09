@@ -3,7 +3,11 @@
 
 use super::ipc::{DaemonShared, ERR_BAD_PARAMS, ERR_UNAVAILABLE, Request, Response};
 use crate::{
-    config::{ContributorConfig, config_allowlist},
+    // `allowlist_for` and `config_allowlist` are both here on purpose.
+    // `adopt_receipt_endpoint` vets each source with the list that source's
+    // own author controls, so an operator-supplied value keeps being checked
+    // against the operator's own list; the gates below use the config's hosts.
+    config::{ContributorConfig, allowlist_for, config_allowlist},
     identity::DeviceIdentity,
     issuer_client::IssuerClient,
 };
@@ -15,6 +19,7 @@ use std::{
     path::Path,
     time::Duration,
 };
+use trace_commons_operator_client::host_allowlist::HostAllowlist;
 use trace_commons_protocol::admission::AdmissionBinding;
 
 #[derive(Deserialize)]
@@ -49,6 +54,99 @@ enum ReceiptEndpointSetupError {
     #[error("admission_receipt_endpoint_invalid")]
     Invalid,
 }
+/// Take up a receipt endpoint this config does not have yet, and save it.
+///
+/// Split from the fetch so the decision and the persistence can be tested
+/// without a commons to talk to. `published` is what the commons answered, or
+/// `None` when it published nothing or could not be reached -- an absent value
+/// is not an error here, it simply leaves [`require_receipt_endpoint`] to
+/// refuse exactly as it did before.
+///
+/// Saved, not merely set: an endpoint that lived only in this call would be
+/// the original defect again, one process-lifetime long.
+fn adopt_receipt_endpoint(
+    shared: &DaemonShared,
+    cfg: &mut ContributorConfig,
+    published: Option<&str>,
+) -> Result<()> {
+    // Each source is vetted by the list that source's own author controls.
+    //
+    // The operator's variable is checked against the operator's allowlist. A
+    // published value cannot be: that list is permissive whenever nobody set
+    // `TRACE_COMMONS_ALLOWED_HOSTS`, which is every shipped app, so vetting a
+    // server-supplied host with it would be vetting it with nothing. It gets
+    // the list this commons's own published hosts derive instead -- the same
+    // basis on which that origin's issuer and witness are admitted -- and a
+    // host outside it is dropped rather than adopted.
+    let derived = published
+        .and_then(|endpoint| {
+            super::account_onboarding::published_host_allowlist(
+                &allowlist_for(cfg.allowed_hosts.as_deref()),
+                &cfg.ingest_url,
+                endpoint,
+            )
+            .ok()
+        })
+        .unwrap_or_else(HostAllowlist::permissive);
+    let Some(endpoint) = crate::config::receipt_endpoint_to_adopt(
+        cfg.inference_receipt_endpoint.as_deref(),
+        crate::config::inference_receipt_endpoint_from_env().as_deref(),
+        &allowlist_for(cfg.allowed_hosts.as_deref()),
+        published,
+        &derived,
+    ) else {
+        return Ok(());
+    };
+    cfg.inference_receipt_endpoint = Some(endpoint);
+    // The endpoint is a URL: it is saved, never logged.
+    shared.store.save_config(cfg)?;
+    Ok(())
+}
+
+/// Ask this config's commons for a receipt endpoint, when it has none.
+///
+/// An account enrolled before its commons published a receipt service, or
+/// before a build that could read one, has nothing saved and no way to type
+/// a value in. This is where it is first needed, so this is where it is asked
+/// for -- once, and only when the answer is missing.
+///
+/// Never fatal. A commons that publishes nothing, is unreachable, or is no
+/// longer ready leaves the config alone and [`require_receipt_endpoint`] then
+/// refuses exactly as it did before -- an unreachable commons must not turn a
+/// clear "no receipt endpoint" into a transport error nobody can read.
+async fn adopt_published_receipt_endpoint(
+    shared: &DaemonShared,
+    cfg: &mut ContributorConfig,
+) -> Result<()> {
+    if cfg.inference_receipt_endpoint.is_some() {
+        return Ok(());
+    }
+    let published = super::account_onboarding::published_receipt_endpoint(&cfg.ingest_url).await;
+    adopt_receipt_endpoint(shared, cfg, published.as_deref())
+}
+
+/// A saved receipt endpoint this client will actually call.
+///
+/// Vetted on the same basis it was adopted on, which is the only basis that
+/// can work: native signup persists `allowed_hosts: None`, so
+/// `allowlist_for(cfg.allowed_hosts)` is the environment list, and that is
+/// permissive on every machine where no operator set one. Checking a saved
+/// endpoint against a permissive list refuses it as `Invalid` -- so gating it
+/// that way would adopt an endpoint and then reject it one line later, moving
+/// the wall rather than removing it.
+///
+/// The list used here is [`crate::config::config_allowlist`]: the hosts this
+/// enrolled config already names, including the receipt endpoint itself, with
+/// an operator's own list still governing whenever they set one.
+///
+/// #787 reached the same conclusion for this gate by a different route,
+/// `account_onboarding::published_host_allowlist(env, ingest_url, endpoint)`,
+/// which derives `{ingest, endpoint}` per call. For validating the endpoint the
+/// two are equivalent -- both contain it, and both defer to a configured
+/// operator list -- so this call site uses the one the gate two lines below it
+/// uses, rather than keeping two derivations in one function. That wrapper
+/// remains the right thing at its other caller, inside the signup ceremony,
+/// where there is no enrolled config to read hosts from yet.
 fn require_receipt_endpoint(cfg: &ContributorConfig) -> Result<()> {
     let endpoint = cfg
         .inference_receipt_endpoint
@@ -97,12 +195,13 @@ async fn prepare(shared: &DaemonShared, params: Params) -> Result<i64> {
     if !params.confirmed {
         bail!("admission_setup_consent_required");
     }
-    let cfg = shared
+    let mut cfg = shared
         .store
         .load_config()?
         .ok_or_else(|| anyhow!("admission_setup_unenrolled"))?;
     let settings = shared.settings.lock().expect("settings lock").clone();
     check_consent(&cfg, settings.ironwire_attested_bodies, params.confirmed)?;
+    adopt_published_receipt_endpoint(shared, &mut cfg).await?;
     require_receipt_endpoint(&cfg)?;
     if params.backend.is_empty()
         || params.backend.len() > 128
@@ -714,5 +813,165 @@ mod tests {
             error.downcast_ref::<ReceiptEndpointSetupError>(),
             Some(ReceiptEndpointSetupError::Invalid)
         ));
+    }
+
+    /// The defect, end to end, at the layer that has to fix it.
+    ///
+    /// A contributor with no `TRACE_COMMONS_INFERENCE_RECEIPT_ENDPOINT` and no
+    /// saved endpoint could not reach a preparable session by any route that
+    /// did not involve editing `contributor.json` by hand. Here the commons
+    /// answers, and the endpoint is adopted and written down.
+    ///
+    /// The variable is asserted absent, not set: a harness that exported one
+    /// would be exercising the single path that already worked, which is the
+    /// mistake that let this ship.
+    #[test]
+    fn a_daemon_with_no_environment_variable_adopts_what_its_commons_published() {
+        assert!(
+            std::env::var(crate::config::TRACE_COMMONS_INFERENCE_RECEIPT_ENDPOINT).is_err(),
+            "this proves nothing unless the environment is silent"
+        );
+        let (_dir, store) = crate::config::tests_support::temp_store();
+        let mut cfg = config();
+        // What native signup actually persists. Setting a list here instead
+        // would be the test arranging the one condition a shipped app never
+        // has, and it would pass while the app stayed broken.
+        assert!(cfg.allowed_hosts.is_none());
+        store.save_config(&cfg).unwrap();
+        let shared = DaemonShared::load(store).unwrap();
+
+        assert!(
+            matches!(
+                require_receipt_endpoint(&cfg)
+                    .unwrap_err()
+                    .downcast_ref::<ReceiptEndpointSetupError>(),
+                Some(ReceiptEndpointSetupError::Required)
+            ),
+            "the starting state is the one a contributor is stuck in"
+        );
+
+        adopt_receipt_endpoint(&shared, &mut cfg, Some("https://receipts.example/v1")).unwrap();
+
+        assert!(
+            require_receipt_endpoint(&cfg).is_ok(),
+            "adoption that does not clear the very next gate has moved the wall, not removed it"
+        );
+        assert_eq!(
+            shared
+                .store
+                .load_config()
+                .unwrap()
+                .expect("a saved config")
+                .inference_receipt_endpoint
+                .as_deref(),
+            Some("https://receipts.example/v1"),
+            "an endpoint held only in memory is the same defect, one process long"
+        );
+    }
+
+    /// A commons that publishes nothing changes nothing, and in particular
+    /// does not write a null over a config.
+    #[test]
+    fn a_commons_that_publishes_no_endpoint_leaves_the_refusal_standing() {
+        let (_dir, store) = crate::config::tests_support::temp_store();
+        let mut cfg = config();
+        cfg.allowed_hosts = Some("receipts.example,issuer.example,ingest.example".into());
+        store.save_config(&cfg).unwrap();
+        let shared = DaemonShared::load(store).unwrap();
+
+        adopt_receipt_endpoint(&shared, &mut cfg, None).unwrap();
+
+        assert!(cfg.inference_receipt_endpoint.is_none());
+        assert!(matches!(
+            require_receipt_endpoint(&cfg)
+                .unwrap_err()
+                .downcast_ref::<ReceiptEndpointSetupError>(),
+            Some(ReceiptEndpointSetupError::Required)
+        ));
+    }
+
+    /// A commons that cannot be reached is not an error, and does not become
+    /// one on the way out.
+    ///
+    /// This drives the real fetch -- `published_receipt_endpoint`, its client
+    /// construction and its validation -- against a commons that answers
+    /// nothing, and requires the refusal a contributor sees to still be the
+    /// readable `Required` rather than a transport failure wearing
+    /// `admission_setup_unavailable`.
+    #[tokio::test]
+    async fn an_unreachable_commons_leaves_the_readable_refusal_in_place() {
+        let (_dir, store) = crate::config::tests_support::temp_store();
+        let mut cfg = config();
+        cfg.allowed_hosts = Some("receipts.example,issuer.example,ingest.example".into());
+        store.save_config(&cfg).unwrap();
+        let shared = DaemonShared::load(store).unwrap();
+
+        adopt_published_receipt_endpoint(&shared, &mut cfg)
+            .await
+            .expect("an unreachable commons is not a failure to adopt");
+
+        assert!(cfg.inference_receipt_endpoint.is_none());
+        assert!(matches!(
+            require_receipt_endpoint(&cfg)
+                .unwrap_err()
+                .downcast_ref::<ReceiptEndpointSetupError>(),
+            Some(ReceiptEndpointSetupError::Required)
+        ));
+    }
+
+    /// An endpoint already saved is not re-fetched, and the check is the
+    /// absence of a connection rather than the absence of a change: a commons
+    /// asked on every prepare would be a new call on a path that does not
+    /// need one.
+    #[tokio::test]
+    async fn a_config_that_already_has_an_endpoint_does_not_call_its_commons() {
+        let (_dir, store) = crate::config::tests_support::temp_store();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut cfg = config();
+        cfg.allowed_hosts = Some("127.0.0.1".into());
+        cfg.ingest_url = format!("https://{}", listener.local_addr().unwrap());
+        cfg.inference_receipt_endpoint = Some("https://127.0.0.1/v1".into());
+        store.save_config(&cfg).unwrap();
+        let shared = DaemonShared::load(store).unwrap();
+
+        adopt_published_receipt_endpoint(&shared, &mut cfg)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            cfg.inference_receipt_endpoint.as_deref(),
+            Some("https://127.0.0.1/v1")
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), listener.accept())
+                .await
+                .is_err(),
+            "the commons was asked for an endpoint this config already had"
+        );
+    }
+
+    /// The commons is not trusted to pick this value: a published endpoint the
+    /// operator's own allowlist does not admit is not adopted, and the
+    /// contributor is left refusing rather than quietly calling a new host.
+    #[test]
+    fn a_published_endpoint_outside_the_allowlist_is_not_adopted() {
+        let (_dir, store) = crate::config::tests_support::temp_store();
+        let mut cfg = config();
+        cfg.allowed_hosts = Some("issuer.example,ingest.example".into());
+        store.save_config(&cfg).unwrap();
+        let shared = DaemonShared::load(store).unwrap();
+
+        adopt_receipt_endpoint(&shared, &mut cfg, Some("https://elsewhere.example/v1")).unwrap();
+
+        assert!(cfg.inference_receipt_endpoint.is_none());
+        assert!(
+            shared
+                .store
+                .load_config()
+                .unwrap()
+                .expect("a saved config")
+                .inference_receipt_endpoint
+                .is_none()
+        );
     }
 }

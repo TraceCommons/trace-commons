@@ -376,6 +376,20 @@ pub struct AdmissionCopy {
     pub working: &'static str,
     pub ready: &'static str,
     pub failed: &'static str,
+    /// Said instead of [`Self::failed`] when the commons has published no
+    /// receipt service and nothing on this machine supplied one.
+    ///
+    /// Every other admission failure names something the contributor holds --
+    /// an agent, a backend, a capture permission -- so "then try again" is
+    /// real advice. This one names nothing they hold. Borrowing the generic
+    /// sentence sends them round a loop of settings that were never wrong,
+    /// and no wording of "check your settings" can end that loop.
+    ///
+    /// It names the commons rather than this app, because that is where the
+    /// value comes from, and it does not ask for a URL: a contributor has no
+    /// way to know which one is right, and this app would not take one from
+    /// them anyway.
+    pub failed_receipt_endpoint: &'static str,
     pub refused_glyph: &'static str,
     pub refused_tone: &'static str,
 }
@@ -500,6 +514,7 @@ pub fn witness_copy() -> WitnessCopy {
             working: "Preparing this session…",
             ready: "Ready. Continue this session in your agent, then review the updated session.",
             failed: "This session could not be prepared. Check your supported agent, backend, and capture settings, then try again.",
+            failed_receipt_endpoint: "This session could not be prepared, and nothing in your settings will fix it. Your commons has not published a receipt service, so there is nowhere to collect the provider's signature for this inference. Ask the operator of your commons to publish one. You can still contribute existing history without it.",
             refused_glyph: "⊘",
             refused_tone: "refused",
         },

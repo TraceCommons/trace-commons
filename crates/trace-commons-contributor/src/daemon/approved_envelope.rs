@@ -216,8 +216,18 @@ impl WitnessReviewArtifact {
             let evidence: trace_commons_protocol::admission::AdmissionEvidence =
                 serde_json::from_str(&headers.evidence_json)
                     .map_err(|_| anyhow::anyhow!("witness-certificate-invalid"))?;
-            if cfg.tenant_id.strip_prefix("near-") != Some(evidence.account_anchor_sha256.as_str())
-            {
+            // Shape only, deliberately. This used to require the tenant id's
+            // suffix to equal the anchor -- the client half of the coupling
+            // #785 removed from the server's `admission::anchor`. V58 held
+            // those equal; V61 made `anchor_hash` a keyed blind index and the
+            // tenant id 32 random bytes precisely so a contributor's tenant id
+            // is not computable from their NEAR account name, and the equality
+            // has since held for no real account. A client cannot re-derive
+            // its own anchor and must not try: the authorisation is the
+            // server's stored row for (tenant, principal), checked at upload
+            // by `verify_admission_evidence`, which refuses evidence bound to
+            // any other account.
+            if !trace_commons_protocol::admission::is_hash(&evidence.account_anchor_sha256) {
                 bail!("witness-certificate-invalid");
             }
         }
@@ -454,7 +464,13 @@ mod tests {
         let (_dir, store) = temp_store();
         let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
         let source_hash = "pre-inference-history";
-        let tenant = format!("near-{}", "ab".repeat(32));
+        // Deliberately NOT `near-{anchor}`. That shape is what V58's
+        // `CHECK (tenant_id = 'near-' || substring(anchor_hash from 8))`
+        // produced, V61 removed it, and a fixture still building it cannot
+        // express any post-V61 failure -- which is exactly how the account
+        // check in `validate_stored` above stayed broken. A wallet tenant id
+        // is now 32 random bytes and a function of nothing.
+        let tenant = format!("near-{}", "3f".repeat(32));
         let mut envelope = envelope().await;
         envelope.submission_id = crate::source::submission_id_for(source_hash);
         envelope.contributor.tenant_scope_ref = Some(tenant.clone());

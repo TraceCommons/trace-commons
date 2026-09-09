@@ -298,6 +298,24 @@ const RAW_RLS_RANKING_POLICY_VERSION: &str = "trace-credit-policy-raw-rls-v1";
 const RAW_RLS_RANKING_TARGET_USE: &str = "ranking_model_training";
 const RAW_RLS_RANKING_CALIBRATION_DATASET_HASH: &str = "sha256:raw-rls-calibration-dataset";
 
+/// `trace_ranking_model_versions` and `trace_ranking_calibration_datasets` are
+/// keyed by a version string and a hash, not by a UUID, so the fixture wrote
+/// the SAME value under both tenants and `raw_trace_rls_counts` counted it with
+/// a literal rather than a per-tenant parameter. Every other count in that
+/// query is scoped to one tenant's row by id.
+///
+/// The effect was that "how many of tenant B's rows can tenant A see" returned
+/// tenant A's OWN row and read as a cross-tenant leak. Nobody saw it: the
+/// assertion has never run, because the connecting role always bypassed RLS
+/// (#752). The policies on both tables are correct; the fixture was not.
+fn raw_rls_ranking_model_version(tenant_id: &str) -> String {
+    format!("{RAW_RLS_RANKING_MODEL_VERSION}:{tenant_id}")
+}
+
+fn raw_rls_ranking_calibration_dataset_hash(tenant_id: &str) -> String {
+    format!("{RAW_RLS_RANKING_CALIBRATION_DATASET_HASH}:{tenant_id}")
+}
+
 #[derive(Clone, Copy)]
 struct RawRankingControlPlaneIds {
     secondary_submission_id: Uuid,
@@ -566,12 +584,12 @@ async fn write_sample_ranking_and_benchmark_control_plane_rows(
     backend
         .upsert_trace_ranking_model_version(TraceRankingModelVersionWrite {
             tenant_id: tenant_id.to_string(),
-            model_version: RAW_RLS_RANKING_MODEL_VERSION.to_string(),
+            model_version: raw_rls_ranking_model_version(tenant_id),
             feature_schema_version: RAW_RLS_RANKING_FEATURE_SCHEMA_VERSION.to_string(),
             policy_version: RAW_RLS_RANKING_POLICY_VERSION.to_string(),
             status: TraceRankingModelStatus::Candidate,
             training_dataset_hash: format!("sha256:{tenant_id}:raw-rls-training"),
-            calibration_dataset_hash: RAW_RLS_RANKING_CALIBRATION_DATASET_HASH.to_string(),
+            calibration_dataset_hash: raw_rls_ranking_calibration_dataset_hash(tenant_id),
             model_artifact_hash: format!("sha256:{tenant_id}:raw-rls-model"),
             actor_principal_ref: format!("principal:{tenant_id}:ranker-admin"),
         })
@@ -580,7 +598,7 @@ async fn write_sample_ranking_and_benchmark_control_plane_rows(
     backend
         .upsert_trace_ranking_calibration_dataset(TraceRankingCalibrationDatasetWrite {
             tenant_id: tenant_id.to_string(),
-            calibration_dataset_hash: RAW_RLS_RANKING_CALIBRATION_DATASET_HASH.to_string(),
+            calibration_dataset_hash: raw_rls_ranking_calibration_dataset_hash(tenant_id),
             target_use: RAW_RLS_RANKING_TARGET_USE.to_string(),
             policy_version: RAW_RLS_RANKING_POLICY_VERSION.to_string(),
             source_manifest_hash: format!("sha256:{tenant_id}:raw-rls-calibration-manifest"),
@@ -619,7 +637,7 @@ async fn write_sample_ranking_and_benchmark_control_plane_rows(
             submission_id,
             trace_id,
             target_use: RAW_RLS_RANKING_TARGET_USE.to_string(),
-            model_version: RAW_RLS_RANKING_MODEL_VERSION.to_string(),
+            model_version: raw_rls_ranking_model_version(tenant_id),
             feature_schema_version: RAW_RLS_RANKING_FEATURE_SCHEMA_VERSION.to_string(),
             prediction_policy_version: RAW_RLS_RANKING_POLICY_VERSION.to_string(),
             feature_vector_hash: format!("sha256:{tenant_id}:raw-rls-feature-vector"),
@@ -673,10 +691,10 @@ async fn write_sample_ranking_and_benchmark_control_plane_rows(
         .upsert_trace_ranking_calibration_run(TraceRankingCalibrationRunWrite {
             tenant_id: tenant_id.to_string(),
             calibration_run_id: ids.calibration_run_id,
-            model_version: RAW_RLS_RANKING_MODEL_VERSION.to_string(),
+            model_version: raw_rls_ranking_model_version(tenant_id),
             target_use: RAW_RLS_RANKING_TARGET_USE.to_string(),
             policy_version: RAW_RLS_RANKING_POLICY_VERSION.to_string(),
-            evaluation_dataset_hash: RAW_RLS_RANKING_CALIBRATION_DATASET_HASH.to_string(),
+            evaluation_dataset_hash: raw_rls_ranking_calibration_dataset_hash(tenant_id),
             prediction_count: 1,
             label_count: 1,
             joined_label_prediction_count: 1,
@@ -709,7 +727,7 @@ async fn write_sample_ranking_and_benchmark_control_plane_rows(
             status: TraceRankingWorkerRunStatus::Completed,
             dry_run: false,
             reason_hash: format!("sha256:{tenant_id}:raw-rls-worker-reason"),
-            model_version: Some(RAW_RLS_RANKING_MODEL_VERSION.to_string()),
+            model_version: Some(raw_rls_ranking_model_version(tenant_id)),
             target_use: Some(RAW_RLS_RANKING_TARGET_USE.to_string()),
             policy_version: Some(RAW_RLS_RANKING_POLICY_VERSION.to_string()),
             limit: 10,
@@ -773,34 +791,103 @@ async fn current_role_bypasses_trace_rls(
     Ok(row.get::<_, bool>("owns_unforced_trace_table") || row.get::<_, bool>("bypass_role"))
 }
 
+/// Login role the raw-SQL assertions in this suite connect as.
+///
+/// Those assertions read a trace table directly and judge RLS by what comes
+/// back, so they mean nothing under a role that bypasses RLS: a superuser, a
+/// BYPASSRLS role, or the owner of a table whose policies are not FORCEd sees
+/// every row whatever the policy says. Each of them used to detect that and
+/// return early. The `postgres-suites` job connects as the container
+/// superuser, so on every CI run they all did -- and the suite still reported
+/// `32 passed; 0 failed`. That is #752, and the count was seven, not one:
+/// locally, as a superuser, seven assertions announced a skip and the suite
+/// went green.
+///
+/// So there is no longer anything to detect. This role is provisioned after
+/// the migrations have run and therefore owns nothing; it is NOSUPERUSER
+/// NOBYPASSRLS and holds exactly the DML these assertions perform and no DDL.
+/// Failing to reach it is a failure, not a skip.
+///
+/// NOINHERIT is load-bearing, not tidiness. `V36` grants `trace_gate_driver`
+/// permissive `USING (true)` SELECT policies on `trace_submissions` and three
+/// other tables, and PostgreSQL applies a policy to any role holding the
+/// privileges of the role the policy names. This role is granted membership of
+/// `trace_gate_driver` so that
+/// `gate_driver_role_reads_across_tenants_while_default_role_stays_isolated`
+/// can `SET ROLE` to it; an inheriting membership would hand every other
+/// assertion in this file that cross-tenant read without asking for it.
+const RAW_RLS_ASSERTION_ROLE: &str = "trace_rls_assertion_runtime";
+
+/// Connect for a raw-SQL RLS assertion as a role that cannot bypass RLS.
+///
+/// Panics rather than skipping, at every step. `purpose` names the assertion
+/// so a failure says which one could not be made.
+async fn connect_for_raw_rls_assertion(
+    database_url: &str,
+    purpose: &str,
+) -> tokio_postgres::Client {
+    let (admin_client, admin_connection) = tokio_postgres::connect(database_url, NoTls)
+        .await
+        .unwrap_or_else(|e| {
+            panic!("{purpose}: connect to provision {RAW_RLS_ASSERTION_ROLE} ({e})")
+        });
+    tokio::spawn(async move {
+        let _ = admin_connection.await;
+    });
+
+    admin_client
+        .batch_execute(&format!(
+            "DO $$ BEGIN
+                IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{RAW_RLS_ASSERTION_ROLE}')
+                THEN CREATE ROLE {RAW_RLS_ASSERTION_ROLE}
+                     LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOINHERIT;
+                END IF;
+                IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'trace_gate_driver')
+                THEN GRANT trace_gate_driver TO {RAW_RLS_ASSERTION_ROLE};
+                END IF;
+             END $$;
+             GRANT USAGE ON SCHEMA public TO {RAW_RLS_ASSERTION_ROLE};
+             GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public
+                TO {RAW_RLS_ASSERTION_ROLE};
+             GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public
+                TO {RAW_RLS_ASSERTION_ROLE};"
+        ))
+        .await
+        .unwrap_or_else(|e| panic!("{purpose}: provision {RAW_RLS_ASSERTION_ROLE} ({e})"));
+
+    let mut assertion_url = reqwest::Url::parse(database_url)
+        .unwrap_or_else(|e| panic!("{purpose}: parse the test database URL ({e})"));
+    assertion_url
+        .set_username(RAW_RLS_ASSERTION_ROLE)
+        .unwrap_or_else(|()| panic!("{purpose}: rewrite the username in the test database URL"));
+
+    let (mut client, connection) = tokio_postgres::connect(assertion_url.as_str(), NoTls)
+        .await
+        .unwrap_or_else(|e| panic!("{purpose}: connect as {RAW_RLS_ASSERTION_ROLE} ({e})"));
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+
+    let bypasses = current_role_bypasses_trace_rls(&mut client)
+        .await
+        .unwrap_or_else(|e| panic!("{purpose}: inspect the connecting role ({e})"));
+    assert!(
+        !bypasses,
+        "{purpose}: connected as a role that bypasses RLS, which sees every row whatever \
+         the policy says. This assertion reads raw SQL and would pass against no policy \
+         at all, so it fails here rather than returning early. See #752."
+    );
+
+    client
+}
+
 async fn assert_raw_sql_rls_filters_by_tenant_context(
     database_url: &str,
     tenant_a: &str,
     tenant_b: &str,
     submission_id: Uuid,
 ) {
-    let (mut client, connection) = match tokio_postgres::connect(database_url, NoTls).await {
-        Ok(parts) => parts,
-        Err(e) => {
-            eprintln!("skipping raw RLS assertion: database unavailable ({e})");
-            return;
-        }
-    };
-    tokio::spawn(async move {
-        let _ = connection.await;
-    });
-
-    match current_role_bypasses_trace_rls(&mut client).await {
-        Ok(true) => {
-            eprintln!("skipping raw RLS assertion: current role bypasses RLS");
-            return;
-        }
-        Ok(false) => {}
-        Err(e) => {
-            eprintln!("skipping raw RLS assertion: could not inspect role ({e})");
-            return;
-        }
-    }
+    let mut client = connect_for_raw_rls_assertion(database_url, "raw RLS assertion").await;
 
     let tx = client
         .transaction()
@@ -845,28 +932,7 @@ async fn assert_raw_sql_tenants_visible_only_with_matching_tenant_context(
     tenant_a: &str,
     tenant_b: &str,
 ) {
-    let (mut client, connection) = match tokio_postgres::connect(database_url, NoTls).await {
-        Ok(parts) => parts,
-        Err(e) => {
-            eprintln!("skipping raw tenant RLS assertion: database unavailable ({e})");
-            return;
-        }
-    };
-    tokio::spawn(async move {
-        let _ = connection.await;
-    });
-
-    match current_role_bypasses_trace_rls(&mut client).await {
-        Ok(true) => {
-            eprintln!("skipping raw tenant RLS assertion: current role bypasses RLS");
-            return;
-        }
-        Ok(false) => {}
-        Err(e) => {
-            eprintln!("skipping raw tenant RLS assertion: could not inspect role ({e})");
-            return;
-        }
-    }
+    let mut client = connect_for_raw_rls_assertion(database_url, "raw tenant RLS assertion").await;
 
     let tx = client
         .transaction()
@@ -952,7 +1018,10 @@ async fn assert_raw_sql_tenants_visible_only_with_matching_tenant_context(
 async fn raw_trace_rls_counts(
     tx: &tokio_postgres::Transaction<'_>,
     ids: RawTraceRlsIds,
+    tenant_id: &str,
 ) -> RawTraceRlsCounts {
+    let model_version = raw_rls_ranking_model_version(tenant_id);
+    let calibration_dataset_hash = raw_rls_ranking_calibration_dataset_hash(tenant_id);
     let row = tx
         .query_one(
             "SELECT
@@ -971,8 +1040,8 @@ async fn raw_trace_rls_counts(
                 (SELECT COUNT(*) FROM trace_credit_holds WHERE hold_id = $12) AS credit_holds,
                 (SELECT COUNT(*) FROM trace_near_credit_outbox WHERE near_outbox_id = $13) AS near_credit_outbox,
                 (SELECT COUNT(*) FROM trace_near_credit_account_outbox WHERE near_outbox_id = $14) AS near_credit_account_outbox,
-                (SELECT COUNT(*) FROM trace_ranking_model_versions WHERE model_version = 'trace-ranker-raw-rls-v1') AS ranking_model_versions,
-                (SELECT COUNT(*) FROM trace_ranking_calibration_datasets WHERE calibration_dataset_hash = 'sha256:raw-rls-calibration-dataset') AS ranking_calibration_datasets,
+                (SELECT COUNT(*) FROM trace_ranking_model_versions WHERE model_version = $25) AS ranking_model_versions,
+                (SELECT COUNT(*) FROM trace_ranking_calibration_datasets WHERE calibration_dataset_hash = $26) AS ranking_calibration_datasets,
                 (SELECT COUNT(*) FROM trace_ranking_features WHERE ranking_feature_id = $15) AS ranking_features,
                 (SELECT COUNT(*) FROM trace_ranking_predictions WHERE ranking_prediction_id = $16) AS ranking_predictions,
                 (SELECT COUNT(*) FROM trace_ranking_labels WHERE ranking_label_id = $17) AS ranking_labels,
@@ -1009,6 +1078,8 @@ async fn raw_trace_rls_counts(
                 &ids.tombstone_id,
                 &ids.retention_job_id,
                 &ids.propagation_item_id,
+                &model_version,
+                &calibration_dataset_hash,
             ],
         )
         .await
@@ -1053,40 +1124,19 @@ async fn assert_raw_sql_trace_rows_visible_only_with_matching_tenant_context(
     tenant_a_ids: RawTraceRlsIds,
     tenant_b_ids: RawTraceRlsIds,
 ) {
-    let (mut client, connection) = match tokio_postgres::connect(database_url, NoTls).await {
-        Ok(parts) => parts,
-        Err(e) => {
-            eprintln!("skipping raw RLS assertion: database unavailable ({e})");
-            return;
-        }
-    };
-    tokio::spawn(async move {
-        let _ = connection.await;
-    });
-
-    match current_role_bypasses_trace_rls(&mut client).await {
-        Ok(true) => {
-            eprintln!("skipping raw RLS assertion: current role bypasses RLS");
-            return;
-        }
-        Ok(false) => {}
-        Err(e) => {
-            eprintln!("skipping raw RLS assertion: could not inspect role ({e})");
-            return;
-        }
-    }
+    let mut client = connect_for_raw_rls_assertion(database_url, "raw RLS assertion").await;
 
     let tx = client
         .transaction()
         .await
         .expect("start raw no-context RLS assertion transaction");
     assert_eq!(
-        raw_trace_rls_counts(&tx, tenant_a_ids).await,
+        raw_trace_rls_counts(&tx, tenant_a_ids, tenant_a).await,
         RawTraceRlsCounts::all(0),
         "tenant A rows must be invisible without transaction-local tenant context"
     );
     assert_eq!(
-        raw_trace_rls_counts(&tx, tenant_b_ids).await,
+        raw_trace_rls_counts(&tx, tenant_b_ids, tenant_b).await,
         RawTraceRlsCounts::all(0),
         "tenant B rows must be invisible without transaction-local tenant context"
     );
@@ -1105,12 +1155,12 @@ async fn assert_raw_sql_trace_rows_visible_only_with_matching_tenant_context(
     .await
     .expect("set tenant A context");
     assert_eq!(
-        raw_trace_rls_counts(&tx, tenant_a_ids).await,
+        raw_trace_rls_counts(&tx, tenant_a_ids, tenant_a).await,
         RawTraceRlsCounts::all(1),
         "tenant A rows must be visible with matching tenant context"
     );
     assert_eq!(
-        raw_trace_rls_counts(&tx, tenant_b_ids).await,
+        raw_trace_rls_counts(&tx, tenant_b_ids, tenant_b).await,
         RawTraceRlsCounts::all(0),
         "tenant B rows must be invisible from tenant A context"
     );
@@ -1129,12 +1179,12 @@ async fn assert_raw_sql_trace_rows_visible_only_with_matching_tenant_context(
     .await
     .expect("set tenant B context");
     assert_eq!(
-        raw_trace_rls_counts(&tx, tenant_b_ids).await,
+        raw_trace_rls_counts(&tx, tenant_b_ids, tenant_b).await,
         RawTraceRlsCounts::all(1),
         "tenant B rows must be visible with matching tenant context"
     );
     assert_eq!(
-        raw_trace_rls_counts(&tx, tenant_a_ids).await,
+        raw_trace_rls_counts(&tx, tenant_a_ids, tenant_a).await,
         RawTraceRlsCounts::all(0),
         "tenant A rows must be invisible from tenant B context"
     );
@@ -1148,28 +1198,8 @@ async fn assert_raw_sql_tenant_policies_visible_only_with_matching_tenant_contex
     tenant_a: &str,
     tenant_b: &str,
 ) {
-    let (mut client, connection) = match tokio_postgres::connect(database_url, NoTls).await {
-        Ok(parts) => parts,
-        Err(e) => {
-            eprintln!("skipping raw tenant policy RLS assertion: database unavailable ({e})");
-            return;
-        }
-    };
-    tokio::spawn(async move {
-        let _ = connection.await;
-    });
-
-    match current_role_bypasses_trace_rls(&mut client).await {
-        Ok(true) => {
-            eprintln!("skipping raw tenant policy RLS assertion: current role bypasses RLS");
-            return;
-        }
-        Ok(false) => {}
-        Err(e) => {
-            eprintln!("skipping raw tenant policy RLS assertion: could not inspect role ({e})");
-            return;
-        }
-    }
+    let mut client =
+        connect_for_raw_rls_assertion(database_url, "raw tenant policy RLS assertion").await;
 
     let tx = client
         .transaction()
@@ -1247,35 +1277,23 @@ async fn assert_raw_sql_tenant_policies_visible_only_with_matching_tenant_contex
         .expect("commit raw tenant policy tenant B assertion");
 }
 
+/// The two expected counts are the caller's, because only the caller knows how
+/// many grants its fixture wrote. This assertion used to hardcode one apiece
+/// while the calling test seeds TWO grants for tenant A and asserts so itself,
+/// which nobody noticed because the assertion never ran under a role that
+/// could not bypass RLS (#752). The unqualified `COUNT(*)` is the point of the
+/// assertion -- it proves RLS hides every other tenant's grant, not merely
+/// that a `WHERE tenant_id` predicate works -- so it stays unqualified and the
+/// expected number comes in from outside.
 async fn assert_raw_sql_tenant_access_grants_visible_only_with_matching_tenant_context(
     database_url: &str,
     tenant_a: &str,
     tenant_b: &str,
+    expected_tenant_a_grants: i64,
+    expected_tenant_b_grants: i64,
 ) {
-    let (mut client, connection) = match tokio_postgres::connect(database_url, NoTls).await {
-        Ok(parts) => parts,
-        Err(e) => {
-            eprintln!("skipping raw tenant access grant RLS assertion: database unavailable ({e})");
-            return;
-        }
-    };
-    tokio::spawn(async move {
-        let _ = connection.await;
-    });
-
-    match current_role_bypasses_trace_rls(&mut client).await {
-        Ok(true) => {
-            eprintln!("skipping raw tenant access grant RLS assertion: current role bypasses RLS");
-            return;
-        }
-        Ok(false) => {}
-        Err(e) => {
-            eprintln!(
-                "skipping raw tenant access grant RLS assertion: could not inspect role ({e})"
-            );
-            return;
-        }
-    }
+    let mut client =
+        connect_for_raw_rls_assertion(database_url, "raw tenant access grant RLS assertion").await;
 
     let tx = client
         .transaction()
@@ -1317,7 +1335,10 @@ async fn assert_raw_sql_tenant_access_grants_visible_only_with_matching_tenant_c
         .await
         .expect("count tenant B access grant from tenant A context")
         .get(0);
-    assert_eq!(tenant_a_visible_count, 1);
+    assert_eq!(
+        tenant_a_visible_count, expected_tenant_a_grants,
+        "tenant A must see exactly the grants its own fixture wrote"
+    );
     assert_eq!(tenant_b_from_a_count, 0);
     tx.commit()
         .await
@@ -1346,7 +1367,10 @@ async fn assert_raw_sql_tenant_access_grants_visible_only_with_matching_tenant_c
         .await
         .expect("count tenant A access grant from tenant B context")
         .get(0);
-    assert_eq!(tenant_b_visible_count, 1);
+    assert_eq!(
+        tenant_b_visible_count, expected_tenant_b_grants,
+        "tenant B must see exactly the grants its own fixture wrote"
+    );
     assert_eq!(tenant_a_from_b_count, 0);
     tx.commit()
         .await
@@ -2461,6 +2485,8 @@ async fn store_facade_preserves_tenant_access_grant_scope_and_active_filter() {
             config.url.expose_secret(),
             &tenant_alpha,
             &tenant_beta,
+            alpha_grants.len() as i64,
+            beta_grants.len() as i64,
         )
         .await;
     }
@@ -5279,30 +5305,8 @@ async fn instance_enrollment_ledger_is_instance_scoped() {
         .await
         .expect("run migrations for instance enrollment test");
 
-    let (mut client, connection) = match tokio_postgres::connect(&database_url, NoTls).await {
-        Ok(parts) => parts,
-        Err(e) => {
-            eprintln!("skipping instance enrollment RLS test: database unavailable ({e})");
-            return;
-        }
-    };
-    tokio::spawn(async move {
-        let _ = connection.await;
-    });
-
-    match current_role_bypasses_trace_rls(&mut client).await {
-        Ok(true) => {
-            eprintln!(
-                "skipping instance enrollment RLS test: current role bypasses RLS (superuser or bypass-rls role)"
-            );
-            return;
-        }
-        Ok(false) => {}
-        Err(e) => {
-            eprintln!("skipping instance enrollment RLS test: could not inspect role ({e})");
-            return;
-        }
-    }
+    let mut client =
+        connect_for_raw_rls_assertion(&database_url, "instance enrollment RLS test").await;
 
     let instance_a = format!("sha256:{}", "a".repeat(64));
     let instance_b = format!("sha256:{}", "c".repeat(64));
@@ -5399,30 +5403,7 @@ async fn gate_driver_role_reads_across_tenants_while_default_role_stays_isolated
         .await
         .expect("run migrations for gate driver test");
 
-    let (mut client, connection) = match tokio_postgres::connect(&database_url, NoTls).await {
-        Ok(parts) => parts,
-        Err(e) => {
-            eprintln!("skipping gate driver RLS test: database unavailable ({e})");
-            return;
-        }
-    };
-    tokio::spawn(async move {
-        let _ = connection.await;
-    });
-
-    match current_role_bypasses_trace_rls(&mut client).await {
-        Ok(true) => {
-            eprintln!(
-                "skipping gate driver RLS test: current role bypasses RLS (superuser or bypass-rls role)"
-            );
-            return;
-        }
-        Ok(false) => {}
-        Err(e) => {
-            eprintln!("skipping gate driver RLS test: could not inspect role ({e})");
-            return;
-        }
-    }
+    let mut client = connect_for_raw_rls_assertion(&database_url, "gate driver RLS test").await;
 
     let tenant_id = format!("gate-driver-tenant-{}", Uuid::new_v4());
     let submission_id = Uuid::new_v4();

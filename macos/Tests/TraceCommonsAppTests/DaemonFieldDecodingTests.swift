@@ -38,6 +38,48 @@ final class DaemonFieldDecodingTests: XCTestCase {
         XCTAssertNil(entry.sessionPath)
     }
 
+    // MARK: - Admission evidence: only an explicit yes is a yes
+
+    /// `admission_evidence_required` decides whether the preview sheet offers
+    /// the admission-preparation control at all. It is not a preference: the
+    /// daemon sets it true for a contributor who signed up through NEAR and
+    /// false for one who came in on an invite, so an invited contributor
+    /// shown the control could only ever be refused by it.
+    ///
+    /// The daemon answers null when it could not read the config
+    /// (`add_admission_setting`), and a daemon that predates the key answers
+    /// nothing. Neither is a yes. This shell reads the flag through
+    /// `admissionEvidenceOffered` rather than at the call site so that the
+    /// question can be asked here, of the decoder, in both directions --
+    /// GTK and Windows hold the same contract in their own suites.
+    private func settings(_ admissionEvidence: String) throws -> DaemonSettingsView {
+        try decode(DaemonSettingsView.self, """
+        {"quiescence_secs":30,"digest_interval_secs":3600,
+         "local_notifications":true,"queue_ttl_days":7,
+         "max_queue_entries":100,"max_uploads_per_day":10,
+         "near_ai_configured":false,"claude_root_configured":true,
+         "codex_root_configured":false\(admissionEvidence)}
+        """)
+    }
+
+    func testAdmissionPreparationIsOfferedOnlyOnAnExplicitYes() throws {
+        XCTAssertTrue(try settings(",\"admission_evidence_required\":true").admissionEvidenceOffered)
+    }
+
+    func testAdmissionPreparationIsWithheldFromEveryOtherAnswer() throws {
+        for answer in [
+            ",\"admission_evidence_required\":false",
+            // The daemon could not read the config.
+            ",\"admission_evidence_required\":null",
+            // A daemon that predates the key.
+            "",
+        ] {
+            XCTAssertFalse(
+                try settings(answer).admissionEvidenceOffered,
+                "\(answer.isEmpty ? "an absent key" : answer) was read as eligibility")
+        }
+    }
+
     // MARK: - Eligibility: an absent key is not a state
 
     /// The distinction the eligibility contract turns on, at the decoder.

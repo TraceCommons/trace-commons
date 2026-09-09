@@ -59,6 +59,36 @@ fn validate_witness(witness: &PublishedWitness) -> Option<()> {
     }
     Some(())
 }
+/// A receipt-service base URL fit to publish to clients.
+///
+/// Clients append `/signature/{chat_id}` and a served-model query to this, so
+/// a value carrying a query, a fragment or credentials of its own would be
+/// silently mangled or would leak. Refused here rather than left for every
+/// client to rediscover. The same shape `published_issuer` requires.
+fn validate_receipt_endpoint(endpoint: &str) -> Option<()> {
+    let url = reqwest::Url::parse(endpoint).ok()?;
+    if url.scheme() != "https"
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return None;
+    }
+    Some(())
+}
+
+/// The receipt endpoint an operator has chosen to publish, if any.
+///
+/// Optional, unlike the issuer: a commons that serves no attested inference
+/// publishes nothing here and its clients stay unattested, which is the
+/// behaviour they already have.
+fn published_receipt_endpoint() -> Option<String> {
+    let endpoint = std::env::var("TRACE_COMMONS_NEAR_PROVISIONING_RECEIPT_ENDPOINT").ok()?;
+    validate_receipt_endpoint(&endpoint)?;
+    Some(endpoint)
+}
 fn published_issuer() -> Option<(String, String)> {
     let issuer = std::env::var("TRACE_COMMONS_NEAR_PROVISIONING_ISSUER_URL").ok()?;
     let audience = std::env::var("TRACE_COMMONS_NEAR_PROVISIONING_AUDIENCE").ok()?;
@@ -84,7 +114,7 @@ pub(super) async fn capabilities(State(state): State<Arc<AppState>>) -> axum::re
             };
             let network = account_near_config(&state).ok().map(|c| c.network.clone());
             response(
-                serde_json::json!({"ready":true,"network":network,"witness":witness,"issuer_url":issuer_url,"audience":audience,"funding_available":false}),
+                serde_json::json!({"ready":true,"network":network,"witness":witness,"issuer_url":issuer_url,"audience":audience,"inference_receipt_endpoint":published_receipt_endpoint(),"funding_available":false}),
             )
         }
         None => response(serde_json::json!({"ready":false,"funding_available":false})),
@@ -345,6 +375,28 @@ mod tests {
         value.url = "https://witness.example".into();
         value.signing_address = "0xinvalid".into();
         assert!(validate_witness(&value).is_none());
+    }
+    /// The receipt endpoint is published to clients that will call it with a
+    /// `chat_id` on the path and a model on the query, so a value carrying a
+    /// query, a fragment or credentials of its own is refused here rather
+    /// than left for every client to discover separately.
+    #[test]
+    fn a_published_receipt_endpoint_must_be_a_bare_https_origin() {
+        assert!(validate_receipt_endpoint("https://cloud-api.near.ai/v1").is_some());
+        for refused in [
+            "http://cloud-api.near.ai/v1",
+            "https://user@cloud-api.near.ai/v1",
+            "https://user:secret@cloud-api.near.ai/v1",
+            "https://cloud-api.near.ai/v1?model=x",
+            "https://cloud-api.near.ai/v1#fragment",
+            "not a url",
+            "",
+        ] {
+            assert!(
+                validate_receipt_endpoint(refused).is_none(),
+                "{refused} was published"
+            );
+        }
     }
     #[test]
     fn requests_reject_extra_fields_and_pkce_is_device_bound() {

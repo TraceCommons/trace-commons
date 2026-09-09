@@ -44,6 +44,14 @@ struct Capability {
     witness: Option<serde_json::Value>,
     issuer_url: Option<String>,
     audience: Option<String>,
+    /// The provider base URL clients fetch inference receipts from.
+    ///
+    /// Optional in both directions: a commons serving no attested inference
+    /// publishes nothing here, and a commons older than this field is simply
+    /// one that publishes nothing. `Capability` deliberately does not
+    /// `deny_unknown_fields`, so the reverse -- this client against a newer
+    /// commons -- was already safe.
+    inference_receipt_endpoint: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -164,6 +172,29 @@ impl SignupRefusal {
 /// The derivation never degrades to permissive: an origin with no host is an
 /// error, and [`HostAllowlist::from_hosts`] treats an empty set as
 /// "nothing", not "everything".
+/// The allowlist that admits a receipt endpoint this origin published.
+///
+/// The same derivation signup uses, exposed for the adoption that happens
+/// after signup: an already-enrolled client asking its commons for an endpoint
+/// must vet the answer on the same basis signup would have, rather than
+/// against a list that is permissive on every machine where no operator set
+/// one.
+///
+/// `configured` is the operator's own allowlist and still governs when it is
+/// enforcing -- at signup that is the environment's, and after signup the
+/// enrolled config's, which is the operator choice that outlived the ceremony.
+///
+/// # Errors
+///
+/// When the origin or the endpoint has no host to derive from.
+pub(super) fn published_host_allowlist(
+    configured: &HostAllowlist,
+    origin: &str,
+    endpoint: &str,
+) -> Result<HostAllowlist> {
+    derive_signup_allowlist(configured, origin, &[endpoint])
+}
+
 fn signup_allowlist(origin: &str, published: &[&str]) -> Result<HostAllowlist> {
     derive_signup_allowlist(&allowlist_for(None), origin, published)
 }
@@ -215,7 +246,7 @@ pub async fn handle_capabilities(_shared: &DaemonShared, req: &Request) -> Respo
         return Response::err(req.id, ERR_BAD_PARAMS, "near_signup_invalid");
     };
     match validated_capability(url).await {
-        Ok((issuer, audience, witness)) => Response::ok(
+        Ok((issuer, audience, witness, _endpoint)) => Response::ok(
             req.id,
             serde_json::json!({"ready":true,"issuer_url":issuer,"audience":audience,"witness":witness,"funding_available":false}),
         ),
@@ -232,7 +263,7 @@ pub async fn handle_capabilities(_shared: &DaemonShared, req: &Request) -> Respo
 
 async fn validated_capability(
     url: &str,
-) -> std::result::Result<(String, String, WitnessSettings), SignupRefusal> {
+) -> std::result::Result<(String, String, WitnessSettings, Option<String>), SignupRefusal> {
     let origin_only = signup_allowlist(url, &[]).map_err(|_| SignupRefusal::AddressRefused)?;
     let capability: Capability = client(url, &origin_only)
         .map_err(|_| SignupRefusal::AddressRefused)?
@@ -252,7 +283,7 @@ async fn validated_capability(
 fn validate_capability(
     origin: &str,
     capability: Capability,
-) -> std::result::Result<(String, String, WitnessSettings), SignupRefusal> {
+) -> std::result::Result<(String, String, WitnessSettings, Option<String>), SignupRefusal> {
     if !capability.ready {
         return Err(SignupRefusal::Unsupported);
     }
@@ -263,15 +294,56 @@ fn validate_capability(
     }
     let witness = published_witness(capability.witness.ok_or(SignupRefusal::Unsupported)?)
         .map_err(|_| SignupRefusal::Unsupported)?;
-    // The issuer and the witness are hosts this origin named for itself. They
-    // enter the list because the person chose this origin, and only for as
-    // long as this call: an operator's own allowlist, when set, still governs
-    // and refuses either of them if it does not list them.
-    let published = signup_allowlist(origin, &[&issuer, &witness.url])
-        .map_err(|_| SignupRefusal::AddressRefused)?;
+    // The issuer, the witness and the receipt service are hosts this origin
+    // named for itself. They enter the list because the person chose this
+    // origin, and only for as long as this call: an operator's own allowlist,
+    // when set, still governs and refuses any of them if it does not list
+    // them.
+    // Dropped before the derivation, not after: `signup_allowlist` parses
+    // every host it is given, so a commons publishing a receipt endpoint that
+    // is not even a URL would otherwise refuse the whole derivation and take
+    // enrollment down with it. The endpoint is the optional one of the three.
+    let receipt = capability
+        .inference_receipt_endpoint
+        .filter(|endpoint| reqwest::Url::parse(endpoint).is_ok_and(|url| url.host_str().is_some()));
+    let mut named = vec![issuer.as_str(), witness.url.as_str()];
+    if let Some(endpoint) = receipt.as_deref() {
+        named.push(endpoint);
+    }
+    let published = signup_allowlist(origin, &named).map_err(|_| SignupRefusal::AddressRefused)?;
     client(&issuer, &published).map_err(|_| SignupRefusal::AddressRefused)?;
     client(&witness.url, &published).map_err(|_| SignupRefusal::AddressRefused)?;
-    Ok((issuer, audience, witness))
+    // Gated by the list its own source produced. A published endpoint is
+    // admitted on the same basis the issuer and witness are -- this origin
+    // named it -- and an operator's own allowlist, when set, is what
+    // `signup_allowlist` returns instead and refuses it against. Dropped
+    // rather than fatal: a commons naming a receipt service this client will
+    // not call still enrolls the person, and they contribute unattested.
+    let receipt = receipt.filter(|endpoint| {
+        crate::config::validate_inference_receipt_endpoint(endpoint, &published).is_ok()
+    });
+    Ok((issuer, audience, witness, receipt))
+}
+
+/// Ask a commons what receipt endpoint it publishes, for a client that is
+/// already enrolled.
+///
+/// Signup reads the same value out of the same document; this exists because
+/// an account enrolled before the commons published one would otherwise never
+/// get it, and hand-editing `contributor.json` is not a thing a person does.
+///
+/// The whole capability document is validated on the way through -- including
+/// the endpoint against the allowlist this origin's own published hosts derive
+/// -- so a commons that has since stopped being ready, or that names a receipt
+/// service outside its published set, publishes nothing here either.
+///
+/// Never fatal to the caller: no endpoint simply means the refusal the caller
+/// was already going to make.
+pub(super) async fn published_receipt_endpoint(ingest_url: &str) -> Option<String> {
+    validated_capability(ingest_url)
+        .await
+        .ok()
+        .and_then(|(_, _, _, endpoint)| endpoint)
 }
 
 pub async fn handle_start(shared: &DaemonShared, req: &Request) -> Response {
@@ -359,13 +431,30 @@ async fn prepare(
     ingest: trace_commons_operator_client::Client,
     id: &str,
 ) -> Result<serde_json::Value> {
-    let receipt_endpoint = crate::config::inference_receipt_endpoint_from_env();
-    if let Some(endpoint) = receipt_endpoint.as_deref() {
-        crate::config::validate_inference_receipt_endpoint(endpoint, &allowlist_for(None))?;
-    }
-    let (issuer, audience, witness) = validated_capability(&options.ingest_url)
+    let (issuer, audience, witness, published) = validated_capability(&options.ingest_url)
         .await
         .map_err(|refusal| anyhow!(refusal.wire()))?;
+    // The environment stays ahead of the published value so an operator who
+    // set it on this host keeps the last word; a contributor who set nothing
+    // now gets the commons's answer instead of no answer at all. An invalid
+    // operator value refuses here rather than falling through to the server.
+    //
+    // Each source is gated by its own list: an operator's value against the
+    // operator's allowlist, and the published value against the one the
+    // origin's published hosts derived, which `validated_capability` has
+    // already applied.
+    let receipt_endpoint = crate::config::receipt_endpoint_to_adopt(
+        None,
+        crate::config::inference_receipt_endpoint_from_env().as_deref(),
+        &allowlist_for(None),
+        published.as_deref(),
+        &published
+            .as_deref()
+            .and_then(|endpoint| {
+                published_host_allowlist(&allowlist_for(None), &options.ingest_url, endpoint).ok()
+            })
+            .unwrap_or_else(HostAllowlist::permissive),
+    );
     if (!options.issuer_url.is_empty() && options.issuer_url != issuer)
         || (!options.audience.is_empty() && options.audience != audience)
     {
@@ -839,6 +928,10 @@ mod tests {
     }
 
     fn capability(issuer: &str, witness_url: &str) -> Capability {
+        capability_publishing(issuer, witness_url, None)
+    }
+
+    fn capability_publishing(issuer: &str, witness_url: &str, receipt: Option<&str>) -> Capability {
         Capability {
             ready: true,
             issuer_url: Some(issuer.into()),
@@ -848,6 +941,66 @@ mod tests {
                 "signing_address": format!("0x{}", "ab".repeat(20)),
                 "expected_measurements": [format!("mrtd={}", "ab".repeat(48))],
             })),
+            inference_receipt_endpoint: receipt.map(str::to_string),
+        }
+    }
+
+    /// A commons that publishes a receipt endpoint hands it back, on the same
+    /// basis it hands back an issuer and a witness: this origin named it.
+    #[test]
+    fn a_published_receipt_endpoint_comes_back_from_the_capability() {
+        let (_, _, _, receipt) = validate_capability(
+            "https://commons.example",
+            capability_publishing(
+                "https://issuer.example",
+                "https://witness.example",
+                Some("https://cloud-api.near.ai/v1"),
+            ),
+        )
+        .expect("a ready commons");
+        assert_eq!(receipt.as_deref(), Some("https://cloud-api.near.ai/v1"));
+    }
+
+    /// A commons that publishes none is not a commons that fails. The person
+    /// still enrolls; they contribute unattested, which is what they did
+    /// before any of this existed.
+    #[test]
+    fn a_commons_publishing_no_receipt_endpoint_still_enrolls_the_person() {
+        let (_, _, _, receipt) = validate_capability(
+            "https://commons.example",
+            capability("https://issuer.example", "https://witness.example"),
+        )
+        .expect("a ready commons");
+        assert!(receipt.is_none());
+    }
+
+    /// The endpoint is an address this daemon has to dial, so it faces the
+    /// address rules the issuer and witness face. A capabilities response is
+    /// not a licence to name anything.
+    ///
+    /// Dropped rather than fatal: enrollment survives, attestation does not.
+    /// A commons naming a receipt service this client will not call should not
+    /// cost the person their account.
+    #[test]
+    fn a_published_receipt_endpoint_that_is_not_a_dialable_address_is_dropped() {
+        for endpoint in [
+            "http://receipts.example/v1",
+            "https://user:secret@receipts.example/v1",
+            "https://receipts.example/v1?token=secret",
+            "https://receipts.example/v1#fragment",
+            "not a URL",
+            "",
+        ] {
+            let (_, _, _, receipt) = validate_capability(
+                "https://commons.example",
+                capability_publishing(
+                    "https://issuer.example",
+                    "https://witness.example",
+                    Some(endpoint),
+                ),
+            )
+            .expect("enrollment survives a receipt endpoint this client will not call");
+            assert!(receipt.is_none(), "{endpoint} was published");
         }
     }
 
@@ -857,7 +1010,7 @@ mod tests {
     /// failure this change exists to remove, moved one step later.
     #[test]
     fn a_commons_may_publish_its_issuer_and_witness_on_other_hosts() {
-        let (issuer, audience, witness) = validate_capability(
+        let (issuer, audience, witness, _) = validate_capability(
             "https://commons.example",
             capability("https://issuer.example", "https://witness.example"),
         )
@@ -964,6 +1117,41 @@ mod tests {
             wallet_refusal_line(Some("a_class_from_2027")),
             wallet_refusal_line(None)
         );
+    }
+
+    /// The receipt endpoint is read off the capability document under the name
+    /// the server publishes it as, and a commons that omits it publishes none
+    /// rather than failing to parse.
+    ///
+    /// The second case is also the compatibility check that matters in the
+    /// other direction: the extra keys it carries are ones `Capability` does
+    /// not name, and they are tolerated because the struct deliberately does
+    /// not `deny_unknown_fields`.
+    #[test]
+    fn a_capability_document_carries_the_published_receipt_endpoint() {
+        let published: Capability = serde_json::from_value(serde_json::json!({
+            "ready": true,
+            "witness": null,
+            "issuer_url": "https://issuer.example",
+            "audience": "upload",
+            "inference_receipt_endpoint": "https://cloud-api.near.ai/v1"
+        }))
+        .expect("a capability document");
+        assert_eq!(
+            published.inference_receipt_endpoint.as_deref(),
+            Some("https://cloud-api.near.ai/v1")
+        );
+
+        let silent: Capability = serde_json::from_value(serde_json::json!({
+            "ready": true,
+            "witness": null,
+            "issuer_url": "https://issuer.example",
+            "audience": "upload",
+            "network": "mainnet",
+            "funding_available": false
+        }))
+        .expect("a commons that publishes no receipt endpoint still parses");
+        assert!(silent.inference_receipt_endpoint.is_none());
     }
     #[tokio::test]
     async fn callback_accepts_fragmented_http_headers() {

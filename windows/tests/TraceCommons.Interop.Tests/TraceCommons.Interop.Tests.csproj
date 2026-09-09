@@ -159,6 +159,18 @@
     <None Include="$(MSBuildThisFileDirectory)../../src/TraceCommons.App/ViewModels/MainViewModel.cs"
           Link="MainViewModel.cs.txt"
           CopyToOutputDirectory="PreserveNewest" />
+    <!--
+      The preview sheet, whose admission-preparation control must be offered
+      only to a contributor whose enrolment can use it. The enrolment check
+      lives one hop from the property the markup binds, so both halves are
+      copied and held by AdmissionPreparationTests.
+    -->
+    <None Include="$(MSBuildThisFileDirectory)../../src/TraceCommons.App/ViewModels/PreviewSheetViewModel.cs"
+          Link="PreviewSheetViewModel.cs.txt"
+          CopyToOutputDirectory="PreserveNewest" />
+    <None Include="$(MSBuildThisFileDirectory)../../src/TraceCommons.App/Controls/PreviewSheet.xaml"
+          Link="PreviewSheet.xaml.txt"
+          CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <ItemGroup>
