@@ -437,6 +437,59 @@ internal static class NativeMethods
         [MarshalAs(UnmanagedType.LPUTF8Str)] string? reason);
 
     /// <summary>
+    /// The sentence for one queue entry's <c>attestation</c> mark: whether
+    /// that session carries proof of the model call that produced it.
+    ///
+    /// EVERY ROW REACHES HERE, INCLUDING AN INVITED CONTRIBUTOR'S. That is
+    /// the opposite of the eligibility line's rule, and deliberately so: the
+    /// mark is a fact about the trace rather than an answer to a permission
+    /// question nobody asked.
+    ///
+    /// An empty, NULL or unfamiliar mark reports that the answer is not
+    /// known, which is also the honest reading of a daemon too old to send
+    /// the field. IT NEVER REPORTS AN UNATTESTED SESSION. NULL only on a
+    /// caught panic.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    internal static extern IntPtr tc_contribution_attestation_line(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? mark);
+
+    /// <summary>
+    /// How that sentence is painted, as a raw
+    /// <c>TC_PRIVATE_INFERENCE_TONE_*</c> value.
+    ///
+    /// A permanently unattested session is deliberately NOT
+    /// <c>_REFUSED</c> and not even attention: nothing was refused and
+    /// nothing went wrong, the session simply has no attached call. Only the
+    /// configuration mark asks for attention, because a setting decides
+    /// whether the next session carries proof.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    internal static extern int tc_contribution_attestation_tone(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? mark);
+
+    /// <summary>
+    /// The sentence for one queue entry's <c>attestation_reason</c> label, or
+    /// THE EMPTY STRING for an absent, NULL or unfamiliar reason -- for which
+    /// a shell renders nothing.
+    ///
+    /// THE SAME THIRTEEN LABELS AS
+    /// <see cref="tc_contribution_eligibility_reason_line"/>, WITH DIFFERENT
+    /// SENTENCES. Never substitute one for the other: eligibility's read as
+    /// refusals of a request, and for an invited contributor nothing was
+    /// requested. NULL only on a caught panic.
+    /// </summary>
+    /// <remarks>
+    /// There is no <c>tc_contribution_attestation_control</c> to go with
+    /// these two, and that absence is the contract. The mark describes the
+    /// trace and offers nothing to press; whether a session may be sent stays
+    /// <see cref="tc_contribution_eligibility_control"/>'s question.
+    /// </remarks>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    internal static extern IntPtr tc_contribution_attestation_reason_line(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? reason);
+
+    /// <summary>
     /// How many sessions a group submit is leaving behind, as a sentence, or
     /// THE EMPTY STRING for zero and for a negative.
     /// </summary>
