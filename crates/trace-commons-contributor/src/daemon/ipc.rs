@@ -3239,7 +3239,11 @@ async fn handle_witness_preview_request_inner(
     req: &Request,
     // Recorded signed responses exercise persistence/approval without pretending
     // that local fixtures are Intel-signed quotes. Absent from production builds.
-    #[cfg(test)] recorded: Option<super::preview::WitnessPreview>,
+    //
+    // A `Result`, not a `WitnessPreview`: the refusal branch below decides what
+    // word a shell is given, and a seam that can only inject success leaves
+    // that decision with no way to be tested at all.
+    #[cfg(test)] recorded: Option<anyhow::Result<super::preview::WitnessPreview>>,
 ) -> Response {
     if req
         .params
@@ -3332,7 +3336,7 @@ async fn handle_witness_preview_request_inner(
     );
     #[cfg(test)]
     let built = match recorded {
-        Some(review) => Ok(review),
+        Some(review) => review,
         None => build.await,
     };
     #[cfg(not(test))]
@@ -4992,6 +4996,70 @@ mod tests {
         )
     }
 
+    /// A review that the witness refused reaches the shell under its own
+    /// name.
+    ///
+    /// Every witness refusal used to arrive as the single word
+    /// `witness-review-failed`: this route discarded the label with `Err(_)`,
+    /// so a receipt whose signer was not yet trusted and a witness that was
+    /// simply down were the same event to every shell. The label is already
+    /// in hand here -- `submit.rs` maps the transport error through
+    /// `refusal_label()` and `.map_err(anyhow::Error::msg)` carries it -- so
+    /// this route was throwing away something it had.
+    ///
+    /// The injected label is taken from the variant rather than typed, so a
+    /// rename cannot leave this test asserting a word nothing produces.
+    #[tokio::test]
+    async fn a_refused_review_reaches_the_shell_under_its_own_name() {
+        let (s, id, _dir, _review) = recorded_witness_review().await;
+        let refusal =
+            crate::witness::WitnessTrustError::WitnessAdmissionEvidenceRefused.refusal_label();
+        let response = handle_witness_preview_request_inner(
+            &s,
+            &req(
+                "witness_preview_request",
+                serde_json::json!({"entry_id":id,"raw_session_confirmed":true}),
+            ),
+            Some(Err(anyhow::anyhow!(refusal))),
+        )
+        .await;
+        assert_eq!(
+            response.error.as_ref().map(|e| e.message.as_str()),
+            Some(refusal),
+            "the refusal was replaced with a word that names nothing"
+        );
+    }
+
+    /// The fail-closed half. A failure that is not a witness refusal keeps the
+    /// fixed word: the messages on this path are internal strings, and a route
+    /// that forwarded whatever `anyhow` happened to hold would put them in
+    /// front of a contributor.
+    #[tokio::test]
+    async fn a_failure_that_is_not_a_witness_refusal_keeps_the_fixed_word() {
+        for message in [
+            "secret-leak-detected",
+            "pii-filter-unavailable",
+            "witness-review-source-changed",
+            "some internal string nobody should read",
+        ] {
+            let (s, id, _dir, _review) = recorded_witness_review().await;
+            let response = handle_witness_preview_request_inner(
+                &s,
+                &req(
+                    "witness_preview_request",
+                    serde_json::json!({"entry_id":id,"raw_session_confirmed":true}),
+                ),
+                Some(Err(anyhow::anyhow!(message))),
+            )
+            .await;
+            assert_eq!(
+                response.error.as_ref().map(|e| e.message.as_str()),
+                Some("witness-review-failed"),
+                "{message} was forwarded to a shell"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn recorded_witness_request_reopens_and_approves_the_same_persisted_artifact() {
         let (s, id, _dir, review) = recorded_witness_review().await;
@@ -5003,7 +5071,7 @@ mod tests {
                 "witness_preview_request",
                 serde_json::json!({"entry_id":id,"raw_session_confirmed":true}),
             ),
-            Some(review),
+            Some(Ok(review)),
         )
         .await;
         assert!(response.error.is_none(), "{:?}", response.error);
@@ -5056,7 +5124,7 @@ mod tests {
                 "witness_preview_request",
                 serde_json::json!({"entry_id":id,"raw_session_confirmed":true}),
             ),
-            Some(review),
+            Some(Ok(review)),
         )
         .await;
         assert_eq!(response.error.unwrap().message, "witness-review-stale");
