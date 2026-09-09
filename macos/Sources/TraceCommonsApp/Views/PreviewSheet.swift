@@ -297,7 +297,7 @@ struct PreviewSheet: View {
         } else if let failure {
             VStack(spacing: TC.Space.md) {
                 CenteredNotice(title: "This one can't be shown.", detail: witnessRequested ? (model.witnessCopy?.review?.failed ?? failure) : failure)
-                if model.daemonSettings?.admissionEvidenceRequired == true {
+                if model.daemonSettings?.admissionEvidenceOffered == true {
                     AdmissionPreparationView(entryID: entry.entryID)
                 }
                 if witnessSupported, model.witnessStateCode == 1, let copy = model.witnessCopy?.review {
