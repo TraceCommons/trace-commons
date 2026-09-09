@@ -2288,6 +2288,26 @@ pub use trace_commons_contributor::private_inference_copy::{
     certificate_list_empty, certificate_list_title, certificate_row_line,
 };
 
+// --- Joining with a NEAR AI login ---------------------------------------
+//
+// The way in that needs no wallet. A contributor cannot produce an
+// admissible receipt without a NEAR AI account in the first place, so
+// requiring a wallet as well is a second onboarding for an identity they
+// already hold. Both paths are offered here and neither is removed.
+//
+// `near_ai_enroll_line` picks the sentence and `near_ai_enroll_tone` paints
+// it; both take the daemon's control name and are used as one. Ten refusals,
+// each with its own words -- and the three that refuse before anything is
+// spent must not be run together: not signed in, commons unreachable, and
+// commons not offering this are three different things to do about it.
+//
+// An unknown label reaches the generic sentence and never the empty string.
+// Unlike an attestation reason, silence here would leave a control that did
+// nothing and said nothing.
+pub use trace_commons_contributor::private_inference_copy::{
+    near_ai_enroll_line, near_ai_enroll_tone,
+};
+
 // --- The redaction witness ---------------------------------------------
 //
 // Same rule as the Tools block above, for the same reason. The witness
