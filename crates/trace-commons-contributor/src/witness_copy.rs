@@ -1031,6 +1031,7 @@ mod tests {
         );
 
         let generic = witness_copy().review.failed;
+        let mut selected: Vec<&str> = Vec::new();
         for label in crate::witness::WitnessTrustError::ALL_REFUSAL_LABELS {
             let line = witness_refusal_line(Some(label));
             assert_ne!(
@@ -1041,7 +1042,28 @@ mod tests {
                 !line.contains(label),
                 "{label} is rendered to a contributor as its own internal name"
             );
+            selected.push(line);
         }
+
+        // The partition, not the mapping. Grouping several causes onto one
+        // sentence is deliberate -- five ways of failing to prove itself are
+        // one thing to do about it -- so this cannot require fourteen
+        // distinct sentences. What it can require is that the eight written
+        // sentences are the eight reached: a label quietly folded into a
+        // neighbour's wording drops this to seven, and a sentence no label
+        // selects is one nobody will ever read.
+        //
+        // Deliberately not a table of label to field. That would be this
+        // function written twice, and the copy would agree with itself by
+        // construction.
+        selected.sort_unstable();
+        selected.dedup();
+        sentences.sort_unstable();
+        assert_eq!(
+            selected, sentences,
+            "the refusal sentences written and the refusal sentences reached are not the \
+             same set, so a cause was folded into a neighbour or a sentence is unreachable"
+        );
         assert_eq!(witness_refusal_line(None), generic);
         assert_eq!(
             witness_refusal_line(Some("nothing-classifies-this")),
