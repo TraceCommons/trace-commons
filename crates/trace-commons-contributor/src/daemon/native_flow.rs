@@ -556,6 +556,47 @@ mod tests {
         );
     }
 
+    /// Every cause a person must act on differently gets its own sentence.
+    ///
+    /// One label having escaped the generic sentence is not the fix: a person
+    /// who has not granted the inference-body permission, one whose IronWire
+    /// is not running, and one whose session came from an agent this build
+    /// cannot read are three different problems with three different actions,
+    /// and all three are told to check their settings and try again.
+    #[test]
+    fn each_distinct_admission_cause_gets_its_own_sentence() {
+        let generic = admission_message("admission_setup_unavailable");
+        assert_eq!(
+            generic,
+            witness_copy().admission.failed,
+            "an unclassified failure still says the generic sentence"
+        );
+        let distinct = [
+            "admission_setup_consent_required",
+            "admission_setup_unenrolled",
+            "admission_setup_proxy_missing",
+            "admission_setup_source_unsupported",
+            "admission_setup_endpoint_untrusted",
+            "admission_receipt_endpoint_required",
+        ];
+        for label in distinct {
+            assert_ne!(
+                admission_message(label),
+                generic,
+                "{label} still borrows the sentence that tells a person to retry"
+            );
+        }
+        let mut seen: Vec<String> = distinct.iter().map(|l| admission_message(l)).collect();
+        seen.sort();
+        let before = seen.len();
+        seen.dedup();
+        assert_eq!(
+            seen.len(),
+            before,
+            "two causes needing different actions were given the same words"
+        );
+    }
+
     /// Its own sentence, not its own outcome: this is still a refusal, and a
     /// distinct message must not leak into the `ready` flag, the state or the
     /// tone.

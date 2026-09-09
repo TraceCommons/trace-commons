@@ -582,6 +582,43 @@ mod tests {
         ));
     }
 
+    /// The label the daemon computed must survive to the response.
+    ///
+    /// `prepare` distinguishes sixteen causes and `handle_prepare_admission_session`
+    /// threw all but two of them away as `admission_setup_unavailable`, so the
+    /// sentence layer above had nothing left to tell apart. A person who never
+    /// granted the inference-body permission is not having an outage.
+    #[tokio::test]
+    async fn a_computed_cause_is_not_flattened_into_unavailable() {
+        let (_dir, store) = crate::config::tests_support::temp_store();
+        let mut cfg = config();
+        cfg.consent_scopes.clear();
+        store.save_config(&cfg).unwrap();
+        let shared = DaemonShared::load(store).unwrap();
+        shared.settings.lock().unwrap().ironwire_attested_bodies = true;
+
+        let response = handle_prepare_admission_session(
+            &shared,
+            &Request {
+                id: 1,
+                method: "prepare_admission_session".into(),
+                params: serde_json::json!({
+                    "entry_id": uuid::Uuid::new_v4(),
+                    "backend": "near",
+                    "confirmed": true
+                }),
+            },
+        )
+        .await;
+
+        let label = response.error.expect("a refusal").message;
+        assert_ne!(
+            label, "admission_setup_unavailable",
+            "the consent cause was computed and then discarded"
+        );
+        assert_eq!(label, "admission_setup_consent_required");
+    }
+
     /// The defect, end to end, at the layer that has to fix it.
     ///
     /// A contributor with no `TRACE_COMMONS_INFERENCE_RECEIPT_ENDPOINT` and no
