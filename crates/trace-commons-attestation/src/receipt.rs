@@ -633,11 +633,13 @@ pub fn attested_ed25519_key(
 ///
 /// This is the set a hosted-model receipt's signer must be checked against,
 /// and it is not the gateway key. NEAR AI signs each hosted model's receipts
-/// with a **per-model** `provider_tee` key, and that key appears only in
-/// `model_attestations`, and only when the report was requested with
-/// `signing_algo=ed25519` -- without that query parameter the endpoint answers
-/// with the ECDSA model attestations instead, which is how it came to be
-/// missed. Checking a hosted-model receipt against
+/// with a **per-model** `provider_tee` key, and that key appears only in the
+/// report's model-attestation container, and only when the report was
+/// requested with `signing_algo=ed25519` -- without that query parameter the
+/// endpoint answers with the ECDSA model attestations instead, which is how it
+/// came to be missed. See [`model_attestation_entries`] for the container
+/// name, which the provider has changed once. Checking a hosted-model receipt
+/// against
 /// `gateway_attestation.signing_address` refuses every real one, because the
 /// gateway key signs no receipts.
 ///
@@ -656,10 +658,45 @@ pub fn attested_ed25519_key(
 ///
 /// # Errors
 ///
-/// [`AttestedKeyError::Malformed`] when the report is not JSON or has no
-/// `model_attestations` array; [`AttestedKeyError::ModelNotAttested`] when no
-/// entry names this model; and the binding errors of [`attested_ed25519_key`]
-/// when an entry that does name it fails to bind.
+/// [`AttestedKeyError::Malformed`] when the report is not JSON or carries
+/// neither model-attestation container -- which is what a gateway-only report
+/// looks like, and it must never yield the gateway key;
+/// [`AttestedKeyError::ModelNotAttested`] when no entry names this model; and
+/// the binding errors of [`attested_ed25519_key`] when an entry that does name
+/// it fails to bind.
+/// The container names a report may carry its per-model attestation entries
+/// under, newest first.
+///
+/// Two names for one thing, because the provider renamed it. Live on
+/// 2026-09-08, `qwen3-8-27b.completions.near.ai` serves the entries under
+/// **`all_attestations`** and carries no `model_attestations` at all (issue
+/// #802); earlier captures, and the fixtures taken from them, use
+/// `model_attestations`.
+///
+/// Both are read rather than one replacing the other. The observation window
+/// for the rename is one provider deployment on one day, a rename that went
+/// one way can go back, and a fallback costs nothing.
+pub const MODEL_ATTESTATION_CONTAINERS: [&str; 2] = ["all_attestations", "model_attestations"];
+
+/// The model-attestation entries of a parsed report, under whichever container
+/// name it uses.
+///
+/// `None` when the report carries neither -- which is exactly what a
+/// **gateway-only** report looks like, and the reason this returns `None`
+/// rather than an empty slice: a gateway report attests no model, and
+/// answering "no entries" would let a caller fall through to a
+/// `ModelNotAttested` that reads like "this model is not served here" instead
+/// of "you are looking at the wrong report".
+///
+/// The first container present wins; they are not merged. A report carrying
+/// both is not something seen in the wild, and merging would let a stale
+/// container contribute keys to a fresh answer.
+pub fn model_attestation_entries(document: &serde_json::Value) -> Option<&Vec<serde_json::Value>> {
+    MODEL_ATTESTATION_CONTAINERS
+        .iter()
+        .find_map(|name| document.get(*name).and_then(serde_json::Value::as_array))
+}
+
 pub fn model_ed25519_keys(
     report_json: &str,
     expected_nonce: &str,
@@ -667,10 +704,7 @@ pub fn model_ed25519_keys(
 ) -> Result<Vec<String>, AttestedKeyError> {
     let document: serde_json::Value =
         serde_json::from_str(report_json).map_err(|_| AttestedKeyError::Malformed)?;
-    let entries = document
-        .get("model_attestations")
-        .and_then(serde_json::Value::as_array)
-        .ok_or(AttestedKeyError::Malformed)?;
+    let entries = model_attestation_entries(&document).ok_or(AttestedKeyError::Malformed)?;
 
     let mut keys = Vec::new();
     for entry in entries {

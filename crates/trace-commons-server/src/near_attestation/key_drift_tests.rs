@@ -922,3 +922,84 @@ async fn the_live_client_reports_a_rejected_credential_by_status() {
         ReportCredentialVerdict::Unauthorized
     );
 }
+
+// ---------------------------------------------------------------------------
+// The container the provider actually serves (#802)
+// ---------------------------------------------------------------------------
+
+/// A real 2026-09-08 capture from the per-model host, under `all_attestations`.
+const ALL_ATTESTATIONS_REPORT: &str = include_str!(
+    "../../../trace-commons-attestation/tests/fixtures/near_ai_all_attestations_report_ed25519.json"
+);
+
+fn all_attestations_nonce() -> String {
+    json(ALL_ATTESTATIONS_REPORT)["_fixture_nonce"]
+        .as_str()
+        .expect("the capture records the nonce it was taken with")
+        .to_string()
+}
+
+#[tokio::test]
+async fn the_probe_derives_a_model_key_from_the_live_all_attestations_container() {
+    // The symptom in #802, as a test: the probe reached `model_keys_bound`
+    // and failed `report_shape` with `model_entry_count: 0`, because the
+    // provider serves the entries under a container this code did not read.
+    // Every later step stayed `not_run` behind it.
+    let nonce = all_attestations_nonce();
+    let stub = StubEndpoint::serving(SECOND_MODEL, ALL_ATTESTATIONS_REPORT);
+    let outcome = run_attested_key_drift_drill(
+        &stub,
+        None,
+        &FixedNonce(Box::leak(nonce.into_boxed_str())),
+        FIXTURE_CAPTURED_AT,
+    )
+    .await;
+
+    assert_eq!(
+        step(&outcome, AttestedKeyDriftStep::ModelKeysBound).status,
+        AttestedKeyDriftStatus::Passed,
+        "{:?}",
+        outcome.blocking_steps()
+    );
+    assert_eq!(outcome.model_entry_count, 1);
+    assert_eq!(outcome.model_key_refs.len(), 1);
+
+    // And the quote walk found the same entry, so the step after it is no
+    // longer starved of quotes. It fails on collateral -- the checked-in
+    // collateral does not verify a model enclave's quote, which #781
+    // established -- and that is a different failure than `report_shape`.
+    assert_ne!(
+        reason(&outcome, AttestedKeyDriftStep::ModelQuoteVerified),
+        Some("report_shape"),
+        "the quote walk must read the same container the key walk did"
+    );
+    assert_eq!(stub.quotes_seen().len(), 1);
+}
+
+#[tokio::test]
+async fn a_gateway_only_report_yields_the_probe_no_model_keys() {
+    // The gateway key signs no `provider_tee` receipt. A probe that answered
+    // with it would look green while attesting the wrong key entirely, which
+    // is the confusion this whole module exists to prevent.
+    let nonce = fixture_nonce(ED25519_REPORT);
+    let gateway_only = serde_json::json!({
+        "gateway_attestation": json(ED25519_REPORT)["gateway_attestation"].clone(),
+    })
+    .to_string();
+    let stub = StubEndpoint::serving(SECOND_MODEL, &gateway_only);
+    let outcome = run_attested_key_drift_drill(
+        &stub,
+        None,
+        &FixedNonce(Box::leak(nonce.into_boxed_str())),
+        FIXTURE_CAPTURED_AT,
+    )
+    .await;
+
+    assert_eq!(
+        step(&outcome, AttestedKeyDriftStep::ModelKeysBound).status,
+        AttestedKeyDriftStatus::Failed
+    );
+    assert!(outcome.model_key_refs.is_empty());
+    assert_eq!(outcome.model_entry_count, 0);
+    assert!(!outcome.passed);
+}

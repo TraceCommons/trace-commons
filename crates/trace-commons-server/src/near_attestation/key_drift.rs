@@ -9,7 +9,7 @@
 //! That is the right shape for the gateway, and it is the wrong report for
 //! everything the client already does: NEAR AI signs each hosted model's
 //! receipts with a **per-model** ed25519 key that appears only in
-//! `model_attestations`, and only when the report was asked for with
+//! the report's model-attestation container, and only when it was asked for with
 //! `signing_algo=ed25519`. This probe fetches that report and derives those
 //! keys, so the path a future invite-free contribution flow would depend on is
 //! exercised on a schedule before anything is switched on.
@@ -50,7 +50,7 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use trace_commons_attestation::receipt::{
-    AttestedKeyError, gateway_ed25519_key, model_ed25519_keys,
+    AttestedKeyError, gateway_ed25519_key, model_attestation_entries, model_ed25519_keys,
 };
 
 use super::client::{AttestationClientError, AttestedKeyReportClient};
@@ -75,7 +75,7 @@ pub enum AttestedKeyDriftStep {
     ReportFetched,
     /// `gateway_attestation` binds a key to the nonce we generated.
     GatewayKeyBound,
-    /// `model_attestations` binds at least one key for our model to that
+    /// The model-attestation container binds at least one key for our model to that
     /// nonce.
     ModelKeysBound,
     /// Every model entry's own quote verified against Intel collateral
@@ -364,10 +364,10 @@ fn credential_verdict(error: &AttestationClientError) -> ReportCredentialVerdict
 fn model_entry_quotes(report_json: &str, model: &str) -> Result<Vec<Vec<u8>>, &'static str> {
     let document: serde_json::Value =
         serde_json::from_str(report_json).map_err(|_| "report_shape")?;
-    let entries = document
-        .get("model_attestations")
-        .and_then(serde_json::Value::as_array)
-        .ok_or("report_shape")?;
+    // Whichever container this deployment serves the entries under. Reading
+    // one name here while `model_ed25519_keys` read the other is how the
+    // probe came to report a green key step beside an unverifiable quote.
+    let entries = model_attestation_entries(&document).ok_or("report_shape")?;
     let mut quotes = Vec::new();
     for entry in entries {
         if entry.get("model_name").and_then(serde_json::Value::as_str) != Some(model) {
