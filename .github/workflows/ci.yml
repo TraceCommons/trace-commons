@@ -35,7 +35,15 @@ on:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # PR and merge-queue runs are superseded by the next push to the same ref
+  # and are cancelled. Push-to-main runs are NOT: `github.ref` is the same
+  # `refs/heads/main` for every merge, so with cancellation on, each merge
+  # killed the previous merge's run mid-build -- 22 of the 40 main runs on
+  # 2026-09-09 ended `cancelled` -- and actions/cache only saves on a job
+  # that finished. The default-branch caches every PR is meant to restore
+  # from were therefore written on fewer than half the merges. A main run
+  # that completes costs the same minutes a cancelled one already spent.
+  cancel-in-progress: ${{ github.event_name != 'push' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -261,6 +269,10 @@ jobs:
             fi
           done
           exit $fail
+      # Last, so every step above still has its binaries; see the action for
+      # what is removed and why. Only a finished job saves its cache, so this
+      # runs exactly when a save is about to happen.
+      - uses: ./.github/actions/trim-cargo-cache
 
   mark-assets-drift:
     name: mark assets match the generator
@@ -340,6 +352,10 @@ jobs:
       # style/perf lints are the only ones suppressed from the default
       # clippy gate; everything else fails the build under -D warnings.
       - run: cargo clippy --workspace --all-targets -- -D warnings -A clippy::type_complexity -A clippy::collapsible_if -A clippy::manual_option_as_slice -A clippy::useless_vec -A clippy::redundant_pattern_matching
+      # Last, so every step above still has its binaries; see the action for
+      # what is removed and why. Only a finished job saves its cache, so this
+      # runs exactly when a save is about to happen.
+      - uses: ./.github/actions/trim-cargo-cache
 
   cargo-check-default:
     name: cargo check (default features)
@@ -361,6 +377,10 @@ jobs:
       # A manifest change must not silently re-resolve reviewed Git dependencies.
       - run: cargo check --locked -p trace-commons-server --bins
       - run: cargo check --locked -p trace-commons-contributor
+      # Last, so every step above still has its binaries; see the action for
+      # what is removed and why. Only a finished job saves its cache, so this
+      # runs exactly when a save is about to happen.
+      - uses: ./.github/actions/trim-cargo-cache
 
   cargo-check-permissive-standalone:
     name: cargo check (permissive crates, standalone)
@@ -399,6 +419,10 @@ jobs:
       - run: cargo check -p trace-commons-operator-client --no-default-features
       - run: cargo check -p trace-commons-mark --no-default-features
       - run: cargo check -p trace-commons-build-info --no-default-features
+      # Last, so every step above still has its binaries; see the action for
+      # what is removed and why. Only a finished job saves its cache, so this
+      # runs exactly when a save is about to happen.
+      - uses: ./.github/actions/trim-cargo-cache
 
   cargo-check-local-gpu-models:
     name: cargo check (local-gpu-models, non-CUDA)
@@ -421,6 +445,10 @@ jobs:
       # the CUDA toolkit and a GPU runtime, and is operator-tested on GPU
       # hosts only.
       - run: cargo check -p trace-commons-server --bins --features local-gpu-models
+      # Last, so every step above still has its binaries; see the action for
+      # what is removed and why. Only a finished job saves its cache, so this
+      # runs exactly when a save is about to happen.
+      - uses: ./.github/actions/trim-cargo-cache
 
   cargo-check-near-ai-scorer:
     name: cargo check (near-ai-scorer)
@@ -453,6 +481,10 @@ jobs:
       # client, which is the exact call that panicked.
       - run: cargo build -p trace-commons-server --bin trace-commons-ingest --features near-ai-scorer
       - run: ./target/debug/trace-commons-ingest --tls-selfcheck
+      # Last, so every step above still has its binaries; see the action for
+      # what is removed and why. Only a finished job saves its cache, so this
+      # runs exactly when a save is about to happen.
+      - uses: ./.github/actions/trim-cargo-cache
 
   cargo-check-near-attestation-collateral:
     name: cargo check (near-attestation-collateral)
@@ -504,6 +536,10 @@ jobs:
       # behind `#[cfg(not(feature = "near-attestation-collateral"))]`, which
       # this job excludes, so the source-attribute count is always one high.
       - run: cargo test -p trace-commons-attestation --features collateral-client
+      # Last, so every step above still has its binaries; see the action for
+      # what is removed and why. Only a finished job saves its cache, so this
+      # runs exactly when a save is about to happen.
+      - uses: ./.github/actions/trim-cargo-cache
 
   msrv-floor:
     name: builds at the declared MSRV floor
@@ -629,6 +665,10 @@ jobs:
         run: |
           cargo "+${{ steps.floor.outputs.gtk }}" check --locked \
             --manifest-path crates/trace-commons-contributor-gtk/Cargo.toml --bins
+      # Last, so every step above still has its binaries; see the action for
+      # what is removed and why. Only a finished job saves its cache, so this
+      # runs exactly when a save is about to happen.
+      - uses: ./.github/actions/trim-cargo-cache
 
   cargo-test-default:
     name: cargo test (default features)
@@ -653,6 +693,10 @@ jobs:
       # (41 tests) were never executed by CI at all, and a new crate joins the
       # workspace untested by default.
       - run: cargo test --workspace
+      # Last, so every step above still has its binaries; see the action for
+      # what is removed and why. Only a finished job saves its cache, so this
+      # runs exactly when a save is about to happen.
+      - uses: ./.github/actions/trim-cargo-cache
 
   preserve-order-guard:
     name: serde_json preserve_order guard
@@ -706,6 +750,10 @@ jobs:
           grep -q 'preserve_order' crates/trace-commons-protocol/Cargo.toml
       - name: The protocol crate must hold its bytes under preserve_order
         run: cargo test -p trace-commons-protocol
+      # Last, so every step above still has its binaries; see the action for
+      # what is removed and why. Only a finished job saves its cache, so this
+      # runs exactly when a save is about to happen.
+      - uses: ./.github/actions/trim-cargo-cache
 
   pilot-bootstrap-smoke:
     name: pilot-bootstrap smoke
@@ -749,6 +797,10 @@ jobs:
       # from reintroducing the confound. They gated nothing before.
       - name: Run corpus-builder self-tests
         run: python3 scripts/operator/test_build_agent_traces_corpus.py
+      # Last, so every step above still has its binaries; see the action for
+      # what is removed and why. Only a finished job saves its cache, so this
+      # runs exactly when a save is about to happen.
+      - uses: ./.github/actions/trim-cargo-cache
 
   operator-binaries-smoke:
     name: operator-binaries smoke
@@ -772,6 +824,10 @@ jobs:
       # See docs/operator/operator-binaries.md.
       - name: Run operator-binaries smoke
         run: bash scripts/operator/operator-smoke.sh
+      # Last, so every step above still has its binaries; see the action for
+      # what is removed and why. Only a finished job saves its cache, so this
+      # runs exactly when a save is about to happen.
+      - uses: ./.github/actions/trim-cargo-cache
 
   privacy-filter-shim-tests:
     name: privacy-filter shim tests
@@ -835,6 +891,10 @@ jobs:
       - name: swift test
         working-directory: macos
         run: swift test
+      # Last, so every step above still has its binaries; see the action for
+      # what is removed and why. Only a finished job saves its cache, so this
+      # runs exactly when a save is about to happen.
+      - uses: ./.github/actions/trim-cargo-cache
 
   windows-pipe-acl:
     name: windows named-pipe ACL
@@ -868,6 +928,10 @@ jobs:
       - name: Verify the pipe excludes a second local user
         shell: pwsh
         run: pwsh -File scripts/windows/verify-pipe-acl.ps1
+      # Last, so every step above still has its binaries; see the action for
+      # what is removed and why. Only a finished job saves its cache, so this
+      # runs exactly when a save is about to happen.
+      - uses: ./.github/actions/trim-cargo-cache
 
   # The contributor crate's Rust tests, on Windows. Nothing ran them there
   # before this job existed, and the cost was not that some tests were
@@ -910,6 +974,10 @@ jobs:
       # unix jobs.
       - name: Test the contributor and FFI crates
         run: cargo test -p trace-commons-contributor -p trace-commons-contributor-ffi
+      # Last, so every step above still has its binaries; see the action for
+      # what is removed and why. Only a finished job saves its cache, so this
+      # runs exactly when a save is about to happen.
+      - uses: ./.github/actions/trim-cargo-cache
 
   windows-update-conformance:
     name: windows update conformance
@@ -990,6 +1058,10 @@ jobs:
       - name: Note on the manifest roundtrip test
         shell: pwsh
         run: Write-Host "update_manifest_roundtrip.rs intentionally skipped on Windows -- see job comment"
+      # Last, so every step above still has its binaries; see the action for
+      # what is removed and why. Only a finished job saves its cache, so this
+      # runs exactly when a save is about to happen.
+      - uses: ./.github/actions/trim-cargo-cache
 
   windows-install-script:
     name: install.ps1 against the real release
@@ -1076,6 +1148,35 @@ jobs:
           # hands it back as the step's own status. Without this the step fails
           # precisely because the installer behaved.
           exit 0
+
+  linux-shell-desktop-entry:
+    name: linux-shell desktop entry and metainfo
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # The four validations below used to run only inside the weston job,
+    # after its apt install and before its two cold cargo builds -- so a
+    # one-character metainfo typo was reported after the whole build had
+    # been paid for, and on a 40-minute cancellation it was not reported at
+    # all. They take seconds and need two apt packages, so they get a job
+    # of their own that answers in about a minute.
+    #
+    # They are DELIBERATELY still run in the weston job as well. This job is
+    # not a required status check until someone adds it to branch
+    # protection, and until then a validation that lived only here would
+    # still run and no longer block -- the metainfo-version pin exists
+    # because 0.10.0 was tagged with a stale metainfo, and that is not a
+    # check to let go quiet. Once this job's name is in the required list,
+    # the copy in the weston job can be removed.
+    steps:
+      - uses: actions/checkout@v6
+      # Through the hardened update, never a bare `apt-get update`: the
+      # runner image's vendor repositories would fail this job before it
+      # validated anything, which is the exposure the action exists to close.
+      - uses: ./.github/actions/apt-update-ubuntu-only
+      - name: Install the validators
+        run: sudo apt-get install -y --no-install-recommends desktop-file-utils appstream
+      - name: Validate the desktop entry and AppStream metainfo
+        run: bash crates/trace-commons-contributor-gtk/scripts/validate-desktop-entry.sh
 
   linux-shell-desktop-integration:
     name: linux-shell desktop integration (weston + portal)
@@ -1190,34 +1291,10 @@ jobs:
       # software centre shows a blank tile. appstreamcli validate is the only
       # thing that checks the metainfo at all, and Flathub runs it on
       # submission, so it is better to fail here.
+      # Also run in its own fast job (`linux-shell-desktop-entry`); kept here
+      # until that job is a required check, so the pin never stops blocking.
       - name: Validate the desktop entry and AppStream metainfo
-        run: |
-          desktop-file-validate \
-            crates/trace-commons-contributor-gtk/flatpak/ai.tracecommons.Contributor.desktop
-          appstreamcli validate --no-net --pedantic \
-            crates/trace-commons-contributor-gtk/flatpak/ai.tracecommons.Contributor.metainfo.xml
-          # The entry names an icon; the manifest must install a file under
-          # that name. Checked as a pair because each half looks fine alone.
-          icon_name="$(sed -n 's/^Icon=//p' \
-            crates/trace-commons-contributor-gtk/flatpak/ai.tracecommons.Contributor.desktop)"
-          grep -q "apps/${icon_name}.svg" \
-            crates/trace-commons-contributor-gtk/flatpak/ai.tracecommons.Contributor.yml \
-            || { echo "the flatpak manifest installs no icon named ${icon_name}" >&2; exit 1; }
-          # The newest <release> must name the version the crate is at.
-          # Nothing else checks this: appstreamcli validates the document's
-          # shape and cannot know what the crate calls itself, so 0.10.0 was
-          # tagged with a metainfo still naming the previous release and was
-          # caught only by a person reading it before the tag. The version is
-          # not covered by the workspace either -- this crate carries its own.
-          crate_version="$(sed -n 's/^version = "\(.*\)"$/\1/p' \
-            crates/trace-commons-contributor-gtk/Cargo.toml | head -1)"
-          meta_version="$(sed -n 's/.*<release version="\([^"]*\)".*/\1/p' \
-            crates/trace-commons-contributor-gtk/flatpak/ai.tracecommons.Contributor.metainfo.xml \
-            | head -1)"
-          [ -n "$crate_version" ] && [ -n "$meta_version" ] \
-            || { echo "could not read one of the two versions" >&2; exit 1; }
-          [ "$crate_version" = "$meta_version" ] \
-            || { echo "metainfo newest release is ${meta_version}, crate is ${crate_version}" >&2; exit 1; }
+        run: bash crates/trace-commons-contributor-gtk/scripts/validate-desktop-entry.sh
       # trace-commons-contributor is a root-workspace crate; the shell links
       # it directly (see the crate's own Cargo.toml comment on why -- both
       # sides are Rust on Linux, no FFI boundary needed).
@@ -1246,6 +1323,10 @@ jobs:
             -A clippy::redundant_pattern_matching
       - name: Run weston + portal verification
         run: bash crates/trace-commons-contributor-gtk/scripts/weston-portal-verify.sh
+      # Last, so every step above still has its binaries; see the action for
+      # what is removed and why. Only a finished job saves its cache, so this
+      # runs exactly when a save is about to happen.
+      - uses: ./.github/actions/trim-cargo-cache
 
   windows-contributor-app:
     name: windows contributor app
@@ -1418,3 +1499,7 @@ jobs:
           if ($main.Name -ne $manifest.Package.Identity.Name) {
             throw "feed package name $($main.Name) does not match manifest identity $($manifest.Package.Identity.Name)"
           }
+      # Last, so every step above still has its binaries; see the action for
+      # what is removed and why. Only a finished job saves its cache, so this
+      # runs exactly when a save is about to happen.
+      - uses: ./.github/actions/trim-cargo-cache
