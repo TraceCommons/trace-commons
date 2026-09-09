@@ -1351,3 +1351,57 @@ fn evidence_carries_digests_and_never_a_key() {
         "a key may not reach an evidence surface"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The container the provider actually serves (#802)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn the_resolver_installs_a_model_key_from_the_all_attestations_container() {
+    // NEAR AI serves the per-model entries under `all_attestations` today.
+    // A resolver that only read `model_attestations` refuses every live
+    // report with `ReportShape` and installs nothing, so every
+    // `provider_tee` receipt is refused for want of a key that was there all
+    // along.
+    let (report, nonce) = synthetic_report(FIRST_MODEL);
+    let mut document: serde_json::Value = serde_json::from_str(&report).unwrap();
+    let entries = document["model_attestations"].take();
+    document
+        .as_object_mut()
+        .unwrap()
+        .remove("model_attestations");
+    document["all_attestations"] = entries;
+    assert!(document.get("model_attestations").is_none());
+
+    let stub = StubEndpoint::serving(FIRST_MODEL, &document.to_string());
+    let r = resolver(stub, &nonce, pins_for_both(synthetic_pins()));
+    let outcome = r.refresh(FIXTURE_CAPTURED_AT).await;
+
+    assert_eq!(outcome.model.refusal(), None, "{outcome:?}");
+    assert_eq!(model_keys(&r).len(), 1);
+}
+
+#[tokio::test]
+async fn the_resolver_installs_no_model_key_from_a_gateway_only_report() {
+    // The gateway key signs no `provider_tee` receipt. Installing it as one
+    // would accept every receipt signed by the gateway as though it came from
+    // the model's enclave, which is the confusion the split exists to prevent.
+    let (report, nonce) = synthetic_report(FIRST_MODEL);
+    let mut document: serde_json::Value = serde_json::from_str(&report).unwrap();
+    document
+        .as_object_mut()
+        .unwrap()
+        .remove("model_attestations");
+    assert!(document.get("gateway_attestation").is_some());
+
+    let stub = StubEndpoint::serving(FIRST_MODEL, &document.to_string());
+    let r = resolver(stub, &nonce, pins_for_both(synthetic_pins()));
+    let outcome = r.refresh(FIXTURE_CAPTURED_AT).await;
+
+    assert_eq!(
+        outcome.model.refusal(),
+        Some(RefreshRefusal::ReportShape),
+        "a gateway-only report attests no model"
+    );
+    assert!(model_keys(&r).is_empty());
+}

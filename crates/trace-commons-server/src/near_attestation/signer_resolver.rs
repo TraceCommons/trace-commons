@@ -77,7 +77,8 @@ use sha2::{Digest, Sha256};
 use super::measurements::EXPECTED_MEASUREMENTS_CONTROL;
 use super::quote::{QuoteVerifyError, VerifiedQuote, verify_quote};
 use super::receipt::{
-    AttestedKeyError, ReceiptSignatureKind, gateway_ed25519_key, model_ed25519_keys,
+    AttestedKeyError, ReceiptSignatureKind, gateway_ed25519_key, model_attestation_entries,
+    model_ed25519_keys,
 };
 use trace_commons_attestation::measurements::{ExpectedMeasurements, check_measurements_opt};
 
@@ -709,7 +710,7 @@ fn reconcile(
     Ok(derived)
 }
 
-/// The `intel_quote` bytes of every `model_attestations` entry naming `model`.
+/// The `intel_quote` bytes of every model-attestation entry naming `model`.
 ///
 /// An entry for this model carrying no readable quote is a refusal, not a
 /// skip: skipping it would leave the resolver verifying some other entry's
@@ -717,10 +718,9 @@ fn reconcile(
 fn model_entry_quotes(report_json: &str, model: &str) -> Result<Vec<Vec<u8>>, RefreshRefusal> {
     let document: serde_json::Value =
         serde_json::from_str(report_json).map_err(|_| RefreshRefusal::ReportShape)?;
-    let entries = document
-        .get("model_attestations")
-        .and_then(serde_json::Value::as_array)
-        .ok_or(RefreshRefusal::ReportShape)?;
+    // Same container lookup the key derivation uses, so the quotes verified
+    // here are the quotes those keys came out of.
+    let entries = model_attestation_entries(&document).ok_or(RefreshRefusal::ReportShape)?;
     let mut quotes = Vec::new();
     for entry in entries {
         if entry.get("model_name").and_then(serde_json::Value::as_str) != Some(model) {
