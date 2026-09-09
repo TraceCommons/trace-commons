@@ -61,6 +61,9 @@ struct StubEndpoint {
     collateral: String,
     seen_nonce: Mutex<Option<String>>,
     seen_quotes: Mutex<Vec<Vec<u8>>>,
+    /// How many times the report was fetched. The gateway answers both halves
+    /// in one response, so this being 1 is a property worth holding.
+    report_fetches: Mutex<usize>,
 }
 
 impl StubEndpoint {
@@ -71,6 +74,7 @@ impl StubEndpoint {
             collateral: COLLATERAL.to_string(),
             seen_nonce: Mutex::new(None),
             seen_quotes: Mutex::new(Vec::new()),
+            report_fetches: Mutex::new(0),
         }
     }
 
@@ -81,6 +85,7 @@ impl StubEndpoint {
             collateral: COLLATERAL.to_string(),
             seen_nonce: Mutex::new(None),
             seen_quotes: Mutex::new(Vec::new()),
+            report_fetches: Mutex::new(0),
         }
     }
 
@@ -90,6 +95,10 @@ impl StubEndpoint {
 
     fn quotes_seen(&self) -> Vec<Vec<u8>> {
         self.seen_quotes.lock().unwrap().clone()
+    }
+
+    fn report_fetches(&self) -> usize {
+        *self.report_fetches.lock().unwrap()
     }
 }
 
@@ -104,6 +113,7 @@ impl AttestedKeyReportClient for StubEndpoint {
         nonce: &str,
     ) -> Result<String, AttestationClientError> {
         *self.seen_nonce.lock().unwrap() = Some(nonce.to_string());
+        *self.report_fetches.lock().unwrap() += 1;
         self.report.clone()
     }
 
@@ -873,12 +883,16 @@ async fn the_live_client_asks_for_the_ed25519_report_with_our_nonce() {
         .mount(&server)
         .await;
 
+    // The mock is the ATTESTATION host. `base_url` is deliberately a URL that
+    // cannot resolve: the registry fetch must not use it, and if it ever does
+    // this test fails on a transport error rather than passing quietly.
     let client = HttpAttestationClient::new(
-        format!("{}/v1", server.uri()),
+        "https://completions.invalid.test/v1",
         FIRST_MODEL,
         SecretString::from("unused"),
         "https://invalid.test",
         Duration::from_secs(5),
+        Some(format!("{}/v1", server.uri())),
     )
     .expect("client builds");
 
@@ -905,12 +919,16 @@ async fn the_live_client_reports_a_rejected_credential_by_status() {
         .mount(&server)
         .await;
 
+    // The mock is the ATTESTATION host. `base_url` is deliberately a URL that
+    // cannot resolve: the registry fetch must not use it, and if it ever does
+    // this test fails on a transport error rather than passing quietly.
     let client = HttpAttestationClient::new(
-        format!("{}/v1", server.uri()),
+        "https://completions.invalid.test/v1",
         FIRST_MODEL,
         SecretString::from("unused"),
         "https://invalid.test",
         Duration::from_secs(5),
+        Some(format!("{}/v1", server.uri())),
     )
     .expect("client builds");
 
@@ -1002,4 +1020,101 @@ async fn a_gateway_only_report_yields_the_probe_no_model_keys() {
     assert!(outcome.model_key_refs.is_empty());
     assert_eq!(outcome.model_entry_count, 0);
     assert!(!outcome.passed);
+}
+
+// ---------------------------------------------------------------------------
+// One gateway fetch answers both halves (#802)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn one_gateway_fetch_satisfies_both_the_gateway_and_the_model_step() {
+    // The reason the drill fetches the registry from the gateway rather than
+    // making the gateway step not-applicable: the gateway serves
+    // `gateway_attestation` AND `model_attestations` in a single response, so
+    // both steps are answered by one request and neither has to be skipped.
+    //
+    // A step that silently becomes inapplicable because the report lacked a
+    // field is an absent signal reading as a pass, which is the failure this
+    // drill exists to prevent. This test is what keeps that route closed: if
+    // both steps can pass from one fetch, there is never a reason to reach for
+    // it.
+    let report = json(ED25519_REPORT);
+    assert!(
+        report.get("gateway_attestation").is_some() && report.get("model_attestations").is_some(),
+        "precondition: the capture is the gateway shape, carrying both halves"
+    );
+
+    let nonce = fixture_nonce(ED25519_REPORT);
+    let stub = StubEndpoint::serving(FIRST_MODEL, ED25519_REPORT);
+    let outcome = run_attested_key_drift_drill(
+        &stub,
+        None,
+        &FixedNonce(Box::leak(nonce.into_boxed_str())),
+        FIXTURE_CAPTURED_AT,
+    )
+    .await;
+
+    assert_eq!(
+        step(&outcome, AttestedKeyDriftStep::GatewayKeyBound).status,
+        AttestedKeyDriftStatus::Passed,
+        "{:?}",
+        outcome.blocking_steps()
+    );
+    assert_eq!(
+        step(&outcome, AttestedKeyDriftStep::ModelKeysBound).status,
+        AttestedKeyDriftStatus::Passed,
+        "{:?}",
+        outcome.blocking_steps()
+    );
+    assert_eq!(
+        stub.report_fetches(),
+        1,
+        "both halves must come from one request, not two"
+    );
+    // And they are different keys, so one fetch answering both is not one key
+    // answering both.
+    assert_ne!(
+        outcome.gateway_key_ref.as_deref(),
+        outcome.model_key_refs.first().map(String::as_str)
+    );
+}
+
+#[tokio::test]
+async fn a_report_with_no_gateway_half_fails_that_step_rather_than_skipping_it() {
+    // The route deliberately not taken. A completions host serves no
+    // `gateway_attestation`; the answer is to ask the gateway, never to let
+    // the missing field make the step not-applicable. `NotRun` and `Passed`
+    // are both wrong here -- only `Failed` says an operator has something to
+    // fix.
+    let mut document = json(ED25519_REPORT);
+    document
+        .as_object_mut()
+        .unwrap()
+        .remove("gateway_attestation");
+    let nonce = fixture_nonce(ED25519_REPORT);
+    let stub = StubEndpoint::serving(FIRST_MODEL, &document.to_string());
+    let outcome = run_attested_key_drift_drill(
+        &stub,
+        None,
+        &FixedNonce(Box::leak(nonce.into_boxed_str())),
+        FIXTURE_CAPTURED_AT,
+    )
+    .await;
+
+    assert_eq!(
+        step(&outcome, AttestedKeyDriftStep::GatewayKeyBound).status,
+        AttestedKeyDriftStatus::Failed,
+        "a missing gateway half is a failure, never a skip"
+    );
+    assert_eq!(
+        reason(&outcome, AttestedKeyDriftStep::GatewayKeyBound),
+        Some("report_shape")
+    );
+    assert!(!outcome.passed);
+    // The model half still runs -- the two rotate independently, and the whole
+    // point of the probe is seeing which moved.
+    assert_eq!(
+        step(&outcome, AttestedKeyDriftStep::ModelKeysBound).status,
+        AttestedKeyDriftStatus::Passed
+    );
 }
