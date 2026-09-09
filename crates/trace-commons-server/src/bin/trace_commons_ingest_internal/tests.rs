@@ -91281,3 +91281,31 @@ fn free_text_wrappers_preserve_error_labels_and_hash_only_approval() {
         );
     }
 }
+
+#[test]
+fn a_run_that_passed_every_step_still_records_red_evidence_when_it_drifted() {
+    // The cell no fixture can reach through the handler: a passing run needs a
+    // report bound to the nonce this process generated, and a capture never
+    // is. So the truth table is asserted here, on the function the handler
+    // calls -- all four cells, not only the reachable three.
+    use TraceRolloutSmokeEvidenceStatus::{Failed, Passed};
+
+    assert_eq!(
+        near_attestation_key_drift_evidence_status(true, false),
+        Passed,
+        "a clean run against a matching baseline is the only green case"
+    );
+    assert_eq!(
+        near_attestation_key_drift_evidence_status(true, true),
+        Failed,
+        "green evidence beside a moved key is worse than no evidence"
+    );
+    assert_eq!(
+        near_attestation_key_drift_evidence_status(false, false),
+        Failed
+    );
+    assert_eq!(
+        near_attestation_key_drift_evidence_status(false, true),
+        Failed
+    );
+}

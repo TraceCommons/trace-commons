@@ -73533,6 +73533,25 @@ fn attested_key_drift_label(drift: &AttestedKeyDrift) -> String {
     }
 }
 
+/// The evidence status a probe run earns.
+///
+/// A named function rather than an inline conditional because the cell that
+/// matters -- a run that passed every step while the keys it watches moved --
+/// is not reachable from any offline fixture: a passing run needs a report
+/// bound to the nonce this process generated, and no capture can be. Left
+/// inline, that cell would be untested, and it is the whole point: green
+/// evidence beside a moved key is worse than no evidence.
+fn near_attestation_key_drift_evidence_status(
+    ready: bool,
+    drift_detected: bool,
+) -> TraceRolloutSmokeEvidenceStatus {
+    if ready && !drift_detected {
+        TraceRolloutSmokeEvidenceStatus::Passed
+    } else {
+        TraceRolloutSmokeEvidenceStatus::Failed
+    }
+}
+
 fn near_attestation_key_drift_evidence_hash(
     tenant: &TenantAuth,
     purpose: &str,
@@ -73672,11 +73691,10 @@ async fn run_near_attestation_key_drift_drill(
             // Drift against a supplied baseline is a failure of the check even
             // where every step of this run passed: the keys the client pins
             // moved, and that is the event the probe exists to catch.
-            status: if response.ready && !response.drift_detected {
-                TraceRolloutSmokeEvidenceStatus::Passed
-            } else {
-                TraceRolloutSmokeEvidenceStatus::Failed
-            },
+            status: near_attestation_key_drift_evidence_status(
+                response.ready,
+                response.drift_detected,
+            ),
             evidence_hash: response.evidence_hash.clone(),
             evidence_ref_hash: Some(sha256_prefixed(&purpose)),
             actor_principal_ref: tenant.principal_ref.clone(),
