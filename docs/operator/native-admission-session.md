@@ -20,10 +20,13 @@ Required configuration:
   cannot be used. This operation changes no route, credentials, or capture flag.
 - An enforcing Commons/issuer/receipt-service host allowlist and configured
   admission service. A saved `inference_receipt_endpoint` must explicitly name the
-  provider's HTTPS receipt-service base URL. Native signup preserves
-  `TRACE_COMMONS_INFERENCE_RECEIPT_ENDPOINT` when configured; it never derives it
-  from a backend name or funds. Existing enrollment configuration must be updated
-  explicitly when this endpoint was absent at signup.
+  provider's HTTPS receipt-service base URL. It is normally adopted from what the
+  commons publishes -- at signup, or here on the first prepare when signup
+  predated it -- with `TRACE_COMMONS_INFERENCE_RECEIPT_ENDPOINT` as the operator
+  override. It is never derived from a backend name or funds. When neither the
+  commons nor the operator supplies one, this operation refuses with
+  `admission_receipt_endpoint_required`, which carries its own sentence rather
+  than the generic "check your settings and try again".
 
 The daemon resolves the queue entry back to a declared native source and reads
 its exact session identifier from metadata: Codex `session_meta.payload.id` or

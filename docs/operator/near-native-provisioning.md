@@ -16,6 +16,12 @@ PostgreSQL mirror writes and tenant RLS readiness, plus these operator settings:
 - `TRACE_COMMONS_NEAR_PROVISIONING_WITNESS_JSON`: JSON containing `url` (HTTPS),
   `signing_address` (0x plus 40 hex characters), and `expected_measurements`
   (nonempty array of attestation measurement pin strings).
+- `TRACE_COMMONS_NEAR_PROVISIONING_RECEIPT_ENDPOINT` (optional): the provider's
+  receipt-service base URL, published to clients so a contributor never has to
+  be told it out of band. HTTPS, with no credentials, query or fragment, or it
+  is not published at all. A commons serving no attested inference leaves this
+  unset and its contributors stay unattested, which is the behaviour they
+  already had.
 
 The native daemon enforces a host allowlist for every request in this flow.
 It no longer requires a contributor to set one: with `TRACE_COMMONS_ALLOWED_HOSTS`
@@ -43,21 +49,36 @@ on a configured host list), `unreachable` (dialled, no usable answer), or
 `unsupported` (the Commons answered and does not offer wallet signup, or
 published trust material the client will not accept).
 
-As with invite enrollment, set `TRACE_COMMONS_INFERENCE_RECEIPT_ENDPOINT` to the
-provider's explicit receipt-service base URL before wallet signup. Native signup
-preserves it in `contributor.json` after validating HTTPS, an enforcing host
-allowlist, and absence of URL credentials, query, or fragment. It never guesses a
-receipt URL from the selected inference backend. An absent endpoint still allows
-identity enrollment and window-based history contributions; preparing a new bound
-inference session requires a saved endpoint. For existing accounts, configure
-`inference_receipt_endpoint` explicitly in their contributor configuration; merely
-changing the environment after enrollment does not retrofit saved configuration.
-The receipt client appends `/signature/{chat_id}` and the served-model query. It
-refuses redirects, so configure the canonical provider endpoint.
+Contributors get the receipt endpoint from the commons. A client with none
+saved adopts the published value at wallet signup, and again the first time it
+prepares a bound inference session -- so an account enrolled before the commons
+published one is not stranded. Nobody has to edit `contributor.json`, and no
+contributor is asked to type a URL they have no way to choose.
+
+`TRACE_COMMONS_INFERENCE_RECEIPT_ENDPOINT` remains the operator override on a
+host you control, and it outranks the published value. Set to something invalid
+it refuses outright rather than falling through to the server, so a typo cannot
+quietly hand the choice back.
+
+Either value is validated the same way: HTTPS, an enforcing host allowlist, and
+no URL credentials, query or fragment. A published endpoint is checked against
+the client's own allowlist too -- the commons publishes this and is not trusted
+to pick it. The client never guesses a receipt URL from the selected inference
+backend.
+
+An absent endpoint still allows identity enrollment and window-based history
+contributions; preparing a new bound inference session requires one, and says
+so in its own words rather than telling the contributor to check settings that
+were never wrong.
+
+The receipt client appends `/signature/{chat_id}` and the served-model query,
+so one base serves every model a deployment routes to. It refuses redirects, so
+publish the canonical provider endpoint.
 
 `GET /v1/account/near/provision/capabilities` returns `ready: false` until the
 whole dependency chain is configured. A ready response includes `issuer_url`,
-`audience`, `network`, `witness`, and `funding_available: false`. Readiness describes
+`audience`, `network`, `witness`, `inference_receipt_endpoint` (null when none
+is published), and `funding_available: false`. Readiness describes
 the Commons identity and admission service, not inference funding availability.
 Root ingest wiring must derive `near_provisioning_admission_ready` from the
 validated admission configuration; its standalone default is deliberately false.

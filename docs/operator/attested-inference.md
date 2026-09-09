@@ -324,9 +324,14 @@ Two operational consequences:
    a partly configured witness. Note the separator difference from the server
    side: the client separates measurement *sets* with `;`, because a set's
    own keys are comma-separated. The server's list is comma-separated.
-4. **A receipt endpoint**, `TRACE_COMMONS_INFERENCE_RECEIPT_ENDPOINT`. It must
-   be an allowlisted HTTPS origin with no query, fragment or userinfo, or the
-   client refuses it as `inference_receipt_endpoint_invalid`.
+4. **A receipt endpoint.** Normally the commons publishes this, from
+   `TRACE_COMMONS_NEAR_PROVISIONING_RECEIPT_ENDPOINT`, and a client with none
+   saved adopts it at signup or the first time it prepares a bound session; see
+   [near-native-provisioning.md](./near-native-provisioning.md).
+   `TRACE_COMMONS_INFERENCE_RECEIPT_ENDPOINT` is the operator override on a host
+   you control and outranks the published value. Either way it must be an
+   allowlisted HTTPS origin with no query, fragment or userinfo, or the client
+   refuses it as `inference_receipt_endpoint_invalid`.
    `TRACE_COMMONS_INFERENCE_RECEIPT_CHECK_ATTESTATION=true` (the literal word,
    nothing else counts) additionally **verifies the receipt** against the
    call's own request and response bytes — signature, both digests, and that
