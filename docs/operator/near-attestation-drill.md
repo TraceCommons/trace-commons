@@ -314,7 +314,7 @@ Two runs against **different models** are not comparable and report nothing:
 per-model keys differ per model by design, so calling that drift would be
 exactly wrong. The `model_label` in each outcome says which model was probed.
 
-### Evidence and when the check is required
+### Evidence, and why this check is advisory for now
 
 `record_evidence: true` writes a `near_attestation_key_drift` rollout-smoke
 evidence row — its own check name, deliberately not the ECDSA drill's, so one
@@ -322,12 +322,40 @@ drill's evidence cannot satisfy the other's gate. The row is **failed** when
 the run did not pass every step *or* when drift was found against a supplied
 baseline. Green evidence beside a moved key would be worse than no evidence.
 
-Like `near_attestation`, `near_attestation_key_drift` is a required
-rollout-smoke check only where a NEAR AI endpoint is configured
-(`TRACE_COMMONS_NEAR_AI_BASE_URL`, `_MODEL` and `_API_KEY` all set), and the
-condition keys on the surface being in use — never on any drill's result.
-Elsewhere it is reported in `not_applicable_checks`. Evidence goes stale after
-24 hours.
+`near_attestation_key_drift` is **advisory**: it is not in
+`TRACE_OPERATIONAL_ROLLOUT_SMOKE_REQUIRED_CHECKS` and it gates nothing, on any
+deployment, configured or not.
+
+That is a stage, not an oversight. This probe has never run against the live
+endpoint, so we do not yet know that it *can* pass — whether our credential is
+authorized for the report endpoint at all is one of the things it exists to
+find out, and per-quote collateral has never been fetched for a live model
+enclave. A required check that turns out to be structurally unpassable is
+permanently missing on every configured deployment, and a control nobody can
+ever turn green teaches operators to ignore red controls, which is the exact
+failure this surface exists to prevent.
+
+**Promote it to a conditional required check — beside `near_attestation`,
+keyed on the NEAR AI endpoint being configured — once a live run has produced
+a baseline.** A test named
+`the_key_drift_check_is_advisory_until_a_live_run_has_passed` pins the current
+stage; updating it is part of that promotion.
+
+Until then, note that a non-required check's evidence is filtered out of the
+rollout-smoke summary **entirely** — it appears in neither `required_checks`
+nor `not_applicable_checks`, and counts towards neither passed, failed nor
+stale. So do not look for this drill in the rollout-smoke summary; there is
+nothing there to find. In the meantime:
+
+- **Read the drill's own response.** `ready`, `blocking_gaps`, `credential`
+  and `drift` are the whole result, and the body is safe to paste into a
+  ticket.
+- **The evidence row is still written** when you pass `record_evidence: true`,
+  as a hash-only audit event, so a run leaves a durable trace even though
+  nothing reads it as a gate yet.
+
+Evidence goes stale after 24 hours, which will matter once the check is
+promoted.
 
 Like its neighbour, this drill is not in the `REQUIRED_DRILLS` loop in
 `scripts/operator/smoke-gate.sh`; run it with the curl above.

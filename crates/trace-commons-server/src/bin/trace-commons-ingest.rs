@@ -73455,6 +73455,23 @@ async fn near_attestation_drill_handler(
 /// different reports (`signing_algo=ecdsa` versus `ed25519`) and answer
 /// different questions, and sharing a check name would let one drill's
 /// evidence satisfy the other's gate.
+///
+/// **Advisory, and deliberately not in
+/// [`TRACE_OPERATIONAL_ROLLOUT_SMOKE_REQUIRED_CHECKS`] yet.** This probe has
+/// never run against the live endpoint, so we do not yet know it can pass:
+/// whether our credential is even authorized for the report endpoint is one
+/// of the questions it exists to answer, and per-quote collateral has never
+/// been fetched for a live model enclave. A required check that turns out to
+/// be structurally unpassable is permanently missing on every configured
+/// deployment, and a control nobody can ever turn green teaches operators to
+/// ignore red controls -- the exact failure this surface exists to prevent.
+///
+/// Promote it to a conditional required check -- beside `near_attestation`,
+/// keyed on the NEAR AI surface being configured -- once a live run has
+/// produced a baseline. Until then the evidence row is still written and
+/// still hash-only; it is simply not gating anything, and
+/// [`TraceOperationalRolloutSmokeSummary`] filters it out of the summary
+/// entirely, so read the drill's own response.
 const NEAR_ATTESTATION_KEY_DRIFT_CHECK: &str = "near_attestation_key_drift";
 
 #[derive(Debug, Default, Deserialize)]
@@ -73745,7 +73762,6 @@ const TRACE_OPERATIONAL_ROLLOUT_SMOKE_REQUIRED_CHECKS: &[&str] = &[
     "ranking_model_readiness",
     "credit_settlement",
     "near_attestation",
-    "near_attestation_key_drift",
     "object_primary_reads",
     "object_store_migration",
     "postgres_rls_readiness",
@@ -73765,12 +73781,7 @@ const TRACE_OPERATIONAL_ROLLOUT_SMOKE_REQUIRED_CHECKS: &[&str] = &[
 /// drill's result. A deployment that does use NEAR AI cannot opt out of a red
 /// drill; there is no allow-list, no severity dial and no acknowledgement
 /// flag. That distinction is the whole of it.
-///
-/// `near_attestation_key_drift` is conditional on the same thing and for the
-/// same reason: it probes the same endpoint, with the same credential, for the
-/// `signing_algo=ed25519` report.
-const TRACE_OPERATIONAL_ROLLOUT_SMOKE_CONDITIONAL_CHECKS: &[&str] =
-    &["near_attestation", "near_attestation_key_drift"];
+const TRACE_OPERATIONAL_ROLLOUT_SMOKE_CONDITIONAL_CHECKS: &[&str] = &["near_attestation"];
 
 /// The required checks for a deployment, given which conditional surfaces it
 /// has configured.
@@ -73779,10 +73790,8 @@ fn rollout_smoke_required_checks(near_attestation_configured: bool) -> Vec<&'sta
         .iter()
         .copied()
         .filter(|check| {
-            // Every conditional check today keys on the NEAR AI surface being
-            // configured at all -- never on any drill's result.
             !TRACE_OPERATIONAL_ROLLOUT_SMOKE_CONDITIONAL_CHECKS.contains(check)
-                || near_attestation_configured
+                || (*check == "near_attestation" && near_attestation_configured)
         })
         .collect()
 }

@@ -89813,12 +89813,8 @@ async fn near_attestation_key_drift_drill_records_failed_smoke_evidence() {
     assert_eq!(evidence.check_name, "near_attestation_key_drift");
     assert_eq!(evidence.status, TraceRolloutSmokeEvidenceStatus::Failed);
     assert_eq!(evidence.evidence_hash, drill.evidence_hash);
-    // Recorded into a bucket rollout-smoke actually reads, and under its own
-    // name -- sharing the ECDSA drill's would let one drill's evidence satisfy
-    // the other's gate.
-    assert!(
-        TRACE_OPERATIONAL_ROLLOUT_SMOKE_REQUIRED_CHECKS.contains(&"near_attestation_key_drift")
-    );
+    // Its own name, never the ECDSA drill's: sharing one would let this
+    // drill's evidence satisfy that drill's gate, which is a real gate.
     assert_ne!(evidence.check_name, "near_attestation");
 }
 
@@ -89885,17 +89881,74 @@ async fn the_key_drift_response_carries_no_key_and_no_credential() {
 }
 
 #[test]
-fn the_key_drift_check_is_required_only_where_a_near_ai_endpoint_is_configured() {
-    // Same ruling as its neighbour, for the same reason: a deployment routing
-    // no inference through NEAR AI has nothing for either drill to prove.
-    let configured = rollout_smoke_required_checks(true);
-    let unconfigured = rollout_smoke_required_checks(false);
+fn the_key_drift_check_is_advisory_until_a_live_run_has_passed() {
+    // A deliberate stage, pinned so it reads as one rather than as an
+    // oversight. This probe has never run against the live endpoint: whether
+    // our credential is even authorized for the report endpoint is one of the
+    // things it exists to find out. A required check that turns out to be
+    // structurally unpassable is permanently missing on every configured
+    // deployment, and a control nobody can turn green teaches operators to
+    // ignore red controls.
+    //
+    // Promote it beside `near_attestation` -- conditional on the NEAR AI
+    // surface being configured -- once a live run has produced a baseline.
+    // Deleting this test is part of that change, not a way around it.
+    for configured in [true, false] {
+        assert!(
+            !rollout_smoke_required_checks(configured).contains(&"near_attestation_key_drift"),
+            "advisory until a live run has passed (configured={configured})"
+        );
+    }
+    // The neighbour it will one day sit beside is unaffected either way.
+    assert!(rollout_smoke_required_checks(true).contains(&"near_attestation"));
+}
 
-    assert!(configured.contains(&"near_attestation_key_drift"));
-    assert!(!unconfigured.contains(&"near_attestation_key_drift"));
-    // And the two conditional checks are independent names, not one.
-    assert!(configured.contains(&"near_attestation"));
-    assert_eq!(configured.len(), unconfigured.len() + 2);
+#[test]
+fn advisory_key_drift_evidence_is_filtered_out_of_the_summary_entirely() {
+    // The consequence of being advisory, asserted rather than assumed: a
+    // non-required check's evidence does not reach the summary at all -- not
+    // as passed, not as failed, not as stale, not as not-applicable. That is
+    // why the operator doc sends a reader to the drill's own response and to
+    // the audit row, and this test is what keeps that instruction true.
+    let recorded = TraceRolloutSmokeEvidenceResponse {
+        event_id: Uuid::new_v4(),
+        tenant_id: "tenant-a".to_string(),
+        tenant_storage_ref: tenant_storage_ref("tenant-a"),
+        check_name: "near_attestation_key_drift".to_string(),
+        status: TraceRolloutSmokeEvidenceStatus::Failed,
+        evidence_hash: sha256_prefixed("a red key drift probe"),
+        evidence_ref_hash: None,
+        actor_principal_ref: "principal-a".to_string(),
+        recorded_at: Utc::now(),
+    };
+    let summary = TraceOperationalRolloutSmokeSummary::from_promotion_gates_and_evidence(
+        &TraceOperationalPromotionGateSummary {
+            ready: true,
+            ..TraceOperationalPromotionGateSummary::default()
+        },
+        std::slice::from_ref(&recorded),
+        Utc::now(),
+        true,
+    );
+
+    let name = "near_attestation_key_drift".to_string();
+    assert!(!summary.required_checks.contains(&name));
+    assert!(!summary.not_applicable_checks.contains(&name));
+    assert!(!summary.failed_evidence_checks.contains(&name));
+    assert!(!summary.passed_evidence_checks.contains(&name));
+    assert!(!summary.stale_evidence_checks.contains(&name));
+    assert!(!summary.missing_evidence_checks.contains(&name));
+    // And a red advisory row does not block promotion, which is the whole
+    // point of the stage: it cannot be the third always-red control.
+    assert_eq!(summary.failed_evidence_count, 0);
+    assert!(
+        summary
+            .blocker_reasons
+            .iter()
+            .all(|reason| !reason.contains("key_drift")),
+        "{:?}",
+        summary.blocker_reasons
+    );
 }
 
 #[test]
@@ -89909,13 +89962,13 @@ fn near_attestation_is_required_only_where_a_near_ai_endpoint_is_configured() {
 
     assert!(configured.contains(&"near_attestation"));
     assert!(!unconfigured.contains(&"near_attestation"));
-    assert_eq!(configured.len(), unconfigured.len() + 2);
+    assert_eq!(configured.len(), unconfigured.len() + 1);
     // Nothing else moved. A filter that dropped a second check would be a
     // silent weakening of the promotion gate.
     assert_eq!(
         configured
             .iter()
-            .filter(|check| !TRACE_OPERATIONAL_ROLLOUT_SMOKE_CONDITIONAL_CHECKS.contains(check))
+            .filter(|check| **check != "near_attestation")
             .copied()
             .collect::<Vec<_>>(),
         unconfigured
@@ -89939,14 +89992,9 @@ fn an_unconfigured_near_attestation_check_is_reported_not_applicable_not_passed(
         Utc::now(),
         false,
     );
-    // Both NEAR-AI-keyed drills, each named. A conditional check that fell
-    // out of this list would be indistinguishable from one quietly dropped.
     assert_eq!(
         summary.not_applicable_checks,
-        vec![
-            "near_attestation".to_string(),
-            "near_attestation_key_drift".to_string()
-        ]
+        vec!["near_attestation".to_string()]
     );
     assert!(
         !summary
