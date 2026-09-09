@@ -3,7 +3,7 @@
 
 use super::ipc::{DaemonShared, ERR_BAD_PARAMS, ERR_UNAVAILABLE, Request, Response};
 use crate::{
-    config::{ContributorConfig, allowlist_for},
+    config::{ContributorConfig, config_allowlist},
     identity::DeviceIdentity,
     issuer_client::IssuerClient,
 };
@@ -54,11 +54,8 @@ fn require_receipt_endpoint(cfg: &ContributorConfig) -> Result<()> {
         .inference_receipt_endpoint
         .as_deref()
         .ok_or(ReceiptEndpointSetupError::Required)?;
-    crate::config::validate_inference_receipt_endpoint(
-        endpoint,
-        &allowlist_for(cfg.allowed_hosts.as_deref()),
-    )
-    .map_err(|_| ReceiptEndpointSetupError::Invalid)?;
+    crate::config::validate_inference_receipt_endpoint(endpoint, &config_allowlist(cfg))
+        .map_err(|_| ReceiptEndpointSetupError::Invalid)?;
     Ok(())
 }
 
@@ -172,7 +169,12 @@ async fn prepare(shared: &DaemonShared, params: Params) -> Result<i64> {
     }
     let device = DeviceIdentity::load(&shared.store)?
         .ok_or_else(|| anyhow!("admission_setup_device_missing"))?;
-    let allowlist = allowlist_for(cfg.allowed_hosts.as_deref());
+    // The config's own hosts, when no operator list is configured. This gate
+    // stays exactly as fail-closed as it was -- a list that names nothing
+    // refuses everything -- but it is no longer unsatisfiable on a shipped
+    // application, which sets no `TRACE_COMMONS_ALLOWED_HOSTS` and whose
+    // signup writes no `allowed_hosts`.
+    let allowlist = config_allowlist(&cfg);
     if !allowlist.is_enforcing() {
         bail!("admission_setup_endpoint_untrusted");
     }
@@ -363,7 +365,7 @@ mod tests {
             "signup writes no host list; the list has to come from the config's own hosts"
         );
 
-        let allowlist = crate::config::config_allowlist(&cfg);
+        let allowlist = config_allowlist(&cfg);
         assert!(
             allowlist.is_enforcing(),
             "a signup-written config must yield an enforcing list, or every gate below refuses"
