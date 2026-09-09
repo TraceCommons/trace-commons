@@ -756,6 +756,24 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         Err(DatabaseError::Pool("near_provisioning_unconfigured".into()))
     }
 
+    /// Provision from a verified NEAR AI login (#836).
+    ///
+    /// The default refuses, like its wallet sibling: a backend that has not
+    /// implemented this has not configured login provisioning, and the
+    /// fail-closed answer is the only safe one for a path that mints an
+    /// admission anchor.
+    async fn provision_near_ai_login(
+        &self,
+        _login: &crate::near_ai_login::VerifiedNearAiLogin,
+        _device_public_key: &[u8; 32],
+        _session: NewSession<'_>,
+        _identity: &crate::near_account_identity::NearAccountIdentity,
+    ) -> Result<crate::account_onboarding::ProvisionedNearAccount, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "near_ai_login_provisioning_unconfigured".into(),
+        ))
+    }
+
     async fn resolve_near_public_key_tenant(
         &self,
         _public_key: &str,

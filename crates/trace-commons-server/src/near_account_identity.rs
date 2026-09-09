@@ -339,6 +339,26 @@ impl NearAccountIdentity {
         ))
     }
 
+    /// Seal a NEAR AI subject id (#836), bound to its **login** blind index.
+    ///
+    /// The same envelope and the same row shape as [`Self::seal`], so rotation
+    /// reads a login row and a wallet row identically. What differs is the
+    /// index it is bound to: the KEK context is the login anchor, so a sealed
+    /// subject cannot be unwrapped against a wallet row's anchor even under the
+    /// same key. The two identity systems stay separated inside the envelope as
+    /// well as in the keyspace.
+    pub fn seal_login_subject(&self, subject_id: &str) -> anyhow::Result<SealedNearAccountName> {
+        let index_label = self.login_index_label(subject_id);
+        let dek = generate_dek();
+        let wrapped_dek = self.kek.wrap_dek(&dek, &Self::context(&index_label))?;
+        let ciphertext = aead_encrypt_with_dek(&dek, subject_id.as_bytes())?;
+        Ok(SealedNearAccountName {
+            schema_version: SEALED_NEAR_ACCOUNT_NAME_SCHEMA_V1.into(),
+            wrapped_dek,
+            ciphertext_base64: STANDARD.encode(ciphertext),
+        })
+    }
+
     /// Recover a sealed account name. `index_label` is the row's stored anchor,
     /// which the unwrap verifies against the context recorded at seal time.
     pub fn open(

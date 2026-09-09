@@ -229,6 +229,150 @@ impl PgBackend {
         }))
     }
 
+    /// Provision a contributor from a verified NEAR AI login (#836).
+    ///
+    /// The sibling of [`Self::near_provision`], and deliberately a sibling
+    /// rather than a shared function with branches: the wallet path is
+    /// unchanged by this work, and threading five flags through it to serve
+    /// two identity systems would put the change inside the path it was
+    /// supposed to leave alone.
+    ///
+    /// **The duplication is real and is the cost of that choice.** The race
+    /// handling below -- resolve the tenant, attempt, retry once on a lost
+    /// anchor claim -- is the subtle part and now exists twice. If the two
+    /// drift, the login path is the one that will drift silently, because the
+    /// wallet path has the older test coverage. Extracting the wrapper is the
+    /// obvious follow-up; it was not done here because it edits the wallet
+    /// path.
+    pub(super) async fn near_ai_login_provision(
+        &self,
+        login: &crate::near_ai_login::VerifiedNearAiLogin,
+        device_public_key: &[u8; 32],
+        session: NewSession<'_>,
+        identity: &NearAccountIdentity,
+    ) -> Result<ProvisionedNearAccount, DatabaseError> {
+        if session.client_kind != crate::account_native_auth::NATIVE_SESSION_CLIENT_KIND {
+            return Err(refused());
+        }
+        // The anchor is HMAC(pepper, subject_id) under the *login* domain, and
+        // the sealed subject is the only copy of that id we keep -- the same
+        // shape the wallet path uses for an account name, so rotation reads
+        // both rows identically.
+        let anchor_hash = identity.login_index_label(login.subject_id());
+        let sealed_subject = identity
+            .seal_login_subject(login.subject_id())
+            .map_err(|_| refused())?;
+        let sealed_json = serde_json::to_value(&sealed_subject).map_err(|_| refused())?;
+        let pepper_ref = identity.pepper_ref_hash().to_string();
+        let key_ref = identity.key_ref_hash();
+        let mut tenant = match self.near_anchor_tenant(&anchor_hash).await? {
+            Some(existing) => existing,
+            None => crate::near_account_identity::random_near_ai_tenant_id(),
+        };
+        for attempt in 0..2 {
+            match self
+                .near_ai_login_provision_in_tenant(
+                    login,
+                    device_public_key,
+                    &session,
+                    &tenant,
+                    &anchor_hash,
+                    &sealed_json,
+                    &pepper_ref,
+                    &key_ref,
+                )
+                .await?
+            {
+                Some(provisioned) => return Ok(provisioned),
+                None if attempt == 0 => {
+                    tenant = self
+                        .near_anchor_tenant(&anchor_hash)
+                        .await?
+                        .ok_or_else(refused)?;
+                }
+                None => return Err(refused()),
+            }
+        }
+        Err(refused())
+    }
+
+    /// One login provisioning attempt against a decided tenant.
+    ///
+    /// `Ok(None)` means the anchor was claimed by another tenant while this
+    /// transaction waited on the advisory lock; everything written here,
+    /// including the minted tenant, is rolled back by dropping the transaction.
+    #[allow(clippy::too_many_arguments)]
+    async fn near_ai_login_provision_in_tenant(
+        &self,
+        login: &crate::near_ai_login::VerifiedNearAiLogin,
+        device_public_key: &[u8; 32],
+        session: &NewSession<'_>,
+        tenant: &str,
+        anchor_hash: &str,
+        sealed_json: &serde_json::Value,
+        pepper_ref: &str,
+        key_ref: &str,
+    ) -> Result<Option<ProvisionedNearAccount>, DatabaseError> {
+        let tenant = tenant.to_string();
+        let device = trace_commons_protocol::onboarding::device_key_id_from_public_key_bytes(
+            device_public_key,
+        );
+        let principal = super::onboarding_device_principal_ref(&tenant, &device);
+        let public_key = base64::engine::general_purpose::STANDARD.encode(device_public_key);
+        let provider = login.auth_provider().to_string();
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, &tenant).await?;
+        tx.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended($1,0))",
+            &[&anchor_hash],
+        )
+        .await?;
+        tx.execute(
+            "INSERT INTO trace_tenants(tenant_id) VALUES($1) ON CONFLICT DO NOTHING",
+            &[&tenant],
+        )
+        .await?;
+        let existing = tx.query_opt("SELECT a.account_id FROM trace_near_account_anchors n JOIN trace_accounts a USING(tenant_id,account_id) WHERE n.anchor_hash=$1 AND a.closed_at IS NULL", &[&anchor_hash]).await?;
+        let account = if let Some(row) = existing {
+            row.get::<_, Uuid>(0)
+        } else {
+            let id = Uuid::new_v4();
+            tx.execute(
+                "INSERT INTO trace_accounts(tenant_id,account_id) VALUES($1,$2)",
+                &[&tenant, &id],
+            )
+            .await?;
+            // `identity_source` and `auth_provider` are what make this row
+            // distinguishable from a wallet anchor in the table that decides
+            // admission. The database enforces their pairing.
+            let claimed = tx.execute("INSERT INTO trace_near_account_anchors(tenant_id,anchor_hash,account_id,sealed_account_name,index_pepper_ref,account_name_key_ref,identity_source,auth_provider) VALUES($1,$2,$3,$4,$5,$6,'near_ai_login',$7) ON CONFLICT (anchor_hash) DO NOTHING", &[&tenant,&anchor_hash,&id,&sealed_json,&pepper_ref,&key_ref,&provider]).await?;
+            if claimed == 0 {
+                return Ok(None);
+            }
+            id
+        };
+        // No `trace_near_identities` row: that table binds a wallet public key
+        // to a NEAR account name, and this path has neither. A login proves an
+        // account, not a key.
+        tx.execute("INSERT INTO device_keys(device_key_id,tenant_id,public_key,invite_subject_hash,onboarding_origin) VALUES($1,$2,$3,NULL,'near_ai') ON CONFLICT(device_key_id) DO NOTHING", &[&device,&tenant,&public_key]).await?;
+        if tx.query_opt("SELECT 1 FROM device_keys WHERE tenant_id=$1 AND device_key_id=$2 AND public_key=$3 AND onboarding_origin='near_ai' AND revoked_at IS NULL", &[&tenant,&device,&public_key]).await?.is_none() { return Err(refused()); }
+        tx.execute("INSERT INTO trace_account_principals(tenant_id,account_id,principal_ref) VALUES($1,$2,$3) ON CONFLICT(tenant_id,principal_ref) DO NOTHING", &[&tenant,&account,&principal]).await?;
+        if tx.query_opt("SELECT 1 FROM trace_account_principals WHERE tenant_id=$1 AND account_id=$2 AND principal_ref=$3 AND unlinked_at IS NULL", &[&tenant,&account,&principal]).await?.is_none() { return Err(refused()); }
+        tx.execute("INSERT INTO trace_near_provisioned_devices(tenant_id,principal_ref,account_id,device_key_id,anchor_hash) VALUES($1,$2,$3,$4,$5) ON CONFLICT(tenant_id,principal_ref) DO NOTHING", &[&tenant,&principal,&account,&device,&anchor_hash]).await?;
+        tx.execute("INSERT INTO trace_sessions(tenant_id,session_id,account_id,token_hash,client_kind,expires_at) VALUES($1,$2,$3,$4,'native',$5)", &[&tenant,&Uuid::new_v4(),&account,&session.token_hash,&session.expires_at]).await?;
+        // Hash-only, like its wallet sibling: the audit row names the identity
+        // system and says admission was not granted here. No subject, no
+        // provider label that could narrow who this is, no token.
+        tx.execute("INSERT INTO trace_account_audit(tenant_id,action,actor_ref,outcome,safe_metadata) VALUES($1,'near_ai_login_provisioned',$2,'success',$3)", &[&tenant,&principal,&serde_json::json!({"identity":"near_ai_login","admission":"not_granted"})]).await?;
+        tx.commit().await?;
+        Ok(Some(ProvisionedNearAccount {
+            tenant_id: tenant,
+            account_id: account,
+            device_key_id: device,
+            anchor_hash: anchor_hash.to_string(),
+        }))
+    }
+
     /// The provisioned admission anchor for one authenticated principal.
     ///
     /// Accepts either provisioning origin (#836): `near` is a wallet, `near_ai`

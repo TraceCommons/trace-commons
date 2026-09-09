@@ -3057,6 +3057,17 @@ impl Database for PgBackend {
     ) -> Result<crate::account_onboarding::ProvisionedNearAccount, DatabaseError> {
         self.near_provision(proof, session, identity).await
     }
+    async fn provision_near_ai_login(
+        &self,
+        login: &crate::near_ai_login::VerifiedNearAiLogin,
+        device_public_key: &[u8; 32],
+        session: crate::db::NewSession<'_>,
+        identity: &crate::near_account_identity::NearAccountIdentity,
+    ) -> Result<crate::account_onboarding::ProvisionedNearAccount, DatabaseError> {
+        self.near_ai_login_provision(login, device_public_key, session, identity)
+            .await
+    }
+
     async fn get_near_provisioned_anchor(
         &self,
         tenant: &str,
