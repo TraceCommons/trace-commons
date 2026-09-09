@@ -873,12 +873,16 @@ async fn the_live_client_asks_for_the_ed25519_report_with_our_nonce() {
         .mount(&server)
         .await;
 
+    // The mock is the ATTESTATION host. `base_url` is deliberately a URL
+    // that cannot resolve: the registry fetch must not use it, and if it ever
+    // does this test fails on a transport error rather than passing quietly.
     let client = HttpAttestationClient::new(
-        format!("{}/v1", server.uri()),
+        "https://completions.invalid.test/v1",
         FIRST_MODEL,
         SecretString::from("unused"),
         "https://invalid.test",
         Duration::from_secs(5),
+        Some(format!("{}/v1", server.uri())),
     )
     .expect("client builds");
 
@@ -905,12 +909,16 @@ async fn the_live_client_reports_a_rejected_credential_by_status() {
         .mount(&server)
         .await;
 
+    // The mock is the ATTESTATION host. `base_url` is deliberately a URL
+    // that cannot resolve: the registry fetch must not use it, and if it ever
+    // does this test fails on a transport error rather than passing quietly.
     let client = HttpAttestationClient::new(
-        format!("{}/v1", server.uri()),
+        "https://completions.invalid.test/v1",
         FIRST_MODEL,
         SecretString::from("unused"),
         "https://invalid.test",
         Duration::from_secs(5),
+        Some(format!("{}/v1", server.uri())),
     )
     .expect("client builds");
 
@@ -921,4 +929,81 @@ async fn the_live_client_reports_a_rejected_credential_by_status() {
         credential_verdict(&error),
         ReportCredentialVerdict::Unauthorized
     );
+}
+
+// ---------------------------------------------------------------------------
+// The registry is a gateway service (#802)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_gateway_only_report_yields_the_probe_no_model_keys() {
+    // What the probe gets from a gateway fetched without `model=`: a report
+    // that looks entirely well formed and attests nothing about the model.
+    // The gateway key signs no `provider_tee` receipt, so answering with it
+    // would be worse than the refusal.
+    let nonce = fixture_nonce(ED25519_REPORT);
+    let gateway_only = serde_json::json!({
+        "gateway_attestation": json(ED25519_REPORT)["gateway_attestation"].clone(),
+    })
+    .to_string();
+    let stub = StubEndpoint::serving(FIRST_MODEL, &gateway_only);
+    let outcome = run_attested_key_drift_drill(
+        &stub,
+        None,
+        &FixedNonce(Box::leak(nonce.into_boxed_str())),
+        FIXTURE_CAPTURED_AT,
+    )
+    .await;
+
+    // The gateway half binds -- so this is the model lookup refusing, not the
+    // report being unreadable.
+    assert_eq!(
+        step(&outcome, AttestedKeyDriftStep::GatewayKeyBound).status,
+        AttestedKeyDriftStatus::Passed
+    );
+    assert_eq!(
+        step(&outcome, AttestedKeyDriftStep::ModelKeysBound).status,
+        AttestedKeyDriftStatus::Failed
+    );
+    assert!(outcome.model_key_refs.is_empty());
+    assert_eq!(outcome.model_entry_count, 0);
+    assert!(!outcome.passed);
+    // And the gateway key is nowhere in the evidence as a model key.
+    assert_ne!(outcome.gateway_key_ref, None);
+    assert!(
+        !outcome
+            .model_key_refs
+            .contains(outcome.gateway_key_ref.as_ref().unwrap())
+    );
+}
+
+#[tokio::test]
+async fn a_completions_host_document_yields_the_probe_no_model_keys() {
+    // A per-model completions host answers /attestation/report with its own
+    // single-enclave document under `all_attestations`, with no
+    // `model_attestations` and no `gateway_attestation`. Verified live on
+    // 2026-09-09, with and without `model=`. A probe pointed at that host must
+    // refuse rather than read one host's self-description as the registry.
+    let document = serde_json::json!({
+        "model_name": FIRST_MODEL,
+        "all_attestations": [json(ED25519_REPORT)["model_attestations"][0].clone()],
+    })
+    .to_string();
+    let nonce = fixture_nonce(ED25519_REPORT);
+    let stub = StubEndpoint::serving(FIRST_MODEL, &document);
+    let outcome = run_attested_key_drift_drill(
+        &stub,
+        None,
+        &FixedNonce(Box::leak(nonce.into_boxed_str())),
+        FIXTURE_CAPTURED_AT,
+    )
+    .await;
+
+    assert_eq!(
+        reason(&outcome, AttestedKeyDriftStep::ModelKeysBound),
+        Some("report_shape"),
+        "only the gateway publishes the registry"
+    );
+    assert_eq!(outcome.model_entry_count, 0);
+    assert!(!outcome.passed);
 }

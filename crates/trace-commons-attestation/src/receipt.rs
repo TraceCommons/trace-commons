@@ -2143,4 +2143,66 @@ mod tests {
             assert_eq!(verdict.signature_kind, kind);
         }
     }
+
+    /// **A gateway-shaped report yields no model keys, and never the gateway
+    /// key.**
+    ///
+    /// The gateway key signs no `provider_tee` receipt. Returning it here
+    /// would silently restore the exact confusion this function exists to
+    /// prevent, and it would do so on the report an operator is most likely
+    /// to fetch by mistake -- #802 was a gateway fetched without `model=`,
+    /// which comes back looking entirely well formed.
+    #[test]
+    fn a_gateway_only_report_yields_no_model_keys_and_never_the_gateway_key() {
+        let gateway_only = format!(
+            r#"{{"gateway_attestation":{{"signing_address":"{LIVE_GATEWAY_KEY}","signing_algo":"ed25519","request_nonce":"{REPORT_NONCE}","report_data":"{LIVE_GATEWAY_KEY}{REPORT_NONCE}"}},"ohttp_attestation":{{}}}}"#
+        );
+        // Precondition: the gateway half is genuinely sound, so the refusal
+        // below is the model lookup refusing and not the report being
+        // unreadable.
+        assert_eq!(
+            gateway_ed25519_key(&gateway_only, REPORT_NONCE).expect("the gateway binds"),
+            LIVE_GATEWAY_KEY
+        );
+
+        let error = model_ed25519_keys(&gateway_only, REPORT_NONCE, MODEL_B)
+            .expect_err("a gateway-only report attests no model");
+        assert_eq!(error, AttestedKeyError::Malformed);
+    }
+
+    /// A single-enclave document from a **completions** host attests no model
+    /// either. That host answers `/attestation/report` with its own
+    /// attestation under `all_attestations` and carries no
+    /// `model_attestations` array at all -- verified live on 2026-09-09, with
+    /// and without `model=`.
+    ///
+    /// It must not be mistaken for a registry. The entry is real and its key
+    /// is sound, which is exactly why accepting it here would be wrong: it
+    /// would let a deployment pointed at the wrong host look like it was
+    /// reading the per-model registry when it was reading one host's
+    /// self-description, and the misconfiguration would never surface.
+    #[test]
+    fn a_completions_host_document_is_not_a_model_registry() {
+        let completions_shaped = format!(
+            r#"{{"model_name":"{MODEL_B}","signing_algo":"ed25519","signing_address":"{MODEL_B_KEY}","request_nonce":"{REPORT_NONCE}","all_attestations":[{}]}}"#,
+            model_entry(MODEL_B, MODEL_B_KEY, "ed25519", REPORT_NONCE)
+        );
+        assert_eq!(
+            model_ed25519_keys(&completions_shaped, REPORT_NONCE, MODEL_B),
+            Err(AttestedKeyError::Malformed),
+            "only the gateway publishes the registry; see #802"
+        );
+    }
+
+    /// An empty registry is `ModelNotAttested`, not a silent empty success.
+    /// An empty key set makes `signer_is_attested_for_model` answer `false`
+    /// for everything, which reads as a refusal but is really "we never
+    /// looked".
+    #[test]
+    fn an_empty_model_attestations_array_is_not_a_silent_pass() {
+        assert_eq!(
+            model_ed25519_keys(r#"{"model_attestations":[]}"#, REPORT_NONCE, MODEL_B),
+            Err(AttestedKeyError::ModelNotAttested)
+        );
+    }
 }

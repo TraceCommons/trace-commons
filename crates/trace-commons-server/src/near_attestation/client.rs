@@ -224,6 +224,19 @@ pub trait AttestationClient: Send + Sync {
 pub struct HttpAttestationClient {
     http: reqwest::Client,
     base_url: String,
+    /// Where the **per-model attestation registry** is published.
+    ///
+    /// Deliberately not `base_url`. The two are different services, and
+    /// conflating them is what #802 was: `base_url` is a *direct-completions*
+    /// host such as `https://qwen3-8-27b.completions.near.ai/v1`, and asking
+    /// that host for `/attestation/report` returns its own single-enclave
+    /// document under `all_attestations` -- no `model_attestations`, no
+    /// `gateway_attestation`, whatever query parameters are sent. Verified
+    /// against the live host on 2026-09-09, with and without `model=`.
+    ///
+    /// The registry lives on the gateway, and only the gateway answers with
+    /// the `model_attestations` array the key readers need.
+    attestation_base_url: String,
     model: String,
     api_key: SecretString,
     #[cfg_attr(
@@ -237,14 +250,58 @@ pub struct HttpAttestationClient {
     pccs_url: String,
 }
 
+/// NEAR AI's attestation gateway: the service that publishes the per-model
+/// `model_attestations` registry.
+///
+/// A hosted-model receipt's `provider_tee` signer is a per-model ed25519 key,
+/// and this is the only host that publishes the set of them. A per-model
+/// completions host attests *itself* and nothing else.
+pub const ATTESTATION_GATEWAY_BASE_URL: &str = "https://cloud-api.near.ai/v1";
+
+/// The `GET /attestation/report` URL for the ed25519 registry fetch.
+///
+/// A named function rather than an inline `.query(...)` so the three
+/// parameters can be asserted. `model` is the one whose absence caused #802 --
+/// without it the gateway answers with no `model_attestations` at all, and the
+/// resulting report looks well formed while attesting nothing about the model.
+/// `signing_algo=ed25519` is the other: without it the endpoint answers with
+/// the ECDSA attestations, whose keys sign no receipt this code verifies.
+///
+/// `parse_with_params` rather than string formatting: a model identifier
+/// carries a `/` and would otherwise land in the path.
+fn ed25519_report_url(
+    base_url: &str,
+    model: &str,
+    nonce: &str,
+) -> Result<reqwest::Url, AttestationClientError> {
+    reqwest::Url::parse_with_params(
+        &format!("{}/attestation/report", base_url.trim_end_matches('/')),
+        &[
+            ("model", model),
+            ("nonce", nonce),
+            ("signing_algo", "ed25519"),
+        ],
+    )
+    .map_err(|e| AttestationClientError::Transport {
+        step: AttestationStep::Report,
+        detail_hash: detail_hash(&e.to_string()),
+    })
+}
+
 impl HttpAttestationClient {
     /// Build a client. `timeout` bounds every one of the four calls.
+    ///
+    /// `attestation_base_url` is where the per-model registry is fetched from;
+    /// `None` uses [`ATTESTATION_GATEWAY_BASE_URL`]. It is a separate argument
+    /// rather than defaulting to `base_url` because inheriting the completions
+    /// host silently is the defect this parameter exists to prevent.
     pub fn new(
         base_url: impl Into<String>,
         model: impl Into<String>,
         api_key: SecretString,
         pccs_url: impl Into<String>,
         timeout: Duration,
+        attestation_base_url: Option<String>,
     ) -> Result<Self, AttestationClientError> {
         let http = reqwest::Client::builder()
             .timeout(timeout)
@@ -256,6 +313,10 @@ impl HttpAttestationClient {
         Ok(Self {
             http,
             base_url: base_url.into().trim_end_matches('/').to_string(),
+            attestation_base_url: attestation_base_url
+                .unwrap_or_else(|| ATTESTATION_GATEWAY_BASE_URL.to_string())
+                .trim_end_matches('/')
+                .to_string(),
             model: model.into(),
             api_key,
             pccs_url: pccs_url.into(),
@@ -421,6 +482,12 @@ impl AttestationClient for HttpAttestationClient {
 /// against the other. Two traits, one live implementation, and each drill sees
 /// only the calls it is allowed to make.
 ///
+/// The two also reach **different hosts**: the ECDSA report is fetched from the
+/// completions endpoint this deployment actually scores against, because what
+/// it proves is that *that* host is the enclave we think it is; the ed25519
+/// registry is fetched from the attestation gateway, which is the only host
+/// that publishes it. See [`ATTESTATION_GATEWAY_BASE_URL`].
+///
 /// [`Self::fetch_ed25519_report_json`] returns the **raw body**, not a parsed
 /// [`AttestationReport`]. `AttestationReport` models the single-enclave shape
 /// and has no `model_attestations` field at all, and the key readers in
@@ -432,7 +499,8 @@ pub trait AttestedKeyReportClient: Send + Sync {
     /// The model whose per-model attestation the probe reads.
     fn model(&self) -> &str;
 
-    /// `GET {base}/attestation/report?...&signing_algo=ed25519`, raw body.
+    /// `GET {gateway}/attestation/report?model=..&nonce=..&signing_algo=ed25519`,
+    /// raw body. All three parameters are required; see [`ed25519_report_url`].
     async fn fetch_ed25519_report_json(
         &self,
         nonce: &str,
@@ -463,18 +531,12 @@ impl AttestedKeyReportClient for HttpAttestationClient {
         nonce: &str,
     ) -> Result<String, AttestationClientError> {
         let step = AttestationStep::Report;
-        // `signing_algo=ed25519` is the whole point of this call: without it
-        // the endpoint answers with the ECDSA attestations and carries no
-        // per-model ed25519 key, which is how the per-model key came to be
-        // missed in the first place.
+        // `attestation_base_url`, never `base_url`: the registry is a gateway
+        // service and the completions host does not publish it. See #802.
+        let url = ed25519_report_url(&self.attestation_base_url, &self.model, nonce)?;
         let response = self
             .http
-            .get(format!("{}/attestation/report", self.base_url))
-            .query(&[
-                ("model", self.model.as_str()),
-                ("nonce", nonce),
-                ("signing_algo", "ed25519"),
-            ])
+            .get(url)
             .bearer_auth(self.api_key.expose_secret())
             .send()
             .await
@@ -582,6 +644,7 @@ mod tests {
             SecretString::from("unused"),
             "https://invalid.test",
             Duration::from_secs(1),
+            None,
         )
         .expect("client builds");
         let err = client
@@ -620,5 +683,108 @@ mod tests {
         let hashed = detail_hash("token sk-live-abcdef");
         assert_eq!(hashed.len(), 16);
         assert!(!hashed.contains("sk-"));
+    }
+
+    // -----------------------------------------------------------------
+    // The registry fetch goes to the gateway, with `model=` (#802)
+    // -----------------------------------------------------------------
+
+    fn test_client(base_url: &str, attestation_base_url: Option<String>) -> HttpAttestationClient {
+        HttpAttestationClient::new(
+            base_url,
+            "Qwen/Qwen3.8-27B",
+            SecretString::from("sk-not-a-real-key".to_string()),
+            INTEL_PCS_URL,
+            Duration::from_secs(5),
+            attestation_base_url,
+        )
+        .expect("the client builds")
+    }
+
+    #[test]
+    fn the_registry_url_carries_the_model_the_nonce_and_the_algorithm() {
+        // `model=` is the parameter whose absence caused #802: without it the
+        // gateway answers with no `model_attestations` at all, and the report
+        // looks well formed while attesting nothing about the model.
+        let nonce = "ab".repeat(32);
+        let url = ed25519_report_url(ATTESTATION_GATEWAY_BASE_URL, "Qwen/Qwen3.8-27B", &nonce)
+            .expect("the url builds");
+
+        let pairs: Vec<(String, String)> = url
+            .query_pairs()
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect();
+        assert!(
+            pairs.contains(&("model".to_string(), "Qwen/Qwen3.8-27B".to_string())),
+            "{pairs:?}"
+        );
+        assert!(pairs.contains(&("signing_algo".to_string(), "ed25519".to_string())));
+        assert!(pairs.contains(&("nonce".to_string(), nonce)));
+        // The model identifier carries a `/` and must stay in the query.
+        assert_eq!(url.path(), "/v1/attestation/report");
+        assert_eq!(url.host_str(), Some("cloud-api.near.ai"));
+    }
+
+    #[test]
+    fn an_unset_attestation_url_falls_back_to_the_gateway_not_the_completions_host() {
+        // The pilot sets no attestation URL. Absent must mean the gateway --
+        // inheriting the completions host is the defect, not the default.
+        let client = test_client("https://qwen3-8-27b.completions.near.ai/v1", None);
+        assert_eq!(client.attestation_base_url, ATTESTATION_GATEWAY_BASE_URL);
+        assert_ne!(client.attestation_base_url, client.base_url);
+    }
+
+    #[test]
+    fn an_operator_supplied_attestation_url_is_used_and_trimmed() {
+        let client = test_client(
+            "https://qwen3-8-27b.completions.near.ai/v1",
+            Some("https://gateway.example/v1/".to_string()),
+        );
+        assert_eq!(client.attestation_base_url, "https://gateway.example/v1");
+        // And the completions host is untouched by it.
+        assert_eq!(
+            client.base_url,
+            "https://qwen3-8-27b.completions.near.ai/v1"
+        );
+    }
+
+    /// The one that actually observes which host is contacted.
+    ///
+    /// Two mock servers stand in for the two services. A client that used
+    /// `base_url` for the registry fetch -- the #802 bug -- would contact the
+    /// completions server, and the `expect(0)` there fails on drop. Asserting
+    /// on the built URL alone could not catch that.
+    #[tokio::test]
+    async fn the_registry_fetch_contacts_the_gateway_and_never_the_completions_host() {
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let gateway = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/attestation/report"))
+            .and(query_param("model", "Qwen/Qwen3.8-27B"))
+            .and(query_param("signing_algo", "ed25519"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+            .expect(1)
+            .mount(&gateway)
+            .await;
+
+        let completions = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("wrong host"))
+            .expect(0)
+            .mount(&completions)
+            .await;
+
+        let client = test_client(
+            &format!("{}/v1", completions.uri()),
+            Some(format!("{}/v1", gateway.uri())),
+        );
+        let body = client
+            .fetch_ed25519_report_json(&"cd".repeat(32))
+            .await
+            .expect("the gateway answered");
+        assert_eq!(body, "{}");
+        // Both expectations are verified on drop.
     }
 }
