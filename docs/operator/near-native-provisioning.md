@@ -17,11 +17,31 @@ PostgreSQL mirror writes and tenant RLS readiness, plus these operator settings:
   `signing_address` (0x plus 40 hex characters), and `expected_measurements`
   (nonempty array of attestation measurement pin strings).
 
-The native daemon additionally requires an explicitly enforcing
-`TRACE_COMMONS_ALLOWED_HOSTS` containing Commons, issuer, witness, and any configured receipt-service hosts.
-An unset or permissive allowlist refuses this trust-bootstrap flow. It also
-validates every published measurement set before persisting witness settings.
-The integrated native settings type must retain `admission_evidence=true`.
+The native daemon enforces a host allowlist for every request in this flow.
+It no longer requires a contributor to set one: with `TRACE_COMMONS_ALLOWED_HOSTS`
+unset, the daemon derives an enforcing allowlist per signup step from the
+Commons address the person typed on the signup screen, extended only by the
+issuer and witness hosts that same origin publishes in its capabilities
+response. Nothing else is reachable, and an origin the daemon cannot take a
+host from is refused rather than admitted. This requirement previously fell on
+the contributor, and no shipped application set the variable, so wallet signup
+was impossible from Finder, the Start Menu or a flatpak.
+
+An operator who does set `TRACE_COMMONS_ALLOWED_HOSTS` still governs the flow
+in full: the list is used exactly as configured and must contain the Commons,
+issuer and witness hosts, or those steps are refused. A configured
+receipt-service host is validated against the same variable, so an operator who
+sets `TRACE_COMMONS_INFERENCE_RECEIPT_ENDPOINT` alongside an enforcing
+allowlist must list its host too. The daemon also validates every published
+measurement set before persisting witness settings. The integrated native
+settings type must retain `admission_evidence=true`.
+
+A refusal in this flow now names its class. `near_account_capabilities` returns
+`reason` alongside `ready: false`: `address_refused` (rejected here, before any
+request left the process -- not HTTPS, carrying credentials or a query, or not
+on a configured host list), `unreachable` (dialled, no usable answer), or
+`unsupported` (the Commons answered and does not offer wallet signup, or
+published trust material the client will not accept).
 
 As with invite enrollment, set `TRACE_COMMONS_INFERENCE_RECEIPT_ENDPOINT` to the
 provider's explicit receipt-service base URL before wallet signup. Native signup

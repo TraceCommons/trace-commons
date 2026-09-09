@@ -25,6 +25,7 @@ use std::{
     time::Duration,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use trace_commons_operator_client::host_allowlist::HostAllowlist;
 
 pub const LOOPBACK_PATH: &str = "/trace-commons/near-onboarding/callback";
 #[derive(Deserialize)]
@@ -108,9 +109,87 @@ fn random() -> Result<String> {
         .map_err(|_| anyhow!("near_signup_unavailable"))?;
     Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes))
 }
-fn client(url: &str) -> Result<trace_commons_operator_client::Client> {
+/// Why a signup step stopped, in the three classes a person acts on
+/// differently. Every failure below is one of these, and the shells render
+/// one sentence per class -- see [`crate::witness_copy::wallet_refusal_line`].
+/// Collapsing them, as this surface used to, leaves a person told only that
+/// signup is "unavailable" with nothing to check and nothing to report.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SignupRefusal {
+    /// The address was rejected here, before any request left the process:
+    /// not https, carrying credentials or a query, unparseable, or not on a
+    /// host list this installation was configured with.
+    AddressRefused,
+    /// The address was dialled and did not answer, or answered in a way this
+    /// client could not read.
+    Unreachable,
+    /// The commons answered and does not offer wallet signup, or published
+    /// trust material this client will not accept.
+    Unsupported,
+}
+
+impl SignupRefusal {
+    /// The stable wire value. Native shells map this to a sentence; they must
+    /// never re-derive the class from anything else in the response.
+    #[must_use]
+    pub fn wire(self) -> &'static str {
+        match self {
+            Self::AddressRefused => "address_refused",
+            Self::Unreachable => "unreachable",
+            Self::Unsupported => "unsupported",
+        }
+    }
+}
+
+/// The hosts one signup step may reach, and who chose each of them.
+///
+/// This exists because the shipped applications set no
+/// `TRACE_COMMONS_ALLOWED_HOSTS`, and [`client`] refuses when the allowlist
+/// is not enforcing -- so signup was impossible from Finder, the Start Menu
+/// or a flatpak, and the only documented remedy was an environment variable
+/// no contributor can reasonably be asked to set.
+///
+/// The list is now:
+///
+/// * An operator's `TRACE_COMMONS_ALLOWED_HOSTS`, unchanged and in full,
+///   whenever it is set. An operator who pins hosts keeps pinning them, and
+///   an origin outside that list is still refused.
+/// * Otherwise exactly the hosts named in `origin` and `published`: `origin`
+///   is the commons address the person typed on the signup screen, and
+///   `published` holds hosts that same origin returned over authenticated
+///   HTTPS for this step (its issuer, its witness). Nothing else is
+///   reachable, and no host enters the list that the person did not choose
+///   or that their chosen origin did not name.
+///
+/// The derivation never degrades to permissive: an origin with no host is an
+/// error, and [`HostAllowlist::from_hosts`] treats an empty set as
+/// "nothing", not "everything".
+fn signup_allowlist(origin: &str, published: &[&str]) -> Result<HostAllowlist> {
+    derive_signup_allowlist(&allowlist_for(None), origin, published)
+}
+
+fn derive_signup_allowlist(
+    configured: &HostAllowlist,
+    origin: &str,
+    published: &[&str],
+) -> Result<HostAllowlist> {
+    if configured.is_enforcing() {
+        return Ok(configured.clone());
+    }
+    let mut hosts = Vec::with_capacity(1 + published.len());
+    for url in std::iter::once(origin).chain(published.iter().copied()) {
+        let parsed =
+            reqwest::Url::parse(url).map_err(|_| anyhow!("near_signup_endpoint_refused"))?;
+        let host = parsed
+            .host_str()
+            .ok_or_else(|| anyhow!("near_signup_endpoint_refused"))?;
+        hosts.push(host.to_string());
+    }
+    Ok(HostAllowlist::from_hosts(hosts))
+}
+
+fn client(url: &str, allowed: &HostAllowlist) -> Result<trace_commons_operator_client::Client> {
     let parsed = reqwest::Url::parse(url)?;
-    let allowed = allowlist_for(None);
     if !allowed.is_enforcing()
         || parsed.scheme() != "https"
         || !parsed.username().is_empty()
@@ -126,7 +205,7 @@ fn client(url: &str) -> Result<trace_commons_operator_client::Client> {
         "TRACE_COMMONS_CONTRIBUTOR_UNUSED_BEARER_ENV",
     )
     .bearer_token("unauthenticated")
-    .host_allowlist(allowlist_for(None))
+    .host_allowlist(allowed.clone())
     .build()
     .map_err(|_| anyhow!("near_signup_endpoint_refused"))
 }
@@ -140,17 +219,23 @@ pub async fn handle_capabilities(_shared: &DaemonShared, req: &Request) -> Respo
             req.id,
             serde_json::json!({"ready":true,"issuer_url":issuer,"audience":audience,"witness":witness,"funding_available":false}),
         ),
-        Err(_) => Response::ok(
+        // A refusal names its class. Without it every failure here -- an
+        // address this daemon will not dial, a commons that did not answer,
+        // and a commons that does not offer wallet signup -- reached the
+        // person as one "unavailable" sentence they could not act on.
+        Err(refusal) => Response::ok(
             req.id,
-            serde_json::json!({"ready":false,"funding_available":false}),
+            serde_json::json!({"ready":false,"reason":refusal.wire(),"funding_available":false}),
         ),
     }
 }
-async fn validated_capability(url: &str) -> Result<(String, String, WitnessSettings)> {
-    if reqwest::Url::parse(url)?.scheme() != "https" {
-        bail!("near_signup_endpoint_refused");
-    }
-    let capability: Capability = client(url)?
+
+async fn validated_capability(
+    url: &str,
+) -> std::result::Result<(String, String, WitnessSettings), SignupRefusal> {
+    let origin_only = signup_allowlist(url, &[]).map_err(|_| SignupRefusal::AddressRefused)?;
+    let capability: Capability = client(url, &origin_only)
+        .map_err(|_| SignupRefusal::AddressRefused)?
         .call_json(
             reqwest::Method::GET,
             "/v1/account/near/provision/capabilities",
@@ -158,28 +243,25 @@ async fn validated_capability(url: &str) -> Result<(String, String, WitnessSetti
             None::<&serde_json::Value>,
         )
         .await
-        .map_err(|_| anyhow!("near_signup_unavailable"))?;
+        .map_err(|_| SignupRefusal::Unreachable)?;
     if !capability.ready {
-        bail!("near_signup_unavailable");
+        return Err(SignupRefusal::Unsupported);
     }
-    let issuer = capability
-        .issuer_url
-        .ok_or_else(|| anyhow!("near_signup_unavailable"))?;
-    let audience = capability
-        .audience
-        .ok_or_else(|| anyhow!("near_signup_unavailable"))?;
-    if reqwest::Url::parse(&issuer)?.scheme() != "https"
-        || audience.trim().is_empty()
-        || audience.len() > 256
-    {
-        bail!("near_signup_invalid");
+    let issuer = capability.issuer_url.ok_or(SignupRefusal::Unsupported)?;
+    let audience = capability.audience.ok_or(SignupRefusal::Unsupported)?;
+    if audience.trim().is_empty() || audience.len() > 256 {
+        return Err(SignupRefusal::Unsupported);
     }
-    let _issuer = client(&issuer)?;
-    let witness = validate_published_witness(
-        capability
-            .witness
-            .ok_or_else(|| anyhow!("near_signup_unavailable"))?,
-    )?;
+    let witness = published_witness(capability.witness.ok_or(SignupRefusal::Unsupported)?)
+        .map_err(|_| SignupRefusal::Unsupported)?;
+    // The issuer and the witness are hosts this origin named for itself. They
+    // enter the list because the person chose this origin, and only for as
+    // long as this call: an operator's own allowlist, when set, still governs
+    // and refuses either of them if it does not list them.
+    let published = signup_allowlist(url, &[&issuer, &witness.url])
+        .map_err(|_| SignupRefusal::AddressRefused)?;
+    client(&issuer, &published).map_err(|_| SignupRefusal::AddressRefused)?;
+    client(&witness.url, &published).map_err(|_| SignupRefusal::AddressRefused)?;
     Ok((issuer, audience, witness))
 }
 
@@ -222,7 +304,10 @@ async fn begin(store: &ConfigStore, options: Options) -> Result<serde_json::Valu
     if store.load_config()?.is_some() {
         bail!("near_signup_already_enrolled")
     }
-    let ingest = client(&options.ingest_url)?;
+    let ingest = client(
+        &options.ingest_url,
+        &signup_allowlist(&options.ingest_url, &[])?,
+    )?;
 
     let id = random()?;
     let dir = store.dir().to_path_buf();
@@ -269,7 +354,9 @@ async fn prepare(
     if let Some(endpoint) = receipt_endpoint.as_deref() {
         crate::config::validate_inference_receipt_endpoint(endpoint, &allowlist_for(None))?;
     }
-    let (issuer, audience, witness) = validated_capability(&options.ingest_url).await?;
+    let (issuer, audience, witness) = validated_capability(&options.ingest_url)
+        .await
+        .map_err(|refusal| anyhow!(refusal.wire()))?;
     if (!options.issuer_url.is_empty() && options.issuer_url != issuer)
         || (!options.audience.is_empty() && options.audience != audience)
     {
@@ -348,7 +435,10 @@ async fn prepare(
         let result = async {
             let listener = tokio::net::TcpListener::from_std(listener)?;
             // Never reuse a connection pool attached to the caller's reactor.
-            let ingest = client(&options.ingest_url)?;
+            let ingest = client(
+                &options.ingest_url,
+                &signup_allowlist(&options.ingest_url, &[])?,
+            )?;
             finish(
                 listener,
                 &state,
@@ -484,7 +574,11 @@ async fn receive_wallet(listener: tokio::net::TcpListener, state: &str) -> Resul
     }
 }
 
-fn validate_published_witness(mut value: serde_json::Value) -> Result<WitnessSettings> {
+/// Shape and pin checks on the witness an origin published. Deliberately does
+/// NOT decide whether its host may be reached -- the caller owns that, because
+/// only the caller knows which origin published it. See
+/// [`validated_capability`].
+fn published_witness(mut value: serde_json::Value) -> Result<WitnessSettings> {
     value
         .as_object_mut()
         .ok_or_else(|| anyhow!("near_signup_trust_invalid"))?
@@ -499,7 +593,6 @@ fn validate_published_witness(mut value: serde_json::Value) -> Result<WitnessSet
     {
         bail!("near_signup_trust_invalid")
     }
-    let _allowed = client(&witness.url)?;
     let address = witness
         .signing_address
         .strip_prefix("0x")
@@ -620,12 +713,112 @@ mod tests {
     fn refuses_untrusted_or_unpinned_witness_capabilities() {
         for witness in [
             serde_json::json!({"url":"http://localhost:1234","signing_address":format!("0x{}","ab".repeat(20)),"expected_measurements":[format!("mrtd={}","ab".repeat(48))]}),
-            serde_json::json!({"url":"https://attacker.invalid","signing_address":format!("0x{}","ab".repeat(20)),"expected_measurements":[format!("mrtd={}","ab".repeat(48))]}),
             serde_json::json!({"url":"https://api.tracecommons.org","signing_address":format!("0x{}","ab".repeat(20)),"expected_measurements":[]}),
             serde_json::json!({"url":"https://api.tracecommons.org","signing_address":"broken","expected_measurements":["broken"]}),
+            serde_json::json!({"url":"https://api.tracecommons.org?x=1","signing_address":format!("0x{}","ab".repeat(20)),"expected_measurements":[format!("mrtd={}","ab".repeat(48))]}),
         ] {
-            assert!(validate_published_witness(witness).is_err());
+            assert!(published_witness(witness).is_err());
         }
+    }
+
+    /// A witness on a host the operator did not list stays refused. This case
+    /// used to live in the loop above, where it passed for the wrong reason:
+    /// `client` refused *every* host, because the allowlist was never
+    /// enforcing. The refusal that remains is the real one -- an operator's
+    /// `TRACE_COMMONS_ALLOWED_HOSTS` still governs what any published host
+    /// may be.
+    #[test]
+    fn an_operator_allowlist_still_refuses_a_published_witness_host() {
+        let operator = HostAllowlist::from_csv("commons.example");
+        let allowed = derive_signup_allowlist(
+            &operator,
+            "https://commons.example",
+            &["https://attacker.invalid"],
+        )
+        .unwrap();
+        assert!(client("https://commons.example", &allowed).is_ok());
+        assert!(client("https://attacker.invalid", &allowed).is_err());
+    }
+
+    #[test]
+    fn with_no_operator_list_the_person_chosen_origin_is_the_list() {
+        // The defect: with `TRACE_COMMONS_ALLOWED_HOSTS` unset the allowlist
+        // was permissive, `client` refused on `!is_enforcing()`, and signup
+        // was impossible in every shipped application.
+        let unset = HostAllowlist::permissive();
+        let allowed = derive_signup_allowlist(&unset, "https://commons.example/join", &[]).unwrap();
+        assert!(allowed.is_enforcing());
+        assert!(client("https://commons.example", &allowed).is_ok());
+        // And it is a list, not a bypass: nothing the person did not choose
+        // is reachable through it.
+        assert!(client("https://evil.example", &allowed).is_err());
+        assert!(client("https://sub.commons.example", &allowed).is_err());
+    }
+
+    #[test]
+    fn a_published_host_is_reachable_only_once_the_origin_has_named_it() {
+        let unset = HostAllowlist::permissive();
+        let origin = "https://commons.example";
+        let before = derive_signup_allowlist(&unset, origin, &[]).unwrap();
+        assert!(client("https://issuer.example", &before).is_err());
+        let after = derive_signup_allowlist(&unset, origin, &["https://issuer.example"]).unwrap();
+        assert!(client("https://issuer.example", &after).is_ok());
+        // Naming one host does not name its neighbours.
+        assert!(client("https://witness.example", &after).is_err());
+    }
+
+    #[test]
+    fn an_origin_without_a_host_is_an_error_and_never_a_permissive_list() {
+        let unset = HostAllowlist::permissive();
+        for origin in ["", "not a url", "file:///etc/passwd", "https://"] {
+            assert!(
+                derive_signup_allowlist(&unset, origin, &[]).is_err(),
+                "{origin} must not yield a list"
+            );
+        }
+    }
+
+    #[test]
+    fn a_shape_refusal_does_not_depend_on_the_allowlist_admitting_the_host() {
+        // Every one of these names a host the derived list contains, so the
+        // only thing that can refuse them is the shape check in `client`.
+        let unset = HostAllowlist::permissive();
+        for url in [
+            "http://commons.example",
+            "https://user@commons.example",
+            "https://user:pw@commons.example",
+            "https://commons.example/?token=abc",
+            "https://commons.example/#frag",
+        ] {
+            let allowed = derive_signup_allowlist(&unset, url, &[]).unwrap();
+            assert!(client(url, &allowed).is_err(), "{url} must be refused");
+        }
+    }
+
+    #[test]
+    fn the_three_refusal_classes_have_three_distinct_wire_values_and_sentences() {
+        use crate::witness_copy::wallet_refusal_line;
+        let classes = [
+            SignupRefusal::AddressRefused,
+            SignupRefusal::Unreachable,
+            SignupRefusal::Unsupported,
+        ];
+        let wires: std::collections::BTreeSet<_> = classes.iter().map(|c| c.wire()).collect();
+        assert_eq!(wires.len(), classes.len(), "the classes must not collide");
+        let lines: std::collections::BTreeSet<_> = classes
+            .iter()
+            .map(|c| wallet_refusal_line(Some(c.wire())))
+            .collect();
+        assert_eq!(
+            lines.len(),
+            classes.len(),
+            "each class must read differently to a person"
+        );
+        // A class this build does not know about must not be described.
+        assert_eq!(
+            wallet_refusal_line(Some("a_class_from_2027")),
+            wallet_refusal_line(None)
+        );
     }
     #[tokio::test]
     async fn callback_accepts_fragmented_http_headers() {

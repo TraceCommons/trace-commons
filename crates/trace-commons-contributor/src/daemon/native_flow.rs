@@ -340,7 +340,14 @@ pub async fn handle_wallet(shared: &DaemonShared, req: &Request) -> Response {
                     flow.state = WalletState::Ready;
                     flow.message = witness_copy().wallet.available;
                 } else {
-                    flow.refuse(witness_copy().wallet.unavailable);
+                    // The daemon says which class of refusal this was; the
+                    // shared mapper turns that into the one sentence every
+                    // shell shows. This surface used to say "unavailable"
+                    // for all of them, including for the refusal that made
+                    // signup impossible in every shipped application.
+                    flow.refuse(crate::witness_copy::wallet_refusal_line(
+                        value.get("reason").and_then(Value::as_str),
+                    ));
                 }
                 None
             }
@@ -424,6 +431,59 @@ mod tests {
         assert_eq!(f.state, WalletState::Complete);
         assert!(!f.view().busy);
     }
+    /// The check path must carry the daemon's refusal class all the way to
+    /// the sentence the shells print. This drives `handle_wallet` itself
+    /// rather than the mapper, because the seam that used to be wrong is the
+    /// one line between them: every refusal became "unavailable" there.
+    #[tokio::test]
+    async fn a_refused_address_and_an_unanswered_one_reach_the_shell_differently() {
+        use crate::config::tests_support::temp_store;
+        use crate::witness_copy::witness_copy;
+
+        async fn check(origin: &str) -> Value {
+            let (dir, store) = temp_store();
+            std::mem::forget(dir);
+            let shared = DaemonShared::load(store).unwrap();
+            let open = handle_wallet(
+                &shared,
+                &request(1, "native_wallet_flow", json!({"action":"open"})),
+            )
+            .await;
+            let flow_id = open.result.unwrap()["flow_id"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            let checked = handle_wallet(
+                &shared,
+                &request(
+                    2,
+                    "native_wallet_flow",
+                    json!({"action":"check","flow_id":flow_id,"ingest_url":origin}),
+                ),
+            )
+            .await;
+            checked.result.unwrap()
+        }
+
+        // Nothing is listening here, so the daemon dials and gets nothing.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let refused = check("http://commons.example").await;
+        let unanswered = check(&format!("https://127.0.0.1:{port}")).await;
+
+        let copy = witness_copy().wallet;
+        assert_eq!(refused["message"], copy.address_refused);
+        assert_eq!(unanswered["message"], copy.unreachable);
+        assert_ne!(refused["message"], unanswered["message"]);
+        // Both are refusals, and neither is the sentence for a commons that
+        // answered and declined.
+        assert_eq!(refused["state"], "Refused");
+        assert_eq!(unanswered["state"], "Refused");
+        assert_ne!(unanswered["message"], copy.unavailable);
+    }
+
     #[test]
     fn admission_requires_fresh_integer_expiry_and_success() {
         for value in [

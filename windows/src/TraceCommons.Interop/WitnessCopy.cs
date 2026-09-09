@@ -244,6 +244,8 @@ public sealed record WalletCopy
     [JsonPropertyName("cancel")] public string Cancel { get; init; } = "";
     [JsonPropertyName("available")] public string Available { get; init; } = "";
     [JsonPropertyName("unavailable")] public string Unavailable { get; init; } = "";
+    [JsonPropertyName("address_refused")] public string AddressRefused { get; init; } = "";
+    [JsonPropertyName("unreachable")] public string Unreachable { get; init; } = "";
     [JsonPropertyName("opening")] public string Opening { get; init; } = "";
     [JsonPropertyName("waiting")] public string Waiting { get; init; } = "";
     [JsonPropertyName("failed")] public string Failed { get; init; } = "";

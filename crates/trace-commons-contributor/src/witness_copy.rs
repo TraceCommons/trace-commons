@@ -353,6 +353,10 @@ pub struct WalletCopy {
     pub cancel: &'static str,
     pub available: &'static str,
     pub unavailable: &'static str,
+    /// The address was rejected before anything was sent.
+    pub address_refused: &'static str,
+    /// The address was dialled and did not answer.
+    pub unreachable: &'static str,
     pub opening: &'static str,
     pub waiting: &'static str,
     pub failed: &'static str,
@@ -412,6 +416,24 @@ pub struct WitnessCopy {
     pub admission: AdmissionCopy,
 }
 
+/// The one sentence for a wallet-signup refusal, chosen from the `reason` the
+/// daemon reported.
+///
+/// One mapper for all three shells, for the reason this module exists: a shell
+/// that picks the sentence itself picks a different one. `reason` is the wire
+/// value of `daemon::account_onboarding::SignupRefusal`; anything else --
+/// absent, or a class a newer daemon added -- falls back to the general
+/// sentence rather than inventing a claim about why.
+#[must_use]
+pub fn wallet_refusal_line(reason: Option<&str>) -> &'static str {
+    let wallet = witness_copy().wallet;
+    match reason {
+        Some("address_refused") => wallet.address_refused,
+        Some("unreachable") => wallet.unreachable,
+        _ => wallet.unavailable,
+    }
+}
+
 /// The witness surface's fixed words.
 #[must_use]
 pub fn witness_copy() -> WitnessCopy {
@@ -457,7 +479,9 @@ pub fn witness_copy() -> WitnessCopy {
             start: "Continue in wallet",
             cancel: "Cancel connection",
             available: "This commons supports wallet signup.",
-            unavailable: "Wallet signup is unavailable for this commons. You can still use an invite.",
+            unavailable: "This commons answered, and does not offer wallet signup. You can still use an invite.",
+            address_refused: "That address was refused before anything was sent. A commons address must start with https, carry no user name, password or query, and be permitted by any host list this installation was set up with.",
+            unreachable: "That address did not answer. Check the address and your network connection, then try again.",
             opening: "Opening a wallet connection…",
             waiting: "Finish signing in your wallet. Keep this window open.",
             failed: "The wallet connection could not be confirmed. Cancel and try again.",
