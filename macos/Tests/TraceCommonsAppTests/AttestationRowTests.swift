@@ -202,7 +202,21 @@ final class AttestationRowTests: XCTestCase {
         var scanned: [String: String] = [:]
         for case let url as URL in walker where url.pathExtension == "swift" {
             let relative = url.path.replacingOccurrences(of: base.path + "/", with: "")
-            scanned[relative] = try String(contentsOf: url, encoding: .utf8)
+            // Comment-only lines are dropped before anything is scanned,
+            // the way `RoutingSurfaceTests` does it. Every assertion in this
+            // file is about what the shell EXECUTES, and the prose here
+            // names the forbidden symbols precisely in order to explain why
+            // they are forbidden -- `TCAttestation.swift` says there is no
+            // `tc_contribution_attestation_control` and that reaching for
+            // `tc_contribution_eligibility_reason_line` would render a
+            // refusal. Scanning the prose would fail the guard for stating
+            // the rule it guards, and the fix a future reader would reach
+            // for is deleting the explanation.
+            let text = try String(contentsOf: url, encoding: .utf8)
+            scanned[relative] = text
+                .split(separator: "\n", omittingEmptySubsequences: false)
+                .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
+                .joined(separator: "\n")
         }
         return scanned
     }

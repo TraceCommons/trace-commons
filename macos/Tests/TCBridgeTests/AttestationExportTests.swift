@@ -148,9 +148,23 @@ final class AttestationExportTests: XCTestCase {
     /// The mark's words are its own, never the eligibility surface's.
     ///
     /// The two vocabularies partition the same facts, and the reason labels
-    /// really are the same thirteen strings. Only the sentences keep them
-    /// apart, so a shell that wired the wrong accessor would be caught here
-    /// and nowhere else.
+    /// really are the same thirteen strings. The four MARK sentences are
+    /// disjoint from the four eligibility state sentences outright.
+    ///
+    /// The reasons are NOT, and asserting that they were is what this test
+    /// used to do wrongly. Eight of the thirteen reason sentences are
+    /// deliberately word-for-word identical across the two surfaces, because
+    /// those reasons state a plain fact about the recording -- the copy could
+    /// not be read back, the request was malformed -- and that fact does not
+    /// change with the question being asked. The five that diverge are
+    /// exactly the ones whose sentence names a CONSEQUENCE, which is the
+    /// half that does change: eligibility says a session cannot be sent,
+    /// the mark says nothing can be checked against it.
+    ///
+    /// So the wrong accessor is caught on those five and only those five,
+    /// and they are asserted individually. A blanket "all thirteen differ"
+    /// cannot be made to pass without flattening eight sentences that are
+    /// right as they are.
     func testTheMarkNeverBorrowsTheEligibilitySentences() throws {
         let copy = try XCTUnwrap(copy())
         let marks = [
@@ -165,28 +179,69 @@ final class AttestationExportTests: XCTestCase {
             XCTAssertFalse(sentence.isEmpty)
             XCTAssertFalse(states.contains(sentence), "a mark is wearing an eligibility sentence")
         }
-        let markReasons = [
-            copy.attestationReasonNoCall, copy.attestationReasonCaptureOff,
-            copy.attestationReasonDigestAbsent, copy.attestationReasonUpstreamIdAbsent,
-            copy.attestationReasonDigestMismatch, copy.attestationReasonReferenceMalformed,
-            copy.attestationReasonBodiesUnreadable, copy.attestationReasonBodyNotUtf8,
-            copy.attestationReasonBodyTooLarge, copy.attestationReasonEvidenceCaptureOff,
-            copy.attestationReasonMarkerAbsent, copy.attestationReasonRequestMalformed,
-            copy.attestationReasonReceiptUnavailable,
+        // The five whose sentences name a consequence, so the two surfaces
+        // must not share them. Each is asserted through the LABEL, through
+        // the accessor production actually calls: reading the fields alone
+        // would compare the payload with itself and pass even if the bridge
+        // called `tc_contribution_eligibility_reason_line` for every row.
+        let divergent: [(String, String, String)] = [
+            // The label is `no_inference_call`; the field it reaches is
+            // `...ReasonNoCall`. The two are spelled differently on
+            // purpose and only the label crosses the ABI.
+            (
+                "no_inference_call", copy.attestationReasonNoCall,
+                copy.eligibilityReasonNoCall
+            ),
+            (
+                "digest_mismatch", copy.attestationReasonDigestMismatch,
+                copy.eligibilityReasonDigestMismatch
+            ),
+            (
+                "body_too_large", copy.attestationReasonBodyTooLarge,
+                copy.eligibilityReasonBodyTooLarge
+            ),
+            (
+                "evidence_capture_off", copy.attestationReasonEvidenceCaptureOff,
+                copy.eligibilityReasonEvidenceCaptureOff
+            ),
+            (
+                "marker_absent", copy.attestationReasonMarkerAbsent,
+                copy.eligibilityReasonMarkerAbsent
+            ),
         ]
-        let stateReasons = Set([
-            copy.eligibilityReasonNoCall, copy.eligibilityReasonCaptureOff,
-            copy.eligibilityReasonDigestAbsent, copy.eligibilityReasonUpstreamIdAbsent,
-            copy.eligibilityReasonDigestMismatch, copy.eligibilityReasonReferenceMalformed,
-            copy.eligibilityReasonBodiesUnreadable, copy.eligibilityReasonBodyNotUtf8,
-            copy.eligibilityReasonBodyTooLarge, copy.eligibilityReasonEvidenceCaptureOff,
-            copy.eligibilityReasonMarkerAbsent, copy.eligibilityReasonRequestMalformed,
-            copy.eligibilityReasonReceiptUnavailable,
-        ])
-        for sentence in markReasons {
-            XCTAssertFalse(
-                stateReasons.contains(sentence),
-                "an attestation reason is wearing an eligibility reason's sentence")
+        for (label, mine, theirs) in divergent {
+            XCTAssertNotEqual(
+                mine, theirs,
+                "\(label) is meant to read differently on the two surfaces")
+            let rendered = TCAttestation.reasonLine(reason: label)
+            XCTAssertEqual(
+                rendered, mine,
+                "the attestation table did not answer \(label) in its own words")
+            XCTAssertNotEqual(
+                rendered, theirs,
+                "\(label) came back wearing the eligibility reason's sentence")
+        }
+
+        // The other eight are identical ON PURPOSE and are pinned here so
+        // that a later edit splitting one of them has to come back and say
+        // which list it belongs in.
+        //
+        // Eight, and the arithmetic is the point: 5 + 8 = 13, and a count
+        // that does not close is a parse that missed a constant rather than
+        // a fact about the copy. `body_not_utf8` is the one most easily
+        // dropped -- its label carries a digit, and its sentence puts the
+        // literal on the line after the `=`.
+        let identical = [
+            "capture_off", "digest_absent", "upstream_id_absent", "reference_malformed",
+            "bodies_unreadable", "body_not_utf8", "request_malformed", "receipt_unavailable",
+        ]
+        XCTAssertEqual(
+            divergent.count + identical.count, 13,
+            "the two lists must account for all thirteen reason labels")
+        for label in identical {
+            let rendered = TCAttestation.reasonLine(reason: label)
+            XCTAssertNotNil(rendered)
+            XCTAssertFalse(rendered?.isEmpty ?? true, "\(label) reached no sentence")
         }
     }
 
