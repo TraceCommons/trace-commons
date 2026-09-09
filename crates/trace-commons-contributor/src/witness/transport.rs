@@ -378,7 +378,7 @@ fn verify_admission_context(
 ) -> Result<(), WitnessTrustError> {
     use trace_commons_attestation::receipt::{ReceiptAlgo, verify_receipt};
     use trace_commons_protocol::admission::{
-        AdmissionBinding, AdmissionEvidence, REQUEST_METADATA_KEY, receipt_identity,
+        AdmissionBinding, AdmissionEvidence, REQUEST_METADATA_KEY, is_hash, receipt_identity,
     };
     let Some(headers) = &response.admission else {
         return Ok(());
@@ -386,9 +386,41 @@ fn verify_admission_context(
     let refused = || WitnessTrustError::WitnessCertificateMismatched;
     let evidence: AdmissionEvidence =
         serde_json::from_str(&headers.evidence_json).map_err(|_| refused())?;
-    let anchor = tenant
+    // The tenant id is NOT the account anchor and has not been since V61.
+    //
+    // This used to read `tenant.strip_prefix("near-")` and compare that
+    // suffix to both anchors below. V58 held the two equal by database
+    // constraint -- `CHECK (tenant_id = 'near-' || substring(anchor_hash
+    // from 8))` -- so the comparison restated a server invariant rather than
+    // checking anything this client independently knew. V61 made the anchor a
+    // keyed blind index and the tenant id 32 random bytes, precisely so a
+    // contributor's tenant id is not computable from their NEAR account name
+    // (#716, #783, #785), and from that point the comparison was false for
+    // every real account: it refused every admission-bearing submission here,
+    // on the upload path, before ingest ever saw one.
+    //
+    // What replaces it is a check with two genuinely independent inputs,
+    // which the tenant comparison never had. `binding.account_anchor_sha256`
+    // arrives from the proxy's challenge; `evidence.account_anchor_sha256`
+    // comes back from the witness. Requiring those to agree is what the old
+    // comparison was standing in for, and unlike it, it can fail honestly: a
+    // witness that bound this artifact to some other account is caught here.
+    //
+    // The account's *authorisation* is not this client's to check and never
+    // was. The server resolves the anchor from its stored row for the
+    // authenticated (tenant, principal) and refuses evidence bound to any
+    // other account in `verify_admission_evidence`. See `is_near_tenant_id`
+    // in `daemon::account_onboarding`, which reached the same conclusion.
+    // The namespace still has to be right -- admission evidence on a
+    // non-wallet tenant is nonsense -- but the suffix is checked for shape
+    // only, and is never read as an anchor. `is_hash` is the same predicate
+    // the server applies to the `near-` suffix in `admission::anchor`.
+    if !tenant
         .and_then(|value| value.strip_prefix("near-"))
-        .ok_or_else(refused)?;
+        .is_some_and(is_hash)
+    {
+        return Err(refused());
+    }
     let attested = attested.ok_or_else(refused)?;
     let receipt = attested.receipt.ok_or_else(refused)?;
     let request: serde_json::Value =
@@ -417,8 +449,8 @@ fn verify_admission_context(
     )
     .map_err(|_| refused())?;
     if verified.signing_algo != ReceiptAlgo::Ed25519
-        || binding.account_anchor_sha256 != anchor
-        || evidence.account_anchor_sha256 != anchor
+        || !is_hash(&binding.account_anchor_sha256)
+        || evidence.account_anchor_sha256 != binding.account_anchor_sha256
         || evidence.challenge_sha256 != binding.digest().map_err(|_| refused())?
         || evidence.expires_at != binding.expires_at
         || evidence.provider_signer != verified.signing_address
@@ -1376,7 +1408,20 @@ mod tests {
             issued_at: 1,
             expires_at: 200,
         };
-        let tenant = format!("near-{}", binding.account_anchor_sha256);
+        // Independent of the anchor, deliberately. This fixture used to be
+        // `format!("near-{}", binding.account_anchor_sha256)` -- the shape
+        // V58's database CHECK produced and V61 removed -- and while it read
+        // that way the "valid" case below could not fail for a real V61
+        // account, because the fixture was the only world in which the
+        // tenant id and the anchor were equal. A tenant id is now 32 random
+        // bytes and a function of nothing; if a test ever needs it related to
+        // an anchor again, that relationship is the bug.
+        let tenant = format!("near-{}", "5e".repeat(32));
+        assert_ne!(
+            tenant.strip_prefix("near-"),
+            Some(binding.account_anchor_sha256.as_str()),
+            "the fixture drifted back to the pre-V61 shape"
+        );
         let attested = Some(AttestedInference {
             call: &call,
             receipt: Some(&receipt),
