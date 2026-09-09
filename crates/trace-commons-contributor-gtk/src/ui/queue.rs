@@ -1100,6 +1100,41 @@ fn manifest_block(
         facts.append(&extent);
     }
 
+    // Whether this session carries a checkable copy of the model call that
+    // produced it.
+    //
+    // **On every row, unconditionally** -- the opposite rule to the
+    // eligibility line below, and deliberately so. Eligibility asks whether
+    // this contributor may send this session and says nothing when nobody
+    // is asking; the mark states a fact about the trace, which an invited
+    // contributor is owed exactly as much as anyone else.
+    // `attestation::view` therefore returns a view rather than an `Option`,
+    // and a daemon that predates the field reports `unknown` rather than
+    // going quiet.
+    //
+    // One line, not two: the reason is drawn only when the entry carried
+    // one, which is what keeps an always-present mark from becoming two
+    // lines of chrome on every card. That branch is on the KEY's presence
+    // and never on the mark -- `unknown` carries a reason only sometimes,
+    // and suppressing it there would drop the only signal saying a receipt
+    // may be fetchable later.
+    //
+    // Nothing is branched on here, and nothing is offered: the mark
+    // describes the trace, so it draws no control. Sendability stays the
+    // eligibility question below.
+    {
+        let mark = crate::attestation::view(entry);
+        let tone = super::private_inference::indicator_tone(mark.tone);
+        let state = style::caveat(mark.state_line);
+        state.add_css_class(tone.css());
+        facts.append(&state);
+        if !mark.reason_line.is_empty() {
+            let reason = style::caveat(mark.reason_line);
+            reason.add_css_class("tc-tertiary");
+            facts.append(&reason);
+        }
+    }
+
     // Whether this session can be contributed at all, and why not.
     //
     // Absent entirely for a contributor who was invited rather than

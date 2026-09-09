@@ -192,6 +192,45 @@ pub struct QueueEntry {
     /// predates the field.
     #[serde(default)]
     pub eligibility_reason: Option<String>,
+    /// Whether this session carries a checkable copy of the model call
+    /// that produced it.
+    ///
+    /// **The opposite presence rule to [`Self::eligibility`], and this is
+    /// the field's whole point.** Eligibility asks whether this contributor
+    /// may send this session, and is absent when nobody is asking. The mark
+    /// states a fact about the trace, which every contributor is owed --
+    /// including an invited one, whose sessions send perfectly well and may
+    /// still arrive without a copy of their call. The daemon therefore
+    /// sends it on EVERY entry, unconditionally.
+    ///
+    /// `Option` here is not a tri-state, then: it is the daemon that
+    /// predates the field, and it degrades to `unknown` rather than to an
+    /// unattested mark -- a build that cannot read a label has no evidence
+    /// about anybody's session. `crate::copy::attestation_state_line`
+    /// answers the `unknown` sentence for the empty string, so the absence
+    /// needs no branch of its own.
+    ///
+    /// Never matched on in this shell: it is handed to
+    /// [`crate::attestation`], which asks the shared crate.
+    #[serde(default)]
+    pub attestation: Option<String>,
+    /// Which classification decided [`Self::attestation`], as a stable
+    /// label.
+    ///
+    /// **Presence varies WITHIN a single mark.** `attested` never carries
+    /// one; both unattested marks always do; `unknown` carries one only
+    /// when a send was refused for `receipt_unavailable`, which is a
+    /// retraction rather than a refusal because the receipt comes from a
+    /// service that can be down. A shell that suppressed the reason on
+    /// `unknown` would drop the only signal saying it may work later, so
+    /// the reason line branches on THIS KEY's presence and never on the
+    /// mark.
+    ///
+    /// The same thirteen labels [`Self::eligibility_reason`] takes, and
+    /// deliberately NOT the same sentences -- see
+    /// `crate::copy::attestation_reason_line`.
+    #[serde(default)]
+    pub attestation_reason: Option<String>,
 }
 
 impl QueueEntry {
