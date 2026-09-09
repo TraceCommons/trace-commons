@@ -421,6 +421,31 @@ public sealed record PrivateInferenceCopy
     // where the other belongs.
 
     /// <summary>The session carries a checkable copy of its last model call.</summary>
+    /// <summary>
+    /// The certificate-held list, in both readings.
+    /// </summary>
+    /// <remarks>
+    /// The list is driven by the queue entry's <c>holds_certificate</c>,
+    /// true after either witness route. Which sentence a row gets follows
+    /// the contributor's invite status, the same status this shell already
+    /// reads for the eligibility surface, and never the attestation mark
+    /// below. Holds a certificate and was attested are different facts.
+    /// </remarks>
+    [JsonPropertyName("certificate_row_candidate")]
+    public string CertificateRowCandidate { get; init; } = string.Empty;
+
+    [JsonPropertyName("certificate_row_attested")]
+    public string CertificateRowAttested { get; init; } = string.Empty;
+
+    [JsonPropertyName("certificate_list_candidate")]
+    public string CertificateListCandidate { get; init; } = string.Empty;
+
+    [JsonPropertyName("certificate_list_attested")]
+    public string CertificateListAttested { get; init; } = string.Empty;
+
+    [JsonPropertyName("certificate_list_empty")]
+    public string CertificateListEmpty { get; init; } = string.Empty;
+
     [JsonPropertyName("attestation_attested")]
     public string AttestationAttested { get; init; } = string.Empty;
 
@@ -608,6 +633,11 @@ public sealed record PrivateInferenceCopy
             EligibilityReasonMarkerAbsent,
             EligibilityReasonRequestMalformed,
             EligibilityReasonReceiptUnavailable,
+            CertificateRowCandidate,
+            CertificateRowAttested,
+            CertificateListCandidate,
+            CertificateListAttested,
+            CertificateListEmpty,
             AttestationAttested,
             AttestationUnattestedPermanent,
             AttestationUnattestedConfiguration,
