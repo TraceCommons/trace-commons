@@ -53,6 +53,7 @@ the link.
 | Running or scheduling admin drills | [`./drills.md`](./drills.md) |
 | Proving the NEAR AI inference endpoint is the enclave you pinned | [`./near-attestation-drill.md`](./near-attestation-drill.md) |
 | Taking attested inference from dormant to enforced | [`./attested-inference.md`](./attested-inference.md) |
+| Switching on invite-free (uninvited, receipt-backed) contribution | [`./invite-free-admission.md`](./invite-free-admission.md) |
 | Deploying the redaction witness on dstack (this project's first CVM) | [`../../deploy/witness/README.md`](../../deploy/witness/README.md) |
 | Looking up an env var | [`./env-reference.md`](./env-reference.md) |
 | Driving review / admin / worker / tenant workflows from a CLI | [`./operator-binaries.md`](./operator-binaries.md) |
@@ -144,6 +145,12 @@ Every runbook in this directory, with a one-line description.
   layout, disk-space requirements, and hygiene commands for the HuggingFace
   dataset and model cache used by pilot-bootstrap and the bake-off corpus
   builder.
+- [`./invite-free-admission.md`](./invite-free-admission.md) — switching on
+  invite-free contribution: the six `TRACE_COMMONS_ADMISSION_*` limits and why
+  each value, which three are frozen into the ledger at first reservation, the
+  order to enable witness and ingest in, per-step verification, rollback and
+  what persists after it, and the failure modes (a missing limit refuses
+  startup; a stale signer pin refuses every receipt with no useful label).
 - [`./key-rotation.md`](./key-rotation.md) — Cloud KMS key-version rotation
   procedure, including drill validation and rollback.
 - [Large-trace chunked scoring](large-trace-chunked-scoring.md) — chunking
