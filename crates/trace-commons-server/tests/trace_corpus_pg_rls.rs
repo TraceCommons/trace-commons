@@ -818,6 +818,34 @@ async fn current_role_bypasses_trace_rls(
 /// assertion in this file that cross-tenant read without asking for it.
 const RAW_RLS_ASSERTION_ROLE: &str = "trace_rls_assertion_runtime";
 
+/// Advisory-lock key serialising every test-role GRANT in this suite.
+///
+/// `GRANT ... ON ALL TABLES IN SCHEMA public` rewrites the `relacl` of every
+/// table in the schema, and libtest runs these tests in parallel against one
+/// database. Two of those in flight -- or one of them against the single-table
+/// grant in `community_withdrawal_eviction_client` -- update the same
+/// `pg_class` tuples, and PostgreSQL raises `XX000 tuple concurrently
+/// updated`. It surfaces as an RLS test failing on whatever PR happened to be
+/// running: observed on run 34381118381 against #825, a copy-only change.
+///
+/// The contended tuple belongs to the TABLE, not to the role. Giving each test
+/// its own role does not help -- reproduced outside this suite, two concurrent
+/// `GRANT ... ON ALL TABLES` to two DIFFERENT roles raise it just as two to
+/// the same role do. Serialising the DDL is what removes it, following the
+/// migration runner's advisory-lock precedent.
+///
+/// Two-int form with its own classid, so it cannot alias the one-arg
+/// `pg_advisory_xact_lock(hashtext(tenant))` the audit-chain append takes.
+/// Taken with `_xact_`, inside the implicit transaction that wraps a
+/// multi-statement `batch_execute`, so it is released when that batch commits
+/// and no path can leak it. The `SET ROLE` that shares one of those batches is
+/// session-scoped, not transaction-scoped, so it deliberately outlives that
+/// commit -- the assertions run under that role after the batch returns. Two
+/// different scopes in one statement list is intentional; do not "fix" it by
+/// making them agree.
+const RLS_TEST_ROLE_DDL_LOCK_CLASSID: i32 = 0x726f_6c65u32 as i32; // "role"
+const RLS_TEST_ROLE_DDL_LOCK_OBJID: i32 = 0x7273_6c73u32 as i32; // "rsls"
+
 /// Connect for a raw-SQL RLS assertion as a role that cannot bypass RLS.
 ///
 /// Panics rather than skipping, at every step. `purpose` names the assertion
@@ -837,7 +865,9 @@ async fn connect_for_raw_rls_assertion(
 
     admin_client
         .batch_execute(&format!(
-            "DO $$ BEGIN
+            "SELECT pg_advisory_xact_lock({RLS_TEST_ROLE_DDL_LOCK_CLASSID}, \
+                {RLS_TEST_ROLE_DDL_LOCK_OBJID});
+             DO $$ BEGIN
                 IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{RAW_RLS_ASSERTION_ROLE}')
                 THEN CREATE ROLE {RAW_RLS_ASSERTION_ROLE}
                      LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOINHERIT;
@@ -5972,7 +6002,9 @@ async fn rls_actor_client() -> Option<tokio_postgres::Client> {
         // creating this fixture may skip; schema/grant/SET ROLE failures remain errors.
         if let Err(error) = client
             .batch_execute(&format!(
-                "DO $$ BEGIN
+                "SELECT pg_advisory_xact_lock({RLS_TEST_ROLE_DDL_LOCK_CLASSID}, \
+                    {RLS_TEST_ROLE_DDL_LOCK_OBJID});
+                 DO $$ BEGIN
                     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{RLS_TEST_ACTOR_ROLE}')
                     THEN CREATE ROLE {RLS_TEST_ACTOR_ROLE} NOLOGIN NOBYPASSRLS;
                     END IF;
@@ -5988,7 +6020,9 @@ async fn rls_actor_client() -> Option<tokio_postgres::Client> {
         }
         client
             .batch_execute(&format!(
-                "GRANT SELECT, INSERT, UPDATE, DELETE
+                "SELECT pg_advisory_xact_lock({RLS_TEST_ROLE_DDL_LOCK_CLASSID}, \
+                    {RLS_TEST_ROLE_DDL_LOCK_OBJID});
+                 GRANT SELECT, INSERT, UPDATE, DELETE
                     ON trace_community_withdrawal_evictions TO {RLS_TEST_ACTOR_ROLE};
                  SET ROLE {RLS_TEST_ACTOR_ROLE};"
             ))
