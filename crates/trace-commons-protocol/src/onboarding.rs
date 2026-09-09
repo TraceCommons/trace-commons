@@ -188,9 +188,180 @@ pub fn near_provisioning_device_bytes(
     bytes
 }
 
+/// Device proof preimage for the NEAR AI login ceremony.
+///
+/// A separate domain string from [`near_provisioning_device_bytes`] on
+/// purpose. The two ceremonies enroll the same device key against the same
+/// commons, and both are signed by it; if they shared a preimage domain a
+/// signature captured from one could be presented as the other. The domain is
+/// the only thing standing between them, because every other field is either
+/// server-chosen or public.
+///
+/// Same length-prefixed shape as its wallet sibling, for the same reason: no
+/// field may absorb the next one by containing a separator. `ceremony_id` and
+/// `code_challenge` are ASCII in practice but are length-prefixed rather than
+/// trusted to be.
+///
+/// # One rule, no exceptions
+///
+/// **Every part is length-prefixed, including the integer.** `expires_at`
+/// contributes its eight big-endian bytes behind the same `u64` length prefix
+/// as every other part, rather than being appended raw. That is deliberate and
+/// it is the detail most likely to diverge between two implementations: this
+/// repository already holds two conventions -- this module length-prefixes
+/// everything, while `AdmissionEvidence::signing_bytes` appends
+/// `expires_at.to_be_bytes()` un-prefixed and last -- and the wallet sibling
+/// offers no precedent because its own expiry lives inside the `message`
+/// string. Either convention would work; a reader reaching for the wrong
+/// neighbour by analogy is what would not. Uniform prefixing leaves nothing to
+/// reach for, and the loop below is written so the integer cannot be treated
+/// specially without deleting it from the list.
+///
+/// # No presence byte
+///
+/// All five parameters are mandatory, so there is no optional tail and nothing
+/// corresponding to the wallet sibling's `bytes.push(u8::from(callback
+/// .is_some()))`. Do not add one "for symmetry": it would be a byte the other
+/// half does not expect.
+///
+/// # One definition, not two agreeing ones
+///
+/// Both halves of this ceremony call this function. Neither writes a
+/// concatenation of its own, which is what makes the questions above moot by
+/// construction rather than by agreement.
+pub fn near_ai_provisioning_device_bytes(
+    nonce: &[u8; 32],
+    ceremony_id: &str,
+    device: &[u8; 32],
+    code_challenge: &str,
+    expires_at: i64,
+) -> Vec<u8> {
+    let expiry = expires_at.to_be_bytes();
+    let mut bytes = b"trace_commons.near_ai_provisioning_device.v1\n".to_vec();
+    for part in [
+        &nonce[..],
+        ceremony_id.as_bytes(),
+        &device[..],
+        code_challenge.as_bytes(),
+        &expiry[..],
+    ] {
+        bytes.extend_from_slice(&(part.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(part);
+    }
+    bytes
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn near_ai_device_bytes_cannot_be_confused_with_the_wallet_ceremony() {
+        // Both ceremonies enroll the same device key against the same commons.
+        // If they shared a domain, a signature captured from one could be
+        // presented as the other.
+        let nonce = [7u8; 32];
+        let device = [9u8; 32];
+        let near_ai =
+            near_ai_provisioning_device_bytes(&nonce, "ceremony", &device, "challenge", 100);
+        let wallet = near_provisioning_device_bytes(&nonce, "ceremony", "challenge", &device, None);
+        assert_ne!(near_ai, wallet);
+        assert!(near_ai.starts_with(b"trace_commons.near_ai_provisioning_device.v1\n"));
+    }
+
+    /// The exact bytes, so a second implementation cannot quietly disagree
+    /// about how `expires_at` is framed.
+    ///
+    /// This is the detail the two halves were most likely to diverge on: raw
+    /// vs length-prefixed, and little- vs big-endian. Asserting the whole
+    /// preimage against a literal means a change to any of those has to be
+    /// made here too, deliberately, rather than discovered when a real client
+    /// meets a real server.
+    #[test]
+    fn near_ai_device_bytes_frame_the_expiry_like_every_other_part() {
+        let bytes = near_ai_provisioning_device_bytes(&[0xAA; 32], "c", &[0xBB; 32], "k", 1);
+
+        let mut expected = b"trace_commons.near_ai_provisioning_device.v1\n".to_vec();
+        for part in [&[0xAA; 32][..], b"c", &[0xBB; 32][..], b"k"] {
+            expected.extend_from_slice(&(part.len() as u64).to_le_bytes());
+            expected.extend_from_slice(part);
+        }
+        // The expiry: an 8-byte length prefix like every other part, then the
+        // value big-endian. Not raw, and not little-endian.
+        expected.extend_from_slice(&8u64.to_le_bytes());
+        expected.extend_from_slice(&1i64.to_be_bytes());
+
+        assert_eq!(bytes, expected);
+
+        // The two mistakes this pins against, spelled out so a failure says
+        // which one was made.
+        let raw_appended = {
+            let mut v = expected.clone();
+            v.truncate(v.len() - 16);
+            v.extend_from_slice(&1i64.to_be_bytes());
+            v
+        };
+        assert_ne!(bytes, raw_appended, "the expiry must not be appended raw");
+        let little_endian = {
+            let mut v = expected.clone();
+            v.truncate(v.len() - 8);
+            v.extend_from_slice(&1i64.to_le_bytes());
+            v
+        };
+        assert_ne!(bytes, little_endian, "the expiry must be big-endian");
+    }
+
+    /// No optional tail, so no presence byte -- the wallet sibling has one and
+    /// this must not acquire it by symmetry.
+    #[test]
+    fn near_ai_device_bytes_carry_no_presence_byte() {
+        let bytes = near_ai_provisioning_device_bytes(&[1; 32], "cc", &[2; 32], "kkk", 9);
+        let domain = b"trace_commons.near_ai_provisioning_device.v1\n".len();
+        // Five parts, each 8 bytes of prefix plus its own length. Anything
+        // trailing -- a presence byte, a raw integer -- makes this sum wrong.
+        let expected = domain + 5 * 8 + 32 + 2 + 32 + 3 + 8;
+        assert_eq!(
+            bytes.len(),
+            expected,
+            "the preimage carries a trailing byte"
+        );
+    }
+
+    #[test]
+    fn near_ai_device_bytes_are_unambiguous_across_field_boundaries() {
+        // Length prefixes exist so no field can absorb the next one. Moving a
+        // character from the ceremony id to the challenge must change the
+        // preimage, which a plain concatenation would not.
+        let nonce = [1u8; 32];
+        let device = [2u8; 32];
+        let a = near_ai_provisioning_device_bytes(&nonce, "ab", &device, "cd", 5);
+        let b = near_ai_provisioning_device_bytes(&nonce, "a", &device, "bcd", 5);
+        assert_ne!(a, b);
+
+        // And every input is actually bound: changing any one of them alone
+        // must move the bytes.
+        let base = near_ai_provisioning_device_bytes(&nonce, "ab", &device, "cd", 5);
+        assert_ne!(
+            base,
+            near_ai_provisioning_device_bytes(&[3u8; 32], "ab", &device, "cd", 5)
+        );
+        assert_ne!(
+            base,
+            near_ai_provisioning_device_bytes(&nonce, "zz", &device, "cd", 5)
+        );
+        assert_ne!(
+            base,
+            near_ai_provisioning_device_bytes(&nonce, "ab", &[4u8; 32], "cd", 5)
+        );
+        assert_ne!(
+            base,
+            near_ai_provisioning_device_bytes(&nonce, "ab", &device, "zz", 5)
+        );
+        assert_ne!(
+            base,
+            near_ai_provisioning_device_bytes(&nonce, "ab", &device, "cd", 6)
+        );
+    }
 
     #[test]
     fn onboard_request_round_trips() {

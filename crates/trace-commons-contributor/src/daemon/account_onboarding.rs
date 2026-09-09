@@ -41,6 +41,17 @@ struct Options {
 #[derive(Deserialize)]
 struct Capability {
     ready: bool,
+    /// Whether this commons offers the NEAR AI **login** enrollment path.
+    ///
+    /// Additive and deliberately separate from `ready`, which is the wallet
+    /// path's readiness and stays exactly as it was: redefining it would have
+    /// silently changed behaviour for every existing wallet client with no
+    /// test going red. `Capability` does not `deny_unknown_fields`, so a
+    /// client older than this field ignores it rather than refusing the
+    /// response, and `Option` is what lets a client newer than the *server*
+    /// fall back — see [`Path::ready_for`].
+    #[serde(default)]
+    near_ai_login_ready: Option<bool>,
     witness: Option<serde_json::Value>,
     issuer_url: Option<String>,
     audience: Option<String>,
@@ -195,7 +206,7 @@ pub(super) fn published_host_allowlist(
     derive_signup_allowlist(configured, origin, &[endpoint])
 }
 
-fn signup_allowlist(origin: &str, published: &[&str]) -> Result<HostAllowlist> {
+pub(super) fn signup_allowlist(origin: &str, published: &[&str]) -> Result<HostAllowlist> {
     derive_signup_allowlist(&allowlist_for(None), origin, published)
 }
 
@@ -219,7 +230,10 @@ fn derive_signup_allowlist(
     Ok(HostAllowlist::from_hosts(hosts))
 }
 
-fn client(url: &str, allowed: &HostAllowlist) -> Result<trace_commons_operator_client::Client> {
+pub(super) fn client(
+    url: &str,
+    allowed: &HostAllowlist,
+) -> Result<trace_commons_operator_client::Client> {
     let parsed = reqwest::Url::parse(url)?;
     if !allowed.is_enforcing()
         || parsed.scheme() != "https"
@@ -245,7 +259,7 @@ pub async fn handle_capabilities(_shared: &DaemonShared, req: &Request) -> Respo
     let Some(url) = req.params.get("ingest_url").and_then(|v| v.as_str()) else {
         return Response::err(req.id, ERR_BAD_PARAMS, "near_signup_invalid");
     };
-    match validated_capability(url).await {
+    match validated_capability(url, Path::Wallet).await {
         Ok((issuer, audience, witness, _endpoint)) => Response::ok(
             req.id,
             serde_json::json!({"ready":true,"issuer_url":issuer,"audience":audience,"witness":witness,"funding_available":false}),
@@ -261,8 +275,69 @@ pub async fn handle_capabilities(_shared: &DaemonShared, req: &Request) -> Respo
     }
 }
 
-async fn validated_capability(
+/// Which enrollment path is asking, and therefore which readiness flag in the
+/// capabilities response answers it.
+///
+/// This type exists because of #839: readiness checks belonging to one
+/// onboarding path were silently gating the other, in three separate places.
+/// The rule it encodes is that a path's readiness is derived from what that
+/// path's own route requires, never mirrored from a neighbour.
+///
+/// The two paths have genuinely different preconditions: the wallet ceremony
+/// needs NEP-413 sign-in configuration and a public origin to redirect a
+/// browser to, and the login ceremony needs neither because it has no browser
+/// redirect at all. A commons can offer one and not the other, so one flag
+/// cannot answer for both.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Path {
+    Wallet,
+    NearAiLogin,
+}
+
+impl Path {
+    /// The path an already-enrolled config was enrolled by, read from the
+    /// tenant namespace it holds.
+    ///
+    /// A client asking its commons a readiness question after enrollment must
+    /// ask it for the path it actually took. Asking as the wallet on behalf of
+    /// a login-enrolled contributor is the same class of mistake as gating the
+    /// login ceremony on `ready`: a check belonging to the other mechanism.
+    pub(super) fn for_tenant(tenant_id: &str) -> Self {
+        if crate::daemon::nearai_onboarding::is_near_ai_tenant_id(tenant_id) {
+            Self::NearAiLogin
+        } else {
+            Self::Wallet
+        }
+    }
+
+    /// Whether this commons offers this path.
+    ///
+    /// The login path prefers `near_ai_login_ready` and falls back to `ready`
+    /// when it is absent, which is what makes the field additive in both
+    /// directions: a commons older than the field, and one offering both
+    /// paths, are both answered correctly by `ready`, while a login-only
+    /// commons publishes `near_ai_login_ready: true` alongside `ready: false`.
+    ///
+    /// **An explicit `false` wins over the fallback, and that clause is not
+    /// redundant.** `unwrap_or` is doing two different jobs here: absent means
+    /// "this commons is older than the field, so ask the flag that existed",
+    /// and `Some(false)` means "this commons has been asked and says no". A
+    /// later reader may notice that a commons with `ready: true` is plainly
+    /// running and simplify this to `capability.ready ||
+    /// capability.near_ai_login_ready.unwrap_or(false)`. That would silently
+    /// re-enable the login path on every commons that turned it off
+    /// deliberately, and no test of the wallet path would notice. See #839.
+    fn ready_for(self, capability: &Capability) -> bool {
+        match self {
+            Self::Wallet => capability.ready,
+            Self::NearAiLogin => capability.near_ai_login_ready.unwrap_or(capability.ready),
+        }
+    }
+}
+
+pub(super) async fn validated_capability(
     url: &str,
+    path: Path,
 ) -> std::result::Result<(String, String, WitnessSettings, Option<String>), SignupRefusal> {
     let origin_only = signup_allowlist(url, &[]).map_err(|_| SignupRefusal::AddressRefused)?;
     let capability: Capability = client(url, &origin_only)
@@ -275,7 +350,7 @@ async fn validated_capability(
         )
         .await
         .map_err(|_| SignupRefusal::Unreachable)?;
-    validate_capability(url, capability)
+    validate_capability(url, capability, path)
 }
 
 /// Everything the capabilities response has to satisfy, with no I/O of its
@@ -283,8 +358,9 @@ async fn validated_capability(
 fn validate_capability(
     origin: &str,
     capability: Capability,
+    path: Path,
 ) -> std::result::Result<(String, String, WitnessSettings, Option<String>), SignupRefusal> {
-    if !capability.ready {
+    if !path.ready_for(&capability) {
         return Err(SignupRefusal::Unsupported);
     }
     let issuer = capability.issuer_url.ok_or(SignupRefusal::Unsupported)?;
@@ -339,8 +415,8 @@ fn validate_capability(
 ///
 /// Never fatal to the caller: no endpoint simply means the refusal the caller
 /// was already going to make.
-pub(super) async fn published_receipt_endpoint(ingest_url: &str) -> Option<String> {
-    validated_capability(ingest_url)
+pub(super) async fn published_receipt_endpoint(ingest_url: &str, path: Path) -> Option<String> {
+    validated_capability(ingest_url, path)
         .await
         .ok()
         .and_then(|(_, _, _, endpoint)| endpoint)
@@ -431,9 +507,10 @@ async fn prepare(
     ingest: trace_commons_operator_client::Client,
     id: &str,
 ) -> Result<serde_json::Value> {
-    let (issuer, audience, witness, published) = validated_capability(&options.ingest_url)
-        .await
-        .map_err(|refusal| anyhow!(refusal.wire()))?;
+    let (issuer, audience, witness, published) =
+        validated_capability(&options.ingest_url, Path::Wallet)
+            .await
+            .map_err(|refusal| anyhow!(refusal.wire()))?;
     // The environment stays ahead of the published value so an operator who
     // set it on this host keeps the last word; a contributor who set nothing
     // now gets the commons's answer instead of no answer at all. An invalid
@@ -933,6 +1010,7 @@ mod tests {
 
     fn capability_publishing(issuer: &str, witness_url: &str, receipt: Option<&str>) -> Capability {
         Capability {
+            near_ai_login_ready: None,
             ready: true,
             issuer_url: Some(issuer.into()),
             audience: Some("trace-commons-upload".into()),
@@ -947,6 +1025,60 @@ mod tests {
 
     /// A commons that publishes a receipt endpoint hands it back, on the same
     /// basis it hands back an issuer and a witness: this origin named it.
+    /// The four commons shapes the additive field has to answer correctly,
+    /// including the one that does not exist yet.
+    #[test]
+    fn each_path_reads_its_own_readiness_flag() {
+        let shape = |ready: bool, login: Option<bool>| {
+            let mut c = capability("https://issuer.example", "https://witness.example");
+            c.ready = ready;
+            c.near_ai_login_ready = login;
+            c
+        };
+        let accepted = |c: Capability, path: Path| {
+            validate_capability("https://commons.example", c, path).is_ok()
+        };
+
+        // Today: both paths on. `ready` answers for both, and the field is
+        // absent because no server publishes it yet.
+        assert!(accepted(shape(true, None), Path::Wallet));
+        assert!(accepted(shape(true, None), Path::NearAiLogin));
+
+        // The configuration #836 makes possible: login only. The wallet path
+        // is refused and the login path is not, which is the whole point --
+        // before the field existed this commons could not be expressed.
+        assert!(!accepted(shape(false, Some(true)), Path::Wallet));
+        assert!(accepted(shape(false, Some(true)), Path::NearAiLogin));
+
+        // Wallet only, stated explicitly. An explicit `false` must win over
+        // the fallback -- a commons saying the login path is off is not
+        // overruled because the wallet path is on.
+        assert!(accepted(shape(true, Some(false)), Path::Wallet));
+        assert!(!accepted(shape(true, Some(false)), Path::NearAiLogin));
+
+        // Neither offered.
+        assert!(!accepted(shape(false, None), Path::Wallet));
+        assert!(!accepted(shape(false, None), Path::NearAiLogin));
+    }
+
+    /// An enrolled config asks its commons for the path it took, not for the
+    /// other one.
+    #[test]
+    fn the_path_is_read_from_the_enrolled_tenant_namespace() {
+        assert_eq!(
+            Path::for_tenant(&format!("near-{}", "ab".repeat(32))),
+            Path::Wallet
+        );
+        assert_eq!(
+            Path::for_tenant(&format!("nearai-{}", "ab".repeat(32))),
+            Path::NearAiLogin
+        );
+        // Anything that is not a well-formed login tenant is treated as the
+        // wallet path, which is the pre-existing behaviour and the safe
+        // default: it is the stricter readiness flag of the two.
+        assert_eq!(Path::for_tenant("tenant-whatever"), Path::Wallet);
+    }
+
     #[test]
     fn a_published_receipt_endpoint_comes_back_from_the_capability() {
         let (_, _, _, receipt) = validate_capability(
@@ -956,6 +1088,7 @@ mod tests {
                 "https://witness.example",
                 Some("https://cloud-api.near.ai/v1"),
             ),
+            Path::Wallet,
         )
         .expect("a ready commons");
         assert_eq!(receipt.as_deref(), Some("https://cloud-api.near.ai/v1"));
@@ -969,6 +1102,7 @@ mod tests {
         let (_, _, _, receipt) = validate_capability(
             "https://commons.example",
             capability("https://issuer.example", "https://witness.example"),
+            Path::Wallet,
         )
         .expect("a ready commons");
         assert!(receipt.is_none());
@@ -998,6 +1132,7 @@ mod tests {
                     "https://witness.example",
                     Some(endpoint),
                 ),
+                Path::Wallet,
             )
             .expect("enrollment survives a receipt endpoint this client will not call");
             assert!(receipt.is_none(), "{endpoint} was published");
@@ -1013,6 +1148,7 @@ mod tests {
         let (issuer, audience, witness, _) = validate_capability(
             "https://commons.example",
             capability("https://issuer.example", "https://witness.example"),
+            Path::Wallet,
         )
         .expect("hosts the chosen origin published must be reachable");
         assert_eq!(issuer, "https://issuer.example");
@@ -1034,7 +1170,8 @@ mod tests {
             assert_eq!(
                 validate_capability(
                     "https://commons.example",
-                    capability(issuer, "https://witness.example")
+                    capability(issuer, "https://witness.example"),
+                    Path::Wallet,
                 ),
                 Err(SignupRefusal::AddressRefused),
                 "{issuer}"
@@ -1047,7 +1184,8 @@ mod tests {
             assert_eq!(
                 validate_capability(
                     "https://commons.example",
-                    capability("https://issuer.example", witness_url)
+                    capability("https://issuer.example", witness_url),
+                    Path::Wallet,
                 ),
                 Err(SignupRefusal::Unsupported),
                 "{witness_url}"
@@ -1060,19 +1198,19 @@ mod tests {
         let mut not_ready = capability("https://issuer.example", "https://witness.example");
         not_ready.ready = false;
         assert_eq!(
-            validate_capability("https://commons.example", not_ready),
+            validate_capability("https://commons.example", not_ready, Path::Wallet),
             Err(SignupRefusal::Unsupported)
         );
         let mut no_audience = capability("https://issuer.example", "https://witness.example");
         no_audience.audience = Some("   ".into());
         assert_eq!(
-            validate_capability("https://commons.example", no_audience),
+            validate_capability("https://commons.example", no_audience, Path::Wallet),
             Err(SignupRefusal::Unsupported)
         );
         let mut no_witness = capability("https://issuer.example", "https://witness.example");
         no_witness.witness = None;
         assert_eq!(
-            validate_capability("https://commons.example", no_witness),
+            validate_capability("https://commons.example", no_witness, Path::Wallet),
             Err(SignupRefusal::Unsupported)
         );
     }

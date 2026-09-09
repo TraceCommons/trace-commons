@@ -36,7 +36,12 @@ pub mod balance;
 pub mod ceremony;
 pub mod loopback;
 
+use crate::config::ConfigStore;
 use crate::daemon::ipc::{DaemonShared, ERR_BAD_PARAMS, ERR_UNAVAILABLE, Request, Response};
+use crate::daemon::settings::{DaemonSettings, NearAiSession};
+use anyhow::{Result, anyhow};
+use api::CloudApi;
+use chrono::{DateTime, Utc};
 
 /// The state labels `near_ai_credential_status` reports, and the only
 /// vocabulary a shell branches on.
@@ -322,6 +327,66 @@ pub async fn handle_forget_async(shared: &DaemonShared, req: &Request) -> Respon
 /// calls; on the async dispatch path for the same reason `handle_start` is.
 pub async fn handle_balance(shared: &DaemonShared, req: &Request) -> Response {
     Response::ok(req.id, balance::read(shared).await.to_value())
+}
+
+/// Spend the stored refresh token for a short-lived access token, persisting
+/// the rotation before the access token is used for anything.
+///
+/// Lives here rather than in [`balance`] because it is not about balances.
+/// Two callers need it now -- reading the account balance, and proving to a
+/// commons that this contributor logged in -- and a second copy of a
+/// rotate-then-persist ordering is the kind of thing that agrees in review and
+/// diverges in production.
+/// before the access token is used for anything.
+///
+/// Order is the whole point. The exchange retires the token that authenticated
+/// it, so an access token used against a rotation that was never written to
+/// disk leaves the contributor holding a dead credential the next time the
+/// daemon starts.
+pub(super) async fn exchange(
+    shared: &DaemonShared,
+    api: &CloudApi,
+    stored: &NearAiSession,
+) -> Result<String> {
+    let refreshed = api.refresh_session(&stored.refresh_token).await?;
+    persist_rotation(
+        shared,
+        refreshed.session.refresh_token.clone(),
+        refreshed.refresh_token_expires_at,
+    )
+    .map_err(|_| anyhow!("near_ai_credential_unavailable"))?;
+    Ok(refreshed.session.access_token)
+}
+
+/// Persist a rotated refresh token, to disk and to the running daemon.
+///
+/// Both, and in that order. Disk is what survives a restart; the in-memory
+/// copy is what the next read consults, and leaving it holding the retired
+/// token would make every subsequent read fail until the process restarted.
+///
+/// The disk write is a read-modify-write of the whole settings document from
+/// disk, matching `ceremony::persist`, so a rotation cannot revert an
+/// unrelated setting changed while the HTTP call was in flight.
+pub(super) fn persist_rotation(
+    shared: &DaemonShared,
+    refresh_token: String,
+    expires_at: DateTime<Utc>,
+) -> Result<()> {
+    let session = NearAiSession {
+        refresh_token,
+        refresh_token_expires_at: Some(expires_at),
+        stored_at: Utc::now(),
+    };
+    let store = ConfigStore::open(shared.store.dir().to_path_buf())?;
+    let mut settings = DaemonSettings::load(&store)?;
+    settings.near_ai_session = Some(session.clone());
+    settings.save(&store)?;
+    shared
+        .settings
+        .lock()
+        .expect("settings lock")
+        .near_ai_session = Some(session);
+    Ok(())
 }
 
 #[cfg(test)]

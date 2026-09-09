@@ -30,10 +30,9 @@
 
 use super::api::{CloudApi, OrganizationBalance};
 use super::loopback::SessionTokens;
-use crate::config::ConfigStore;
 use crate::daemon::ipc::DaemonShared;
-use crate::daemon::settings::{DaemonSettings, NearAiSession};
-use anyhow::{Result, anyhow};
+use crate::daemon::settings::NearAiSession;
+use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use std::{
@@ -229,37 +228,6 @@ fn stored_session(shared: &DaemonShared) -> Option<NearAiSession> {
         .clone()
 }
 
-/// Persist a rotated refresh token, to disk and to the running daemon.
-///
-/// Both, and in that order. Disk is what survives a restart; the in-memory
-/// copy is what the next read consults, and leaving it holding the retired
-/// token would make every subsequent read fail until the process restarted.
-///
-/// The disk write is a read-modify-write of the whole settings document from
-/// disk, matching `ceremony::persist`, so a rotation cannot revert an
-/// unrelated setting changed while the HTTP call was in flight.
-fn persist_rotation(
-    shared: &DaemonShared,
-    refresh_token: String,
-    expires_at: DateTime<Utc>,
-) -> Result<()> {
-    let session = NearAiSession {
-        refresh_token,
-        refresh_token_expires_at: Some(expires_at),
-        stored_at: Utc::now(),
-    };
-    let store = ConfigStore::open(shared.store.dir().to_path_buf())?;
-    let mut settings = DaemonSettings::load(&store)?;
-    settings.near_ai_session = Some(session.clone());
-    settings.save(&store)?;
-    shared
-        .settings
-        .lock()
-        .expect("settings lock")
-        .near_ai_session = Some(session);
-    Ok(())
-}
-
 /// Map a label this module's callees raise onto the state a shell renders.
 fn report_for(error: &anyhow::Error) -> BalanceReport {
     match error.to_string().as_str() {
@@ -320,7 +288,7 @@ async fn read_with(shared: &DaemonShared, api: &CloudApi) -> BalanceReport {
     // we already have a name for.
     let mut access_token = match entry.access_token.take() {
         Some((token, at)) if at.elapsed() < ACCESS_TOKEN_REUSE => token,
-        _ => match exchange(shared, api, &stored).await {
+        _ => match super::exchange(shared, api, &stored).await {
             Ok(token) => token,
             Err(error) => return report_for(&error),
         },
@@ -361,7 +329,7 @@ async fn read_with(shared: &DaemonShared, api: &CloudApi) -> BalanceReport {
                     Some(stored) => stored,
                     None => return BalanceReport::NoSession,
                 };
-                match exchange(shared, api, &stored).await {
+                match super::exchange(shared, api, &stored).await {
                     Ok(token) => access_token = token,
                     Err(error) => return report_for(&error),
                 }
@@ -369,24 +337,6 @@ async fn read_with(shared: &DaemonShared, api: &CloudApi) -> BalanceReport {
             Err(error) => return report_for(&error),
         }
     }
-}
-
-/// Spend the stored refresh token for an access token, persisting the rotation
-/// before the access token is used for anything.
-///
-/// Order is the whole point. The exchange retires the token that authenticated
-/// it, so an access token used against a rotation that was never written to
-/// disk leaves the contributor holding a dead credential the next time the
-/// daemon starts.
-async fn exchange(shared: &DaemonShared, api: &CloudApi, stored: &NearAiSession) -> Result<String> {
-    let refreshed = api.refresh_session(&stored.refresh_token).await?;
-    persist_rotation(
-        shared,
-        refreshed.session.refresh_token.clone(),
-        refreshed.refresh_token_expires_at,
-    )
-    .map_err(|_| anyhow!("near_ai_credential_unavailable"))?;
-    Ok(refreshed.session.access_token)
 }
 
 /// Resolve the organization the ceremony would have chosen, then read its
@@ -399,6 +349,7 @@ async fn fetch(api: &CloudApi, session: &SessionTokens) -> Result<OrganizationBa
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::daemon::settings::DaemonSettings;
     use axum::{Json, Router, extract::Request, routing::get};
     use std::sync::{Arc, Mutex};
 
