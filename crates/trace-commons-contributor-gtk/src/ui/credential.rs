@@ -189,6 +189,12 @@ pub fn refresh(app: &Rc<App>) {
             .and_then(serde_json::Value::as_str)
             .unwrap_or_default();
         render(app, state);
+        // The balance is the same fact read the other way round: it is the
+        // account this key spends from, and a sign-in that has just landed
+        // or just been forgotten changes both. Re-read here rather than
+        // waiting for the next screen refresh, so the ceremony a
+        // contributor finishes in a browser lands on both rows at once.
+        super::balance::refresh(app);
     });
 }
 
@@ -249,7 +255,13 @@ pub fn render(app: &Rc<App>, state: &str) {
 /// no path from a state label to a call other than through
 /// `credential_action`. [`CredentialAction::None`] reaches here only if a
 /// button was drawn for it, which [`action_label`] does not do.
-fn act(app: &Rc<App>, action: CredentialAction) {
+///
+/// **Reachable from the balance row too, and that is the point.**
+/// `balance_action` answers this row's `Obtain` on the two states that need
+/// a sign-in, so the balance's button comes here rather than opening a
+/// second ceremony path with a second in-flight guard. One press at a time,
+/// wherever it was pressed.
+pub(super) fn act(app: &Rc<App>, action: CredentialAction) {
     let view = &app.private_inference.credential;
     if view.pending.replace(true) {
         return;
