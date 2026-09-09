@@ -119,6 +119,18 @@ pub struct App {
     pub toasts: adw::ToastOverlay,
     pub stack: adw::ViewStack,
 
+    /// `admission_evidence_required`, as `get_settings` last answered it.
+    ///
+    /// Held verbatim and NEVER negated. It is true for a contributor who
+    /// signed up through NEAR and therefore has no invite, so it selects the
+    /// candidate reading of the certificate-held section. A `!` anywhere on
+    /// the way to `certificate::view` would swap both readings and compile.
+    ///
+    /// False until the first settings read, which is the reading that claims
+    /// less: a section that has not been told yet must not assert
+    /// attestation.
+    pub evidence_admitted: std::cell::Cell<bool>,
+
     pub queue: queue::QueueView,
     pub history: history::HistoryView,
     /// The model-calls screen. Its own destination rather than a card on
@@ -357,6 +369,7 @@ impl App {
             window,
             toasts,
             stack,
+            evidence_admitted: std::cell::Cell::new(false),
             queue,
             history,
             private_inference,
@@ -674,7 +687,13 @@ impl App {
             else {
                 return;
             };
+            // The certificate-held section's reading, from the same read.
+            // Re-rendered rather than latched: the flag can change under a
+            // running window when a contributor completes signup.
+            app.evidence_admitted
+                .set(settings.admission_evidence_required == Some(true));
             queue::render_private_inference_offer(app, &settings);
+            queue::render(app);
         });
         // The group counts, asked on the same refresh as the queue itself.
         // Only `contributable_count` is read from here: the folder's total

@@ -17,7 +17,7 @@ final class PreviewSizingTests: XCTestCase {
             // The same invited contributor still gets a mark. Absent
             // eligibility and present attestation is the ordinary shape
             // of an invited contributor's row, not a special case.
-            attestation: "attested", attestationReason: nil)
+            attestation: "attested", attestationReason: nil, holdsCertificateRaw: nil)
         let summary = PreviewSummary(wouldSendBytes: 80, rawSessionBytes: 100, eventCount: 2,
             openingPrompt: "Review a synthetic session", redactions: [:], redactionsDistinct: [:],
             piiLabelsPresent: [], consentScopes: [], residualRisk: "low")

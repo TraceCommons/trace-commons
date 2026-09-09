@@ -117,8 +117,29 @@ struct QueueEntry: Decodable, Identifiable, Hashable {
     /// marks, and present on `unknown` only when a send was retracted for a
     /// receipt the service could not supply.
     let attestationReason: String?
+    /// Whether a witness certificate is held for the bytes this row was
+    /// pinned to. True after either witness route.
+    ///
+    /// Optional on the wire and read through `holdsCertificate` below, for
+    /// the reason every new daemon field is optional here: this app ships
+    /// separately from the daemon and routinely runs against an older one.
+    /// A non-optional property would throw on a daemon that sends no such
+    /// key, and one row's missing field would fail the WHOLE list.
+    ///
+    /// Not `attestation` above. That says whether the session carries a copy
+    /// of the model call that produced it; this says whether a certificate
+    /// is held over the reviewed bytes. A session can have either without
+    /// the other.
+    let holdsCertificateRaw: Bool?
 
     var id: String { entryID }
+
+    /// Whether this row belongs in the certificate-held list.
+    ///
+    /// Absent reads as no, never as yes: a row from a daemon that predates
+    /// the field has established nothing, and putting it in a list that
+    /// claims a certificate is held would assert something nobody checked.
+    var holdsCertificate: Bool { holdsCertificateRaw == true }
 
     /// The eligibility question this row carries, or none at all.
     ///
@@ -175,6 +196,7 @@ struct QueueEntry: Decodable, Identifiable, Hashable {
         case eligibilityReason = "eligibility_reason"
         case attestation
         case attestationReason = "attestation_reason"
+        case holdsCertificateRaw = "holds_certificate"
     }
 
     /// "Claude Code" / "Antigravity", never the raw source token.
@@ -828,7 +850,11 @@ extension QueueEntry {
             // an absent value here still draws a sentence: see
             // `attestationMark`.
             attestation: try c.decodeIfPresent(String.self, forKey: .attestation),
-            attestationReason: try c.decodeIfPresent(String.self, forKey: .attestationReason)
+            attestationReason: try c.decodeIfPresent(String.self, forKey: .attestationReason),
+            // Optional for the same one reason: a daemon predating the
+            // field. Absent stays nil and reads as "no certificate" at
+            // `holdsCertificate`, never as an error and never as held.
+            holdsCertificateRaw: try c.decodeIfPresent(Bool.self, forKey: .holdsCertificateRaw)
         )
     }
 }

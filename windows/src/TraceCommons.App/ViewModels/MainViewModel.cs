@@ -192,6 +192,61 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public ObservableCollection<QueueEntryViewModel> OpenFolderEntries { get; } = new();
 
     /// <summary>
+    /// The sessions a witness certificate is held for, gathered above the
+    /// folders they are scattered across.
+    /// </summary>
+    /// <remarks>
+    /// Membership is the row's own answer and takes no reading: which rows
+    /// are in the list is the same question for both audiences, and only the
+    /// words differ. A filter that accepted the reading could one day depend
+    /// on it, and then an invited and an uninvited contributor would be
+    /// looking at different sessions rather than the same ones described
+    /// differently.
+    /// </remarks>
+    public ObservableCollection<QueueEntryViewModel> CertificateHeld { get; } = new();
+
+    /// <summary>
+    /// <c>admission_evidence_required</c> as the daemon last answered it,
+    /// held VERBATIM and never negated.
+    /// </summary>
+    /// <remarks>
+    /// True for a contributor who signed up through NEAR and therefore has
+    /// no invite, which selects the candidate reading. False until the first
+    /// settings read, the reading that claims less: a section that has not
+    /// been told yet must not assert attestation.
+    /// </remarks>
+    private bool _evidenceAdmitted;
+
+    /// <summary>The section heading, in this contributor's reading.</summary>
+    public string CertificateHeldTitle =>
+        CertificateSurface.ListTitle(_evidenceAdmitted) ?? string.Empty;
+
+    /// <summary>The row sentence, in the same reading.</summary>
+    public string CertificateHeldLine =>
+        CertificateSurface.RowLine(_evidenceAdmitted) ?? string.Empty;
+
+    /// <summary>
+    /// What the section says with nothing in it. Never blank.
+    /// </summary>
+    /// <remarks>
+    /// A filtered section that renders as nothing when nothing matches cannot
+    /// be told apart from one that failed to load, and System.Text.Json
+    /// defaults a missing <c>holds_certificate</c> to false on every row,
+    /// which produces exactly that.
+    /// </remarks>
+    public string CertificateHeldEmptyText =>
+        _privateInferenceCopy?.CertificateListEmpty ?? string.Empty;
+
+    /// <summary>Whether to draw the empty sentence rather than the rows.</summary>
+    public bool CertificateHeldIsEmpty => CertificateHeld.Count == 0;
+
+    /// <summary>
+    /// The inverse, for the row sentence's visibility. x:Bind cannot negate,
+    /// so the pair is spelled here rather than in the markup.
+    /// </summary>
+    public bool CertificateHeldIsNotEmpty => !CertificateHeldIsEmpty;
+
+    /// <summary>
     /// Whether the queue is showing the folder list rather than one folder's
     /// sessions.
     /// </summary>
@@ -573,6 +628,11 @@ public sealed class MainViewModel : INotifyPropertyChanged
         if (settings is not null)
         {
             _privateInferenceKnown = true;
+            // The certificate section's reading, from the same settings read.
+            // Passed through, never negated.
+            _evidenceAdmitted = settings.AdmissionEvidenceRequired == true;
+            Raise(nameof(CertificateHeldTitle));
+            Raise(nameof(CertificateHeldLine));
             _privateInferenceState = PrivateInferenceState.From(settings.PrivateInferenceReport);
             Raise(nameof(PrivateInferenceQuitDetail));
             Raise(nameof(PrivateInferenceIsWorking));
@@ -1686,6 +1746,20 @@ public sealed class MainViewModel : INotifyPropertyChanged
         {
             Pending.Add(row);
         }
+
+        // The certificate-held section, filtered from the same rows. No
+        // reading is applied here: which rows belong is one question for both
+        // audiences, and only the words differ.
+        CertificateHeld.Clear();
+        foreach (QueueEntryViewModel row in rows)
+        {
+            if (row.HoldsCertificate)
+            {
+                CertificateHeld.Add(row);
+            }
+        }
+        Raise(nameof(CertificateHeldIsEmpty));
+        Raise(nameof(CertificateHeldIsNotEmpty));
 
         Groups.Clear();
         foreach (QueueGroupViewModel group in groupRows)

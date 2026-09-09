@@ -14,11 +14,112 @@ struct PublishedWitness {
     signing_address: String,
     expected_measurements: Vec<String>,
 }
-fn published_witness(state: &AppState) -> Option<PublishedWitness> {
-    if !state.near_provisioning_enabled || !state.near_provisioning_admission_ready {
-        return None;
+/// The controls `published_witness` walks, as stable labels.
+///
+/// Label-only by rule: these name a *control*, never a value. Nothing here may
+/// come to carry an environment value, a URL, a signing address or a
+/// measurement string -- see the repo's hash-only/label-only convention and
+/// [`crate::redaction_witness::config`], whose errors are `&'static str`
+/// control names for the same reason. `every_control_label_is_a_bare_name`
+/// holds the line.
+mod control {
+    pub(super) const PROVISIONING_ENABLED: &str = "near_provisioning_enabled";
+    pub(super) const ADMISSION_READY: &str = "near_provisioning_admission_ready";
+    pub(super) const PUBLIC_ORIGIN: &str = "witness_public_origin";
+    pub(super) const NEAR_SIGN_IN: &str = "near_sign_in";
+    pub(super) const ACCOUNT_REGISTRY_DB: &str = "account_registry_db";
+    pub(super) const WITNESS_JSON_ABSENT: &str = "witness_json_absent";
+    pub(super) const WITNESS_JSON_MALFORMED: &str = "witness_json_malformed";
+    pub(super) const WITNESS_URL: &str = "witness_url";
+    pub(super) const WITNESS_SIGNING_ADDRESS: &str = "witness_signing_address";
+    pub(super) const WITNESS_MEASUREMENTS_ABSENT: &str = "witness_measurements_absent";
+    pub(super) const WITNESS_MEASUREMENT_SYNTAX: &str = "witness_measurement_syntax";
+    pub(super) const ISSUER: &str = "issuer";
+    /// The index pepper and account-name KEK. Checked by the login readiness
+    /// (#836) and, today, by neither `published_witness` nor anything else
+    /// before the wallet's `finish` needs it -- see #838.
+    pub(super) const NEAR_ACCOUNT_IDENTITY: &str = "near_account_identity";
+
+    /// Every label, for the tests that hold the label-only rule.
+    #[cfg(test)]
+    pub(super) const ALL: [&str; 13] = [
+        PROVISIONING_ENABLED,
+        ADMISSION_READY,
+        PUBLIC_ORIGIN,
+        NEAR_SIGN_IN,
+        ACCOUNT_REGISTRY_DB,
+        WITNESS_JSON_ABSENT,
+        WITNESS_JSON_MALFORMED,
+        WITNESS_URL,
+        WITNESS_SIGNING_ADDRESS,
+        WITNESS_MEASUREMENTS_ABSENT,
+        WITNESS_MEASUREMENT_SYNTAX,
+        ISSUER,
+        NEAR_ACCOUNT_IDENTITY,
+    ];
+}
+
+/// Controls already reported, so a polled endpoint does not repeat itself.
+///
+/// Per distinct control rather than once overall: an operator who fixes one
+/// gate and trips the next needs the next one named too, and the set is
+/// bounded by [`control::ALL`], so this cannot grow without bound however
+/// often the endpoint is polled.
+static REPORTED_CONTROLS: std::sync::Mutex<Option<BTreeSet<&'static str>>> =
+    std::sync::Mutex::new(None);
+
+/// Report `control` unless it has been reported already.
+///
+/// Returns whether it was newly reported, which is what makes the dedup
+/// testable without capturing a log.
+fn report_declined_control(control: &'static str) -> bool {
+    let mut reported = match REPORTED_CONTROLS.lock() {
+        Ok(reported) => reported,
+        // A poisoned lock must not take the endpoint down: the whole point of
+        // this path is that it is diagnostic and cannot change behaviour.
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let first = reported.get_or_insert_with(BTreeSet::new).insert(control);
+    if first {
+        // The control name and nothing else. No env value, no URL, no
+        // measurement string, no signing address.
+        tracing::warn!(
+            control = control,
+            "native provisioning is not ready: this control declined"
+        );
     }
-    let origin = reqwest::Url::parse(state.near_provisioning_public_origin.as_ref()?).ok()?;
+    first
+}
+
+fn published_witness(state: &AppState) -> Option<PublishedWitness> {
+    match published_witness_named(state) {
+        Ok(witness) => Some(witness),
+        Err(control) => {
+            report_declined_control(control);
+            None
+        }
+    }
+}
+
+/// `published_witness`, naming the control that declined.
+///
+/// Deliberately the same gates in the same order as before, decision for
+/// decision: this exists to make an existing refusal legible, and a
+/// configuration that was accepted before must still be accepted.
+/// `naming_a_control_does_not_change_which_configurations_are_accepted` pins
+/// that against the original predicates.
+fn published_witness_named(state: &AppState) -> Result<PublishedWitness, &'static str> {
+    if !state.near_provisioning_enabled {
+        return Err(control::PROVISIONING_ENABLED);
+    }
+    if !state.near_provisioning_admission_ready {
+        return Err(control::ADMISSION_READY);
+    }
+    let origin = state
+        .near_provisioning_public_origin
+        .as_ref()
+        .ok_or(control::PUBLIC_ORIGIN)?;
+    let origin = reqwest::Url::parse(origin).map_err(|_| control::PUBLIC_ORIGIN)?;
     if origin.scheme() != "https"
         || origin.host_str().is_none()
         || origin.path() != "/"
@@ -27,26 +128,32 @@ fn published_witness(state: &AppState) -> Option<PublishedWitness> {
         || origin.query().is_some()
         || origin.fragment().is_some()
     {
-        return None;
+        return Err(control::PUBLIC_ORIGIN);
     }
-    account_near_config(state).ok()?;
-    account_db(state).ok()?;
-    let witness = published_witness_material()?;
-    published_issuer()?;
-    Some(witness)
+    account_near_config(state).map_err(|_| control::NEAR_SIGN_IN)?;
+    account_db(state).map_err(|_| control::ACCOUNT_REGISTRY_DB)?;
+    let witness = published_witness_material_named()?;
+    published_issuer().ok_or(control::ISSUER)?;
+    Ok(witness)
 }
 
 /// The published witness, with **no ceremony-specific preconditions**.
 ///
-/// Factored out of [`published_witness`] rather than duplicated: the witness
-/// is a property of the commons, and both enrolment ceremonies need the same
-/// one. What differs is what else each requires, which is why the
+/// Factored out of [`published_witness_named`] rather than duplicated: the
+/// witness is a property of the commons, and both enrolment ceremonies need
+/// the same one. What differs is what *else* each requires, which is why the
 /// preconditions stayed with the callers.
-fn published_witness_material() -> Option<PublishedWitness> {
-    let raw = std::env::var("TRACE_COMMONS_NEAR_PROVISIONING_WITNESS_JSON").ok()?;
-    let witness: PublishedWitness = serde_json::from_str(&raw).ok()?;
-    validate_witness(&witness)?;
-    Some(witness)
+///
+/// Names the same controls #831 gave these gates, because they are the same
+/// gates -- an operator whose witness JSON is malformed should read that fact
+/// once, however they reached it.
+fn published_witness_material_named() -> Result<PublishedWitness, &'static str> {
+    let raw = std::env::var("TRACE_COMMONS_NEAR_PROVISIONING_WITNESS_JSON")
+        .map_err(|_| control::WITNESS_JSON_ABSENT)?;
+    let witness: PublishedWitness =
+        serde_json::from_str(&raw).map_err(|_| control::WITNESS_JSON_MALFORMED)?;
+    validate_witness_named(&witness)?;
+    Ok(witness)
 }
 
 /// Whether a NEAR AI login enrolment can actually complete here (#836).
@@ -63,40 +170,98 @@ fn published_witness_material() -> Option<PublishedWitness> {
 /// What it does require is what this path needs to leave a contributor able to
 /// upload, which is the failure worth preventing: enrolled, and then refused at
 /// their first submission.
-///
-/// `near_account_identity` is checked here and **not** by `published_witness`,
-/// which is a gap on the wallet side rather than a difference in requirement:
-/// the wallet's `finish` needs it too and fails at the last step without it.
-/// Widening the wallet's own readiness is a separate decision.
 fn near_ai_login_ready(state: &AppState) -> bool {
-    state.near_provisioning_enabled
-        && state.near_provisioning_admission_ready
-        && account_db(state).is_ok()
-        && state.near_account_identity.is_some()
-        && published_witness_material().is_some()
-        && published_issuer().is_some()
+    match near_ai_login_ready_named(state) {
+        Ok(()) => true,
+        Err(control) => {
+            report_declined_control(control);
+            false
+        }
+    }
 }
+
+/// `near_ai_login_ready`, naming the control that declined.
+///
+/// **Shared controls keep their existing labels; only what is genuinely new
+/// gets a new one.** The provisioning switch, the admission gate, the account
+/// registry, the witness JSON and the issuer are properties of the commons,
+/// not of either ceremony, so reusing #831's labels for them is not a wallet
+/// label describing a login refusal -- it is one control with one name. The
+/// two wallet-specific labels, `NEAR_SIGN_IN` and `PUBLIC_ORIGIN`, are
+/// deliberately unreachable from here.
+///
+/// [`control::NEAR_ACCOUNT_IDENTITY`] is the one genuinely new refusal:
+/// `published_witness` never checks it, which is a gap on the wallet side
+/// rather than a difference in requirement -- the wallet's `finish` needs it
+/// too and fails at the last step without it. Filed as #838; checked here
+/// because this path needs it for the same reason.
+fn near_ai_login_ready_named(state: &AppState) -> Result<(), &'static str> {
+    if !state.near_provisioning_enabled {
+        return Err(control::PROVISIONING_ENABLED);
+    }
+    if !state.near_provisioning_admission_ready {
+        return Err(control::ADMISSION_READY);
+    }
+    account_db(state).map_err(|_| control::ACCOUNT_REGISTRY_DB)?;
+    if state.near_account_identity.is_none() {
+        return Err(control::NEAR_ACCOUNT_IDENTITY);
+    }
+    published_witness_material_named()?;
+    published_issuer().ok_or(control::ISSUER)?;
+    Ok(())
+}
+
+/// The original `Option` shape, kept as the reference the equivalence test
+/// compares against. Production goes through [`validate_witness_named`].
+#[cfg(test)]
 fn validate_witness(witness: &PublishedWitness) -> Option<()> {
-    let url = reqwest::Url::parse(&witness.url).ok()?;
+    validate_witness_named(witness).ok()
+}
+
+/// `validate_witness`, naming which part of the witness declined.
+///
+/// The measurement syntax gets its own label, separate from
+/// `witness_json_malformed`, and that distinction is the point of the whole
+/// change. This repo has **two** measurement-pin spellings for the same
+/// witness -- `field=<96 hex>` joined by commas, which is what
+/// `ExpectedMeasurements` parses and what this field takes, and
+/// `mrtd:<hex>+mrconfigid:<hex>`, which is a `WitnessPin` and what
+/// `TRACE_COMMONS_WITNESS_EXPECTED_MEASUREMENTS` takes. The wrong one is
+/// still perfectly good JSON, so it declines here while looking like a
+/// well-formed document, and folding it into a JSON error would send an
+/// operator to inspect the one thing that is not wrong.
+fn validate_witness_named(witness: &PublishedWitness) -> Result<(), &'static str> {
+    let url = reqwest::Url::parse(&witness.url).map_err(|_| control::WITNESS_URL)?;
     if url.scheme() != "https"
         || url.host_str().is_none()
         || !url.username().is_empty()
         || url.password().is_some()
         || url.query().is_some()
         || url.fragment().is_some()
-        || witness.expected_measurements.is_empty()
     {
-        return None;
+        return Err(control::WITNESS_URL);
     }
-    let address = witness.signing_address.strip_prefix("0x")?;
+    if witness.expected_measurements.is_empty() {
+        return Err(control::WITNESS_MEASUREMENTS_ABSENT);
+    }
+    let address = witness
+        .signing_address
+        .strip_prefix("0x")
+        .ok_or(control::WITNESS_SIGNING_ADDRESS)?;
     if address.len() != 40 || !address.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return None;
+        return Err(control::WITNESS_SIGNING_ADDRESS);
     }
     for entry in &witness.expected_measurements {
-        trace_commons_attestation::measurements::ExpectedMeasurements::from_env_value(Some(entry))
-            .ok()??;
+        // `Ok(None)` -- an empty or whitespace entry -- is a refusal here too,
+        // exactly as the `??` it replaces made it.
+        match trace_commons_attestation::measurements::ExpectedMeasurements::from_env_value(Some(
+            entry,
+        )) {
+            Ok(Some(_)) => {}
+            Ok(None) | Err(_) => return Err(control::WITNESS_MEASUREMENT_SYNTAX),
+        }
     }
-    Some(())
+    Ok(())
 }
 /// A receipt-service base URL fit to publish to clients.
 ///
@@ -164,7 +329,7 @@ pub(super) async fn capabilities(State(state): State<Arc<AppState>>) -> axum::re
     let login_ready = near_ai_login_ready(&state);
     // The wallet's own answer, preserved exactly: witness AND issuer.
     let wallet_ready = wallet.is_some() && published_issuer().is_some();
-    let witness = wallet.or_else(published_witness_material);
+    let witness = wallet.or_else(|| published_witness_material_named().ok());
     match (witness, published_issuer()) {
         (Some(witness), Some((issuer_url, audience))) if wallet_ready || login_ready => {
             // Absent on a login-only commons, which is correct: it is the
@@ -464,5 +629,251 @@ mod tests {
         assert_ne!(binding("first"), binding("second"));
         assert!(device_key(&"x".repeat(49)).is_none());
         assert!(device_key("bad").is_none());
+    }
+
+    /// A witness whose measurements use the *other* spelling this repo has for
+    /// the same pins.
+    ///
+    /// `mrtd:<hex>+mrconfigid:<hex>` is a `WitnessPin`, correct for
+    /// `TRACE_COMMONS_WITNESS_EXPECTED_MEASUREMENTS`. The provisioning JSON
+    /// takes `ExpectedMeasurements`, which is `field=<96 hex>` joined by
+    /// commas. Same witness, same signing address, same URL.
+    fn witness_with_the_certificate_pin_spelling() -> PublishedWitness {
+        PublishedWitness {
+            url: "https://witness.example".into(),
+            signing_address: format!("0x{}", "ab".repeat(20)),
+            expected_measurements: vec![format!(
+                "mrtd:{}+mrconfigid:{}",
+                "ab".repeat(48),
+                "cd".repeat(48)
+            )],
+        }
+    }
+
+    fn well_formed_witness() -> PublishedWitness {
+        PublishedWitness {
+            url: "https://witness.example".into(),
+            signing_address: format!("0x{}", "ab".repeat(20)),
+            expected_measurements: vec![format!("mrtd={}", "ab".repeat(48))],
+        }
+    }
+
+    /// **The motivating case.** The wrong pin spelling is perfectly good JSON,
+    /// so it must not be reported as a JSON problem -- that sends an operator
+    /// to inspect the one thing that is not wrong, which is what cost a
+    /// restart cycle on the pilot.
+    #[test]
+    fn the_wrong_measurement_spelling_is_named_as_syntax_not_as_malformed_json() {
+        let witness = witness_with_the_certificate_pin_spelling();
+        // Precondition: it really is valid JSON, so a JSON-level label would
+        // be actively misleading rather than merely vague.
+        let raw = serde_json::to_string(&witness).expect("it serializes");
+        assert!(
+            serde_json::from_str::<PublishedWitness>(&raw).is_ok(),
+            "precondition: the document parses; only the pin spelling is wrong"
+        );
+
+        assert_eq!(
+            validate_witness_named(&witness),
+            Err(control::WITNESS_MEASUREMENT_SYNTAX)
+        );
+        assert_ne!(
+            validate_witness_named(&witness),
+            Err(control::WITNESS_JSON_MALFORMED)
+        );
+    }
+
+    /// And the spelling that *is* correct for this field is accepted, so the
+    /// test above is about the spelling and not about the parser refusing
+    /// everything.
+    #[test]
+    fn the_expected_measurements_spelling_is_the_one_this_field_accepts() {
+        assert_eq!(validate_witness_named(&well_formed_witness()), Ok(()));
+    }
+
+    /// Each refusal names its own control. A single label for the whole
+    /// witness would be no better than the `None` it replaces.
+    #[test]
+    fn each_part_of_the_witness_declines_under_its_own_name() {
+        let mut witness = well_formed_witness();
+        witness.url = "http://witness.example".into();
+        assert_eq!(validate_witness_named(&witness), Err(control::WITNESS_URL));
+
+        let mut witness = well_formed_witness();
+        witness.url = "https://user@witness.example".into();
+        assert_eq!(validate_witness_named(&witness), Err(control::WITNESS_URL));
+
+        let mut witness = well_formed_witness();
+        witness.signing_address = "0xinvalid".into();
+        assert_eq!(
+            validate_witness_named(&witness),
+            Err(control::WITNESS_SIGNING_ADDRESS)
+        );
+
+        let mut witness = well_formed_witness();
+        witness.signing_address = "ab".repeat(20);
+        assert_eq!(
+            validate_witness_named(&witness),
+            Err(control::WITNESS_SIGNING_ADDRESS),
+            "a missing 0x prefix is an address problem, not a syntax one"
+        );
+
+        let mut witness = well_formed_witness();
+        witness.expected_measurements = Vec::new();
+        assert_eq!(
+            validate_witness_named(&witness),
+            Err(control::WITNESS_MEASUREMENTS_ABSENT)
+        );
+
+        let mut witness = well_formed_witness();
+        witness.expected_measurements = vec![String::new()];
+        assert_eq!(
+            validate_witness_named(&witness),
+            Err(control::WITNESS_MEASUREMENT_SYNTAX),
+            "an empty entry is a syntax refusal, as the `??` it replaced made it"
+        );
+
+        // Every one of those is a different label. A refactor that collapsed
+        // them would satisfy every assertion above taken singly.
+        let labels: BTreeSet<&str> = [
+            control::WITNESS_URL,
+            control::WITNESS_SIGNING_ADDRESS,
+            control::WITNESS_MEASUREMENTS_ABSENT,
+            control::WITNESS_MEASUREMENT_SYNTAX,
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(labels.len(), 4);
+    }
+
+    /// The safety property for this change: naming a control must not move
+    /// any gate. Checked against the original predicates, re-stated here by
+    /// hand, over a battery that exercises every arm.
+    #[test]
+    fn naming_a_control_does_not_change_which_configurations_are_accepted() {
+        let hex96 = "ab".repeat(48);
+        let mut cases = Vec::new();
+        for url in [
+            "https://witness.example",
+            "http://witness.example",
+            "https://user@witness.example",
+            "https://witness.example/?q=1",
+            "https://witness.example/#f",
+            "not a url",
+        ] {
+            for address in [
+                format!("0x{}", "ab".repeat(20)),
+                "0xinvalid".into(),
+                "ab".repeat(20),
+            ] {
+                for measurements in [
+                    vec![format!("mrtd={hex96}")],
+                    vec![format!("mrtd={hex96}"), format!("rtmr0={hex96}")],
+                    vec![format!("mrtd:{hex96}+mrconfigid:{hex96}")],
+                    vec![String::new()],
+                    vec![],
+                ] {
+                    cases.push(PublishedWitness {
+                        url: url.into(),
+                        signing_address: address.clone(),
+                        expected_measurements: measurements,
+                    });
+                }
+            }
+        }
+        assert_eq!(cases.len(), 90, "the battery covers every combination");
+
+        // Deliberately no `Debug` on `PublishedWitness`, and none added for
+        // this test: a derived `Debug` is a path for a URL and a signing
+        // address to reach a log by accident. The case index is enough to
+        // locate a failure.
+        for (index, witness) in cases.iter().enumerate() {
+            // The original predicate, written out independently of the code
+            // under test.
+            let accepted_before = (|| {
+                let url = reqwest::Url::parse(&witness.url).ok()?;
+                if url.scheme() != "https"
+                    || url.host_str().is_none()
+                    || !url.username().is_empty()
+                    || url.password().is_some()
+                    || url.query().is_some()
+                    || url.fragment().is_some()
+                    || witness.expected_measurements.is_empty()
+                {
+                    return None;
+                }
+                let address = witness.signing_address.strip_prefix("0x")?;
+                if address.len() != 40 || !address.bytes().all(|b| b.is_ascii_hexdigit()) {
+                    return None;
+                }
+                for entry in &witness.expected_measurements {
+                    trace_commons_attestation::measurements::ExpectedMeasurements::from_env_value(
+                        Some(entry),
+                    )
+                    .ok()??;
+                }
+                Some(())
+            })()
+            .is_some();
+
+            assert_eq!(
+                validate_witness_named(witness).is_ok(),
+                accepted_before,
+                "verdict moved for case {index}"
+            );
+            assert_eq!(validate_witness(witness).is_some(), accepted_before);
+        }
+        // And the battery is not vacuous in either direction.
+        assert!(cases.iter().any(|w| validate_witness_named(w).is_ok()));
+        assert!(cases.iter().any(|w| validate_witness_named(w).is_err()));
+    }
+
+    /// The hash-only/label-only rule, enforced rather than described: a
+    /// control name is a bare identifier and can never carry an operator
+    /// value.
+    #[test]
+    fn every_control_label_is_a_bare_name() {
+        for label in control::ALL {
+            assert!(
+                label
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b == b'_' || b.is_ascii_digit()),
+                "{label} is not a bare snake_case name"
+            );
+            assert!(!label.contains("://") && !label.contains('.') && !label.contains('='));
+        }
+        // Distinct labels, or two controls send an operator to one place.
+        let unique: BTreeSet<&str> = control::ALL.into_iter().collect();
+        assert_eq!(unique.len(), control::ALL.len());
+
+        // And a refusal really returns one of them, rather than a message
+        // built from the input.
+        let leaky = PublishedWitness {
+            url: "https://secret-host.example/path?token=SHOULD-NOT-APPEAR".into(),
+            signing_address: "0xSHOULD-NOT-APPEAR".into(),
+            expected_measurements: vec!["SHOULD-NOT-APPEAR".into()],
+        };
+        let refusal = validate_witness_named(&leaky).expect_err("it declines");
+        assert!(control::ALL.contains(&refusal));
+        assert!(!refusal.contains("SHOULD-NOT-APPEAR"));
+    }
+
+    /// A polled endpoint must not repeat itself, and must still name a second
+    /// control when the operator trips one after fixing the first.
+    #[test]
+    fn a_control_is_reported_once_and_a_later_one_is_still_reported() {
+        // Unique names so this test cannot collide with another that also
+        // touches the process-wide set.
+        let first: &'static str = "test_control_alpha";
+        let second: &'static str = "test_control_beta";
+
+        assert!(report_declined_control(first), "first sighting reports");
+        assert!(!report_declined_control(first), "a repeat stays quiet");
+        assert!(!report_declined_control(first));
+        assert!(
+            report_declined_control(second),
+            "a different control must still be named"
+        );
+        assert!(!report_declined_control(second));
     }
 }

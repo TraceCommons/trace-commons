@@ -994,6 +994,51 @@
                 </ListView>
 
                 <!--
+                    The sessions a witness certificate is held for, gathered
+                    above the folders they are scattered across.
+
+                    Drawn on every render including when it is empty. A
+                    filtered section that renders as nothing when nothing
+                    matches cannot be told apart from one that failed to load,
+                    and System.Text.Json defaults a missing holds_certificate
+                    to false on every row, which produces exactly that. The
+                    empty sentence is what says which one a contributor is
+                    looking at.
+
+                    Every word is bound. The heading and the row sentence come
+                    back from the shared crate through CertificateSurface, and
+                    the choice between the two readings is behind the ABI: no
+                    shell decides it. Nothing here is typed out.
+                -->
+                <StackPanel Grid.Row="2"
+                            Spacing="6"
+                            Margin="0,0,0,12"
+                            Visibility="{x:Bind ViewModel.IsAtQueueRoot, Mode=OneWay}">
+                    <TextBlock Text="{x:Bind ViewModel.CertificateHeldTitle, Mode=OneWay}"
+                               Style="{StaticResource TcTitleCardTextStyle}"
+                               TextWrapping="Wrap" />
+                    <TextBlock Text="{x:Bind ViewModel.CertificateHeldEmptyText, Mode=OneWay}"
+                               Visibility="{x:Bind ViewModel.CertificateHeldIsEmpty, Mode=OneWay}"
+                               Style="{StaticResource TcCaptionTextStyle}"
+                               Foreground="{ThemeResource TcInkSecondaryBrush}"
+                               TextWrapping="Wrap" />
+                    <ItemsControl ItemsSource="{x:Bind ViewModel.CertificateHeld, Mode=OneWay}">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate x:DataType="vm:QueueEntryViewModel">
+                                <StackPanel Spacing="2" Margin="0,0,0,6">
+                                    <TextBlock Text="{x:Bind ProjectLabel}" TextWrapping="Wrap" />
+                                </StackPanel>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                    <TextBlock Text="{x:Bind ViewModel.CertificateHeldLine, Mode=OneWay}"
+                               Visibility="{x:Bind ViewModel.CertificateHeldIsNotEmpty, Mode=OneWay}"
+                               Style="{StaticResource TcCaptionTextStyle}"
+                               Foreground="{ThemeResource TcInkSecondaryBrush}"
+                               TextWrapping="Wrap" />
+                </StackPanel>
+
+                <!--
                     One folder's sessions.
 
                     The cards are exactly what the flat queue drew, scoped to

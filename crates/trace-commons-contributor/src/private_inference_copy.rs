@@ -562,7 +562,8 @@ pub struct PrivateInferenceCopy {
     pub eligibility_reason_marker_absent: &'static str,
     pub eligibility_reason_request_malformed: &'static str,
     pub eligibility_reason_receipt_unavailable: &'static str,
-    /// The four `attestation` marks a queue entry can carry, and the thirteen
+    pub eligibility_reason_receipt_not_issued: &'static str,
+    /// The four `attestation` marks a queue entry can carry, and the fourteen
     /// `attestation_reason` sentences. Rendered through
     /// [`attestation_state_line`] and [`attestation_reason_line`]; carried
     /// here as well so a test on the far side can pin the set it was built
@@ -610,6 +611,7 @@ pub struct PrivateInferenceCopy {
     /// does not differ between them: nothing has been through a witness yet.
     /// [`CERTIFICATE_LIST_EMPTY`].
     pub certificate_list_empty: &'static str,
+    pub attestation_reason_receipt_not_issued: &'static str,
     /// The balance row's heading. [`BALANCE_TITLE`].
     pub balance_title: &'static str,
     /// [`BALANCE_WHAT`].
@@ -1335,6 +1337,16 @@ pub const ELIGIBILITY_REASON_REQUEST_MALFORMED: &str = "The last model call in t
 pub const ELIGIBILITY_REASON_RECEIPT_UNAVAILABLE: &str = "The proof that goes with this session's last model call could not be \
      fetched just now. It may work later.";
 
+/// `receipt_not_issued`.
+///
+/// Permanent, and the reason it reads that way: the model that answered this
+/// session does not issue the proof a contribution is accepted on. A call to
+/// a model the provider runs itself can carry that proof; one the provider
+/// only passes along to someone else cannot, and no setting changes that.
+pub const ELIGIBILITY_REASON_RECEIPT_NOT_ISSUED: &str = "The model that answered this session does not provide the proof a \
+     contribution is accepted on. Using a model the provider runs itself, \
+     rather than one it only passes along, is what produces that proof.";
+
 /// How many sessions a group submit is leaving behind.
 ///
 /// **A button reading "Submit all (2)" above a folder showing five rows, with
@@ -1454,13 +1466,26 @@ pub fn eligibility_state_tone(label: &str) -> PrivateInferenceTone {
 
 /// The one control a shell may offer for an eligibility state.
 ///
-/// `eligible` alone. Every other state -- including one this build has never
-/// heard of -- offers nothing, because the alternative is a send button on a
-/// session that cannot be sent, discovered on the press.
+/// `eligible` and `unknown`. The two ineligible states -- and any state this
+/// build has never heard of -- offer nothing, because the alternative is a
+/// send button on a session that cannot be sent, discovered on the press.
+///
+/// `unknown` is offered, and the reason is what `unknown` is: a session
+/// whose attestation could not be decided at discovery. Every Responses-API
+/// call is one -- which is every Codex session -- because a hosted and a
+/// brokered call come back under the same identifier shape, and the only
+/// thing that can decide it is the receipt fetch at submission, which cannot
+/// run on a row nobody can send. Nothing is claimed: the state line still
+/// says it has not been worked out, that is not the same as a no, and the
+/// button beside it offers to find out. The daemon already let a single
+/// named `unknown` entry through on the reasoning that the server decides;
+/// this brings the shell gate into line with it. A retracted row (`unknown`
+/// after a server refusal) becomes sendable too and earns the same refusal
+/// again -- one round trip, and the server was the authority anyway.
 #[must_use]
 pub fn eligibility_control(label: &str) -> ContributionControl {
     match label {
-        ELIGIBILITY_STATE_ELIGIBLE => ContributionControl::Contribute,
+        ELIGIBILITY_STATE_ELIGIBLE | ELIGIBILITY_STATE_UNKNOWN => ContributionControl::Contribute,
         _ => ContributionControl::None,
     }
 }
@@ -1489,6 +1514,7 @@ pub fn eligibility_reason_line(label: &str) -> &'static str {
         REASON_MARKER_ABSENT => ELIGIBILITY_REASON_MARKER_ABSENT,
         REASON_REQUEST_MALFORMED => ELIGIBILITY_REASON_REQUEST_MALFORMED,
         REASON_RECEIPT_UNAVAILABLE => ELIGIBILITY_REASON_RECEIPT_UNAVAILABLE,
+        REASON_RECEIPT_NOT_ISSUED => ELIGIBILITY_REASON_RECEIPT_NOT_ISSUED,
         _ => "",
     }
 }
@@ -1886,6 +1912,7 @@ pub fn private_inference_copy() -> PrivateInferenceCopy {
         certificate_list_candidate: CERTIFICATE_LIST_CANDIDATE,
         certificate_list_attested: CERTIFICATE_LIST_ATTESTED,
         certificate_list_empty: CERTIFICATE_LIST_EMPTY,
+        eligibility_reason_receipt_not_issued: ELIGIBILITY_REASON_RECEIPT_NOT_ISSUED,
         attestation_attested: ATTESTATION_ATTESTED,
         attestation_unattested_permanent: ATTESTATION_UNATTESTED_PERMANENT,
         attestation_unattested_configuration: ATTESTATION_UNATTESTED_CONFIGURATION,
@@ -1903,6 +1930,7 @@ pub fn private_inference_copy() -> PrivateInferenceCopy {
         attestation_reason_marker_absent: ATTESTATION_REASON_MARKER_ABSENT,
         attestation_reason_request_malformed: ATTESTATION_REASON_REQUEST_MALFORMED,
         attestation_reason_receipt_unavailable: ATTESTATION_REASON_RECEIPT_UNAVAILABLE,
+        attestation_reason_receipt_not_issued: ATTESTATION_REASON_RECEIPT_NOT_ISSUED,
         balance_title: BALANCE_TITLE,
         balance_what: BALANCE_WHAT,
         balance_no_session: BALANCE_NO_SESSION,
@@ -1937,32 +1965,44 @@ pub fn private_inference_copy() -> PrivateInferenceCopy {
 /// contributor who read that would believe a step had happened that has not.
 /// Which reading of the certificate-held list this contributor gets.
 ///
-/// `invited` is the contributor's invite status, which every shell already
-/// holds: `get_settings` answers `admission_evidence_required`, and all
-/// three shells decode it and fail closed on the null a config-read failure
-/// produces. It is NOT a second question to the daemon and NOT the
-/// attestation mark.
+/// **`evidence_admitted` is `admission_evidence_required` verbatim, not its
+/// negation.** That flag is true for a contributor who signed up through
+/// NEAR -- who has no invite and is building a case for submission -- and
+/// false for one enrolled on an invite, whose contributions are already
+/// admitted. So the true arm is the CANDIDATE reading, which looks backwards
+/// until you know which way the flag points.
+///
+/// The parameter is named for the wire fact rather than for "invited" so
+/// that no shell has to negate anything. Three shells each writing `!flag`
+/// is three chances to swap the two readings, and a swapped reading either
+/// promises an attestation that has not happened or withholds one that has.
+/// Every shell passes the flag straight through.
+///
+/// Every shell already holds it: `get_settings` answers
+/// `admission_evidence_required`, and all three decode it and fail closed on
+/// the null a config-read failure produces. It is NOT a second question to
+/// the daemon and NOT the attestation mark.
 ///
 /// The pick lives here rather than in each shell for the reason the
 /// attestation table does: three shells choosing for themselves is three
 /// chances to promise an uninvited contributor an attestation that has not
 /// happened, or to withhold from an invited one the fact that it has.
 #[must_use]
-pub fn certificate_row_line(invited: bool) -> &'static str {
-    if invited {
-        CERTIFICATE_ROW_ATTESTED
-    } else {
+pub fn certificate_row_line(evidence_admitted: bool) -> &'static str {
+    if evidence_admitted {
         CERTIFICATE_ROW_CANDIDATE
+    } else {
+        CERTIFICATE_ROW_ATTESTED
     }
 }
 
 /// The list's heading, on the same split as [`certificate_row_line`].
 #[must_use]
-pub fn certificate_list_title(invited: bool) -> &'static str {
-    if invited {
-        CERTIFICATE_LIST_ATTESTED
-    } else {
+pub fn certificate_list_title(evidence_admitted: bool) -> &'static str {
+    if evidence_admitted {
         CERTIFICATE_LIST_CANDIDATE
+    } else {
+        CERTIFICATE_LIST_ATTESTED
     }
 }
 
@@ -2110,6 +2150,16 @@ pub const ATTESTATION_REASON_REQUEST_MALFORMED: &str = "The last model call in t
 pub const ATTESTATION_REASON_RECEIPT_UNAVAILABLE: &str = "The proof that goes with this session's last model call could not be \
      fetched just now. It may work later.";
 
+/// `receipt_not_issued`.
+///
+/// Permanent. The model that answered this session does not issue the proof
+/// an attested contribution carries -- a model the provider only passes along
+/// to someone else cannot be attested by the provider, and no setting reaches
+/// back to change where the call went.
+pub const ATTESTATION_REASON_RECEIPT_NOT_ISSUED: &str = "The model that answered this session does not provide a copy-of-call \
+     proof. A model the provider runs itself can; one it only passes along \
+     cannot.";
+
 /// The sentence for one queue entry's `attestation` label.
 ///
 /// **Every shell calls this for every row**, unlike
@@ -2178,6 +2228,7 @@ pub fn attestation_reason_line(label: &str) -> &'static str {
         REASON_MARKER_ABSENT => ATTESTATION_REASON_MARKER_ABSENT,
         REASON_REQUEST_MALFORMED => ATTESTATION_REASON_REQUEST_MALFORMED,
         REASON_RECEIPT_UNAVAILABLE => ATTESTATION_REASON_RECEIPT_UNAVAILABLE,
+        REASON_RECEIPT_NOT_ISSUED => ATTESTATION_REASON_RECEIPT_NOT_ISSUED,
         _ => "",
     }
 }
@@ -2198,6 +2249,7 @@ pub use crate::daemon::contribution_eligibility::{
     REASON_EVIDENCE_CAPTURE_OFF,
     REASON_MARKER_ABSENT,
     REASON_NO_CALL,
+    REASON_RECEIPT_NOT_ISSUED,
     REASON_RECEIPT_UNAVAILABLE,
     REASON_REFERENCE_MALFORMED,
     REASON_REQUEST_MALFORMED,
@@ -3387,6 +3439,8 @@ mod tests {
                     "{unknown:?} borrowed a known state's sentence"
                 );
             }
+            // An unfamiliar STATE offers nothing. (The `unknown` state proper
+            // does offer the control; see `eligibility_control`.)
             assert_eq!(eligibility_control(unknown), ContributionControl::None);
             assert_eq!(
                 eligibility_state_tone(unknown),
@@ -3405,19 +3459,21 @@ mod tests {
         }
     }
 
-    /// The send control is offered for `eligible` and for nothing else. This
-    /// is the safety property of the surface in one assertion: a control on
-    /// any other row is an action the transport cannot perform, discovered
-    /// on the press.
+    /// The send control is offered for `eligible` and `unknown`, and for
+    /// neither ineligible state. The safety property is the second half: a
+    /// control on an ineligible row is an action the transport cannot
+    /// perform, discovered on the press. `unknown` is the other case -- an
+    /// action the transport CAN perform and only the transport can decide.
     #[test]
-    fn only_an_eligible_session_is_offered() {
+    fn eligible_and_unknown_sessions_are_offered_and_ineligible_ones_are_not() {
         use crate::daemon::contribution_eligibility::ALL_STATES;
         for state in ALL_STATES {
-            let expected = if state == ELIGIBILITY_STATE_ELIGIBLE {
-                ContributionControl::Contribute
-            } else {
-                ContributionControl::None
-            };
+            let expected =
+                if state == ELIGIBILITY_STATE_ELIGIBLE || state == ELIGIBILITY_STATE_UNKNOWN {
+                    ContributionControl::Contribute
+                } else {
+                    ContributionControl::None
+                };
             assert_eq!(eligibility_control(state), expected, "{state}");
         }
     }
@@ -3465,15 +3521,45 @@ mod tests {
     /// invited one. The pick is one function here and the shells call it.
     #[test]
     fn the_reading_follows_the_invite_and_nothing_else() {
-        assert_eq!(certificate_row_line(true), CERTIFICATE_ROW_ATTESTED);
-        assert_eq!(certificate_row_line(false), CERTIFICATE_ROW_CANDIDATE);
-        assert_eq!(certificate_list_title(true), CERTIFICATE_LIST_ATTESTED);
-        assert_eq!(certificate_list_title(false), CERTIFICATE_LIST_CANDIDATE);
+        // The argument is `admission_evidence_required` verbatim. True means
+        // signed up through NEAR, so no invite, so the CANDIDATE reading --
+        // which is the arm most likely to be written backwards.
+        assert_eq!(certificate_row_line(true), CERTIFICATE_ROW_CANDIDATE);
+        assert_eq!(certificate_row_line(false), CERTIFICATE_ROW_ATTESTED);
+        assert_eq!(certificate_list_title(true), CERTIFICATE_LIST_CANDIDATE);
+        assert_eq!(certificate_list_title(false), CERTIFICATE_LIST_ATTESTED);
 
         // The empty state is one sentence for both, because the reason the
         // list is empty does not differ between them. Asserted rather than
         // left implicit so a later split is a deliberate edit here.
         assert_eq!(certificate_list_empty(), CERTIFICATE_LIST_EMPTY);
+    }
+
+    /// The arm most likely to be written backwards, stated as an outcome.
+    ///
+    /// `admission_evidence_required` is TRUE for a contributor who signed up
+    /// through NEAR and therefore has NO invite. If the arms were ever
+    /// swapped, that contributor would be told their session is
+    /// cryptographically attested when nothing has attested it, and an
+    /// invited contributor would be told theirs is merely a candidate when
+    /// it is already admitted. Both are lies a person would act on.
+    #[test]
+    fn a_contributor_without_an_invite_is_never_told_it_is_attested() {
+        let uninvited = certificate_row_line(true);
+        assert!(
+            !uninvited.to_lowercase().contains("signed proof"),
+            "a contributor with no invite was promised signed proof: {uninvited}"
+        );
+        assert!(
+            uninvited.to_lowercase().contains("put forward"),
+            "a contributor with no invite was not told they can put it forward: {uninvited}"
+        );
+
+        let invited = certificate_row_line(false);
+        assert!(
+            invited.to_lowercase().contains("signed proof"),
+            "an invited contributor was not told what the certificate carries: {invited}"
+        );
     }
 
     /// The certificate-held list says the same fact two ways, and the two
@@ -3579,7 +3665,7 @@ mod tests {
         let fields = payload.as_object().expect("a JSON object");
         assert_eq!(
             fields.len(),
-            111,
+            113,
             "the payload's field count changed -- update the shells' decoders \
              and the tests that pin the set"
         );

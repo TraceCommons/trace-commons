@@ -38,6 +38,44 @@ final class DaemonFieldDecodingTests: XCTestCase {
         XCTAssertNil(entry.sessionPath)
     }
 
+    // MARK: - The certificate a row holds
+
+    /// `holds_certificate` decides which rows the certificate-held list
+    /// shows. It is optional on this shell for the reason every other new
+    /// daemon field is: the app ships separately from the daemon and
+    /// routinely runs against an older one, which sends no such key.
+    ///
+    /// **An absent key must read as "no certificate", never as an error and
+    /// never as a certificate.** Reading it as held would put a session in a
+    /// list claiming something nobody established.
+    ///
+    /// The three shells differ here and the difference is worth knowing:
+    /// GTK's mirror is `#[serde(default)]` so a missing key is silently
+    /// false, and C# System.Text.Json does the same. This shell would throw
+    /// on a missing key if the property were non-optional, which would fail
+    /// the WHOLE list rather than one row. Optional plus a false default is
+    /// what makes all three agree.
+    private func row(_ holdsCertificate: String) throws -> QueueEntry {
+        try decode(QueueEntry.self, """
+        {"entry_id":"e1","session_hash":"sha256:a","source":"claude_code",
+         "project_id":"proj","project_label":"repo",
+         "size_bytes":12,"discovered_at":"2026-09-03T00:00:00Z",
+         "state":"pending","attempts":0\(holdsCertificate)}
+        """)
+    }
+
+    func testARowSaysWhenACertificateIsHeldForIt() throws {
+        XCTAssertTrue(try row(",\"holds_certificate\":true").holdsCertificate)
+    }
+
+    func testARowWithoutTheKeyHoldsNoCertificate() throws {
+        for answer in [",\"holds_certificate\":false", ""] {
+            XCTAssertFalse(
+                try row(answer).holdsCertificate,
+                "\(answer.isEmpty ? "an absent key" : answer) was read as a held certificate")
+        }
+    }
+
     // MARK: - Admission evidence: only an explicit yes is a yes
 
     /// `admission_evidence_required` decides whether the preview sheet offers

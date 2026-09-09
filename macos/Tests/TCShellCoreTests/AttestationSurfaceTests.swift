@@ -25,7 +25,7 @@ private final class MarkRecorder: @unchecked Sendable {
 /// call that produced it, which is a fact about the trace and is owed to
 /// everyone -- invited contributors included.
 final class AttestationSurfaceTests: XCTestCase {
-    /// The 17 fields the mark reads, so a test can delete each in turn.
+    /// The 18 fields the mark reads, so a test can delete each in turn.
     private static let attestationFields = [
         "attestation_attested", "attestation_unattested_permanent",
         "attestation_unattested_configuration", "attestation_unknown",
@@ -35,7 +35,7 @@ final class AttestationSurfaceTests: XCTestCase {
         "attestation_reason_bodies_unreadable", "attestation_reason_body_not_utf8",
         "attestation_reason_body_too_large", "attestation_reason_evidence_capture_off",
         "attestation_reason_marker_absent", "attestation_reason_request_malformed",
-        "attestation_reason_receipt_unavailable",
+        "attestation_reason_receipt_unavailable", "attestation_reason_receipt_not_issued",
     ]
 
     /// Decoded once, in `setUpWithError`, so a fixture that stops decoding
