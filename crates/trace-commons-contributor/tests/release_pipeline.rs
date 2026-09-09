@@ -515,6 +515,74 @@ fn every_rust_toolchain_usage_pins_a_toolchain_input() {
     }
 }
 
+/// Every `toolchain: "..."` literal in the release workflows must equal the
+/// workspace `rust-version`.
+///
+/// These are deliberately literals rather than a `scripts/ci/msrv-floor.sh`
+/// derivation, and that choice is right: the floor has to be known BEFORE a
+/// toolchain is installed, and the script reads it with `cargo metadata`, so
+/// deriving here would make a signed release depend on the runner image
+/// shipping cargo. Keeping the literal is not the problem. Leaving it
+/// unchecked is, and that is what this closes.
+///
+/// Nothing else compares these values.
+/// `every_rust_toolchain_usage_pins_a_toolchain_input` is plain string
+/// counting -- it asserts a `toolchain:` input EXISTS beside every action
+/// usage and never reads what it says -- and `ci.yml`'s msrv-floor job
+/// derives the floor independently, so it goes green on the new floor while
+/// these stay on the old one. A bump therefore leaves `main` green and fails
+/// every release leg at tag time, having compiled nothing. That is the
+/// `contributor-v0.10.0` shape, which this repository has already shipped
+/// once.
+///
+/// `flatpak_manifest_bundles_a_pinned_rust_toolchain_per_arch` does redden on
+/// a bump, but it points at the flatpak manifest rather than at these lines:
+/// updating the manifest and that test is enough to get green again with
+/// every workflow literal still stale. A tripwire beside the bug rather than
+/// on it is worse than none, because the green run it produces feels earned.
+#[test]
+fn release_workflow_toolchain_literals_match_the_workspace_floor() {
+    let root = read("Cargo.toml");
+    // Comment lines mention the floor in prose ("rust-version = 1.96",
+    // unquoted), so match only a real key with a quoted value.
+    let floor = root
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.starts_with('#'))
+        .find_map(|line| line.strip_prefix("rust-version = \""))
+        .and_then(|rest| rest.split('"').next())
+        .expect("root Cargo.toml must declare rust-version under [workspace.package]");
+
+    for path in [
+        ".github/workflows/release-apps.yml",
+        ".github/workflows/release-contributor.yml",
+    ] {
+        let workflow = read(path);
+        let needle = "toolchain: \"";
+        let literals: Vec<&str> = workflow
+            .match_indices(needle)
+            .filter_map(|(at, _)| workflow[at + needle.len()..].split('"').next())
+            .collect();
+        assert!(
+            !literals.is_empty(),
+            "{path}: expected at least one `toolchain: \"...\"` literal"
+        );
+        for literal in literals {
+            assert_eq!(
+                literal, floor,
+                "{path} pins `toolchain: \"{literal}\"`, but the workspace \
+                 declares `rust-version = \"{floor}\"` in Cargo.toml. Change \
+                 the workflow literal to \"{floor}\" (every `toolchain:` line \
+                 in both release workflows, not just this one). They are \
+                 deliberately literals rather than a msrv-floor.sh \
+                 derivation, so nothing updates them for you when the floor \
+                 moves; left stale, every release leg installs the wrong \
+                 toolchain and fails at tag time having compiled nothing."
+            );
+        }
+    }
+}
+
 /// Both workflows sign Windows binaries with the same duplicated dlib logic,
 /// so both must be pinned. Reading only one leaves the other free to drop the
 /// timestamp -- and an untimestamped Trusted Signing signature keeps validating
