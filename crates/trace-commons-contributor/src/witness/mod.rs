@@ -255,6 +255,42 @@ impl WitnessTrustError {
             }
         }
     }
+
+    /// Every refusal label this type can produce.
+    ///
+    /// Written out rather than derived, because `refusal_label` has one arm
+    /// that returns a runtime value -- the measurement control -- and a
+    /// derivation would have to construct a variant to read it.
+    /// `every_refusal_label_is_recognised` walks the enum and fails if this
+    /// list falls behind.
+    pub const ALL_REFUSAL_LABELS: [&'static str; 14] = [
+        "witness_host_not_allowed",
+        "witness_attestation_unavailable",
+        "witness_collateral_unavailable",
+        "witness_quote_unverified",
+        "witness_quote_replayed",
+        "witness_signer_unexpected",
+        WITNESS_EXPECTED_MEASUREMENT_CONTROL,
+        "witness_payload_too_large",
+        "witness_certificate_mismatched",
+        "witness_certificate_unverified",
+        "witness_response_malformed",
+        "witness_claim_unavailable",
+        "witness_body_not_stripped",
+        "admission_evidence_refused",
+    ];
+
+    /// Recognise a refusal label that has been through a `String`.
+    ///
+    /// Returns this crate's own constant, never the caller's slice, so a
+    /// value that has crossed a boundary as text cannot become a word a
+    /// contributor is shown unless it is one of these.
+    #[must_use]
+    pub fn refusal_label_from(value: &str) -> Option<&'static str> {
+        Self::ALL_REFUSAL_LABELS
+            .into_iter()
+            .find(|label| *label == value)
+    }
 }
 
 /// Verify a witness, then hand it a raw session. In that order, always.

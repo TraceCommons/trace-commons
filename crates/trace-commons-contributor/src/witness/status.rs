@@ -845,3 +845,71 @@ mod tests {
         assert_eq!(json["certificate_verified"], serde_json::json!(true));
     }
 }
+
+/// The recognised-label set and the enum must not drift.
+///
+/// `refusal_label_from` is what decides whether a refusal that has been
+/// through a `String` reaches a shell as itself or collapses to the fixed
+/// word, so a variant missing from `ALL_REFUSAL_LABELS` is a refusal that
+/// silently keeps the old single-word behaviour. Every variant is named here
+/// rather than a sample: the whole point of the list is to be complete.
+#[cfg(test)]
+mod refusal_label_set_tests {
+    use crate::witness::{WITNESS_EXPECTED_MEASUREMENT_CONTROL, WitnessTrustError};
+
+    #[test]
+    fn every_refusal_label_is_recognised() {
+        let every = [
+            WitnessTrustError::WitnessHostNotAllowed,
+            WitnessTrustError::WitnessAttestationUnavailable,
+            WitnessTrustError::WitnessCollateralUnavailable,
+            WitnessTrustError::WitnessQuoteUnverified,
+            WitnessTrustError::WitnessQuoteReplayed,
+            WitnessTrustError::WitnessSignerUnexpected,
+            WitnessTrustError::WitnessMeasurementUnpinned {
+                control: WITNESS_EXPECTED_MEASUREMENT_CONTROL,
+                reported: None,
+            },
+            WitnessTrustError::WitnessPayloadTooLarge,
+            WitnessTrustError::WitnessCertificateMismatched,
+            WitnessTrustError::WitnessCertificateUnverified,
+            WitnessTrustError::WitnessResponseMalformed,
+            WitnessTrustError::WitnessClaimUnavailable,
+            WitnessTrustError::WitnessBodyNotStripped,
+            WitnessTrustError::WitnessAdmissionEvidenceRefused,
+        ];
+        assert_eq!(
+            every.len(),
+            WitnessTrustError::ALL_REFUSAL_LABELS.len(),
+            "a variant was added or removed without moving ALL_REFUSAL_LABELS"
+        );
+        for error in every {
+            let label = error.refusal_label();
+            assert_eq!(
+                WitnessTrustError::refusal_label_from(label),
+                Some(label),
+                "{label} is produced but not recognised, so it still collapses"
+            );
+        }
+    }
+
+    /// The other half: nothing is recognised that no refusal produces, and a
+    /// string that merely looks like one is not.
+    #[test]
+    fn nothing_unrecognised_crosses() {
+        for value in [
+            "",
+            "witness_response_malformed ",
+            "Witness_Response_Malformed",
+            "secret-leak-detected",
+            "witness-review-failed",
+            "admission_refused",
+        ] {
+            assert_eq!(
+                WitnessTrustError::refusal_label_from(value),
+                None,
+                "{value} was let through"
+            );
+        }
+    }
+}

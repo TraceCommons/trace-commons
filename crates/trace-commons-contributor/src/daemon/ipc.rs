@@ -3234,6 +3234,23 @@ async fn handle_witness_preview_request(shared: &DaemonShared, req: &Request) ->
     .await
 }
 
+/// The word a refused review is reported under.
+///
+/// A witness refusal passes through under its own name; everything else
+/// collapses to the fixed word.
+///
+/// **The message is not forwarded.** Errors on this path are internal strings
+/// -- `secret-leak-detected`, `pii-filter-unavailable`, whatever a future
+/// `bail!` adds -- and a route that handed `anyhow`'s message to a shell would
+/// put them in front of a contributor and break the never-name-the-mechanism
+/// rule by the shortest route available. `refusal_label_from` matches against
+/// the closed set and returns that crate's own constant, so the only strings
+/// that can cross are ones a shell has words for.
+fn witness_review_refusal(error: &anyhow::Error) -> &'static str {
+    crate::witness::WitnessTrustError::refusal_label_from(&error.to_string())
+        .unwrap_or("witness-review-failed")
+}
+
 async fn handle_witness_preview_request_inner(
     shared: &DaemonShared,
     req: &Request,
@@ -3343,7 +3360,9 @@ async fn handle_witness_preview_request_inner(
     let built = build.await;
     let review = match built {
         Ok(review) => review,
-        Err(_) => return Response::err(req.id, ERR_UNAVAILABLE, "witness-review-failed"),
+        Err(error) => {
+            return Response::err(req.id, ERR_UNAVAILABLE, witness_review_refusal(&error));
+        }
     };
     // The async network operation is over. Recheck identity, consent and source
     // before either persistent write, and keep the queue locked through both.
