@@ -2357,6 +2357,41 @@ mod tests {
         assert!(!super::admission_control_visible(true, true, true));
     }
 
+    /// This shell renders the refusal it chooses, so choosing wrongly here is
+    /// invisible everywhere else: the daemon can classify perfectly and Linux
+    /// still shows one sentence. That was the state before this change.
+    #[test]
+    fn a_refusal_says_what_the_daemon_classified_rather_than_one_sentence() {
+        let generic = trace_commons_contributor::witness_copy::witness_copy()
+            .admission
+            .failed;
+        let refusal = |label: &str| {
+            super::admission_refusal(&Err::<serde_json::Value, String>(label.to_string()))
+        };
+
+        assert_eq!(
+            refusal("admission_setup_unavailable"),
+            generic,
+            "an unclassified failure still says the generic sentence"
+        );
+
+        let mut seen = Vec::new();
+        for label in [
+            "admission_setup_consent_required",
+            "admission_setup_proxy_missing",
+            "admission_setup_source_unsupported",
+            "admission_receipt_endpoint_required",
+        ] {
+            let line = refusal(label);
+            assert_ne!(line, generic, "{label} is rendered as the generic sentence");
+            seen.push(line);
+        }
+        seen.sort_unstable();
+        let before = seen.len();
+        seen.dedup();
+        assert_eq!(seen.len(), before, "two causes were given the same words");
+    }
+
     #[test]
     fn admission_preparation_requires_fresh_explicit_success() {
         let future = chrono::Utc::now().timestamp() + 600;
