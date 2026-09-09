@@ -23,13 +23,12 @@ use trace_commons_contributor_ffi::{
     TC_WITNESS_STATE_UNREADABLE, TC_WITNESS_TONE_ATTENTION, TC_WITNESS_TONE_CLEAR,
     TC_WITNESS_TONE_HELD, TC_WITNESS_TONE_NEUTRAL, TC_WITNESS_TONE_REFUSED, tc_call,
     tc_certificate_list_title, tc_certificate_row_line, tc_consent_copy, tc_consent_gate_help,
-    tc_contribution_attestation_line,
-    tc_contribution_attestation_reason_line, tc_contribution_attestation_tone,
-    tc_contribution_eligibility_control, tc_contribution_eligibility_line,
-    tc_contribution_eligibility_reason_line, tc_contribution_eligibility_tone,
-    tc_contribution_group_control, tc_contribution_withheld_line, tc_daemon_start,
-    tc_daemon_start_with_settings, tc_daemon_stop, tc_discover_sources, tc_handle, tc_handle_free,
-    tc_invite_issuer_host, tc_last_error, tc_near_ai_credential_action,
+    tc_contribution_attestation_line, tc_contribution_attestation_reason_line,
+    tc_contribution_attestation_tone, tc_contribution_eligibility_control,
+    tc_contribution_eligibility_line, tc_contribution_eligibility_reason_line,
+    tc_contribution_eligibility_tone, tc_contribution_group_control, tc_contribution_withheld_line,
+    tc_daemon_start, tc_daemon_start_with_settings, tc_daemon_stop, tc_discover_sources, tc_handle,
+    tc_handle_free, tc_invite_issuer_host, tc_last_error, tc_near_ai_credential_action,
     tc_near_ai_credential_state_line, tc_near_ai_credential_state_tone, tc_preview,
     tc_preview_body, tc_preview_open, tc_preview_search, tc_preview_summary_json,
     tc_preview_turns_json, tc_private_inference_copy, tc_private_inference_quit_needs_notice,
@@ -4471,7 +4470,6 @@ fn the_balance_age_crosses_the_abi() {
     }
 }
 
-
 /// The certificate-held list's reading is chosen once, behind the ABI.
 ///
 /// **The argument is `admission_evidence_required` verbatim, not its
@@ -4486,10 +4484,13 @@ fn the_balance_age_crosses_the_abi() {
 /// carries cryptographic proof when nothing has attested it.
 #[test]
 fn the_certificate_reading_is_chosen_behind_the_abi_and_never_by_a_shell() {
-    let uninvited = take_owned(unsafe { tc_certificate_row_line(1) });
-    let invited = take_owned(unsafe { tc_certificate_row_line(0) });
+    let uninvited = take_owned(tc_certificate_row_line(1));
+    let invited = take_owned(tc_certificate_row_line(0));
 
-    assert_ne!(uninvited, invited, "one sentence is answering for both readings");
+    assert_ne!(
+        uninvited, invited,
+        "one sentence is answering for both readings"
+    );
 
     // Stated as outcomes rather than as a mapping: an assertion that merely
     // repeats the implementation would be equally happy with both arms
@@ -4508,17 +4509,30 @@ fn the_certificate_reading_is_chosen_behind_the_abi_and_never_by_a_shell() {
     );
 
     assert_ne!(
-        take_owned(unsafe { tc_certificate_list_title(1) }),
-        take_owned(unsafe { tc_certificate_list_title(0) })
+        take_owned(tc_certificate_list_title(1)),
+        take_owned(tc_certificate_list_title(0))
     );
 
     // Anything that is not an explicit zero is the flag being set. A shell
     // passing a native bool widened to some other non-zero value must not
     // silently get the invited reading.
     for set in [1, 2, i32::MAX] {
-        assert_eq!(take_owned(unsafe { tc_certificate_row_line(set) }), uninvited);
+        assert_eq!(take_owned(tc_certificate_row_line(set)), uninvited);
     }
-    for clear in [0, -1, i32::MIN] {
-        assert_eq!(take_owned(unsafe { tc_certificate_row_line(clear) }), invited);
+    assert_eq!(take_owned(tc_certificate_row_line(0)), invited);
+
+    // A NEGATIVE VALUE IS A CALLER ERROR, and it resolves to the reading that
+    // CLAIMS LESS. Nothing should send one -- a widened bool is 0 or 1 -- but
+    // the two arms are not equally safe when something does. The candidate
+    // reading says a session can be put forward; the attested reading asserts
+    // a security property. A malformed argument must not be able to produce
+    // the claim, so this direction is pinned rather than left to whichever
+    // way the comparison happened to be written.
+    for malformed in [-1, i32::MIN] {
+        assert_eq!(
+            take_owned(tc_certificate_row_line(malformed)),
+            uninvited,
+            "a malformed argument produced the reading that asserts attestation"
+        );
     }
 }
