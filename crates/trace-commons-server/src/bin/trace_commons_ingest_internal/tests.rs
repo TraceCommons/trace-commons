@@ -5122,6 +5122,7 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         near_provisioning_public_origin: None,
         near_provisioning_admission_ready: false,
         near_attestation_client: None,
+        near_attestation_key_report_client: None,
         near_attestation_verification_clock: None,
         driver_liveness: Arc::new(
             trace_commons_server::driver_liveness::DriverLivenessRegistry::default(),
@@ -26070,6 +26071,7 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         near_provisioning_public_origin: None,
         near_provisioning_admission_ready: false,
         near_attestation_client: None,
+        near_attestation_key_report_client: None,
         near_attestation_verification_clock: None,
         driver_liveness: Arc::new(
             trace_commons_server::driver_liveness::DriverLivenessRegistry::default(),
@@ -89474,6 +89476,575 @@ async fn near_attestation_drill_runs_the_configured_endpoint_and_leaks_nothing()
     assert!(!body.contains("e5d0fec43b001f181a3410b96715ec54171f36da"));
 }
 
+// ---------------------------------------------------------------------------
+// The attested-key drift probe's route
+// ---------------------------------------------------------------------------
+
+/// A stub `signing_algo=ed25519` report endpoint, over the checked-in capture.
+///
+/// The capture is bound to the nonce it was captured with, and the handler
+/// generates a fresh random one, so a run against this stub reaches
+/// `model_keys_bound` and refuses there. That is the correct behaviour and is
+/// exactly what makes the stub useful: it proves the handler really passed its
+/// client through and really challenged with a nonce of its own.
+struct FixtureEd25519ReportEndpoint {
+    report: Result<String, trace_commons_server::near_attestation::client::AttestationClientError>,
+}
+
+impl FixtureEd25519ReportEndpoint {
+    fn serving() -> Self {
+        Self {
+            report: Ok(include_str!(
+                "../../../../trace-commons-attestation/tests/fixtures/near_ai_model_attestation_report_ed25519.json"
+            )
+            .to_string()),
+        }
+    }
+
+    fn refusing_authorization() -> Self {
+        Self {
+            report: Err(
+                trace_commons_server::near_attestation::client::AttestationClientError::HttpStatus {
+                    step: trace_commons_server::near_attestation::client::AttestationStep::Report,
+                    status: 401,
+                },
+            ),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl trace_commons_server::near_attestation::client::AttestedKeyReportClient
+    for FixtureEd25519ReportEndpoint
+{
+    fn model(&self) -> &str {
+        "Qwen/Qwen3.6-35B-A3B-FP8"
+    }
+
+    async fn fetch_ed25519_report_json(
+        &self,
+        _nonce: &str,
+    ) -> Result<String, trace_commons_server::near_attestation::client::AttestationClientError>
+    {
+        self.report.clone()
+    }
+
+    async fn fetch_collateral_for(
+        &self,
+        _quote: &[u8],
+    ) -> Result<
+        trace_commons_server::near_attestation::quote::Collateral,
+        trace_commons_server::near_attestation::client::AttestationClientError,
+    > {
+        Ok(
+            trace_commons_server::near_attestation::quote::parse_collateral(include_str!(
+                "../../../../trace-commons-attestation/tests/fixtures/near_ai_attestation_collateral.json"
+            ))
+            .expect("fixture collateral parses"),
+        )
+    }
+}
+
+fn key_drift_state(
+    temp: &std::path::Path,
+    endpoint: FixtureEd25519ReportEndpoint,
+) -> Arc<AppState> {
+    let mut state = test_state(temp.to_path_buf());
+    {
+        let state = Arc::get_mut(&mut state).expect("the test holds the only reference");
+        state.near_attestation_key_report_client = Some(Arc::new(endpoint));
+        // See the ECDSA drill's tests: pin the clock to the fixture capture
+        // date so this fails on a code change, never on a calendar date.
+        state.near_attestation_verification_clock =
+            Some(DateTime::from_timestamp(FIXTURE_COLLATERAL_CAPTURED_AT, 0).expect("valid"));
+    }
+    state
+}
+
+/// A hand-built outcome standing in for a stored previous run.
+///
+/// Built by hand rather than captured, because the values are exactly what the
+/// comparison reads and a captured one would hide which field each finding
+/// comes from.
+fn key_drift_baseline() -> AttestedKeyDriftOutcome {
+    use trace_commons_server::near_attestation::key_drift::{
+        AttestedKeyDriftStatus, AttestedKeyDriftStep, AttestedKeyDriftStepResult,
+        AttestedKeyMeasurementEvidence, AttestedKeyQuoteEvidence,
+    };
+    AttestedKeyDriftOutcome {
+        nonce: "1".repeat(64),
+        model_label: "Qwen/Qwen3.6-35B-A3B-FP8".to_string(),
+        passed: true,
+        steps: AttestedKeyDriftStep::ALL
+            .iter()
+            .map(|step| AttestedKeyDriftStepResult {
+                step: *step,
+                status: AttestedKeyDriftStatus::Passed,
+                reason: None,
+                missing_control: None,
+            })
+            .collect(),
+        credential: ReportCredentialVerdict::Accepted,
+        gateway_key_ref: Some(format!("sha256:{}", "a".repeat(64))),
+        model_key_refs: vec![format!("sha256:{}", "b".repeat(64))],
+        model_entry_count: 1,
+        quote: Some(AttestedKeyQuoteEvidence {
+            tcb_status: "UpToDate".to_string(),
+            advisory_ids: Vec::new(),
+            mrtd: "aa".repeat(48),
+            mr_config_id: "00".repeat(48),
+            rtmr: [
+                "11".repeat(48),
+                "22".repeat(48),
+                "33".repeat(48),
+                "44".repeat(48),
+            ],
+        }),
+        measurements: Some(AttestedKeyMeasurementEvidence {
+            verdict: "pinned".to_string(),
+            checked_fields: vec!["mrtd".to_string()],
+            mismatched_fields: Vec::new(),
+            missing_control: None,
+        }),
+    }
+}
+
+#[tokio::test]
+async fn near_attestation_key_drift_drill_requires_an_admin() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+
+    let error = near_attestation_key_drift_drill_handler(
+        State(state),
+        auth_headers("token-a"),
+        Json(TraceNearAttestationKeyDriftDrillRequest::default()),
+    )
+    .await
+    .expect_err("a contributor token must not run an admin drill");
+    assert_eq!(error.0, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn near_attestation_key_drift_drill_refuses_an_unauthenticated_caller() {
+    // Asserted as a refusal with a status, not merely as "not a success":
+    // an `expect_err` alone would pass if the handler fell over for any
+    // reason at all, including one that had already reached the endpoint.
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = key_drift_state(temp.path(), FixtureEd25519ReportEndpoint::serving());
+
+    let error = near_attestation_key_drift_drill_handler(
+        State(state),
+        HeaderMap::new(),
+        Json(TraceNearAttestationKeyDriftDrillRequest::default()),
+    )
+    .await
+    .expect_err("an unauthenticated caller must not run an admin drill");
+    assert_eq!(error.0, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn near_attestation_key_drift_drill_refuses_when_the_endpoint_is_not_configured() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+
+    let Json(drill) = near_attestation_key_drift_drill_handler(
+        State(state),
+        auth_headers("admin-token-a"),
+        Json(TraceNearAttestationKeyDriftDrillRequest::default()),
+    )
+    .await
+    .expect("the probe reports a refusal rather than failing the request");
+
+    assert!(!drill.ready);
+    assert!(drill.outcome.is_none());
+    assert!(drill.credential.is_none());
+    assert!(
+        !drill.blocking_gaps.is_empty(),
+        "a refusal must say why: {drill:?}"
+    );
+    assert_eq!(
+        drill.expected_measurements_env,
+        "TRACE_COMMONS_NEAR_AI_EXPECTED_MEASUREMENTS"
+    );
+}
+
+#[tokio::test]
+async fn a_first_run_with_no_baseline_is_a_baseline_not_drift() {
+    // The distinction the route's contract turns on: nothing to compare
+    // against is not a finding. A probe that reported drift on its first run
+    // would be red forever from the day it was switched on.
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = key_drift_state(temp.path(), FixtureEd25519ReportEndpoint::serving());
+
+    let Json(drill) = near_attestation_key_drift_drill_handler(
+        State(state),
+        auth_headers("admin-token-a"),
+        Json(TraceNearAttestationKeyDriftDrillRequest::default()),
+    )
+    .await
+    .expect("the probe runs");
+
+    let outcome = drill.outcome.as_ref().expect("the probe ran");
+    // The handler really passed its client through and really challenged with
+    // a nonce of its own: the capture is bound to a different one.
+    assert_eq!(
+        outcome.credential,
+        ReportCredentialVerdict::Accepted,
+        "the stub served the report"
+    );
+    assert!(!drill.baseline_compared);
+    assert_eq!(drill.drift, Vec::new());
+    assert!(drill.drift_labels.is_empty());
+    assert!(!drill.drift_detected);
+}
+
+#[tokio::test]
+async fn the_stored_outcome_round_trips_back_as_a_baseline() {
+    // The operator workflow, asserted rather than documented: the `outcome`
+    // object a run returns is exactly what the next run accepts as
+    // `baseline`. If this ever stops holding, the route has no usable
+    // baseline mechanism at all and every later run silently reports nothing.
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = key_drift_state(temp.path(), FixtureEd25519ReportEndpoint::serving());
+
+    let Json(first) = near_attestation_key_drift_drill_handler(
+        State(state.clone()),
+        auth_headers("admin-token-a"),
+        Json(TraceNearAttestationKeyDriftDrillRequest::default()),
+    )
+    .await
+    .expect("the probe runs");
+
+    let stored = serde_json::to_string(&first.outcome.expect("the probe ran"))
+        .expect("the outcome serializes");
+    let baseline: AttestedKeyDriftOutcome =
+        serde_json::from_str(&stored).expect("a stored outcome is accepted back as a baseline");
+
+    let Json(second) = near_attestation_key_drift_drill_handler(
+        State(state),
+        auth_headers("admin-token-a"),
+        Json(TraceNearAttestationKeyDriftDrillRequest {
+            baseline: Some(baseline),
+            ..Default::default()
+        }),
+    )
+    .await
+    .expect("the probe runs against a baseline");
+
+    assert!(second.baseline_compared);
+    // Two identical runs against the same stub differ only in the nonce, which
+    // is not compared. Nothing moved, so nothing is reported.
+    assert_eq!(second.drift, Vec::new());
+    assert!(!second.drift_detected);
+}
+
+#[tokio::test]
+async fn a_run_that_learned_less_does_not_manufacture_a_rotation() {
+    // A baseline that saw everything, against a run that reached only
+    // `report_fetched`. The one honest finding is that the quote verified
+    // before and does not now; reporting "the keys rotated" here would send an
+    // operator to NEAR AI over a failure of our own probe.
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = key_drift_state(temp.path(), FixtureEd25519ReportEndpoint::serving());
+
+    let Json(drill) = near_attestation_key_drift_drill_handler(
+        State(state),
+        auth_headers("admin-token-a"),
+        Json(TraceNearAttestationKeyDriftDrillRequest {
+            baseline: Some(key_drift_baseline()),
+            ..Default::default()
+        }),
+    )
+    .await
+    .expect("the probe runs against a baseline");
+
+    assert!(drill.baseline_compared);
+    assert!(drill.drift_detected);
+    assert_eq!(
+        drill.drift_labels,
+        vec!["quote_verification_regressed".to_string()],
+        "{:?}",
+        drill.drift
+    );
+    assert_eq!(
+        drill.drift,
+        vec![AttestedKeyDrift::QuoteVerificationRegressed]
+    );
+}
+
+#[tokio::test]
+async fn an_unauthorized_credential_reaches_the_operator_as_itself() {
+    // One of the questions this probe exists to answer. Left as an HTTP-status
+    // label on a step it is a generic failure, and the operator cannot tell
+    // "our key is not authorized for this endpoint" from "the endpoint is
+    // down".
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = key_drift_state(
+        temp.path(),
+        FixtureEd25519ReportEndpoint::refusing_authorization(),
+    );
+
+    let Json(drill) = near_attestation_key_drift_drill_handler(
+        State(state),
+        auth_headers("admin-token-a"),
+        Json(TraceNearAttestationKeyDriftDrillRequest::default()),
+    )
+    .await
+    .expect("a refused credential is an answer, not a failed request");
+
+    assert_eq!(
+        drill.credential,
+        Some(ReportCredentialVerdict::Unauthorized)
+    );
+    assert!(
+        drill
+            .blocking_gaps
+            .iter()
+            .any(|gap| gap == "report_credential_unauthorized"),
+        "the credential answer must survive into the gaps: {:?}",
+        drill.blocking_gaps
+    );
+    assert!(!drill.ready);
+}
+
+#[test]
+fn every_drift_finding_gets_its_own_label() {
+    // The whole point of the probe: a key rotation, a measurement move, a TCB
+    // change and a verification regression send an operator to four different
+    // places. This asserts each survives to the response as itself, and that
+    // one register moving is not the same label as another.
+    use trace_commons_server::near_attestation::key_drift::AttestedKeyQuoteEvidence;
+
+    let before = key_drift_baseline();
+    let mut after = before.clone();
+    after.nonce = "2".repeat(64);
+    after.gateway_key_ref = Some(format!("sha256:{}", "c".repeat(64)));
+    after.model_key_refs = vec![
+        format!("sha256:{}", "d".repeat(64)),
+        format!("sha256:{}", "e".repeat(64)),
+    ];
+    after.model_entry_count = 2;
+    after.quote = Some(AttestedKeyQuoteEvidence {
+        tcb_status: "SWHardeningNeeded".to_string(),
+        advisory_ids: vec!["INTEL-SA-00000".to_string()],
+        mrtd: "ff".repeat(48),
+        mr_config_id: "00".repeat(48),
+        rtmr: [
+            "11".repeat(48),
+            "99".repeat(48),
+            "33".repeat(48),
+            "44".repeat(48),
+        ],
+    });
+
+    let findings = compare_attested_key_drift(&before, &after);
+    let labels: Vec<String> = findings.iter().map(attested_key_drift_label).collect();
+
+    assert_eq!(
+        labels,
+        vec![
+            "gateway_key_rotated".to_string(),
+            "model_keys_rotated".to_string(),
+            "model_entry_count_changed:1->2".to_string(),
+            "measurement_moved:mrtd".to_string(),
+            "measurement_moved:rtmr1".to_string(),
+            "tcb_status_changed:UpToDate->SWHardeningNeeded".to_string(),
+        ],
+        "{findings:?}"
+    );
+    // And they really are distinct: a label function that returned one string
+    // for every variant would satisfy a "six findings" assertion.
+    let distinct: BTreeSet<&String> = labels.iter().collect();
+    assert_eq!(distinct.len(), labels.len());
+    // The register that did not move is not reported.
+    assert!(
+        !labels
+            .iter()
+            .any(|label| label == "measurement_moved:rtmr0")
+    );
+}
+
+#[test]
+fn the_two_directions_of_a_verification_change_are_different_labels() {
+    // A recovery and a regression are opposite events. Collapsing them into
+    // one label would report a fix as a fault.
+    assert_eq!(
+        attested_key_drift_label(&AttestedKeyDrift::QuoteVerificationRegressed),
+        "quote_verification_regressed"
+    );
+    assert_eq!(
+        attested_key_drift_label(&AttestedKeyDrift::QuoteVerificationRecovered),
+        "quote_verification_recovered"
+    );
+    assert_eq!(
+        attested_key_drift_label(&AttestedKeyDrift::ReportUnavailable),
+        "report_unavailable"
+    );
+    assert_eq!(
+        attested_key_drift_label(&AttestedKeyDrift::CredentialRejected),
+        "credential_rejected"
+    );
+}
+
+#[tokio::test]
+async fn near_attestation_key_drift_drill_records_failed_smoke_evidence() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+
+    let Json(drill) = near_attestation_key_drift_drill_handler(
+        State(state),
+        auth_headers("admin-token-a"),
+        Json(TraceNearAttestationKeyDriftDrillRequest {
+            purpose: Some("probe an unconfigured endpoint".to_string()),
+            record_evidence: true,
+            baseline: None,
+        }),
+    )
+    .await
+    .expect("the probe records evidence for a refusal");
+
+    let evidence = drill.recorded_evidence.expect("evidence was recorded");
+    assert_eq!(evidence.check_name, "near_attestation_key_drift");
+    assert_eq!(evidence.status, TraceRolloutSmokeEvidenceStatus::Failed);
+    assert_eq!(evidence.evidence_hash, drill.evidence_hash);
+    // Its own name, never the ECDSA drill's: sharing one would let this
+    // drill's evidence satisfy that drill's gate, which is a real gate.
+    assert_ne!(evidence.check_name, "near_attestation");
+}
+
+#[tokio::test]
+async fn drift_against_a_baseline_records_failed_evidence() {
+    // Evidence must go red on drift, not only on a failed step. A probe that
+    // recorded a pass while the keys the client pins moved underneath it would
+    // be worse than no probe.
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = key_drift_state(temp.path(), FixtureEd25519ReportEndpoint::serving());
+
+    let Json(drill) = near_attestation_key_drift_drill_handler(
+        State(state),
+        auth_headers("admin-token-a"),
+        Json(TraceNearAttestationKeyDriftDrillRequest {
+            purpose: None,
+            record_evidence: true,
+            baseline: Some(key_drift_baseline()),
+        }),
+    )
+    .await
+    .expect("the probe runs");
+
+    assert!(drill.drift_detected);
+    assert_eq!(
+        drill
+            .recorded_evidence
+            .expect("evidence was recorded")
+            .status,
+        TraceRolloutSmokeEvidenceStatus::Failed
+    );
+}
+
+#[tokio::test]
+async fn the_key_drift_response_carries_no_key_and_no_credential() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = key_drift_state(temp.path(), FixtureEd25519ReportEndpoint::serving());
+
+    let Json(drill) = near_attestation_key_drift_drill_handler(
+        State(state),
+        auth_headers("admin-token-a"),
+        Json(TraceNearAttestationKeyDriftDrillRequest {
+            baseline: Some(key_drift_baseline()),
+            ..Default::default()
+        }),
+    )
+    .await
+    .expect("the probe runs");
+
+    let body = serde_json::to_string(&drill).expect("the response serializes");
+    for forbidden in ["sk-", "Bearer", "0x"] {
+        assert!(!body.contains(forbidden), "response leaked {forbidden}");
+    }
+    // Every key reference that does appear is a digest.
+    if let Some(outcome) = drill.outcome.as_ref() {
+        for reference in outcome
+            .model_key_refs
+            .iter()
+            .chain(outcome.gateway_key_ref.iter())
+        {
+            assert!(reference.starts_with("sha256:"), "{reference}");
+        }
+    }
+}
+
+#[test]
+fn the_key_drift_check_is_advisory_until_a_live_run_has_passed() {
+    // A deliberate stage, pinned so it reads as one rather than as an
+    // oversight. This probe has never run against the live endpoint: whether
+    // our credential is even authorized for the report endpoint is one of the
+    // things it exists to find out. A required check that turns out to be
+    // structurally unpassable is permanently missing on every configured
+    // deployment, and a control nobody can turn green teaches operators to
+    // ignore red controls.
+    //
+    // Promote it beside `near_attestation` -- conditional on the NEAR AI
+    // surface being configured -- once a live run has produced a baseline.
+    // Deleting this test is part of that change, not a way around it.
+    for configured in [true, false] {
+        assert!(
+            !rollout_smoke_required_checks(configured).contains(&"near_attestation_key_drift"),
+            "advisory until a live run has passed (configured={configured})"
+        );
+    }
+    // The neighbour it will one day sit beside is unaffected either way.
+    assert!(rollout_smoke_required_checks(true).contains(&"near_attestation"));
+}
+
+#[test]
+fn advisory_key_drift_evidence_is_filtered_out_of_the_summary_entirely() {
+    // The consequence of being advisory, asserted rather than assumed: a
+    // non-required check's evidence does not reach the summary at all -- not
+    // as passed, not as failed, not as stale, not as not-applicable. That is
+    // why the operator doc sends a reader to the drill's own response and to
+    // the audit row, and this test is what keeps that instruction true.
+    let recorded = TraceRolloutSmokeEvidenceResponse {
+        event_id: Uuid::new_v4(),
+        tenant_id: "tenant-a".to_string(),
+        tenant_storage_ref: tenant_storage_ref("tenant-a"),
+        check_name: "near_attestation_key_drift".to_string(),
+        status: TraceRolloutSmokeEvidenceStatus::Failed,
+        evidence_hash: sha256_prefixed("a red key drift probe"),
+        evidence_ref_hash: None,
+        actor_principal_ref: "principal-a".to_string(),
+        recorded_at: Utc::now(),
+    };
+    let summary = TraceOperationalRolloutSmokeSummary::from_promotion_gates_and_evidence(
+        &TraceOperationalPromotionGateSummary {
+            ready: true,
+            ..TraceOperationalPromotionGateSummary::default()
+        },
+        std::slice::from_ref(&recorded),
+        Utc::now(),
+        true,
+    );
+
+    let name = "near_attestation_key_drift".to_string();
+    assert!(!summary.required_checks.contains(&name));
+    assert!(!summary.not_applicable_checks.contains(&name));
+    assert!(!summary.failed_evidence_checks.contains(&name));
+    assert!(!summary.passed_evidence_checks.contains(&name));
+    assert!(!summary.stale_evidence_checks.contains(&name));
+    assert!(!summary.missing_evidence_checks.contains(&name));
+    // And a red advisory row does not block promotion, which is the whole
+    // point of the stage: it cannot be the third always-red control.
+    assert_eq!(summary.failed_evidence_count, 0);
+    assert!(
+        summary
+            .blocker_reasons
+            .iter()
+            .all(|reason| !reason.contains("key_drift")),
+        "{:?}",
+        summary.blocker_reasons
+    );
+}
+
 #[test]
 fn near_attestation_is_required_only_where_a_near_ai_endpoint_is_configured() {
     // The ruling this implements: key on whether the surface is in use at
@@ -90851,4 +91422,32 @@ fn free_text_wrappers_preserve_error_labels_and_hash_only_approval() {
             }
         );
     }
+}
+
+#[test]
+fn a_run_that_passed_every_step_still_records_red_evidence_when_it_drifted() {
+    // The cell no fixture can reach through the handler: a passing run needs a
+    // report bound to the nonce this process generated, and a capture never
+    // is. So the truth table is asserted here, on the function the handler
+    // calls -- all four cells, not only the reachable three.
+    use TraceRolloutSmokeEvidenceStatus::{Failed, Passed};
+
+    assert_eq!(
+        near_attestation_key_drift_evidence_status(true, false),
+        Passed,
+        "a clean run against a matching baseline is the only green case"
+    );
+    assert_eq!(
+        near_attestation_key_drift_evidence_status(true, true),
+        Failed,
+        "green evidence beside a moved key is worse than no evidence"
+    );
+    assert_eq!(
+        near_attestation_key_drift_evidence_status(false, false),
+        Failed
+    );
+    assert_eq!(
+        near_attestation_key_drift_evidence_status(false, true),
+        Failed
+    );
 }
