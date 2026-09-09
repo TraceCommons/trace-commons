@@ -54,6 +54,17 @@ struct CredentialSection: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             actionButton(action)
+            // What the key is worth, on the same card as the key. A balance
+            // is the one fact on this screen about an ACCOUNT rather than
+            // this computer, and it is here because it is the thing the
+            // sign-in above is for -- a contributor who has just signed in
+            // should not have to go looking for what they signed in to see.
+            //
+            // `credentialAction` is passed so the two rows cannot draw the
+            // same sign-in button twice; the decision is
+            // `BalanceSurface.actionToDraw`'s, not this view's.
+            Divider().padding(.vertical, TC.Space.xs)
+            BalanceRow(copy: copy, credentialAction: action, run: run)
         }
         .task(id: action) {
             // A state nobody could read polls nothing. There is no outcome
