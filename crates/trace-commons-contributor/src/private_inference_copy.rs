@@ -3630,8 +3630,10 @@ mod tests {
     /// `null`, because a `null` means "we know we do not know" while an
     /// absent key would mean "this daemon is too old to answer".
     ///
-    /// Three answers to three questions that share a wire. There is no rule
-    /// underneath them to derive a fourth from.
+    /// Each answers its own question and they happen to share a wire. There
+    /// is no convention here to generalise from, and a field added later is
+    /// a fourth answer to a fourth question rather than a fourth instance of
+    /// a pattern.
     #[test]
     fn the_balance_row_carries_its_own_words() {
         let copy = private_inference_copy();

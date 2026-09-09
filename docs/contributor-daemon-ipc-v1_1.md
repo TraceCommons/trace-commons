@@ -2619,9 +2619,11 @@ knowing one tells you nothing about the next.
   client that treats it as a `null` is asserting a state the daemon never
   reported. **A `null` must never be rendered as `0`.**
 
-Three answers to three questions that happen to share a wire. There is no
-rule underneath them to derive a fourth from -- read each contract, and do
-not carry a habit from one into another.
+Each of these answers its own question and they happen to share a wire.
+There is no convention here to generalise from: read the contract for the
+field you are touching, and do not carry a habit across from another one.
+A field added later is a fourth answer to a fourth question, not a fourth
+instance of a pattern.
 
 ### The public profile
 
