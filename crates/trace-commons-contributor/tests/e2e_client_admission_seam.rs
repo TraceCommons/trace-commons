@@ -51,7 +51,7 @@
 #![cfg(not(windows))]
 
 use sha2::Digest as _;
-use trace_commons_contributor::config::{ConfigStore, ContributorConfig};
+use trace_commons_contributor::config::ContributorConfig;
 use trace_commons_contributor::source::TraceSource as _;
 use trace_commons_protocol::admission::AdmissionEvidence;
 
@@ -67,7 +67,6 @@ fn fixture_signer(seed: &str) -> k256::ecdsa::SigningKey {
 }
 
 fn fixture_address(key: &k256::ecdsa::SigningKey) -> String {
-    use k256::elliptic_curve::sec1::ToEncodedPoint as _;
     use sha3::Digest as _;
     let point = key.verifying_key().to_encoded_point(false);
     let digest = sha3::Keccak256::digest(&point.as_bytes()[1..]);
@@ -131,7 +130,8 @@ impl V61Account {
     fn provision(account_name: &str) -> Self {
         use trace_commons_server::near_account_identity::NearAccountIndexPepper;
         let mut pepper = [0u8; 32];
-        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut pepper);
+        ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut pepper)
+            .expect("os rng");
         let pepper = NearAccountIndexPepper::from_bytes(&pepper).expect("32-byte pepper");
         let anchor = pepper
             .index_label("mainnet", account_name)
@@ -236,7 +236,12 @@ async fn stored_admission_artifact(
         request_bytes: 1,
         request_sha256: "44".repeat(32),
         response_sha256: "55".repeat(32),
-        receipt_sha256: "66".repeat(32),
+        receipt_sha256: trace_commons_protocol::admission::receipt_identity(
+            &"33".repeat(32),
+            &"44".repeat(32),
+            &"55".repeat(32),
+        )
+        .expect("receipt identity"),
         artifact_sha256: redacted_sha256.clone(),
         witness_measurement: measurement.clone(),
         redaction_policy_version: policy.into(),
@@ -290,5 +295,304 @@ async fn a_v61_accounts_admission_review_is_not_refused_for_its_tenant_id() {
     assert_eq!(
         envelope.contributor.tenant_scope_ref.as_deref(),
         Some(cfg.tenant_id.as_str())
+    );
+}
+
+/// The control that makes the failure above legible, and the fixture trap
+/// itself, written down.
+///
+/// `validate_stored` collapses two distinct refusals onto the same
+/// `witness-certificate-invalid` string: a certificate that does not verify,
+/// and an account anchor the client would not accept. Without this control a
+/// red run above could be read as "the fixture's certificate is wrong".
+///
+/// So: the same artifact, the same signer, the same code path -- with only
+/// the account changed to the **pre-V61** shape the server-side fixture also
+/// builds, `tenant = near-{anchor}`. That passes. Which means the
+/// certificate is sound and the account is the only thing the client
+/// objected to, and it means a fixture written in the old shape can never
+/// express the new world's failure.
+#[tokio::test]
+async fn the_pre_v61_account_shape_validates_which_is_why_this_was_missed() {
+    let key = fixture_signer("witness-fixture-only");
+    let anchor = "ab".repeat(32);
+    let legacy = V61Account {
+        tenant_id: format!("near-{anchor}"),
+        anchor: anchor.clone(),
+    };
+    let cfg = config_for(&legacy, &fixture_address(&key));
+    let (artifact, source_hash) = stored_admission_artifact(&cfg, &key, &anchor).await;
+
+    artifact
+        .validate_stored(&cfg, &source_hash, "fingerprint-e2e")
+        .expect(
+            "the pre-V61 shape must validate; if this fails the fixture's own \
+             certificate is broken and the test above proves nothing",
+        );
+}
+
+/// The server's real verifier over the headers the client actually carries.
+///
+/// This is the seam in the other direction. The evidence and certificate the
+/// client stored -- read back off the artifact in its on-disk form, not
+/// re-derived -- are handed to `trace-commons-server`'s own
+/// `verify_witness_certificate` and then `verify_admission_evidence`, bound
+/// to the V61 anchor. Nothing between the two halves is re-implemented.
+///
+/// The witness pin and the provider policy name the fixture signer rather
+/// than a real enclave and a real NEAR AI model (see the module docs), so
+/// what this asserts is the *binding*: signature, artifact, measurement,
+/// policy, receipt identity and account anchor, all checked by the server's
+/// code over bytes the client produced.
+///
+/// It also cross-checks this file's hand-written certificate preimage: the
+/// server recovers the signer from its own `signing_bytes`, so a wrong
+/// encoding here fails rather than passing quietly.
+#[tokio::test]
+async fn the_evidence_a_client_carries_is_admitted_by_the_servers_own_verifier() {
+    use trace_commons_protocol::trace_contribution::ResidualPiiRisk;
+    use trace_commons_server::admission_evidence::{
+        AdmissionProviderTrust, verify_admission_evidence,
+    };
+    use trace_commons_server::redaction_witness::certificate::{
+        CertificateDetails, WitnessCertificate,
+    };
+    use trace_commons_server::redaction_witness::verification::{
+        WitnessPin, verify_witness_certificate,
+    };
+
+    let account = V61Account::provision("bob.near");
+    let key = fixture_signer("witness-fixture-only");
+    let address = fixture_address(&key);
+    let cfg = config_for(&account, &address);
+    let (artifact, _) = stored_admission_artifact(&cfg, &key, &account.anchor).await;
+
+    // Read the stored artifact back in its on-disk form, which is what the
+    // uploader attaches to `POST /v1/traces`.
+    let stored = serde_json::to_value(&artifact).expect("artifact serialises");
+    let response = &stored["response"];
+    use base64::Engine as _;
+    let envelope_bytes = base64::engine::general_purpose::STANDARD
+        .decode(response["envelope_bytes"].as_str().expect("envelope bytes"))
+        .expect("base64");
+    let certificate: serde_json::Value =
+        serde_json::from_str(response["certificate_json"].as_str().expect("certificate"))
+            .expect("certificate json");
+    let evidence: AdmissionEvidence = serde_json::from_str(
+        response["admission"]["evidence_json"]
+            .as_str()
+            .expect("evidence"),
+    )
+    .expect("evidence parses server-side");
+
+    assert_eq!(
+        evidence.account_anchor_sha256, account.anchor,
+        "the client must carry the account's anchor, not anything derived \
+         from its tenant id"
+    );
+
+    let pin = WitnessPin::new(&address, [certificate["witness_measurement"]
+        .as_str()
+        .expect("measurement")
+        .to_string()])
+    .expect("witness pin");
+    let verified = verify_witness_certificate(
+        WitnessCertificate::from_wire(
+            certificate["redacted_sha256"]
+                .as_str()
+                .expect("digest")
+                .to_string(),
+            CertificateDetails {
+                residual_risk_verdict: ResidualPiiRisk::Low,
+                redaction_policy_version: certificate["redaction_policy_version"]
+                    .as_str()
+                    .expect("policy")
+                    .to_string(),
+                witness_measurement: certificate["witness_measurement"]
+                    .as_str()
+                    .expect("measurement")
+                    .to_string(),
+                timestamp: certificate["timestamp"].as_i64().expect("timestamp"),
+            },
+        ),
+        response["signature_hex"].as_str().expect("signature"),
+        Some(&pin),
+        &envelope_bytes,
+    )
+    .expect("the server must verify the certificate the client stored");
+
+    let trust = AdmissionProviderTrust::new(
+        [evidence.provider_signer.clone()],
+        Vec::new(),
+        ["operator-approved-model".to_string()],
+        1,
+    )
+    .expect("fixture provider policy");
+    let signature = response["admission"]["signature_hex"]
+        .as_str()
+        .expect("admission signature");
+    let now = chrono::Utc::now().timestamp();
+
+    verify_admission_evidence(
+        &evidence,
+        signature,
+        &verified,
+        &pin,
+        &trust,
+        &account.anchor,
+        now,
+    )
+    .expect("the server must admit evidence bound to this account's anchor");
+
+    // The negative control, and the reason the client cannot simply drop its
+    // own anchor check: the same evidence is refused for a different
+    // account, so the binding is doing work.
+    let other = V61Account::provision("carol.near");
+    assert_ne!(account.anchor, other.anchor);
+    assert!(
+        verify_admission_evidence(
+            &evidence,
+            signature,
+            &verified,
+            &pin,
+            &trust,
+            &other.anchor,
+            now,
+        )
+        .is_err(),
+        "evidence bound to one account must not admit another"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The preparation path's refusals, through the real IPC entry point.
+// ---------------------------------------------------------------------------
+
+fn daemon_with(cfg: &ContributorConfig, dir: &std::path::Path) -> trace_commons_contributor::daemon::ipc::DaemonShared {
+    let store = trace_commons_contributor::config::ConfigStore::open(dir.join("state"))
+        .expect("config store");
+    store.save_config(cfg).expect("save config");
+    trace_commons_contributor::daemon::ipc::DaemonShared::load(store).expect("daemon shared")
+}
+
+fn prepare_request(entry_id: uuid::Uuid) -> trace_commons_contributor::daemon::ipc::Request {
+    trace_commons_contributor::daemon::ipc::Request {
+        id: 1,
+        method: "prepare_admission_session".into(),
+        params: serde_json::json!({
+            "entry_id": entry_id,
+            "backend": "near",
+            "confirmed": true,
+        }),
+    }
+}
+
+/// A client with no receipt endpoint refuses, by name, before it opens a
+/// socket.
+///
+/// #787 was that the receipt endpoint could not be set after signup. This is
+/// the consequence of that on the path that needs it: without one, admission
+/// preparation is unreachable. The assertion that nothing was contacted is
+/// made against a listener that would have accepted the connection, not
+/// inferred from the check existing in the source.
+#[tokio::test]
+async fn a_client_with_no_receipt_endpoint_refuses_before_contacting_the_proxy() {
+    let account = V61Account::provision("dave.near");
+    let key = fixture_signer("witness-fixture-only");
+    let cfg = config_for(&account, &fixture_address(&key));
+    assert!(
+        cfg.inference_receipt_endpoint.is_none(),
+        "this fixture is about the absent endpoint"
+    );
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let shared = daemon_with(&cfg, dir.path());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("listener");
+    {
+        let mut settings = shared.settings.lock().expect("settings lock");
+        settings.ironwire_attested_bodies = true;
+        settings.ironwire = Some(
+            trace_commons_contributor::daemon::settings::IronWireDeclaration::Watch {
+                port: listener.local_addr().expect("addr").port(),
+                token_dir: Some(dir.path().into()),
+            },
+        );
+    }
+
+    let response = trace_commons_contributor::daemon::admission_setup::handle_prepare_admission_session(
+        &shared,
+        &prepare_request(uuid::Uuid::new_v4()),
+    )
+    .await;
+    assert_eq!(
+        response.error.expect("refused").message,
+        "admission_receipt_endpoint_required"
+    );
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(50), listener.accept())
+            .await
+            .is_err(),
+        "the proxy was contacted before the endpoint was required"
+    );
+}
+
+/// A session recorded by a harness the admission path cannot address is
+/// refused -- and the caller learns only one word.
+///
+/// The refusal itself is right: `exact_session_id` reads a session id out of
+/// the transcript's own metadata, and it knows how to do that for two
+/// harnesses. What this pins is the *reporting*: the specific reason
+/// (`admission_setup_source_unsupported`) is collapsed to
+/// `admission_setup_unavailable` before it reaches a person, so a
+/// contributor on Gemini CLI is told nothing about why.
+#[tokio::test]
+async fn a_session_on_an_unsupported_harness_refuses_with_one_word() {
+    let account = V61Account::provision("erin.near");
+    let key = fixture_signer("witness-fixture-only");
+    let mut cfg = config_for(&account, &fixture_address(&key));
+    cfg.inference_receipt_endpoint = Some("https://receipts.example/v1".into());
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let shared = daemon_with(&cfg, dir.path());
+
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/gemini-cli");
+    let source = trace_commons_contributor::source::gemini_cli::GeminiCliSource::new(root.clone());
+    let session = source.discover().expect("discover").remove(0);
+
+    let entry_id = uuid::Uuid::new_v4();
+    {
+        let mut settings = shared.settings.lock().expect("settings lock");
+        settings.ironwire_attested_bodies = true;
+        settings.gemini_source = Some(
+            trace_commons_contributor::daemon::settings::SourceDeclaration::Watch { path: root },
+        );
+    }
+    shared
+        .queue
+        .lock()
+        .expect("queue lock")
+        .upsert(
+            trace_commons_contributor::daemon::queue::QueueEntry {
+                entry_id,
+                source: "gemini-cli".into(),
+                path: session.path.clone(),
+                ..Default::default()
+            },
+            16,
+        )
+        .expect("queue upsert");
+
+    let response = trace_commons_contributor::daemon::admission_setup::handle_prepare_admission_session(
+        &shared,
+        &prepare_request(entry_id),
+    )
+    .await;
+    let error = response.error.expect("refused");
+    assert_eq!(
+        error.message, "admission_setup_unavailable",
+        "the harness-specific reason does not reach the caller; if this ever \
+         becomes a distinct label, say so here rather than deleting the test"
     );
 }
