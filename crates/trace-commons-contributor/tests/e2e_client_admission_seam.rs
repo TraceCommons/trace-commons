@@ -232,6 +232,8 @@ async fn stored_admission_artifact(
         account_anchor_sha256: anchor.to_string(),
         challenge_sha256: "22".repeat(32),
         provider_signer: "33".repeat(32),
+        // Part of the signed statement now, so a fixture has to name one.
+        signature_kind: trace_commons_protocol::admission::AdmissionSignatureKind::ProviderTee,
         model: "operator-approved-model".into(),
         request_bytes: 1,
         request_sha256: "44".repeat(32),
