@@ -122,6 +122,38 @@ impl AdmissionProviderTrust {
         };
         is_hash(signer) && signers.contains(signer)
     }
+    /// The kind this **signer** establishes, independent of anything the
+    /// caller claimed.
+    ///
+    /// `signature_kind` on the receipt is a wire label NEAR AI does not sign.
+    /// It is sound as a *selector* -- a wrong claim only sends the receipt at
+    /// a stricter set and fails -- and unsound as a *record*: writing it into
+    /// the evidence would have the witness signing a statement whose kind
+    /// field is attacker-chosen text that happened not to change the
+    /// accept/reject decision, and a consumer would read that as something the
+    /// witness vouched for.
+    ///
+    /// The signer answers it instead, and can, because
+    /// [`AdmissionProviderTrust::new`] refuses a key present in both sets. The
+    /// sets are therefore disjoint by construction, at most one contains any
+    /// signer, and the order of the two lookups below cannot matter.
+    ///
+    /// **Do not replace this with `receipt.signature_kind`.** It is the same
+    /// value in every accepted case, which is exactly what makes the
+    /// substitution look harmless.
+    pub fn established_kind(&self, signer: &str) -> Option<AdmissionSignatureKind> {
+        if !is_hash(signer) {
+            return None;
+        }
+        if self.provider_tee_signers.contains(signer) {
+            return Some(AdmissionSignatureKind::ProviderTee);
+        }
+        if self.gateway_signers.contains(signer) {
+            return Some(AdmissionSignatureKind::Gateway);
+        }
+        None
+    }
+
     /// Kind-agnostic membership, for the ingest-side re-check only.
     ///
     /// [`AdmissionEvidence`] carries no signature kind, so ingest cannot
@@ -282,14 +314,14 @@ pub fn verify_admission_call(
         (ReceiptSignatureKind::ProviderTee, Some(_)) => ModelAttribution::ReceiptBound,
         _ => ModelAttribution::RequestAsserted,
     };
-    // `accepts_kind` above already refused `Unrecognised`, so the remaining
-    // two are the only reachable kinds -- which is why the protocol enum has
-    // no third arm to map onto.
-    let signature_kind = match verified.signature_kind {
-        ReceiptSignatureKind::ProviderTee => AdmissionSignatureKind::ProviderTee,
-        ReceiptSignatureKind::Gateway => AdmissionSignatureKind::Gateway,
-        ReceiptSignatureKind::Unrecognised => return Err(AdmissionEvidenceError),
-    };
+    // From the signer, never from `verified.signature_kind` -- which is the
+    // caller's own label carried through `verify_receipt` unchanged
+    // (`receipt.rs` assigns `payload.signature_kind` verbatim). The evidence
+    // below is signed by the witness, so what goes into it has to be
+    // something the server established.
+    let signature_kind = trust
+        .established_kind(&verified.signing_address)
+        .ok_or(AdmissionEvidenceError)?;
     Ok(VerifiedAdmissionCall {
         binding,
         provider_signer: verified.signing_address,
@@ -563,6 +595,55 @@ mod tests {
             .expect("a gateway-only deployment is expressible");
         assert!(trust.accepts_request(ReceiptSignatureKind::Gateway, "anything", 1));
         assert!(!trust.accepts_request(ReceiptSignatureKind::ProviderTee, "anything", 1));
+    }
+
+    /// A mislabelled receipt is refused outright, never admitted under the
+    /// looser rule.
+    ///
+    /// This is what makes the kind-aware model check safe. A caller holding a
+    /// provider-TEE key whose model is not on the list could otherwise claim
+    /// `gateway` and skip the check. They cannot: the label only selects which
+    /// set the signer must be in, and a provider-TEE signer is not in the
+    /// gateway set, so the receipt is refused rather than taking the gateway
+    /// path.
+    ///
+    /// It rests entirely on the two sets being disjoint, which
+    /// [`AdmissionProviderTrust::new`] enforces. Remove that and this fails --
+    /// verified by mutation, not assumed: allowing a key in both sets makes
+    /// `accepts_kind(Gateway, provider_key)` true and the mislabelled receipt
+    /// is admitted.
+    #[test]
+    fn a_mislabelled_receipt_is_refused_rather_than_admitted_under_the_looser_rule() {
+        let provider = "a".repeat(64);
+        let gateway = "b".repeat(64);
+        let trust = AdmissionProviderTrust::new(
+            [provider.clone()],
+            [gateway.clone()],
+            ["operator-approved-model".to_string()],
+            1,
+        )
+        .expect("both kinds configured");
+
+        // The claim that would skip the model list, from a key that is not a
+        // gateway key.
+        assert!(
+            !trust.accepts_kind(ReceiptSignatureKind::Gateway, &provider),
+            "a provider-TEE signer claiming gateway would take the looser path"
+        );
+        // And the mirror: a gateway key cannot buy the attested reading.
+        assert!(!trust.accepts_kind(ReceiptSignatureKind::ProviderTee, &gateway));
+
+        // Whatever a caller claims, the recorded kind follows the signer.
+        assert_eq!(
+            trust.established_kind(&provider),
+            Some(AdmissionSignatureKind::ProviderTee)
+        );
+        assert_eq!(
+            trust.established_kind(&gateway),
+            Some(AdmissionSignatureKind::Gateway)
+        );
+        assert_eq!(trust.established_kind(&"c".repeat(64)), None);
+        assert_eq!(trust.established_kind("not-a-hash"), None);
     }
 
     /// The two vocabularies must not drift.
