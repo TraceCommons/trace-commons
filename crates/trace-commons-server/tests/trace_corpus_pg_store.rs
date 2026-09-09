@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 
-use chrono::Utc;
+use chrono::{SubsecRound, Utc};
 use secrecy::SecretString;
 use trace_commons_server::config::{DatabaseConfig, SslMode};
 use trace_commons_server::db::{
@@ -5128,4 +5128,77 @@ async fn residual_risk_basis_round_trips_and_distinguishes_unrecorded_from_empty
     );
 
     cleanup_tenant(&backend, tenant_id).await;
+}
+
+/// `trace_credit_holds.released_at` is a `timestamptz`, which holds microseconds
+/// and nothing finer. The file mirror keeps whatever it was handed. So the two
+/// sinks in `append_credit_hold_with_db_mirror` only agree when the value they
+/// are handed is already microsecond-truncated, and `reconcile_db_mirror`
+/// compares them for exact equality.
+///
+/// macOS clocks are microsecond-granular, so `Utc::now()` there can never expose
+/// this; the nanoseconds below are supplied by the fixture so the loss is
+/// reproducible off Linux. See #754.
+#[tokio::test]
+async fn pg_store_credit_hold_release_holds_only_microsecond_precision() {
+    let Some(backend) = postgres_backend().await else {
+        return;
+    };
+    backend.run_migrations().await.expect("run migrations");
+
+    let tenant_id = format!("pg-hold-precision-{}", Uuid::new_v4());
+    let submission_id = Uuid::new_v4();
+    backend
+        .upsert_trace_submission(sample_submission(&tenant_id, submission_id))
+        .await
+        .expect("insert precision source submission");
+
+    let hold_id = Uuid::new_v4();
+    let hold_write = |released_at: Option<chrono::DateTime<Utc>>| TraceCreditHoldWrite {
+        tenant_id: tenant_id.clone(),
+        hold_id,
+        credit_account_ref: "principal:hold-precision-account".to_string(),
+        credit_account_hash: "sha256:hold-precision-account".to_string(),
+        reason: TraceCreditHoldReason::AttestationDispute,
+        reason_hash: "sha256:hold-precision-reason".to_string(),
+        actor_principal_ref: "principal:admin".to_string(),
+        released_at,
+    };
+
+    let nanosecond_bearing = Utc::now().trunc_subsecs(6) + chrono::Duration::nanoseconds(760);
+    assert_ne!(
+        nanosecond_bearing.trunc_subsecs(6),
+        nanosecond_bearing,
+        "fixture must carry sub-microsecond digits for this test to mean anything"
+    );
+    let stored = backend
+        .upsert_trace_credit_hold(hold_write(Some(nanosecond_bearing)))
+        .await
+        .expect("upsert nanosecond-bearing credit hold release");
+    assert_eq!(
+        stored.released_at,
+        Some(nanosecond_bearing.trunc_subsecs(6)),
+        "PostgreSQL truncates a released_at to microseconds; a file mirror handed \
+         the untruncated value therefore disagrees with the row forever"
+    );
+    assert_ne!(
+        stored.released_at,
+        Some(nanosecond_bearing),
+        "an untruncated released_at cannot round-trip, so the reconciliation's \
+         equality check reports drift that is not there"
+    );
+
+    let microsecond_only = nanosecond_bearing.trunc_subsecs(6);
+    let stored = backend
+        .upsert_trace_credit_hold(hold_write(Some(microsecond_only)))
+        .await
+        .expect("upsert microsecond-truncated credit hold release");
+    assert_eq!(
+        stored.released_at,
+        Some(microsecond_only),
+        "a microsecond-truncated released_at must round-trip exactly; that is what \
+         lets credit_hold_release_mismatch_ids stay an exact-equality check"
+    );
+
+    cleanup_tenant(&backend, &tenant_id).await;
 }
