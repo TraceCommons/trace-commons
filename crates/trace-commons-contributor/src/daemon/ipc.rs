@@ -277,6 +277,7 @@ pub const METHODS: &[&str] = &[
     "near_account_capabilities",
     "native_wallet_flow",
     "near_account_start",
+    "near_ai_account_enroll",
     "near_account_status",
     "near_account_cancel",
     "near_ai_credential_start",
@@ -1746,6 +1747,7 @@ const ASYNC_ONLY_METHODS: &[(&str, &str)] = &[
         "admission-setup-requires-async",
     ),
     ("near_account_start", "near-signup-requires-async"),
+    ("near_ai_account_enroll", "near-signup-requires-async"),
     ("near_account_capabilities", "near-signup-requires-async"),
     (
         "near_ai_credential_start",
@@ -2589,6 +2591,7 @@ pub async fn handle_request_async(shared: &DaemonShared, req: &Request) -> Respo
             chrono::Utc::now().timestamp(),
         ),
         "near_account_start" => super::account_onboarding::handle_start(shared, req).await,
+        "near_ai_account_enroll" => super::nearai_onboarding::handle_enroll(shared, req).await,
         "near_ai_credential_start" => super::nearai_credential::handle_start(shared, req).await,
         // Both of these answer identically on the sync path -- they are in
         // `handle_request` too, and that is what defines the response. The
@@ -9734,6 +9737,7 @@ mod tests {
                 "admission-setup-requires-async",
             ),
             ("near_account_start", "near-signup-requires-async"),
+            ("near_ai_account_enroll", "near-signup-requires-async"),
             ("near_account_capabilities", "near-signup-requires-async"),
             ("native_wallet_flow", "near-signup-requires-async"),
             ("witness_preview_request", "witness-review-requires-async"),
@@ -9750,7 +9754,7 @@ mod tests {
     #[test]
     fn every_async_only_method_is_advertised_and_refused_synchronously() {
         let s = shared();
-        assert_eq!(ASYNC_ONLY_METHODS.len(), 16);
+        assert_eq!(ASYNC_ONLY_METHODS.len(), 17);
         let mut seen = std::collections::BTreeSet::new();
         for &(method, label) in ASYNC_ONLY_METHODS {
             assert!(
@@ -10180,7 +10184,7 @@ mod tests {
             "pub async fn handle_request_async(shared",
         ));
         assert_eq!(sync.len(), 37, "synchronous dispatcher arms: {sync:?}");
-        assert_eq!(asy.len(), 23, "asynchronous dispatcher arms: {asy:?}");
+        assert_eq!(asy.len(), 24, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();
         let advertised: std::collections::BTreeSet<String> =

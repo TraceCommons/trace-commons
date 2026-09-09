@@ -195,7 +195,7 @@ pub(super) fn published_host_allowlist(
     derive_signup_allowlist(configured, origin, &[endpoint])
 }
 
-fn signup_allowlist(origin: &str, published: &[&str]) -> Result<HostAllowlist> {
+pub(super) fn signup_allowlist(origin: &str, published: &[&str]) -> Result<HostAllowlist> {
     derive_signup_allowlist(&allowlist_for(None), origin, published)
 }
 
@@ -219,7 +219,10 @@ fn derive_signup_allowlist(
     Ok(HostAllowlist::from_hosts(hosts))
 }
 
-fn client(url: &str, allowed: &HostAllowlist) -> Result<trace_commons_operator_client::Client> {
+pub(super) fn client(
+    url: &str,
+    allowed: &HostAllowlist,
+) -> Result<trace_commons_operator_client::Client> {
     let parsed = reqwest::Url::parse(url)?;
     if !allowed.is_enforcing()
         || parsed.scheme() != "https"
