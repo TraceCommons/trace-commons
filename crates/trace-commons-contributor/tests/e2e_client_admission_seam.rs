@@ -551,21 +551,21 @@ async fn a_client_with_no_receipt_endpoint_refuses_before_contacting_the_proxy()
 /// tell that from any other refusal.
 ///
 /// Read what this can and cannot show. `handle_prepare_admission_session`
-/// maps every reason but the two receipt-endpoint ones onto the single label
+/// mapped every reason but the two receipt-endpoint ones onto the single label
 /// `admission_setup_unavailable`, so from outside the daemon an unsupported
-/// harness, a session that could not be found, an absent proxy and an
-/// untrusted one are indistinguishable. This test therefore does NOT claim
-/// to observe which branch fired -- it could not -- and the discrimination
-/// itself is held by `admission_setup::extracts_source_metadata_not_queue_id_or_filename`,
-/// which calls `exact_session_id` directly.
+/// harness, a session that could not be found, an absent proxy and an untrusted
+/// one were indistinguishable. This test was written to *show* that collapse.
 ///
-/// What it does show is the collapse, by driving two materially different
-/// sessions -- one on a harness the path cannot address, one on a harness it
-/// can -- through the same entry point and getting the same word back. That
-/// is the thing a contributor actually experiences, and it is not visible
-/// from any unit test of the branches.
+/// It now shows its removal, which is the same observation with the assertion
+/// turned over: two materially different sessions go through the same entry
+/// point and come back with different words. Inverted rather
+/// than deleted, because the end-to-end observation is the part unit tests of
+/// the branches cannot make, and it is what a contributor actually experiences.
+///
+/// See `admission_setup::every_admission_label_is_classified`, which fails if a
+/// cause is raised without being classified.
 #[tokio::test]
-async fn every_preparation_refusal_reaches_the_caller_as_the_same_word() {
+async fn two_unrelated_preparation_refusals_reach_the_caller_as_different_words() {
     let account = V61Account::provision("erin.near");
     let key = fixture_signer("witness-fixture-only");
     let mut cfg = config_for(&account, &fixture_address(&key));
@@ -607,14 +607,21 @@ async fn every_preparation_refusal_reaches_the_caller_as_the_same_word() {
             &prepare_request(entry_id),
         )
         .await;
-    assert_eq!(
-        response.error.expect("refused").message,
-        "admission_setup_unavailable"
-    );
+    let unsupported_word = response.error.expect("refused").message;
+    assert_eq!(unsupported_word, "admission_setup_source_unsupported");
 
-    // The other half of the collapse: a harness the path CAN address, whose
-    // preparation fails later and for an unrelated reason (no proxy is
-    // declared), reports the identical word.
+    // The other half: a harness the path CAN address, which fails for an
+    // unrelated reason and used to report the identical word.
+    //
+    // NOTE, and it is a finding rather than an aside: this half does not reach
+    // the proxy check its original comment claimed. It stops earlier, at the
+    // session lookup, so the fixture wiring below never exercised "no proxy is
+    // declared" at all. Under the collapse both produced
+    // `admission_setup_unavailable`, so nothing could tell the intended cause
+    // from the actual one -- which is the second-order cost of a single label,
+    // and why this is asserted as what it is rather than as what it was meant
+    // to be. Making it genuinely reach the proxy gate belongs with whoever
+    // owns this fixture.
     let claude_root =
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/claude-code");
     let claude =
@@ -644,11 +651,13 @@ async fn every_preparation_refusal_reaches_the_caller_as_the_same_word() {
             &prepare_request(claude_entry),
         )
         .await;
-    assert_eq!(
-        supported.error.expect("refused").message,
-        "admission_setup_unavailable",
-        "two unrelated failures must be reporting the same word, or this \
-         test is no longer about the collapse"
+    let other_word = supported.error.expect("refused").message;
+    assert_eq!(other_word, "admission_setup_session_missing");
+    assert_ne!(
+        unsupported_word, other_word,
+        "a harness this path cannot address and a session it cannot find are \
+         different problems with different remedies, and a contributor is now \
+         told which"
     );
 }
 

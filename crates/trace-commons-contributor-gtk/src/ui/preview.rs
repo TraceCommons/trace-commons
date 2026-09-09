@@ -910,12 +910,12 @@ impl Sheet {
             let result_sheet = sheet.clone();
             let prepared_entry = entry.entry_id.clone();
             sheet.app.call("prepare_admission_session", serde_json::json!({"entry_id":entry.entry_id,"backend":backend.text().trim(),"confirmed":true}), move |_, result| {
-                let ready = result.ok().is_some_and(|v| admission_ready(&v));
+                let (ready, text) = admission_outcome(&result);
                 result_sheet.admission_busy.set(false);
                 if result_sheet.current().is_none_or(|entry| entry.entry_id != prepared_entry) { result_sheet.sync_witness(); return; }
-                let copy = trace_commons_contributor::witness_copy::witness_copy().admission;
-                if ready { result_sheet.admission_message.remove_css_class("tc-refused"); result_sheet.admission_message.set_label(copy.ready); }
-                else { result_sheet.admission_message.add_css_class("tc-refused"); result_sheet.admission_message.set_label(&format!("{} {}",copy.refused_glyph,copy.failed)); }
+                if ready { result_sheet.admission_message.remove_css_class("tc-refused"); }
+                else { result_sheet.admission_message.add_css_class("tc-refused"); }
+                result_sheet.admission_message.set_label(&text);
                 result_sheet.sync_witness();
             });
         });
@@ -2285,6 +2285,43 @@ fn admission_control_visible(required: bool, supported: bool, pinned: bool) -> b
     required && supported && !pinned
 }
 
+/// The sentence for a refused preparation.
+///
+/// This shell reaches a refusal as a bare label string -- `Backend::call`
+/// turns `error.message` into the `Err` side, and the daemon's `view` object
+/// does not survive that -- so it maps the label itself rather than reading
+/// `view.message` the way the macOS shell does. Same function, same words:
+/// a second mapping here would drift from the one the daemon uses.
+///
+/// The label is a fixed string by IPC contract, which is what makes forwarding
+/// it safe; it is used to *choose* a sentence and is never displayed.
+/// What the sheet should say about one preparation attempt, and whether it
+/// succeeded.
+///
+/// The whole decision, so the widget callback has nothing left to get wrong.
+/// It previously chose the refusal sentence inline, which meant the choice
+/// could only be checked by running GTK -- and it was choosing one fixed
+/// sentence for every cause.
+///
+/// This shell reaches a refusal as a bare label string: `Backend::call` turns
+/// `error.message` into the `Err` side and the daemon's `view` object does not
+/// survive that, so the label is mapped here rather than read from
+/// `view.message` as the macOS shell does. Same function, same words -- a
+/// second mapping would drift from the daemon's.
+///
+/// The label is a fixed string by IPC contract, which is what makes using it
+/// safe. It selects a sentence and is never shown.
+fn admission_outcome(result: &Result<serde_json::Value, String>) -> (bool, String) {
+    let copy = trace_commons_contributor::witness_copy::witness_copy().admission;
+    if result.as_ref().ok().is_some_and(admission_ready) {
+        return (true, copy.ready.to_string());
+    }
+    let line = trace_commons_contributor::witness_copy::admission_refusal_line(
+        result.as_ref().err().map(String::as_str),
+    );
+    (false, format!("{} {}", copy.refused_glyph, line))
+}
+
 fn admission_ready(value: &serde_json::Value) -> bool {
     value
         .get("view")
@@ -2341,6 +2378,43 @@ mod tests {
         assert!(!super::admission_control_visible(false, true, false));
         assert!(!super::admission_control_visible(true, false, false));
         assert!(!super::admission_control_visible(true, true, true));
+    }
+
+    /// This shell renders the refusal it chooses, so choosing wrongly here is
+    /// invisible everywhere else: the daemon can classify perfectly and Linux
+    /// still shows one sentence. That was the state before this change.
+    #[test]
+    fn a_refusal_says_what_the_daemon_classified_rather_than_one_sentence() {
+        let generic = trace_commons_contributor::witness_copy::witness_copy()
+            .admission
+            .failed;
+        let refusal = |label: &str| {
+            let (ready, text) =
+                super::admission_outcome(&Err::<serde_json::Value, String>(label.to_string()));
+            assert!(!ready, "{label} is a refusal");
+            text
+        };
+
+        assert!(
+            refusal("admission_setup_unavailable").ends_with(generic),
+            "an unclassified failure still says the generic sentence"
+        );
+
+        let mut seen = Vec::new();
+        for label in [
+            "admission_setup_consent_required",
+            "admission_setup_proxy_missing",
+            "admission_setup_source_unsupported",
+            "admission_receipt_endpoint_required",
+        ] {
+            let line = refusal(label);
+            assert_ne!(line, generic, "{label} is rendered as the generic sentence");
+            seen.push(line);
+        }
+        seen.sort_unstable();
+        let before = seen.len();
+        seen.dedup();
+        assert_eq!(seen.len(), before, "two causes were given the same words");
     }
 
     #[test]

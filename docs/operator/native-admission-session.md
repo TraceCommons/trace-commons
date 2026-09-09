@@ -58,6 +58,41 @@ is absent (`admission_receipt_endpoint_required`) or fails trust validation
 credentials. This prerequisite applies to preparation for the next bound inference;
 it does not add a receipt requirement to ordinary admission-window history uploads.
 
+### Refusal codes
+
+`prepare_admission_session` names its cause. Every code below is a fixed string
+carrying no path, URL, host or token, and each maps to a sentence that says what
+is missing and what to do about it:
+
+| Code | Cause |
+| --- | --- |
+| `admission_setup_consent_required` | inference-body permission not granted, or the session not confirmed |
+| `admission_setup_unenrolled` | no enrolled account on this computer |
+| `admission_setup_device_missing` | the device key is absent |
+| `admission_setup_invalid` | the backend name is unusable |
+| `admission_setup_session_missing` | the queue entry names no readable session |
+| `admission_setup_session_invalid` | the session file could not be parsed |
+| `admission_setup_session_unknown` | the session carries no identifier |
+| `admission_setup_source_unsupported` | the agent that produced it is not readable by this build |
+| `admission_setup_proxy_missing` | IronWire is not configured or not capturing bodies |
+| `admission_setup_proxy_unsupported` | IronWire cannot serve this protocol or lifetime |
+| `admission_setup_proxy_untrusted` | IronWire's control token failed its trust check |
+| `admission_setup_endpoint_untrusted` | the host allowlist refuses an address this step must call |
+| `admission_setup_claim_expired` | the minted upload claim was already stale |
+| `admission_setup_state_changed` | the entry moved while preparing |
+| `admission_setup_registration_refused` | the proxy declined the binding |
+| `admission_setup_binding_invalid` | the returned challenge did not validate |
+| `admission_receipt_endpoint_required` | no receipt service is configured or published |
+| `admission_receipt_endpoint_invalid` | the configured receipt service is one this client will not call |
+| `admission_setup_unavailable` | anything else, including transport failures |
+
+`admission_setup_unavailable` is deliberately the only unclassified code.
+Failures reaching it come from filesystem, HTTP and JSON errors whose messages
+are written elsewhere and may contain a path or a host, so they are never
+forwarded; the daemon allowlists the codes above and reports everything else as
+unavailable. A code added without being classified would silently rejoin that
+bucket, so a test walks the source and fails when one is missing.
+
 ## Admission policy and provider trust
 
 Admission evidence uses `trace_commons_admission_evidence.v2`. Only Ed25519

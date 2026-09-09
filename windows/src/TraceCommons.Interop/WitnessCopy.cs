@@ -266,6 +266,16 @@ public sealed record AdmissionCopy
     [JsonPropertyName("ready")] public string Ready { get; init; } = "";
     [JsonPropertyName("failed")] public string Failed { get; init; } = "";
     [JsonPropertyName("failed_receipt_endpoint")] public string FailedReceiptEndpoint { get; init; } = "";
+    [JsonPropertyName("failed_receipt_endpoint_invalid")] public string FailedReceiptEndpointInvalid { get; init; } = "";
+    [JsonPropertyName("failed_permission")] public string FailedPermission { get; init; } = "";
+    [JsonPropertyName("failed_not_enrolled")] public string FailedNotEnrolled { get; init; } = "";
+    [JsonPropertyName("failed_session_unreadable")] public string FailedSessionUnreadable { get; init; } = "";
+    [JsonPropertyName("failed_source_unsupported")] public string FailedSourceUnsupported { get; init; } = "";
+    [JsonPropertyName("failed_proxy_missing")] public string FailedProxyMissing { get; init; } = "";
+    [JsonPropertyName("failed_proxy_untrusted")] public string FailedProxyUntrusted { get; init; } = "";
+    [JsonPropertyName("failed_hosts_untrusted")] public string FailedHostsUntrusted { get; init; } = "";
+    [JsonPropertyName("failed_backend")] public string FailedBackend { get; init; } = "";
+    [JsonPropertyName("failed_try_again")] public string FailedTryAgain { get; init; } = "";
     [JsonPropertyName("refused_glyph")] public string RefusedGlyph { get; init; } = "";
     [JsonPropertyName("refused_tone")] public string RefusedTone { get; init; } = "";
 }

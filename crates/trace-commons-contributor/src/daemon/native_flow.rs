@@ -374,14 +374,9 @@ pub fn admission_response(mut response: Response, now: i64) -> Response {
             .and_then(Value::as_i64)
             .is_some_and(|expiry| expiry > now);
     let copy = witness_copy().admission;
-    // Eighteen other labels reach this point and share `copy.failed`, which
-    // tells a contributor to check settings and retry. That is right for all
-    // of them and wrong for exactly one: a commons that published no receipt
-    // service is not a setting, and retrying cannot clear it.
-    let refused = match response.error.as_ref().map(|error| error.message.as_str()) {
-        Some("admission_receipt_endpoint_required") => copy.failed_receipt_endpoint,
-        _ => copy.failed,
-    };
+    let refused = crate::witness_copy::admission_refusal_line(
+        response.error.as_ref().map(|error| error.message.as_str()),
+    );
     value["view"] = json!({"ready":ready,"state":if ready{"Ready"}else{"Refused"},"message":if ready{copy.ready}else{refused},"tone":if ready{"neutral"}else{copy.refused_tone},"glyph":if ready{""}else{copy.refused_glyph}});
     response
 }
@@ -536,11 +531,15 @@ mod tests {
     /// advice that can never work.
     #[test]
     fn a_missing_receipt_endpoint_does_not_borrow_the_generic_failure_sentence() {
-        let generic = admission_message("admission_setup_proxy_missing");
+        // `admission_setup_unavailable` is the one code that stays generic --
+        // it covers transport and filesystem failures this build cannot name.
+        // Every other code now classifies, so picking a named one here would
+        // compare two distinct sentences and pass for the wrong reason.
+        let generic = admission_message("admission_setup_unavailable");
         assert_eq!(
             generic,
             witness_copy().admission.failed,
-            "an ordinary admission failure still says the generic sentence"
+            "an unclassified failure still says the generic sentence"
         );
         assert_ne!(
             admission_message("admission_receipt_endpoint_required"),
@@ -553,6 +552,47 @@ mod tests {
             witness_copy().admission.failed_receipt_endpoint,
             "the sentence comes from the shared copy, so the three shells say the same \
              thing this one does"
+        );
+    }
+
+    /// Every cause a person must act on differently gets its own sentence.
+    ///
+    /// One label having escaped the generic sentence is not the fix: a person
+    /// who has not granted the inference-body permission, one whose IronWire
+    /// is not running, and one whose session came from an agent this build
+    /// cannot read are three different problems with three different actions,
+    /// and all three are told to check their settings and try again.
+    #[test]
+    fn each_distinct_admission_cause_gets_its_own_sentence() {
+        let generic = admission_message("admission_setup_unavailable");
+        assert_eq!(
+            generic,
+            witness_copy().admission.failed,
+            "an unclassified failure still says the generic sentence"
+        );
+        let distinct = [
+            "admission_setup_consent_required",
+            "admission_setup_unenrolled",
+            "admission_setup_proxy_missing",
+            "admission_setup_source_unsupported",
+            "admission_setup_endpoint_untrusted",
+            "admission_receipt_endpoint_required",
+        ];
+        for label in distinct {
+            assert_ne!(
+                admission_message(label),
+                generic,
+                "{label} still borrows the sentence that tells a person to retry"
+            );
+        }
+        let mut seen: Vec<String> = distinct.iter().map(|l| admission_message(l)).collect();
+        seen.sort();
+        let before = seen.len();
+        seen.dedup();
+        assert_eq!(
+            seen.len(),
+            before,
+            "two causes needing different actions were given the same words"
         );
     }
 

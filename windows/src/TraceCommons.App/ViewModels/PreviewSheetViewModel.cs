@@ -124,7 +124,7 @@ public sealed class PreviewSheetViewModel : INotifyPropertyChanged, IDisposable
         try {
             var response = await _host.CallAsync(AdmissionPreparation.Method, AdmissionPreparation.Request(Entry.EntryId, backend)).ConfigureAwait(true);
             _admissionRefused = !AdmissionPreparation.IsReady(response);
-            _admissionMessage = _admissionRefused ? AdmissionPreparation.Failed : AdmissionPreparation.Success;
+            _admissionMessage = _admissionRefused ? AdmissionPreparation.Refusal(response) : AdmissionPreparation.Success;
         } catch { _admissionRefused = true; _admissionMessage = AdmissionPreparation.Failed; }
         finally { _admissionBusy = false; Raise(nameof(CanPrepareAdmission)); Raise(nameof(AdmissionMessage)); Raise(nameof(AdmissionRefusalMessage)); Raise(nameof(AdmissionNeutralMessage)); Raise(nameof(AdmissionGlyph)); Raise(nameof(CanRequestWitness)); }
     }
