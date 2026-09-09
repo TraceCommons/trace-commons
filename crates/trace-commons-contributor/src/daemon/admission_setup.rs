@@ -159,15 +159,62 @@ pub async fn handle_prepare_admission_session(shared: &DaemonShared, req: &Reque
             req.id,
             serde_json::json!({"status":"ready_for_next_inference","expires_at":expires_at}),
         ),
-        Err(error) => {
-            let label = match error.downcast_ref::<ReceiptEndpointSetupError>() {
-                Some(ReceiptEndpointSetupError::Required) => "admission_receipt_endpoint_required",
-                Some(ReceiptEndpointSetupError::Invalid) => "admission_receipt_endpoint_invalid",
-                None => "admission_setup_unavailable",
-            };
-            Response::err(req.id, ERR_UNAVAILABLE, label)
-        }
+        Err(error) => Response::err(req.id, ERR_UNAVAILABLE, admission_label(&error)),
     }
+}
+
+/// Every cause `prepare` and its callees name for themselves.
+///
+/// This is an **allowlist, not a passthrough**, and that is the whole design.
+/// `prepare` also fails through `?` on filesystem, HTTP and JSON errors whose
+/// messages are written by other crates and can carry a path, a URL or a host.
+/// Returning `error.to_string()` would put those on the wire and into whatever
+/// a shell renders, which the hash-only rule forbids. A message that is not
+/// one of these fixed strings is therefore not a label, and becomes
+/// `admission_setup_unavailable` -- which is the honest answer for it: something
+/// failed that this build cannot name.
+///
+/// Adding a cause means adding its label here as well as at its `bail!`. A
+/// label missing from this list is silently generic, which is the defect this
+/// list exists to end, so `every_admission_label_is_classified` walks the
+/// source and fails when one is absent.
+const ADMISSION_LABELS: [&str; 16] = [
+    "admission_setup_consent_required",
+    "admission_setup_unenrolled",
+    "admission_setup_invalid",
+    "admission_setup_session_missing",
+    "admission_setup_session_invalid",
+    "admission_setup_session_unknown",
+    "admission_setup_source_unsupported",
+    "admission_setup_proxy_missing",
+    "admission_setup_proxy_untrusted",
+    "admission_setup_proxy_unsupported",
+    "admission_setup_device_missing",
+    "admission_setup_endpoint_untrusted",
+    "admission_setup_claim_expired",
+    "admission_setup_state_changed",
+    "admission_setup_registration_refused",
+    "admission_setup_binding_invalid",
+];
+
+/// The wire label for one refusal.
+///
+/// `prepare` distinguishes sixteen causes and this route used to keep two of
+/// them, so a person who had not granted the inference-body permission and a
+/// person whose IronWire was not running were told the same thing. The label
+/// exists already; the only work here is not throwing it away.
+fn admission_label(error: &anyhow::Error) -> &'static str {
+    if let Some(receipt) = error.downcast_ref::<ReceiptEndpointSetupError>() {
+        return match receipt {
+            ReceiptEndpointSetupError::Required => "admission_receipt_endpoint_required",
+            ReceiptEndpointSetupError::Invalid => "admission_receipt_endpoint_invalid",
+        };
+    }
+    let message = error.to_string();
+    ADMISSION_LABELS
+        .into_iter()
+        .find(|label| *label == message)
+        .unwrap_or("admission_setup_unavailable")
 }
 fn check_consent(cfg: &ContributorConfig, body_export: bool, confirmed: bool) -> Result<()> {
     if !confirmed
@@ -580,6 +627,65 @@ mod tests {
             error.downcast_ref::<ReceiptEndpointSetupError>(),
             Some(ReceiptEndpointSetupError::Invalid)
         ));
+    }
+
+    /// A cause added to this file without a label here is silently generic.
+    ///
+    /// That is exactly the defect this work removes, so it must not be able to
+    /// come back by omission. This reads the source rather than the binary
+    /// because a `bail!` string has no runtime representation to enumerate,
+    /// and it fails on absence rather than staying quiet about it.
+    ///
+    /// The two `admission_receipt_endpoint_*` labels are deliberately not in
+    /// `ADMISSION_LABELS`: they arrive typed, through
+    /// `ReceiptEndpointSetupError`, and are matched before the list is
+    /// consulted.
+    #[test]
+    fn every_admission_label_is_classified() {
+        let source = include_str!("admission_setup.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("the module above its tests");
+
+        let mut found: Vec<&str> = Vec::new();
+        for (marker, close) in [("bail!(\"", '"'), ("anyhow!(\"", '"')] {
+            let mut rest = production;
+            while let Some(at) = rest.find(marker) {
+                rest = &rest[at + marker.len()..];
+                let end = rest.find(close).expect("a closed string literal");
+                let label = &rest[..end];
+                if label.starts_with("admission_") {
+                    found.push(label);
+                }
+                rest = &rest[end..];
+            }
+        }
+        found.sort_unstable();
+        found.dedup();
+        assert!(
+            !found.is_empty(),
+            "the scan found no labels at all, so it proves nothing"
+        );
+
+        let classified: Vec<&str> = ADMISSION_LABELS.to_vec();
+        let unclassified: Vec<&&str> = found
+            .iter()
+            .filter(|label| !classified.contains(label))
+            .collect();
+        assert!(
+            unclassified.is_empty(),
+            "these causes would reach a person as the generic sentence: {unclassified:?}"
+        );
+
+        let unused: Vec<&&str> = classified
+            .iter()
+            .filter(|label| !found.contains(label))
+            .collect();
+        assert!(
+            unused.is_empty(),
+            "these labels are classified but no longer raised: {unused:?}"
+        );
     }
 
     /// The label the daemon computed must survive to the response.
