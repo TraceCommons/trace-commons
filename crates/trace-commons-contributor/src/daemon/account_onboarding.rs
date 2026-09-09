@@ -244,6 +244,15 @@ async fn validated_capability(
         )
         .await
         .map_err(|_| SignupRefusal::Unreachable)?;
+    validate_capability(url, capability)
+}
+
+/// Everything the capabilities response has to satisfy, with no I/O of its
+/// own, so the decision is testable without a live HTTPS commons.
+fn validate_capability(
+    origin: &str,
+    capability: Capability,
+) -> std::result::Result<(String, String, WitnessSettings), SignupRefusal> {
     if !capability.ready {
         return Err(SignupRefusal::Unsupported);
     }
@@ -258,7 +267,7 @@ async fn validated_capability(
     // enter the list because the person chose this origin, and only for as
     // long as this call: an operator's own allowlist, when set, still governs
     // and refuses either of them if it does not list them.
-    let published = signup_allowlist(url, &[&issuer, &witness.url])
+    let published = signup_allowlist(origin, &[&issuer, &witness.url])
         .map_err(|_| SignupRefusal::AddressRefused)?;
     client(&issuer, &published).map_err(|_| SignupRefusal::AddressRefused)?;
     client(&witness.url, &published).map_err(|_| SignupRefusal::AddressRefused)?;
@@ -793,6 +802,108 @@ mod tests {
             let allowed = derive_signup_allowlist(&unset, url, &[]).unwrap();
             assert!(client(url, &allowed).is_err(), "{url} must be refused");
         }
+    }
+
+    fn capability(issuer: &str, witness_url: &str) -> Capability {
+        Capability {
+            ready: true,
+            issuer_url: Some(issuer.into()),
+            audience: Some("trace-commons-upload".into()),
+            witness: Some(serde_json::json!({
+                "url": witness_url,
+                "signing_address": format!("0x{}", "ab".repeat(20)),
+                "expected_measurements": [format!("mrtd={}", "ab".repeat(48))],
+            })),
+        }
+    }
+
+    /// A real commons publishes its issuer and its witness on hosts that are
+    /// not the ingest host. If those do not enter the list this step enforces,
+    /// signup is refused against every such deployment -- which is the same
+    /// failure this change exists to remove, moved one step later.
+    #[test]
+    fn a_commons_may_publish_its_issuer_and_witness_on_other_hosts() {
+        let (issuer, audience, witness) = validate_capability(
+            "https://commons.example",
+            capability("https://issuer.example", "https://witness.example"),
+        )
+        .expect("hosts the chosen origin published must be reachable");
+        assert_eq!(issuer, "https://issuer.example");
+        assert_eq!(audience, "trace-commons-upload");
+        assert_eq!(witness.url, "https://witness.example");
+    }
+
+    /// And the list is still a list. A published host that fails the address
+    /// rules is refused as an address, not admitted because the origin named
+    /// it.
+    #[test]
+    fn a_published_host_still_has_to_be_an_address_this_daemon_will_dial() {
+        for issuer in [
+            "http://issuer.example",
+            "https://user@issuer.example",
+            "https://issuer.example/?token=abc",
+            "https://",
+        ] {
+            assert_eq!(
+                validate_capability(
+                    "https://commons.example",
+                    capability(issuer, "https://witness.example")
+                ),
+                Err(SignupRefusal::AddressRefused),
+                "{issuer}"
+            );
+        }
+        // A witness address that breaks the same rules is caught earlier, by
+        // the trust checks, and is reported as trust material this client will
+        // not accept rather than as an address.
+        for witness_url in ["http://witness.example", "https://witness.example?x=1"] {
+            assert_eq!(
+                validate_capability(
+                    "https://commons.example",
+                    capability("https://issuer.example", witness_url)
+                ),
+                Err(SignupRefusal::Unsupported),
+                "{witness_url}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_commons_that_is_not_offering_signup_is_unsupported_rather_than_refused() {
+        let mut not_ready = capability("https://issuer.example", "https://witness.example");
+        not_ready.ready = false;
+        assert_eq!(
+            validate_capability("https://commons.example", not_ready),
+            Err(SignupRefusal::Unsupported)
+        );
+        let mut no_audience = capability("https://issuer.example", "https://witness.example");
+        no_audience.audience = Some("   ".into());
+        assert_eq!(
+            validate_capability("https://commons.example", no_audience),
+            Err(SignupRefusal::Unsupported)
+        );
+        let mut no_witness = capability("https://issuer.example", "https://witness.example");
+        no_witness.witness = None;
+        assert_eq!(
+            validate_capability("https://commons.example", no_witness),
+            Err(SignupRefusal::Unsupported)
+        );
+    }
+
+    /// `client` refuses a permissive list outright rather than trusting
+    /// `HostAllowlist::check`, which is a no-op on one. Every caller here
+    /// passes an enforcing list, so this guard is what keeps a future one
+    /// from quietly reaching anything at all.
+    #[test]
+    fn a_permissive_list_is_refused_rather_than_checked() {
+        let permissive = HostAllowlist::permissive();
+        assert!(
+            permissive
+                .check(&reqwest::Url::parse("https://evil.example").unwrap())
+                .is_ok()
+        );
+        assert!(client("https://evil.example", &permissive).is_err());
+        assert!(client("https://commons.example", &permissive).is_err());
     }
 
     #[test]
