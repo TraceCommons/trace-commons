@@ -194,19 +194,22 @@ async fn enroll(
     // is spent: a commons that is unreachable or not offering enrollment must
     // not cost the contributor their refresh token either.
     let (issuer_url, audience, witness, receipt_endpoint) =
-        super::account_onboarding::validated_capability(ingest_url)
-            .await
-            .map_err(|refusal| match refusal {
-                super::account_onboarding::SignupRefusal::AddressRefused => {
-                    anyhow!("near_ai_enroll_endpoint_refused")
-                }
-                super::account_onboarding::SignupRefusal::Unreachable => {
-                    anyhow!("near_ai_enroll_commons_unreachable")
-                }
-                super::account_onboarding::SignupRefusal::Unsupported => {
-                    anyhow!("near_ai_enroll_commons_unsupported")
-                }
-            })?;
+        super::account_onboarding::validated_capability(
+            ingest_url,
+            super::account_onboarding::Path::NearAiLogin,
+        )
+        .await
+        .map_err(|refusal| match refusal {
+            super::account_onboarding::SignupRefusal::AddressRefused => {
+                anyhow!("near_ai_enroll_endpoint_refused")
+            }
+            super::account_onboarding::SignupRefusal::Unreachable => {
+                anyhow!("near_ai_enroll_commons_unreachable")
+            }
+            super::account_onboarding::SignupRefusal::Unsupported => {
+                anyhow!("near_ai_enroll_commons_unsupported")
+            }
+        })?;
 
     let identity = DeviceIdentity::load_or_generate(&shared.store)?;
     let verifier = random()?;

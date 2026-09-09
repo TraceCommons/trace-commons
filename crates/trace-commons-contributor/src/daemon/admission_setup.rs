@@ -121,7 +121,16 @@ async fn adopt_published_receipt_endpoint(
     if cfg.inference_receipt_endpoint.is_some() {
         return Ok(());
     }
-    let published = super::account_onboarding::published_receipt_endpoint(&cfg.ingest_url).await;
+    // Asked for the path this config was actually enrolled by. A
+    // login-enrolled contributor on a commons that offers only the login path
+    // would otherwise be told there is no published endpoint, because the
+    // wallet readiness flag is false -- a refusal belonging to the other
+    // mechanism.
+    let published = super::account_onboarding::published_receipt_endpoint(
+        &cfg.ingest_url,
+        super::account_onboarding::Path::for_tenant(&cfg.tenant_id),
+    )
+    .await;
     adopt_receipt_endpoint(shared, cfg, published.as_deref())
 }
 
