@@ -85,13 +85,17 @@ use trace_commons_server::near_account_identity::{
 };
 use trace_commons_server::near_attestation::client::{
     API_KEY_CONTROL as NEAR_ATTESTATION_API_KEY_CONTROL,
-    AttestationClient as NearAttestationClient,
+    AttestationClient as NearAttestationClient, AttestedKeyReportClient,
     BASE_URL_CONTROL as NEAR_ATTESTATION_BASE_URL_CONTROL, HttpAttestationClient, INTEL_PCS_URL,
     MODEL_CONTROL as NEAR_ATTESTATION_MODEL_CONTROL,
 };
 use trace_commons_server::near_attestation::drill::{
     NearAttestationDrillOutcome, generate_drill_nonce,
     run_near_attestation_drill as run_near_attestation_drill_steps,
+};
+use trace_commons_server::near_attestation::key_drift::{
+    AttestedKeyDrift, AttestedKeyDriftOutcome, RandomNonce, ReportCredentialVerdict,
+    compare_attested_key_drift, run_attested_key_drift_drill,
 };
 use trace_commons_server::near_attestation::measurements::{
     EXPECTED_MEASUREMENTS_ENV, expected_measurements_from_env,
@@ -1570,6 +1574,17 @@ struct AppState {
     /// A drill run against `None` refuses with a named missing control; it
     /// never reports a pass it did not earn.
     near_attestation_client: Option<Arc<dyn NearAttestationClient>>,
+    /// The same endpoint, held at the seam the attested-key drift probe
+    /// needs.
+    ///
+    /// A second field rather than a supertrait because the two are different
+    /// questions of the same service: `AttestationClient` fetches the
+    /// `signing_algo=ecdsa` report and can pay for a completion, while
+    /// [`AttestedKeyReportClient`] fetches the `signing_algo=ed25519` report
+    /// and fetches collateral per quote. Both are built from one
+    /// `HttpAttestationClient` and one credential, so they cannot disagree
+    /// about which endpoint is configured.
+    near_attestation_key_report_client: Option<Arc<dyn AttestedKeyReportClient>>,
     /// Frozen clock for the attestation drill's collateral-validity check.
     ///
     /// `None` means wall-clock time, which is the only correct production
@@ -4022,11 +4037,21 @@ impl AppState {
             None => None,
         };
 
-        let near_attestation_client = build_near_attestation_client_from_env()?;
+        // One client, two seams. Constructing it twice would let a future
+        // edit configure one half and not the other, which is the shape of a
+        // probe that silently observes a different endpoint than the one
+        // admission uses.
+        let near_attestation_endpoint = build_near_attestation_client_from_env()?;
+        let near_attestation_client = near_attestation_endpoint
+            .clone()
+            .map(|client| client as Arc<dyn NearAttestationClient>);
+        let near_attestation_key_report_client =
+            near_attestation_endpoint.map(|client| client as Arc<dyn AttestedKeyReportClient>);
 
         Ok(Self {
             root,
             near_attestation_client,
+            near_attestation_key_report_client,
             near_attestation_verification_clock: None,
             driver_liveness: Arc::new(DriverLivenessRegistry::default()),
             tokens: Arc::new(tokens),
@@ -7876,6 +7901,10 @@ fn app(state: Arc<AppState>) -> Router {
         .route(
             "/v1/admin/near-attestation-drill",
             post(near_attestation_drill_handler),
+        )
+        .route(
+            "/v1/admin/near-attestation-key-drift-drill",
+            post(near_attestation_key_drift_drill_handler),
         )
         .route(
             "/v1/workers/credit-settlements/run",
@@ -73186,8 +73215,7 @@ fn trace_revocation_propagation_summary_from_audit_event(
 /// drill's job is to name missing controls, and a boot failure would name it
 /// to nobody. [`near_attestation_missing_controls`] is what turns the `None`
 /// back into a list an operator can act on.
-fn build_near_attestation_client_from_env() -> anyhow::Result<Option<Arc<dyn NearAttestationClient>>>
-{
+fn build_near_attestation_client_from_env() -> anyhow::Result<Option<Arc<HttpAttestationClient>>> {
     let base_url = trimmed_env(TRACE_COMMONS_NEAR_AI_BASE_URL);
     let model = trimmed_env(TRACE_COMMONS_NEAR_AI_MODEL);
     let api_key = trimmed_env(TRACE_COMMONS_NEAR_AI_API_KEY);
@@ -73421,6 +73449,265 @@ async fn near_attestation_drill_handler(
     Ok(Json(response))
 }
 
+/// The rollout-smoke check name the drift probe records under.
+///
+/// Deliberately distinct from `near_attestation`: the two drills probe
+/// different reports (`signing_algo=ecdsa` versus `ed25519`) and answer
+/// different questions, and sharing a check name would let one drill's
+/// evidence satisfy the other's gate.
+const NEAR_ATTESTATION_KEY_DRIFT_CHECK: &str = "near_attestation_key_drift";
+
+#[derive(Debug, Default, Deserialize)]
+struct TraceNearAttestationKeyDriftDrillRequest {
+    #[serde(default)]
+    purpose: Option<String>,
+    #[serde(default)]
+    record_evidence: bool,
+    /// The previous run's `outcome`, posted back verbatim.
+    ///
+    /// The probe keeps no state of its own: an operator stores the `outcome`
+    /// object from the last run and hands it back here. Absent is the
+    /// ordinary first-run case and is **not** drift -- see
+    /// `baseline_compared`.
+    #[serde(default)]
+    baseline: Option<AttestedKeyDriftOutcome>,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceNearAttestationKeyDriftDrillResponse {
+    tenant_id: String,
+    tenant_storage_ref: String,
+    generated_at: DateTime<Utc>,
+    purpose: String,
+    /// Whether **this run** passed every step. Says nothing about drift.
+    ready: bool,
+    evidence_hash: String,
+    expected_measurements_env: &'static str,
+    /// Absent when the probe did not run at all -- a missing endpoint control
+    /// or an unparseable pin set. Absent is not a pass.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    outcome: Option<AttestedKeyDriftOutcome>,
+    /// Whether the credential this deployment holds reached the report
+    /// endpoint, mirrored out of the outcome so it is answerable without
+    /// reading the step list. `unauthorized` here is one of the questions the
+    /// probe exists to answer and is never folded into a generic failure.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    credential: Option<ReportCredentialVerdict>,
+    /// False when no baseline was supplied. A first run has nothing to
+    /// compare against; that is a baseline, not a finding.
+    baseline_compared: bool,
+    /// Every difference from the baseline, each named separately. Empty when
+    /// `baseline_compared` is false.
+    drift: Vec<AttestedKeyDrift>,
+    /// The same findings as stable flat labels, for evidence and for logs. A
+    /// measurement move names its register; a count change and a TCB change
+    /// stay distinct from a key rotation.
+    drift_labels: Vec<String>,
+    drift_detected: bool,
+    blocking_gaps: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recorded_evidence: Option<TraceRolloutSmokeEvidenceResponse>,
+}
+
+/// A stable flat label for one finding.
+///
+/// A pure rendering of the variant the comparison already chose -- it makes no
+/// judgement of its own. Registers, counts and TCB statuses are public
+/// identifiers and appear in full; nothing here can reach a key, because the
+/// comparison never sees one.
+fn attested_key_drift_label(drift: &AttestedKeyDrift) -> String {
+    match drift {
+        AttestedKeyDrift::ReportUnavailable => "report_unavailable".to_string(),
+        AttestedKeyDrift::CredentialRejected => "credential_rejected".to_string(),
+        AttestedKeyDrift::GatewayKeyRotated => "gateway_key_rotated".to_string(),
+        AttestedKeyDrift::ModelKeysRotated => "model_keys_rotated".to_string(),
+        AttestedKeyDrift::ModelEntryCountChanged { before, after } => {
+            format!("model_entry_count_changed:{before}->{after}")
+        }
+        AttestedKeyDrift::MeasurementMoved { field } => format!("measurement_moved:{field}"),
+        AttestedKeyDrift::TcbStatusChanged { before, after } => {
+            format!("tcb_status_changed:{before}->{after}")
+        }
+        AttestedKeyDrift::QuoteVerificationRegressed => "quote_verification_regressed".to_string(),
+        AttestedKeyDrift::QuoteVerificationRecovered => "quote_verification_recovered".to_string(),
+    }
+}
+
+fn near_attestation_key_drift_evidence_hash(
+    tenant: &TenantAuth,
+    purpose: &str,
+    outcome: Option<&AttestedKeyDriftOutcome>,
+    drift_labels: &[String],
+    blocking_gaps: &[String],
+) -> String {
+    let evidence = serde_json::json!({
+        "schema": "trace_commons_near_attestation_key_drift_drill.v1",
+        "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
+        "actor_principal_ref": tenant.principal_ref,
+        "purpose_hash": sha256_prefixed(purpose),
+        "outcome": outcome,
+        "drift": drift_labels,
+        "blocking_gaps": blocking_gaps,
+    });
+    sha256_prefixed(&evidence.to_string())
+}
+
+/// Probe the per-model attested keys, and name what moved since last time.
+///
+/// Read-only in the strongest sense available: it fetches a report and
+/// collateral, verifies quotes, and writes nothing but hash-only smoke
+/// evidence. It pins no key, admits nothing, and changes no admission
+/// behaviour. See `docs/operator/near-attestation-drill.md`.
+async fn run_near_attestation_key_drift_drill(
+    state: &AppState,
+    tenant: &TenantAuth,
+    request: TraceNearAttestationKeyDriftDrillRequest,
+) -> ApiResult<TraceNearAttestationKeyDriftDrillResponse> {
+    let generated_at = Utc::now();
+    let purpose = request
+        .purpose
+        .as_deref()
+        .map(str::trim)
+        .filter(|purpose| !purpose.is_empty())
+        .unwrap_or("trace_commons_near_attestation_key_drift_drill")
+        .to_string();
+
+    let mut blocking_gaps: Vec<String> = Vec::new();
+    let mut outcome = None;
+
+    let expected = match expected_measurements_from_env() {
+        Ok(expected) => expected,
+        Err(error) => {
+            // The error names a key, never a value.
+            blocking_gaps.push(format!("expected_measurements_config_invalid:{error}"));
+            None
+        }
+    };
+    let expected_measurements_valid = blocking_gaps.is_empty();
+
+    match state.near_attestation_key_report_client.as_ref() {
+        Some(client) if expected_measurements_valid => {
+            let now_unix = state
+                .near_attestation_verification_clock
+                .unwrap_or(generated_at)
+                .timestamp()
+                .max(0) as u64;
+            outcome = Some(
+                run_attested_key_drift_drill(
+                    client.as_ref(),
+                    expected.as_ref(),
+                    &RandomNonce,
+                    now_unix,
+                )
+                .await,
+            );
+        }
+        Some(_) => {}
+        None => {
+            let missing = near_attestation_missing_controls();
+            if missing.is_empty() {
+                blocking_gaps.push("near_attestation_client_unavailable".to_string());
+            }
+            for control in missing {
+                blocking_gaps.push(format!("missing_control:{control}"));
+            }
+        }
+    }
+
+    let credential = outcome.as_ref().map(|outcome| outcome.credential);
+    // "The credential was refused" is one of the questions this probe exists
+    // to answer. Left to `blocking_steps` alone it arrives as an HTTP-status
+    // label on `report_fetched`, which is exactly the generic failure the
+    // operator cannot act on.
+    if credential == Some(ReportCredentialVerdict::Unauthorized) {
+        blocking_gaps.push("report_credential_unauthorized".to_string());
+    }
+    if let Some(outcome) = outcome.as_ref() {
+        blocking_gaps.extend(outcome.blocking_steps());
+    }
+
+    // Drift is compared only where there is something to compare. A first run
+    // is a baseline, not a finding.
+    let baseline_compared = matches!((&request.baseline, &outcome), (Some(_), Some(_)));
+    let drift = match (&request.baseline, &outcome) {
+        (Some(before), Some(after)) => compare_attested_key_drift(before, after),
+        _ => Vec::new(),
+    };
+    let drift_labels: Vec<String> = drift.iter().map(attested_key_drift_label).collect();
+    let drift_detected = !drift.is_empty();
+
+    let ready = blocking_gaps.is_empty() && outcome.as_ref().is_some_and(|outcome| outcome.passed);
+    let evidence_hash = near_attestation_key_drift_evidence_hash(
+        tenant,
+        &purpose,
+        outcome.as_ref(),
+        &drift_labels,
+        &blocking_gaps,
+    );
+
+    let mut response = TraceNearAttestationKeyDriftDrillResponse {
+        tenant_id: tenant.tenant_id.clone(),
+        tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+        generated_at,
+        purpose: purpose.clone(),
+        ready,
+        evidence_hash,
+        expected_measurements_env: EXPECTED_MEASUREMENTS_ENV,
+        outcome,
+        credential,
+        baseline_compared,
+        drift,
+        drift_labels,
+        drift_detected,
+        blocking_gaps,
+        recorded_evidence: None,
+    };
+
+    if request.record_evidence {
+        let evidence = TraceRolloutSmokeEvidenceResponse {
+            event_id: Uuid::new_v4(),
+            tenant_id: tenant.tenant_id.clone(),
+            tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+            check_name: NEAR_ATTESTATION_KEY_DRIFT_CHECK.to_string(),
+            // Drift against a supplied baseline is a failure of the check even
+            // where every step of this run passed: the keys the client pins
+            // moved, and that is the event the probe exists to catch.
+            status: if response.ready && !response.drift_detected {
+                TraceRolloutSmokeEvidenceStatus::Passed
+            } else {
+                TraceRolloutSmokeEvidenceStatus::Failed
+            },
+            evidence_hash: response.evidence_hash.clone(),
+            evidence_ref_hash: Some(sha256_prefixed(&purpose)),
+            actor_principal_ref: tenant.principal_ref.clone(),
+            recorded_at: Utc::now(),
+        };
+        append_audit_event_with_db_mirror(
+            state,
+            tenant,
+            TraceCommonsAuditEvent::rollout_smoke_evidence(&evidence),
+            StorageTraceAuditAction::Read,
+            StorageTraceAuditSafeMetadata::Empty,
+        )
+        .await
+        .map_err(internal_error)?;
+        response.recorded_evidence = Some(evidence);
+    }
+
+    Ok(response)
+}
+
+async fn near_attestation_key_drift_drill_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(request): Json<TraceNearAttestationKeyDriftDrillRequest>,
+) -> ApiResult<Json<TraceNearAttestationKeyDriftDrillResponse>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(&tenant)?;
+    let response = run_near_attestation_key_drift_drill(state.as_ref(), &tenant, request).await?;
+    Ok(Json(response))
+}
+
 const TRACE_OPERATIONAL_ROLLOUT_SMOKE_REQUIRED_CHECKS: &[&str] = &[
     "submit_status",
     "tenant_canary_isolation",
@@ -73440,6 +73727,7 @@ const TRACE_OPERATIONAL_ROLLOUT_SMOKE_REQUIRED_CHECKS: &[&str] = &[
     "ranking_model_readiness",
     "credit_settlement",
     "near_attestation",
+    "near_attestation_key_drift",
     "object_primary_reads",
     "object_store_migration",
     "postgres_rls_readiness",
@@ -73459,7 +73747,12 @@ const TRACE_OPERATIONAL_ROLLOUT_SMOKE_REQUIRED_CHECKS: &[&str] = &[
 /// drill's result. A deployment that does use NEAR AI cannot opt out of a red
 /// drill; there is no allow-list, no severity dial and no acknowledgement
 /// flag. That distinction is the whole of it.
-const TRACE_OPERATIONAL_ROLLOUT_SMOKE_CONDITIONAL_CHECKS: &[&str] = &["near_attestation"];
+///
+/// `near_attestation_key_drift` is conditional on the same thing and for the
+/// same reason: it probes the same endpoint, with the same credential, for the
+/// `signing_algo=ed25519` report.
+const TRACE_OPERATIONAL_ROLLOUT_SMOKE_CONDITIONAL_CHECKS: &[&str] =
+    &["near_attestation", "near_attestation_key_drift"];
 
 /// The required checks for a deployment, given which conditional surfaces it
 /// has configured.
@@ -73468,8 +73761,10 @@ fn rollout_smoke_required_checks(near_attestation_configured: bool) -> Vec<&'sta
         .iter()
         .copied()
         .filter(|check| {
+            // Every conditional check today keys on the NEAR AI surface being
+            // configured at all -- never on any drill's result.
             !TRACE_OPERATIONAL_ROLLOUT_SMOKE_CONDITIONAL_CHECKS.contains(check)
-                || (*check == "near_attestation" && near_attestation_configured)
+                || near_attestation_configured
         })
         .collect()
 }
