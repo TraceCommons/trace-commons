@@ -520,6 +520,50 @@ pub struct PrivateInferenceCopy {
     pub harness_plan_nothing_to_change: &'static str,
     pub harness_plan_entry_unusable: &'static str,
     pub harness_plan_no_config_path: &'static str,
+    /// Enrolling this device with the NEAR AI login a contributor already
+    /// has, instead of a NEAR wallet.
+    ///
+    /// Invite-free admission needs an identity to count abuse against; it
+    /// does not need a wallet. A contributor cannot produce an admissible
+    /// receipt without a NEAR AI account in the first place, so requiring a
+    /// wallet as well is a second onboarding for an identity they already
+    /// hold. Both paths are offered and neither is removed.
+    ///
+    /// Reached by the shells as `tc_near_ai_enroll_*`. The ten refusals below
+    /// are the daemon's own control names, and each says its own thing -- see
+    /// `every_enrolment_refusal_says_its_own_thing`.
+    pub near_ai_enroll_title: &'static str,
+    /// [`NEAR_AI_ENROLL_WHAT`].
+    pub near_ai_enroll_what: &'static str,
+    /// [`NEAR_AI_ENROLL_ACTION`].
+    pub near_ai_enroll_action: &'static str,
+    /// What a contributor with no NEAR AI session is shown. NOT a refusal:
+    /// they have not done anything wrong, they have a step to take first.
+    pub near_ai_enroll_needs_login: &'static str,
+    /// [`NEAR_AI_ENROLL_WORKING`].
+    pub near_ai_enroll_working: &'static str,
+    /// [`NEAR_AI_ENROLL_DONE`].
+    pub near_ai_enroll_done: &'static str,
+    /// The ten refusals, in the daemon's order.
+    pub near_ai_enroll_already_enrolled: &'static str,
+    /// [`NEAR_AI_ENROLL_NO_SESSION_LINE`].
+    pub near_ai_enroll_no_session: &'static str,
+    /// [`NEAR_AI_ENROLL_ENDPOINT_REFUSED_LINE`].
+    pub near_ai_enroll_endpoint_refused: &'static str,
+    /// [`NEAR_AI_ENROLL_TOKEN_UNAVAILABLE_LINE`].
+    pub near_ai_enroll_token_unavailable: &'static str,
+    /// [`NEAR_AI_ENROLL_START_FAILED_LINE`].
+    pub near_ai_enroll_start_failed: &'static str,
+    /// [`NEAR_AI_ENROLL_COMMONS_UNREACHABLE_LINE`].
+    pub near_ai_enroll_commons_unreachable: &'static str,
+    /// [`NEAR_AI_ENROLL_COMMONS_UNSUPPORTED_LINE`].
+    pub near_ai_enroll_commons_unsupported: &'static str,
+    /// [`NEAR_AI_ENROLL_INVALID_LINE`].
+    pub near_ai_enroll_invalid: &'static str,
+    /// [`NEAR_AI_ENROLL_VERIFICATION_FAILED_LINE`].
+    pub near_ai_enroll_verification_failed: &'static str,
+    /// [`NEAR_AI_ENROLL_UNAVAILABLE_LINE`].
+    pub near_ai_enroll_unavailable: &'static str,
     pub credential_title: &'static str,
     pub credential_what: &'static str,
     pub credential_cost: &'static str,
@@ -1875,6 +1919,22 @@ pub fn private_inference_copy() -> PrivateInferenceCopy {
         harness_plan_nothing_to_change: HARNESS_PLAN_NOTHING_TO_CHANGE,
         harness_plan_entry_unusable: HARNESS_PLAN_ENTRY_UNUSABLE,
         harness_plan_no_config_path: HARNESS_PLAN_NO_CONFIG_PATH,
+        near_ai_enroll_title: NEAR_AI_ENROLL_TITLE,
+        near_ai_enroll_what: NEAR_AI_ENROLL_WHAT,
+        near_ai_enroll_action: NEAR_AI_ENROLL_ACTION,
+        near_ai_enroll_needs_login: NEAR_AI_ENROLL_NEEDS_LOGIN,
+        near_ai_enroll_working: NEAR_AI_ENROLL_WORKING,
+        near_ai_enroll_done: NEAR_AI_ENROLL_DONE,
+        near_ai_enroll_already_enrolled: NEAR_AI_ENROLL_ALREADY_ENROLLED_LINE,
+        near_ai_enroll_no_session: NEAR_AI_ENROLL_NO_SESSION_LINE,
+        near_ai_enroll_endpoint_refused: NEAR_AI_ENROLL_ENDPOINT_REFUSED_LINE,
+        near_ai_enroll_token_unavailable: NEAR_AI_ENROLL_TOKEN_UNAVAILABLE_LINE,
+        near_ai_enroll_start_failed: NEAR_AI_ENROLL_START_FAILED_LINE,
+        near_ai_enroll_commons_unreachable: NEAR_AI_ENROLL_COMMONS_UNREACHABLE_LINE,
+        near_ai_enroll_commons_unsupported: NEAR_AI_ENROLL_COMMONS_UNSUPPORTED_LINE,
+        near_ai_enroll_invalid: NEAR_AI_ENROLL_INVALID_LINE,
+        near_ai_enroll_verification_failed: NEAR_AI_ENROLL_VERIFICATION_FAILED_LINE,
+        near_ai_enroll_unavailable: NEAR_AI_ENROLL_UNAVAILABLE_LINE,
         credential_title: CREDENTIAL_TITLE,
         credential_what: CREDENTIAL_WHAT,
         credential_cost: CREDENTIAL_COST,
@@ -2233,7 +2293,141 @@ pub fn attestation_reason_line(label: &str) -> &'static str {
     }
 }
 
+/// The offer's heading.
+pub const NEAR_AI_ENROLL_TITLE: &str = "Join with your NEAR AI login";
+
+/// What the offer is, and the thing a contributor is deciding.
+///
+/// Says "wallet" out loud on purpose. Somebody looking at two ways to join
+/// needs to know which one saves them a step, and the wallet is the step.
+pub const NEAR_AI_ENROLL_WHAT: &str = "Use the NEAR AI account you already sign in with. No wallet, no seed phrase, and nothing else to set up.";
+
+/// The control.
+pub const NEAR_AI_ENROLL_ACTION: &str = "Join with NEAR AI";
+
+/// Before there is a session to enrol with.
+///
+/// NOT a refusal. Nothing has gone wrong and nothing was attempted; there is
+/// a step to take first, and this says which.
+pub const NEAR_AI_ENROLL_NEEDS_LOGIN: &str =
+    "Sign in to NEAR AI first, then come back here to join.";
+
+/// While the ceremony runs.
+pub const NEAR_AI_ENROLL_WORKING: &str = "Joining with your NEAR AI account...";
+
+/// After it lands.
+pub const NEAR_AI_ENROLL_DONE: &str = "This device is joined. You can contribute sessions now.";
+
+/// `already_enrolled`. Not a failure a contributor caused or can fix by
+/// retrying, and it must not read as one.
+pub const NEAR_AI_ENROLL_ALREADY_ENROLLED_LINE: &str =
+    "This device has already joined a commons, so there is nothing to do here.";
+
+/// `no_session`. The first of the three refusals that happen before anything
+/// is spent, and the one most easily mistaken for a network problem.
+///
+/// Names the step and nothing else. A contributor who has simply never signed
+/// in must not be sent to look at their connection.
+pub const NEAR_AI_ENROLL_NO_SESSION_LINE: &str =
+    "You are not signed in to NEAR AI yet. Sign in, then try joining again.";
+
+/// `endpoint_refused`. The address itself was rejected before any request.
+pub const NEAR_AI_ENROLL_ENDPOINT_REFUSED_LINE: &str =
+    "That commons address was refused before anything was sent. Check the address and try again.";
+
+/// `token_unavailable`.
+pub const NEAR_AI_ENROLL_TOKEN_UNAVAILABLE_LINE: &str =
+    "Your NEAR AI sign-in could not be used just now. Sign in again, then retry.";
+
+/// `start_failed`.
+pub const NEAR_AI_ENROLL_START_FAILED_LINE: &str =
+    "The commons did not start the join. Nothing was sent from your account; try again shortly.";
+
+/// `commons_unreachable`. The second pre-spend refusal.
+///
+/// Says the commons could not be reached and says nothing about signing in:
+/// this one really is about the network, and the sign-in refusal above really
+/// is not.
+pub const NEAR_AI_ENROLL_COMMONS_UNREACHABLE_LINE: &str =
+    "That commons could not be reached. Nothing was sent; check the address or try again shortly.";
+
+/// `commons_unsupported`. The third pre-spend refusal.
+///
+/// A commons that is reachable and working, and simply does not offer this
+/// way in. Distinct from both of the above, because the thing to do is
+/// different: neither retrying nor signing in will help.
+pub const NEAR_AI_ENROLL_COMMONS_UNSUPPORTED_LINE: &str =
+    "That commons does not offer joining with a NEAR AI login. You can still join with a wallet.";
+
+/// `invalid`. A malformed request, which a contributor cannot cause from the
+/// app and cannot act on.
+pub const NEAR_AI_ENROLL_INVALID_LINE: &str =
+    "The join request was not accepted. Nothing was sent from your account.";
+
+/// `verification_failed`. The commons declined to bind this device.
+pub const NEAR_AI_ENROLL_VERIFICATION_FAILED_LINE: &str = "The commons could not confirm this device. Nothing was joined; try again, and sign in again if it repeats.";
+
+/// Anything this build has never heard of, including a label from a newer
+/// daemon. Claims nothing specific rather than borrowing another refusal's
+/// words.
+pub const NEAR_AI_ENROLL_UNAVAILABLE_LINE: &str =
+    "Joining with a NEAR AI login is not available right now. Nothing was joined.";
+
+/// The sentence for one login-enrolment control name.
+///
+/// Every label the daemon can return reaches its own sentence, and anything
+/// else reaches the generic one. Never the empty string: a refusal a shell
+/// cannot name is still a refusal a contributor has to be told about.
+#[must_use]
+pub fn near_ai_enroll_line(label: &str) -> &'static str {
+    match label {
+        NEAR_AI_ENROLL_ALREADY_ENROLLED => NEAR_AI_ENROLL_ALREADY_ENROLLED_LINE,
+        NEAR_AI_ENROLL_NO_SESSION => NEAR_AI_ENROLL_NO_SESSION_LINE,
+        NEAR_AI_ENROLL_ENDPOINT_REFUSED => NEAR_AI_ENROLL_ENDPOINT_REFUSED_LINE,
+        NEAR_AI_ENROLL_TOKEN_UNAVAILABLE => NEAR_AI_ENROLL_TOKEN_UNAVAILABLE_LINE,
+        NEAR_AI_ENROLL_START_FAILED => NEAR_AI_ENROLL_START_FAILED_LINE,
+        NEAR_AI_ENROLL_COMMONS_UNREACHABLE => NEAR_AI_ENROLL_COMMONS_UNREACHABLE_LINE,
+        NEAR_AI_ENROLL_COMMONS_UNSUPPORTED => NEAR_AI_ENROLL_COMMONS_UNSUPPORTED_LINE,
+        NEAR_AI_ENROLL_INVALID => NEAR_AI_ENROLL_INVALID_LINE,
+        NEAR_AI_ENROLL_VERIFICATION_FAILED => NEAR_AI_ENROLL_VERIFICATION_FAILED_LINE,
+        _ => NEAR_AI_ENROLL_UNAVAILABLE_LINE,
+    }
+}
+
+/// How firmly that sentence reads.
+///
+/// `no_session` is `Attention`: there is a step the contributor can take and
+/// the surface should point at it. Everything else that failed is `Refused`,
+/// except `already_enrolled`, which refused nothing -- the device is joined,
+/// which is the outcome they wanted.
+#[must_use]
+pub fn near_ai_enroll_tone(label: &str) -> PrivateInferenceTone {
+    match label {
+        NEAR_AI_ENROLL_ALREADY_ENROLLED => PrivateInferenceTone::Clear,
+        NEAR_AI_ENROLL_NO_SESSION => PrivateInferenceTone::Attention,
+        _ => PrivateInferenceTone::Refused,
+    }
+}
+
 // PRIVATE-INFERENCE-SURFACE-END
+
+// The daemon's control names for login enrolment. Below the marker on
+// purpose: the sweep above bans mechanism words from sentences a contributor
+// reads, and these are wire labels nobody is shown. Mirrored here rather than
+// imported because `daemon::nearai_onboarding` lands separately; when it does,
+// these should be sourced from it so a rename moves one string.
+/// The daemon's control names for login enrolment, so a shell never spells
+/// one and a rename moves one string.
+pub const NEAR_AI_ENROLL_ALREADY_ENROLLED: &str = "near_ai_enroll_already_enrolled";
+pub const NEAR_AI_ENROLL_NO_SESSION: &str = "near_ai_enroll_no_session";
+pub const NEAR_AI_ENROLL_ENDPOINT_REFUSED: &str = "near_ai_enroll_endpoint_refused";
+pub const NEAR_AI_ENROLL_TOKEN_UNAVAILABLE: &str = "near_ai_enroll_token_unavailable";
+pub const NEAR_AI_ENROLL_START_FAILED: &str = "near_ai_enroll_start_failed";
+pub const NEAR_AI_ENROLL_COMMONS_UNREACHABLE: &str = "near_ai_enroll_commons_unreachable";
+pub const NEAR_AI_ENROLL_COMMONS_UNSUPPORTED: &str = "near_ai_enroll_commons_unsupported";
+pub const NEAR_AI_ENROLL_INVALID: &str = "near_ai_enroll_invalid";
+pub const NEAR_AI_ENROLL_VERIFICATION_FAILED: &str = "near_ai_enroll_verification_failed";
+pub const NEAR_AI_ENROLL_UNAVAILABLE: &str = "near_ai_enroll_unavailable";
 
 /// The eligibility state and reason labels, re-exported from the daemon
 /// module that produces them -- the same rule the credential labels above
@@ -3694,8 +3888,8 @@ mod tests {
         // set difference: each must say the thing a contributor would act on.
         let no_session = near_ai_enroll_line(NEAR_AI_ENROLL_NO_SESSION).to_lowercase();
         assert!(
-            no_session.contains("log in"),
-            "the no-session refusal does not tell them to log in: {no_session}"
+            no_session.contains("sign in"),
+            "the no-session refusal does not name the step to take: {no_session}"
         );
         assert!(
             !no_session.contains("unreachable") && !no_session.contains("network"),
@@ -3704,13 +3898,13 @@ mod tests {
 
         let unreachable = near_ai_enroll_line(NEAR_AI_ENROLL_COMMONS_UNREACHABLE).to_lowercase();
         assert!(
-            !unreachable.contains("log in"),
+            !unreachable.contains("sign in"),
             "an unreachable commons was reported as a login problem: {unreachable}"
         );
 
         let unsupported = near_ai_enroll_line(NEAR_AI_ENROLL_COMMONS_UNSUPPORTED).to_lowercase();
         assert!(
-            !unsupported.contains("log in") && !unsupported.contains("unreachable"),
+            !unsupported.contains("sign in") && !unsupported.contains("unreachable"),
             "a commons not offering this was reported as something else: {unsupported}"
         );
     }
@@ -3759,7 +3953,7 @@ mod tests {
         let fields = payload.as_object().expect("a JSON object");
         assert_eq!(
             fields.len(),
-            113,
+            129,
             "the payload's field count changed -- update the shells' decoders \
              and the tests that pin the set"
         );
