@@ -9212,6 +9212,40 @@ mod tests {
         String::from_utf8_lossy(&buf).starts_with("HTTP/1.1 200")
     }
 
+    /// Wait for `port` to stop answering, up to `within`.
+    ///
+    /// **The instant assertion this replaces was wrong about the contract.**
+    /// `set_settings` does not promise the listener is closed by the time it
+    /// returns, and `PrivateInference::apply` is explicit about it: turning the
+    /// switch off spawns the shutdown onto the daemon runtime, sets
+    /// `PrivateInferenceState::Stopping`, and returns. Both off-path sites do
+    /// this, and the join handle is reaped later by `poll`. So between the
+    /// call returning and the spawned task running, the accept loop may serve
+    /// one more connection. Locally the spawned task wins every time; under CI
+    /// load it need not, which is #823.
+    ///
+    /// Waiting is therefore not a workaround for flakiness -- it is the
+    /// assertion matching the promise. What the daemon guarantees is that the
+    /// port *is* released, not that it is released synchronously, and that is
+    /// what this checks.
+    ///
+    /// It fails closed: a port still answering at the deadline returns false
+    /// and the caller's assertion fires. Widening the deadline would not hide
+    /// a regression that stopped releasing the port at all, because no
+    /// deadline makes a leaked listener stop answering.
+    fn health_stops_answering_within(port: u16, within: std::time::Duration) -> bool {
+        let deadline = std::time::Instant::now() + within;
+        loop {
+            if !health_answers(port) {
+                return true;
+            }
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
     /// The switch flipped through the synchronous path leaves a proxy that
     /// is still serving after the call returns.
     ///
@@ -9284,8 +9318,13 @@ mod tests {
             serde_json::json!({"private_inference": false}),
         );
         assert!(off.error.is_none(), "{:?}", off.error);
+        // Not `!health_answers(port)` on its own: see
+        // `health_stops_answering_within`. The switch answers while the state
+        // is `Stopping` and the shutdown is still a spawned task, so the
+        // promise being checked is that the port is released, not that it is
+        // released before the call returns.
         assert!(
-            !health_answers(port),
+            health_stops_answering_within(port, std::time::Duration::from_secs(10)),
             "turning it off through the same path must release the port"
         );
     }
