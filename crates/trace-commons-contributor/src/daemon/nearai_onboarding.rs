@@ -440,7 +440,29 @@ fn persist(
     }))
 }
 
-fn start_payload(code_challenge: &str, device_public_key: &str) -> serde_json::Value {
+/// The body `enroll` sends to `provision/start`.
+///
+/// # Why this is `pub`
+///
+/// The same reason as [`device_proof_for_ceremony`], and it is the same seam.
+/// `enroll` is the only caller and must stay so; this is `pub` so the **wire
+/// contract is testable**, because the server parses this body with
+/// `deny_unknown_fields` and a **required** `code_challenge_method`.
+///
+/// That requirement is exactly what the shipped client missed. It sent
+/// `code_challenge` and `device_public_key` alone, the missing field failed the
+/// `Deserialize`, and `provision/start` was refused at the parse boundary on
+/// every attempt -- while both halves' suites stayed green, because the
+/// server's tests built their own well-formed body and the client's tests never
+/// sent one. A cross-check that constructs its own start request cannot see
+/// this class at all; only one that calls the function the client actually
+/// calls can.
+///
+/// **Do not fold it back inline as a tidy-up.** Inline, it is reachable only by
+/// standing up a capability route, a host allowlist, a session and a token
+/// exchange, and the seam at which the two halves can be shown to agree about
+/// this body disappears.
+pub fn start_payload(code_challenge: &str, device_public_key: &str) -> serde_json::Value {
     serde_json::json!({
         "code_challenge": code_challenge,
         "code_challenge_method": "S256",

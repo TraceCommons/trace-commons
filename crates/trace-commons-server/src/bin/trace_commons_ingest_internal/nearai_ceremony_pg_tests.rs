@@ -45,7 +45,9 @@
 use super::*;
 use axum::body::Body;
 use tower::ServiceExt;
-use trace_commons_contributor::daemon::nearai_onboarding::device_proof_for_ceremony;
+use trace_commons_contributor::daemon::nearai_onboarding::{
+    device_proof_for_ceremony, start_payload,
+};
 use trace_commons_contributor::identity::DeviceIdentity;
 
 /// A subject nobody has enrolled before, minted per call.
@@ -320,11 +322,11 @@ async fn a_client_device_proof_enrols_against_the_real_handlers() {
     let (status, body) = post_json(
         &state,
         "/v1/account/near-ai/provision/start",
-        serde_json::json!({
-            "device_public_key": identity.public_key_b64,
-            "code_challenge": challenge,
-            "code_challenge_method": "S256",
-        }),
+        // The client's own body, not one this test composes. A hand-written
+        // start request is a second implementation of the client's half, and
+        // it agrees with the server by construction -- which is precisely how
+        // the omitted `code_challenge_method` survived until #851.
+        start_payload(&challenge, &identity.public_key_b64),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
@@ -408,11 +410,11 @@ async fn a_refused_finish_writes_no_anchor_row() {
     let (_, body) = post_json(
         &state,
         "/v1/account/near-ai/provision/start",
-        serde_json::json!({
-            "device_public_key": identity.public_key_b64,
-            "code_challenge": challenge,
-            "code_challenge_method": "S256",
-        }),
+        // The client's own body, not one this test composes. A hand-written
+        // start request is a second implementation of the client's half, and
+        // it agrees with the server by construction -- which is precisely how
+        // the omitted `code_challenge_method` survived until #851.
+        start_payload(&challenge, &identity.public_key_b64),
     )
     .await;
     let started: serde_json::Value = serde_json::from_slice(&body).unwrap();
@@ -472,11 +474,11 @@ async fn a_finish_naming_an_account_is_refused_over_the_wire() {
     let (_, body) = post_json(
         &state,
         "/v1/account/near-ai/provision/start",
-        serde_json::json!({
-            "device_public_key": identity.public_key_b64,
-            "code_challenge": challenge,
-            "code_challenge_method": "S256",
-        }),
+        // The client's own body, not one this test composes. A hand-written
+        // start request is a second implementation of the client's half, and
+        // it agrees with the server by construction -- which is precisely how
+        // the omitted `code_challenge_method` survived until #851.
+        start_payload(&challenge, &identity.public_key_b64),
     )
     .await;
     let started: serde_json::Value = serde_json::from_slice(&body).unwrap();
