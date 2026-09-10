@@ -83,15 +83,15 @@ async fn ceremony_pg_admin() -> Arc<PgBackend> {
 /// back to something weaker.
 fn ceremony_identity() -> trace_commons_server::near_account_identity::NearAccountIdentity {
     use base64::Engine as _;
-    let crypto = trace_commons_server::secrets::SecretsCrypto::new(SecretString::from(
-        "a".repeat(32),
-    ))
-    .expect("fixture SecretsCrypto");
-    let kek: Arc<dyn trace_commons_server::trace_artifact_kek::KmsKeyWrapper> =
-        Arc::new(trace_commons_server::trace_artifact_kek::LocalMasterKeyWrapper::new(
+    let crypto =
+        trace_commons_server::secrets::SecretsCrypto::new(SecretString::from("a".repeat(32)))
+            .expect("fixture SecretsCrypto");
+    let kek: Arc<dyn trace_commons_server::trace_artifact_kek::KmsKeyWrapper> = Arc::new(
+        trace_commons_server::trace_artifact_kek::LocalMasterKeyWrapper::new(
             crypto,
             "nearai-ceremony-fixture",
-        ));
+        ),
+    );
     trace_commons_server::near_account_identity::NearAccountIdentity::from_parts(
         Some(&base64::engine::general_purpose::STANDARD.encode([9u8; 32])),
         Some(kek),
@@ -161,7 +161,11 @@ async fn ceremony_state(db: Arc<PgBackend>, near_ai_base: String) -> Arc<AppStat
     state
 }
 
-async fn post_json(state: &Arc<AppState>, path: &str, body: serde_json::Value) -> (StatusCode, Vec<u8>) {
+async fn post_json(
+    state: &Arc<AppState>,
+    path: &str,
+    body: serde_json::Value,
+) -> (StatusCode, Vec<u8>) {
     let request = axum::http::Request::builder()
         .method("POST")
         .uri(path)
@@ -182,7 +186,10 @@ async fn post_json(state: &Arc<AppState>, path: &str, body: serde_json::Value) -
 async fn anchor_rows(db: &PgBackend) -> i64 {
     let client = db.raw_pool_for_tests_and_diagnostics().get().await.unwrap();
     client
-        .query_one("SELECT count(*)::bigint FROM trace_near_account_anchors", &[])
+        .query_one(
+            "SELECT count(*)::bigint FROM trace_near_account_anchors",
+            &[],
+        )
         .await
         .unwrap()
         .get(0)
@@ -229,7 +236,10 @@ async fn a_client_device_proof_enrols_against_the_real_handlers() {
     .await;
     assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
     let started: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    let nonce_wire = started["nonce"].as_str().expect("a nonce field").to_string();
+    let nonce_wire = started["nonce"]
+        .as_str()
+        .expect("a nonce field")
+        .to_string();
     let ceremony_id = started["ceremony_id"].as_str().unwrap().to_string();
     let expires_at = started["expires_at"].as_i64().unwrap();
 
@@ -278,7 +288,12 @@ async fn a_client_device_proof_enrols_against_the_real_handlers() {
         String::from_utf8_lossy(&body)
     );
     let finished: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert!(finished["tenant_id"].as_str().unwrap().starts_with("nearai-"));
+    assert!(
+        finished["tenant_id"]
+            .as_str()
+            .unwrap()
+            .starts_with("nearai-")
+    );
     assert!(!finished["anchor_hash"].as_str().unwrap().is_empty());
     assert_eq!(
         anchor_rows(&db).await,
@@ -333,7 +348,11 @@ async fn a_refused_finish_writes_no_anchor_row() {
         }),
     )
     .await;
-    assert_ne!(status, StatusCode::OK, "a proof for another ceremony was accepted");
+    assert_ne!(
+        status,
+        StatusCode::OK,
+        "a proof for another ceremony was accepted"
+    );
     assert_eq!(
         anchor_rows(&db).await,
         before,
