@@ -3,7 +3,7 @@
 > A small model for processing traces, explaining outcomes, and changing policy safely.
 
 - **Status:** Proposed target design
-- **Date:** 2026-09-08
+- **Date:** 2026-09-09
 - **Scope:** Domain model, workflow, persistence, policy development, and rollout
 
 ## Review guide
@@ -47,8 +47,10 @@ A **phase** is one step in the pipeline:
 
 - **Admission** decides whether processing can continue.
 - **Review** transforms and approves the trace for the registry.
-- **Score** assigns credits from one or more valuations.
-- **Settle** applies the assigned credits to a ledger.
+- **Score** assigns credits.
+- **Settle** decides index membership and applies index and credit operations.
+
+
 
 ### Policy
 
@@ -58,7 +60,7 @@ A **policy** is the versioned implementation of one phase. Examples include:
 - A Review policy that removes PII.
 - A Score policy that assigns a fixed amount.
 - A Score policy that aggregates valuations from several participants.
-- A Settle policy that writes to a local or external ledger.
+- A Settle policy that updates the index and uses the existing credit process.
 
 Each policy owns its internal algorithm and dependencies. An observer, scorer,
 embedder, or vector index is a policy dependency, not a durable domain concept.
@@ -94,14 +96,23 @@ enum ReviewDecision {
 }
 
 struct ScoreDecision {
-    credits: u64,
+    credit_microcredits: u64,
+}
+
+enum IndexMembershipDecision {
+    Exclude { reason: ReasonCode },
+    Include { command_hash: ContentHash, entry_count: u32 },
 }
 
 struct SettleDecision {
-    credits: u64,
-    ledger_receipt_ref_hash: ContentHash,
+    index_membership: IndexMembershipDecision,
+    credit_microcredits_finalized: u64,
+    settlement_batch_ref_hash: Option<ContentHash>,
 }
 ```
+
+One credit equals 1,000,000 microcredits. All policy and storage boundaries use
+integer microcredits. A conversion rejects excess precision and overflow.
 
 An operational error is not a decision. The run remains retryable or moves to
 a failed state with a safe error label.
@@ -112,8 +123,8 @@ a failed state with a safe error label.
 
 - Rate-limit state and PII findings for Admission.
 - The source revision and transformation report for Review.
-- Participant valuations and signed-attestation hashes for Score.
-- The Score outcome and ledger response reference for Settle.
+- Measurements, index state, and valuation evidence for Score.
+- The index-membership result and internal settlement batch for Settle.
 
 Large or sensitive evidence stays in encrypted object storage. The outcome
 contains bounded values and content hashes.
@@ -123,8 +134,9 @@ contains bounded values and content hashes.
 An **evaluation** explains how the policy mapped its evidence to its decision.
 It uses structured fields and stable reason codes, not free-form prose.
 
-For example, Score evidence can contain five valuations. Its evaluation can
-record that three valid valuations produced a median of 200 credits.
+For example, Score evidence can contain an index snapshot, measurements, and
+coverage. Its evaluation records the rule that produced credit and index
+membership.
 
 ### Outcome
 
@@ -163,6 +175,10 @@ flowchart LR
     D --> O
     B --> O
 ```
+
+
+
+
 
 ## 3. Bundle identity
 
@@ -223,11 +239,18 @@ flowchart TD
     R -->|Reject| X
     R -->|Approve| G[Commit reviewed revision to registry]
     G --> S[Score: asynchronous]
-    S -->|0 credits| C[Complete]
-    S -->|More than 0 credits| L[Settle: asynchronous]
-    L -->|Ledger confirms| C
-    L -->|Retryable error| L
+    S --> L[Settle: asynchronous]
+    L --> I[Decide and apply index membership]
+    L --> B[Use credit settlement if required]
+    I --> O[Record Settle outcome]
+    B --> O
+    B --> N[Existing NEAR outbox]
+    O --> C[Complete]
 ```
+
+
+
+
 
 ### Admission
 
@@ -236,6 +259,9 @@ can complete before the response.
 
 The policy can reject a request because of rate limits. It can quarantine a
 trace because of synchronous PII risk. It can also admit a valid trace.
+
+Admission validates the contribution path, schema, tenant grant, consent, and
+allowed uses. Model-based substance and novelty valuation belongs in Score.
 
 Admission can read indexes but cannot make external writes. This restriction
 makes a repeated request safe before its outcome commits.
@@ -255,105 +281,106 @@ commits the approved revision to the registry.
 A static Review policy can pass the trace through during tests. A production
 policy can scrub PII or apply another required transformation.
 
+Review uses only the submitted contribution artifact and server-generated
+evidence. It cannot request or collect more contributor-side data.
+
+The field `request_content_hash` identifies the exact approved artifact. The
+Review outcome binds this source hash to the approved registry revision.
+
+Review can query an index when its policy requires one, but it cannot modify an
+index.
+
 The Review outcome identifies the source revision, transformation evidence,
 and approved registry revision. A rejected trace does not enter the registry.
 
 ### Score
 
 Score runs after Review approves the registry revision. It determines the
-credit amount, not an objective value for the trace.
+credit amount. It does not define an objective trace value.
 
 A Score policy can use:
 
 - A fixed amount.
-- One trusted external valuation.
-- Several independent valuations.
-- An auction or another aggregation rule.
+- Model-based substance and novelty measurements.
+- A read-only query of the active index.
+- One or more external valuations.
 
-The outcome records each used valuation as evidence. Each participant uses a
-hash-only reference and an attestation hash.
+Score can read an index, but it cannot modify one. A shadow policy uses an
+isolated index namespace and cannot affect an active decision.
 
-An external valuation is a signed claim:
-
-```rust
-struct ValuationClaim {
-    tenant_id: TenantId,
-    reviewed_revision_hash: ContentHash,
-    bundle_id: BundleId,
-    score_policy_id: PolicyId,
-    round_id: ValuationRoundId,
-    credits: u64,
-    participant_key_id: KeyId,
-    nonce: Nonce,
-    expires_at: DateTime<Utc>,
-}
-```
-
-The Score phase creates its round before it requests valuations. A retry
-resumes that round and retains its deadline.
-
-The bundle defines permitted signers, quorum, ranges, duplicate-signer rules,
-late-response behavior, aggregation, and deterministic tie handling. The phase
-seals one response snapshot before evaluation.
+If Settle can use an embedding, Score stores it as encrypted evidence. The
+Score outcome stores only its artifact hash.
 
 ```json
 {
   "decision": {
-    "credits": 200
+    "credit_microcredits": 200000000
   },
   "evidence": {
-    "round_id": "valuation-round-42",
-    "response_snapshot_hash": "sha256:valuation-snapshot",
-    "valuations": [
-      {
-        "participant_ref_hash": "sha256:participant-a",
-        "credits": 150,
-        "attestation_ref_hash": "sha256:attestation-a"
-      },
-      {
-        "participant_ref_hash": "sha256:participant-b",
-        "credits": 200,
-        "attestation_ref_hash": "sha256:attestation-b"
-      },
-      {
-        "participant_ref_hash": "sha256:participant-c",
-        "credits": 300,
-        "attestation_ref_hash": "sha256:attestation-c"
-      }
-    ]
+    "index_id": "novelty-active-v1",
+    "index_snapshot_id": "snapshot-42",
+    "index_snapshot_hash": "sha256:index-snapshot",
+    "index_cardinality": 8421,
+    "projection_id": "canonical-summary-v3",
+    "projection_input_hash": "sha256:reviewed-revision",
+    "neighbors_requested": 10,
+    "neighbors_returned": 10,
+    "neighbor_summary_hash": "sha256:neighbor-summary",
+    "embedding_artifact_hash": "sha256:embedding-artifact",
+    "novelty_score_micros": 910000,
+    "substance_score_micros": 870000,
+    "coverage_micros": 1000000
   },
   "evaluation": {
-    "rule": "median-v1",
-    "accepted_valuations": 3,
-    "selected_credits": 200
+    "rule": "compatibility-score-v1",
+    "credit_microcredits": 200000000
   }
 }
 ```
 
-Missing required valuations cannot produce a favorable default. A trusted-party
-policy uses the same claim with a quorum of one. A fixed policy needs no round.
+The bundle stores immutable thresholds and model configuration. The evidence
+stores mutable index state and measured values that affected the decision.
+
+Future Score policies can combine signed external valuations. A separate
+protocol must define participant trust, quorum, and key management before
+activation.
 
 ### Settle
 
-Settle runs only when Score assigns more than zero credits. It applies that
-amount through the ledger adapter selected by the bundle.
+Settle runs after every completed Score phase. It receives the committed Review
+and Score outcomes and the bound bundle.
 
-The Score transaction seals a settlement command before any external call. The
-command binds the credits, Score outcome, ledger, and beneficiary.
+Settle decides index membership only from these immutable inputs. It cannot
+query a mutable index or repeat valuation work to make this decision.
 
-The encrypted artifact store holds sensitive command fields. The run stores its
-content hash, opaque artifact identifier, and idempotency key.
+If Settle includes the revision, it creates deterministic entry keys. Each key
+covers the tenant, index, reviewed revision, projection, model, and chunk.
 
-The server records the Settle outcome only after the ledger confirms the
-credit. A retry uses the sealed command and the same key.
+Settle stores the encrypted index command and its hash before the index write.
+A retry uses the stored command and does not repeat the membership decision.
 
-Each ledger adapter must apply or find a command atomically by idempotency key.
-The server fails closed when an adapter cannot provide that guarantee.
+An upsert with the same key and content is a successful no-op. A conflict with
+different content fails closed. Queries exclude the same reviewed revision.
 
-The outcome stores a hash-only receipt reference. Raw account references and
-transaction hashes do not appear in outcomes, audit rows, or logs.
+For a credit operation, Score creates one eligible credit event with a stable
+key for the tenant, run, and Score outcome. The existing settlement process
+groups compatible events into account-level batches. It preserves holds, caps,
+issuer approval, source-list approval, and duplicate-credit protection.
+
+The server records the Settle outcome after all required index and credit
+operations complete. The outcome refers to the settlement batch by hash.
+External NEAR payout remains in the existing outbox. Its later state does not
+change the Settle outcome.
+
+Raw account references and transaction hashes do not appear in outcomes, audit
+rows, or logs.
 
 ## 5. Policy contracts
+
+The phase traits, result types, and decisions live in
+`trace-commons-gate-api`. Policy implementations and persistence remain in
+their server or gate crates. Client DTOs remain in
+`trace-commons-protocol`.
 
 Each phase has a small typed policy trait. This example shows the Score phase:
 
@@ -366,6 +393,14 @@ trait ScorePolicy: Send + Sync {
     ) -> Result<PhaseResult<ScoreDecision, ScoreEvidence, ScoreEvaluation>, PolicyError>;
 }
 
+#[async_trait]
+trait SettlePolicy: Send + Sync {
+    async fn execute(
+        &self,
+        input: &SettleInput,
+    ) -> Result<PhaseResult<SettleDecision, SettleEvidence, SettleEvaluation>, PolicyError>;
+}
+
 struct PhaseResult<D, E, V> {
     decision: D,
     evidence: E,
@@ -375,17 +410,29 @@ struct PhaseResult<D, E, V> {
 struct ScoreRunner {
     policy: Arc<dyn ScorePolicy>,
 }
+
+struct IndexedScorePolicy {
+    index: Arc<dyn VectorIndexReader>,
+}
+
+struct DefaultSettlePolicy {
+    index: Arc<dyn VectorIndexWriter>,
+    credit: Arc<dyn CreditSettlement>,
+}
 ```
 
 Admission, Review, and Settle use the same result shape with their own types.
-Runners hold policies as trait objects. Policies hold their scorers, embedders,
-vector indexes, and ledgers as trait objects.
+Runners hold policies as trait objects. Score policies receive read-only index
+capabilities. Settle policies receive write capabilities.
+
+Policies hold their scorers, embedders, vector indexes, and credit adapters as
+trait objects. This boundary prevents Score from modifying an index.
 
 Tests use small policy implementations through the production trait:
 
 ```rust
 struct FixedScorePolicy {
-    credits: u64,
+    credit_microcredits: u64,
 }
 
 #[async_trait]
@@ -396,7 +443,7 @@ impl ScorePolicy for FixedScorePolicy {
     ) -> Result<PhaseResult<ScoreDecision, ScoreEvidence, ScoreEvaluation>, PolicyError> {
         Ok(PhaseResult {
             decision: ScoreDecision {
-                credits: self.credits,
+                credit_microcredits: self.credit_microcredits,
             },
             evidence: ScoreEvidence::Fixed,
             evaluation: ScoreEvaluation::FixedAmount,
@@ -422,9 +469,10 @@ pipeline_runs
   lease_token, lease_expires_at
   attempt_count, next_attempt_at
   last_error_label
-  valuation_round_id, valuation_deadline, valuation_snapshot_hash nullable
-  settlement_command_ref, settlement_command_hash nullable
-  settlement_idempotency_key nullable
+  index_membership: undecided | excluded | included
+  index_command_ref, index_command_hash nullable
+  index_write_state: none | pending | complete | failed
+  credit_event_id, settlement_batch_id nullable
   created_at, updated_at
   unique (tenant_id, request_idempotency_key)
 
@@ -440,6 +488,8 @@ phase_outcomes
 ```
 
 `pipeline_runs` is mutable queue state. `phase_outcomes` is immutable history.
+The run records index progress. Existing credit events, holds, batches, and
+outbox rows record credit and payout progress.
 
 The receipt path performs these operations:
 
@@ -457,20 +507,27 @@ An asynchronous worker performs these operations:
 1. Claim a run with a fenced lease.
 2. Load the bundle that is already bound to the run.
 3. Execute the next phase.
-4. Commit its outcome and the next phase in one transaction.
 
-A retry retains the bundle identifier. The unique phase constraint prevents
-duplicate outcomes from concurrent workers.
+Review and Score commit their outcome and next phase in one transaction. Settle
+uses the staged command process below. A retry retains the bundle identifier.
+The unique phase constraint prevents duplicate outcomes from concurrent workers.
 
 Review stores transformed content by content hash. Its transaction commits the
 approved revision, registry entry, outcome, and Score transition together.
 
-Before Score requests external valuations, it commits the round identifier and
-deadline. It stores responses in an encrypted artifact and seals its snapshot
-hash before evaluation. A retry resumes the same round.
+The Score transaction stores its outcome. A positive Score also creates one
+eligible credit event with a stable key.
 
-The Score transaction stores the sealed settlement command and its idempotency
-key. If confirmation is lost, Settle finds or applies that same command.
+Settle stores its membership decision and any index command before the index
+write. The stored command makes an index retry idempotent.
+
+Settle applies the index command independently from credit settlement. The
+existing settlement worker selects eligible credit events and creates approved
+account-level batches. A batch can finalize credit for several runs.
+
+The Settle outcome is per run. It records the completed index operation and the
+internal batch that finalized credit for that run. A disabled or pending NEAR
+outbox item does not delay this outcome.
 
 Terminal infrastructure errors update the run with a safe label. They do not
 create a phase decision or change an earlier outcome.
@@ -485,7 +542,88 @@ Workers set tenant context from the trusted lease result, not envelope fields.
 The cross-tenant claimer can update lease columns only. Policy execution,
 artifact access, outcome writes, and settlement use a tenant-scoped transaction.
 
-## 7. Policy development
+### Contributor status
+
+`POST /v1/contributors/me/submission-status` combines the new run data with
+existing credit and outbox data. No new read-model table is necessary.
+
+```json
+{
+  "submission_id": "0198...",
+  "processing": {
+    "phase": "score",
+    "state": "pending",
+    "reason": null
+  },
+  "credit": {
+    "microcredits": 0,
+    "state": "unscored"
+  },
+  "payout": {
+    "state": "not_available"
+  }
+}
+```
+
+The response derives these distinctions:
+
+- `review` with `pending` means that Review has not produced an outcome.
+- `score` with `pending` means that Review approved the trace and Score is due.
+- `zero` credit means that Score completed with no credit.
+- `held` credit means that an existing account hold blocks internal settlement.
+- `finalized` means that an approved batch finalized internal credit.
+- `held` payout comes from the existing payout-hold reason.
+- Payout uses the existing `disabled`, `pending`, `submitted`, `confirmed`, and
+`failed` outbox states.
+
+
+
+## 7. Phase guards
+
+A phase guard stops work when its required authority is no longer valid. Each
+phase checks its guard at two boundaries:
+
+1. Before it loads content or starts policy work.
+2. Inside the transaction that commits its outcome or side effects.
+
+The final check locks the applicable submission and policy-status rows. A
+withdrawal or policy suspension that commits first prevents the phase commit.
+If the phase commits first, its outcome precedes the intervention.
+
+For an index write, Settle keeps these locks until it commits the command
+result.
+
+Review and Score require an operable submission. The submission is not
+operable after withdrawal, revocation, or retention expiry. Its consent and
+allowed uses must also authorize the phase.
+
+The Settle index decision and write also require an operable submission. Credit
+settlement uses the committed Score outcome and does not read the trace.
+
+Every phase requires a runnable bound policy. The bundle registry stores this
+operational status outside the immutable package. A suspension does not change
+the bundle identifier or move the run to another bundle.
+
+If withdrawal commits before the Settle decision, Settle excludes index
+membership. If withdrawal commits later, Settle stops a pending command. The
+existing revocation path invalidates an index write that completed first.
+
+If Score already commits credit, withdrawal does not remove that credit. The
+existing settlement process can finalize it without reading the trace. This
+rule preserves the current no-clawback contract.
+
+A suspended policy leaves the run retryable with a safe error label. Previous
+outcomes stay immutable. The run resumes only if the same bound policy becomes
+runnable again.
+
+The NEAR outbox worker repeats the policy guard before dispatch. A suspension
+keeps a pending item undispatched. A guard cannot retract an operation that an
+external system already accepted.
+
+Each withdrawal, suspension, resume, or terminal stop appends a hash-only audit
+event. An intervention never rewrites an earlier outcome.
+
+## 8. Policy development
 
 Policy development occurs outside the ingest path.
 
@@ -498,6 +636,8 @@ flowchart LR
     T --> BR[Bundle registry]
     BR --> A[Activate for new runs]
 ```
+
+
 
 The existing calibration and pilot-bootstrap tools provide this lab workflow.
 A new lab service or lab database is not required by this design.
@@ -527,27 +667,33 @@ They cover retry and persistence behavior.
 Bundle tests process golden traces through all four policies. They assert the
 phase decisions, evidence shape, evaluation shape, and bundle identifier.
 
-Integration tests use a local ledger adapter. Contract tests apply the same
-idempotency cases to each external ledger adapter.
+Integration tests use an isolated index and the existing settlement interfaces.
+External payout stays disabled during these tests.
 
-## 8. Rollout
+## 9. Rollout
 
-The rollout has five steps:
+The rollout has six steps:
 
 1. Add bundle loading, pipeline runs, and phase outcomes beside current tables.
-2. Wrap current behavior in the four policy contracts.
-3. Compare new bundle outcomes with current results on a fixed corpus.
-4. Activate one bundle for new submissions.
-5. Keep old records readable until their retention period ends.
+2. Wrap current behavior in one compatibility bundle.
+3. Preserve current review, scoring, and settlement results across the new phase
+  boundaries.
+4. Compare compatibility outcomes with current results on a fixed corpus.
+5. Activate the compatibility bundle for new submissions.
+6. Keep old records readable until their retention period ends.
 
-Existing runs finish with their bound bundle. A rollback changes the active
-bundle for new runs and does not rewrite old outcomes.
+New valuation rules follow after the compatibility bundle and its transitions
+are stable.
+
+Routine activation changes affect new runs only. Existing runs retain their
+bound bundle unless a phase guard stops them. A rollback does not rewrite old
+outcomes.
 
 This proposal does not define production reprocessing. Policy development and
 comparison use the lab path. A later reprocessing design must prevent repeated
 settlement before it can operate in production.
 
-## 9. Required constraints
+## 10. Required constraints
 
 1. Each run binds one immutable bundle before Admission executes.
 2. Each completed phase stores one immutable outcome.
@@ -556,23 +702,35 @@ settlement before it can operate in production.
 5. Evaluation explains the mapping from evidence to decision.
 6. Missing required evidence fails closed.
 7. Request keys bind to request content and are unique within a tenant.
-8. A multi-party Score retry resumes one durable valuation round.
-9. Settlement seals its command before an external call and uses one stable
-   idempotency key.
-10. Authentication supplies tenant scope. Envelope tenant fields provide
-   attribution only.
-11. Audit rows and logs use hashes and safe labels only.
-12. Policy implementations hold scorers, embedders, vector indexes, and ledgers
-    behind trait objects.
+8. Score can read an active index but cannot modify it.
+9. Settle decides index membership only from the bound bundle and committed
+  Review and Score outcomes.
+10. Settle seals an index command before it writes to the index.
+11. Settle uses deterministic index keys and self-exclusion.
+12. Shadow comparisons use an isolated index namespace.
+13. Positive Score outcomes create one idempotent eligible credit event.
+14. Existing batches, holds, approvals, and the NEAR outbox remain authoritative.
+15. All credit amounts use checked integer microcredits.
+16. Each phase checks submission and policy authority before work and commit.
+17. Authentication supplies tenant scope. Envelope tenant fields provide
+  attribution only.
+18. Audit rows and logs use hashes and safe labels only.
+19. Policy implementations hold scorers, embedders, vector indexes, and credit adapters
+  behind trait objects.
 
-## 10. Follow-up specifications
 
-Implementation requires four narrow specifications:
+
+## 11. Follow-up specifications
+
+Implementation requires these narrow specifications:
 
 - The payload types and reason codes for each phase.
 - The bundle package format, signature, and retention policy.
 - The external valuation request and attestation protocol.
-- The idempotency contract for each settlement adapter.
+- The vector adapter contract for idempotency and self-exclusion.
+- The integration contract for existing settlement batches and the NEAR outbox.
+- The operator controls for policy suspension, resumption, and termination.
+- A migration qualification plan for crash recovery, isolation, and retries.
 
 These specifications can add fields inside the defined boundaries. They do not
 add another workflow layer or another provenance model.
