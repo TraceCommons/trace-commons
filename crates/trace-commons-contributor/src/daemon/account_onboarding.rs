@@ -422,6 +422,30 @@ pub(super) async fn published_receipt_endpoint(ingest_url: &str, path: Path) -> 
         .and_then(|(_, _, _, endpoint)| endpoint)
 }
 
+pub const CEREMONY_MISMATCH: &str = "near_signup_ceremony_mismatch";
+
+#[derive(Debug, thiserror::Error)]
+#[error("near_signup_ceremony_mismatch")]
+struct CeremonyMismatch;
+
+fn verify_device_preimage(encoded: &str, expected: &[u8]) -> Result<()> {
+    let supplied = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .map_err(|_| anyhow!("near_signup_invalid"))?;
+    if supplied != expected {
+        return Err(CeremonyMismatch.into());
+    }
+    Ok(())
+}
+
+fn start_error_label(error: &anyhow::Error) -> &'static str {
+    if error.downcast_ref::<CeremonyMismatch>().is_some() {
+        CEREMONY_MISMATCH
+    } else {
+        "near_signup_unavailable"
+    }
+}
+
 pub async fn handle_start(shared: &DaemonShared, req: &Request) -> Response {
     let options: Options = match serde_json::from_value(req.params.clone()) {
         Ok(v) => v,
@@ -429,7 +453,7 @@ pub async fn handle_start(shared: &DaemonShared, req: &Request) -> Response {
     };
     match begin(&shared.store, options).await {
         Ok(value) => Response::ok(req.id, value),
-        Err(_) => Response::err(req.id, ERR_UNAVAILABLE, "near_signup_unavailable"),
+        Err(error) => Response::err(req.id, ERR_UNAVAILABLE, start_error_label(&error)),
     }
 }
 pub fn handle_status(shared: &DaemonShared, req: &Request) -> Response {
@@ -583,9 +607,7 @@ async fn prepare(
         &binding,
         Some(&signed.wallet_url),
     );
-    if base64::engine::general_purpose::STANDARD.decode(&signed.device_signing_bytes)? != bytes {
-        bail!("near_signup_invalid")
-    }
+    verify_device_preimage(&signed.device_signing_bytes, &bytes)?;
     let device_signature = identity.sign_b64(&bytes);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let callback = format!(
@@ -906,6 +928,20 @@ fn persist(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn device_preimage_mismatch_survives_start_error_mapping_without_exposing_material() {
+        let expected = b"synthetic expected preimage";
+        let encoded = base64::engine::general_purpose::STANDARD.encode(expected);
+        assert!(verify_device_preimage(&encoded, expected).is_ok());
+        let error = verify_device_preimage(&encoded, b"different preimage").unwrap_err();
+        assert_eq!(start_error_label(&error), CEREMONY_MISMATCH);
+        assert_eq!(error.to_string(), CEREMONY_MISMATCH);
+        assert_eq!(
+            start_error_label(&verify_device_preimage("!", expected).unwrap_err()),
+            "near_signup_unavailable"
+        );
+    }
+
     #[test]
     fn callback_requires_exact_path_state_and_single_result() {
         let state = "expected";

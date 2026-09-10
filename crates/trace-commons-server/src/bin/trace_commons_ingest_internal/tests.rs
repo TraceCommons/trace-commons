@@ -91463,3 +91463,25 @@ fn a_run_that_passed_every_step_still_records_red_evidence_when_it_drifted() {
         Failed
     );
 }
+
+#[tokio::test]
+async fn wallet_readiness_refuses_missing_identity_before_starting_a_ceremony() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut state = test_state(temp.path().to_path_buf());
+    let settings = Arc::get_mut(&mut state).unwrap();
+    settings.near_provisioning_enabled = true;
+    settings.near_provisioning_admission_ready = true;
+    assert!(settings.near_account_identity.is_none());
+    assert_eq!(
+        near_provisioning::wallet_readiness_refusal(&state),
+        Some("near_account_identity")
+    );
+    let response = near_provisioning::capabilities(State(state)).await;
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body["ready"], false);
+}

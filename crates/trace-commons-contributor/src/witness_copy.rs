@@ -505,6 +505,17 @@ pub fn wallet_refusal_line(reason: Option<&str>) -> &'static str {
     }
 }
 
+/// A start failure is distinct from capability discovery. Native flow views
+/// carry this sentence to all three shells without rendering wire labels.
+pub fn wallet_start_refusal_line(reason: Option<&str>) -> &'static str {
+    match reason {
+        Some(crate::daemon::account_onboarding::CEREMONY_MISMATCH) => {
+            "This commons and the app disagree about the signup details. No device proof was signed. Contact the commons operator."
+        }
+        _ => witness_copy().wallet.failed,
+    }
+}
+
 /// The sentence for one refusal.
 ///
 /// Grouped by **what the person must do differently**, which is the only
