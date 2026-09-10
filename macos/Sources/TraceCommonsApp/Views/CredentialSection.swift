@@ -35,6 +35,9 @@ struct CredentialSection: View {
         let action = CredentialSurface.action(
             requiresSession ? CredentialStatus(state: status.sessionState) : status,
             calls: model.credentialCalls)
+        let balanceAction = requiresSession ? CredentialAction.none : BalanceSurface.actionToDraw(
+            balance: BalanceSurface.action(model.balanceStatus, calls: model.balanceCalls),
+            credential: action)
         VStack(alignment: .leading, spacing: TC.Space.sm) {
             if prominent {
                 Label(copy.credentialTitle, systemImage: "person.crop.circle")
@@ -63,7 +66,7 @@ struct CredentialSection: View {
                     .font(TC.Font_.body)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            if action == .obtain {
+            if action == .obtain || balanceAction == .obtain {
                 Picker(copy.credentialProviderLabel, selection: $provider) {
                     Text(copy.credentialProviderGithub).tag("github")
                     Text(copy.credentialProviderGoogle).tag("google")
