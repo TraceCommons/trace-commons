@@ -35,9 +35,7 @@ mod control {
     pub(super) const WITNESS_MEASUREMENTS_ABSENT: &str = "witness_measurements_absent";
     pub(super) const WITNESS_MEASUREMENT_SYNTAX: &str = "witness_measurement_syntax";
     pub(super) const ISSUER: &str = "issuer";
-    /// The index pepper and account-name KEK. Checked by the login readiness
-    /// (#836) and, today, by neither `published_witness` nor anything else
-    /// before the wallet's `finish` needs it -- see #838.
+    /// The index pepper and account-name KEK required by both enrollment paths.
     pub(super) const NEAR_ACCOUNT_IDENTITY: &str = "near_account_identity";
 
     /// Every label, for the tests that hold the label-only rule.
@@ -103,17 +101,17 @@ fn published_witness(state: &AppState) -> Option<PublishedWitness> {
 
 /// `published_witness`, naming the control that declined.
 ///
-/// Deliberately the same gates in the same order as before, decision for
-/// decision: this exists to make an existing refusal legible, and a
-/// configuration that was accepted before must still be accepted.
-/// `naming_a_control_does_not_change_which_configurations_are_accepted` pins
-/// that against the original predicates.
+/// Includes the identity controls used by wallet completion, so a client is
+/// not invited to sign a ceremony this commons cannot finish.
 fn published_witness_named(state: &AppState) -> Result<PublishedWitness, &'static str> {
     if !state.near_provisioning_enabled {
         return Err(control::PROVISIONING_ENABLED);
     }
     if !state.near_provisioning_admission_ready {
         return Err(control::ADMISSION_READY);
+    }
+    if state.near_account_identity.is_none() {
+        return Err(control::NEAR_ACCOUNT_IDENTITY);
     }
     let origin = state
         .near_provisioning_public_origin
@@ -135,6 +133,11 @@ fn published_witness_named(state: &AppState) -> Result<PublishedWitness, &'stati
     let witness = published_witness_material_named()?;
     published_issuer().ok_or(control::ISSUER)?;
     Ok(witness)
+}
+
+#[cfg(test)]
+pub(super) fn wallet_readiness_refusal(state: &AppState) -> Option<&'static str> {
+    published_witness_named(state).err()
 }
 
 /// The published witness, with **no ceremony-specific preconditions**.
@@ -190,11 +193,8 @@ fn near_ai_login_ready(state: &AppState) -> bool {
 /// two wallet-specific labels, `NEAR_SIGN_IN` and `PUBLIC_ORIGIN`, are
 /// deliberately unreachable from here.
 ///
-/// [`control::NEAR_ACCOUNT_IDENTITY`] is the one genuinely new refusal:
-/// `published_witness` never checks it, which is a gap on the wallet side
-/// rather than a difference in requirement -- the wallet's `finish` needs it
-/// too and fails at the last step without it. Filed as #838; checked here
-/// because this path needs it for the same reason.
+/// Both paths require [`control::NEAR_ACCOUNT_IDENTITY`], while wallet-only
+/// configuration remains outside this predicate.
 fn near_ai_login_ready_named(state: &AppState) -> Result<(), &'static str> {
     if !state.near_provisioning_enabled {
         return Err(control::PROVISIONING_ENABLED);

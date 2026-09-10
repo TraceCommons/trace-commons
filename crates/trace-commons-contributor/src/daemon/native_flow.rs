@@ -127,7 +127,9 @@ impl Flow {
             || !browser
                 .is_some_and(|browser| same_origin(self.origin.as_deref().unwrap_or(""), browser))
         {
-            self.refuse(witness_copy().wallet.failed);
+            self.refuse(crate::witness_copy::wallet_start_refusal_line(
+                value.get("reason").and_then(Value::as_str),
+            ));
             return attempt;
         }
         self.attempt = attempt;
@@ -330,7 +332,10 @@ pub async fn handle_wallet(shared: &DaemonShared, req: &Request) -> Response {
         )
         .await
     };
-    let value = result.result.unwrap_or_default();
+    let value = match result.error {
+        Some(error) => json!({"reason": error.message}),
+        None => result.result.unwrap_or_default(),
+    };
     let cancel = {
         let mut map = flows().lock().expect("native flow lock");
         match map.get_mut(shared.store.dir()).filter(|f| f.id == flow_id) {
@@ -391,6 +396,24 @@ mod tests {
         f.state = WalletState::Checking;
         f
     }
+    #[test]
+    fn ceremony_mismatch_reaches_native_views_without_a_browser_or_retry_loop() {
+        let mut flow = Flow::new();
+        flow.starting = true;
+        let response = json!({"reason": account_onboarding::CEREMONY_MISMATCH});
+        assert!(flow.finish_start(0, &response).is_none());
+        let view = flow.view();
+        assert_eq!(view.state, WalletState::Refused);
+        assert!(view.message.contains("disagree"));
+        assert!(!view.message.contains(account_onboarding::CEREMONY_MISMATCH));
+        assert!(!view.busy);
+        assert!(!view.wait);
+        assert!(view.browser_url.is_none());
+        flow.cancel();
+        flow.finish_start(0, &response);
+        assert_eq!(flow.view().state, WalletState::Idle);
+    }
+
     #[test]
     fn wallet_origin_requires_exact_https_and_no_credentials() {
         for invalid in [
