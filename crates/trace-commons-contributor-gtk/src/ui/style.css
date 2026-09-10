@@ -251,6 +251,19 @@
   padding: 14px;
 }
 
+.tc-card.tc-tool-card {
+  background-color: @tc_surface_inset;
+  border: none;
+  padding: 20px;
+}
+
+.tc-tool-icon {
+  background-color: @tc_surface;
+  color: @tc_green_text;
+  border-radius: 6px;
+  padding: 12px;
+}
+
 /* Reserved for a card a person should weigh before deciding -- today, one
    whose scrubbing matched nothing at all. §4.3: attention borders are the
    solid hue on Linux, where the other platforms use a 55% alpha. */
