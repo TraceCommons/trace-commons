@@ -1,1612 +1,196 @@
-# Signed releases of the contributor apps. Tag-driven: push a tag like
-# `app-v0.2.0`.
-#
-# Three independent jobs rather than a matrix. The packaging steps share
-# essentially nothing -- SwiftPM plus notarytool, cargo plus Azure Trusted
-# Signing, flatpak-builder plus OSTree -- so matrix legs would be a stack of
-# `if:` guards. Independent jobs also mean one platform failing does not block
-# the others, which matters most for Linux: its flatpak manifest is the least
-# proven part of this pipeline.
-name: release-apps
-
-on:
-  push:
-    tags:
-      - "app-v*"
-  workflow_dispatch:
-    inputs:
-      platform:
-        description: Which platform to build
-        type: choice
-        default: all
-        options: [all, macos, windows, linux]
-      version:
-        description: Version to stamp when running without a tag (e.g. 1.2.3)
-        type: string
-        required: true
-      # MSIX has never been built. It is opt-in, and reachable ONLY from a
-      # dispatch, so the first attempt cannot take a tagged release down with
-      # it: a tag push runs the zip path exactly as before and never touches
-      # these steps. Flip this on a dispatch to prove the packaging and the
-      # signing publisher, then decide whether it becomes part of a release.
-      msix:
-        description: Also build and sign an MSIX (unproven; never runs on a tag push)
-        type: boolean
-        default: false
-
-concurrency:
-  group: release-apps-${{ github.ref }}
-  cancel-in-progress: false
-
+# One-time recovery: no tag movement, rebuild, or replacement of published assets.
+name: recover v0.12.1 app publication
+'on':
+  workflow_dispatch: {}
 permissions:
   contents: read
+  actions: read
   id-token: write
-  attestations: write
-
+concurrency:
+  group: recover-v0.12.1-app-publication
+  cancel-in-progress: false
 jobs:
-  # Every credential this workflow spends is checked here, before a single
-  # byte is signed or uploaded. Without it the first thing a missing
-  # HOMEBREW_TAP_TOKEN stops is the cask bump -- which runs in `publish`,
-  # after two signed artifacts exist and both GCS buckets have already
-  # moved. release-contributor.yml has had this shape since it was written;
-  # this is the same idea with this workflow's own credential list.
-  #
-  # The list is enumerated from what release-apps.yml actually reads, NOT
-  # copied from release-contributor.yml: this workflow never touches
-  # WINGET_PKGS_TOKEN, and its update manifests take their signing key from
-  # Secret Manager rather than from
-  # vars.TRACE_COMMONS_UPDATE_PUBLIC_KEY_HEX. Requiring either here would
-  # fail releases over configuration nothing in this file consumes.
-  #
-  # `environment: release` is load-bearing and not just symmetry with the
-  # signing jobs: the AZURE_SIGNING_* values are environment variables on
-  # `release`, so a job without the environment reads them as empty and this
-  # pre-flight would refuse every release. The environment carries no
-  # protection rules, so declaring it adds no approval step.
-  release-config:
-    name: verify release configuration
-    runs-on: ubuntu-latest
-    environment: release
-    timeout-minutes: 5
-    steps:
-      # Dispatch runs build and sign but never publish (every publication
-      # step in this file is guarded on `github.event_name == 'push'`), so
-      # they are not held to the publishing credentials.
-      - name: Confirm tag-release credentials are configured
-        if: github.event_name == 'push'
-        env:
-          # macOS: Developer ID signing, notarization, and the Sparkle
-          # public key make-release-dmg.sh refuses to build without.
-          MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
-          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
-          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
-          MACOS_NOTARY_ASC_KEY_P8_BASE64: ${{ secrets.MACOS_NOTARY_ASC_KEY_P8_BASE64 }}
-          MACOS_NOTARY_ASC_KEY_ID: ${{ secrets.MACOS_NOTARY_ASC_KEY_ID }}
-          MACOS_NOTARY_ASC_ISSUER_ID: ${{ secrets.MACOS_NOTARY_ASC_ISSUER_ID }}
-          SPARKLE_PUBLIC_ED_KEY: ${{ secrets.SPARKLE_PUBLIC_ED_KEY }}
-          # Windows: Azure Trusted Signing, used by both the `windows` and
-          # `windows-app` jobs.
-          AZURE_SIGNING_CLIENT_ID: ${{ vars.AZURE_SIGNING_CLIENT_ID }}
-          AZURE_SIGNING_TENANT_ID: ${{ vars.AZURE_SIGNING_TENANT_ID }}
-          AZURE_SIGNING_SUBSCRIPTION_ID: ${{ vars.AZURE_SIGNING_SUBSCRIPTION_ID }}
-          AZURE_SIGNING_ENDPOINT: ${{ vars.AZURE_SIGNING_ENDPOINT }}
-          AZURE_SIGNING_ACCOUNT: ${{ vars.AZURE_SIGNING_ACCOUNT }}
-          AZURE_SIGNING_PROFILE: ${{ vars.AZURE_SIGNING_PROFILE }}
-          # GCS: the flatpak repo, the Windows .appinstaller feed, and the
-          # appcast all authenticate with these.
-          GCP_WIF_PROVIDER: ${{ secrets.GCP_WIF_PROVIDER }}
-          GCP_FLATPAK_PUBLISHER_SA: ${{ secrets.GCP_FLATPAK_PUBLISHER_SA }}
-          # Cross-repository: the cask bump in `publish`.
-          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-        run: |
-          set -euo pipefail
-          missing=()
-          for name in \
-            MACOS_CERTIFICATE_P12_BASE64 \
-            MACOS_CERTIFICATE_PASSWORD \
-            MACOS_SIGNING_IDENTITY \
-            MACOS_NOTARY_ASC_KEY_P8_BASE64 \
-            MACOS_NOTARY_ASC_KEY_ID \
-            MACOS_NOTARY_ASC_ISSUER_ID \
-            SPARKLE_PUBLIC_ED_KEY \
-            AZURE_SIGNING_CLIENT_ID \
-            AZURE_SIGNING_TENANT_ID \
-            AZURE_SIGNING_SUBSCRIPTION_ID \
-            AZURE_SIGNING_ENDPOINT \
-            AZURE_SIGNING_ACCOUNT \
-            AZURE_SIGNING_PROFILE \
-            GCP_WIF_PROVIDER \
-            GCP_FLATPAK_PUBLISHER_SA \
-            HOMEBREW_TAP_TOKEN
-          do
-            # Indirect expansion, so the names above are the single list and
-            # cannot drift from the tests below them.
-            [ -n "${!name:-}" ] || missing+=("$name")
-          done
-          if [ ${#missing[@]} -ne 0 ]; then
-            printf 'refusing to release: missing configuration: %s\n' "${missing[*]}" >&2
-            exit 1
-          fi
-          echo "all 16 release credentials are present"
-
   version:
-    name: resolve version
+    name: verify existing release artifacts
     runs-on: ubuntu-latest
-    timeout-minutes: 5
     outputs:
-      short: ${{ steps.v.outputs.short }}
-      build: ${{ steps.v.outputs.build }}
+      short: 0.12.1
+      build: '3501'
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-
-      # CFBundleVersion must increase monotonically across releases.
-      # GitHub's run_number is monotonic per workflow and increments with every
-      # run, persisting across branches and tag pushes without external state.
-      # run_attempt increments on re-runs while run_number stays the same.
-      # Arithmetic composition ensures strict monotonicity: * 100 shifts the
-      # run_number to the hundreds place, making it dominant over run_attempt.
-      # Short version is semantic (e.g., 1.2.3).
-      - id: v
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          REF_NAME: ${{ github.ref_name }}
-          INPUT_VERSION: ${{ inputs.version }}
-          RUN_NUMBER: ${{ github.run_number }}
-          RUN_ATTEMPT: ${{ github.run_attempt }}
-        run: |
-          set -euo pipefail
-          if [ "$EVENT_NAME" = "push" ]; then
-            SHORT="${REF_NAME#app-v}"
-          else
-            SHORT="$INPUT_VERSION"
-          fi
-          if ! printf '%s' "$SHORT" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-            echo "refusing to release: '$SHORT' is not a three-part numeric version." >&2
-            echo "Tags must look like app-v1.2.3; a dispatch must pass the same shape." >&2
-            exit 1
-          fi
-          echo "short=$SHORT" >> "$GITHUB_OUTPUT"
-          echo "build=$(( RUN_NUMBER * 100 + RUN_ATTEMPT ))" >> "$GITHUB_OUTPUT"
-
-      # The Linux shell reports CARGO_PKG_VERSION while the workflow names
-      # its artifacts from the tag. Keep those two user-visible versions from
-      # drifting. Dispatches remain free to exercise an arbitrary future
-      # version without publishing it.
-      - name: Confirm the tag matches the Linux app package version
-        if: github.event_name == 'push'
-        env:
-          TAG_VERSION: ${{ steps.v.outputs.short }}
-        run: |
-          set -euo pipefail
-          MANIFEST=crates/trace-commons-contributor-gtk/Cargo.toml
-          PACKAGE_VERSION="$(awk -F '"' '/^version = "/ { print $2; exit }' "$MANIFEST")"
-          if [ "$PACKAGE_VERSION" != "$TAG_VERSION" ]; then
-            echo "refusing to release: $MANIFEST is $PACKAGE_VERSION, tag is $TAG_VERSION" >&2
-            exit 1
-          fi
-
-  macos:
-    name: macOS signed DMG
-    needs: [version, release-config]
-    if: >-
-      github.event_name == 'push' ||
-      inputs.platform == 'all' || inputs.platform == 'macos'
-    # macos-15, not macos-14: the 14 image ships Swift 5.10 while
-    # macos/Package.swift declares swift-tools-version:6.0 and TCBridge uses
-    # .swiftLanguageMode(.v6). The first real release failed with "package
-    # 'macos' is using Swift tools version 6.0.0 but the installed version is
-    # 5.10.0".
-    # macos-26, not macos-15. The universal build (`swift build --arch arm64
-    # --arch x86_64`) collides on output files under the macos-15 image's
-    # toolchain -- "duplicate output file '... Swift Compilation Finished'" for
-    # the arm64 and x86_64 SwiftDriver tasks, surfaced as a misleading
-    # "Swift language versions ... supported: []" error. It builds cleanly on
-    # Xcode 26 / Swift 6.3, which is also what this app is developed against
-    # locally, so CI and the developer toolchain now match.
-    runs-on: macos-26
-    # This job holds a Developer ID private key. The environment scopes those
-    # secrets to release runs and gives the signing path a place to hang
-    # required reviewers, matching how the Windows job is gated.
-    environment: release
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-      # Pinned by commit SHA, so dtolnay/rust-toolchain cannot infer the
-      # toolchain from a ref name (@stable, @1.96) the way it does when
-      # pinned to a branch or tag -- `toolchain` becomes a required input.
-      # The version tracks the workspace's rust-version (Cargo.toml), which
-      # rose from 1.92 to 1.96 on 2026-09-06: trace-commons-contributor takes
-      # an unconditional git dependency on ironwire_proxy, and the
-      # ironwire_*/ironclaw_* crates behind it declare rust-version = 1.96.
-      # ci.yml builds everything on @stable, so these tag-only pins are the
-      # only place the declared floor is ever exercised -- when you change
-      # one, change all of them in this file and in release-contributor.yml.
-      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master@2026-05-27
-        with:
-          toolchain: "1.96"
-          # make-app-bundle.sh (invoked below via make-release-dmg.sh) builds
-          # the FFI dylib for both targets itself and lipos them together, so
-          # both need to be installed here.
-          targets: aarch64-apple-darwin,x86_64-apple-darwin
-      # No build cache in a release job, deliberately. A cache is a
-      # write-target a lower-privilege job can poison, and this job holds
-      # signing authority. The cold-build cost is the price of that.
-
-      # make-release-dmg.sh refuses outright when any credential is missing,
-      # rather than falling back to an ad-hoc signature. An unsigned artifact
-      # named like a release is worse than no artifact.
-      - name: Build, sign, notarize and staple
-        env:
-          SHORT_VERSION: ${{ needs.version.outputs.short }}
-          BUILD_VERSION: ${{ needs.version.outputs.build }}
-          MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
-          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
-          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
-          MACOS_NOTARY_ASC_KEY_P8_BASE64: ${{ secrets.MACOS_NOTARY_ASC_KEY_P8_BASE64 }}
-          MACOS_NOTARY_ASC_KEY_ID: ${{ secrets.MACOS_NOTARY_ASC_KEY_ID }}
-          MACOS_NOTARY_ASC_ISSUER_ID: ${{ secrets.MACOS_NOTARY_ASC_ISSUER_ID }}
-          TC_SPARKLE_PUBLIC_ED_KEY: ${{ secrets.SPARKLE_PUBLIC_ED_KEY }}
-        run: |
-          ./macos/scripts/make-release-dmg.sh "$SHORT_VERSION" "$BUILD_VERSION"
-
-      # make-app-bundle.sh lipos the FFI dylib and passes
-      # `swift build --arch arm64 --arch x86_64`, so the DMG is universal and
-      # the artifact name no longer carries an arch suffix.
-      - name: Rename and checksum
-        env:
-          SHORT_VERSION: ${{ needs.version.outputs.short }}
-        run: |
-          set -euo pipefail
-          mkdir -p dist
-          OUT="TraceCommons-${SHORT_VERSION}.dmg"
-          cp macos/.build/TraceCommons.dmg "dist/$OUT"
-          # The DMG is signed, notarized and stapled by this point, so this
-          # checksum already covers the final bytes -- unlike the Windows and
-          # CLI paths, where signing happens after packaging and the checksum
-          # must be recomputed.
-          ( cd dist && shasum -a 256 "$OUT" > "$OUT.sha256" )
-
-      # After signing and stapling, so the provenance covers the bytes a
-      # contributor actually downloads.
-      - uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4
-        with:
-          subject-path: |
-            dist/*.dmg
-            dist/*.dmg.sha256
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: macos-dmg
-          path: dist/
-
-  windows:
-    name: Windows signed binaries
-    needs: [version, release-config]
-    if: >-
-      github.event_name == 'push' ||
-      inputs.platform == 'all' || inputs.platform == 'windows'
-    runs-on: windows-latest
-    # The federated credential's subject is
-    # repo:...:environment:release, so this job must declare the environment
-    # or the OIDC token will not match and signing fails at auth.
-    environment: release
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master@2026-05-27
-        with:
-          toolchain: "1.96"
-          targets: x86_64-pc-windows-msvc
-      # No build cache in a release job, deliberately. A cache is a
-      # write-target a lower-privilege job can poison, and this job holds
-      # signing authority. The cold-build cost is the price of that.
-
-      - name: Build the CLI
-        run: cargo build --locked --release --bin trace-commons-contributor -p trace-commons-contributor --target x86_64-pc-windows-msvc
-
-      # The WinUI desktop app, from here to the second signing pass below.
-      #
-      # Until this existed the Windows asset on an apps release was the CLI and
-      # nothing else, so Windows contributors could get the command line from
-      # two release streams and the desktop app from neither -- even though the
-      # app has built in CI (`windows contributor app` in ci.yml) since it
-      # landed. The CLI zip below is untouched; this is an additional asset.
-      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
-        with:
-          dotnet-version: "8.0.x"
-
-      # MSBuild from Visual Studio, not `dotnet build`/`dotnet publish`, and
-      # that is not a preference. A WinUI 3 project invokes tasks that live in
-      # Microsoft.Build.AppxPackage.dll and Microsoft.Build.Packaging.Pri.Tasks.dll,
-      # which ship with Visual Studio's tooling and are never part of the .NET
-      # SDK; driving this project from the SDK CLI fails with MSB4062 naming a
-      # path under the dotnet SDK directory, which reads like a .NET version
-      # problem and is not one. ci.yml's app job hit exactly this.
-      - uses: microsoft/setup-msbuild@6fb02220983dee41ce7ae257b6f4d8f9bf5ed4ce # v2
-
-      # The app is C# over the same C ABI the macOS app uses, so the cdylib has
-      # to exist before anything managed builds. TraceCommons.App.csproj fails
-      # its own build when the DLL is absent rather than deferring that to a
-      # runtime "core not found", so this is a hard prerequisite, not an
-      # optimisation.
-      - name: Build the contributor FFI cdylib
-        run: cargo build --locked --release -p trace-commons-contributor-ffi --target x86_64-pc-windows-msvc
-
-      # Self-contained and unpackaged (WindowsPackageType=None, SelfContained,
-      # WindowsAppSDKSelfContained -- all three set in the csproj), so the
-      # publish output carries the .NET runtime and the Windows App SDK with it
-      # and needs no prerequisites on a contributor's machine. That is why a
-      # zip of this directory is a usable distribution and no MSIX is involved.
-      #
-      # Run from windows/ so windows/global.json applies: MSBuild otherwise
-      # selects the newest installed SDK regardless of what setup-dotnet put
-      # there, and the runner image ships a .NET whose layout Windows App SDK
-      # 1.6 cannot build against.
-      #
-      # PublishDir is absolute and written with forward slashes deliberately. A
-      # relative PublishDir resolves against the project directory rather than
-      # the workspace, and a trailing backslash inside a quoted MSBuild
-      # property escapes the closing quote.
-      - name: Publish the WinUI app (self-contained, win-x64)
-        shell: pwsh
-        working-directory: windows
-        env:
-          TC_FFI_LIB_DIR: ${{ github.workspace }}\target\x86_64-pc-windows-msvc\release
-        run: |
-          $ErrorActionPreference = "Stop"
-          $publishDir = "$env:GITHUB_WORKSPACE/app-publish"
-          msbuild src/TraceCommons.App/TraceCommons.App.csproj `
-            -restore `
-            -t:Publish `
-            -p:Configuration=Release `
-            -p:Platform=x64 `
-            -p:RuntimeIdentifier=win-x64 `
-            -p:SelfContained=true `
-            -p:PublishDir=$publishDir/
-          if ($LASTEXITCODE -ne 0) { throw "msbuild publish failed with exit code $LASTEXITCODE" }
-
-      - name: Stage the binary for signing
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          New-Item -ItemType Directory -Force -Path signed | Out-Null
-          Copy-Item target/x86_64-pc-windows-msvc/release/trace-commons-contributor.exe signed/
-          $staged = @(Get-ChildItem signed\*.exe)
-          if ($staged.Count -ne 1) {
-            throw "expected exactly 1 binary staged for signing, found $($staged.Count): $($staged.Name -join ', ')"
-          }
-
-      # The app is signed in place inside its publish tree rather than staged
-      # into signed\, because the tree itself is the artifact: the binaries have
-      # to sit beside the runtime they were published with.
-      #
-      # A self-contained WinUI publish emits several hundred files, nearly all
-      # of them Microsoft's and already signed. This job holds signing authority
-      # through federated credentials, so it signs an explicit allowlist and
-      # never "everything in the directory". Signing whatever happens to be in
-      # the tree would mean a file an attacker managed to place there leaves
-      # here carrying the project's public-trust certificate.
-      #
-      # The assertion runs in both directions. Every allowlisted path must
-      # exist, and a recursive scan for anything named the way our own output is
-      # named must yield exactly the allowlist -- so a binary that went missing
-      # and an unexpected extra one both stop the release, instead of quietly
-      # changing what gets signed.
-      - name: Stage the app binaries for signing
-        id: appstage
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          $publishDir = (Resolve-Path "$env:GITHUB_WORKSPACE/app-publish").Path
-
-          # TraceCommons.exe is the apphost and TraceCommons.dll the managed
-          # assembly behind it -- AssemblyName is TraceCommons in
-          # windows/src/TraceCommons.App/TraceCommons.App.csproj.
-          # TraceCommons.Interop.dll is our C ABI binding
-          # (windows/src/TraceCommons.Interop/TraceCommons.Interop.csproj), and
-          # the cdylib is the Rust core the app hosts in-process. Nothing else
-          # under app-publish is built by this repository.
-          $allowlist = @(
-            "TraceCommons.exe",
-            "TraceCommons.dll",
-            "TraceCommons.Interop.dll",
-            "trace_commons_contributor_ffi.dll"
-          )
-
-          $missing = @($allowlist | Where-Object {
-            -not (Test-Path (Join-Path $publishDir $_) -PathType Leaf)
-          })
-          if ($missing.Count -ne 0) {
-            throw "expected app binaries are missing from the publish output: $($missing -join ', ')"
-          }
-
-          $found = @(
-            Get-ChildItem -Path $publishDir -Recurse -File |
-              Where-Object { @(".exe", ".dll") -contains $_.Extension } |
-              Where-Object { $_.Name -like "TraceCommons*" -or $_.Name -like "trace_commons_*" } |
-              ForEach-Object { $_.FullName.Substring($publishDir.Length + 1) } |
-              Sort-Object
-          )
-          $expected = @($allowlist | Sort-Object)
-          if (($found -join "|") -ne ($expected -join "|")) {
-            throw "the binaries our build produces under app-publish do not match the signing allowlist. Expected: $($expected -join ', '). Found: $($found -join ', ')."
-          }
-
-          # Set-Content rather than Out-File: Out-File runs its input through
-          # the formatter, which has a line width, and these are long absolute
-          # paths whose truncation would be silent.
-          $listFile = Join-Path $env:RUNNER_TEMP "app-sign-list.txt"
-          Set-Content -Path $listFile -Encoding utf8 -Value @(
-            $allowlist | ForEach-Object { Join-Path $publishDir $_ }
-          )
-          Write-Host "staged for signing:"
-          Get-Content $listFile | ForEach-Object { Write-Host "  $_" }
-          "app_sign_list=$listFile" >> $env:GITHUB_OUTPUT
-
-      - uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2
-        with:
-          client-id: ${{ vars.AZURE_SIGNING_CLIENT_ID }}
-          tenant-id: ${{ vars.AZURE_SIGNING_TENANT_ID }}
-          subscription-id: ${{ vars.AZURE_SIGNING_SUBSCRIPTION_ID }}
-
-      # No signing key reaches this runner: Trusted Signing issues a
-      # short-lived certificate against the OIDC token above, and the dlib
-      # authenticates through DefaultAzureCredential picking up that session.
-      #
-      # Microsoft's client is fetched rather than vendored, so it is verified by
-      # content before anything is extracted or executed. This job holds signing
-      # authority; a tampered download here would sign whatever an attacker
-      # liked with a public-trust certificate.
-      - name: Set up Trusted Signing (SHA-verified dlib + signtool)
-        id: ts
-        shell: pwsh
-        env:
-          TS_ENDPOINT: ${{ vars.AZURE_SIGNING_ENDPOINT }}
-          TS_ACCOUNT: ${{ vars.AZURE_SIGNING_ACCOUNT }}
-          TS_PROFILE: ${{ vars.AZURE_SIGNING_PROFILE }}
-          # Independently verified 2026-08-16 by downloading the package and
-          # hashing it. When bumping the version, re-derive this from a
-          # trusted machine -- do not copy a hash from anywhere.
-          TRUSTED_SIGNING_CLIENT_SHA256: 3BFCF1E0A3CB42AF1692F0A8ED45C15DE070C2DE86F28A59B2795D904D8A920F
-        run: |
-          ./scripts/windows/setup-trusted-signing.ps1 `
-            -Endpoint $env:TS_ENDPOINT `
-            -Account $env:TS_ACCOUNT `
-            -Profile $env:TS_PROFILE `
-            -ExpectedSha256 $env:TRUSTED_SIGNING_CLIENT_SHA256
-
-      # /tr plus /td is the RFC3161 countersignature. It is not optional here:
-      # Trusted Signing certificates carry roughly three-day validity, and the
-      # timestamp is the only reason a signature outlives them. An untimestamped
-      # binary starts failing validation days after release -- a failure no
-      # same-day test would catch.
-      #
-      # Signing and verification are one step, not two, so there is no
-      # arrangement of this workflow in which a file is signed and then
-      # shipped without a verifier having looked at it. /pa uses the
-      # Authenticode policy an end user's machine uses -- the real check is
-      # what a verifier says, not what the signing step reported.
-      - name: Sign and verify
-        shell: pwsh
-        env:
-          TS_SIGNTOOL: ${{ steps.ts.outputs.signtool }}
-          TS_DLIB: ${{ steps.ts.outputs.dlib }}
-          TS_METADATA: ${{ steps.ts.outputs.metadata }}
-        run: |
-          $ErrorActionPreference = "Stop"
-          $files = @(Get-ChildItem signed\*.exe | ForEach-Object { $_.FullName })
-          ./scripts/windows/sign-with-trusted-signing.ps1 `
-            -SignTool $env:TS_SIGNTOOL -Dlib $env:TS_DLIB `
-            -Metadata $env:TS_METADATA -Path $files
-
-      # A separate pass from the CLI's, and driven by the list the staging step
-      # wrote rather than by a glob over a directory. That difference is the
-      # whole point: a glob over a self-contained publish tree would hand
-      # signtool several hundred files, most of them Microsoft's, and would sign
-      # anything that appeared there. The count check below is a second reading
-      # of the same invariant the staging step asserted, in the step that
-      # actually holds the certificate.
-      - name: Sign the app binaries
-        shell: pwsh
-        env:
-          TS_SIGNTOOL: ${{ steps.ts.outputs.signtool }}
-          TS_DLIB: ${{ steps.ts.outputs.dlib }}
-          TS_METADATA: ${{ steps.ts.outputs.metadata }}
-          APP_SIGN_LIST: ${{ steps.appstage.outputs.app_sign_list }}
-        run: |
-          $ErrorActionPreference = "Stop"
-          $paths = @(Get-Content -Path $env:APP_SIGN_LIST | Where-Object { $_.Trim() -ne "" })
-          if ($paths.Count -ne 4) {
-            throw "expected exactly 4 app binaries staged for signing, found $($paths.Count): $($paths -join ', ')"
-          }
-          foreach ($p in $paths) {
-            if (-not (Test-Path $p -PathType Leaf)) { throw "staged path is not a file: $p" }
-            & "$env:TS_SIGNTOOL" sign /v /fd SHA256 `
-              /tr http://timestamp.acs.microsoft.com /td SHA256 `
-              /dlib "$env:TS_DLIB" `
-              /dmdf "$env:TS_METADATA" `
-              $p
-            if ($LASTEXITCODE -ne 0) { throw "signing failed for $p" }
-          }
-
-      - name: Verify the app signatures
-        shell: pwsh
-        env:
-          TS_SIGNTOOL: ${{ steps.ts.outputs.signtool }}
-          APP_SIGN_LIST: ${{ steps.appstage.outputs.app_sign_list }}
-        run: |
-          $ErrorActionPreference = "Stop"
-          Get-Content -Path $env:APP_SIGN_LIST | Where-Object { $_.Trim() -ne "" } | ForEach-Object {
-            & "$env:TS_SIGNTOOL" verify /pa /v $_
-            if ($LASTEXITCODE -ne 0) { throw "signature verification failed for $_" }
-          }
-
-      # After signing, so the provenance covers the signed bytes rather than the
-      # unsigned build output. The Authenticode signature travels inside the .exe,
-      # so provenance on the exe covers what a contributor executes; the zip is
-      # only transport. The same reasoning extends to the app: provenance names
-      # the four binaries we built and signed, not the Microsoft runtime files
-      # the publish tree carries alongside them.
-      - uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4
-        with:
-          subject-path: |
-            signed/*.exe
-            app-publish/TraceCommons.exe
-            app-publish/TraceCommons.dll
-            app-publish/TraceCommons.Interop.dll
-            app-publish/trace_commons_contributor_ffi.dll
-
-      - name: Package
-        shell: pwsh
-        env:
-          SHORT_VERSION: ${{ needs.version.outputs.short }}
-        run: |
-          $ErrorActionPreference = "Stop"
-          New-Item -ItemType Directory -Force -Path dist | Out-Null
-          $v = $env:SHORT_VERSION
-          $zip = "dist\trace-commons-windows-x86_64-$v.zip"
-          Compress-Archive -Path signed\*.exe -DestinationPath $zip
-          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
-          "$hash  $(Split-Path -Leaf $zip)" |
-            Out-File "$zip.sha256" -Encoding ascii -NoNewline
-
-      # A second, separate asset. The CLI zip above keeps its name and its
-      # contents; nothing consumes this one yet, and winget and install.ps1
-      # both draw from the contributor release rather than from here.
-      #
-      # The publish tree is renamed into a versioned folder before compression
-      # so the zip carries that folder at its root. Extracting several hundred
-      # loose runtime files into whatever directory a contributor happened to be
-      # in is not a distribution, it is a mess.
-      - name: Package the app
-        shell: pwsh
-        env:
-          SHORT_VERSION: ${{ needs.version.outputs.short }}
-        run: |
-          $ErrorActionPreference = "Stop"
-          $v = $env:SHORT_VERSION
-          New-Item -ItemType Directory -Force -Path dist, app-staging | Out-Null
-          $folder = "app-staging\TraceCommons-$v"
-          Move-Item -Path app-publish -Destination $folder
-          $zip = "dist\trace-commons-app-windows-x86_64-$v.zip"
-          Compress-Archive -Path $folder -DestinationPath $zip
-          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
-          "$hash  $(Split-Path -Leaf $zip)" |
-            Out-File "$zip.sha256" -Encoding ascii -NoNewline
-
-      # ---- MSIX, opt-in and unproven -------------------------------------
-      #
-      # Everything above this line is the shipping path and is unchanged. These
-      # steps run only on a workflow_dispatch with msix=true, so a tag push
-      # produces exactly the two zips it always did.
-      #
-      # They come AFTER the zip is packaged, deliberately. The MSIX build is a
-      # second, independent MSBuild invocation with TcPackaged=true; running it
-      # last means it cannot perturb the publish tree the shipping artifact was
-      # made from, even if it fails.
-      - name: Build the MSIX (unsigned)
-        if: inputs.msix
-        shell: pwsh
-        id: msix
-        env:
-          SHORT_VERSION: ${{ needs.version.outputs.short }}
-          TC_FFI_LIB_DIR: ${{ github.workspace }}\target\x86_64-pc-windows-msvc\release
-        run: |
-          $ErrorActionPreference = "Stop"
-          $signList = Join-Path $env:RUNNER_TEMP "msix-sign-list.txt"
-          ./windows/scripts/make-msix.ps1 `
-            -Version $env:SHORT_VERSION `
-            -OutputDir "$env:GITHUB_WORKSPACE/dist" `
-            -SignListPath $signList
-          "msix_sign_list=$signList" >> $env:GITHUB_OUTPUT
-
-      # Same shape as the app-binary signing pass: driven by the list file the
-      # build step wrote, count asserted, never a glob over a directory. The
-      # MSIX is one file, so the assertion is one entry -- but it is still an
-      # assertion, and it still reads a list rather than scanning dist\.
-      #
-      # /fd SHA256 and the RFC3161 countersignature for the same reason as the
-      # Authenticode pass: a Trusted Signing certificate lives about three days
-      # and the timestamp is the only thing that outlives it. Note that
-      # signtool signs an MSIX in place and REWRITES the file, so the checksum
-      # below is computed afterwards.
-      - name: Sign the MSIX
-        if: inputs.msix
-        shell: pwsh
-        env:
-          TS_SIGNTOOL: ${{ steps.ts.outputs.signtool }}
-          TS_DLIB: ${{ steps.ts.outputs.dlib }}
-          TS_METADATA: ${{ steps.ts.outputs.metadata }}
-          MSIX_SIGN_LIST: ${{ steps.msix.outputs.msix_sign_list }}
-        run: |
-          $ErrorActionPreference = "Stop"
-          $paths = @(Get-Content -Path $env:MSIX_SIGN_LIST | Where-Object { $_.Trim() -ne "" })
-          if ($paths.Count -ne 1) {
-            throw "expected exactly 1 MSIX staged for signing, found $($paths.Count): $($paths -join ', ')"
-          }
-          foreach ($p in $paths) {
-            if (-not (Test-Path $p -PathType Leaf)) { throw "staged path is not a file: $p" }
-            & "$env:TS_SIGNTOOL" sign /v /fd SHA256 `
-              /tr http://timestamp.acs.microsoft.com /td SHA256 `
-              /dlib "$env:TS_DLIB" `
-              /dmdf "$env:TS_METADATA" `
-              $p
-            if ($LASTEXITCODE -ne 0) {
-              throw "MSIX signing failed for $p. If this reports a publisher mismatch, the Identity Publisher in windows/packaging/Package.appxmanifest does not match the certificate subject -- see windows/packaging/README.md."
-            }
-          }
-
-      - name: Verify the MSIX signature
-        if: inputs.msix
-        shell: pwsh
-        env:
-          TS_SIGNTOOL: ${{ steps.ts.outputs.signtool }}
-          MSIX_SIGN_LIST: ${{ steps.msix.outputs.msix_sign_list }}
-        run: |
-          $ErrorActionPreference = "Stop"
-          Get-Content -Path $env:MSIX_SIGN_LIST | Where-Object { $_.Trim() -ne "" } | ForEach-Object {
-            & "$env:TS_SIGNTOOL" verify /pa /v $_
-            if ($LASTEXITCODE -ne 0) { throw "MSIX signature verification failed for $_" }
-            $hash = (Get-FileHash $_ -Algorithm SHA256).Hash.ToLowerInvariant()
-            "$hash  $(Split-Path -Leaf $_)" |
-              Out-File "$_.sha256" -Encoding ascii -NoNewline
-          }
-
-      # After signing, so the provenance covers the bytes signtool wrote. An
-      # MSIX is a signed container rather than a tree of separately signed
-      # files, so unlike the publish tree above there is exactly one subject.
-      - uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4
-        if: inputs.msix
-        with:
-          subject-path: dist/*.msix
-
-      # Both Windows zips ride in the one artifact, so the publish job's
-      # existing download pattern and its `dist/*/*` upload glob pick the app up
-      # with no further wiring. An MSIX, when one was built, rides along here
-      # too -- but only on a dispatch, and the publish job runs on tag pushes
-      # only, so it is never attached to a release without that being a
-      # separate, deliberate change.
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: windows-zip
-          path: dist/
-
-  windows-app:
-    name: Windows signed MSIX
-    needs: [version, release-config]
-    if: >-
-      github.event_name == 'push' ||
-      inputs.platform == 'all' || inputs.platform == 'windows'
-    runs-on: windows-latest
-    # Same reason as the `windows` job above: the federated credential's
-    # subject is repo:...:environment:release, so this job must declare the
-    # environment or the OIDC token will not match and signing fails at auth.
-    environment: release
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master@2026-05-27
-        with:
-          toolchain: "1.96"
-          targets: x86_64-pc-windows-msvc
-      # windows/global.json pins the SDK to 8.0.x. MSBuild otherwise selects
-      # the newest installed SDK regardless of what setup-dotnet put there,
-      # and the runner image ships .NET 10, whose layout Windows App SDK 1.6
-      # cannot build against.
-      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
-        with:
-          dotnet-version: '8.0.x'
-      # MSBuild from Visual Studio, not `dotnet build`. A WinUI 3 project
-      # invokes tasks from Microsoft.Build.AppxPackage.dll and
-      # Microsoft.Build.Packaging.Pri.Tasks.dll, which are never part of the
-      # .NET SDK.
-      - uses: microsoft/setup-msbuild@6fb02220983dee41ce7ae257b6f4d8f9bf5ed4ce # v2
-      # No build cache in a release job, deliberately. A cache is a
-      # write-target a lower-privilege job can poison, and this job holds
-      # signing authority.
-
-      - name: Build the contributor FFI cdylib
-        run: cargo build --locked -p trace-commons-contributor-ffi --release
-
-      # Compile first, package later. The publisher the package must carry is
-      # not known until a certificate has actually signed something, so the
-      # manifest cannot be finalized before this point.
-      - name: Build the app
-        working-directory: windows
-        env:
-          TC_FFI_LIB_DIR: ${{ github.workspace }}\target\release
-        run: msbuild src\TraceCommons.App\TraceCommons.App.csproj -restore -p:Configuration=Release -p:Platform=x64
-
-      - uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2
-        with:
-          client-id: ${{ vars.AZURE_SIGNING_CLIENT_ID }}
-          tenant-id: ${{ vars.AZURE_SIGNING_TENANT_ID }}
-          subscription-id: ${{ vars.AZURE_SIGNING_SUBSCRIPTION_ID }}
-
-      - name: Set up Trusted Signing (SHA-verified dlib + signtool)
-        id: ts
-        shell: pwsh
-        env:
-          TS_ENDPOINT: ${{ vars.AZURE_SIGNING_ENDPOINT }}
-          TS_ACCOUNT: ${{ vars.AZURE_SIGNING_ACCOUNT }}
-          TS_PROFILE: ${{ vars.AZURE_SIGNING_PROFILE }}
-          # Independently verified 2026-08-16. When bumping the version,
-          # re-derive this from a trusted machine.
-          TRUSTED_SIGNING_CLIENT_SHA256: 3BFCF1E0A3CB42AF1692F0A8ED45C15DE070C2DE86F28A59B2795D904D8A920F
-        run: |
-          ./scripts/windows/setup-trusted-signing.ps1 `
-            -Endpoint $env:TS_ENDPOINT `
-            -Account $env:TS_ACCOUNT `
-            -Profile $env:TS_PROFILE `
-            -ExpectedSha256 $env:TRUSTED_SIGNING_CLIENT_SHA256
-
-      # Identity/@Publisher must match the signing certificate's subject
-      # EXACTLY or signtool refuses the package. Rather than configure that
-      # subject and let it drift the day the profile is re-issued, sign a
-      # throwaway copy of the app's own executable and read back the subject
-      # Windows itself reports. The value cannot be wrong, because it is the
-      # value the real signature will carry.
-      - name: Discover the certificate subject
-        id: subject
-        shell: pwsh
-        env:
-          TS_SIGNTOOL: ${{ steps.ts.outputs.signtool }}
-          TS_DLIB: ${{ steps.ts.outputs.dlib }}
-          TS_METADATA: ${{ steps.ts.outputs.metadata }}
-        run: |
-          $ErrorActionPreference = "Stop"
-          $exe = @(Get-ChildItem -Recurse -Filter TraceCommons.exe `
-                     -Path windows\src\TraceCommons.App\bin\x64\Release)
-          if ($exe.Count -lt 1) { throw "TraceCommons.exe was not found in the build output" }
-          New-Item -ItemType Directory -Force -Path "$env:RUNNER_TEMP\probe" | Out-Null
-          $probe = Join-Path "$env:RUNNER_TEMP\probe" "subject-probe.exe"
-          Copy-Item $exe[0].FullName $probe -Force
-          ./scripts/windows/sign-with-trusted-signing.ps1 `
-            -SignTool $env:TS_SIGNTOOL -Dlib $env:TS_DLIB `
-            -Metadata $env:TS_METADATA -Path @($probe)
-          $subject = (Get-AuthenticodeSignature $probe).SignerCertificate.Subject
-          if ([string]::IsNullOrWhiteSpace($subject)) {
-            throw "could not read the certificate subject back from the probe signature"
-          }
-          Write-Host "certificate subject: $subject"
-          "subject=$subject" >> $env:GITHUB_OUTPUT
-          Remove-Item $probe -Force
-
-      - name: Stamp the package identity
-        id: identity
-        shell: pwsh
-        env:
-          SHORT_VERSION: ${{ needs.version.outputs.short }}
-          CERT_SUBJECT: ${{ steps.subject.outputs.subject }}
-        run: |
-          $ErrorActionPreference = "Stop"
-          $quad = & windows\scripts\stamp-package-identity.ps1 `
-            -ManifestPath windows\packaging\Package.appxmanifest `
-            -Version $env:SHORT_VERSION -Publisher $env:CERT_SUBJECT
-          "quad=$quad" >> $env:GITHUB_OUTPUT
-
-      - name: Package
-        working-directory: windows
-        env:
-          TC_FFI_LIB_DIR: ${{ github.workspace }}\target\release
-        run: msbuild src\TraceCommons.App\TraceCommons.App.csproj -p:Configuration=Release -p:Platform=x64 -p:TcPackaged=true -p:GenerateAppxPackageOnBuild=true
-
-      # Exactly one, asserted rather than assumed -- the same shape as the
-      # CLI job's staging check. A second .msix in the output directory means
-      # a stale build is about to be signed and published as this release.
-      - name: Locate the package
-        id: pkg
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          $found = @(Get-ChildItem -Recurse -Filter *.msix -Path windows\dist\msix)
-          if ($found.Count -ne 1) {
-            throw "expected exactly 1 .msix, found $($found.Count): $($found.Name -join ', ')"
-          }
-          "path=$($found[0].FullName)" >> $env:GITHUB_OUTPUT
-          "name=$($found[0].Name)" >> $env:GITHUB_OUTPUT
-
-      - name: Sign and verify
-        shell: pwsh
-        env:
-          TS_SIGNTOOL: ${{ steps.ts.outputs.signtool }}
-          TS_DLIB: ${{ steps.ts.outputs.dlib }}
-          TS_METADATA: ${{ steps.ts.outputs.metadata }}
-          PKG: ${{ steps.pkg.outputs.path }}
-        run: |
-          ./scripts/windows/sign-with-trusted-signing.ps1 `
-            -SignTool $env:TS_SIGNTOOL -Dlib $env:TS_DLIB `
-            -Metadata $env:TS_METADATA -Path @($env:PKG)
-
-      # Installing is the only real validation of a manifest. A schema that
-      # parses and a package Windows will register are different claims, and
-      # this job holds the second one BEFORE anything is published.
-      - name: Install it on the runner
-        shell: pwsh
-        env:
-          PKG: ${{ steps.pkg.outputs.path }}
-          QUAD: ${{ steps.identity.outputs.quad }}
-        run: |
-          $ErrorActionPreference = "Stop"
-          Add-AppxPackage -Path $env:PKG
-          $installed = Get-AppxPackage -Name Iqlusion.TraceCommons
-          if (-not $installed) { throw "the package did not register" }
-          if ($installed.Version -ne $env:QUAD) {
-            throw "installed version $($installed.Version) does not match the stamped $env:QUAD"
-          }
-          Write-Host "registered $($installed.PackageFullName)"
-
-      # The virtualization check. Files a packaged desktop app creates under
-      # %LOCALAPPDATA% are redirected to a per-package private location
-      # unless write virtualization is disabled, and under redirection this
-      # app would keep a SECOND queue the contributor CLI cannot see. The
-      # manifest disables it; this proves the manifest worked, inside the
-      # real container, on a real installed package.
-      #
-      # The probe is deliberately three-way. A missing file at the real path
-      # is not on its own evidence of virtualization: it is equally
-      # consistent with the container process never having started. So this
-      # step also watches the redirected location the write would land in if
-      # virtualization were on, and has the container process write its own
-      # transcript to RUNNER_TEMP, which is on the work volume and is never
-      # redirected. Those two extra observations turn one ambiguous symptom
-      # into a named cause, and a probe that appears at the redirected path
-      # now fails immediately instead of waiting out the deadline.
-      - name: Confirm the state directory is not virtualized
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-
-          # Exactly one registration, or PackageFamilyName below is empty or
-          # an array and Invoke-CommandInDesktopPackage silently does nothing.
-          $pkgs = @(Get-AppxPackage -Name Iqlusion.TraceCommons)
-          if ($pkgs.Count -ne 1) {
-            throw "expected exactly 1 registered Iqlusion.TraceCommons package, found $($pkgs.Count): $($pkgs.PackageFullName -join ', ')"
-          }
-          $pkg = $pkgs[0]
-          Write-Host "package family name: $($pkg.PackageFamilyName)"
-          Write-Host "package full name:   $($pkg.PackageFullName)"
-
-          $dir = Join-Path $env:LOCALAPPDATA 'trace-commons'
-          $probe = Join-Path $dir 'msix-virtualization-probe.txt'
-          # Where the write lands instead when virtualization is on.
-          $shadow = Join-Path $env:LOCALAPPDATA "Packages\$($pkg.PackageFamilyName)\LocalCache\Local\trace-commons\msix-virtualization-probe.txt"
-          $log = Join-Path $env:RUNNER_TEMP 'msix-probe-inner.log'
-          foreach ($stale in @($probe, $shadow, $log)) {
-            if (Test-Path $stale) { Remove-Item $stale -Force }
-          }
-
-          # -EncodedCommand, not a quoted -Command string: the inner script
-          # has to survive Invoke-CommandInDesktopPackage's argument parsing
-          # intact, and base64 removes every nesting-quote failure mode.
-          $innerScript = @"
-          `$ErrorActionPreference = 'Continue'
-          try {
-            New-Item -ItemType Directory -Force -Path '$dir' | Out-Null
-            Set-Content -Path '$probe' -Value ok
-            "inner: wrote $probe" | Out-File -FilePath '$log' -Encoding ascii
-          } catch {
-            "inner: write failed: `$(`$_.Exception.Message)" | Out-File -FilePath '$log' -Encoding ascii
-          }
-          "@
-          $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($innerScript))
-
-          Invoke-CommandInDesktopPackage -PackageFamilyName $pkg.PackageFamilyName `
-            -AppId App `
-            -Command "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" `
-            -Args "-NoProfile -NonInteractive -EncodedCommand $encoded"
-
-          # A liveness bound on the container process starting, not a
-          # tolerance for a bad verdict: a virtualized write is caught by the
-          # $shadow test and breaks out of this loop on the first poll.
-          $deadline = (Get-Date).AddSeconds(120)
-          while (-not (Test-Path $probe) -and -not (Test-Path $shadow) -and (Get-Date) -lt $deadline) {
-            Start-Sleep -Seconds 2
-          }
-
-          if (Test-Path $log) {
-            Write-Host "container process transcript:"
-            Get-Content $log | ForEach-Object { Write-Host "  $_" }
-          } else {
-            Write-Host "container process left no transcript at $log"
-          }
-
-          if (Test-Path $shadow) {
-            throw "the packaged app's write to $dir was redirected to $shadow. Write virtualization is on, which means this app would keep a second queue the contributor CLI cannot see."
-          }
-          if (-not (Test-Path $probe)) {
-            if (Test-Path $log) {
-              throw "the packaged app ran but its write to $dir landed at neither the real path nor the virtualized path. See the transcript above."
-            }
-            throw "the packaged app's write to $dir did not land at the real path, and the container process left no transcript, so it may never have started. Cannot confirm write virtualization is off."
-          }
-
-          Write-Host "probe landed at the real path: $probe"
-          Remove-Item $probe -Force
-          Remove-AppxPackage -Package $pkg.PackageFullName
-
-      - name: Generate the appinstaller feed
-        shell: pwsh
-        env:
-          QUAD: ${{ steps.identity.outputs.quad }}
-          CERT_SUBJECT: ${{ steps.subject.outputs.subject }}
-          PKG_NAME: ${{ steps.pkg.outputs.name }}
-        run: |
-          $ErrorActionPreference = "Stop"
-          New-Item -ItemType Directory -Force -Path dist | Out-Null
-          Copy-Item "${{ steps.pkg.outputs.path }}" "dist\$env:PKG_NAME" -Force
-          ./windows/scripts/make-appinstaller.ps1 `
-            -PackageName Iqlusion.TraceCommons `
-            -Publisher $env:CERT_SUBJECT `
-            -Version $env:QUAD `
-            -ProcessorArchitecture x64 `
-            -BaseUri https://storage.googleapis.com/tracecommons-flatpak/windows `
-            -PackageFileName $env:PKG_NAME `
-            -OutputPath dist\TraceCommons.appinstaller
-          $hash = (Get-FileHash "dist\$env:PKG_NAME" -Algorithm SHA256).Hash.ToLowerInvariant()
-          "$hash  $env:PKG_NAME" | Out-File "dist\$env:PKG_NAME.sha256" -Encoding ascii -NoNewline
-
-      # After signing, so provenance covers the signed bytes rather than the
-      # unsigned build output.
-      - uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4
-        with:
-          subject-path: dist/*.msix
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: windows-msix
-          path: dist/
-
-      # Publication is tag pushes only. A dispatch run still builds, signs,
-      # installs and verifies above, so the whole path is provable -- but it
-      # must never move what an installed client would actually pull.
-      - name: Authenticate to GCP (workload identity federation; no key on the runner)
-        if: github.event_name == 'push'
-        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
-        with:
-          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
-          service_account: ${{ secrets.GCP_FLATPAK_PUBLISHER_SA }}
-
-      - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
-        if: github.event_name == 'push'
-
-      # The package goes up FIRST. The feed is what clients follow, so a feed
-      # that names a package not yet in the bucket is a window in which every
-      # update attempt 404s.
-      #
-      # Content types matter: the deployment service dispatches on them.
-      # Cache-Control matters more -- a cached .appinstaller is a release
-      # nobody receives, so the feed is explicitly uncacheable while the
-      # immutable, version-named package is cached hard.
-      #
-      # This runs BEFORE the `publish` job cuts the GitHub Release, and that
-      # ordering is deliberate (see #695). The .appinstaller's BaseUri is
-      # this bucket, not the Release, so an installed client's update path
-      # never reads a GitHub Release at all: a bucket newer than the Release
-      # page is a discovery inconsistency, while a Release page newer than
-      # the bucket would tell a contributor to expect a build the update
-      # channel does not yet serve. The second is the worse of the two, and
-      # it is what moving this after `publish` would create.
-      #
-      # `publish` is also deliberately `always()` and satisfied by any one
-      # of four platforms, so a partial release is a designed outcome.
-      # Making this step depend on it would put a signed, verified MSIX
-      # behind a job that is allowed to run with three platforms failed.
-      #
-      # Instead the step is re-runnable: `gcloud storage cp` overwrites
-      # unconditionally, the package name carries the version quad, and the
-      # package is uploaded before the feed that names it. Re-running the
-      # job converges the bucket rather than layering onto it.
-      - name: Publish
-        if: github.event_name == 'push'
-        shell: pwsh
-        env:
-          BUCKET: tracecommons-flatpak
-          PKG_NAME: ${{ steps.pkg.outputs.name }}
-        run: |
-          $ErrorActionPreference = "Stop"
-          gcloud storage cp "dist\$env:PKG_NAME" "gs://$env:BUCKET/windows/$env:PKG_NAME" `
-            --content-type=application/msix --cache-control="public, max-age=31536000, immutable"
-          if ($LASTEXITCODE -ne 0) { throw "uploading the package failed" }
-          gcloud storage cp "dist\TraceCommons.appinstaller" "gs://$env:BUCKET/windows/TraceCommons.appinstaller" `
-            --content-type=application/appinstaller --cache-control="no-cache, max-age=0"
-          if ($LASTEXITCODE -ne 0) { throw "uploading the feed failed" }
-
-  linux-flatpak:
-    name: Linux flatpak
-    needs: [version, release-config]
-    if: >-
-      github.event_name == 'push' ||
-      inputs.platform == 'all' || inputs.platform == 'linux'
-    runs-on: ubuntu-latest
-    # Signing authority, so it declares the environment like the other two:
-    # this job imports the OSTree repo's GPG private key from Secret Manager
-    # (Task 9) to sign the built repo before publication. Its GCP auth is
-    # repository-scoped rather than environment-scoped, so unlike the
-    # Windows job this is protection rather than a hard auth requirement --
-    # but a job holding a signing key is gated either way.
-    environment: release
-    # This manifest had never been built when the job was written. The
-    # generous timeout is because a from-scratch flatpak build compiles the
-    # whole GTK crate against the GNOME SDK with no cargo cache.
-    timeout-minutes: 90
-    steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-
-      # Ubuntu-archive packages only, so the runner image's vendor apt
-      # sources are pure exposure. A bare `apt-get update` here fetches
-      # Chrome's index among others, and a bad vendor index fails the job
-      # having compiled nothing -- which on this workflow would happen
-      # AFTER the tag exists, since nothing else triggers it.
-      - uses: ./.github/actions/apt-update-ubuntu-only
-
-      - name: Install flatpak and the GNOME SDK
-        run: |
-          set -euo pipefail
-          # ostree is a SEPARATE package: flatpak and flatpak-builder depend
-          # only on libostree-1-1, so the verification step below would fail
-          # with "ostree: command not found" after a full successful build.
-          sudo apt-get install -y flatpak flatpak-builder ostree
-          sudo flatpak remote-add --if-not-exists flathub \
-            https://dl.flathub.org/repo/flathub.flatpakrepo
-          # No org.freedesktop.Sdk.Extension.rust-stable here anymore. The
-          # first real release run (app-v0.1.0, run 31959830328) proved the
-          # extension's rustc is 15 minor versions behind the crate's
-          # rust-version floor (now "1.96"), and the build is network-sandboxed
-          # so rustup cannot rescue it at build time. The manifest now
-          # bundles a pinned rust 1.96.0 toolchain as a source instead (see
-          # ai.tracecommons.Contributor.yml), so this job no longer needs
-          # the extension at all.
-          sudo flatpak install -y --noninteractive flathub \
-            org.gnome.Platform//46 org.gnome.Sdk//46
-
-      - name: Check the manifest's pinned rust against the crate's requirement
-        run: |
-          set -euo pipefail
-          REQUIRED="$(grep -m1 '^rust-version' crates/trace-commons-contributor-gtk/Cargo.toml | cut -d'"' -f2)"
-          MANIFEST="crates/trace-commons-contributor-gtk/flatpak/ai.tracecommons.Contributor.yml"
-          # The manifest pins one tarball version for both arches (see the
-          # `only-arches` sources); grab the first `rust-<version>-` url and
-          # trust the rest match, the way the sha256-count check in
-          # release_pipeline.rs already assumes.
-          PINNED="$(grep -m1 -oE 'rust-[0-9]+\.[0-9]+\.[0-9]+-' "$MANIFEST" | head -1 | sed -E 's/^rust-//; s/-$//')"
-          echo "crate requires rust-version = $REQUIRED"
-          echo "manifest pins rust $PINNED"
-          if [ -z "$PINNED" ]; then
-            echo "REFUSING: could not find a pinned rust toolchain version in $MANIFEST." >&2
-            exit 1
-          fi
-          LOWEST="$(printf '%s\n%s\n' "$REQUIRED" "$PINNED" | sort -V | head -1)"
-          if [ "$LOWEST" != "$REQUIRED" ]; then
-            echo "REFUSING: the manifest pins rust $PINNED but the crate requires $REQUIRED." >&2
-            echo "The flatpak build is network-sandboxed, so rustup cannot fix this at build time." >&2
-            echo "Bump the pinned tarball (url + sha256, both arches) in $MANIFEST to a version" >&2
-            echo ">= $REQUIRED before releasing." >&2
-            exit 1
-          fi
-
-      - name: Build the flatpak into a local repo
-        run: |
-          set -euo pipefail
-          sudo flatpak-builder --disable-rofiles-fuse --force-clean \
-            --repo=flatpak-repo build-dir \
-            crates/trace-commons-contributor-gtk/flatpak/ai.tracecommons.Contributor.yml
-          sudo chown -R "$USER" flatpak-repo
-
-      - name: Confirm the app is actually in the repo
-        run: |
-          set -euo pipefail
-          ostree --repo=flatpak-repo refs | tee refs.txt
-          grep -q 'app/ai.tracecommons.Contributor/' refs.txt
-
-      # GCP_WIF_PROVIDER and GCP_FLATPAK_PUBLISHER_SA are repository secrets
-      # provisioned outside this workflow (Task 9, steps 1-3). Until they
-      # exist this step fails closed -- an empty workload_identity_provider
-      # is a hard auth failure, not a silent no-op -- which is the correct
-      # behavior for a job about to import a signing key.
-      - name: Authenticate to GCP (workload identity federation; no key on the runner)
-        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
-        with:
-          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
-          service_account: ${{ secrets.GCP_FLATPAK_PUBLISHER_SA }}
-
-      - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
-
-      - name: Import the signing key from Secret Manager
-        env:
-          GCP_PROJECT: tracecommons-pilot-2026
-          SECRET_NAME: flatpak-signing-key
-          KEY_UID: ops@tracecommons.ai
-        run: |
-          set -euo pipefail
-          gcloud secrets versions access latest --secret="$SECRET_NAME" \
-            --project "$GCP_PROJECT" | gpg --batch --import
-          KEYID="$(gpg --list-keys --with-colons "$KEY_UID" \
-            | awk -F: '/^fpr:/{print $10; exit}')"
-          echo "GPG_KEYID=$KEYID" >> "$GITHUB_ENV"
-          gpg --export "$KEYID" > flatpak-signing-pub.gpg
-
-      # GPG_KEYID reaches this step as a real OS environment variable via
-      # GITHUB_ENV above, not through `${{ }}` interpolation -- this job
-      # holds a GPG private key, so nothing sensitive is allowed to cross
-      # into a `run:` body through template expansion.
-      - name: Sign the repo
-        run: ./scripts/flatpak/build-and-sign.sh flatpak-repo "$GPG_KEYID"
-
-      # Tag pushes only. A dispatch run still builds and signs above, so the
-      # path is provable, but publication never runs on a dispatch -- it
-      # must not move what contributors' clients would actually pull.
-      #
-      # Like the Windows feed, this publishes before `publish` cuts the
-      # GitHub Release, and for the same reason (#695): `flatpak update`
-      # pulls from this OSTree repo and never consults a GitHub Release, so
-      # a repo ahead of the Release page is cosmetic while a Release page
-      # ahead of the repo silently hands Linux contributors the previous
-      # build under the new version's notes.
-      #
-      # Moving it would also mean shipping a whole signed OSTree repo across
-      # a job boundary as an artifact and re-importing the GPG private key
-      # in a second job to re-export its public half -- more signing-key
-      # exposure, not less.
-      #
-      # publish-repo.sh is written to be re-run: it rsyncs with
-      # --delete-unmatched-destination-objects, so the destination converges
-      # on the source rather than accumulating, and the flatpakref and
-      # public key are plain overwrites.
-      - name: Publish
-        if: github.event_name == 'push'
-        env:
-          BUCKET: tracecommons-flatpak
-        run: ./scripts/flatpak/publish-repo.sh flatpak-repo flatpak-signing-pub.gpg "$BUCKET"
-
-      # The signature gate is a CHECK, not a publication, so it runs on every
-      # build -- including a workflow_dispatch, which skips the publish step
-      # above. Without this, a broken signature could only be discovered by
-      # cutting a real tag, which is how the first two attempts were spent.
-      # Nothing is uploaded here; --verify-only stops before the transfer.
-      - name: Verify the signed repo (no upload)
-        if: github.event_name != 'push'
-        run: ./scripts/flatpak/publish-repo.sh --verify-only flatpak-repo flatpak-signing-pub.gpg
-
-      - name: Name the artifact for this version
-        id: name
-        env:
-          SHORT_VERSION: ${{ needs.version.outputs.short }}
-        run: |
-          set -euo pipefail
-          echo "artifact=flatpak-repo-${SHORT_VERSION}" >> "$GITHUB_OUTPUT"
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: ${{ steps.name.outputs.artifact }}
-          path: flatpak-repo/
-
+    - name: Verify source commit and completed platform jobs
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: "set -euo pipefail\ngh run view 34501588678 --repo TraceCommons/trace-commons --json headSha,jobs > source.json\n\
+        python3 - <<'CHECK'\nimport json\nr=json.load(open('source.json'))\nassert r['headSha']=='cbb27dffeacf07d3d4216be62c9b9bb203a943ab'\n\
+        for name in ['macOS signed DMG','Windows signed MSIX','Windows signed binaries','Linux flatpak']:\n    jobs=[j for\
+        \ j in r['jobs'] if j['name']==name]\n    assert len(jobs)==1 and jobs[0]['conclusion']=='success', name\nprint('All\
+        \ source platform jobs succeeded at the immutable release commit.')\nCHECK\ngh release view app-v0.12.1 --repo TraceCommons/trace-commons\
+        \ >/dev/null\n"
   publish:
     name: publish release
-    needs: [version, macos, windows, windows-app, linux-flatpak]
-    # Publish whatever succeeded: the three build jobs are independent
-    # precisely so a Linux failure does not withhold a verified macOS DMG.
-    # But always() alone would let this job run even when EVERY platform
-    # failed, with nothing to attach and no reason to touch the tap -- so the
-    # gate also requires at least one of them to have actually succeeded.
-    if: >-
-      ${{ always() && github.event_name == 'push' &&
-          (needs.macos.result == 'success' || needs.windows.result == 'success' ||
-           needs.windows-app.result == 'success' ||
-           needs.linux-flatpak.result == 'success') }}
+    needs:
+    - version
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    # Job-level only: the workflow-level block stays contents: read, and only
-    # this job needs write access to cut a release.
     permissions:
       contents: write
+      actions: read
     steps:
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          path: dist
-          pattern: "{macos-dmg,windows-zip,windows-msix}"
+    - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      with:
+        path: dist
+        pattern: macos-dmg
+        run-id: '34501588678'
+        github-token: ${{ github.token }}
+    - name: Add missing verified macOS assets without replacing downloads
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: 'set -euo pipefail
 
-      # The build jobs are independent so that one platform failing does not
-      # withhold the others (see the job comment above), which means this
-      # step can run with only a subset of them green. Notes that
-      # unconditionally describe all three platforms would then tell, e.g.,
-      # Linux contributors to install from a bucket URL that either 404s or
-      # -- worse -- silently serves the previous release's repo, so they
-      # install an old build believing it is the new tag. Each paragraph is
-      # therefore built only when that platform's job actually succeeded.
-      - name: Publish
-        env:
-          GH_TOKEN: ${{ github.token }}
-          MACOS_RESULT: ${{ needs.macos.result }}
-          WINDOWS_RESULT: ${{ needs.windows.result }}
-          WINDOWS_APP_RESULT: ${{ needs.windows-app.result }}
-          LINUX_RESULT: ${{ needs.linux-flatpak.result }}
-        run: |
-          set -euo pipefail
-          NOTES="Trace Commons contributor apps."
-          if [ "$MACOS_RESULT" = success ]; then
-            NOTES="$NOTES
+        cd dist/macos-dmg
 
-          macOS: signed with Iqlusion Inc's Developer ID and notarized by
-          Apple. Universal build (Apple silicon and Intel). You can also
-          \`brew tap TraceCommons/tap && brew install --cask trace-commons\`."
-          fi
-          if [ "$WINDOWS_RESULT" = success ]; then
-            NOTES="$NOTES
+        shasum -a 256 -c TraceCommons-0.12.1.dmg.sha256
 
-          Windows: two assets, both Authenticode-signed via Azure Trusted
-          Signing and RFC3161 timestamped.
-          \`trace-commons-app-windows-x86_64-*.zip\` is the desktop app --
-          unzip it and run \`TraceCommons.exe\`; it is self-contained, so
-          there is no runtime to install first.
-          \`trace-commons-windows-x86_64-*.zip\` is the command-line
-          contributor."
-          fi
-          if [ "$WINDOWS_APP_RESULT" = success ]; then
-            NOTES="$NOTES
+        gh release upload app-v0.12.1 TraceCommons-0.12.1.dmg TraceCommons-0.12.1.dmg.sha256 --repo TraceCommons/trace-commons
 
-          Windows app: install the signed MSIX from
-          https://storage.googleapis.com/tracecommons-flatpak/windows/TraceCommons.appinstaller
-          Windows keeps it up to date from that same address afterwards."
-          fi
-          if [ "$LINUX_RESULT" = success ]; then
-            NOTES="$NOTES
-
-          Linux: install the GPG-signed flatpak with
-          \`flatpak install --from https://storage.googleapis.com/tracecommons-flatpak/ai.tracecommons.Contributor.flatpakref\`"
-          fi
-          NOTES="$NOTES
-
-          Nothing leaves your machine until you approve an upload."
-          gh release create "${GITHUB_REF_NAME}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --title "${GITHUB_REF_NAME}" \
-            --notes "$NOTES" \
-            dist/*/*
-
-      # HOMEBREW_TAP_TOKEN is a fine-grained PAT scoped to
-      # TraceCommons/homebrew-tap with contents and pull-request write.
-      # github.token cannot reach another repository, which is why this
-      # secret exists. Merging a pull request needs pull-request write and
-      # nothing beyond it, so the same secret covers the auto-merge below.
-      #
-      # This still opens a pull request rather than pushing to the tap's
-      # default branch -- the pull request is the audit trail, and the place
-      # the tap's own checks run -- but it now merges that pull request
-      # itself. Leaving the merge to a human is what left eleven bump pull
-      # requests open back to 0.4.1 while the tap kept serving cask 0.4.0 to
-      # everyone who had already tapped us: releases shipped, Homebrew users
-      # silently stopped receiving them.
-      #
-      # The gate this comment used to attribute to the pull request is not
-      # the pull request at all -- it is `if: needs.macos.result ==
-      # 'success'` on this step. The macOS job builds, signs, notarizes and
-      # staples the DMG, and only writes the checksum read below once all of
-      # that has succeeded, so a failed verification never reaches here.
-      # That gate is what is preserved; the human merge was never the gate.
-      - name: Open a cask bump
-        if: needs.macos.result == 'success'
-        env:
-          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-          SHORT_VERSION: ${{ needs.version.outputs.short }}
-        run: |
-          set -euo pipefail
-          V="$SHORT_VERSION"
-          # No -arm64 suffix: the DMG is universal now. This reads the
-          # checksum THIS run's macOS job produced, out of the artifact
-          # downloaded into dist/. It is the only source of a hash anywhere
-          # in this step.
-          SHA="$(awk '{print $1}' dist/macos-dmg/TraceCommons-"$V".dmg.sha256)"
-          # Clone with the token IN the remote URL. `gh repo clone` leaves a
-          # plain HTTPS remote, and GH_TOKEN authenticates the gh CLI but NOT
-          # raw `git push` -- which failed on the first real release with
-          # "could not read Username for https://github.com".
-          #
-          # --single-branch --depth 1 fetches the tap's DEFAULT branch and
-          # nothing else. The bump branch is never fetched, checked out or
-          # read at any point. That is what makes a stale checksum
-          # structurally impossible to carry across a re-run: the branch is
-          # rebuilt from the tap's default branch plus the $SHA computed
-          # above, so no previous attempt's bytes can survive into the push.
-          # app-v0.4.7 is why that matters -- the tag was re-cut, the DMG was
-          # rebuilt, and the branch left behind by the first run named a hash
-          # (5234e018...) that no longer matched the published asset
-          # (d60ce434...).
-          git clone --depth 1 --single-branch \
-            "https://x-access-token:${GH_TOKEN}@github.com/TraceCommons/homebrew-tap.git" tap
-          cd tap
-          BRANCH="bump-cask-$V"
-          git switch -c "$BRANCH"
-          sed -i "s/^  version \".*\"/  version \"$V\"/" Casks/trace-commons.rb
-          # Assert exactly one sha256 line before substituting: harmless
-          # today with a single hash, but a positional sed like the
-          # formula's awk would be needed the moment the cask grows an
-          # arch-conditional pair, and a silent no-op substitution would
-          # leave a stale hash paired with a bumped version.
-          SHA256_LINES="$(grep -c '^  sha256 "' Casks/trace-commons.rb)"
-          if [ "$SHA256_LINES" != 1 ]; then
-            echo "expected exactly one sha256 line in Casks/trace-commons.rb, found $SHA256_LINES" >&2
-            exit 1
-          fi
-          sed -i "s/^  sha256 \".*\"/  sha256 \"$SHA\"/" Casks/trace-commons.rb
-          # Prove the hash now in the file is the one computed from this
-          # run's DMG. Everything up to here is a hard failure by design: it
-          # runs before anything has been pushed, so refusing costs a
-          # package-manager bump, not a published release.
-          if ! grep -qF "$SHA" Casks/trace-commons.rb; then
-            echo "cask bump did not apply the checksum computed from this run's DMG; refusing to push a stale hash" >&2
-            exit 1
-          fi
-          git config user.name "trace-commons-release"
-          git config user.email "ops@tracecommons.ai"
-          if git diff --quiet; then
-            echo "the tap already carries version $V with $SHA; nothing to bump."
-            exit 0
-          fi
-          git commit -am "trace-commons $V"
-          # --force, not a plain push. `bump-cask-$V` already exists whenever
-          # a tag is deleted and re-cut, and the plain push was rejected with
-          # "! [rejected] (fetch first)", failing the whole publish job on
-          # app-v0.4.7 after every artifact had already published. Forcing is
-          # only safe because of the clone above: the branch being replaced
-          # cannot have contributed a single byte to what is being pushed.
-          git push --force -u origin "$BRANCH"
-          # A re-run finds its own pull request already open, and `gh pr
-          # create` exits non-zero on a duplicate head. The force-push has
-          # already updated that pull request's contents, so reuse it.
-          PR_URL="$(gh pr list --repo TraceCommons/homebrew-tap --head "$BRANCH" --state open --json url --jq '.[0].url // empty')"
-          if [ -z "$PR_URL" ]; then
-            # `--repo` changes gh's base repository but does not tell it which
-            # remote branch is the PR head. Without an explicit head, the real
-            # tag run aborts here even though the branch was pushed successfully.
-            PR_URL="$(gh pr create --fill --repo TraceCommons/homebrew-tap --head "$BRANCH")"
-          fi
-          echo "cask bump: $PR_URL"
-          # Deliberately NOT merged here. Auto-merge is disabled on
-          # TraceCommons/homebrew-tap, the default branch carries no branch
-          # protection, and the tap has no CI at all -- so `--auto` would
-          # fail outright and any fallback would be an immediate, ungated
-          # merge straight to what `brew upgrade` serves. That is the direct
-          # push this step exists to avoid, wearing a pull request as a
-          # disguise.
-          #
-          # Automating the merge is wanted, but it needs something to gate
-          # on first: a cask/formula audit workflow on the tap, auto-merge
-          # enabled, and that check required. Until then the merge stays a
-          # human step, and tap-bump-staleness.yml is what stops the queue
-          # growing unnoticed the way it did through 0.4.1-0.4.6.
-          echo "::notice::cask bump open at $PR_URL -- merge it, or brew upgrade keeps serving the previous version"
-          {
-            echo "### cask bump ready to merge"
-            echo
-            echo "[$PR_URL]($PR_URL)"
-            echo
-            echo "Homebrew serves the previous version until this is merged."
-          } >> "$GITHUB_STEP_SUMMARY"
-
+        '
+    - name: Open a cask bump
+      env:
+        GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        SHORT_VERSION: ${{ needs.version.outputs.short }}
+      run: "set -euo pipefail\nV=\"$SHORT_VERSION\"\n# No -arm64 suffix: the DMG is universal now. This reads the\n# checksum\
+        \ THIS run's macOS job produced, out of the artifact\n# downloaded into dist/. It is the only source of a hash anywhere\n\
+        # in this step.\nSHA=\"$(awk '{print $1}' dist/macos-dmg/TraceCommons-\"$V\".dmg.sha256)\"\n# Clone with the token\
+        \ IN the remote URL. `gh repo clone` leaves a\n# plain HTTPS remote, and GH_TOKEN authenticates the gh CLI but NOT\n\
+        # raw `git push` -- which failed on the first real release with\n# \"could not read Username for https://github.com\"\
+        .\n#\n# --single-branch --depth 1 fetches the tap's DEFAULT branch and\n# nothing else. The bump branch is never fetched,\
+        \ checked out or\n# read at any point. That is what makes a stale checksum\n# structurally impossible to carry across\
+        \ a re-run: the branch is\n# rebuilt from the tap's default branch plus the $SHA computed\n# above, so no previous\
+        \ attempt's bytes can survive into the push.\n# app-v0.4.7 is why that matters -- the tag was re-cut, the DMG was\n\
+        # rebuilt, and the branch left behind by the first run named a hash\n# (5234e018...) that no longer matched the published\
+        \ asset\n# (d60ce434...).\ngit clone --depth 1 --single-branch \\\n  \"https://x-access-token:${GH_TOKEN}@github.com/TraceCommons/homebrew-tap.git\"\
+        \ tap\ncd tap\nBRANCH=\"bump-cask-$V\"\ngit switch -c \"$BRANCH\"\nsed -i \"s/^  version \\\".*\\\"/  version \\\"\
+        $V\\\"/\" Casks/trace-commons.rb\n# Assert exactly one sha256 line before substituting: harmless\n# today with a single\
+        \ hash, but a positional sed like the\n# formula's awk would be needed the moment the cask grows an\n# arch-conditional\
+        \ pair, and a silent no-op substitution would\n# leave a stale hash paired with a bumped version.\nSHA256_LINES=\"\
+        $(grep -c '^  sha256 \"' Casks/trace-commons.rb)\"\nif [ \"$SHA256_LINES\" != 1 ]; then\n  echo \"expected exactly\
+        \ one sha256 line in Casks/trace-commons.rb, found $SHA256_LINES\" >&2\n  exit 1\nfi\nsed -i \"s/^  sha256 \\\".*\\\
+        \"/  sha256 \\\"$SHA\\\"/\" Casks/trace-commons.rb\n# Prove the hash now in the file is the one computed from this\n\
+        # run's DMG. Everything up to here is a hard failure by design: it\n# runs before anything has been pushed, so refusing\
+        \ costs a\n# package-manager bump, not a published release.\nif ! grep -qF \"$SHA\" Casks/trace-commons.rb; then\n\
+        \  echo \"cask bump did not apply the checksum computed from this run's DMG; refusing to push a stale hash\" >&2\n\
+        \  exit 1\nfi\ngit config user.name \"trace-commons-release\"\ngit config user.email \"ops@tracecommons.ai\"\nif git\
+        \ diff --quiet; then\n  echo \"the tap already carries version $V with $SHA; nothing to bump.\"\n  exit 0\nfi\ngit\
+        \ commit -am \"trace-commons $V\"\n# --force, not a plain push. `bump-cask-$V` already exists whenever\n# a tag is\
+        \ deleted and re-cut, and the plain push was rejected with\n# \"! [rejected] (fetch first)\", failing the whole publish\
+        \ job on\n# app-v0.4.7 after every artifact had already published. Forcing is\n# only safe because of the clone above:\
+        \ the branch being replaced\n# cannot have contributed a single byte to what is being pushed.\ngit push --force -u\
+        \ origin \"$BRANCH\"\n# A re-run finds its own pull request already open, and `gh pr\n# create` exits non-zero on\
+        \ a duplicate head. The force-push has\n# already updated that pull request's contents, so reuse it.\nPR_URL=\"$(gh\
+        \ pr list --repo TraceCommons/homebrew-tap --head \"$BRANCH\" --state open --json url --jq '.[0].url // empty')\"\n\
+        if [ -z \"$PR_URL\" ]; then\n  # `--repo` changes gh's base repository but does not tell it which\n  # remote branch\
+        \ is the PR head. Without an explicit head, the real\n  # tag run aborts here even though the branch was pushed successfully.\n\
+        \  PR_URL=\"$(gh pr create --fill --repo TraceCommons/homebrew-tap --head \"$BRANCH\")\"\nfi\necho \"cask bump: $PR_URL\"\
+        \n# Deliberately NOT merged here. Auto-merge is disabled on\n# TraceCommons/homebrew-tap, the default branch carries\
+        \ no branch\n# protection, and the tap has no CI at all -- so `--auto` would\n# fail outright and any fallback would\
+        \ be an immediate, ungated\n# merge straight to what `brew upgrade` serves. That is the direct\n# push this step exists\
+        \ to avoid, wearing a pull request as a\n# disguise.\n#\n# Automating the merge is wanted, but it needs something\
+        \ to gate\n# on first: a cask/formula audit workflow on the tap, auto-merge\n# enabled, and that check required. Until\
+        \ then the merge stays a\n# human step, and tap-bump-staleness.yml is what stops the queue\n# growing unnoticed the\
+        \ way it did through 0.4.1-0.4.6.\necho \"::notice::cask bump open at $PR_URL -- merge it, or brew upgrade keeps serving\
+        \ the previous version\"\n{\n  echo \"### cask bump ready to merge\"\n  echo\n  echo \"[$PR_URL]($PR_URL)\"\n  echo\n\
+        \  echo \"Homebrew serves the previous version until this is merged.\"\n} >> \"$GITHUB_STEP_SUMMARY\"\n"
   publish-updates:
     name: publish update manifests
-    needs: [version, macos, windows, linux-flatpak, publish]
-    # Runs only when the release itself was cut, and only if at least one
-    # platform is genuinely publishable. A manifest is what installed clients
-    # poll, so publishing one that names a platform whose build failed would
-    # point every client of that platform at a URL that does not exist.
-    if: >-
-      ${{ always() && github.event_name == 'push' &&
-          needs.publish.result == 'success' &&
-          (needs.macos.result == 'success' || needs.windows.result == 'success') }}
+    needs:
+    - version
+    - publish
+    if: ${{ needs.publish.result == 'success' }}
     runs-on: macos-26
-    # macos-26, not ubuntu: Sparkle's sign_update is a macOS binary, and this
-    # job signs the appcast.
     environment: release
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-
-      # macOS ships LibreSSL at /usr/bin/openssl, which implements neither
-      # `pkeyutl ... -rawin` nor `genpkey -algorithm ed25519` -- both of which
-      # generate-manifest.sh (invoked with a bare `openssl` below) and the
-      # verify step in this job require. Left unguarded, a runner whose PATH
-      # resolves to LibreSSL would fail this job at release time with a
-      # cryptic pkeyutl error, which is the worst possible moment to discover
-      # it. Resolve Homebrew's openssl@3 explicitly, confirm it really is
-      # OpenSSL (not LibreSSL under another name), and put it first on PATH
-      # for every later step in this job so the bare `openssl` calls below
-      # all pick up the same verified binary.
-      - name: Resolve a real OpenSSL (not LibreSSL)
-        run: |
-          set -euo pipefail
-          OPENSSL_DIR="$(brew --prefix openssl@3)/bin"
-          if [ ! -x "$OPENSSL_DIR/openssl" ]; then
-            echo "openssl@3 not found via Homebrew at $OPENSSL_DIR -- refusing to sign with whatever /usr/bin/openssl resolves to (LibreSSL on macOS runners)." >&2
-            exit 1
-          fi
-          VERSION_STRING="$("$OPENSSL_DIR/openssl" version)"
-          case "$VERSION_STRING" in
-            OpenSSL\ *) ;;
-            *)
-              echo "resolved binary at $OPENSSL_DIR/openssl is not OpenSSL: $VERSION_STRING" >&2
-              exit 1
-              ;;
-          esac
-          echo "using $VERSION_STRING at $OPENSSL_DIR/openssl"
-          echo "$OPENSSL_DIR" >> "$GITHUB_PATH"
-
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          path: dist
-          pattern: "{macos-dmg,windows-zip}"
-
-      - name: Authenticate to GCP (workload identity federation; no key on the runner)
-        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
-        with:
-          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
-          service_account: ${{ secrets.GCP_FLATPAK_PUBLISHER_SA }}
-
-      - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
-
-      # Both keys are fetched into RUNNER_TEMP and deleted by the runner when
-      # the job ends. Neither is ever echoed: a `set -x` in this step would
-      # print key material into a public log.
-      - name: Fetch the signing keys from Secret Manager
-        env:
-          GCP_PROJECT: tracecommons-pilot-2026
-        run: |
-          set -euo pipefail
-          gcloud secrets versions access latest \
-            --secret=update-manifest-signing-key --project "$GCP_PROJECT" \
-            > "$RUNNER_TEMP/update-signing.pem"
-          chmod 600 "$RUNNER_TEMP/update-signing.pem"
-
-      - name: Build the manifest from the platforms that actually succeeded
-        env:
-          SHORT_VERSION: ${{ needs.version.outputs.short }}
-          MACOS_RESULT: ${{ needs.macos.result }}
-          WINDOWS_RESULT: ${{ needs.windows.result }}
-          REPO: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          V="$SHORT_VERSION"
-          BASE="https://github.com/$REPO/releases/download/app-v$V"
-          ARGS=()
-
-          if [ "$MACOS_RESULT" = success ]; then
-            F="dist/macos-dmg/TraceCommons-$V.dmg"
-            SHA="$(shasum -a 256 "$F" | awk '{print $1}')"
-            SIZE="$(wc -c < "$F" | tr -d ' ')"
-            ARGS+=(--platform "macos-universal=$BASE/TraceCommons-$V.dmg=$SHA=$SIZE")
-          fi
-
-          if [ "$WINDOWS_RESULT" = success ]; then
-            F="dist/windows-zip/trace-commons-windows-x86_64-$V.zip"
-            SHA="$(shasum -a 256 "$F" | awk '{print $1}')"
-            SIZE="$(wc -c < "$F" | tr -d ' ')"
-            ARGS+=(--platform "windows-x86_64=$BASE/trace-commons-windows-x86_64-$V.zip=$SHA=$SIZE")
-          fi
-
-          # The CLI's own assets. These are published on the contributor-v*
-          # tag stream, not app-v*, and are downloaded here so their digests
-          # come from the bytes clients will actually receive rather than
-          # from a value copied by hand.
-          CLI_BASE="https://github.com/$REPO/releases/download/contributor-v$V"
-          for pair in \
-            "windows-x86_64-cli:trace-commons-contributor-x86_64-pc-windows-msvc.exe" \
-            "linux-x86_64-cli:trace-commons-contributor-x86_64-unknown-linux-gnu" \
-            "macos-aarch64-cli:trace-commons-contributor-aarch64-apple-darwin" \
-            "macos-x86_64-cli:trace-commons-contributor-x86_64-apple-darwin"
-          do
-            SLUG="${pair%%:*}"
-            NAME="${pair#*:}"
-            if curl -fsSL --proto '=https' --tlsv1.2 "$CLI_BASE/$NAME" -o "dist/$NAME"; then
-              SHA="$(shasum -a 256 "dist/$NAME" | awk '{print $1}')"
-              SIZE="$(wc -c < "dist/$NAME" | tr -d ' ')"
-              ARGS+=(--platform "$SLUG=$CLI_BASE/$NAME=$SHA=$SIZE")
-            fi
-            # A missing asset is skipped, not fatal: the CLI tag stream is
-            # independent of the app tag stream, so a release that cut only
-            # the desktop apps legitimately has none of these. An absent slug
-            # means "no update for you"; a present-but-wrong one would point
-            # every client of that platform at a 404.
-          done
-
-          ./scripts/updates/generate-manifest.sh \
-            --version "$V" \
-            --key "$RUNNER_TEMP/update-signing.pem" \
-            --out dist/updates \
-            "${ARGS[@]}"
-
-      - name: Verify the manifest we are about to publish
-        run: |
-          set -euo pipefail
-          # Publishing an unverifiable manifest breaks every installed client
-          # at once, and the failure would only surface on contributors'
-          # machines. Verify here, against the same public key clients pin.
-          openssl pkey -in "$RUNNER_TEMP/update-signing.pem" -pubout \
-            -out "$RUNNER_TEMP/update-signing.pub.pem"
-          openssl base64 -d -A -in dist/updates/latest.json.sig \
-            -out "$RUNNER_TEMP/latest.sig.bin"
-          openssl pkeyutl -verify -rawin \
-            -pubin -inkey "$RUNNER_TEMP/update-signing.pub.pem" \
-            -sigfile "$RUNNER_TEMP/latest.sig.bin" \
-            -in dist/updates/latest.json
-          cat dist/updates/latest.json
-
-      # Sparkle's sign_update lives inside the SwiftPM artifact bundle, so the
-      # package has to be resolved before the appcast can be signed. This is
-      # why appcast publication lives in the Sparkle plan and not in the
-      # manifest-publishing job that produces latest.json.
-      - name: Resolve Sparkle so sign_update exists
-        if: needs.macos.result == 'success'
-        run: swift package --package-path macos resolve
-
-      - name: Import the Sparkle signing key
-        if: needs.macos.result == 'success'
-        env:
-          GCP_PROJECT: tracecommons-pilot-2026
-        run: |
-          set -euo pipefail
-          gcloud secrets versions access latest \
-            --secret=sparkle-signing-key --project "$GCP_PROJECT" \
-            > "$RUNNER_TEMP/sparkle-ed-key"
-          chmod 600 "$RUNNER_TEMP/sparkle-ed-key"
-
-      - name: Generate the signed appcast
-        if: needs.macos.result == 'success'
-        env:
-          SHORT_VERSION: ${{ needs.version.outputs.short }}
-          BUILD_VERSION: ${{ needs.version.outputs.build }}
-          REPO: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          V="$SHORT_VERSION"
-          SIGN_UPDATE="macos/.build/artifacts/sparkle/Sparkle/bin/sign_update"
-          test -x "$SIGN_UPDATE" || {
-            echo "sign_update missing at $SIGN_UPDATE" >&2; exit 1; }
-          ./scripts/updates/generate-appcast.sh \
-            --short-version "$V" \
-            --build-version "$BUILD_VERSION" \
-            --dmg-url "https://github.com/$REPO/releases/download/app-v$V/TraceCommons-$V.dmg" \
-            --dmg-path "dist/macos-dmg/TraceCommons-$V.dmg" \
-            --sign-update "$SIGN_UPDATE" \
-            --ed-key-file "$RUNNER_TEMP/sparkle-ed-key" \
-            --out dist/updates/appcast.xml
-          cat dist/updates/appcast.xml
-
-      - name: Publish to the bucket
-        env:
-          BUCKET: tracecommons-flatpak
-        run: |
-          set -euo pipefail
-          # Cache-Control is short: this is the file that decides whether a
-          # contributor ever learns a security fix shipped. A long edge cache
-          # would silently extend that delay by hours.
-          gcloud storage cp --cache-control="public, max-age=300" \
-            dist/updates/latest.json dist/updates/latest.json.sig \
-            "gs://$BUCKET/updates/"
-          # Conditional on the file rather than on a job result, so a macOS
-          # failure simply leaves the previous appcast in place rather than
-          # replacing it with one pointing at a DMG that does not exist.
-          if [ -f dist/updates/appcast.xml ]; then
-            gcloud storage cp --cache-control="public, max-age=300" \
-              dist/updates/appcast.xml "gs://$BUCKET/updates/"
-          fi
+    - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      with:
+        ref: cbb27dffeacf07d3d4216be62c9b9bb203a943ab
+    - name: Resolve a real OpenSSL (not LibreSSL)
+      run: "set -euo pipefail\nOPENSSL_DIR=\"$(brew --prefix openssl@3)/bin\"\nif [ ! -x \"$OPENSSL_DIR/openssl\" ]; then\n\
+        \  echo \"openssl@3 not found via Homebrew at $OPENSSL_DIR -- refusing to sign with whatever /usr/bin/openssl resolves\
+        \ to (LibreSSL on macOS runners).\" >&2\n  exit 1\nfi\nVERSION_STRING=\"$(\"$OPENSSL_DIR/openssl\" version)\"\ncase\
+        \ \"$VERSION_STRING\" in\n  OpenSSL\\ *) ;;\n  *)\n    echo \"resolved binary at $OPENSSL_DIR/openssl is not OpenSSL:\
+        \ $VERSION_STRING\" >&2\n    exit 1\n    ;;\nesac\necho \"using $VERSION_STRING at $OPENSSL_DIR/openssl\"\necho \"\
+        $OPENSSL_DIR\" >> \"$GITHUB_PATH\"\n"
+    - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      with:
+        path: dist
+        pattern: '{macos-dmg,windows-zip}'
+        run-id: '34501588678'
+        github-token: ${{ github.token }}
+    - name: Authenticate to GCP (workload identity federation; no key on the runner)
+      uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093
+      with:
+        workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+        service_account: ${{ secrets.GCP_FLATPAK_PUBLISHER_SA }}
+    - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db
+    - name: Fetch the signing keys from Secret Manager
+      env:
+        GCP_PROJECT: tracecommons-pilot-2026
+      run: "set -euo pipefail\ngcloud secrets versions access latest \\\n  --secret=update-manifest-signing-key --project\
+        \ \"$GCP_PROJECT\" \\\n  > \"$RUNNER_TEMP/update-signing.pem\"\nchmod 600 \"$RUNNER_TEMP/update-signing.pem\"\n"
+    - name: Build the manifest from the platforms that actually succeeded
+      env:
+        SHORT_VERSION: ${{ needs.version.outputs.short }}
+        MACOS_RESULT: success
+        WINDOWS_RESULT: success
+        REPO: ${{ github.repository }}
+      run: "set -euo pipefail\nV=\"$SHORT_VERSION\"\nBASE=\"https://github.com/$REPO/releases/download/app-v$V\"\nARGS=()\n\
+        \nif [ \"$MACOS_RESULT\" = success ]; then\n  F=\"dist/macos-dmg/TraceCommons-$V.dmg\"\n  SHA=\"$(shasum -a 256 \"\
+        $F\" | awk '{print $1}')\"\n  SIZE=\"$(wc -c < \"$F\" | tr -d ' ')\"\n  ARGS+=(--platform \"macos-universal=$BASE/TraceCommons-$V.dmg=$SHA=$SIZE\"\
+        )\nfi\n\nif [ \"$WINDOWS_RESULT\" = success ]; then\n  F=\"dist/windows-zip/trace-commons-windows-x86_64-$V.zip\"\n\
+        \  SHA=\"$(shasum -a 256 \"$F\" | awk '{print $1}')\"\n  SIZE=\"$(wc -c < \"$F\" | tr -d ' ')\"\n  ARGS+=(--platform\
+        \ \"windows-x86_64=$BASE/trace-commons-windows-x86_64-$V.zip=$SHA=$SIZE\")\nfi\n\n# The CLI's own assets. These are\
+        \ published on the contributor-v*\n# tag stream, not app-v*, and are downloaded here so their digests\n# come from\
+        \ the bytes clients will actually receive rather than\n# from a value copied by hand.\nCLI_BASE=\"https://github.com/$REPO/releases/download/contributor-v$V\"\
+        \nfor pair in \\\n  \"windows-x86_64-cli:trace-commons-contributor-x86_64-pc-windows-msvc.exe\" \\\n  \"linux-x86_64-cli:trace-commons-contributor-x86_64-unknown-linux-gnu\"\
+        \ \\\n  \"macos-aarch64-cli:trace-commons-contributor-aarch64-apple-darwin\" \\\n  \"macos-x86_64-cli:trace-commons-contributor-x86_64-apple-darwin\"\
+        \ndo\n  SLUG=\"${pair%%:*}\"\n  NAME=\"${pair#*:}\"\n  if curl -fsSL --proto '=https' --tlsv1.2 \"$CLI_BASE/$NAME\"\
+        \ -o \"dist/$NAME\"; then\n    SHA=\"$(shasum -a 256 \"dist/$NAME\" | awk '{print $1}')\"\n    SIZE=\"$(wc -c < \"\
+        dist/$NAME\" | tr -d ' ')\"\n    ARGS+=(--platform \"$SLUG=$CLI_BASE/$NAME=$SHA=$SIZE\")\n  fi\n  # A missing asset\
+        \ is skipped, not fatal: the CLI tag stream is\n  # independent of the app tag stream, so a release that cut only\n\
+        \  # the desktop apps legitimately has none of these. An absent slug\n  # means \"no update for you\"; a present-but-wrong\
+        \ one would point\n  # every client of that platform at a 404.\ndone\n\n./scripts/updates/generate-manifest.sh \\\n\
+        \  --version \"$V\" \\\n  --key \"$RUNNER_TEMP/update-signing.pem\" \\\n  --out dist/updates \\\n  \"${ARGS[@]}\"\n"
+    - name: Verify the manifest we are about to publish
+      run: "set -euo pipefail\n# Publishing an unverifiable manifest breaks every installed client\n# at once, and the failure\
+        \ would only surface on contributors'\n# machines. Verify here, against the same public key clients pin.\nopenssl\
+        \ pkey -in \"$RUNNER_TEMP/update-signing.pem\" -pubout \\\n  -out \"$RUNNER_TEMP/update-signing.pub.pem\"\nopenssl\
+        \ base64 -d -A -in dist/updates/latest.json.sig \\\n  -out \"$RUNNER_TEMP/latest.sig.bin\"\nopenssl pkeyutl -verify\
+        \ -rawin \\\n  -pubin -inkey \"$RUNNER_TEMP/update-signing.pub.pem\" \\\n  -sigfile \"$RUNNER_TEMP/latest.sig.bin\"\
+        \ \\\n  -in dist/updates/latest.json\ncat dist/updates/latest.json\n"
+    - name: Resolve Sparkle so sign_update exists
+      run: swift package --package-path macos resolve
+    - name: Import the Sparkle signing key
+      env:
+        GCP_PROJECT: tracecommons-pilot-2026
+      run: "set -euo pipefail\ngcloud secrets versions access latest \\\n  --secret=sparkle-signing-key --project \"$GCP_PROJECT\"\
+        \ \\\n  > \"$RUNNER_TEMP/sparkle-ed-key\"\nchmod 600 \"$RUNNER_TEMP/sparkle-ed-key\"\n"
+    - name: Generate the signed appcast
+      env:
+        SHORT_VERSION: ${{ needs.version.outputs.short }}
+        BUILD_VERSION: ${{ needs.version.outputs.build }}
+        REPO: ${{ github.repository }}
+      run: "set -euo pipefail\nV=\"$SHORT_VERSION\"\nSIGN_UPDATE=\"macos/.build/artifacts/sparkle/Sparkle/bin/sign_update\"\
+        \ntest -x \"$SIGN_UPDATE\" || {\n  echo \"sign_update missing at $SIGN_UPDATE\" >&2; exit 1; }\n./scripts/updates/generate-appcast.sh\
+        \ \\\n  --short-version \"$V\" \\\n  --build-version \"$BUILD_VERSION\" \\\n  --dmg-url \"https://github.com/$REPO/releases/download/app-v$V/TraceCommons-$V.dmg\"\
+        \ \\\n  --dmg-path \"dist/macos-dmg/TraceCommons-$V.dmg\" \\\n  --sign-update \"$SIGN_UPDATE\" \\\n  --ed-key-file\
+        \ \"$RUNNER_TEMP/sparkle-ed-key\" \\\n  --out dist/updates/appcast.xml\ncat dist/updates/appcast.xml\n"
+    - name: Publish to the bucket
+      env:
+        BUCKET: tracecommons-flatpak
+      run: "set -euo pipefail\n# Cache-Control is short: this is the file that decides whether a\n# contributor ever learns\
+        \ a security fix shipped. A long edge cache\n# would silently extend that delay by hours.\ngcloud storage cp --cache-control=\"\
+        public, max-age=300\" \\\n  dist/updates/latest.json dist/updates/latest.json.sig \\\n  \"gs://$BUCKET/updates/\"\n\
+        # Conditional on the file rather than on a job result, so a macOS\n# failure simply leaves the previous appcast in\
+        \ place rather than\n# replacing it with one pointing at a DMG that does not exist.\nif [ -f dist/updates/appcast.xml\
+        \ ]; then\n  gcloud storage cp --cache-control=\"public, max-age=300\" \\\n    dist/updates/appcast.xml \"gs://$BUCKET/updates/\"\
+        \nfi\n"
