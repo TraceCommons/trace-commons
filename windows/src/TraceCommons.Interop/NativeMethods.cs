@@ -593,6 +593,10 @@ internal static class NativeMethods
         [MarshalAs(UnmanagedType.LPUTF8Str)] string? label);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    internal static extern IntPtr tc_queue_outcome_line(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? label);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
     internal static extern IntPtr tc_near_ai_enroll_line(
         [MarshalAs(UnmanagedType.LPUTF8Str)] string? label);
 

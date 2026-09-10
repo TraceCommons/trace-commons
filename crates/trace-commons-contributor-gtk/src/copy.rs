@@ -1458,37 +1458,7 @@ pub fn health_action(label: &str) -> Option<&'static str> {
 /// Plain-language renderings of `reason_label`, for entries that are on the
 /// queue but are not decisions owed.
 pub fn reason_sentence(label: &str) -> &'static str {
-    // A contribution the commons refused, before the table below. Those five
-    // labels reach this surface verbatim from the server, this table has
-    // never known any of them, and its default says NOTHING WAS SENT -- which
-    // on that path is false: the envelope was transmitted and the gate
-    // declined it after receiving it. See #810.
-    //
-    // Asked of the shared crate rather than answered here, so one sentence
-    // serves all three shells and the spelling comes from the protocol crate
-    // rather than from a literal typed twice.
-    if let Some(refused) =
-        trace_commons_contributor::private_inference_copy::outcome_refusal_line(label)
-    {
-        return refused;
-    }
-    match label {
-        "dismissed-by-contributor" => "You skipped this one.",
-        "expired-without-decision" => "Dropped without a decision. Dropped means never sent.",
-        "session-changed-after-offer" => {
-            "The session changed after it was offered, so nothing was sent. It is being offered \
-             again."
-        }
-        "consent-scopes-changed-after-approval" => {
-            "Your permissions changed after you approved this, so nothing was sent. It is being \
-             offered again."
-        }
-        "approval-inputs-changed" | "envelope-changed-after-approval" => {
-            "What would be sent is not what you were shown, so nothing was sent. It is being \
-             offered again."
-        }
-        _ => "Nothing was sent.",
-    }
+    trace_commons_contributor::private_inference_copy::queue_outcome_line(label)
 }
 
 // --- Updating ------------------------------------------------------------
@@ -2392,14 +2362,14 @@ mod tests {
     /// The labels this shell already answered still reach their own
     /// sentences: the refusal lookup is additive, not a takeover.
     #[test]
-    fn the_existing_outcome_sentences_are_unchanged() {
+    fn queue_outcomes_use_the_shared_copy_and_neutral_fallback() {
         assert_eq!(
             super::reason_sentence("dismissed-by-contributor"),
-            "You skipped this one."
+            "Skipped; not sent"
         );
         assert_eq!(
             super::reason_sentence("a-label-this-shell-has-never-seen"),
-            "Nothing was sent."
+            "Status unavailable"
         );
     }
 

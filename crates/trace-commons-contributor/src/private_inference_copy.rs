@@ -2442,6 +2442,33 @@ pub fn outcome_refusal_line(label: &str) -> Option<&'static str> {
     })
 }
 
+/// Complete queue outcome copy. Unknown labels make no claim about whether
+/// a session was sent; admission outcomes retain their existing send semantics.
+pub fn queue_outcome_line(label: &str) -> &'static str {
+    use crate::daemon::{health, preview, queue};
+    if let Some(line) = outcome_refusal_line(label) {
+        return line;
+    }
+    match label {
+        queue::REASON_DISMISSED => "Skipped; not sent",
+        queue::REASON_EXPIRED => "Expired without a decision; not sent",
+        queue::REASON_CHANGED => "Session changed; review it again before sending",
+        queue::REASON_SCOPES_CHANGED => "Permissions changed; review again before sending",
+        preview::REASON_INPUTS_CHANGED | "envelope-changed-after-approval" => {
+            "Content changed; review again before sending"
+        }
+        health::LABEL_NOT_LOGGED_IN => "Waiting for you to reconnect",
+        health::LABEL_DAILY_CAP_REACHED => "Waiting for the daily upload limit to reset",
+        health::LABEL_QUEUE_FULL => "Queue was full",
+        health::LABEL_INGEST_UNREACHABLE | health::LABEL_CLAIM_MINT_FAILED => {
+            "Could not reach the commons"
+        }
+        health::LABEL_PII_FILTER_UNAVAILABLE => "Waiting for the privacy scan",
+        health::LABEL_CANARY_FAILED => "Privacy scan failed its self-test",
+        _ => "Status unavailable",
+    }
+}
+
 /// `admission_refused`. Says the work arrived and was declined, because it
 /// did and it was.
 pub const OUTCOME_ADMISSION_REFUSED: &str = "Sent, and the commons declined it";
@@ -2565,6 +2592,42 @@ mod tests {
     /// If the destination could not be read, or was read and is not ours, the
     /// shell must not paint a working light. `Clear` is the only tone that
     /// paints one, so this is the whole safety property in one assertion.
+    #[test]
+    fn queue_outcomes_cover_producer_labels_without_guessing_unknown_send_state() {
+        use crate::daemon::{health, preview, queue};
+        for label in [
+            queue::REASON_DISMISSED,
+            queue::REASON_CHANGED,
+            preview::REASON_INPUTS_CHANGED,
+            queue::REASON_EXPIRED,
+            queue::REASON_SCOPES_CHANGED,
+            "envelope-changed-after-approval",
+            health::LABEL_NOT_LOGGED_IN,
+            health::LABEL_DAILY_CAP_REACHED,
+            health::LABEL_QUEUE_FULL,
+            health::LABEL_INGEST_UNREACHABLE,
+            health::LABEL_CLAIM_MINT_FAILED,
+            health::LABEL_PII_FILTER_UNAVAILABLE,
+            health::LABEL_CANARY_FAILED,
+        ] {
+            let line = queue_outcome_line(label);
+            assert_ne!(line, "Status unavailable", "{label}");
+            assert!(!line.contains(label), "raw label: {label}");
+        }
+        for label in ["", "unknown-future-label", "admission-refused"] {
+            assert_eq!(queue_outcome_line(label), "Status unavailable");
+        }
+        for label in [
+            "admission_refused",
+            "admission_limit_reached",
+            "admission_in_progress",
+            "admission_identity_conflict",
+            "admission_evidence_refused",
+        ] {
+            assert_eq!(Some(queue_outcome_line(label)), outcome_refusal_line(label));
+        }
+    }
+
     #[test]
     fn a_destination_that_is_not_ours_is_never_painted_as_working() {
         for label in [

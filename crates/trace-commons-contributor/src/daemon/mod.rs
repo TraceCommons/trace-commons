@@ -646,7 +646,7 @@ async fn drain_approved(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<U
             // contributor rather than sent under terms they never saw --
             // the same rule the re-hash guard applies to content.
             if current.approved_scopes.as_deref() != Some(cfg.consent_scopes.as_slice()) {
-                q.revoke_approval(entry.entry_id, "consent-scopes-changed-after-approval");
+                q.revoke_approval(entry.entry_id, queue::REASON_SCOPES_CHANGED);
                 changed = true;
                 continue;
             }

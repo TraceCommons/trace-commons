@@ -84,3 +84,10 @@ public static class OutcomeRefusalSurface
         return string.IsNullOrEmpty(line) ? null : line;
     }
 }
+
+/// <summary>Shared queue outcome copy, including unknown-label handling.</summary>
+public static class QueueOutcomeSurface
+{
+    public static string Line(string? label) =>
+        NativeMethods.TakeOwnedString(NativeMethods.tc_queue_outcome_line(label)) ?? string.Empty;
+}

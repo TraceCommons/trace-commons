@@ -441,6 +441,9 @@ pub fn entry_id_for(session_hash: &str) -> Uuid {
 
 /// The reason label both supersede paths record: the session no longer
 /// matches the description it was offered under.
+pub const REASON_EXPIRED: &str = "expired-without-decision";
+pub const REASON_SCOPES_CHANGED: &str = "consent-scopes-changed-after-approval";
+
 pub const REASON_CHANGED: &str = "session-changed-after-offer";
 
 /// The reason label `dismiss` records: the contributor looked at this
@@ -1380,7 +1383,7 @@ impl Queue {
         for e in self.entries.iter_mut() {
             if e.state == QueueState::Pending && e.discovered_at < cutoff {
                 e.state = QueueState::Expired;
-                e.reason_label = Some("expired-without-decision".to_string());
+                e.reason_label = Some(REASON_EXPIRED.to_string());
                 expired += 1;
             }
         }

@@ -1,4 +1,5 @@
 import SwiftUI
+import TCBridge
 import TCShellCore
 
 /// The queue: one per session waiting for a decision.
@@ -1065,7 +1066,7 @@ struct NotOfferedDisclosure: View {
                 if expanded {
                     VStack(alignment: .leading, spacing: TC.Space.xxs) {
                         ForEach(counts.sorted(by: { $0.key < $1.key }), id: \.key) { label, count in
-                            Text("\(count) — \(OutcomeCopy.sentence(for: label))")
+                            Text("\(count) — \(TCOutcome.line(label: label))")
                                 .font(TC.Font_.meta)
                                 .foregroundStyle(TC.inkSecondary)
                         }

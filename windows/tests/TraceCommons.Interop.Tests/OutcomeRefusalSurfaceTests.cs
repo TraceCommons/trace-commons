@@ -26,6 +26,16 @@ namespace TraceCommons.Interop.Tests;
 /// </remarks>
 public sealed class OutcomeRefusalSurfaceTests
 {
+    [Theory]
+    [InlineData("dismissed-by-contributor", "Skipped; not sent")]
+    [InlineData("expired-without-decision", "Expired without a decision; not sent")]
+    [InlineData("unknown", "Status unavailable")]
+    [InlineData(null, "Status unavailable")]
+    public void QueueOutcomesUseTheSharedAbi(string? label, string expected)
+    {
+        Assert.Equal(expected, QueueOutcomeSurface.Line(label));
+    }
+
     private static readonly string[] RefusalLabels =
     {
         "admission_refused",
@@ -101,8 +111,8 @@ public sealed class OutcomeRefusalSurfaceTests
                 .Split('\n')
                 .Where(line => !line.TrimStart().StartsWith("//", StringComparison.Ordinal)));
 
-        Assert.Contains("OutcomeRefusalSurface.Line(label)", source, StringComparison.Ordinal);
-        // Still additive: the raw-label rendering remains for everything else.
-        Assert.Contains("label.Replace('-', ' ').Replace('_', ' ')", source, StringComparison.Ordinal);
+        Assert.Contains("QueueOutcomeSurface.Line(label)", source, StringComparison.Ordinal);
+        // Every outcome goes through the shared mapper.
+        Assert.DoesNotContain("label.Replace('-', ' ').Replace('_', ' ')", source, StringComparison.Ordinal);
     }
 }

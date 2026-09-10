@@ -716,6 +716,8 @@ int32_t     tc_near_ai_credential_action(const char* state);
  * panic.
  */
 char*       tc_outcome_refusal_line(const char* label);
+/* Shared queue outcome sentence. Unknown labels are neutral. Free with tc_string_free. */
+char*       tc_queue_outcome_line(const char* label);
 
 /* The sentence for one NEAR AI login-enrolment control name.
  *

@@ -4635,3 +4635,33 @@ fn the_login_enrolment_tones_point_at_the_step_rather_than_the_wall() {
         TC_PRIVATE_INFERENCE_TONE_REFUSED
     );
 }
+
+#[test]
+fn queue_outcome_abi_preserves_known_and_unknown_send_state() {
+    use std::ffi::{CStr, CString};
+    for label in [
+        "dismissed-by-contributor",
+        "expired-without-decision",
+        "admission_refused",
+        "unknown",
+    ] {
+        let input = CString::new(label).unwrap();
+        unsafe {
+            let output = trace_commons_contributor_ffi::tc_queue_outcome_line(input.as_ptr());
+            assert!(!output.is_null());
+            assert_eq!(
+                CStr::from_ptr(output).to_str().unwrap(),
+                trace_commons_contributor::private_inference_copy::queue_outcome_line(label)
+            );
+            trace_commons_contributor_ffi::tc_string_free(output);
+        }
+    }
+    unsafe {
+        let output = trace_commons_contributor_ffi::tc_queue_outcome_line(std::ptr::null());
+        assert_eq!(
+            CStr::from_ptr(output).to_str().unwrap(),
+            "Status unavailable"
+        );
+        trace_commons_contributor_ffi::tc_string_free(output);
+    }
+}
