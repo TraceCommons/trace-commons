@@ -48,8 +48,54 @@ use tower::ServiceExt;
 use trace_commons_contributor::daemon::nearai_onboarding::device_proof_for_ceremony;
 use trace_commons_contributor::identity::DeviceIdentity;
 
-/// The subject the stubbed NEAR AI `/users/me` resolves the token to.
-const STUB_SUBJECT: &str = "auth0|nearai-ceremony-fixture";
+/// A subject nobody has enrolled before, minted per call.
+///
+/// Not a constant, and the difference is the whole point. The anchor is a blind
+/// index over this value, so a fixed subject enrolling a second time resolves
+/// the *existing* anchor and reuses its tenant -- which is the returning
+/// contributor path behaving correctly, and it writes no new row. An assertion
+/// of `before + 1` then fails on any database where this suite has already run,
+/// so with a constant the suite passes exactly once per database and cannot be
+/// re-run against it.
+///
+/// This surfaced the moment enrolment first succeeded: on a second local run
+/// the count stayed at one. That is the resolver pool working, not a defect,
+/// but a fixture that only holds on a pristine database is one that tests the
+/// database's history as much as the code.
+fn stub_subject() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    format!(
+        "auth0|nearai-ceremony-fixture-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
+/// Serialises this suite against itself.
+///
+/// `anchor_rows` counts the whole table, and every test here shares one
+/// database and one process. A refusal test captures the
+/// count, refuses a finish, and re-counts; if the enrolling test commits its
+/// anchor inside that window, the refusal test reads a row it did not write and
+/// reports that a refused finish wrote one.
+///
+/// That was invisible until the happy path started working. While every
+/// enrolment refused, no test ever wrote an anchor, so the table-wide count was
+/// accidentally stable and the two refusal tests passed for a reason unrelated
+/// to what they assert. The first green run of
+/// `a_client_device_proof_enrols_against_the_real_handlers` is what made them
+/// fail -- a fixed bug surfacing a second one, not a regression.
+///
+/// The module note above says this state is process-global. It is, and that
+/// covers the environment variables too, but running the suite in its own CI
+/// step only isolates it from *other* suites. This is the isolation from
+/// itself, held here rather than left to `--test-threads=1` so a future edit to
+/// the workflow cannot quietly remove it.
+fn serial() -> &'static tokio::sync::Mutex<()> {
+    static SERIAL: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    SERIAL.get_or_init(Default::default)
+}
 
 /// The runtime pool and the resolver pool, as two roles rather than one.
 ///
@@ -145,17 +191,20 @@ fn ceremony_identity() -> trace_commons_server::near_account_identity::NearAccou
 /// half of anything, and reaching it at all requires the device proof to have
 /// already verified, because introspection is deliberately the last step of
 /// `finish`.
-async fn stub_near_ai() -> String {
+async fn stub_near_ai(subject: String) -> String {
     // `/users/me`, the path cloud-api serves and the one the client asks for
     // after #852. A stub on `/me` would 404 and the refusal would arrive as a
     // generic finish failure, which is the shape that cost a day already.
     let router = axum::Router::new().route(
         "/users/me",
-        axum::routing::get(|| async {
-            axum::Json(serde_json::json!({
-                "id": STUB_SUBJECT,
-                "auth_provider": "github",
-            }))
+        axum::routing::get(move || {
+            let subject = subject.clone();
+            async move {
+                axum::Json(serde_json::json!({
+                    "id": subject,
+                    "auth_provider": "github",
+                }))
+            }
         }),
     );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -261,9 +310,10 @@ fn challenge_pair() -> (String, String) {
 #[tokio::test]
 #[ignore = "requires isolated TRACE_COMMONS_ADMISSION_INGEST_PG_TEST_URL"]
 async fn a_client_device_proof_enrols_against_the_real_handlers() {
+    let _serial = serial().lock().await;
     let db = ceremony_pg_admin().await;
     let before = anchor_rows(&db).await;
-    let state = ceremony_state(db.clone(), stub_near_ai().await).await;
+    let state = ceremony_state(db.clone(), stub_near_ai(stub_subject()).await).await;
     let (_dir, identity) = device();
     let (verifier, challenge) = challenge_pair();
 
@@ -349,8 +399,9 @@ async fn a_client_device_proof_enrols_against_the_real_handlers() {
 #[tokio::test]
 #[ignore = "requires isolated TRACE_COMMONS_ADMISSION_INGEST_PG_TEST_URL"]
 async fn a_refused_finish_writes_no_anchor_row() {
+    let _serial = serial().lock().await;
     let db = ceremony_pg_admin().await;
-    let state = ceremony_state(db.clone(), stub_near_ai().await).await;
+    let state = ceremony_state(db.clone(), stub_near_ai(stub_subject()).await).await;
     let (_dir, identity) = device();
     let (verifier, challenge) = challenge_pair();
 
@@ -412,8 +463,9 @@ async fn a_refused_finish_writes_no_anchor_row() {
 #[tokio::test]
 #[ignore = "requires isolated TRACE_COMMONS_ADMISSION_INGEST_PG_TEST_URL"]
 async fn a_finish_naming_an_account_is_refused_over_the_wire() {
+    let _serial = serial().lock().await;
     let db = ceremony_pg_admin().await;
-    let state = ceremony_state(db.clone(), stub_near_ai().await).await;
+    let state = ceremony_state(db.clone(), stub_near_ai(stub_subject()).await).await;
     let (_dir, identity) = device();
     let (verifier, challenge) = challenge_pair();
 
