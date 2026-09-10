@@ -693,7 +693,7 @@ impl DaemonShared {
     /// keeps the ordinary pass off the disk entirely -- it is zero against
     /// zero for every daemon whose contributor ran no ceremony.
     ///
-    /// Only `near_ai_inference` is taken from the document that comes back.
+    /// Both Cloud credentials are taken from the document that comes back.
     /// The rest of the in-memory copy is authoritative and must stay so: the
     /// ceremony's read-modify-write started from whatever was on disk when it
     /// happened to run, and adopting all of it would let a mint quietly
@@ -703,6 +703,13 @@ impl DaemonShared {
     /// settings document that will not load leaves it where it was, so the
     /// next pass tries again rather than dropping the credential forever.
     fn absorb_near_ai_credential_change(&self) {
+        let Ok(locks) = crate::daemon::nearai_credential::session::coordination(self.store.dir())
+        else {
+            return;
+        };
+        let Ok(_commit) = locks.commit.lock() else {
+            return;
+        };
         let observed = super::nearai_credential::ceremony::change_count(self.store.dir());
         if observed == self.near_ai_credential_changes.load(Ordering::Acquire) {
             return;
@@ -724,6 +731,7 @@ impl DaemonShared {
             self.private_inference_generation
                 .fetch_add(1, Ordering::Release);
         }
+        settings.near_ai_session = stored.near_ai_session;
         drop(settings);
         self.near_ai_credential_changes
             .store(observed, Ordering::Release);
@@ -2511,6 +2519,16 @@ fn handle_list_audit(shared: &DaemonShared, req: &Request) -> Response {
 }
 
 fn handle_set_settings(shared: &DaemonShared, req: &Request) -> Response {
+    let Ok(locks) = crate::daemon::nearai_credential::session::coordination(shared.store.dir())
+    else {
+        return Response::err(req.id, ERR_UNAVAILABLE, "settings-write-failed");
+    };
+    let Ok(_commit) = locks.commit.lock() else {
+        return Response::err(req.id, ERR_UNAVAILABLE, "settings-write-failed");
+    };
+    let Ok(persisted) = crate::daemon::settings::DaemonSettings::load(&shared.store) else {
+        return Response::err(req.id, ERR_UNAVAILABLE, "settings-write-failed");
+    };
     let mut settings = shared.settings.lock().expect("settings lock");
     // Advance lifecycle consent only after this candidate is persisted.
     // Routing separately retains its warm reader when its endpoint is unchanged.
@@ -2522,6 +2540,11 @@ fn handle_set_settings(shared: &DaemonShared, req: &Request) -> Response {
     // unrecognized key is rejected rather than ignored.
     // Rejected or unpersisted values must never reach the supervisor.
     let mut candidate = settings.clone();
+    // A browser ceremony writes outside this daemon's in-memory settings.
+    // Preserve its newest credentials when editing unrelated preferences.
+    let credential_changed = candidate.near_ai_inference != persisted.near_ai_inference;
+    candidate.near_ai_inference = persisted.near_ai_inference;
+    candidate.near_ai_session = persisted.near_ai_session;
     match super::settings::apply_settings_object(&mut candidate, &req.params) {
         Ok(false) => Response::err(req.id, ERR_BAD_PARAMS, "no-known-setting-supplied"),
         Ok(true) => {
@@ -2529,7 +2552,7 @@ fn handle_set_settings(shared: &DaemonShared, req: &Request) -> Response {
                 return Response::err(req.id, ERR_UNAVAILABLE, "settings-write-failed");
             }
             *settings = candidate;
-            if settings.private_inference != private_inference_before {
+            if settings.private_inference != private_inference_before || credential_changed {
                 shared
                     .private_inference_generation
                     .fetch_add(1, Ordering::Release);
@@ -8982,13 +9005,22 @@ mod tests {
             },
             // The ceremony now stores a session beside the key, so this
             // stands in for the refresh token its last leg carries. The
-            // coupling under test is the key reaching a running proxy; the
-            // session is written alongside and is not what reconcile reads.
+            // coupling includes the retained session reaching the running
+            // daemon so balance and enrollment work without a restart.
             "refresh-token-for-the-reconcile-test".to_string(),
         )
         .unwrap();
 
         s.reconcile_private_inference().await;
+        assert_eq!(
+            s.settings
+                .lock()
+                .unwrap()
+                .near_ai_session
+                .as_ref()
+                .map(|session| session.refresh_token.as_str()),
+            Some("refresh-token-for-the-reconcile-test")
+        );
         {
             let held = s.private_inference.lock().await;
             let host = held.as_ref().unwrap();

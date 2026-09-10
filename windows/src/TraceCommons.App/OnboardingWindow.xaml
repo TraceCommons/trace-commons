@@ -122,6 +122,14 @@
                         Visibility="{x:Bind ViewModel.CanOfferNearAiJoin, Mode=OneWay}"
                         IsEnabled="{x:Bind ViewModel.CanJoinWithNearAi, Mode=OneWay}" />
                 <TextBlock Text="{x:Bind ViewModel.NearAiNeedsLogin, Mode=OneWay}" TextWrapping="Wrap" />
+                <StackPanel Spacing="12" Visibility="{x:Bind ViewModel.CanOfferCloudSignIn, Mode=OneWay}">
+                    <TextBlock Text="{x:Bind ViewModel.CloudSignIn.CredentialActionPreamble, Mode=OneWay}" TextWrapping="Wrap" />
+                    <Button Content="{x:Bind ViewModel.CloudSignIn.CredentialActionText, Mode=OneWay}"
+                            Click="OnCloudSignIn"
+                            Visibility="{x:Bind ViewModel.CloudSignIn.HasCredentialAction, Mode=OneWay}"
+                            IsEnabled="{x:Bind ViewModel.CloudSignIn.CredentialControlsEnabled, Mode=OneWay}" />
+                    <TextBlock Text="{x:Bind ViewModel.CloudSignIn.Notice, Mode=OneWay}" TextWrapping="Wrap" />
+                </StackPanel>
                 <TextBlock Text="{x:Bind ViewModel.NearAiWorking, Mode=OneWay}" TextWrapping="Wrap" />
                 <TextBlock Text="{x:Bind ViewModel.NearAiDone, Mode=OneWay}" TextWrapping="Wrap" />
                 <TextBlock Text="{x:Bind ViewModel.NearAiRefusalMessage, Mode=OneWay}"

@@ -92,6 +92,12 @@ public sealed partial class OnboardingWindow : Window
     private async void OnJoinWithNearAi(object sender, RoutedEventArgs e) =>
         await ViewModel.JoinWithNearAiAsync();
 
+    private async void OnCloudSignIn(object sender, RoutedEventArgs e)
+    {
+        var signIn = ViewModel.CloudSignIn;
+        await signIn.ContinueCredentialAsync(await signIn.PressCredentialAsync());
+    }
+
     private async void OnCheckNearAccount(object sender, RoutedEventArgs e) => await ViewModel.NearAccount.CheckAsync();
     private async void OnStartNearAccount(object sender, RoutedEventArgs e) => await ViewModel.NearAccount.StartAsync();
     private async void OnCancelNearAccount(object sender, RoutedEventArgs e) => await ViewModel.NearAccount.CancelAsync();

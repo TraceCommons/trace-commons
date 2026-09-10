@@ -10,6 +10,17 @@ import XCTest
 /// agree with them -- which is the only way a test in this target can tell
 /// "asked the ABI" from "reproduced the ABI in Swift".
 final class CredentialSurfaceTests: XCTestCase {
+    func testInferenceKeyDoesNotImplyACloudSession() {
+        let legacy = CredentialStatus.parse(fromJSON: #"{"state":"present"}"#)
+        XCTAssertEqual(legacy.state, "present")
+        XCTAssertEqual(legacy.sessionState, "")
+        let keyOnly = CredentialStatus.parse(fromJSON: #"{"state":"present","session_state":"absent"}"#)
+        XCTAssertEqual(keyOnly.sessionState, "absent")
+        let session = CredentialStatus.parse(fromJSON: #"{"state":"present","session_state":"present"}"#)
+        XCTAssertEqual(session.sessionState, "present")
+        XCTAssertEqual(CredentialStatus.parse(fromJSON: #"{"session_state":true}"#).sessionState, "")
+    }
+
     /// The 15 fields this surface added, so a test can delete each in turn.
     private static let credentialFields = [
         "credential_title", "credential_what", "credential_cost", "credential_obtain",

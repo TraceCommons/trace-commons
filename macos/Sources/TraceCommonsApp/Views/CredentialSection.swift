@@ -16,6 +16,7 @@ struct CredentialSection: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.openURL) private var openURL
     let copy: PrivateInferenceCopy
+    var requiresSession = false
 
     /// How often a ceremony in flight is re-read.
     ///
@@ -29,7 +30,9 @@ struct CredentialSection: View {
         let status = model.credentialStatus
         let tone = PrivateInferenceIndicator.palette(
             CredentialSurface.tone(status, calls: model.credentialCalls))
-        let action = CredentialSurface.action(status, calls: model.credentialCalls)
+        let action = CredentialSurface.action(
+            requiresSession ? CredentialStatus(state: status.sessionState) : status,
+            calls: model.credentialCalls)
         VStack(alignment: .leading, spacing: TC.Space.sm) {
             TCSectionHeader(title: copy.credentialTitle)
             Text(copy.credentialWhat)
@@ -63,8 +66,10 @@ struct CredentialSection: View {
             // `credentialAction` is passed so the two rows cannot draw the
             // same sign-in button twice; the decision is
             // `BalanceSurface.actionToDraw`'s, not this view's.
-            Divider().padding(.vertical, TC.Space.xs)
-            BalanceRow(copy: copy, credentialAction: action, run: run)
+            if !requiresSession {
+                Divider().padding(.vertical, TC.Space.xs)
+                BalanceRow(copy: copy, credentialAction: action, run: run)
+            }
         }
         .task(id: action) {
             // A state nobody could read polls nothing. There is no outcome

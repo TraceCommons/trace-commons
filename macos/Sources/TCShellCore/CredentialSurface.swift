@@ -42,11 +42,14 @@ public struct CredentialStatus: Equatable, Sendable {
     public let state: String
     public let attemptID: String?
     public let attemptStatus: String?
+    /// Empty when an older daemon cannot report retained Cloud sessions.
+    public let sessionState: String
 
-    public init(state: String, attemptID: String? = nil, attemptStatus: String? = nil) {
+    public init(state: String, attemptID: String? = nil, attemptStatus: String? = nil, sessionState: String = "") {
         self.state = state
         self.attemptID = attemptID
         self.attemptStatus = attemptStatus
+        self.sessionState = sessionState
     }
 
     /// What a payload this build cannot read says: that the question was not
@@ -65,7 +68,8 @@ public struct CredentialStatus: Equatable, Sendable {
         return CredentialStatus(
             state: object["state"] as? String ?? "",
             attemptID: object["attempt_id"] as? String,
-            attemptStatus: object["attempt_status"] as? String)
+            attemptStatus: object["attempt_status"] as? String,
+            sessionState: object["session_state"] as? String ?? "")
     }
 }
 

@@ -179,12 +179,19 @@ impl BalanceReport {
 /// Per-directory cached state.
 #[derive(Default)]
 struct Cached {
+    connection: Option<Connection>,
     /// The access token last exchanged, and when. In memory only: it is a
     /// second credential, it is short-lived, and the exchange route is
     /// authenticated by the refresh token rather than by it, so there is
     /// nothing on disk to gain.
     access_token: Option<(String, Instant)>,
     balance: Option<(BalanceReading, Instant)>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct Connection {
+    session: NearAiSession,
+    organization: Option<String>,
 }
 
 /// One lock over every directory's cache, held across the whole read.
@@ -219,13 +226,18 @@ pub fn invalidate(dir: &Path) {
 }
 
 /// The refresh token this directory has stored, if any.
-fn stored_session(shared: &DaemonShared) -> Option<NearAiSession> {
-    shared
-        .settings
+fn stored_connection(shared: &DaemonShared) -> Result<Option<Connection>> {
+    let locks = crate::daemon::nearai_credential::session::coordination(shared.store.dir())?;
+    let _commit = locks
+        .commit
         .lock()
-        .expect("settings lock")
-        .near_ai_session
-        .clone()
+        .map_err(|_| anyhow::anyhow!("near_ai_credential_unavailable"))?;
+    // A ceremony may have changed disk before the proxy adopted its key.
+    let settings = crate::daemon::settings::DaemonSettings::load(&shared.store)?;
+    Ok(settings.near_ai_session.map(|session| Connection {
+        session,
+        organization: settings.near_ai_inference.map(|key| key.organization_id),
+    }))
 }
 
 /// Map a label this module's callees raise onto the state a shell renders.
@@ -265,6 +277,21 @@ async fn read_with(shared: &DaemonShared, api: &CloudApi) -> BalanceReport {
     let mut map = cache().lock().await;
     let entry = map.entry(dir).or_default();
 
+    let mut connection = match stored_connection(shared) {
+        Ok(Some(connection)) => connection,
+        Ok(None) => {
+            *entry = Cached::default();
+            return BalanceReport::NoSession;
+        }
+        Err(_) => {
+            *entry = Cached::default();
+            return BalanceReport::Unavailable;
+        }
+    };
+    if entry.connection.as_ref() != Some(&connection) {
+        *entry = Cached::default();
+    }
+
     if let Some((reading, at)) = entry.balance
         && at.elapsed() < BALANCE_TTL
     {
@@ -276,11 +303,6 @@ async fn read_with(shared: &DaemonShared, api: &CloudApi) -> BalanceReport {
     // avoid.
     entry.balance = None;
 
-    let Some(stored) = stored_session(shared) else {
-        entry.access_token = None;
-        return BalanceReport::NoSession;
-    };
-
     // A refresh token whose recorded expiry has passed is still offered to the
     // service rather than refused locally. The expiry we hold came from an
     // earlier exchange and this machine's clock may simply be wrong; the
@@ -288,8 +310,13 @@ async fn read_with(shared: &DaemonShared, api: &CloudApi) -> BalanceReport {
     // we already have a name for.
     let mut access_token = match entry.access_token.take() {
         Some((token, at)) if at.elapsed() < ACCESS_TOKEN_REUSE => token,
-        _ => match super::exchange(shared, api, &stored).await {
-            Ok(token) => token,
+        _ => match crate::daemon::nearai_credential::exchange(shared, api, &connection.session)
+            .await
+        {
+            Ok(rotated) => {
+                connection.session = rotated.retained;
+                rotated.access_token
+            }
             Err(error) => return report_for(&error),
         },
     };
@@ -302,8 +329,15 @@ async fn read_with(shared: &DaemonShared, api: &CloudApi) -> BalanceReport {
             // access token, and this field exists only because the type does.
             refresh_token: String::new(),
         };
-        match fetch(api, &session).await {
+        match fetch(api, &session, connection.organization.as_deref()).await {
             Ok(balance) => {
+                // A network result belongs to the connection that requested
+                // it, even if a browser changed accounts while it was pending.
+                match stored_connection(shared) {
+                    Ok(Some(current)) if current == connection => {}
+                    Ok(None) => return BalanceReport::NoSession,
+                    _ => return BalanceReport::Unavailable,
+                }
                 let reading = BalanceReading {
                     remaining_nanos: balance.remaining,
                     spend_limit_nanos: balance.spend_limit,
@@ -313,6 +347,7 @@ async fn read_with(shared: &DaemonShared, api: &CloudApi) -> BalanceReport {
                     observed_at: Utc::now(),
                 };
                 let entry = map.entry(shared.store.dir().to_path_buf()).or_default();
+                entry.connection = Some(connection.clone());
                 entry.access_token = Some((access_token, Instant::now()));
                 entry.balance = Some((reading, Instant::now()));
                 return BalanceReport::Known(reading);
@@ -325,12 +360,13 @@ async fn read_with(shared: &DaemonShared, api: &CloudApi) -> BalanceReport {
                 if !refreshed_once && error.to_string() == "near_ai_credential_session_expired" =>
             {
                 refreshed_once = true;
-                let stored = match stored_session(shared) {
-                    Some(stored) => stored,
-                    None => return BalanceReport::NoSession,
-                };
-                match super::exchange(shared, api, &stored).await {
-                    Ok(token) => access_token = token,
+                match crate::daemon::nearai_credential::exchange(shared, api, &connection.session)
+                    .await
+                {
+                    Ok(rotated) => {
+                        connection.session = rotated.retained;
+                        access_token = rotated.access_token;
+                    }
                     Err(error) => return report_for(&error),
                 }
             }
@@ -339,12 +375,23 @@ async fn read_with(shared: &DaemonShared, api: &CloudApi) -> BalanceReport {
     }
 }
 
-/// Resolve the organization the ceremony would have chosen, then read its
-/// balance.
-async fn fetch(api: &CloudApi, session: &SessionTokens) -> Result<OrganizationBalance> {
-    let organization = api.first_active_organization(session).await?;
+/// Read the key's organization. Session-only legacy installations retain the
+/// existing account lookup until an inference key has been created.
+async fn fetch(
+    api: &CloudApi,
+    session: &SessionTokens,
+    organization: Option<&str>,
+) -> Result<OrganizationBalance> {
+    let organization = match organization {
+        Some(organization) => organization.to_owned(),
+        None => api.first_active_organization(session).await?,
+    };
     api.organization_balance(session, &organization).await
 }
+
+#[cfg(test)]
+#[path = "balance_regression_tests.rs"]
+mod regression_tests;
 
 #[cfg(test)]
 mod tests {

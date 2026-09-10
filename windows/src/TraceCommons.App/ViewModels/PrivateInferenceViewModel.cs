@@ -33,6 +33,7 @@ namespace TraceCommons.App.ViewModels;
 public sealed class PrivateInferenceViewModel : INotifyPropertyChanged
 {
     private readonly DaemonHost _host;
+    private readonly bool _requiresSession;
 
     /// <summary>
     /// Every fixed word, read once across the ABI. Null when the export or
@@ -52,9 +53,10 @@ public sealed class PrivateInferenceViewModel : INotifyPropertyChanged
     /// </summary>
     private bool _offerSeen;
 
-    public PrivateInferenceViewModel(DaemonHost host)
+    public PrivateInferenceViewModel(DaemonHost host, bool requiresSession = false)
     {
         _host = host ?? throw new ArgumentNullException(nameof(host));
+        _requiresSession = requiresSession;
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;
@@ -426,7 +428,10 @@ public sealed class PrivateInferenceViewModel : INotifyPropertyChanged
     public bool CredentialIsRefused => CredentialTone == PrivateInferenceTone.Refused;
 
     /// <summary>The one action the shared table allows for this state.</summary>
-    private CredentialAction OfferedAction => NearAiCredentialSurface.Action(_credential);
+    public bool HasCloudSession => _credential.SessionState == NearAiEnrollSurface.CredentialStatePresent;
+
+    private CredentialAction OfferedAction => NearAiCredentialSurface.Action(
+        _requiresSession ? _credential with { State = _credential.SessionState } : _credential);
 
     /// <summary>The words on that action's button, or the empty string.</summary>
     public string CredentialActionText =>
@@ -494,6 +499,12 @@ public sealed class PrivateInferenceViewModel : INotifyPropertyChanged
         }
     }
 
+    /// <summary>Continues the returned attempt through the platform browser.</summary>
+    public Task ContinueCredentialAsync(NearAiCredentialAttempt? attempt) =>
+        CredentialBrowser.ContinueAsync(attempt,
+            async uri => await Windows.System.Launcher.LaunchUriAsync(uri),
+            CancelCredentialAsync, LoadCredentialAsync, AwaitCredentialAsync);
+
     /// <summary>
     /// Reads what this machine holds. Names the attempt when this page
     /// started one, which is what buys back the ceremony's own lifecycle
@@ -539,7 +550,7 @@ public sealed class PrivateInferenceViewModel : INotifyPropertyChanged
         // ceremony is in flight: that path re-reads this every two seconds
         // for up to five minutes, and there is no balance to read until the
         // sign-in settles anyway. Every read that settles something gets one.
-        if (!NearAiCredentialSurface.AwaitingBrowser(_credential))
+        if (!_requiresSession && !NearAiCredentialSurface.AwaitingBrowser(_credential))
         {
             await LoadBalanceAsync().ConfigureAwait(true);
         }
@@ -700,6 +711,7 @@ public sealed class PrivateInferenceViewModel : INotifyPropertyChanged
 
     private void RaiseCredential()
     {
+        Raise(nameof(HasCloudSession));
         Raise(nameof(CredentialStateText));
         Raise(nameof(CredentialIsNeutral));
         Raise(nameof(CredentialIsHeld));

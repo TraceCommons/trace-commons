@@ -20,6 +20,15 @@ namespace TraceCommons.Interop.Tests;
 /// </summary>
 public class NearAiCredentialTests
 {
+    [Fact]
+    public void InferenceKeyDoesNotImplyACloudSession()
+    {
+        Assert.Equal(string.Empty, NearAiCredentialSurface.ParseStatus("{\"state\":\"present\"}").SessionState);
+        Assert.Equal("absent", NearAiCredentialSurface.ParseStatus("{\"state\":\"present\",\"session_state\":\"absent\"}").SessionState);
+        Assert.Equal("present", NearAiCredentialSurface.ParseStatus("{\"state\":\"present\",\"session_state\":\"present\"}").SessionState);
+        Assert.Equal(string.Empty, NearAiCredentialSurface.ParseStatus("{\"session_state\":true}").SessionState);
+    }
+
     /// <summary>The five labels the daemon reports, spelled as it spells them.</summary>
     private static readonly string[] Reported =
     {
@@ -298,7 +307,8 @@ public class NearAiCredentialTests
         {
             // A browser opens, somebody signs in with a company that is not
             // this app, and a key is minted and kept here.
-            "browser", "signs you in", "makes a", "keeps on this computer",
+            "browser", "creates an inference key", "on this computer",
+            "renewable Cloud sign-in", "can read your account and create more keys",
         })
         {
             Assert.Contains(consequence, copy.CredentialCost, StringComparison.Ordinal);
@@ -579,13 +589,9 @@ public class NearAiCredentialTests
             viewModel[stateAt..(stateAt + 300)],
             StringComparison.Ordinal);
 
-        string codeBehind = ShellSource("TraceCommons.App/Controls/PrivateInferenceView.xaml.cs");
-        int launch = codeBehind.IndexOf("LaunchUriAsync", StringComparison.Ordinal);
-        Assert.True(launch >= 0, "the handler no longer opens a browser");
-        Assert.Contains(
-            "ViewModel.CancelCredentialAsync()",
-            codeBehind[launch..],
-            StringComparison.Ordinal);
+        Assert.Contains("CredentialBrowser.ContinueAsync(attempt,", viewModel, StringComparison.Ordinal);
+        Assert.Contains("Windows.System.Launcher.LaunchUriAsync(uri)", viewModel, StringComparison.Ordinal);
+        Assert.Contains("CancelCredentialAsync, LoadCredentialAsync, AwaitCredentialAsync", viewModel, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -610,9 +616,9 @@ public class NearAiCredentialTests
 
         var allowed = new HashSet<string>(StringComparer.Ordinal)
         {
-            // The wire fields this surface reads and writes, and the empty
-            // parameter body. Nothing else.
-            "state", "attempt_id", "attempt_status", "browser_url", "{}",
+            // Wire fields, the empty parameter body, and the optional
+            // session state's empty default when an older daemon omits it.
+            "state", "session_state", "attempt_id", "attempt_status", "browser_url", "{}", "",
         };
 
         foreach (Match match in Regex.Matches(uncommented, "\"([^\"\\\\]|\\\\.)*\""))
@@ -668,7 +674,8 @@ public class NearAiCredentialTests
             "_copy?.CredentialWhat",
             "NearAiCredentialSurface.StateLine(_credential, _copy)",
             "NearAiCredentialSurface.Tone(_credential)",
-            "NearAiCredentialSurface.Action(_credential)",
+            "NearAiCredentialSurface.Action(",
+            "_requiresSession ? _credential with { State = _credential.SessionState } : _credential",
             "NearAiCredentialSurface.ActionLabel(OfferedAction, _copy)",
             "NearAiCredentialSurface.ActionPreamble(OfferedAction, _copy)",
         })
@@ -722,7 +729,9 @@ public class NearAiCredentialTests
     public void OnlyAStartedCeremonyOpensABrowser()
     {
         string codeBehind = ShellSource("TraceCommons.App/Controls/PrivateInferenceView.xaml.cs");
-        Assert.Contains("started.BrowserUrl", codeBehind, StringComparison.Ordinal);
+        Assert.Contains("ViewModel.ContinueCredentialAsync(await ViewModel.PressCredentialAsync())", codeBehind, StringComparison.Ordinal);
+        string continuation = ShellSource("TraceCommons.App/ViewModels/CredentialBrowser.cs");
+        Assert.Contains("started.BrowserUrl", continuation, StringComparison.Ordinal);
 
         string viewModel = ShellSource("TraceCommons.App/ViewModels/PrivateInferenceViewModel.cs");
         string start = Region(viewModel, "public async Task<NearAiCredentialAttempt?> StartCredentialAsync(");

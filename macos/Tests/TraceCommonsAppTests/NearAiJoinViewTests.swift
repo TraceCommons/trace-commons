@@ -63,8 +63,9 @@ final class NearAiJoinViewTests: XCTestCase {
             source.contains("nearAiEnrollNeedsLogin"),
             "a contributor with no sign-in is shown no step to take")
         XCTAssertTrue(
-            source.contains("CredentialSurface.statePresent"),
-            "the card decides sign-in from something other than the shared state")
+            source.contains("credentialStatus.sessionState == CredentialSurface.statePresent"),
+            "the card must check the retained Cloud session separately from the inference key")
+        XCTAssertTrue(source.contains("CredentialSection(copy: copy, requiresSession: true)"))
     }
 
     /// A success is read from the payload, not assumed from silence.

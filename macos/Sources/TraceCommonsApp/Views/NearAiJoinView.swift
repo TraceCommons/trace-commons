@@ -36,7 +36,7 @@ struct NearAiJoinView: View {
     /// first poll answers -- the reading that claims less. A card that has
     /// not been told yet must not offer a control that can only refuse.
     private var signedIn: Bool {
-        model.credentialStatus.state == CredentialSurface.statePresent
+        model.credentialStatus.sessionState == CredentialSurface.statePresent
     }
 
     var body: some View {
@@ -54,8 +54,8 @@ struct NearAiJoinView: View {
                     Button(copy.nearAiEnrollAction) { join() }
                         .disabled(pending || commons.trimmingCharacters(in: .whitespaces).isEmpty)
                 } else {
-                    // The step, not a wall. No control is drawn at all.
                     Text(copy.nearAiEnrollNeedsLogin).font(.callout).foregroundStyle(.secondary)
+                    CredentialSection(copy: copy, requiresSession: true)
                 }
 
                 if pending {
