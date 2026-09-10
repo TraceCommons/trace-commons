@@ -95,7 +95,11 @@ public sealed partial class OnboardingWindow : Window
     private async void OnCloudSignIn(object sender, RoutedEventArgs e)
     {
         var signIn = ViewModel.CloudSignIn;
-        await signIn.ContinueCredentialAsync(await signIn.PressCredentialAsync());
+        bool choosingProvider = signIn.ShowCredentialSignIn;
+        var provider = choosingProvider
+            ? await Controls.PrivateInferenceView.ChooseProviderAsync(Content.XamlRoot, signIn) : null;
+        if (choosingProvider && (provider is null || !signIn.ShowCredentialSignIn)) return;
+        await signIn.ContinueCredentialAsync(await signIn.PressCredentialAsync(provider));
     }
 
     private async void OnCheckNearAccount(object sender, RoutedEventArgs e) => await ViewModel.NearAccount.CheckAsync();

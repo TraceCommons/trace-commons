@@ -80,11 +80,41 @@ public sealed partial class PrivateInferenceView : UserControl
     /// re-serves it -- and then waits for the ceremony to settle so the card
     /// stops saying a sign-in is under way once it is not.
     /// </remarks>
-    private async void OnCredentialAction(object sender, RoutedEventArgs e) =>
-        await ViewModel.ContinueCredentialAsync(await ViewModel.PressCredentialAsync());
+    private async void OnCredentialAction(object sender, RoutedEventArgs e)
+    {
+        bool choosingProvider = ViewModel.ShowCredentialSignIn;
+        var provider = choosingProvider
+            ? await ChooseProviderAsync(XamlRoot, ViewModel) : null;
+        if (choosingProvider && (provider is null || !ViewModel.ShowCredentialSignIn)) return;
+        await ViewModel.ContinueCredentialAsync(await ViewModel.PressCredentialAsync(provider));
+    }
 
-    private async void OnBalanceAction(object sender, RoutedEventArgs e) =>
-        await ViewModel.ContinueCredentialAsync(await ViewModel.PressBalanceAsync());
+    private async void OnBalanceAction(object sender, RoutedEventArgs e)
+    {
+        var provider = await ChooseProviderAsync(XamlRoot, ViewModel);
+        await ViewModel.ContinueCredentialAsync(await ViewModel.PressBalanceAsync(provider));
+    }
+
+    internal static async Task<NearAiSignInProvider?> ChooseProviderAsync(
+        XamlRoot root, PrivateInferenceViewModel model)
+    {
+        if (!model.CredentialControlsEnabled) return null;
+        var dialog = new ContentDialog
+        {
+            XamlRoot = root,
+            Title = model.CredentialTitle,
+            PrimaryButtonText = model.CredentialGoogle,
+            SecondaryButtonText = model.CredentialGithub,
+            CloseButtonText = model.CredentialCancel,
+            DefaultButton = ContentDialogButton.Close,
+        };
+        return (await DialogGuard.ShowOnceAsync(dialog)) switch
+        {
+            ContentDialogResult.Primary => NearAiSignInProvider.Google,
+            ContentDialogResult.Secondary => NearAiSignInProvider.GitHub,
+            _ => null,
+        };
+    }
 
     /// <summary>
     /// "Send this tool's calls here", for one row.
