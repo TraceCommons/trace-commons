@@ -1077,7 +1077,7 @@ pub const CREDENTIAL_TITLE: &str = "NEAR AI account";
 /// that calls fail without one -- they do not; they are answered using
 /// whatever accounts a contributor's tools already had, which is what
 /// [`STATE_RUNNING_ANSWERED_ELSEWHERE`] says on the state row above.
-pub const CREDENTIAL_WHAT: &str = "Connect your tools to NEAR AI and view your account balance.";
+pub const CREDENTIAL_WHAT: &str = "Sign in to use NEAR AI with your tools and check your balance.";
 
 /// What getting one actually costs. **Required, not optional.**
 ///
@@ -1091,13 +1091,13 @@ pub const CREDENTIAL_WHAT: &str = "Connect your tools to NEAR AI and view your a
 /// the key is theirs, it is listed in their own account, and removing it
 /// there is the thing this app cannot do for them --
 /// [`CREDENTIAL_FORGET_EXPLAINS`] says so again at the moment it matters.
-pub const CREDENTIAL_COST: &str = "Signing in opens your browser and creates an inference key in your own \
-     Private AI account. This app keeps that key and a renewable Private AI sign-in \
-     in this computer's system credential store, which may ask for permission when the app starts. \
-     Your commons account sign-in and device identity remain in local files. \
-     The saved Private AI sign-in can read your account and create more \
-     keys; the app uses it to read your balance and, when you ask, join a commons. \
-     You can remove the inference key in your Private AI account.";
+pub const CREDENTIAL_COST: &str = "Sign in through your browser. The app creates an API key in your NEAR AI \
+     account to send AI requests. You can revoke this key in NEAR AI.\n\n\
+     The app also keeps you signed in to check your balance and, when you ask, \
+     join a commons. This saved sign-in can read your account and create more keys.\n\n\
+     Your key and saved sign-in are stored in this computer's system credential store. \
+     You may be asked to allow access when the app starts. Your commons sign-in and \
+     device identity are stored separately in local files.";
 
 /// The button that starts the ceremony.
 pub const CREDENTIAL_OBTAIN: &str = "Sign in with NEAR AI";
@@ -1125,8 +1125,7 @@ pub const CREDENTIAL_FORGET_EXPLAINS: &str = "Forgetting removes the inference k
      Private AI account to stop it working elsewhere.";
 
 /// `absent`.
-pub const CREDENTIAL_ABSENT: &str = "No key is kept here for Private AI, so nothing on this computer can ask \
-     it to answer a call.";
+pub const CREDENTIAL_ABSENT: &str = "NEAR AI isn’t connected to this app.";
 
 /// `obtaining`.
 ///
@@ -3351,9 +3350,9 @@ mod tests {
         let copy = private_inference_copy();
         for fragment in [
             "browser",
-            "creates an inference key",
+            "creates an API key",
             "system credential store",
-            "renewable Private AI sign-in",
+            "keeps you signed in",
             "can read your account and create more keys",
         ] {
             assert!(
@@ -3364,7 +3363,7 @@ mod tests {
         }
         // The key is the contributor's, and where to go for it is named.
         assert!(
-            copy.credential_cost.contains("your own Private AI account"),
+            copy.credential_cost.contains("your NEAR AI account"),
             "the cost sentence stopped naming where the key lives: {}",
             copy.credential_cost
         );
