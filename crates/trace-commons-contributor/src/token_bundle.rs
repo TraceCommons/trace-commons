@@ -130,12 +130,14 @@ impl BundleJournal {
     /// The directory must be inside the contributor's private state directory.
     pub fn open(root: &Path) -> Result<Self> {
         if !root.exists() {
-            let mut builder = fs::DirBuilder::new();
+            let builder = fs::DirBuilder::new();
             #[cfg(unix)]
-            {
+            let builder = {
                 use std::os::unix::fs::DirBuilderExt;
+                let mut builder = builder;
                 builder.mode(0o700);
-            }
+                builder
+            };
             builder.create(root).context("bundle-journal-create")?;
         }
         let metadata = fs::symlink_metadata(root).context("bundle-journal-metadata")?;
