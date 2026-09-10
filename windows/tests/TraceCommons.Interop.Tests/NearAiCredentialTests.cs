@@ -332,8 +332,8 @@ public class NearAiCredentialTests
         {
             // A browser opens, somebody signs in with a company that is not
             // this app, and a key is minted and kept here.
-            "browser", "creates an inference key", "system credential store",
-            "renewable Private AI sign-in", "can read your account and create more keys",
+            "browser", "creates an API key", "system credential store",
+            "keeps you signed in", "can read your account and create more keys",
         })
         {
             Assert.Contains(consequence, copy.CredentialCost, StringComparison.Ordinal);

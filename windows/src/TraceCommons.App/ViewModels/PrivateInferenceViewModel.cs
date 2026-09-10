@@ -1,5 +1,6 @@
 using System;
 using System.Collections.ObjectModel;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.Threading.Tasks;
 using TraceCommons.Interop;
@@ -357,10 +358,21 @@ public sealed class PrivateInferenceViewModel : INotifyPropertyChanged
             }
 
             HarnessListing listing = HarnessSurface.ParseListing(response.Result.Value.GetRawText());
+            var expanded = new HashSet<string>(StringComparer.Ordinal);
+            foreach (HarnessRowViewModel previous in Harnesses)
+            {
+                if (previous.IsSettingsExpanded)
+                {
+                    expanded.Add(previous.Id);
+                }
+            }
             Harnesses.Clear();
             foreach (HarnessRow row in listing.Harnesses)
             {
-                Harnesses.Add(new HarnessRowViewModel(row, _copy));
+                Harnesses.Add(new HarnessRowViewModel(row, _copy)
+                {
+                    IsSettingsExpanded = expanded.Contains(row.Id),
+                });
             }
 
             // Read from the listing, never held over from the last one: an

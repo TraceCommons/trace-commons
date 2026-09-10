@@ -109,7 +109,7 @@ final class CredentialExportTests: XCTestCase {
         let copy = try XCTUnwrap(copy())
         let cost = copy.credentialCost
         XCTAssertTrue(cost.contains("browser"), cost)
-        XCTAssertTrue(cost.contains("your own Private AI account"), cost)
+        XCTAssertTrue(cost.contains("your NEAR AI account"), cost)
         XCTAssertEqual(CredentialSurface.actionExplains(.obtain, copy: copy), cost)
     }
 

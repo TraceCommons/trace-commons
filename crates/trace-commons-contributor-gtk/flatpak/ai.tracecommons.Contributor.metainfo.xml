@@ -62,6 +62,13 @@
   </provides>
 
   <releases>
+    <release version="0.12.1" date="2026-09-10">
+      <description>
+        <p>Route AI requests through NEAR AI. Private AI now starts with sign-in when you are signed out, with clearer controls and status messages across Linux, macOS and Windows.</p>
+        <p>Private AI keys, Commons sessions and device keys now use the operating system credential store. Existing credentials migrate automatically when read, preserving your device identity.</p>
+        <p>Wallet signup now checks that the server is ready and explains mismatched signup details before signing a device proof.</p>
+      </description>
+    </release>
     <release version="0.12.0" date="2026-09-09">
       <description>
         <p>Every session in the list now says whether it carries a checkable copy of the model call that produced it. That is a statement about the recording, not about your standing, so it is on every row for every contributor, including those who already have an invite and whose sessions send perfectly well. A session can arrive without such a copy whichever of those you are, and until now there was no way to tell which of yours had one.</p>

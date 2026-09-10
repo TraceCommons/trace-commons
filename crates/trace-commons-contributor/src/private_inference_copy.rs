@@ -706,7 +706,7 @@ pub const TRAY_OPEN_TO_TURN_ON: &str = "Route AI requests through NEAR AI…";
 /// a tool is the unit a contributor can decide about. Answering model calls
 /// at all is a consequence of connecting one, not a question to be settled
 /// first.
-pub const HARNESSES_TITLE: &str = "Tools on this computer";
+pub const HARNESSES_TITLE: &str = "Your tools";
 
 /// The one line under that heading.
 ///
@@ -716,9 +716,8 @@ pub const HARNESSES_TITLE: &str = "Tools on this computer";
 /// unqualified list reads as the second, and a contributor whose tool is
 /// missing from it would conclude their tool cannot be connected rather than
 /// that this app has not been taught about it yet.
-pub const HARNESSES_WHAT: &str = "Each of these can be set to send its model calls to this computer, one \
-     tool at a time. The list is what this app knows how to look for, not \
-     every tool there is.";
+pub const HARNESSES_WHAT: &str =
+    "Choose which tools send AI requests through this app. Supported tools are listed below.";
 
 /// What the amount [`harness_spend_line`] names does and does not cover.
 ///
@@ -758,8 +757,7 @@ pub const HARNESS_NOT_INSTALLED: &str = "Not found on this computer. This app lo
 ///
 /// Said as a fact about the tool's settings rather than as a fault. Nothing
 /// is wrong with a tool nobody has connected.
-pub const HARNESS_NOT_CONNECTED: &str = "Not connected. Its own settings still send its calls wherever they went \
-     before.";
+pub const HARNESS_NOT_CONNECTED: &str = "Not connected. Using its existing settings.";
 
 /// A tool whose settings are right and from which nothing has arrived yet.
 ///
@@ -780,21 +778,21 @@ pub const HARNESS_ANSWERING: &str =
     "Answering. A call from it reached this computer and was answered here.";
 
 /// The action that connects one tool.
-pub const HARNESS_CONNECT: &str = "Send this tool's calls here";
+pub const HARNESS_CONNECT: &str = "Connect";
 
 /// The action that disconnects one tool.
 ///
 /// Says what the tool stops doing, not what this app stops doing: the file
 /// being changed is the tool's, and the listener is left exactly as it was
 /// for every other tool.
-pub const HARNESS_DISCONNECT: &str = "Stop sending this tool's calls here";
+pub const HARNESS_DISCONNECT: &str = "Disconnect";
 
 /// The heading over the preview shown before anything is written.
 ///
 /// This app is about to edit a file it does not own, so the change is shown
 /// before it is made. The same reason the destination exists at all: the
 /// consequence is stated where the decision is taken.
-pub const HARNESS_PREVIEW_TITLE: &str = "What would change in this tool's own settings file";
+pub const HARNESS_PREVIEW_TITLE: &str = "Connection settings";
 
 /// The button that writes the change.
 pub const HARNESS_PREVIEW_CONFIRM: &str = "Make this change";
@@ -1087,7 +1085,7 @@ pub const CREDENTIAL_TITLE: &str = "NEAR AI account";
 /// that calls fail without one -- they do not; they are answered using
 /// whatever accounts a contributor's tools already had, which is what
 /// [`STATE_RUNNING_ANSWERED_ELSEWHERE`] says on the state row above.
-pub const CREDENTIAL_WHAT: &str = "Connect your tools to NEAR AI and view your account balance.";
+pub const CREDENTIAL_WHAT: &str = "Sign in to use NEAR AI with your tools and check your balance.";
 
 /// Provider selector copy shared by every native shell.
 pub const CREDENTIAL_PROVIDER_LABEL: &str = "Sign-in method";
@@ -1122,14 +1120,13 @@ pub(crate) fn wallet_browser_copy() -> serde_json::Value {
 /// the key is theirs, it is listed in their own account, and removing it
 /// there is the thing this app cannot do for them --
 /// [`CREDENTIAL_FORGET_EXPLAINS`] says so again at the moment it matters.
-pub const CREDENTIAL_COST: &str = "Signing in opens your browser and creates an inference key in your own \
-     Private AI account. This app keeps that key and a renewable Private AI sign-in \
-     in this computer's system credential store, which may ask for permission when the app starts. \
-     Your commons account sign-in and device key use the system credential store too; \
-     existing credentials move there when next read. \
-     The saved Private AI sign-in can read your account and create more \
-     keys; the app uses it to read your balance and, when you ask, join a commons. \
-     You can remove the inference key in your Private AI account.";
+pub const CREDENTIAL_COST: &str = "Sign in through your browser. The app creates an API key in your NEAR AI \
+     account to send AI requests. You can revoke this key in NEAR AI.\n\n\
+     The app also keeps you signed in to check your balance and, when you ask, \
+     join a commons. This saved sign-in can read your account and create more keys.\n\n\
+     Your key and saved sign-in are stored in this computer's system credential store. \
+     You may be asked to allow access when the app starts. Your commons sign-in and \
+     device identity are stored separately in local files.";
 
 /// The button that starts the ceremony.
 pub const CREDENTIAL_OBTAIN: &str = "Sign in with NEAR AI";
@@ -1157,8 +1154,7 @@ pub const CREDENTIAL_FORGET_EXPLAINS: &str = "Forgetting removes the inference k
      Private AI account to stop it working elsewhere.";
 
 /// `absent`.
-pub const CREDENTIAL_ABSENT: &str = "No key is kept here for Private AI, so nothing on this computer can ask \
-     it to answer a call.";
+pub const CREDENTIAL_ABSENT: &str = "NEAR AI isn’t connected to this app.";
 
 /// `obtaining`.
 ///
@@ -3089,7 +3085,7 @@ mod tests {
             copy.harnesses_none_found
         );
         assert!(
-            copy.harnesses_what.contains("not"),
+            copy.harnesses_what.contains("Supported tools"),
             "the list's line stopped qualifying what the list is: {}",
             copy.harnesses_what
         );
@@ -3425,9 +3421,9 @@ mod tests {
         let copy = private_inference_copy();
         for fragment in [
             "browser",
-            "creates an inference key",
+            "creates an API key",
             "system credential store",
-            "renewable Private AI sign-in",
+            "keeps you signed in",
             "can read your account and create more keys",
         ] {
             assert!(
@@ -3438,7 +3434,7 @@ mod tests {
         }
         // The key is the contributor's, and where to go for it is named.
         assert!(
-            copy.credential_cost.contains("your own Private AI account"),
+            copy.credential_cost.contains("your NEAR AI account"),
             "the cost sentence stopped naming where the key lives: {}",
             copy.credential_cost
         );
