@@ -15,6 +15,7 @@ import TCShellCore
 struct CredentialSection: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.openURL) private var openURL
+    @State private var choosingProvider = false
     let copy: PrivateInferenceCopy
     var requiresSession = false
     var prominent = false
@@ -77,6 +78,10 @@ struct CredentialSection: View {
                 BalanceRow(copy: copy, credentialAction: action, run: run)
             }
         }
+        .confirmationDialog(copy.credentialObtain, isPresented: $choosingProvider, titleVisibility: .visible) {
+            Button(copy.credentialGoogle) { signIn(provider: .google) }
+            Button(copy.credentialGithub) { signIn(provider: .github) }
+        }
         .task(id: action) {
             // A state nobody could read polls nothing. There is no outcome
             // pending and no attempt to name.
@@ -118,23 +123,27 @@ struct CredentialSection: View {
     private func run(_ action: CredentialAction) {
         switch action {
         case .obtain:
-            Task {
-                // The URL is served once, by start. Opening it is this
-                // view's environment; the model has no window.
-                guard let url = await model.startNearAiCredential() else { return }
-                let accepted = await withCheckedContinuation { continuation in
-                    openURL(url) { continuation.resume(returning: $0) }
-                }
-                // A browser that never opened leaves a ceremony nobody can
-                // finish, so it is stopped rather than left to time out.
-                if !accepted { model.cancelNearAiCredential() }
-            }
+            choosingProvider = true
         case .cancel:
             model.cancelNearAiCredential()
         case .forget:
             model.forgetNearAiCredential()
         case .none:
             break
+        }
+    }
+
+    private func signIn(provider: NearAiSignInProvider) {
+        Task {
+            // The URL is served once, by start. Opening it is this
+            // view's environment; the model has no window.
+            guard let url = await model.startNearAiCredential(provider: provider) else { return }
+            let accepted = await withCheckedContinuation { continuation in
+                openURL(url) { continuation.resume(returning: $0) }
+            }
+            // A browser that never opened leaves a ceremony nobody can
+            // finish, so it is stopped rather than left to time out.
+            if !accepted { model.cancelNearAiCredential() }
         }
     }
 }

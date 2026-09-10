@@ -561,6 +561,8 @@ pub struct PrivateInferenceCopy {
     pub credential_what: &'static str,
     pub credential_cost: &'static str,
     pub credential_obtain: &'static str,
+    pub credential_google: &'static str,
+    pub credential_github: &'static str,
     pub credential_cancel: &'static str,
     pub credential_forget: &'static str,
     pub credential_forget_explains: &'static str,
@@ -1101,6 +1103,8 @@ pub const CREDENTIAL_COST: &str = "Signing in opens your browser and creates an 
 
 /// The button that starts the ceremony.
 pub const CREDENTIAL_OBTAIN: &str = "Sign in with NEAR AI";
+pub const CREDENTIAL_GOOGLE: &str = "Continue with Google";
+pub const CREDENTIAL_GITHUB: &str = "Continue with GitHub";
 
 /// The button shown while one is running.
 ///
@@ -1937,6 +1941,8 @@ pub fn private_inference_copy() -> PrivateInferenceCopy {
         credential_what: CREDENTIAL_WHAT,
         credential_cost: CREDENTIAL_COST,
         credential_obtain: CREDENTIAL_OBTAIN,
+        credential_google: CREDENTIAL_GOOGLE,
+        credential_github: CREDENTIAL_GITHUB,
         credential_cancel: CREDENTIAL_CANCEL,
         credential_forget: CREDENTIAL_FORGET,
         credential_forget_explains: CREDENTIAL_FORGET_EXPLAINS,
@@ -3409,6 +3415,8 @@ mod tests {
             copy.credential_what,
             copy.credential_cost,
             copy.credential_obtain,
+            copy.credential_google,
+            copy.credential_github,
             copy.credential_cancel,
             copy.credential_forget,
             copy.credential_forget_explains,
