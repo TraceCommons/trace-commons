@@ -54,6 +54,13 @@ struct Bundle {
     payload: String,
 }
 
+// Secret Service's synchronous API drives its own runtime. Keep the entire
+// native handle lifetime outside a caller's Tokio runtime, including callers
+// of the pre-existing synchronous ConfigStore and DeviceIdentity APIs.
+fn needs_native_thread() -> bool {
+    cfg!(target_os = "linux") && tokio::runtime::Handle::try_current().is_ok()
+}
+
 fn unavailable() -> anyhow::Error {
     anyhow!("commons_credential_storage_unavailable")
 }
@@ -167,6 +174,14 @@ fn ensure_current(store: &ConfigStore, expected: &Snapshot) -> Result<()> {
 }
 
 pub(crate) fn load(store: &ConfigStore, kind: Kind) -> Result<Option<Vec<u8>>> {
+    if needs_native_thread() {
+        return std::thread::scope(|scope| {
+            scope
+                .spawn(|| load(store, kind))
+                .join()
+                .map_err(|_| unavailable())?
+        });
+    }
     let expected = snapshot(store, kind)?;
     let Some(bytes) = &expected.previous else {
         return Ok(None);
@@ -205,6 +220,14 @@ pub(crate) fn replace(
     payload: &[u8],
     enrollment: Option<&ContributorConfig>,
 ) -> Result<()> {
+    if needs_native_thread() {
+        return std::thread::scope(|scope| {
+            scope
+                .spawn(|| replace(store, expected, payload, enrollment))
+                .join()
+                .map_err(|_| unavailable())?
+        });
+    }
     let locks = coordination(store.dir())?;
     let _storage = locks.storage.lock()?;
     let credentials = native(store)?;
@@ -353,6 +376,14 @@ fn cleanup_locked<B: SecretBackend>(
     Ok(())
 }
 pub(crate) fn cleanup(store: &ConfigStore) -> Result<()> {
+    if needs_native_thread() {
+        return std::thread::scope(|scope| {
+            scope
+                .spawn(|| cleanup(store))
+                .join()
+                .map_err(|_| unavailable())?
+        });
+    }
     if Journal::read_named(store, JOURNAL)?.references.is_empty() {
         return Ok(());
     }
@@ -527,6 +558,26 @@ mod tests {
             .insert(store.dir().to_path_buf(), backend.clone());
         (dir, store, backend)
     }
+    #[tokio::test]
+    async fn synchronous_credential_api_is_safe_inside_an_async_runtime() {
+        let (_dir, store, _) = fixture();
+        let identity = DeviceIdentity::load_or_generate(&store).unwrap();
+        assert_eq!(
+            DeviceIdentity::load(&store).unwrap().unwrap().device_key_id,
+            identity.device_key_id
+        );
+        store
+            .write_daemon_file(ACCOUNT_SESSION_FILE, &session())
+            .unwrap();
+        assert!(
+            crate::account_auth::try_load_token(&store)
+                .unwrap()
+                .is_some()
+        );
+        clear(&store, &[Kind::Account, Kind::Device]).unwrap();
+        cleanup(&store).unwrap();
+    }
+
     fn config() -> ContributorConfig {
         serde_json::from_value(serde_json::json!({
             "schema_version": crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION,

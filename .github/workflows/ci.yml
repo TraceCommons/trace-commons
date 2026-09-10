@@ -248,8 +248,15 @@ jobs:
       # Selected by module name, like the step above. #836 shipped as two
       # halves that had never run against each other; without `--ignored` this
       # step passes having run neither.
+      - uses: ./.github/actions/apt-update-ubuntu-only
+      - name: Install Secret Service for native enrollment fixtures
+        run: sudo apt-get install -y --no-install-recommends gnome-keyring dbus-x11
       - name: the NEAR AI enrolment ceremony, both halves
-        run: cargo test --bin trace-commons-ingest nearai_ceremony_pg_tests -- --ignored
+        run: |
+          dbus-run-session -- sh -eu -c '
+            printf "\n" | gnome-keyring-daemon --unlock --components=secrets
+            cargo test --bin trace-commons-ingest nearai_ceremony_pg_tests -- --ignored
+          '
         env:
           TRACE_COMMONS_ADMISSION_INGEST_PG_TEST_URL: postgres://trace@127.0.0.1:5432/admission_test_ingest
       # A suite that runs nothing passes, so the steps above cannot prove
@@ -699,15 +706,21 @@ jobs:
       # redaction and secret-detection suites) and trace-commons-operator-client
       # (41 tests) were never executed by CI at all, and a new crate joins the
       # workspace untested by default.
-      - run: cargo test --workspace
       - uses: ./.github/actions/apt-update-ubuntu-only
       - name: Install a Secret Service provider for credential tests
         run: sudo apt-get install -y --no-install-recommends gnome-keyring dbus-x11
+      - name: Run workspace tests with Secret Service
+        run: |
+          dbus-run-session -- sh -eu -c '
+            printf "\n" | gnome-keyring-daemon --unlock --components=secrets
+            cargo test --workspace
+          '
       - name: Verify real Secret Service storage
         run: |
           dbus-run-session -- sh -eu -c '
             printf "\n" | gnome-keyring-daemon --unlock --components=secrets
             cargo test -p trace-commons-contributor --lib real_os_round_trip_removes_only_its_synthetic_entry -- --ignored
+            cargo test -p trace-commons-contributor --lib real_commons_os_round_trip -- --ignored
           '
       # Last, so every step above still has its binaries; see the action for
       # what is removed and why. Only a finished job saves its cache, so this
@@ -992,6 +1005,7 @@ jobs:
         run: cargo test -p trace-commons-contributor -p trace-commons-contributor-ffi
       - name: Verify real Windows Credential Manager storage
         run: cargo test -p trace-commons-contributor --lib real_os_round_trip_removes_only_its_synthetic_entry -- --ignored
+            cargo test -p trace-commons-contributor --lib real_commons_os_round_trip -- --ignored
       # Last, so every step above still has its binaries; see the action for
       # what is removed and why. Only a finished job saves its cache, so this
       # runs exactly when a save is about to happen.
