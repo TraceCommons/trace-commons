@@ -464,6 +464,10 @@ public sealed class PrivateInferenceViewModel : INotifyPropertyChanged
 
     public bool HasCredentialActionPreamble => CredentialActionPreamble.Length > 0;
 
+    public string CredentialGoogle => _copy?.CredentialGoogle ?? string.Empty;
+    public string CredentialGithub => _copy?.CredentialGithub ?? string.Empty;
+    public string CredentialCancel => _copy?.CredentialCancel ?? string.Empty;
+
     /// <summary>
     /// Whether there is an action to draw at all. A state this build could
     /// not read offers nothing.
@@ -498,12 +502,13 @@ public sealed class PrivateInferenceViewModel : INotifyPropertyChanged
     /// mints a key at a third party cannot be reached from a state this build
     /// could not read.
     /// </remarks>
-    public async Task<NearAiCredentialAttempt?> PressCredentialAsync()
+    public async Task<NearAiCredentialAttempt?> PressCredentialAsync(NearAiSignInProvider? provider = null)
     {
         switch (OfferedAction)
         {
             case CredentialAction.Obtain:
-                return await StartCredentialAsync().ConfigureAwait(true);
+                return provider is { } selected
+                    ? await StartCredentialAsync(selected).ConfigureAwait(true) : null;
             case CredentialAction.Cancel:
                 await CancelCredentialAsync().ConfigureAwait(true);
                 return null;
@@ -583,7 +588,7 @@ public sealed class PrivateInferenceViewModel : INotifyPropertyChanged
     /// which is a second browser tab in front of somebody already looking at
     /// one.
     /// </remarks>
-    public async Task<NearAiCredentialAttempt?> StartCredentialAsync()
+    public async Task<NearAiCredentialAttempt?> StartCredentialAsync(NearAiSignInProvider provider)
     {
         if (_copy is null || _credentialBusy)
         {
@@ -595,7 +600,7 @@ public sealed class PrivateInferenceViewModel : INotifyPropertyChanged
         try
         {
             DaemonResponse response = await _host
-                .CallAsync(DaemonProtocol.Methods.NearAiCredentialStart)
+                .CallAsync(DaemonProtocol.Methods.NearAiCredentialStart, NearAiCredentialSurface.StartParameters(provider))
                 .ConfigureAwait(true);
             if (response.IsError || response.Result is null)
             {
@@ -890,9 +895,9 @@ public sealed class PrivateInferenceViewModel : INotifyPropertyChanged
     /// records, so forgetting would throw away a working key to fix an
     /// unrelated sign-in.
     /// </remarks>
-    public Task<NearAiCredentialAttempt?> PressBalanceAsync() =>
-        BalanceOfferedAction == CredentialAction.Obtain
-            ? StartCredentialAsync()
+    public Task<NearAiCredentialAttempt?> PressBalanceAsync(NearAiSignInProvider? provider = null) =>
+        BalanceOfferedAction == CredentialAction.Obtain && provider is { } selected
+            ? StartCredentialAsync(selected)
             : Task.FromResult<NearAiCredentialAttempt?>(null);
 
     /// <summary>

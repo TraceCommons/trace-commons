@@ -54,7 +54,7 @@ public class NearAiCredentialTests
     private static NearAiCredentialStatus Status(string state) => new(state, null, null);
 
     /// <summary>
-    /// All fourteen credential sentences arrive, and each one arrives
+    /// All sixteen credential sentences arrive, and each one arrives
     /// finished. A template with a hole in it would make this shell a second
     /// place the wording lives.
     /// </summary>
@@ -65,13 +65,13 @@ public class NearAiCredentialTests
         string[] credential =
         {
             copy.CredentialTitle, copy.CredentialWhat, copy.CredentialCost,
-            copy.CredentialObtain, copy.CredentialCancel, copy.CredentialForget,
+            copy.CredentialObtain, copy.CredentialGoogle, copy.CredentialGithub, copy.CredentialCancel, copy.CredentialForget,
             copy.CredentialForgetExplains, copy.CredentialAbsent, copy.CredentialObtaining,
             copy.CredentialFailed, copy.CredentialCancelled, copy.CredentialPresent,
             copy.CredentialUnknown, copy.CredentialUnreported,
         };
 
-        Assert.Equal(14, credential.Length);
+        Assert.Equal(16, credential.Length);
         foreach (string sentence in credential)
         {
             Assert.False(string.IsNullOrWhiteSpace(sentence));
@@ -107,7 +107,7 @@ public class NearAiCredentialTests
             .Where(name => name.StartsWith("credential_", StringComparison.Ordinal))
             .ToList();
 
-        Assert.Equal(14, credentialFields.Count);
+        Assert.Equal(16, credentialFields.Count);
         var carriers = new HashSet<string>(StringComparer.Ordinal)
         {
             "key", "keys", "secret", "token", "prefix", "account", "email", "org", "workspace",
@@ -619,6 +619,7 @@ public class NearAiCredentialTests
             // Wire fields, the empty parameter body, and the optional
             // session state's empty default when an older daemon omits it.
             "state", "session_state", "attempt_id", "attempt_status", "browser_url", "{}", "",
+            "provider", "google", "github",
         };
 
         foreach (Match match in Regex.Matches(uncommented, "\"([^\"\\\\]|\\\\.)*\""))
@@ -716,7 +717,7 @@ public class NearAiCredentialTests
         // answer, and the view holds no arm of it: a press is handed to the
         // view model, which decides what it was.
         string codeBehind = ShellSource("TraceCommons.App/Controls/PrivateInferenceView.xaml.cs");
-        Assert.Contains("ViewModel.PressCredentialAsync()", codeBehind, StringComparison.Ordinal);
+        Assert.Contains("ViewModel.PressCredentialAsync(provider)", codeBehind, StringComparison.Ordinal);
         Assert.DoesNotContain("CredentialAction.", codeBehind, StringComparison.Ordinal);
         Assert.DoesNotContain("NearAiCredentialSurface.Action", codeBehind, StringComparison.Ordinal);
     }
@@ -729,7 +730,7 @@ public class NearAiCredentialTests
     public void OnlyAStartedCeremonyOpensABrowser()
     {
         string codeBehind = ShellSource("TraceCommons.App/Controls/PrivateInferenceView.xaml.cs");
-        Assert.Contains("ViewModel.ContinueCredentialAsync(await ViewModel.PressCredentialAsync())", codeBehind, StringComparison.Ordinal);
+        Assert.Contains("ViewModel.ContinueCredentialAsync(await ViewModel.PressCredentialAsync(provider))", codeBehind, StringComparison.Ordinal);
         string continuation = ShellSource("TraceCommons.App/ViewModels/CredentialBrowser.cs");
         Assert.Contains("started.BrowserUrl", continuation, StringComparison.Ordinal);
 
@@ -747,6 +748,21 @@ public class NearAiCredentialTests
         // to a state this shell made up.
         Assert.Contains("NearAiCredentialStatus.Unreported", status, StringComparison.Ordinal);
     }
+
+    [Theory]
+    [InlineData(NearAiSignInProvider.Google, "google")]
+    [InlineData(NearAiSignInProvider.GitHub, "github")]
+    public void SignInParametersCarryOnlyTheSelectedProvider(NearAiSignInProvider provider, string expected)
+    {
+        using var document = JsonDocument.Parse(NearAiCredentialSurface.StartParameters(provider));
+        Assert.Equal(expected, document.RootElement.GetProperty("provider").GetString());
+        Assert.Single(document.RootElement.EnumerateObject());
+    }
+
+    [Fact]
+    public void UnknownSignInProviderCannotStartACeremony() =>
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            NearAiCredentialSurface.StartParameters((NearAiSignInProvider)99));
 
     /// <summary>One method's body, from its signature to the line closing it.</summary>
     private static string Region(string source, string signature)

@@ -311,6 +311,12 @@ public sealed record PrivateInferenceCopy
     [JsonPropertyName("credential_obtain")]
     public string CredentialObtain { get; init; } = string.Empty;
 
+    [JsonPropertyName("credential_google")]
+    public string CredentialGoogle { get; init; } = string.Empty;
+
+    [JsonPropertyName("credential_github")]
+    public string CredentialGithub { get; init; } = string.Empty;
+
     [JsonPropertyName("credential_cancel")]
     public string CredentialCancel { get; init; } = string.Empty;
 
@@ -665,6 +671,8 @@ public sealed record PrivateInferenceCopy
             CredentialWhat,
             CredentialCost,
             CredentialObtain,
+            CredentialGoogle,
+            CredentialGithub,
             CredentialCancel,
             CredentialForget,
             CredentialForgetExplains,
