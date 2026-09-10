@@ -48,8 +48,31 @@ use tower::ServiceExt;
 use trace_commons_contributor::daemon::nearai_onboarding::device_proof_for_ceremony;
 use trace_commons_contributor::identity::DeviceIdentity;
 
-/// The subject the stubbed NEAR AI `/me` resolves the token to.
+/// The subject the stubbed NEAR AI `/users/me` resolves the token to.
 const STUB_SUBJECT: &str = "auth0|nearai-ceremony-fixture";
+
+/// The runtime pool and the resolver pool, as two roles rather than one.
+///
+/// Aliasing them is not a shortcut, it is #727: the resolver resolves a blind
+/// index while holding no tenant context, which V61 permits only through a
+/// permissive policy scoped `TO trace_login_resolver`. Any other non-superuser
+/// role is left with `trace_corpus_tenant_isolation`, whose predicate compares
+/// `tenant_id` against a `trace_current_tenant_id()` that is NULL here, so it
+/// matches nothing and a returning contributor looks new -- a second tenant
+/// minted quietly for somebody who already had one. This suite enrols a fresh
+/// subject, so it would not fail on the aliased wiring; it would simply stop
+/// modelling the system, which is how #727 survived.
+fn resolver_config(url: &str, resolver_url: Option<&str>) -> DatabaseConfig {
+    DatabaseConfig {
+        url: SecretString::from(url.to_owned()),
+        pool_size: 4,
+        ssl_mode: trace_commons_server::config::SslMode::Prefer,
+        login_resolver_url: resolver_url.map(|u| SecretString::from(u.to_owned())),
+        gate_driver_url: None,
+        pii_backstop_driver_url: None,
+        invite_registry_url: None,
+    }
+}
 
 /// A migrated PostgreSQL on the isolated URL this job supplies.
 ///
@@ -61,18 +84,35 @@ async fn ceremony_pg_admin() -> Arc<PgBackend> {
         .expect("explicit isolated URL required");
     let parsed = reqwest::Url::parse(&url).unwrap();
     assert_eq!(parsed.host_str(), Some("127.0.0.1"));
-    let admin = PgBackend::new(&DatabaseConfig {
-        url: SecretString::from(url),
-        pool_size: 4,
-        ssl_mode: trace_commons_server::config::SslMode::Prefer,
-        login_resolver_url: None,
-        gate_driver_url: None,
-        pii_backstop_driver_url: None,
-        invite_registry_url: None,
-    })
-    .await
-    .unwrap();
-    admin.run_migrations().await.unwrap();
+    // Migrate first, with no resolver: V30 is what creates the role the
+    // resolver pool connects as, so it cannot be wired before it exists.
+    let migrator = PgBackend::new(&resolver_config(&url, None)).await.unwrap();
+    migrator.run_migrations().await.unwrap();
+
+    // V30 creates `trace_login_resolver` NOLOGIN, so a pool cannot connect as
+    // it until a test says so. The grant is the narrow one the resolver needs
+    // and nothing more.
+    let (client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
+        .await
+        .unwrap();
+    let handle = tokio::spawn(connection);
+    client
+        .batch_execute(
+            "ALTER ROLE trace_login_resolver LOGIN; \
+             GRANT USAGE ON SCHEMA public TO trace_login_resolver; \
+             GRANT SELECT (tenant_id, anchor_hash) \
+               ON trace_near_account_anchors TO trace_login_resolver;",
+        )
+        .await
+        .unwrap();
+    drop(client);
+    handle.abort();
+
+    let mut resolver = reqwest::Url::parse(&url).unwrap();
+    resolver.set_username("trace_login_resolver").unwrap();
+    let admin = PgBackend::new(&resolver_config(&url, Some(resolver.as_str())))
+        .await
+        .unwrap();
     Arc::new(admin)
 }
 
@@ -99,15 +139,18 @@ fn ceremony_identity() -> trace_commons_server::near_account_identity::NearAccou
     .expect("fixture identity")
 }
 
-/// A local stand-in for NEAR AI's `GET /me`, and nothing else.
+/// A local stand-in for NEAR AI's `GET /users/me`, and nothing else.
 ///
 /// Returns its base URL. This is the one thing the test stubs: it is not our
 /// half of anything, and reaching it at all requires the device proof to have
 /// already verified, because introspection is deliberately the last step of
 /// `finish`.
 async fn stub_near_ai() -> String {
+    // `/users/me`, the path cloud-api serves and the one the client asks for
+    // after #852. A stub on `/me` would 404 and the refusal would arrive as a
+    // generic finish failure, which is the shape that cost a day already.
     let router = axum::Router::new().route(
-        "/me",
+        "/users/me",
         axum::routing::get(|| async {
             axum::Json(serde_json::json!({
                 "id": STUB_SUBJECT,
