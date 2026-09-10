@@ -1,37 +1,36 @@
 # Token distribution implementation progress
 
-Working branch: `implement-token-logprobs`, based on Trace Commons main `cbb27dff`.
+Trace Commons worktree: `/tmp/tc-token-logprobs`, branch `implement-token-logprobs`.
+Ironwire worktree: `/tmp/ironwire-token-logprobs`, branch `capture-token-distributions`.
 The [implementation plan](2026-09-10-token-logprobs-lifecycle.md) remains the full scope.
 
 ## Implemented locally
 
-- Permissive protocol types for raw and sanitized token records, byte spans, model/conditioning metadata, omission counts, restricted-use manifests, and durable receipt identities.
-- Bounded decoding, exact response reconstruction, canonical manifest encoding and digest binding, finite FP64 preservation, explicit unavailable/negative-infinity values, and strict version handling.
-- A private edit-map filtering primitive: remove entire overlapping token records, require contextual alternative decisions, omit uncertain positions, shift retained offsets, and preserve provider probabilities. This is a primitive, not a PII detector or a provider verifier.
-- Sanitized attachment validation against event bytes and policy. Changed text after ingest rescrubbing invalidates the attachment association.
-- Read-only extraction from complete buffered and SSE Chat Completions bodies, including final-frame probabilities and byte-split UTF-8. Tools, reasoning, partial streams, and unsupported framing remain unavailable. This parser does not authenticate provider responses.
-- Receipt matching binds server, tenant, account, revision, manifest digest, and retention interval. It does not authorize deletion by itself; authenticated response handling and durable local journaling must precede cleanup.
+- Protocol: bounded raw/sanitized token records, exact byte reconstruction, FP64-preserving probabilities, edit-map filtering, immutable manifests and destination-bound durable receipts. Complete Chat Completions JSON/SSE extraction; unsupported tools/reasoning/incomplete streams fail closed.
+- Ironwire: separate opt-in backend/model targets, caller-preserving Chat request augmentation, exact request/response capture, capped private SQLite/file spool, authenticated list/acquire/read/renew/release control API and embedded maintenance. Multi-owner leases protect exact snapshots; capture pressure refuses new captures; renewals cannot exceed seven days from capture.
+- Witness: explicit token-bundle route with source receipt verification, admission restriction/evidence, classifier-required transcript filtering, bounded contextual alternative checks, and signatures over exact envelope and manifest bytes. Changed segments conservatively lose all token records until composed pipeline edit maps are available. Only one verified Chat completion is supported.
+- Storage: scoped encrypted binary artifacts and idempotent prepared ciphertext publication. V64 adds immutable tenant/principal/revision records, forced RLS, attachment identities, staging expiry, and withdrawal-triggered revocation. Pending ciphertext is retained in PostgreSQL until object publication/readback succeeds, then removed from the row.
+- Ingest: gated begin/put/finalize/status and owner-only attachment reads. The exact certified envelope is stored alongside token attachments; a rescrubbed processing envelope cannot stand in for it. Finalize checks event correspondence and requires all artifacts durable before committing a receipt. Withdrawals and retention invoke bundle deletion; object publication/deletion share database locks.
+- Client library: loopback-only authenticated capture access, certificate-verifying bundle upload with missing-artifact retries, destination-bound receipt journal, persisted approval payloads, and restart-safe lease-release intents. The daemon retries one acknowledged intent at startup and every five minutes, bound to the original spool identity. Raw bodies are sent only through a verified witness handle. Neither raw captures nor token payload types implement Debug.
 
-V1 attachments are uncompressed JSON, one bounded attachment per segment. Finite probabilities use decimal strings with scientific notation and correctly rounded FP64 parsing. This avoids serde_json feature unification changing a round-tripped value. Full chunk/codec negotiation and per-exchange attestation remain integration work.
+These are local implementation components, not a shipped or enabled feature. The contributor still pins the previously reviewed Ironwire revision. No live deployment, trust-pin change, or provider capability claim has been made.
 
-## Verified
+## Verification so far
 
-- Protocol tests with `RUSTFLAGS=-D warnings`, standalone/no default features.
-- Protocol tests with `serde_json/preserve_order` enabled during contract validation.
-- Protocol clippy with the repository allow-list; formatting.
-- Server license-boundary test (all four cases pass).
-- No dependencies changed. No capture/upload behavior enabled, and no deployment performed.
+- Protocol contract/parser tests and license-boundary tests passed in the foundation pass.
+- Ironwire core, ledger and proxy suites passed; all-target clippy passes. Five spool lifecycle tests and 14 passthrough tests pass, including bounded renewal, expired-release retry and exact-wire capture.
+- Client receipt journal restart, refusal, retry and path tests pass.
+- Encrypted binary artifact replay, tenant-scope refusal and idempotent deletion test passes.
+- V64 ran in a fresh disposable PostgreSQL database. Staging immutability, owner/tenant lookup isolation and incomplete-commit refusal test passes. This is not yet a full concurrent RLS/fault-injection test.
+- Contributor library suite passed on the workspace rerun (the initial sandboxed run hit a home-directory fixture restriction and a timing-sensitive existing test).
+- Workspace testing found the new migration missing from the RLS coverage tests' migration readers; V64 and those readers were corrected. The workspace rerun passed with four test threads. Final focused client tests pass (31 matched tests), fresh PostgreSQL staging/quota tests pass, and server/contributor all-target clippy passes with the existing allowlist. Some later additive helpers received compile/clippy checks rather than another entire workspace run.
 
-## Remaining work (not implemented)
+## Remaining acceptance work
 
-1. P0 live provider/model/receipt qualification. Synthetic parser tests are not live capability evidence.
-2. P1 final certificate, consent, chunk/codec, and lifecycle contracts, including cross-language fixtures.
-3. P2/P3 upstream Ironwire opt-in request behavior, bounded spool, durable leases, GC coordination, and control/embedded APIs. An isolated `capture-token-distributions` worktree exists at `/tmp/ironwire-token-logprobs`; it currently has no source changes.
-4. P4 redactors emitting composed edit maps, contextual alternatives policy, exact source verification, bounded witness processing, and signed bundle transport.
-5. P5/P6 encrypted binary artifact storage, PostgreSQL/RLS migrations, staged uploads, durable finalization/receipt lookup, rescrub derivatives, and orphan recovery.
-6. P7 client snapshot/approval/transfer integration and receipt-plus-cleanup journal.
-7. P8 restricted indexes/exports and immutable lineage.
-8. P9 lease release worker, withdrawal/retention traversal, concurrency and restore qualification.
-9. P10/P11 platform controls, merged upstream dependency pin, release checks and restricted pilot.
+1. Connect capture selection, bundle preview/approval persistence and upload to the desktop queue; implement renewal scheduling and user controls across macOS/Windows/Linux.
+2. Add composed redaction maps so unchanged token spans survive an edited segment; qualify alternative policy with PII attack fixtures and signed end-to-end witness tests.
+3. Complete concurrent PostgreSQL RLS, finalize/withdraw/crash/orphan, transport retry, rescrub and backup-restore tests. Validate deployed object-version/deletion semantics before advertising cleanup-safe production receipts.
+4. Complete restricted export/index metadata policy and lifecycle propagation; normal text/vector paths currently receive no token attachments.
+5. Qualify actual provider/model behavior and overhead with synthetic probes; finish upstream integration/pinning and release checks. Empty target lists and independent server/policy gates keep the feature unavailable by default.
 
-The feature is not complete or available to users. Continue with provider qualification and the remaining shared contracts; do not interpret passing protocol tests as end-to-end readiness.
+Do not claim end-to-end completion until these acceptance gates pass together.

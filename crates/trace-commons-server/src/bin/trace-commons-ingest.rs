@@ -3,6 +3,8 @@
 
 #[path = "trace_commons_ingest_internal/admission.rs"]
 mod admission;
+#[path = "trace_commons_ingest_internal/token_bundles.rs"]
+mod token_bundles;
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
@@ -7569,6 +7571,15 @@ fn community_cors_origins() -> Vec<HeaderValue> {
 
 fn app(state: Arc<AppState>) -> Router {
     Router::new()
+        .route("/v1/token-bundles", post(token_bundles::begin))
+        .route(
+            "/v1/token-bundles/{submission}/{revision}",
+            get(token_bundles::status).post(token_bundles::finalize),
+        )
+        .route(
+            "/v1/token-bundles/{submission}/{revision}/{artifact}",
+            axum::routing::put(token_bundles::put).get(token_bundles::read),
+        )
         .route("/health", get(health_handler))
         .route("/v1/source", get(source_offer_handler))
         // Unauthenticated, like /v1/source above and for the same structural
@@ -16284,6 +16295,7 @@ async fn delete_withdrawn_trace_objects(
     tenant_id: &str,
     submission_id: Uuid,
 ) -> anyhow::Result<()> {
+    token_bundles::cleanup(state, tenant_id, Some(submission_id)).await?;
     if let Some(record) = read_submission_record(&state.root, tenant_id, submission_id)? {
         delete_trace_objects_for_record(state, &record)?;
     }
@@ -50431,6 +50443,11 @@ async fn retention_maintenance_handler(
     )
     .await
     .map_err(maintenance_error)?;
+    if !body.dry_run {
+        token_bundles::cleanup(state.as_ref(), &tenant.tenant_id, None)
+            .await
+            .map_err(internal_error)?;
+    }
     if state.near_provisioning_enabled || state.admission.is_some() {
         let db = state.db_mirror.as_ref().ok_or_else(|| {
             api_error(

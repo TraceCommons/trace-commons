@@ -36,6 +36,9 @@ pub enum DistributionError {
 #[serde(transparent)]
 pub struct ContentDigest(String);
 impl ContentDigest {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
     pub fn of(bytes: &[u8]) -> Self {
         Self(hex::encode(Sha256::digest(bytes)))
     }
@@ -487,7 +490,7 @@ impl ContributionBundleManifest {
             identifier(&attachment.artifact_id)?;
             identifier(&attachment.event_id)?;
             attachment.content_digest.validate()?;
-            if !ids.insert(&attachment.artifact_id) {
+            if attachment.artifact_id == "envelope" || !ids.insert(&attachment.artifact_id) {
                 return Err(DistributionError::Invalid);
             }
             if attachment.size_bytes == 0 || attachment.size_bytes > MAX_ATTACHMENT_BYTES as u64 {

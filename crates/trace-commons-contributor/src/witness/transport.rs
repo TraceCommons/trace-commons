@@ -945,6 +945,149 @@ pub(crate) fn signed_admission_fixture(bytes: Vec<u8>, account: &str) -> Witness
     tests::signed_admission_fixture(bytes, account)
 }
 
+/// Explicit token-bundle request, bound to a separately acquired capture lease.
+pub struct TokenBundleRequest {
+    pub capture_store_id: String,
+    pub capture_id: String,
+    pub bundle_revision: String,
+    pub restricted_token_consent: bool,
+}
+
+impl HttpWitnessTransport {
+    /// The verified witness type enforces attestation before raw bytes leave.
+    pub async fn witness_token_contribution(
+        &self,
+        witness: &VerifiedWitness,
+        mut raw: RawTraceContribution,
+        attested: AttestedInference<'_>,
+        granted: &GrantedConsent,
+        options: TokenBundleRequest,
+    ) -> Result<crate::token_bundle::CertifiedBundleUpload, WitnessTrustError> {
+        if !options.restricted_token_consent || attested.receipt.is_none() {
+            return Err(WitnessTrustError::WitnessAdmissionEvidenceRefused);
+        }
+        raw.events
+            .push(crate::routing::attested::attested_exchange_event(
+                attested.call,
+            ));
+        let presence = crate::envelope::declared_content_presence(&raw.events);
+        raw.consent.message_text_included = presence.message_text;
+        raw.consent.tool_payloads_included = presence.tool_payloads;
+        raw.consent.routing_metadata_included = presence.routing_metadata;
+        raw_contribution_size_ok(&raw).map_err(|_| WitnessTrustError::WitnessPayloadTooLarge)?;
+        let contribution: serde_json::Value =
+            serde_json::from_slice(&witness_request_body(&raw, granted, attested.receipt)?)
+                .map_err(|_| WitnessTrustError::WitnessResponseMalformed)?;
+        let body = serde_json::to_vec(&serde_json::json!({"contribution":contribution,"capture_store_id":options.capture_store_id,"capture_id":options.capture_id,"bundle_revision":options.bundle_revision,"restricted_token_consent":true})).map_err(|_| WitnessTrustError::WitnessResponseMalformed)?;
+        if body.len() > MAX_WITNESS_REQUEST_BYTES {
+            return Err(WitnessTrustError::WitnessPayloadTooLarge);
+        }
+        let url = self
+            .allowed(witness.url())?
+            .join("/v1/witness/token-bundle")
+            .map_err(|_| WitnessTrustError::WitnessHostNotAllowed)?;
+        let mut response = self
+            .http
+            .post(url)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body)
+            .send()
+            .await
+            .map_err(|_| WitnessTrustError::WitnessAttestationUnavailable)?;
+        if !response.status().is_success() {
+            return Err(WitnessTrustError::WitnessAdmissionEvidenceRefused);
+        }
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|_| WitnessTrustError::WitnessResponseMalformed)?
+        {
+            if bytes.len().saturating_add(chunk.len()) > 64 * 1024 * 1024 {
+                return Err(WitnessTrustError::WitnessPayloadTooLarge);
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Response {
+            envelope_bytes: Vec<u8>,
+            envelope_certificate: serde_json::Value,
+            envelope_signature_hex: String,
+            manifest_bytes: Vec<u8>,
+            attachment_bytes: Vec<u8>,
+            certificate: serde_json::Value,
+            signature_hex: String,
+            admission: Option<(trace_commons_protocol::admission::AdmissionEvidence, String)>,
+        }
+        let response: Response = serde_json::from_slice(&bytes)
+            .map_err(|_| WitnessTrustError::WitnessResponseMalformed)?;
+        let encode = |value: &serde_json::Value| {
+            serde_json::to_string(value).map_err(|_| WitnessTrustError::WitnessResponseMalformed)
+        };
+        let admission = response
+            .admission
+            .map(|(evidence, signature_hex)| {
+                Ok::<_, WitnessTrustError>(AdmissionHeaders {
+                    evidence_json: serde_json::to_string(&evidence)
+                        .map_err(|_| WitnessTrustError::WitnessResponseMalformed)?,
+                    signature_hex,
+                })
+            })
+            .transpose()?;
+        let envelope = WitnessedEnvelope {
+            envelope_bytes: response.envelope_bytes,
+            certificate_json: encode(&response.envelope_certificate)?,
+            signature_hex: response.envelope_signature_hex,
+            admission,
+        };
+        if envelope.envelope_bytes.len() > MAX_ENVELOPE_BYTES {
+            return Err(WitnessTrustError::WitnessPayloadTooLarge);
+        }
+        if artifact_still_carries(&envelope.envelope_bytes, attested.call) {
+            return Err(WitnessTrustError::WitnessBodyNotStripped);
+        }
+        verify_certificate(&envelope, witness.signing_address())?;
+        verify_admission_context(
+            &envelope,
+            raw.contributor.tenant_scope_ref.as_deref(),
+            Some(attested),
+        )?;
+        let manifest = WitnessedEnvelope {
+            envelope_bytes: response.manifest_bytes,
+            certificate_json: encode(&response.certificate)?,
+            signature_hex: response.signature_hex,
+            admission: None,
+        };
+        verify_certificate(&manifest, witness.signing_address())?;
+        let decoded =
+            trace_commons_protocol::token_distribution::ContributionBundleManifest::decode(
+                &manifest.envelope_bytes,
+            )
+            .map_err(|_| WitnessTrustError::WitnessResponseMalformed)?;
+        if decoded.attachments.len() != 1
+            || !decoded.envelope_digest.matches(&envelope.envelope_bytes)
+        {
+            return Err(WitnessTrustError::WitnessCertificateMismatched);
+        }
+        decoded
+            .verify_attachment(
+                &decoded.attachments[0].artifact_id,
+                &response.attachment_bytes,
+            )
+            .map_err(|_| WitnessTrustError::WitnessCertificateMismatched)?;
+        Ok(crate::token_bundle::CertifiedBundleUpload {
+            pinned_witness_address: witness.signing_address().into(),
+            envelope,
+            manifest,
+            attachments: std::collections::BTreeMap::from([(
+                decoded.attachments[0].artifact_id.clone(),
+                response.attachment_bytes,
+            )]),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
