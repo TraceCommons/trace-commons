@@ -2870,6 +2870,25 @@ pub unsafe extern "C" fn tc_outcome_refusal_line(label: *const c_char) -> *mut c
     })
 }
 
+/// Shared queue outcome sentence, including a neutral unknown-label fallback.
+/// Returns an owned string; free with `tc_string_free`. NULL on panic.
+///
+/// # Safety
+/// `label`, if non-null, must point to a valid NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_queue_outcome_line(label: *const c_char) -> *mut c_char {
+    guarded_string_no_err(|| {
+        let label = if label.is_null() {
+            ""
+        } else {
+            unsafe { borrow_str(label) }.unwrap_or("")
+        };
+        Ok(to_owned_cstring(
+            trace_commons_contributor::private_inference_copy::queue_outcome_line(label),
+        ))
+    })
+}
+
 /// The sentence for one NEAR AI login-enrolment control name.
 ///
 /// Ten labels, each with its own sentence, and anything else -- including a
