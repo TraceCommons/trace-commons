@@ -110,7 +110,13 @@
                                    Style="{StaticResource TcCaptionTextStyle}"
                                    TextWrapping="Wrap" />
                         <Button Content="{x:Bind ViewModel.CredentialActionText, Mode=OneWay}"
-                                Visibility="{x:Bind ViewModel.HasCredentialAction, Mode=OneWay}"
+                                Visibility="{x:Bind ViewModel.ShowCredentialSignIn, Mode=OneWay}"
+                                IsEnabled="{x:Bind ViewModel.CredentialControlsEnabled, Mode=OneWay}"
+                                Style="{StaticResource TcPrimaryButtonStyle}"
+                                HorizontalAlignment="Left"
+                                Click="OnCredentialAction" />
+                        <Button Content="{x:Bind ViewModel.CredentialActionText, Mode=OneWay}"
+                                Visibility="{x:Bind ViewModel.ShowCredentialOtherAction, Mode=OneWay}"
                                 IsEnabled="{x:Bind ViewModel.CredentialControlsEnabled, Mode=OneWay}"
                                 HorizontalAlignment="Left"
                                 Click="OnCredentialAction" />
@@ -143,7 +149,7 @@
                         BorderThickness="1"
                         CornerRadius="{StaticResource TcCardCornerRadius}"
                         Padding="14,12"
-                        Visibility="{x:Bind ViewModel.Available, Mode=OneWay}">
+                        Visibility="{x:Bind ViewModel.ShowAccountBalance, Mode=OneWay}">
                     <StackPanel Spacing="10">
                         <TextBlock Text="{x:Bind ViewModel.BalanceTitle, Mode=OneWay}"
                                    Style="{StaticResource TcTitleSectionTextStyle}"
@@ -408,6 +414,10 @@
                         Padding="14,12"
                         Visibility="{x:Bind ViewModel.Available, Mode=OneWay}">
                     <StackPanel Spacing="10">
+                        <Expander Header="{x:Bind ViewModel.Title, Mode=OneWay}"
+                                  HorizontalAlignment="Stretch"
+                                  HorizontalContentAlignment="Stretch">
+                            <StackPanel Spacing="10">
                         <TextBlock Text="{x:Bind ViewModel.What, Mode=OneWay}"
                                    Style="{StaticResource TcCaptionTextStyle}"
                                    TextWrapping="Wrap" />
@@ -424,6 +434,8 @@
                                       IsOn="{x:Bind ViewModel.Enabled, Mode=OneWay}"
                                       IsEnabled="{x:Bind ViewModel.ControlsEnabled, Mode=OneWay}"
                                       Toggled="OnToggled" />
+                            </StackPanel>
+                        </Expander>
                         <!--
                             One line per tone, chosen from the tone and never
                             from the text: three of the sentences begin with

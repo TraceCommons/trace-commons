@@ -879,7 +879,7 @@ pub const HARNESS_PLAN_NO_CONFIG_PATH: &str = "This app could not work out where
 /// see [`CREDENTIAL_OBTAIN`] -- so a contributor reading this sentence is
 /// looking for words that exist somewhere on the screen.
 pub const HARNESS_NEEDS_CREDENTIAL: &str = "This computer would be the one answering this tool's calls, and no key \
-     is kept here to answer them with yet. Sign in to Private AI first, and \
+     is kept here to answer them with yet. Sign in with NEAR AI first, and \
      this tool can be connected after that.";
 
 /// The sentence for one tool's state, or the empty string.
@@ -1069,7 +1069,7 @@ pub fn harness_spend_line(micros: Option<u64>) -> String {
 /// Names the machine for the reason [`OFFER_TITLE`] does: what changes is
 /// what this computer holds, and that is the only part a contributor can go
 /// and check.
-pub const CREDENTIAL_TITLE: &str = "A Private AI sign-in on this computer";
+pub const CREDENTIAL_TITLE: &str = "NEAR AI account";
 
 /// Why the card is there at all.
 ///
@@ -1077,8 +1077,7 @@ pub const CREDENTIAL_TITLE: &str = "A Private AI sign-in on this computer";
 /// that calls fail without one -- they do not; they are answered using
 /// whatever accounts a contributor's tools already had, which is what
 /// [`STATE_RUNNING_ANSWERED_ELSEWHERE`] says on the state row above.
-pub const CREDENTIAL_WHAT: &str = "For Private AI to answer your calls, this computer needs a sign-in of \
-     its own. This app can get one and keep it here.";
+pub const CREDENTIAL_WHAT: &str = "Connect your tools to NEAR AI and view your account balance.";
 
 /// What getting one actually costs. **Required, not optional.**
 ///
@@ -1099,7 +1098,7 @@ pub const CREDENTIAL_COST: &str = "Signing in opens your browser and creates an 
      You can remove the inference key in your Private AI account.";
 
 /// The button that starts the ceremony.
-pub const CREDENTIAL_OBTAIN: &str = "Sign in to Private AI";
+pub const CREDENTIAL_OBTAIN: &str = "Sign in with NEAR AI";
 
 /// The button shown while one is running.
 ///
