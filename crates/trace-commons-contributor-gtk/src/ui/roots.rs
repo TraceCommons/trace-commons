@@ -38,7 +38,7 @@ use super::style::{self, space};
 use crate::copy;
 
 #[cfg(test)]
-#[path = "roots_submission_tests.rs"]
+#[path = "../../tests/support/roots_submission_tests.rs"]
 mod submission_tests;
 
 /// One agent's row: the discovered evidence, and the two answers.

@@ -1,5 +1,5 @@
 // INTEGRATION: register in main.rs with #[cfg(test)]
-// #[path = "main_startup_tests.rs"] mod startup_tests; this calls the actual
+// #[path = "../tests/support/main_startup_tests.rs"] mod startup_tests; this calls the actual
 // connect_startup(application, dir, drivers) -> Rc<Cell<StartupState>> wiring.
 // Under Weston run cargo test --bin trace-commons-shell
 // startup_tests::quit_during_pending_start_suppresses_completion_and_releases_daemon

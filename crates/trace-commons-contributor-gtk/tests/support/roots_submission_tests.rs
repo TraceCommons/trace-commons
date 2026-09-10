@@ -1,5 +1,5 @@
 // INTEGRATION: nest under ui::roots with #[cfg(test)] and
-// #[path = "roots_submission_tests.rs"] mod submission_tests; run the ignored
+// #[path = "../../tests/support/roots_submission_tests.rs"] mod submission_tests; run the ignored
 // test under a Linux GTK display with --test-threads=1. No production seam or
 // OS credential is needed: the real settings commit lock controls submission.
 #![cfg(target_os = "linux")]

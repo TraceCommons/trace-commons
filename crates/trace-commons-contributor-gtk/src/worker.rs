@@ -20,7 +20,7 @@ use crate::backend::{Backend, DaemonEvent};
 use crate::model::PreviewSummary;
 
 #[cfg(test)]
-#[path = "worker_startup_tests.rs"]
+#[path = "../tests/support/worker_startup_tests.rs"]
 mod startup_tests;
 
 pub enum Job {

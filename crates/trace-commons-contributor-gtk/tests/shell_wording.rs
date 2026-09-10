@@ -250,6 +250,11 @@ fn authored_wording(source: &str) -> Vec<String> {
             i += test_attribute.len();
             continue;
         }
+        // A test module in another file ends here. Its attribute must not
+        // suppress the next production function's body.
+        if chars[i] == ';' && test_attribute_pending {
+            test_attribute_pending = false;
+        }
         if chars[i] == '{' {
             depth += 1;
             if test_attribute_pending && skip_below.is_none() {
@@ -315,6 +320,20 @@ fn reads_as_a_sentence(literal: &str) -> bool {
         .filter(|word| !word.is_empty())
         .collect();
     words.len() >= 2 && words.iter().any(|w| function_words.contains(&w.as_str()))
+}
+
+#[test]
+fn an_external_test_module_does_not_hide_the_next_production_function() {
+    let source = r#"
+        #[cfg(test)]
+        #[path = "../tests/support/example.rs"]
+        mod tests;
+        fn render() { label("A production sentence is visible"); }
+    "#;
+    assert_eq!(
+        authored_wording(source),
+        ["A production sentence is visible"]
+    );
 }
 
 /// No file in this shell authors more wording than it did when this guard

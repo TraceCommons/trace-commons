@@ -13,7 +13,7 @@ use adw::prelude::*;
 use trace_commons_contributor_gtk::{ui, worker::Worker};
 
 #[cfg(test)]
-#[path = "main_startup_tests.rs"]
+#[path = "../tests/support/main_startup_tests.rs"]
 mod startup_tests;
 
 fn main() -> anyhow::Result<()> {
