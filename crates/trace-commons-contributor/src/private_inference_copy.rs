@@ -4158,7 +4158,7 @@ mod tests {
         let fields = payload.as_object().expect("a JSON object");
         assert_eq!(
             fields.len(),
-            129,
+            131,
             "the payload's field count changed -- update the shells' decoders \
              and the tests that pin the set"
         );
