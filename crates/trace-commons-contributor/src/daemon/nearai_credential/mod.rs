@@ -35,13 +35,14 @@ pub mod api;
 pub mod balance;
 pub mod ceremony;
 pub mod loopback;
+pub(crate) mod session;
 
-use crate::config::ConfigStore;
+pub(super) use session::exchange;
+
+#[cfg(test)]
+mod session_regression_tests;
+
 use crate::daemon::ipc::{DaemonShared, ERR_BAD_PARAMS, ERR_UNAVAILABLE, Request, Response};
-use crate::daemon::settings::{DaemonSettings, NearAiSession};
-use anyhow::{Result, anyhow};
-use api::CloudApi;
-use chrono::{DateTime, Utc};
 
 /// The state labels `near_ai_credential_status` reports, and the only
 /// vocabulary a shell branches on.
@@ -156,6 +157,7 @@ pub async fn handle_status_async(shared: &DaemonShared, req: &Request) -> Respon
     let response = handle_status(shared, req);
     if reports_a_finished_ceremony(&response) {
         shared.reconcile_private_inference().await;
+        return handle_status(shared, req);
     }
     response
 }
@@ -200,7 +202,17 @@ fn reports_a_finished_ceremony(response: &Response) -> bool {
 /// re-serves it.
 pub fn handle_status(shared: &DaemonShared, req: &Request) -> Response {
     let attempt = req.params.get("attempt_id").and_then(|v| v.as_str());
-    let mut body = serde_json::json!({ "state": credential_state(shared) });
+    let Ok(settings) = shared.settings.lock() else {
+        return Response::err(req.id, ERR_UNAVAILABLE, "near_ai_credential_unavailable");
+    };
+    let attempt_state = ceremony::attempt_status(shared.store.dir());
+    // Inference keys can outlive a Cloud session. Enrollment and account
+    // management require the session; neither may infer it from the key.
+    let mut body = serde_json::json!({
+        "state": state_from(attempt_state, settings.near_ai_inference.is_some()),
+        "session_state": state_from(attempt_state, settings.near_ai_session.is_some()),
+    });
+    drop(settings);
     // `attempt_status` and not `status`: the ceremony's own lifecycle word
     // sits beside a `state` that is a fact about the machine, and one field
     // called `status` next to another called `state` is a shell reading the
@@ -265,7 +277,13 @@ pub fn handle_cancel(shared: &DaemonShared, req: &Request) -> Response {
 /// other order -- clear memory, then fail to write -- reports a removal that
 /// the next start silently undoes.
 pub fn handle_forget(shared: &DaemonShared, req: &Request) -> Response {
-    match ceremony::forget(&shared.store) {
+    let Ok(locks) = session::coordination(shared.store.dir()) else {
+        return Response::err(req.id, ERR_UNAVAILABLE, "near_ai_credential_unavailable");
+    };
+    let Ok(_commit) = locks.commit.lock() else {
+        return Response::err(req.id, ERR_UNAVAILABLE, "near_ai_credential_unavailable");
+    };
+    match ceremony::forget_locked(&shared.store) {
         Ok(removed) => {
             {
                 // The session only. NOT `near_ai_inference`, and the
@@ -327,66 +345,6 @@ pub async fn handle_forget_async(shared: &DaemonShared, req: &Request) -> Respon
 /// calls; on the async dispatch path for the same reason `handle_start` is.
 pub async fn handle_balance(shared: &DaemonShared, req: &Request) -> Response {
     Response::ok(req.id, balance::read(shared).await.to_value())
-}
-
-/// Spend the stored refresh token for a short-lived access token, persisting
-/// the rotation before the access token is used for anything.
-///
-/// Lives here rather than in [`balance`] because it is not about balances.
-/// Two callers need it now -- reading the account balance, and proving to a
-/// commons that this contributor logged in -- and a second copy of a
-/// rotate-then-persist ordering is the kind of thing that agrees in review and
-/// diverges in production.
-/// before the access token is used for anything.
-///
-/// Order is the whole point. The exchange retires the token that authenticated
-/// it, so an access token used against a rotation that was never written to
-/// disk leaves the contributor holding a dead credential the next time the
-/// daemon starts.
-pub(super) async fn exchange(
-    shared: &DaemonShared,
-    api: &CloudApi,
-    stored: &NearAiSession,
-) -> Result<String> {
-    let refreshed = api.refresh_session(&stored.refresh_token).await?;
-    persist_rotation(
-        shared,
-        refreshed.session.refresh_token.clone(),
-        refreshed.refresh_token_expires_at,
-    )
-    .map_err(|_| anyhow!("near_ai_credential_unavailable"))?;
-    Ok(refreshed.session.access_token)
-}
-
-/// Persist a rotated refresh token, to disk and to the running daemon.
-///
-/// Both, and in that order. Disk is what survives a restart; the in-memory
-/// copy is what the next read consults, and leaving it holding the retired
-/// token would make every subsequent read fail until the process restarted.
-///
-/// The disk write is a read-modify-write of the whole settings document from
-/// disk, matching `ceremony::persist`, so a rotation cannot revert an
-/// unrelated setting changed while the HTTP call was in flight.
-pub(super) fn persist_rotation(
-    shared: &DaemonShared,
-    refresh_token: String,
-    expires_at: DateTime<Utc>,
-) -> Result<()> {
-    let session = NearAiSession {
-        refresh_token,
-        refresh_token_expires_at: Some(expires_at),
-        stored_at: Utc::now(),
-    };
-    let store = ConfigStore::open(shared.store.dir().to_path_buf())?;
-    let mut settings = DaemonSettings::load(&store)?;
-    settings.near_ai_session = Some(session.clone());
-    settings.save(&store)?;
-    shared
-        .settings
-        .lock()
-        .expect("settings lock")
-        .near_ai_session = Some(session);
-    Ok(())
 }
 
 #[cfg(test)]

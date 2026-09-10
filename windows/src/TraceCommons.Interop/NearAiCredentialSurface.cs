@@ -52,7 +52,8 @@ public enum CredentialAction
 public readonly record struct NearAiCredentialStatus(
     string State,
     string? AttemptId,
-    string? AttemptStatus)
+    string? AttemptStatus,
+    string SessionState = "")
 {
     /// <summary>
     /// Nothing was reported. The empty state, which the shared table answers
@@ -100,7 +101,8 @@ public static class NearAiCredentialSurface
             return new NearAiCredentialStatus(
                 ReadString(document.RootElement, StateField) ?? string.Empty,
                 ReadString(document.RootElement, AttemptIdField),
-                ReadString(document.RootElement, AttemptStatusField));
+                ReadString(document.RootElement, AttemptStatusField),
+                ReadString(document.RootElement, "session_state") ?? string.Empty);
         }
         catch (JsonException)
         {

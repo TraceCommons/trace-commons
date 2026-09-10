@@ -19,6 +19,7 @@
 
   <ItemGroup>
     <ProjectReference Include="../../src/TraceCommons.Interop/TraceCommons.Interop.csproj" />
+    <Compile Include="../../src/TraceCommons.App/ViewModels/CredentialBrowser.cs" Link="CredentialBrowser.cs" />
   </ItemGroup>
 
   <!--
@@ -146,6 +147,9 @@
           CopyToOutputDirectory="PreserveNewest" />
     <None Include="$(MSBuildThisFileDirectory)../../src/TraceCommons.App/Controls/PrivateInferenceView.xaml.cs"
           Link="PrivateInferenceView.xaml.cs.txt"
+          CopyToOutputDirectory="PreserveNewest" />
+    <None Include="$(MSBuildThisFileDirectory)../../src/TraceCommons.App/ViewModels/CredentialBrowser.cs"
+          Link="CredentialBrowser.cs.txt"
           CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 

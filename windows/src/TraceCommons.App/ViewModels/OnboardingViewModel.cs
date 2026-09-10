@@ -75,8 +75,16 @@ public sealed class OnboardingViewModel : INotifyPropertyChanged
             async uri => await Windows.System.Launcher.LaunchUriAsync(uri), () => !IsBusy);
         NearAccount.PropertyChanged += (_, _) => { Raise(nameof(CanConnect)); Raise(nameof(CanUseInvite)); };
         NearAccount.Completed += OnNearAccountCompleted;
-
+        CloudSignIn = new PrivateInferenceViewModel(host, requiresSession: true);
+        CloudSignIn.PropertyChanged += (_, _) =>
+        {
+            _nearAiSignedIn = CloudSignIn.HasCloudSession;
+            RaiseNearAi();
+        };
     }
+
+    public PrivateInferenceViewModel CloudSignIn { get; }
+    public bool CanOfferCloudSignIn => !_nearAiSignedIn && !_nearAiJoined;
 
     public event PropertyChangedEventHandler? PropertyChanged;
 
@@ -186,14 +194,7 @@ public sealed class OnboardingViewModel : INotifyPropertyChanged
     /// </summary>
     public async Task RefreshNearAiSignInAsync()
     {
-        DaemonResponse response = await _host.CallAsync("near_ai_credential_status").ConfigureAwait(true);
-        bool present = !response.IsError
-            && response.Result is { ValueKind: System.Text.Json.JsonValueKind.Object } value
-            && value.TryGetProperty("state", out var state)
-            && state.ValueKind == System.Text.Json.JsonValueKind.String
-            && state.GetString() == NearAiEnrollSurface.CredentialStatePresent;
-        _nearAiSignedIn = present;
-        RaiseNearAi();
+        await CloudSignIn.LoadCredentialAsync().ConfigureAwait(true);
     }
 
     /// <summary>
@@ -252,6 +253,7 @@ public sealed class OnboardingViewModel : INotifyPropertyChanged
 
     private void RaiseNearAi()
     {
+        Raise(nameof(CanOfferCloudSignIn));
         Raise(nameof(CanOfferNearAiJoin));
         Raise(nameof(CanJoinWithNearAi));
         Raise(nameof(NearAiNeedsLogin));

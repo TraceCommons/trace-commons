@@ -221,10 +221,7 @@ async fn enroll(
             reqwest::Method::POST,
             "/v1/account/near-ai/provision/start",
             &[],
-            Some(&serde_json::json!({
-                "code_challenge": code_challenge,
-                "device_public_key": identity.public_key_b64,
-            })),
+            Some(&start_payload(&code_challenge, &identity.public_key_b64)),
         )
         .await
         .map_err(|_| anyhow!("near_ai_enroll_start_failed"))?;
@@ -279,7 +276,7 @@ async fn enroll(
                 "code_verifier": verifier,
                 "device_public_key": identity.public_key_b64,
                 "device_signature": device_signature,
-                "access_token": access_token,
+                "access_token": access_token.access_token,
             })),
         )
         .await
@@ -403,6 +400,18 @@ fn persist(
         "device_key_id": identity.device_key_id,
     }))
 }
+
+fn start_payload(code_challenge: &str, device_public_key: &str) -> serde_json::Value {
+    serde_json::json!({
+        "code_challenge": code_challenge,
+        "code_challenge_method": "S256",
+        "device_public_key": device_public_key,
+    })
+}
+
+#[cfg(test)]
+#[path = "nearai_onboarding_contract_tests.rs"]
+mod contract_tests;
 
 #[cfg(test)]
 mod tests {

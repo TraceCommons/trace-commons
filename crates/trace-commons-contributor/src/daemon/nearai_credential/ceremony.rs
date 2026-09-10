@@ -46,6 +46,10 @@ const BROWSER_TIMEOUT: Duration = Duration::from_secs(300);
 /// Above this many tracked attempts the registry refuses rather than growing.
 const MAX_ATTEMPTS: usize = 128;
 
+#[cfg(test)]
+#[path = "ceremony_regression_tests.rs"]
+mod regression_tests;
+
 /// One ceremony's public state. Never carries the key, the session, or the
 /// browser URL -- the URL is returned once, by `begin`, and is not re-served
 /// by a status poll that any local caller can make.
@@ -220,7 +224,7 @@ pub async fn begin(store: &ConfigStore, provider: &str) -> Result<serde_json::Va
             // balance does: every management route on cloud-api is
             // session-only. What is retained is the refresh token alone, and
             // `NearAiSession` states what that is authority over.
-            persist(&finished_dir, minted, session.refresh_token)
+            persist_attempt(&finished_dir, &finished_id, minted, session.refresh_token)
         }
         .await;
         let mut map = attempts().lock().expect("ceremony state lock");
@@ -266,13 +270,55 @@ pub async fn begin(store: &ConfigStore, provider: &str) -> Result<serde_json::Va
 /// No expiry is recorded for the refresh token here because the OAuth finish
 /// does not supply one -- it arrives in a URL fragment with the access token
 /// and nothing else. The first exchange fills it in.
-/// `pub(crate)` so the reconcile test can write a credential the way the
-/// ceremony does rather than the way a test finds convenient -- the coupling
-/// under test is precisely that this function, and not an IPC call, is what a
-/// running daemon has to notice.
+///
+/// **Test-only, and deliberately not the path a ceremony takes.** Production
+/// writes through [`persist_attempt`], which holds the same locks and then
+/// additionally refuses a mint whose attempt is no longer the waiting one --
+/// a cancel or a forget that landed while the browser leg was in flight. This
+/// entry point omits that check, so it still writes the credential the way the
+/// ceremony's final step does, and still exercises the coupling that this
+/// function and not an IPC call is what a running daemon has to notice, but it
+/// cannot stand in for the guard. A test about the guard must drive `begin` or
+/// call `persist_attempt` directly.
+#[cfg(test)]
 pub(crate) fn persist(
     dir: &std::path::Path,
     minted: super::api::MintedKey,
+    refresh_token: String,
+) -> Result<()> {
+    let locks = crate::daemon::nearai_credential::session::coordination(dir)?;
+    let _commit = locks
+        .commit
+        .lock()
+        .map_err(|_| anyhow::anyhow!("near_ai_credential_unavailable"))?;
+    persist_locked(dir, minted, refresh_token)
+}
+
+fn persist_attempt(
+    dir: &std::path::Path,
+    attempt_id: &str,
+    minted: crate::daemon::nearai_credential::api::MintedKey,
+    refresh_token: String,
+) -> Result<()> {
+    let locks = crate::daemon::nearai_credential::session::coordination(dir)?;
+    let _commit = locks
+        .commit
+        .lock()
+        .map_err(|_| anyhow::anyhow!("near_ai_credential_unavailable"))?;
+    let map = attempts()
+        .lock()
+        .map_err(|_| anyhow::anyhow!("near_ai_credential_unavailable"))?;
+    if !map.get(dir).is_some_and(|attempt| {
+        attempt.state.attempt_id == attempt_id && attempt.state.status == "waiting_for_browser"
+    }) {
+        return Err(anyhow::anyhow!("near_ai_credential_cancelled"));
+    }
+    persist_locked(dir, minted, refresh_token)
+}
+
+fn persist_locked(
+    dir: &std::path::Path,
+    minted: crate::daemon::nearai_credential::api::MintedKey,
     refresh_token: String,
 ) -> Result<()> {
     let store = ConfigStore::open(dir.to_path_buf())?;
@@ -383,15 +429,23 @@ pub fn cancel(dir: &std::path::Path, attempt_id: Option<&str>) -> Option<Status>
 /// precisely so a contributor can find the right key in their own list and
 /// revoke it there deliberately.
 pub fn forget(store: &ConfigStore) -> Result<bool> {
+    let locks = crate::daemon::nearai_credential::session::coordination(store.dir())?;
+    let _commit = locks
+        .commit
+        .lock()
+        .map_err(|_| anyhow::anyhow!("near_ai_credential_unavailable"))?;
+    forget_locked(store)
+}
+
+pub(super) fn forget_locked(store: &ConfigStore) -> Result<bool> {
+    cancel(store.dir(), None);
     let mut settings = DaemonSettings::load(store)?;
     let had = settings.near_ai_inference.take().is_some();
     let had_session = settings.near_ai_session.take().is_some();
     settings.save(store)?;
-    if had {
-        // Only on a real removal of the key. A second forget removed nothing,
-        // and announcing a change that did not happen would cycle a running
-        // proxy for no reason. A session removed on its own is not a change
-        // the proxy can see -- it answers with the key, not the session.
+    if had || had_session {
+        // Reconciliation also adopts the session. Only an inference-key
+        // change advances the proxy generation there.
         record_change(store.dir());
     }
     Ok(had || had_session)

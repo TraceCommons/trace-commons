@@ -19,11 +19,14 @@
 //! credential state first and, with no session, draws the step to take rather
 //! than a control that can only fail.
 
-use super::App;
-use super::onboarding::{Onboarding, body_label};
 use crate::copy;
+use crate::ui::onboarding::{Onboarding, Step, body_label, load_consent_options};
+use crate::ui::{App, credential};
 use adw::prelude::*;
 use std::{cell::Cell, rc::Rc};
+
+#[path = "onboarding_nearai_result.rs"]
+mod enrollment_result;
 
 /// The card's own state: whether a NEAR AI session exists and whether a join
 /// is in flight.
@@ -32,6 +35,11 @@ struct NearAiJoin {
     commons: gtk::Entry,
     join: gtk::Button,
     message: gtk::Label,
+    sign_in: gtk::Button,
+    sign_in_explains: gtk::Label,
+    sign_in_action: Cell<copy::CredentialAction>,
+    polling: Cell<bool>,
+    reading_status: Cell<bool>,
     /// Whether `near_ai_credential_status` last reported a usable session.
     ///
     /// False until the first read, which is the answer that claims less: a
@@ -95,6 +103,11 @@ pub(super) fn build(app: &Rc<App>, onboarding: &Rc<Onboarding>) -> gtk::Box {
             .build(),
         join: gtk::Button::with_label(payload.near_ai_enroll_action),
         message: body_label(""),
+        sign_in: gtk::Button::new(),
+        sign_in_explains: body_label(""),
+        sign_in_action: Cell::new(copy::CredentialAction::None),
+        polling: Cell::new(false),
+        reading_status: Cell::new(false),
         signed_in: Cell::new(false),
         pending: Cell::new(false),
     });
@@ -103,6 +116,15 @@ pub(super) fn build(app: &Rc<App>, onboarding: &Rc<Onboarding>) -> gtk::Box {
     card.root.append(&card.commons);
     card.root.append(&card.join);
     card.root.append(&card.message);
+    card.root.append(&card.sign_in_explains);
+    card.root.append(&card.sign_in);
+
+    let sign_in_card = card.clone();
+    let sign_in_app = app.clone();
+    card.sign_in.connect_clicked(move |button| {
+        button.set_sensitive(false);
+        credential::act(&sign_in_app, sign_in_card.sign_in_action.get());
+    });
 
     let entry_card = card.clone();
     card.commons.connect_changed(move |_| entry_card.refresh());
@@ -111,47 +133,99 @@ pub(super) fn build(app: &Rc<App>, onboarding: &Rc<Onboarding>) -> gtk::Box {
     let click_app = app.clone();
     let click_onboarding = onboarding.clone();
     card.join.connect_clicked(move |_| {
-        if click_card.pending.replace(true) || click_onboarding.connection_busy.get() {
+        if click_card.pending.get() || click_onboarding.connection_busy.get() {
             return;
         }
+        click_card.pending.set(true);
+        click_onboarding.connection_busy.set(true);
         click_card.refresh();
         let params = serde_json::json!({ "ingest_url": click_card.commons.text().as_str() });
         let result_card = click_card.clone();
-        click_app.call("near_ai_account_enroll", params, move |_, result| {
-            match result {
-                Ok(_) => result_card.report("", false),
-                // The daemon's control name, straight through. This shell
-                // does not know which refusal it is and must not guess: the
-                // sentence and the tone are both the shared table's.
-                Err(label) => result_card.report(&label, true),
-            }
+        let result_onboarding = click_onboarding.clone();
+        click_app.call("near_ai_account_enroll", params, move |app, result| {
+            enrollment_result::complete(
+                result,
+                &result_onboarding.connection_busy,
+                |label, refused| result_card.report(label, refused),
+                || {
+                    result_card.commons.set_text("");
+                    result_onboarding.invite.set_text("");
+                    load_consent_options(app, &result_onboarding);
+                    result_onboarding.go(Step::Consent);
+                },
+            );
         });
     });
 
-    // Whether a session exists at all, before offering a control that would
-    // otherwise refuse. Read once on build for the same reason the wallet
-    // card asks `open` on build: the screen must be right when it appears,
-    // not after the first click.
+    // Read on every appearance and while visible: the browser and the other
+    // credential surface can both change the retained session.
+    let mapped_card = Rc::downgrade(&card);
+    let mapped_app = Rc::downgrade(app);
+    card.root.connect_map(move |_| {
+        let (Some(app), Some(card)) = (mapped_app.upgrade(), mapped_card.upgrade()) else {
+            return;
+        };
+        if card.polling.replace(true) {
+            return;
+        }
+        refresh_sign_in(&app, &card);
+        let weak_card = Rc::downgrade(&card);
+        let weak_app = Rc::downgrade(&app);
+        gtk::glib::timeout_add_seconds_local(2, move || {
+            let (Some(app), Some(card)) = (weak_app.upgrade(), weak_card.upgrade()) else {
+                return gtk::glib::ControlFlow::Break;
+            };
+            if !card.root.is_mapped() {
+                card.polling.set(false);
+                return gtk::glib::ControlFlow::Break;
+            }
+            refresh_sign_in(&app, &card);
+            gtk::glib::ControlFlow::Continue
+        });
+    });
+
+    card.refresh();
+    card.root.clone()
+}
+
+fn refresh_sign_in(app: &Rc<App>, card: &Rc<NearAiJoin>) {
+    if card.reading_status.replace(true) {
+        return;
+    }
     let status_card = card.clone();
     app.call(
         "near_ai_credential_status",
         serde_json::json!({}),
         move |_, result| {
-            let present = result
-                .ok()
-                .and_then(|v| {
-                    v.get("state")
-                        .and_then(serde_json::Value::as_str)
-                        .map(|s| s == trace_commons_contributor::daemon::nearai_credential::LABEL_CREDENTIAL_PRESENT)
-                })
-                .unwrap_or(false);
+            status_card.reading_status.set(false);
+            let value = result.ok();
+            let state = value
+                .as_ref()
+                .and_then(|v| v.get("session_state"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            let present = state
+                == trace_commons_contributor::daemon::nearai_credential::LABEL_CREDENTIAL_PRESENT;
+            let action = copy::credential_action(state);
+            status_card.sign_in_action.set(action);
+            status_card
+                .sign_in
+                .set_visible(!present && credential::action_label(action).is_some());
+            status_card
+                .sign_in
+                .set_label(credential::action_label(action).unwrap_or_default());
+            status_card
+                .sign_in
+                .set_sensitive(!status_card.pending.get());
+            status_card.sign_in_explains.set_label(if present {
+                ""
+            } else {
+                credential::action_explains(action)
+            });
             status_card.signed_in.set(present);
             status_card.refresh();
         },
     );
-
-    card.refresh();
-    card.root.clone()
 }
 
 #[cfg(test)]

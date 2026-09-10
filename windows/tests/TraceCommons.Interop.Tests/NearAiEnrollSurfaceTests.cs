@@ -91,7 +91,7 @@ public sealed class NearAiEnrollSurfaceTests
     {
         string source = Uncommented("OnboardingViewModel.cs.txt");
         Assert.Contains("NearAiEnrollSurface.Line(_nearAiRefusal)", source, StringComparison.Ordinal);
-        Assert.Contains("NearAiEnrollSurface.CredentialStatePresent", source, StringComparison.Ordinal);
+        Assert.Contains("CloudSignIn.HasCloudSession", source, StringComparison.Ordinal);
         foreach (string label in new[]
                  {
                      "near_ai_enroll_no_session",

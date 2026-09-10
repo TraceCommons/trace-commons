@@ -1103,10 +1103,11 @@ pub const CREDENTIAL_WHAT: &str = "For Private AI to answer your calls, this com
 /// the key is theirs, it is listed in their own account, and removing it
 /// there is the thing this app cannot do for them --
 /// [`CREDENTIAL_FORGET_EXPLAINS`] says so again at the moment it matters.
-pub const CREDENTIAL_COST: &str = "Getting one opens your browser, signs you in to Private AI, and makes a \
-     new key that this app then keeps on this computer. The sign-in is with \
-     a company that is not this app. The key is yours: it is listed in your \
-     own Private AI account, and you can remove it there.";
+pub const CREDENTIAL_COST: &str = "Signing in opens your browser and creates an inference key in your own \
+     Private AI account. This app keeps that key and a renewable Private AI sign-in \
+     on this computer. The saved sign-in can read your account and create more \
+     keys; the app uses it to read your balance and, when you ask, join a commons. \
+     You can remove the inference key in your Private AI account.";
 
 /// The button that starts the ceremony.
 pub const CREDENTIAL_OBTAIN: &str = "Sign in to Private AI";
@@ -1124,15 +1125,14 @@ pub const CREDENTIAL_FORGET: &str = "Forget this key";
 /// What forgetting does, and the larger part it does not do.
 ///
 /// **Local only, and the sentence says so.** The key stays valid at the
-/// service until the contributor removes it there, and this app cannot do it
-/// for them: revoking needs the sign-in, and the sign-in was discarded the
-/// moment the key was minted. A confirmation that said "removed" and let it
+/// service until the contributor removes it there. This action removes both
+/// locally stored credentials without revoking either at Private AI. A
+/// confirmation that said "removed" and let it
 /// be read as "revoked" would be the claim this codebase does not make --
 /// `handle_forget` answers `revoked: false` for the same reason.
-pub const CREDENTIAL_FORGET_EXPLAINS: &str = "Forgetting removes the key from this computer and does nothing else. It \
-     keeps working until you remove it in your own Private AI account, and \
-     this app cannot do that for you: the sign-in that would be needed was \
-     thrown away as soon as the key was made.";
+pub const CREDENTIAL_FORGET_EXPLAINS: &str = "Forgetting removes the inference key and saved Private AI sign-in from this \
+     computer. It does not revoke them at Private AI. Remove the key in your \
+     Private AI account to stop it working elsewhere.";
 
 /// `absent`.
 pub const CREDENTIAL_ABSENT: &str = "No key is kept here for Private AI, so nothing on this computer can ask \
@@ -1143,8 +1143,8 @@ pub const CREDENTIAL_ABSENT: &str = "No key is kept here for Private AI, so noth
 /// Names the five minutes because the listener gives the browser exactly
 /// that long and then releases the port. A contributor who walked away and
 /// came back to a card still saying "waiting" would be waiting on nothing.
-pub const CREDENTIAL_OBTAINING: &str = "Waiting for you to finish signing in, in your browser. Nothing is kept \
-     here until you do, and this stops waiting after five minutes.";
+pub const CREDENTIAL_OBTAINING: &str = "Finish signing in in your browser. This app stops waiting after five \
+     minutes; any credentials already kept here remain until sign-in finishes.";
 
 /// `failed`.
 ///
@@ -2309,8 +2309,7 @@ pub const NEAR_AI_ENROLL_ACTION: &str = "Join with NEAR AI";
 ///
 /// NOT a refusal. Nothing has gone wrong and nothing was attempted; there is
 /// a step to take first, and this says which.
-pub const NEAR_AI_ENROLL_NEEDS_LOGIN: &str =
-    "Sign in to NEAR AI first, then come back here to join.";
+pub const NEAR_AI_ENROLL_NEEDS_LOGIN: &str = "Sign in to NEAR AI, then choose the commons to join.";
 
 /// While the ceremony runs.
 pub const NEAR_AI_ENROLL_WORKING: &str = "Joining with your NEAR AI account...";
@@ -3229,9 +3228,10 @@ mod tests {
         let copy = private_inference_copy();
         for fragment in [
             "browser",
-            "signs you in",
-            "makes a",
-            "keeps on this computer",
+            "creates an inference key",
+            "on this computer",
+            "renewable Private AI sign-in",
+            "can read your account and create more keys",
         ] {
             assert!(
                 copy.credential_cost.contains(fragment),
@@ -3258,13 +3258,15 @@ mod tests {
             "the forget sentence stopped saying it is local: {explains}"
         );
         assert!(
-            explains.contains("keeps working"),
+            explains.contains("stop it working elsewhere"),
             "the forget sentence stopped saying the key stays valid: {explains}"
         );
         assert!(
-            explains.contains("cannot do that for you"),
-            "the forget sentence stopped saying this app cannot revoke: {explains}"
+            explains.contains("does not revoke them at Private AI"),
+            "the forget sentence stopped distinguishing removal from revocation: {explains}"
         );
+        assert!(explains.contains("saved Private AI sign-in"));
+        assert!(!explains.contains("thrown away as soon"));
         for word in ["revoked", "cancelled", "deleted everywhere"] {
             assert!(
                 !explains.to_lowercase().contains(word),

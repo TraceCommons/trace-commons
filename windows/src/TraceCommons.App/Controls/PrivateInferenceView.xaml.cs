@@ -80,76 +80,11 @@ public sealed partial class PrivateInferenceView : UserControl
     /// re-serves it -- and then waits for the ceremony to settle so the card
     /// stops saying a sign-in is under way once it is not.
     /// </remarks>
-    private async void OnCredentialAction(object sender, RoutedEventArgs e)
-    {
-        NearAiCredentialAttempt? attempt = await ViewModel.PressCredentialAsync();
-        if (attempt is not { BrowserUrl.Length: > 0 } started)
-        {
-            return;
-        }
+    private async void OnCredentialAction(object sender, RoutedEventArgs e) =>
+        await ViewModel.ContinueCredentialAsync(await ViewModel.PressCredentialAsync());
 
-        bool opened;
-        try
-        {
-            opened = await Windows.System.Launcher.LaunchUriAsync(new Uri(started.BrowserUrl));
-        }
-        catch (UriFormatException)
-        {
-            // A URL this shell cannot parse is not a sign-in it can open.
-            System.Diagnostics.Trace.TraceWarning(nameof(OnCredentialAction));
-            opened = false;
-        }
-
-        // No browser means nobody is going to finish this. Cancelling it now
-        // beats leaving the daemon's own timeout to expire: the alternative is
-        // a contributor watching a card say a sign-in is under way for five
-        // minutes with no tab open anywhere.
-        if (!opened)
-        {
-            await ViewModel.CancelCredentialAsync();
-            return;
-        }
-
-        await ViewModel.AwaitCredentialAsync();
-    }
-
-    /// <summary>
-    /// The balance card's one button.
-    /// </summary>
-    /// <remarks>
-    /// THE SAME CEREMONY, not a parallel one. The view model answers with the
-    /// sign-in card's own started attempt, so everything below this line is
-    /// that card's handling: open the URL the daemon served once, cancel the
-    /// ceremony nobody can finish when no browser opened, and wait for it to
-    /// settle.
-    /// </remarks>
-    private async void OnBalanceAction(object sender, RoutedEventArgs e)
-    {
-        NearAiCredentialAttempt? attempt = await ViewModel.PressBalanceAsync();
-        if (attempt is not { BrowserUrl.Length: > 0 } started)
-        {
-            return;
-        }
-
-        bool opened;
-        try
-        {
-            opened = await Windows.System.Launcher.LaunchUriAsync(new Uri(started.BrowserUrl));
-        }
-        catch (UriFormatException)
-        {
-            System.Diagnostics.Trace.TraceWarning(nameof(OnBalanceAction));
-            opened = false;
-        }
-
-        if (!opened)
-        {
-            await ViewModel.CancelCredentialAsync();
-            return;
-        }
-
-        await ViewModel.AwaitCredentialAsync();
-    }
+    private async void OnBalanceAction(object sender, RoutedEventArgs e) =>
+        await ViewModel.ContinueCredentialAsync(await ViewModel.PressBalanceAsync());
 
     /// <summary>
     /// "Send this tool's calls here", for one row.
