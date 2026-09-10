@@ -966,6 +966,9 @@ impl HttpWitnessTransport {
         if !options.restricted_token_consent || attested.receipt.is_none() {
             return Err(WitnessTrustError::WitnessAdmissionEvidenceRefused);
         }
+        if !raw.events.is_empty() {
+            return Err(WitnessTrustError::WitnessAdmissionEvidenceRefused);
+        }
         raw.events
             .push(crate::routing::attested::attested_exchange_event(
                 attested.call,
@@ -2608,6 +2611,92 @@ mod tests {
         assert_eq!(bodies.len(), 1);
         assert_eq!(ordinary.load(std::sync::atomic::Ordering::SeqCst), 0);
         let body: serde_json::Value = serde_json::from_slice(&bodies[0]).unwrap();
+        let events = body["raw_contribution"]["events"].as_array().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0]["structured_payload"]["request"]["body"],
+            CAPTURED_REQUEST
+        );
+        assert_eq!(events[0]["content"], CAPTURED_RESPONSE);
+        let serialized = String::from_utf8(bodies[0].clone()).unwrap();
+        assert!(!serialized.contains(SECRET));
+        assert!(!serialized.contains("UNBOUND-CORRECTION"));
+        assert_eq!(body["raw_contribution"]["replay"]["replayable"], false);
+        assert_eq!(
+            body["raw_contribution"]["consent"]["tool_payloads_included"],
+            serde_json::json!(true),
+            "the declaration must describe the bodies this request carries"
+        );
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn token_wire_contains_only_the_isolated_call_and_never_retries_ordinary() {
+        let (transcript, _dirs) = transcript_from_a_declared_proxy(true).await;
+        let captured = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
+        let seen = captured.clone();
+        let ordinary = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let ordinary_count = ordinary.clone();
+        let app = Router::new().route(
+            "/v1/witness/token-bundle",
+            post(move |request: Request| {
+                let seen = seen.clone();
+                async move {
+                    let body = axum::body::to_bytes(request.into_body(), MAX_WITNESS_REQUEST_BYTES)
+                        .await
+                        .unwrap();
+                    seen.lock().unwrap().push(body.to_vec());
+                    StatusCode::BAD_REQUEST
+                }
+            }),
+        );
+        let app = app.route(
+            "/v1/witness",
+            post(move || {
+                let count = ordinary_count.clone();
+                async move {
+                    count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    StatusCode::OK
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let transport = transport_for(&url, permissive()).with_admission_evidence(true);
+        let key = test_signer("isolated-call");
+        let witness = crate::witness::verify::verified_witness_for_test(&url, &address_of(&key));
+        let cfg = crate::commands::unenrolled_preview_config();
+        let mut raw = raw_with_secret();
+        raw.outcome.human_correction = Some("UNBOUND-CORRECTION".into());
+        let isolated = crate::submit::witness_input_for_profile(raw, &cfg, true);
+        let receipt = offered_receipt();
+        let call = transcript.attested_call.as_deref().unwrap();
+        assert!(
+            transport
+                .witness_token_contribution(
+                    &witness,
+                    isolated,
+                    AttestedInference {
+                        call,
+                        receipt: Some(&receipt)
+                    },
+                    &granted(),
+                    TokenBundleRequest {
+                        capture_store_id: "1".repeat(32),
+                        capture_id: "2".repeat(32),
+                        bundle_revision: "r1".into(),
+                        restricted_token_consent: true
+                    }
+                )
+                .await
+                .is_err()
+        );
+        let bodies = captured.lock().unwrap();
+        assert_eq!(bodies.len(), 1);
+        assert_eq!(ordinary.load(std::sync::atomic::Ordering::SeqCst), 0);
+        let wrapped: serde_json::Value = serde_json::from_slice(&bodies[0]).unwrap();
+        let body = &wrapped["contribution"];
         let events = body["raw_contribution"]["events"].as_array().unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(

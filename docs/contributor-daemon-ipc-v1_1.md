@@ -464,7 +464,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `harness_commit` | `plan_id` (required) | `id`, `action`, `committed: true`, `path`, `backup_path` | makes an edit that was already shown; takes a plan id and **nothing else**, so a shell cannot ask for a write it did not preview |
 | `quiesce` | `timeout_secs` (optional, default 60, max 300) | `quiesced: true`, `waited_ms` | parks uploads for an update swap; `busy` / `quiesce-timeout` if in-flight work does not finish in time |
 | `get_settings` | — | settings; credential presence as booleans, source declarations as `*_source_mode` (`unset`/`off`/`watch`), never local paths | |
-| `set_settings` | any of `quiescence_secs`, `digest_interval_secs`, `approval_hold_secs`, `local_notifications`, `claude_root`, `codex_root`, `claude_source`, `codex_source`, `gemini_source`, `cline_source`, `opencode_source`, `ironwire`, `ironwire_attested_bodies`, `private_inference`, `private_inference_offer_seen`, `max_uploads_per_day`, `max_bytes_per_day` | updated settings | see "`set_settings`" below |
+| `set_settings` | any of `quiescence_secs`, `digest_interval_secs`, `approval_hold_secs`, `local_notifications`, `claude_root`, `codex_root`, `claude_source`, `codex_source`, `gemini_source`, `cline_source`, `opencode_source`, `ironwire`, `ironwire_attested_bodies`, `token_distributions_contribution`, `private_inference`, `private_inference_offer_seen`, `max_uploads_per_day`, `max_bytes_per_day` | updated settings | see "`set_settings`" below |
 | `consent_options` | — | `scopes[]` of `{name, description, always_on, grants_data_use}` | |
 | `set_consent_scopes` | `scopes[]` (wire-name strings; omitted means floor scope only) | `consent_scopes[]` | requires an existing enrollment |
 | `enroll` | `grant` xor `invite`, `scopes[]` (optional) | `enrolled: bool`, and on success `tenant_id`, `device_key_id`, `consent_scopes[]` | performs real network I/O |
@@ -3075,3 +3075,23 @@ about the call -- an unparseable config, a tool that is not installed -- is
 compatibility but is no longer returned by any method in this version --
 the `v1` terminal-only gate that used it was removed (see "Authorization"
 above).
+
+### Token distribution contribution
+
+`token_distributions_contribution` is a boolean, default `false`. It grants
+permission to include token probabilities and alternatives in explicit witness
+reviews. It does not enable Ironwire capture. Capture must be configured for an
+exact supported backend/model pair, and `ironwire_attested_bodies` must also be
+allowed before raw evidence goes to the configured, pinned witness.
+
+When enabled, review requires an exact capture digest match, a bounded snapshot
+lease, a verified provider receipt, and an ingest endpoint advertising the
+restricted bundle policy. Missing support is a refusal, never a transcript-only
+fallback. Changing this setting invalidates incompatible queued approvals.
+
+The certified manifest and payload are pinned locally before approval. Upload
+reuses those exact bytes and resumes missing objects. Only a destination-bound
+durable receipt authorizes successful-submission cleanup. A separate three-day unapproved (seven-day approved)
+review expiry abandons old local payloads and releases their own leases; it does
+not imply successful submission. Logout deletes local token review state. Agent
+session files are never deleted by this mechanism.

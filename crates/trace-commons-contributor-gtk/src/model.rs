@@ -284,6 +284,8 @@ impl QueueEntry {
 #[derive(Debug, Clone, Deserialize)]
 pub struct PreviewSummary {
     #[serde(default)]
+    pub token_distribution_summary: Option<String>,
+    #[serde(default)]
     pub would_send_bytes: u64,
     #[serde(default)]
     pub raw_session_bytes: u64,
@@ -735,6 +737,8 @@ pub struct Settings {
     pub ironwire: Option<RoutingDeclaration>,
     /// Separate consent to carry captured inference bodies to the witness.
     #[serde(default)]
+    pub token_distributions_contribution: bool,
+    #[serde(default)]
     pub ironwire_attested_bodies: bool,
     #[serde(default)]
     pub admission_evidence_required: Option<bool>,
@@ -1078,6 +1082,7 @@ mod tests {
     #[test]
     fn a_receipt_with_no_redactions_says_so_rather_than_going_quiet() {
         let s = PreviewSummary {
+            token_distribution_summary: None,
             would_send_bytes: 0,
             raw_session_bytes: 0,
             event_count: 0,
@@ -1101,6 +1106,7 @@ mod tests {
         redactions.insert("bearer_token".to_string(), 4);
         redactions.insert("home_path".to_string(), 31);
         let s = PreviewSummary {
+            token_distribution_summary: None,
             would_send_bytes: 86016,
             raw_session_bytes: 1,
             event_count: 1,
@@ -1126,6 +1132,7 @@ mod tests {
         let mut redactions = std::collections::BTreeMap::new();
         redactions.insert("some_new_shape".to_string(), 2);
         let s = PreviewSummary {
+            token_distribution_summary: None,
             would_send_bytes: 0,
             raw_session_bytes: 0,
             event_count: 0,
@@ -1149,6 +1156,7 @@ mod tests {
         redactions.insert("generic_secret".to_string(), 1);
         redactions.insert("email".to_string(), 1);
         let s = PreviewSummary {
+            token_distribution_summary: None,
             would_send_bytes: 0,
             raw_session_bytes: 0,
             event_count: 0,

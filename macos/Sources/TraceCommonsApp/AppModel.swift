@@ -1528,6 +1528,34 @@ final class AppModel: ObservableObject {
         }
     }
 
+    @Published private(set) var tokenContributionBusy = false
+    @Published private(set) var tokenContributionSaveFailed = false
+
+    func setTokenContribution(_ enabled: Bool, disclosureConfirmed: Bool = false) async {
+        guard !tokenContributionBusy else { return }
+        tokenContributionSaveFailed = false
+        guard let client else {
+            daemonSettings?.tokenDistributionsContribution = nil
+            tokenContributionSaveFailed = true
+            return
+        }
+        tokenContributionBusy = true
+        defer { tokenContributionBusy = false }
+        let result = await Task.detached(priority: .userInitiated) {
+            Result { try client.setTokenContribution(enabled, disclosureConfirmed: disclosureConfirmed) }
+        }.value
+        switch result {
+        case .success(let settings):
+            daemonSettings = settings
+            refreshAudit()
+        case .failure:
+            if let confirmed = await Task.detached(operation: { try? client.settings() }).value {
+                daemonSettings = confirmed
+            }
+            tokenContributionSaveFailed = true
+        }
+    }
+
     // MARK: - Onboarding resume
 
     /// Whether onboarding has been walked to the end (the Done screen) for

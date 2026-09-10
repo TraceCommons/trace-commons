@@ -73,6 +73,10 @@ pub(super) async fn begin_token_bundle(
     db.ensure_trace_tenant(&bundle.tenant_id).await?;
     let mut client = db.trace_pool().get().await?;
     let tx = PgBackend::begin_trace_tenant_transaction(&mut client, &bundle.tenant_id).await?;
+    // Same parent-before-bundle lock order as finalize and revocation. A
+    // begin racing withdrawal must see the committed tombstone, rather than
+    // insert a new revision after the withdrawal trigger scanned old rows.
+    tx.query_opt("SELECT submission_id FROM trace_submissions WHERE tenant_id=$1 AND submission_id=$2 FOR UPDATE", &[&bundle.tenant_id, &bundle.submission_id]).await?;
     lock(&tx, &bundle.tenant_id, bundle.submission_id).await?;
     let withdrawn:bool=tx.query_one("SELECT EXISTS(SELECT 1 FROM trace_withdrawals WHERE tenant_id=$1 AND submission_id=$2) OR EXISTS(SELECT 1 FROM trace_submissions WHERE tenant_id=$1 AND submission_id=$2 AND (status='revoked' OR withdrawn_at IS NOT NULL OR purged_at IS NOT NULL))",&[&bundle.tenant_id,&bundle.submission_id]).await?.get(0);
     if withdrawn {
@@ -258,7 +262,7 @@ pub(super) async fn pending_token_bundle_deletions(
 ) -> Result<Vec<StoredTokenBundle>> {
     let mut client = db.trace_pool().get().await?;
     let tx = PgBackend::begin_trace_tenant_transaction(&mut client, tenant).await?;
-    tx.execute("UPDATE trace_token_bundles b SET state='revoked' WHERE tenant_id=$1 AND ($2::uuid IS NULL OR submission_id=$2) AND (expires_at<=NOW() OR EXISTS(SELECT 1 FROM trace_withdrawals w WHERE w.tenant_id=b.tenant_id AND w.submission_id=b.submission_id))",&[&tenant,&submission]).await?;
+    tx.execute("UPDATE trace_token_bundles b SET state='revoked' WHERE tenant_id=$1 AND ($2::uuid IS NULL OR submission_id=$2) AND (expires_at<=NOW() OR EXISTS(SELECT 1 FROM trace_withdrawals w WHERE w.tenant_id=b.tenant_id AND w.submission_id=b.submission_id) OR EXISTS(SELECT 1 FROM trace_submissions p WHERE p.tenant_id=b.tenant_id AND p.submission_id=b.submission_id AND (p.status='revoked' OR p.withdrawn_at IS NOT NULL OR p.purged_at IS NOT NULL)))",&[&tenant,&submission]).await?;
     let keys=tx.query("SELECT submission_id,revision,owner_ref FROM trace_token_bundles WHERE tenant_id=$1 AND state='revoked' AND EXISTS(SELECT 1 FROM trace_token_attachments a WHERE a.tenant_id=trace_token_bundles.tenant_id AND a.submission_id=trace_token_bundles.submission_id AND a.revision=trace_token_bundles.revision AND a.deleted=FALSE) AND ($2::uuid IS NULL OR submission_id=$2) ORDER BY created_at LIMIT 128",&[&tenant,&submission]).await?;
     let mut result = Vec::new();
     for key in keys {

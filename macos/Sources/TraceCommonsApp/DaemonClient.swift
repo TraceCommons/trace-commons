@@ -276,6 +276,15 @@ final class DaemonClient {
         return settings
     }
 
+    func setTokenContribution(_ enabled: Bool, disclosureConfirmed: Bool) throws -> DaemonSettingsView {
+        guard !enabled || disclosureConfirmed else { throw InferenceEvidenceRefusal.disclosureRequired }
+        let settings = try setSettings(["token_distributions_contribution": enabled])
+        guard settings.tokenDistributionsContribution == enabled else {
+            throw InferenceEvidenceRefusal.unconfirmedWrite
+        }
+        return settings
+    }
+
     enum InferenceEvidenceRefusal: Error {
         case disclosureRequired
         case unconfirmedWrite

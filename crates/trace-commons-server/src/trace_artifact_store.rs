@@ -806,6 +806,7 @@ impl<P: RemoteTraceArtifactProvider, K: KmsKeyWrapper> TraceArtifactStore
                 kind,
                 TraceArtifactKind::TokenDistribution
                     | TraceArtifactKind::ContributionBundleManifest
+                    | TraceArtifactKind::ContributionEnvelope
             ),
             "invalid-bundle-artifact-kind"
         );
@@ -843,6 +844,7 @@ impl<P: RemoteTraceArtifactProvider, K: KmsKeyWrapper> TraceArtifactStore
                 kind,
                 TraceArtifactKind::TokenDistribution
                     | TraceArtifactKind::ContributionBundleManifest
+                    | TraceArtifactKind::ContributionEnvelope
             ),
             "invalid-bundle-artifact-kind"
         );

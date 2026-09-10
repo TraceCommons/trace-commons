@@ -82759,6 +82759,7 @@ impl trace_commons_protocol::trace_contribution::PrivacyFilterAdapter for Backst
             ..Default::default()
         };
         Ok(Some(SafePrivacyFilterRedaction {
+            private_edits: None,
             redacted_text: text.replace(&self.needle, "[REDACTED:private_email]"),
             summary: SafePrivacyFilterSummary {
                 schema_version: 1,

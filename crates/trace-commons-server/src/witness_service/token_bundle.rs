@@ -27,8 +27,29 @@ pub struct WitnessTokenBundle {
     pub admission: Option<(trace_commons_protocol::admission::AdmissionEvidence, String)>,
 }
 
+struct MappedRedactor<'a> {
+    inner: &'a dyn ContributionRedactor,
+    maps: std::sync::Mutex<
+        std::collections::BTreeMap<
+            uuid::Uuid,
+            trace_commons_protocol::private_edit_map::PrivateRedactionEdits,
+        >,
+    >,
+}
+#[async_trait::async_trait]
+impl ContributionRedactor for MappedRedactor<'_> {
+    async fn redact(
+        &self,
+        raw: RawTraceContribution,
+    ) -> Result<RedactedContribution, SeamUnavailable> {
+        let (result, maps) = self.inner.redact_with_edits(raw).await?;
+        *self.maps.lock().map_err(|_| SeamUnavailable)? = maps;
+        Ok(result)
+    }
+}
+
 pub async fn witness_token_bundle(
-    request: WitnessContributionRequest,
+    mut request: WitnessContributionRequest,
     options: TokenBundleOptions,
     policy: &InferenceAttestationPolicy,
     redactor: &dyn ContributionRedactor,
@@ -83,17 +104,27 @@ pub async fn witness_token_bundle(
         return Err(refuse());
     }
     let segment = segments.remove(0);
-    let event = request
-        .raw_contribution
-        .events
-        .iter()
-        .rev()
-        .find(|e| e.event_type == TraceContributionEventType::AssistantMessage)
-        .ok_or_else(refuse)?;
-    if event.content.as_deref().map(str::as_bytes) != Some(segment.text.as_slice()) {
+    // Admission accepts exactly one verified HTTP exchange. Derive the
+    // assistant event from those receipt-bound bytes inside the witness,
+    // rather than trusting an importer-supplied companion transcript.
+    if request.raw_contribution.events.len() != 1 {
         return Err(refuse());
     }
+    let mut event = exchange.clone();
+    event.event_id = uuid::Uuid::new_v4();
+    event.event_type = TraceContributionEventType::AssistantMessage;
+    event.content = Some(String::from_utf8(segment.text.clone()).map_err(|_| refuse())?);
+    event.structured_payload = serde_json::json!({});
+    event.parent_event_id = None;
+    event.tool_name = None;
+    event.tool_call_id = None;
+    event.latency_ms = None;
+    event.token_counts = None;
+    event.cost_usd = None;
+    event.success = None;
+    event.failure_modes.clear();
     let event_id = event.event_id.to_string();
+    request.raw_contribution.events.push(event);
     let source = TokenDistribution {
         version: SCHEMA_VERSION,
         capture_store_id: options.capture_store_id,
@@ -116,7 +147,11 @@ pub async fn witness_token_bundle(
         records: segment.records,
     };
     source.validate(&segment.text).map_err(|_| refuse())?;
-    let contribution = witness_contribution(request, policy, redactor, signer, enclave).await?;
+    let mapped = MappedRedactor {
+        inner: redactor,
+        maps: Default::default(),
+    };
+    let contribution = witness_contribution(request, policy, &mapped, signer, enclave).await?;
     let envelope: TraceContributionEnvelope =
         serde_json::from_slice(&contribution.envelope_bytes).map_err(|_| refuse())?;
     if contribution.certificate.claimed_redaction_policy_version()
@@ -136,64 +171,49 @@ pub async fn witness_token_bundle(
         .find(|e| e.event_id.to_string() == event_id)
         .and_then(|e| e.redacted_content.as_deref())
         .ok_or_else(refuse)?;
-    // Until every pipeline stage returns a composed edit map, a changed
-    // segment loses all token records. Never infer offsets by heuristic diff.
-    let edits = if sanitized.as_bytes() != segment.text {
-        vec![RedactionEdit {
-            original: ByteSpan {
-                start: 0,
-                end: segment.text.len() as u64,
-            },
-            replacement: sanitized.as_bytes().to_vec(),
-        }]
-    } else {
-        Vec::new()
-    };
-    let mut checks = 0usize;
-    let mut decisions = Vec::with_capacity(source.records.len());
-    for record in &source.records {
-        let mut keep = vec![false; record.alternatives.len()];
-        if edits.is_empty() && segment.text.len() <= MAX_CANDIDATE_BYTES {
-            for (index, alternative) in record.alternatives.iter().enumerate() {
-                if checks >= MAX_CANDIDATE_CHECKS {
-                    break;
-                }
-                let mut candidate = Vec::new();
-                candidate.extend_from_slice(&segment.text[..record.span.start as usize]);
-                candidate.extend_from_slice(&alternative.bytes);
-                candidate.extend_from_slice(&segment.text[record.span.end as usize..]);
-                if candidate.len() > MAX_CANDIDATE_BYTES {
-                    continue;
-                }
-                let Ok(candidate) = String::from_utf8(candidate) else {
-                    continue;
-                };
-                checks += 1;
-                let filtered = alternative_redactor
-                    .redact(&candidate)
-                    .await
-                    .map_err(|_| WitnessError::RedactionFailed)?;
-                // The alternative pass must use the same redaction pipeline as
-                // the certified transcript. A missing classifier is not success.
-                if filtered.policy_version
-                    != contribution.certificate.claimed_redaction_policy_version()
-                {
-                    return Err(WitnessError::RedactionFailed);
-                }
-                keep[index] = filtered.redacted == candidate;
+    let event_uuid = uuid::Uuid::parse_str(&event_id).map_err(|_| refuse())?;
+    let edits = mapped
+        .maps
+        .lock()
+        .map_err(|_| refuse())?
+        .remove(&event_uuid)
+        .map(|map| map.0)
+        .unwrap_or_else(|| {
+            if sanitized.as_bytes() == segment.text {
+                Vec::new()
+            } else {
+                vec![RedactionEdit {
+                    original: ByteSpan {
+                        start: 0,
+                        end: segment.text.len() as u64,
+                    },
+                    replacement: sanitized.as_bytes().to_vec(),
+                }]
             }
-        }
-        decisions.push(keep);
-    }
-    let attachment = filter_with_edits(
+        });
+    // These unscreened alternatives exist only in this private working value.
+    // Every retained alternative below must pass the same classifier policy.
+    let mut attachment = filter_with_edits(
         &source,
         &segment.text,
         sanitized.as_bytes(),
         &edits,
         TOKEN_BUNDLE_POLICY,
-        |_, index, _| Some(decisions[index].clone()),
+        |source, index, _| Some(vec![true; source.records[index].alternatives.len()]),
     )
     .map_err(|_| refuse())?;
+    screen_alternatives(
+        &mut attachment,
+        &segment.text,
+        sanitized,
+        &edits,
+        contribution.certificate.claimed_redaction_policy_version(),
+        alternative_redactor,
+    )
+    .await?;
+    attachment
+        .validate(sanitized.as_bytes())
+        .map_err(|_| refuse())?;
     let attachment_bytes = serde_json::to_vec(&attachment).map_err(|_| refuse())?;
     if attachment_bytes.len() > MAX_ATTACHMENT_BYTES {
         return Err(refuse());
@@ -239,4 +259,209 @@ pub async fn witness_token_bundle(
         certificate,
         signature_hex,
     })
+}
+
+async fn screen_alternatives(
+    attachment: &mut SanitizedTokenAttachment,
+    original: &[u8],
+    sanitized: &str,
+    edits: &[RedactionEdit],
+    policy_version: &str,
+    alternative_redactor: &dyn TranscriptRedactor,
+) -> Result<(), WitnessError> {
+    let removed_bytes: usize = edits
+        .iter()
+        .map(|edit| (edit.original.end - edit.original.start) as usize)
+        .sum();
+    let mut checks = 0usize;
+    for record in &mut attachment.records {
+        let alternatives = std::mem::take(&mut record.alternatives);
+        for alternative in alternatives {
+            let mut keep = false;
+            let sensitive_fragment = removed_bytes > MAX_CANDIDATE_BYTES
+                || edits.iter().any(|edit| {
+                    let removed =
+                        &original[edit.original.start as usize..edit.original.end as usize];
+                    !alternative.bytes.is_empty()
+                        && removed
+                            .windows(alternative.bytes.len())
+                            .any(|part| part == alternative.bytes)
+                });
+            if !sensitive_fragment
+                && checks < MAX_CANDIDATE_CHECKS
+                && sanitized.len() <= MAX_CANDIDATE_BYTES
+            {
+                let mut candidate = Vec::new();
+                candidate.extend_from_slice(&sanitized.as_bytes()[..record.span.start as usize]);
+                candidate.extend_from_slice(&alternative.bytes);
+                candidate.extend_from_slice(&sanitized.as_bytes()[record.span.end as usize..]);
+                if candidate.len() <= MAX_CANDIDATE_BYTES {
+                    if let Ok(candidate) = String::from_utf8(candidate) {
+                        checks += 1;
+                        let filtered = alternative_redactor
+                            .redact(&candidate)
+                            .await
+                            .map_err(|_| WitnessError::RedactionFailed)?;
+                        if filtered.policy_version != policy_version {
+                            return Err(WitnessError::RedactionFailed);
+                        }
+                        keep = filtered.redacted == candidate;
+                    }
+                }
+            }
+            if keep {
+                record.alternatives.push(alternative);
+            } else {
+                attachment.omitted_alternatives += 1;
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn token(bytes: &[u8]) -> TokenValue {
+        TokenValue {
+            bytes: bytes.to_vec(),
+            token_id: None,
+            logprob: LogProbability::Finite(-1.25),
+        }
+    }
+    fn source(parts: &[&[u8]]) -> TokenDistribution {
+        let mut offset = 0;
+        TokenDistribution {
+            version: SCHEMA_VERSION,
+            capture_store_id: "store-1".into(),
+            exchange_id: "exchange-1".into(),
+            event_id: "event-1".into(),
+            choice: 0,
+            segment: 0,
+            requested_model: "model".into(),
+            served_model: None,
+            tokenizer: None,
+            semantics: ProbabilitySemantics::Unknown,
+            conditioning: Conditioning::Original,
+            requested_alternatives: 20,
+            response_digest: ContentDigest::of(&parts.concat()),
+            records: parts
+                .iter()
+                .enumerate()
+                .map(|(i, bytes)| {
+                    let start = offset;
+                    offset += bytes.len() as u64;
+                    TokenRecord {
+                        index: i as u64,
+                        span: ByteSpan { start, end: offset },
+                        chosen: token(bytes),
+                        alternatives: vec![token(b"alternative")],
+                        returned_alternatives: 1,
+                    }
+                })
+                .collect(),
+        }
+    }
+
+    struct Classifier {
+        fails: bool,
+    }
+    #[async_trait::async_trait]
+    impl TranscriptRedactor for Classifier {
+        async fn redact(&self, raw: &str) -> Result<RedactedTranscript, SeamUnavailable> {
+            if self.fails {
+                return Err(SeamUnavailable);
+            }
+            Ok(RedactedTranscript {
+                redacted: raw.replace("Bob", "[name]"),
+                report: RedactionReport::default(),
+                policy_version: "p1".into(),
+            })
+        }
+    }
+    #[tokio::test]
+    async fn alternatives_use_shifted_sanitized_context_and_remove_secret_fragments() {
+        let mut source = source(&[b"Alice", b" says", b" hello"]);
+        source.records[2].alternatives = vec![token(b" Bob"), token(b"Ali"), token(b" goodbye")];
+        source.records[2].returned_alternatives = 3;
+        let edits = vec![RedactionEdit {
+            original: ByteSpan { start: 0, end: 5 },
+            replacement: b"[name]".to_vec(),
+        }];
+        let sanitized = "[name] says hello";
+        let mut filtered = filter_with_edits(
+            &source,
+            b"Alice says hello",
+            sanitized.as_bytes(),
+            &edits,
+            "p1",
+            |s, index, _| Some(vec![true; s.records[index].alternatives.len()]),
+        )
+        .unwrap();
+        screen_alternatives(
+            &mut filtered,
+            b"Alice says hello",
+            sanitized,
+            &edits,
+            "p1",
+            &Classifier { fails: false },
+        )
+        .await
+        .unwrap();
+        let last = filtered.records.last().unwrap();
+        assert_eq!(last.alternatives.len(), 1);
+        assert_eq!(last.alternatives[0].bytes, b" goodbye");
+        assert!(matches!(
+            last.alternatives[0].logprob,
+            LogProbability::Finite(-1.25)
+        ));
+        assert_eq!(last.span, ByteSpan { start: 11, end: 17 });
+        filtered.validate(sanitized.as_bytes()).unwrap();
+    }
+    #[tokio::test]
+    async fn classifier_outage_refuses_and_context_budget_omits_alternatives() {
+        let source = source(&[b"hello"]);
+        let mut filtered = filter_with_edits(&source, b"hello", b"hello", &[], "p1", |_, _, _| {
+            Some(vec![true])
+        })
+        .unwrap();
+        assert!(
+            screen_alternatives(
+                &mut filtered,
+                b"hello",
+                "hello",
+                &[],
+                "p1",
+                &Classifier { fails: true }
+            )
+            .await
+            .is_err()
+        );
+        let long = "a".repeat(MAX_CANDIDATE_BYTES + 1);
+        let source = source_for_long(&long);
+        let mut filtered = filter_with_edits(
+            &source,
+            long.as_bytes(),
+            long.as_bytes(),
+            &[],
+            "p1",
+            |_, _, _| Some(vec![true]),
+        )
+        .unwrap();
+        screen_alternatives(
+            &mut filtered,
+            long.as_bytes(),
+            &long,
+            &[],
+            "p1",
+            &Classifier { fails: true },
+        )
+        .await
+        .unwrap();
+        assert!(filtered.records[0].alternatives.is_empty());
+        assert_eq!(filtered.omitted_alternatives, 2);
+    }
+    fn source_for_long(long: &str) -> TokenDistribution {
+        source(&[&long.as_bytes()[..32768], &long.as_bytes()[32768..]])
+    }
 }

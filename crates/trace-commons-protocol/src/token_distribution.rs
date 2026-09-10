@@ -286,7 +286,7 @@ impl TokenDistribution {
 }
 
 /// Private witness working data. Do not persist or include in certified output.
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct RedactionEdit {
     pub original: ByteSpan,
     pub replacement: Vec<u8>,

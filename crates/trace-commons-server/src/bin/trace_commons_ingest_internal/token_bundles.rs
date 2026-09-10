@@ -35,6 +35,16 @@ fn gate(state: &AppState) -> ApiResult<(&ConfiguredTraceArtifactStore, String)> 
             "token_bundle_storage_unavailable",
         ));
     }
+    if !state
+        .witness_bypass
+        .as_ref()
+        .is_some_and(|b| b.policy_version_allowed(TOKEN_BUNDLE_POLICY))
+    {
+        return Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "token_bundle_policy_unavailable",
+        ));
+    }
     Ok((store, server))
 }
 fn verify_manifest(state: &AppState, headers: &HeaderMap, bytes: &[u8]) -> ApiResult<()> {
@@ -353,7 +363,7 @@ pub(super) async fn status(
     let tenant = authenticate_ctx(&state, &headers)?;
     let bundle = owned(&state, &tenant, submission, &revision).await?;
     Ok(Json(
-        serde_json::json!({"state":bundle.state,"receipt":bundle.receipt,"ready":bundle.attachments.iter().filter(|o|o.ready&&!o.deleted).map(|o|&o.artifact_id).collect::<Vec<_>>()}),
+        serde_json::json!({"state":bundle.state,"receipt":bundle.receipt,"manifest":bundle.manifest,"ready":bundle.attachments.iter().filter(|o|o.ready&&!o.deleted).map(|o|&o.artifact_id).collect::<Vec<_>>()}),
     ))
 }
 pub(super) async fn cleanup(
@@ -432,18 +442,76 @@ pub(super) async fn read(
         .manifest
         .verify_sanitized_attachment(&artifact, &bytes, text.as_bytes())
         .map_err(|_| api_error(StatusCode::GONE, "token_bundle_rescrub_changed"))?;
+    // Record every restricted download in the ordinary export lineage tables.
+    // There is no derived export object: these exact bytes stream to the owner.
+    // Parent withdrawal invalidates the manifest through existing export GC.
+    let export_id = Uuid::new_v4();
+    let manifest_digest = bundle.manifest.digest().map_err(internal_error)?;
+    account_db(&state)?
+        .upsert_trace_export_manifest_mirror(StorageTraceExportManifestMirrorWrite {
+            manifest: StorageTraceExportManifestWrite {
+                tenant_id: tenant.tenant_id().into(),
+                export_manifest_id: export_id,
+                artifact_kind: StorageTraceObjectArtifactKind::ExportArtifact,
+                purpose_code: Some("restricted_token_distribution".into()),
+                audit_event_id: None,
+                source_submission_ids: vec![submission],
+                source_submission_ids_hash: source_submission_ids_hash(
+                    "restricted_token_distribution",
+                    &[submission],
+                ),
+                item_count: 1,
+                generated_at: Utc::now(),
+            },
+            object_refs: Vec::new(),
+            items: vec![StorageTraceExportManifestItemWrite {
+                tenant_id: tenant.tenant_id().into(),
+                export_manifest_id: export_id,
+                submission_id: submission,
+                trace_id: envelope.trace_id,
+                derived_id: None,
+                object_ref_id: None,
+                vector_entry_id: None,
+                source_status_at_export: storage_corpus_status(record.status),
+                source_hash_at_export: manifest_digest.as_str().into(),
+            }],
+        })
+        .await
+        .map_err(internal_error)?;
     // Recheck after object I/O: revocation/expiry observed during the read
     // must not return bytes from the earlier snapshot.
     let current = owned(&state, &tenant, submission, &revision).await?;
     if current.state != "committed" || current.expires_at <= Utc::now() {
         return Err(api_error(StatusCode::GONE, "token_bundle_revoked"));
     }
-    Ok((
+    let mut response = (
         [
             (header::CONTENT_TYPE, "application/json"),
             (header::CACHE_CONTROL, "no-store"),
         ],
         bytes,
     )
-        .into_response())
+        .into_response();
+    response.headers_mut().insert(
+        "x-trace-export-id",
+        export_id.to_string().parse().map_err(internal_error)?,
+    );
+    response.headers_mut().insert(
+        "x-trace-bundle-digest",
+        manifest_digest.as_str().parse().map_err(internal_error)?,
+    );
+    Ok(response)
+}
+
+/// Authenticated capability discovery precedes any raw witness request.
+pub(super) async fn capabilities(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> ApiResult<Json<serde_json::Value>> {
+    let (_, server_id) = gate(&state)?;
+    let tenant =
+        authorize_tenant_access_grant_ctx(&state, authenticate_ctx(&state, &headers)?).await?;
+    Ok(Json(
+        serde_json::json!({"version":SCHEMA_VERSION,"server_id":server_id,"tenant_id":tenant.tenant_id(),"account_id":tenant.principal_ref(),"policy":TOKEN_BUNDLE_POLICY,"usage_profile":"restricted_research","max_attachment_bytes":MAX_ATTACHMENT_BYTES}),
+    ))
 }

@@ -198,6 +198,12 @@ pub struct SettingsView {
     inference_disable: gtk::Button,
     inference_saving: std::cell::Cell<bool>,
     inference_supported: std::cell::Cell<bool>,
+    token_status: gtk::Label,
+    token_error: gtk::Label,
+    token_enable: gtk::Button,
+    token_disable: gtk::Button,
+    token_saving: std::cell::Cell<bool>,
+    token_supported: std::cell::Cell<bool>,
 }
 
 impl Default for SettingsView {
@@ -458,6 +464,33 @@ impl SettingsView {
             button.set_halign(gtk::Align::Start);
             witness_card.append(button);
         }
+        witness_card.append(&style::eyebrow(copy::WITNESS_TOKEN_HEADING));
+        for text in [
+            copy::WITNESS_TOKEN_DISCLOSURE,
+            copy::WITNESS_TOKEN_CAPTURE_NOTE,
+            copy::WITNESS_TOKEN_SCOPE_NOTE,
+        ] {
+            let label = gtk::Label::builder()
+                .label(text)
+                .wrap(true)
+                .xalign(0.0)
+                .build();
+            label.add_css_class("tc-body");
+            witness_card.append(&label);
+        }
+        let token_status = gtk::Label::builder().wrap(true).xalign(0.0).build();
+        witness_card.append(&token_status);
+        let token_error = gtk::Label::builder().wrap(true).xalign(0.0).build();
+        token_error.add_css_class("tc-refused");
+        witness_card.append(&token_error);
+        let token_enable = gtk::Button::with_label(copy::WITNESS_TOKEN_ENABLE);
+        // No enabling before a persisted settings answer arrives.
+        token_enable.set_sensitive(false);
+        let token_disable = gtk::Button::with_label(copy::WITNESS_TOKEN_DISABLE);
+        for button in [&token_enable, &token_disable] {
+            button.set_halign(gtk::Align::Start);
+            witness_card.append(button);
+        }
 
         content.append(&witness_card);
 
@@ -646,6 +679,12 @@ impl SettingsView {
             inference_disable,
             inference_saving: std::cell::Cell::new(false),
             inference_supported: std::cell::Cell::new(false),
+            token_status,
+            token_error,
+            token_enable,
+            token_disable,
+            token_saving: std::cell::Cell::new(false),
+            token_supported: std::cell::Cell::new(false),
         }
     }
 }
@@ -755,6 +794,7 @@ pub fn wire(app: &Rc<App>) {
 
     wire_witness(app);
     wire_inference_consent(app);
+    wire_token_consent(app);
     // Painted immediately rather than waiting on `get_settings`: the
     // witness is not a daemon setting, so no daemon answer is coming, and a
     // card that stayed blank until one arrived would say nothing about the
@@ -1717,16 +1757,20 @@ pub fn refresh(app: &Rc<App>) {
     });
     app.call("get_settings", serde_json::json!({}), |app, result| {
         invalidate_inference_consent(app);
+        invalidate_token_consent(app);
         let Ok(value) = result else { return };
+        let supports_tokens = token_consent_supported(&value);
         let supports_inference = inference_consent_supported(&value);
         let Ok(settings) = serde_json::from_value::<Settings>(value) else {
             return;
         };
         app.settings.inference_supported.set(supports_inference);
+        app.settings.token_supported.set(supports_tokens);
         render_connection_checks(app, &settings);
         render_knobs(app, &settings);
         render_routing(app, &settings);
         render_inference_consent(app, &settings);
+        render_token_consent(app, &settings);
     });
     // The roster state, from the daemon rather than from what this window
     // last did. A failure -- `not-logged-in` on a device that has never
@@ -3202,10 +3246,12 @@ fn save_inference_consent(app: &Rc<App>, enabled: bool) {
                 if settings.ironwire_attested_bodies == enabled {
                     app.settings.inference_supported.set(true);
                     render_inference_consent(app, &settings);
+                    render_token_consent(app, &settings);
                     return;
                 }
             }
             invalidate_inference_consent(app);
+            invalidate_token_consent(app);
             app.settings.inference_error.set_text(&format!(
                 "{} {}",
                 trace_commons_contributor::witness_copy::witness_copy()
@@ -3247,6 +3293,123 @@ fn wire_inference_consent(app: &Rc<App>) {
             dialog.close();
             if response == "enable" {
                 save_inference_consent(&a, true);
+            }
+        });
+        dialog.present();
+    });
+}
+
+fn render_token_consent(app: &Rc<App>, settings: &Settings) {
+    let view = &app.settings;
+    if view.token_saving.get() {
+        return;
+    }
+    view.token_status.set_text(token_consent_label(
+        view.token_supported
+            .get()
+            .then_some(settings.token_distributions_contribution),
+    ));
+    view.token_enable
+        .set_sensitive(view.token_supported.get() && !settings.token_distributions_contribution);
+    view.token_disable.set_sensitive(true);
+}
+
+fn token_consent_label(persisted: Option<bool>) -> &'static str {
+    match persisted {
+        Some(true) => copy::WITNESS_TOKEN_ENABLED,
+        Some(false) => copy::WITNESS_TOKEN_DISABLED,
+        None => "",
+    }
+}
+
+fn invalidate_token_consent(app: &Rc<App>) {
+    let view = &app.settings;
+    view.token_supported.set(false);
+    view.token_status.set_text(token_consent_label(None));
+    view.token_enable.set_sensitive(false);
+    view.token_disable.set_sensitive(!view.token_saving.get());
+}
+
+fn token_consent_supported(value: &serde_json::Value) -> bool {
+    value
+        .get("token_distributions_contribution")
+        .is_some_and(serde_json::Value::is_boolean)
+}
+
+fn token_consent_response(value: serde_json::Value) -> Option<Settings> {
+    if !token_consent_supported(&value) {
+        return None;
+    }
+    serde_json::from_value(value).ok()
+}
+
+fn token_consent_patch(enabled: bool) -> serde_json::Value {
+    serde_json::json!({ "token_distributions_contribution": enabled })
+}
+
+fn save_token_consent(app: &Rc<App>, enabled: bool) {
+    let view = &app.settings;
+    if view.token_saving.replace(true) {
+        return;
+    }
+    view.token_error.set_text("");
+    view.token_enable.set_sensitive(false);
+    view.token_disable.set_sensitive(false);
+    app.call(
+        "set_settings",
+        token_consent_patch(enabled),
+        move |app, result| {
+            app.settings.token_saving.set(false);
+            let saved = result.ok().and_then(token_consent_response);
+            if let Some(settings) = saved {
+                if settings.token_distributions_contribution == enabled {
+                    app.settings.token_supported.set(true);
+                    render_token_consent(app, &settings);
+                    return;
+                }
+            }
+            invalidate_token_consent(app);
+            app.settings.token_error.set_text(&format!(
+                "{} {}",
+                trace_commons_contributor::witness_copy::witness_copy()
+                    .wallet
+                    .refused_glyph,
+                copy::WITNESS_TOKEN_SAVE_FAILED
+            ));
+            refresh(app);
+        },
+    );
+}
+
+fn wire_token_consent(app: &Rc<App>) {
+    let a = Rc::clone(app);
+    app.settings
+        .token_disable
+        .connect_clicked(move |_| save_token_consent(&a, false));
+    let a = Rc::clone(app);
+    app.settings.token_enable.connect_clicked(move |_| {
+        let body = [
+            copy::WITNESS_TOKEN_DISCLOSURE,
+            copy::WITNESS_TOKEN_CAPTURE_NOTE,
+            copy::WITNESS_TOKEN_SCOPE_NOTE,
+        ]
+        .join("\n\n");
+        let dialog = adw::MessageDialog::new(
+            Some(&a.window),
+            Some(copy::WITNESS_TOKEN_HEADING),
+            Some(&body),
+        );
+        dialog.add_responses(&[
+            ("cancel", copy::WITNESS_TOKEN_CANCEL),
+            ("enable", copy::WITNESS_TOKEN_CONFIRM),
+        ]);
+        dialog.set_default_response(Some("cancel"));
+        dialog.set_close_response("cancel");
+        let a = Rc::clone(&a);
+        dialog.connect_response(None, move |dialog, response| {
+            dialog.close();
+            if response == "enable" {
+                save_token_consent(&a, true);
             }
         });
         dialog.present();

@@ -372,6 +372,7 @@ struct RoutingStatus: Decodable, Equatable {
 
 /// The socket `preview` result: summary only, never the trace body.
 struct PreviewSummary: Decodable, Equatable, Sendable {
+    var tokenDistributionSummary: String? = nil
     let wouldSendBytes: Int
     let rawSessionBytes: Int
     let eventCount: Int
@@ -400,6 +401,7 @@ struct PreviewSummary: Decodable, Equatable, Sendable {
     var enrolled: Bool = false
 
     enum CodingKeys: String, CodingKey {
+        case tokenDistributionSummary = "token_distribution_summary"
         case wouldSendBytes = "would_send_bytes"
         case rawSessionBytes = "raw_session_bytes"
         case eventCount = "event_count"
@@ -650,6 +652,7 @@ struct DaemonSettingsView: Decodable, Equatable {
     /// null when the daemon could not read its config, and absent from a
     /// daemon that predates the key -- neither of which is a yes.
     var admissionEvidenceOffered: Bool { admissionEvidenceRequired == true }
+    var tokenDistributionsContribution: Bool? = nil
     var ironwireAttestedBodies: Bool? = nil
     var inferenceEvidenceEnabled: Bool { ironwireAttestedBodies == true }
     /// Whether this daemon was asked to answer model calls itself. What was
@@ -694,6 +697,7 @@ struct DaemonSettingsView: Decodable, Equatable {
         case opencodeSourceMode = "opencode_source_mode"
         case ironwire
         case admissionEvidenceRequired = "admission_evidence_required"
+        case tokenDistributionsContribution = "token_distributions_contribution"
         case ironwireAttestedBodies = "ironwire_attested_bodies"
         case privateInference = "private_inference"
         case privateInferenceOfferSeen = "private_inference_offer_seen"
@@ -897,6 +901,7 @@ extension PreviewSummary {
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         self.init(
+            tokenDistributionSummary: try c.decodeIfPresent(String.self, forKey: .tokenDistributionSummary),
             wouldSendBytes: try c.decode(Int.self, forKey: .wouldSendBytes),
             rawSessionBytes: try c.decode(Int.self, forKey: .rawSessionBytes),
             eventCount: try c.decode(Int.self, forKey: .eventCount),

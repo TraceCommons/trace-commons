@@ -7571,7 +7571,10 @@ fn community_cors_origins() -> Vec<HeaderValue> {
 
 fn app(state: Arc<AppState>) -> Router {
     Router::new()
-        .route("/v1/token-bundles", post(token_bundles::begin))
+        .route(
+            "/v1/token-bundles",
+            post(token_bundles::begin).get(token_bundles::capabilities),
+        )
         .route(
             "/v1/token-bundles/{submission}/{revision}",
             get(token_bundles::status).post(token_bundles::finalize),

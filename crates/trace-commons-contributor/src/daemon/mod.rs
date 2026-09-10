@@ -61,6 +61,7 @@ pub mod stored_cloud_credentials;
 pub(crate) mod test_paths;
 #[cfg(test)]
 pub(crate) mod test_support;
+pub(crate) mod token_capture;
 mod token_cleanup;
 pub mod uploader;
 pub mod watcher;

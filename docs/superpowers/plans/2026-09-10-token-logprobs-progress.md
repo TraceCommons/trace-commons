@@ -1,36 +1,96 @@
-# Token distribution implementation progress
+# Token distribution implementation status
 
-Trace Commons worktree: `/tmp/tc-token-logprobs`, branch `implement-token-logprobs`.
-Ironwire worktree: `/tmp/ironwire-token-logprobs`, branch `capture-token-distributions`.
-The [implementation plan](2026-09-10-token-logprobs-lifecycle.md) remains the full scope.
+Implementation work is isolated on `implement-token-logprobs`. The upstream
+capture implementation is [nearai/ironwire#57](https://github.com/nearai/ironwire/pull/57),
+pinned at `4652f0481767c785e9d3a21ba180a2f4fa11295d` in both client lockfiles and
+the regenerated Flatpak sources. The Ironclaw revision and registry package
+versions are unchanged.
 
-## Implemented locally
+The [full plan](2026-09-10-token-logprobs-lifecycle.md) remains the acceptance
+specification. This implementation covers the initial, explicitly restricted
+profile: one verified final Chat Completions exchange, JSON or complete SSE.
+Responses API, tools, reasoning, unverified companion history, incomplete
+streams and unqualified backend/model pairs remain unavailable.
 
-- Protocol: bounded raw/sanitized token records, exact byte reconstruction, FP64-preserving probabilities, edit-map filtering, immutable manifests and destination-bound durable receipts. Complete Chat Completions JSON/SSE extraction; unsupported tools/reasoning/incomplete streams fail closed.
-- Ironwire: separate opt-in backend/model targets, caller-preserving Chat request augmentation, exact request/response capture, capped private SQLite/file spool, authenticated list/acquire/read/renew/release control API and embedded maintenance. Multi-owner leases protect exact snapshots; capture pressure refuses new captures; renewals cannot exceed seven days from capture.
-- Witness: explicit token-bundle route with source receipt verification, admission restriction/evidence, classifier-required transcript filtering, bounded contextual alternative checks, and signatures over exact envelope and manifest bytes. Changed segments conservatively lose all token records until composed pipeline edit maps are available. Only one verified Chat completion is supported.
-- Storage: scoped encrypted binary artifacts and idempotent prepared ciphertext publication. V64 adds immutable tenant/principal/revision records, forced RLS, attachment identities, staging expiry, and withdrawal-triggered revocation. Pending ciphertext is retained in PostgreSQL until object publication/readback succeeds, then removed from the row.
-- Ingest: gated begin/put/finalize/status and owner-only attachment reads. The exact certified envelope is stored alongside token attachments; a rescrubbed processing envelope cannot stand in for it. Finalize checks event correspondence and requires all artifacts durable before committing a receipt. Withdrawals and retention invoke bundle deletion; object publication/deletion share database locks.
-- Client library: loopback-only authenticated capture access, certificate-verifying bundle upload with missing-artifact retries, destination-bound receipt journal, persisted approval payloads, and restart-safe lease-release intents. The daemon retries one acknowledged intent at startup and every five minutes, bound to the original spool identity. Raw bodies are sent only through a verified witness handle. Neither raw captures nor token payload types implement Debug.
+## Integrated behavior
 
-These are local implementation components, not a shipped or enabled feature. The contributor still pins the previously reviewed Ironwire revision. No live deployment, trust-pin change, or provider capability claim has been made.
+- Ironwire defaults detailed capture off, adds only absent probability request
+  fields for configured pairs, and preserves exact upstream response bytes.
+  Private bounded spools expose authenticated immutable snapshots, owner-bound
+  leases, renewal, release and garbage collection.
+- The witness verifies the provider receipt and admission challenge before
+  deriving an assistant event from the verified exchange. Actual deterministic
+  and classifier edits compose into private byte maps; unchanged token spans
+  survive. Missing provenance drops the segment. Alternatives are checked in
+  sanitized context, with secret fragments, classifier failures and resource
+  limits handled conservatively. Exact envelope and manifest bytes are signed.
+- Explicit desktop review negotiates ingest support, selects one exact capture
+  digest match, obtains a lease, verifies the witness, and pins the signed
+  payload. The review shows included/omitted positions and alternative counts.
+  Approval and retry use the stored bytes without re-running the witness.
+- Capture configuration, inference-body disclosure and contribution permission
+  are separate. macOS, Windows and GTK expose contribution controls with shared
+  Rust wording; CLI uses the same saved setting. Incompatible consent changes
+  invalidate queued approvals instead of silently changing the upload.
+- Begin/upload/finalize persist encrypted staging packets, read back every
+  object, and return a destination-bound durable receipt only after completion.
+  The exact certified envelope is stored too. PostgreSQL enforces immutable
+  revisions, owner/tenant isolation, forced RLS and staging/active quotas.
+- Owner-only restricted downloads validate current event correspondence and
+  register export lineage before returning bytes. They identify the export and
+  manifest digest in response headers. Ordinary text/vector/corpus exports do
+  not receive token attachments; broader researcher access stays disabled.
+- The client journals acknowledgement before releasing its own lease. Retries
+  recover after acknowledgement, release or payload cleanup. Discarded reviews
+  abandon their payloads; pending reviews expire after three days, approved
+  ones after seven. Approved leases renew in bounded batches with backoff.
+  Local envelope and bundle writers share a locked 256 MiB budget. Logout
+  clears review data; agent session files are never removed.
+- Parent revocation blocks reads and new revisions. Publication/finalization
+  and deletion use database locks, and garbage collection observes both parent
+  tombstones and withdrawal records. Cleanup retries are idempotent.
 
-## Verification so far
+## Qualification evidence
 
-- Protocol contract/parser tests and license-boundary tests passed in the foundation pass.
-- Ironwire core, ledger and proxy suites passed; all-target clippy passes. Five spool lifecycle tests and 14 passthrough tests pass, including bounded renewal, expired-release retry and exact-wire capture.
-- Client receipt journal restart, refusal, retry and path tests pass.
-- Encrypted binary artifact replay, tenant-scope refusal and idempotent deletion test passes.
-- V64 ran in a fresh disposable PostgreSQL database. Staging immutability, owner/tenant lookup isolation and incomplete-commit refusal test passes. This is not yet a full concurrent RLS/fault-injection test.
-- Contributor library suite passed on the workspace rerun (the initial sandboxed run hit a home-directory fixture restriction and a timing-sensitive existing test).
-- Workspace testing found the new migration missing from the RLS coverage tests' migration readers; V64 and those readers were corrected. The workspace rerun passed with four test threads. Final focused client tests pass (31 matched tests), fresh PostgreSQL staging/quota tests pass, and server/contributor all-target clippy passes with the existing allowlist. Some later additive helpers received compile/clippy checks rather than another entire workspace run.
+- Upstream PR #57 CI passes on macOS and Ubuntu, including packaging, journey
+  and size checks.
+- Protocol tests cover exact bytes, split Unicode, decimal probabilities,
+  composed deterministic/classifier edits, repeated text and absent provenance.
+- Signed witness testing verifies receipt-bound event projection, manifest and
+  envelope certificates, byte correspondence, missing consent and tampering.
+  Client wire testing confirms isolated-call projection and no ordinary fallback.
+- Alternative screening tests cover removed secret fragments, shifted spans,
+  classifier outage and bounded context; values are not renormalized.
+- PostgreSQL qualification uses an actual NOBYPASSRLS role and tests isolation,
+  concurrent retries, immutable staging, quotas, incomplete commits, ciphertext
+  publication before ready-state recovery, concurrent commits, parent revocation,
+  deletion retries and a new revision racing the parent lifecycle lock.
+- macOS: 847 XCTest cases and 8 Swift Testing cases passed locally. GTK: 517
+  unit tests plus integration tests passed locally. Windows interop: 994 passed,
+  one native-Windows case skipped on macOS; the available .NET runtime was used
+  with major-version roll-forward. These are not Windows/Wayland native UI runs.
+- All four required cargo-deny license configurations pass. No new dependency
+  packages were added. Full-workspace and final clippy checks are recorded in
+  the PR validation; targeted runtime tests supplement them.
+- `scripts/token-distributions/qualify.py` supplies a bounded synthetic provider
+  probe and records metadata/timing only. Its parser tests pass. No live provider
+  result is inferred from those fixtures.
 
-## Remaining acceptance work
+## Gates before enabling production
 
-1. Connect capture selection, bundle preview/approval persistence and upload to the desktop queue; implement renewal scheduling and user controls across macOS/Windows/Linux.
-2. Add composed redaction maps so unchanged token spans survive an edited segment; qualify alternative policy with PII attack fixtures and signed end-to-end witness tests.
-3. Complete concurrent PostgreSQL RLS, finalize/withdraw/crash/orphan, transport retry, rescrub and backup-restore tests. Validate deployed object-version/deletion semantics before advertising cleanup-safe production receipts.
-4. Complete restricted export/index metadata policy and lifecycle propagation; normal text/vector paths currently receive no token attachments.
-5. Qualify actual provider/model behavior and overhead with synthetic probes; finish upstream integration/pinning and release checks. Empty target lists and independent server/policy gates keep the feature unavailable by default.
+1. Review and merge upstream #57, then confirm the downstream pin and platform
+   CI on the final commits. Native Windows packaging/runtime qualification is
+   still required.
+2. Run the synthetic probe against each intended provider/model and record its
+   attested serving identity, probability semantics and overhead. Populate no
+   default qualified target from a model alias or fixture alone.
+3. Qualify real object-store timeout/versioning behavior, backup restoration
+   with withdrawal tombstones, and production cleanup/retention operations.
+   Local encrypted-file tests do not establish cloud-version or backup erasure.
+4. Roll out the changed witness through the existing measurement/pin procedure,
+   then conduct the bounded pilot. The implementation has not changed deployed
+   witness pins, enabled capture, or enabled production bundle receipts.
 
-Do not claim end-to-end completion until these acceptance gates pass together.
+Broader researcher exports, additional protocol profiles and inference-wide
+multi-call coverage require their own qualified expansion. None is silently
+represented as covered by this initial profile.

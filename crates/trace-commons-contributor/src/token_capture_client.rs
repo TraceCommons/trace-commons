@@ -130,6 +130,20 @@ impl TokenCaptureClient {
         let value: Renewed = self.request(serde_json::json!({"operation":"renew","lease":lease.lease_id,"owner":lease.owner,"snapshot_digest":lease.snapshot_digest,"seconds":seconds}),4096).await?;
         Ok(value.expires_at)
     }
+    pub async fn renew_bundle(&self, lease: &BundleLease, seconds: i64) -> Result<i64> {
+        #[derive(Deserialize)]
+        struct Renewed {
+            expires_at: i64,
+        }
+        let value: Renewed = self
+            .request(
+                serde_json::json!({"operation":"renew","lease":lease.lease_id,
+            "owner":lease.owner,"snapshot_digest":lease.snapshot_digest,"seconds":seconds}),
+                4096,
+            )
+            .await?;
+        Ok(value.expires_at)
+    }
     pub async fn read(
         &self,
         lease: &CaptureLease,

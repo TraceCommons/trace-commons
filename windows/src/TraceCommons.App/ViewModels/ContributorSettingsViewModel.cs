@@ -700,6 +700,80 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
         }
     }
 
+    // Inference-body export consent is independent of witness configuration.
+    private bool _tokenContributionEnabled;
+    private bool _tokenContributionSupported;
+    public bool TokenContributionControlsEnabled => WitnessControlsEnabled && _tokenContributionSupported && !string.IsNullOrEmpty(_witnessCopy?.TokenHeading);
+    private string _tokenContributionNotice = string.Empty;
+    public bool TokenContributionEnabled => _tokenContributionEnabled;
+    public string TokenContributionHeading => _witnessCopy?.TokenHeading ?? string.Empty;
+    public string TokenContributionDisclosure => _witnessCopy?.TokenDisclosure ?? string.Empty;
+    public string TokenContributionCaptureNote => _witnessCopy?.TokenCaptureNote ?? string.Empty;
+    public string TokenContributionScopeNote => _witnessCopy?.TokenScopeNote ?? string.Empty;
+    public string TokenContributionConfirm => _witnessCopy?.TokenConfirm ?? string.Empty;
+    public string TokenContributionCancel => _witnessCopy?.TokenCancel ?? string.Empty;
+    public string TokenContributionEnable => _witnessCopy?.TokenEnable ?? string.Empty;
+    public string TokenContributionDisable => _witnessCopy?.TokenDisable ?? string.Empty;
+    public string TokenContributionState => !_tokenContributionSupported
+        ? string.Empty
+        : (_tokenContributionEnabled ? _witnessCopy?.TokenEnabled : _witnessCopy?.TokenDisabled)
+          ?? string.Empty;
+    public string TokenContributionNotice => _tokenContributionNotice;
+    public string TokenContributionNoticeGlyph => _tokenContributionNotice.Length > 0 ? _witnessCopy?.Wallet?.RefusedGlyph ?? "" : "";
+
+    private void FillTokenContribution(DaemonSettingsSnapshot settings)
+    {
+        _tokenContributionEnabled = settings.ProbabilityContributionEnabled;
+        _tokenContributionSupported = settings.ProbabilityContributionAllowed.HasValue;
+        Raise(nameof(TokenContributionControlsEnabled));
+        Raise(nameof(TokenContributionEnabled));
+        Raise(nameof(TokenContributionState));
+    }
+
+    public async Task SetTokenContributionAsync(bool enabled, bool disclosureConfirmed = false)
+    {
+        if (!IsLoaded || IsBusy || _witnessCopy is null || (enabled && !_tokenContributionSupported))
+        {
+            return;
+        }
+        IsBusy = true;
+        _tokenContributionNotice = string.Empty;
+        try
+        {
+            string payload = TokenContributionConsent.Serialize(enabled, disclosureConfirmed);
+            DaemonResponse response = await _host
+                .CallAsync(DaemonProtocol.Methods.SetSettings, payload)
+                .ConfigureAwait(true);
+            DaemonSettingsSnapshot? settings = response.ResultAs<DaemonSettingsSnapshot>();
+            if (response.IsError || !TokenContributionConsent.ConfirmsWrite(settings, enabled))
+            {
+                _tokenContributionNotice = _witnessCopy.TokenSaveFailed;
+            }
+            else
+            {
+                FillTokenContribution(settings!);
+            }
+        }
+        catch
+        {
+            _tokenContributionNotice = _witnessCopy.TokenSaveFailed;
+        }
+        finally
+        {
+            if (_tokenContributionNotice.Length > 0)
+            {
+                _tokenContributionSupported = false;
+                try {
+                    var authoritative = await _host.CallAsync(DaemonProtocol.Methods.GetSettings).ConfigureAwait(true);
+                    if (authoritative.ResultAs<DaemonSettingsSnapshot>() is { } settings) FillTokenContribution(settings);
+                } catch { }
+                Raise(nameof(TokenContributionState));
+            }
+            Raise(nameof(TokenContributionNotice)); Raise(nameof(TokenContributionNoticeGlyph));
+            IsBusy = false;
+        }
+    }
+
     // Answering model calls on this computer. The switch, the exposure
     // sentence and the line saying what the listener actually did all live on
     // the model-calls destination now -- PrivateInferenceViewModel owns them,
@@ -1130,6 +1204,7 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
         if (settings is not null)
         {
             FillInferenceEvidence(settings);
+            FillTokenContribution(settings);
         }
         ConnectionRows.Clear();
         if (settings is null)

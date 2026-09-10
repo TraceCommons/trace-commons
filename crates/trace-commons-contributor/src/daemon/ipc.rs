@@ -3450,6 +3450,19 @@ async fn handle_witness_preview_request_inner(
     let Some((source, session_ref)) = super::find_session(&sources, &entry) else {
         return Response::err(req.id, ERR_BAD_PARAMS, "session-file-vanished");
     };
+    let token_control = if initial_settings.token_distributions_contribution {
+        let Some(declaration) = initial_settings.ironwire.as_ref() else {
+            return Response::err(req.id, ERR_UNAVAILABLE, "token-capture-proxy-unavailable");
+        };
+        match super::token_capture::client(declaration) {
+            Ok(client) => Some(client),
+            Err(_) => {
+                return Response::err(req.id, ERR_UNAVAILABLE, "token-capture-proxy-unavailable");
+            }
+        }
+    } else {
+        None
+    };
     let build = super::preview::build_witnessed_preview(
         &shared.store,
         &cfg,
@@ -3458,6 +3471,7 @@ async fn handle_witness_preview_request_inner(
         &session_ref,
         super::preview::WitnessPreviewOptions {
             raw_session_confirmed: true,
+            token_capture: token_control.as_ref(),
             expected_session_hash: &entry.session_hash,
             include_inference_bodies: bodies,
             verdict,

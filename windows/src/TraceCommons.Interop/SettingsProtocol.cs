@@ -60,6 +60,8 @@ public sealed class DaemonSettingsSnapshot
     [JsonPropertyName("admission_evidence_required")]
     public bool? AdmissionEvidenceRequired { get; set; }
 
+    [JsonPropertyName("token_distributions_contribution")] public bool? ProbabilityContributionAllowed { get; init; }
+    public bool ProbabilityContributionEnabled => ProbabilityContributionAllowed == true;
     [JsonPropertyName("ironwire_attested_bodies")]
     public bool? IronwireAttestedBodies { get; set; }
     public bool InferenceEvidenceEnabled => IronwireAttestedBodies == true;

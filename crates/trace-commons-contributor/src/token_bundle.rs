@@ -32,6 +32,14 @@ pub struct BundleLease {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Entry {
+    #[serde(default)]
+    created_at_unix: u64,
+    #[serde(default)]
+    expired: bool,
+    #[serde(default)]
+    approved: bool,
+    #[serde(default)]
+    renew_after_unix: u64,
     manifest: ContributionBundleManifest,
     destination: BundleDestination,
     lease: BundleLease,
@@ -41,11 +49,78 @@ struct Entry {
     approved_payload: Option<CertifiedBundleUpload>,
 }
 
+/// Content-free reference included in the ordinary witness approval pin.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TokenBundleReview {
+    pub journal_id: uuid::Uuid,
+    pub manifest_digest: trace_commons_protocol::token_distribution::ContentDigest,
+    pub attachment_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary_line: Option<String>,
+}
 /// Only the caller's immutable lease is released. Implementations must not
 /// delete a session directory or release another destination's lease.
 #[async_trait::async_trait]
 pub trait BundleLeaseReleaser: Send + Sync {
     async fn release(&self, lease: &BundleLease) -> Result<()>;
+}
+
+/// Serialize review-store writers across the ordinary approval files and
+/// token journal, enforcing one aggregate 256 MiB retained-payload budget.
+/// Removal and replacement by smaller data must remain possible at capacity.
+pub(crate) fn with_review_budget(
+    state: &Path,
+    replacing: &Path,
+    bytes: u64,
+    write: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    fs::create_dir_all(state)?;
+    let lock_path = state.join("review-budget.lock");
+    if fs::symlink_metadata(&lock_path).is_ok_and(|m| !m.is_file() || m.file_type().is_symlink()) {
+        bail!("review-budget-lock");
+    }
+    let mut options = OpenOptions::new();
+    options.create(true).truncate(false).read(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let lock = options.open(lock_path)?;
+    lock.lock()?;
+    let mut total = bytes;
+    for item in fs::read_dir(state)? {
+        let item = item?;
+        if item.path() != replacing
+            && item
+                .file_name()
+                .to_string_lossy()
+                .trim_start_matches('.')
+                .starts_with(crate::config::DAEMON_APPROVED_ENVELOPE_PREFIX)
+        {
+            total = total.saturating_add(item.metadata()?.len());
+        }
+    }
+    let root = state.join("token-bundles");
+    if root.exists() {
+        if fs::symlink_metadata(&root)?.file_type().is_symlink() {
+            bail!("review-budget-directory");
+        }
+        for item in fs::read_dir(root)? {
+            let item = item?;
+            if item.path() != replacing && item.path().extension().is_some_and(|s| s == "json") {
+                total = total.saturating_add(item.metadata()?.len());
+            }
+        }
+    }
+    let prior = fs::symlink_metadata(replacing)
+        .map(|m| m.len())
+        .unwrap_or(0);
+    if total > 256 * 1024 * 1024 && bytes > prior {
+        bail!("review-store-capacity");
+    }
+    write()
 }
 
 pub struct BundleJournal {
@@ -120,12 +195,33 @@ impl BundleJournal {
         if total > 256 * 1024 * 1024 {
             bail!("bundle-journal-capacity");
         }
-        crate::config::write_atomic_0600(&self.root, &self.path(id), &bytes)
-            .context("bundle-journal-write")?;
+        // The production journal lives immediately below the state directory.
+        with_review_budget(
+            self.root.parent().context("bundle-journal-parent")?,
+            &self.path(id),
+            bytes.len() as u64,
+            || {
+                crate::config::write_atomic_0600(&self.root, &self.path(id), &bytes)
+                    .context("bundle-journal-write")
+            },
+        )?;
         #[cfg(unix)]
         File::open(&self.root)?
             .sync_all()
             .context("bundle-journal-sync")?;
+        Ok(())
+    }
+    pub fn validate_review(&self, review: &TokenBundleReview, envelope: &[u8]) -> Result<()> {
+        let _lock = self.lock()?;
+        let entry = self.read(review.journal_id)?;
+        if entry.manifest.digest()? != review.manifest_digest
+            || !entry.manifest.envelope_digest.matches(envelope)
+        {
+            bail!("bundle-review-stale");
+        }
+        if entry.approved_payload.is_none() && entry.receipt.is_none() {
+            bail!("bundle-review-unavailable");
+        }
         Ok(())
     }
     /// Call before upload. Retries must reuse the returned journal ID.
@@ -162,6 +258,10 @@ impl BundleJournal {
         self.write(
             id,
             &Entry {
+                created_at_unix: chrono::Utc::now().timestamp().max(0) as u64,
+                expired: false,
+                approved: false,
+                renew_after_unix: 0,
                 manifest,
                 destination,
                 lease,
@@ -209,7 +309,7 @@ impl BundleJournal {
             if entry.released {
                 return Ok(());
             }
-            if entry.receipt.is_none() {
+            if entry.receipt.is_none() && !entry.expired {
                 bail!("bundle-not-acknowledged");
             }
             entry.lease
@@ -221,7 +321,96 @@ impl BundleJournal {
         entry.approved_payload = None;
         self.write(id, &entry)
     }
-    /// Only acknowledged, unfinished intents are retried at daemon startup.
+    /// Called from the durable queue's approved/uploading states, never from
+    /// merely preparing a review. Approval cannot revive expired payloads.
+    pub fn mark_approved(&self, id: uuid::Uuid) -> Result<()> {
+        let _lock = self.lock()?;
+        let mut entry = self.read(id)?;
+        if !entry.approved && !entry.expired && entry.receipt.is_none() {
+            entry.approved = true;
+            self.write(id, &entry)?;
+        }
+        Ok(())
+    }
+    /// Reserve a bounded renewal batch before I/O. Failed attempts back off,
+    /// so an unavailable old spool cannot starve other owners indefinitely.
+    pub fn due_renewals(&self, now: u64) -> Result<Vec<BundleLease>> {
+        let _lock = self.lock()?;
+        let mut due = Vec::new();
+        for item in fs::read_dir(&self.root)? {
+            let path = item?.path();
+            if path.extension().is_none_or(|s| s != "json") {
+                continue;
+            }
+            let id = path
+                .file_stem()
+                .and_then(|v| v.to_str())
+                .and_then(|v| uuid::Uuid::parse_str(v).ok())
+                .context("bundle-journal-invalid")?;
+            let entry = self.read(id)?;
+            if entry.approved
+                && !entry.expired
+                && entry.receipt.is_none()
+                && entry.renew_after_unix <= now
+            {
+                due.push((entry.renew_after_unix, id));
+            }
+        }
+        due.sort_unstable();
+        let mut leases = Vec::new();
+        for (_, id) in due.into_iter().take(8) {
+            let mut entry = self.read(id)?;
+            entry.renew_after_unix = now.saturating_add(3600);
+            self.write(id, &entry)?;
+            leases.push(entry.lease);
+        }
+        Ok(leases)
+    }
+    /// A revoked or discarded local review no longer owns retained payloads.
+    /// This never revokes a server contribution or fabricates a receipt.
+    pub fn abandon_review(&self, id: uuid::Uuid) -> Result<()> {
+        let _lock = self.lock()?;
+        let mut entry = self.read(id)?;
+        if entry.receipt.is_none() {
+            entry.expired = true;
+            entry.approved_payload = None;
+            self.write(id, &entry)?;
+        }
+        Ok(())
+    }
+    /// Expiration is a separate abandonment reason, never a durable receipt.
+    /// Clearing expired review bytes invalidates their approval. Agent source
+    /// files are outside this journal and are never touched.
+    pub fn expire_reviews(&self, now: u64) -> Result<()> {
+        let _lock = self.lock()?;
+        for item in fs::read_dir(&self.root)? {
+            let path = item?.path();
+            if path.extension().is_none_or(|s| s != "json") {
+                continue;
+            }
+            let id = path
+                .file_stem()
+                .and_then(|v| v.to_str())
+                .and_then(|v| uuid::Uuid::parse_str(v).ok())
+                .context("bundle-journal-invalid")?;
+            let mut entry = self.read(id)?;
+            if entry.receipt.is_none()
+                && !entry.expired
+                && now
+                    >= entry.created_at_unix.saturating_add(if entry.approved {
+                        7 * 86400
+                    } else {
+                        3 * 86400
+                    })
+            {
+                entry.expired = true;
+                entry.approved_payload = None;
+                self.write(id, &entry)?;
+            }
+        }
+        Ok(())
+    }
+    /// Acknowledged or explicitly expired intents are retried at startup.
     pub fn pending_cleanup(&self) -> Result<Vec<uuid::Uuid>> {
         let _lock = self.lock()?;
         let mut pending = Vec::new();
@@ -236,7 +425,7 @@ impl BundleJournal {
                 .and_then(|v| uuid::Uuid::parse_str(v).ok())
                 .context("bundle-journal-invalid")?;
             let entry = self.read(id)?;
-            if entry.receipt.is_some() && !entry.released {
+            if (entry.receipt.is_some() || entry.expired) && !entry.released {
                 pending.push(id);
             }
         }
@@ -265,6 +454,9 @@ impl BundleJournal {
         {
             bail!("bundle-approval-mismatch");
         }
+        if entry.expired {
+            bail!("bundle-review-expired");
+        }
         if entry.approved_payload.is_some() {
             bail!("bundle-already-approved");
         }
@@ -280,9 +472,14 @@ impl BundleJournal {
     ) -> Result<DurableBundleReceipt> {
         let payload = {
             let _lock = self.lock()?;
-            self.read(id)?
-                .approved_payload
-                .context("bundle-not-approved")?
+            let entry = self.read(id)?;
+            // A crash can occur after acknowledgement and cleanup but before
+            // the ordinary transcript receipt is written. The authenticated
+            // durable receipt remains evidence after payload deletion.
+            if let Some(receipt) = entry.receipt {
+                return Ok(receipt);
+            }
+            entry.approved_payload.context("bundle-not-approved")?
         };
         self.upload(id, client, &payload).await
     }
@@ -557,6 +754,96 @@ mod tests {
         journal.cleanup(id, &release).await.unwrap();
         assert_eq!(release.calls.load(Ordering::SeqCst), 1);
         assert!(journal.pending_cleanup().unwrap().is_empty());
+    }
+    #[test]
+    fn ordinary_and_token_reviews_share_one_budget_and_can_shrink_at_capacity() {
+        let dir = tempfile::tempdir().unwrap();
+        let ordinary = dir.path().join(format!(
+            "{}test.json",
+            crate::config::DAEMON_APPROVED_ENVELOPE_PREFIX
+        ));
+        File::create(&ordinary)
+            .unwrap()
+            .set_len(200 * 1024 * 1024)
+            .unwrap();
+        let root = dir.path().join("token-bundles");
+        fs::create_dir(&root).unwrap();
+        File::create(root.join("other.json"))
+            .unwrap()
+            .set_len(56 * 1024 * 1024)
+            .unwrap();
+        assert!(with_review_budget(dir.path(), &root.join("new.json"), 1, || Ok(())).is_err());
+        assert!(with_review_budget(dir.path(), &ordinary, 100, || Ok(())).is_ok());
+    }
+    #[test]
+    fn approval_extends_review_retention_but_cannot_renew_forever() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = BundleJournal::open(&dir.path().join("journal")).unwrap();
+        let (manifest, destination, lease, _) = fixture();
+        let id = journal.prepare(manifest, destination, lease).unwrap();
+        let created = journal.read(id).unwrap().created_at_unix;
+        assert!(journal.due_renewals(created).unwrap().is_empty());
+        journal.mark_approved(id).unwrap();
+        assert_eq!(journal.due_renewals(created).unwrap().len(), 1);
+        assert!(journal.due_renewals(created + 1).unwrap().is_empty());
+        journal.expire_reviews(created + 3 * 86400).unwrap();
+        assert!(journal.pending_cleanup().unwrap().is_empty());
+        journal.expire_reviews(created + 7 * 86400).unwrap();
+        assert_eq!(journal.pending_cleanup().unwrap(), vec![id]);
+        assert!(
+            journal
+                .due_renewals(created + 7 * 86400)
+                .unwrap()
+                .is_empty()
+        );
+        journal.mark_approved(id).unwrap();
+        assert!(journal.read(id).unwrap().expired);
+    }
+    #[tokio::test]
+    async fn expired_reviews_release_only_their_lease_without_fabricating_receipts() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = BundleJournal::open(&dir.path().join("journal")).unwrap();
+        let (manifest, destination, lease, _) = fixture();
+        let id = journal.prepare(manifest, destination, lease).unwrap();
+        let created = journal.read(id).unwrap().created_at_unix;
+        journal.expire_reviews(created + 3 * 86400 - 1).unwrap();
+        assert!(journal.pending_cleanup().unwrap().is_empty());
+        journal.expire_reviews(created + 3 * 86400).unwrap();
+        assert_eq!(journal.pending_cleanup().unwrap(), vec![id]);
+        let release = Release {
+            calls: AtomicUsize::new(0),
+            fail: false,
+        };
+        journal.cleanup(id, &release).await.unwrap();
+        assert!(journal.read(id).unwrap().receipt.is_none());
+        assert!(journal.pending_cleanup().unwrap().is_empty());
+        assert_eq!(release.calls.load(Ordering::SeqCst), 1);
+    }
+    #[tokio::test]
+    async fn durable_receipt_recovers_after_payload_cleanup_without_network() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = BundleJournal::open(&dir.path().join("journal")).unwrap();
+        let (manifest, destination, lease, receipt) = fixture();
+        let id = journal.prepare(manifest, destination, lease).unwrap();
+        journal
+            .acknowledge_authenticated(id, receipt.clone(), 101)
+            .unwrap();
+        journal
+            .cleanup(
+                id,
+                &Release {
+                    calls: AtomicUsize::new(0),
+                    fail: false,
+                },
+            )
+            .await
+            .unwrap();
+        let client = trace_commons_operator_client::Client::builder("http://127.0.0.1:1", "unused")
+            .bearer_token("test")
+            .build()
+            .unwrap();
+        let recovered = journal.upload_approved(id, &client).await.unwrap();
+        assert_eq!(recovered.manifest_digest, receipt.manifest_digest);
     }
     #[cfg(unix)]
     #[test]
