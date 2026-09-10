@@ -20,6 +20,7 @@ const SERVICE: &str = "trace-commons.near-ai.credentials";
 #[derive(Clone)]
 pub(crate) struct OsSecretBackend {
     store: Arc<NativeStore>,
+    service: &'static str,
 }
 
 impl OsSecretBackend {
@@ -36,12 +37,21 @@ impl OsSecretBackend {
 
         #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         {
-            Ok(Self { store })
+            Ok(Self {
+                store,
+                service: SERVICE,
+            })
         }
         #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
         {
             Err(CredentialError::Unavailable)
         }
+    }
+
+    pub(crate) fn commons() -> Result<Self, CredentialError> {
+        let mut backend = Self::new()?;
+        backend.service = "trace-commons.account.credentials";
+        Ok(backend)
     }
 
     fn entry(&self, reference: &CredentialReference) -> Result<Entry, CredentialError> {
@@ -55,7 +65,7 @@ impl OsSecretBackend {
         #[cfg(not(target_os = "windows"))]
         let modifiers = None;
         self.store
-            .build(SERVICE, &storage_key, modifiers)
+            .build(self.service, &storage_key, modifiers)
             .map_err(storage_error)
     }
 }
@@ -186,6 +196,42 @@ mod tests {
             assert!(!safe.to_string().contains(private));
             assert!(!format!("{safe:?}").contains(private));
         }
+    }
+
+    #[test]
+    #[ignore = "manual real Commons OS credential round trip; may prompt"]
+    fn real_commons_os_round_trip_removes_only_its_synthetic_entry() {
+        let backend = OsSecretBackend::commons().expect("OS store unavailable");
+        let reference = CredentialReference::allocate();
+        assert!(matches!(
+            backend.read(&reference),
+            Err(CredentialError::NoEntry)
+        ));
+        struct Cleanup(OsSecretBackend, CredentialReference);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = self.0.delete(&self.1);
+            }
+        }
+        let _cleanup = Cleanup(backend.clone(), reference);
+        let bytes = br#"{"version":1,"binding":"synthetic","payload":"c3ludGhldGlj"}"#;
+        backend.write(&reference, bytes).unwrap();
+        assert_eq!(
+            OsSecretBackend::commons()
+                .unwrap()
+                .read(&reference)
+                .unwrap(),
+            bytes
+        );
+        assert!(matches!(
+            OsSecretBackend::new().unwrap().read(&reference),
+            Err(CredentialError::NoEntry)
+        ));
+        backend.delete(&reference).unwrap();
+        assert!(matches!(
+            backend.read(&reference),
+            Err(CredentialError::NoEntry)
+        ));
     }
 
     /// Run explicitly on each supported OS with its user's credential store

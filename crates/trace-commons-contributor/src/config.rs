@@ -596,9 +596,8 @@ impl ConfigStore {
     }
 
     pub fn save_config(&self, cfg: &ContributorConfig) -> Result<()> {
-        let path = self.config_path();
         let body = serde_json::to_vec_pretty(cfg).context("serializing contributor config")?;
-        write_atomic_0600(&self.dir, &path, &body)
+        crate::daemon::commons_credentials::save_config(self, cfg, &body)
     }
 
     /// Path to the device key file. Does not imply the file exists.
@@ -607,17 +606,19 @@ impl ConfigStore {
     }
 
     pub fn save_device_key(&self, pkcs8_der: &[u8]) -> Result<()> {
-        let path = self.device_key_path();
-        write_atomic_0600(&self.dir, &path, pkcs8_der)
+        use crate::daemon::commons_credentials::{self, Kind};
+        let expected = commons_credentials::snapshot(self, Kind::Device)?;
+        if self.device_key_path().exists() {
+            anyhow::bail!("commons_device_identity_exists");
+        }
+        commons_credentials::replace(self, &expected, pkcs8_der, None)
     }
 
     pub fn load_device_key(&self) -> Result<Option<Vec<u8>>> {
-        let path = self.device_key_path();
-        if !path.exists() {
-            return Ok(None);
-        }
-        let bytes = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
-        Ok(Some(bytes))
+        crate::daemon::commons_credentials::load(
+            self,
+            crate::daemon::commons_credentials::Kind::Device,
+        )
     }
 
     fn receipts_path(&self) -> PathBuf {
@@ -680,12 +681,23 @@ impl ConfigStore {
 
     /// Atomically write a daemon state file at 0600.
     pub fn write_daemon_file(&self, name: &str, body: &[u8]) -> Result<()> {
+        if name == ACCOUNT_SESSION_FILE {
+            use crate::daemon::commons_credentials::{self, Kind};
+            let expected = commons_credentials::snapshot(self, Kind::Account)?;
+            return commons_credentials::replace(self, &expected, body, None);
+        }
         let path = self.daemon_path(name);
         write_atomic_0600(&self.dir, &path, body)
     }
 
     /// Read a daemon state file, or `None` when it does not exist yet.
     pub fn read_daemon_file(&self, name: &str) -> Result<Option<Vec<u8>>> {
+        if name == ACCOUNT_SESSION_FILE {
+            return crate::daemon::commons_credentials::load(
+                self,
+                crate::daemon::commons_credentials::Kind::Account,
+            );
+        }
         let path = self.daemon_path(name);
         match std::fs::read(&path) {
             Ok(body) => Ok(Some(body)),
@@ -696,6 +708,12 @@ impl ConfigStore {
 
     /// Remove a daemon runtime file (socket, lock). Missing is not an error.
     pub fn remove_daemon_file(&self, name: &str) -> Result<()> {
+        if name == ACCOUNT_SESSION_FILE {
+            return crate::daemon::commons_credentials::clear(
+                self,
+                &[crate::daemon::commons_credentials::Kind::Account],
+            );
+        }
         let path = self.daemon_path(name);
         match std::fs::remove_file(&path) {
             Ok(()) => Ok(()),
@@ -734,6 +752,17 @@ impl ConfigStore {
     /// that can be left behind if the process crashes between creating the
     /// temp file and renaming it into place in `write_atomic_0600`.
     pub fn wipe(&self) -> Result<()> {
+        use crate::daemon::commons_credentials::{self, Kind};
+        commons_credentials::clear_with(self, &[Kind::Device, Kind::Account], || {
+            self.wipe_files()
+        })?;
+        // The local state is gone even if the native service is locked. Keep
+        // its cleanup journal for retry rather than restoring either secret.
+        let _ = commons_credentials::cleanup(self);
+        Ok(())
+    }
+
+    fn wipe_files(&self) -> Result<()> {
         for name in [
             CONFIG_FILE,
             DEVICE_KEY_FILE,
@@ -917,7 +946,7 @@ pub(crate) mod tests_support {
 
 /// Write `body` to `path` atomically (temp file in the same dir, then
 /// rename), setting 0600 permissions on unix.
-fn write_atomic_0600(dir: &Path, path: &Path, body: &[u8]) -> Result<()> {
+pub(crate) fn write_atomic_0600(dir: &Path, path: &Path, body: &[u8]) -> Result<()> {
     let file_name = path
         .file_name()
         .context("destination path has no file name")?

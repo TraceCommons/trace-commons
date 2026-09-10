@@ -389,7 +389,9 @@ pub async fn submit_sessions(
     if opts.unenrolled_preview && !opts.dry_run {
         anyhow::bail!("unenrolled preview requires dry-run");
     }
-    let mut ctx = SubmitContext::new(store, cfg, opts, near_ai_settings_from_env())?;
+    let mut ctx = crate::daemon::run_blocking(|| {
+        SubmitContext::new(store, cfg, opts, near_ai_settings_from_env())
+    })?;
     let mut outcomes = Vec::with_capacity(sessions.len());
     for (source, session_ref) in sessions {
         outcomes.push(ctx.submit_one(source.as_ref(), &session_ref).await?);
@@ -1291,7 +1293,9 @@ pub async fn status(
     }
     let ids: Vec<Uuid> = receipts.iter().map(|r| r.submission_id).collect();
 
-    let device = DeviceIdentity::load_or_generate(store).context("loading device identity")?;
+    let device = DeviceIdentity::load_or_generate_async(store)
+        .await
+        .context("loading device identity")?;
     let issuer = IssuerClient::new(config_allowlist(cfg)).context("building issuer client")?;
     // Mint with an empty scopes/uses request rather than the submit path's
     // consent_scopes: the issuer resolves an empty request to the caller's
@@ -1351,7 +1355,9 @@ pub async fn set_profile(
     display_handle: &str,
     bio: Option<&str>,
 ) -> Result<CommunityProfile> {
-    let device = DeviceIdentity::load_or_generate(store).context("loading device identity")?;
+    let device = DeviceIdentity::load_or_generate_async(store)
+        .await
+        .context("loading device identity")?;
     let issuer = IssuerClient::new(config_allowlist(cfg)).context("building issuer client")?;
     // Same empty-scope mint as `status`: the issuer resolves it to this
     // caller's full grant ceiling, so claiming a handle does not depend on
@@ -1392,7 +1398,9 @@ pub async fn mint_account_login_link(
     store: &ConfigStore,
     cfg: &ContributorConfig,
 ) -> Result<String> {
-    let device = DeviceIdentity::load_or_generate(store).context("loading device identity")?;
+    let device = DeviceIdentity::load_or_generate_async(store)
+        .await
+        .context("loading device identity")?;
     let issuer = IssuerClient::new(config_allowlist(cfg)).context("building issuer client")?;
     let token = mint_status_claim(&issuer, cfg, &device, Utc::now())
         .await
@@ -1411,7 +1419,9 @@ pub async fn mint_account_login_link(
 /// promises, so it belongs in the tool the contributor already has rather
 /// than only in a page they may never have been given access to.
 pub async fn clear_profile(store: &ConfigStore, cfg: &ContributorConfig) -> Result<()> {
-    let device = DeviceIdentity::load_or_generate(store).context("loading device identity")?;
+    let device = DeviceIdentity::load_or_generate_async(store)
+        .await
+        .context("loading device identity")?;
     let issuer = IssuerClient::new(config_allowlist(cfg)).context("building issuer client")?;
     let token = mint_status_claim(&issuer, cfg, &device, Utc::now())
         .await
@@ -1486,7 +1496,9 @@ pub async fn fetch_score_attestation(
     store: &ConfigStore,
     cfg: &ContributorConfig,
 ) -> Result<String> {
-    let device = DeviceIdentity::load_or_generate(store).context("loading device identity")?;
+    let device = DeviceIdentity::load_or_generate_async(store)
+        .await
+        .context("loading device identity")?;
     let issuer = IssuerClient::new(config_allowlist(cfg)).context("building issuer client")?;
     // Same empty-scope mint as `status`: the attestation is a read of scores
     // the server already holds, so it must not depend on whatever scopes were
@@ -1617,7 +1629,9 @@ pub async fn await_scoped_score_attestation(
     timeout: StdDuration,
     poll_interval: StdDuration,
 ) -> Result<ScopedAttestation> {
-    let device = DeviceIdentity::load_or_generate(store).context("loading device identity")?;
+    let device = DeviceIdentity::load_or_generate_async(store)
+        .await
+        .context("loading device identity")?;
     let issuer = IssuerClient::new(config_allowlist(cfg)).context("building issuer client")?;
     // Same empty-scope mint as `status` and the unscoped attestation: a read
     // of scores the server already holds must not depend on whatever scopes

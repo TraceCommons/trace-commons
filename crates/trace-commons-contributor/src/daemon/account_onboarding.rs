@@ -9,8 +9,8 @@
 
 use super::ipc::{DaemonShared, ERR_BAD_PARAMS, ERR_UNAVAILABLE, Request, Response};
 use crate::config::{
-    ACCOUNT_SESSION_FILE, CONTRIBUTOR_CONFIG_SCHEMA_VERSION, ConfigStore, ContributorConfig,
-    WitnessSettings, allowlist_for,
+    CONTRIBUTOR_CONFIG_SCHEMA_VERSION, ConfigStore, ContributorConfig, WitnessSettings,
+    allowlist_for,
 };
 use crate::identity::DeviceIdentity;
 use anyhow::{Result, anyhow, bail};
@@ -449,6 +449,13 @@ pub fn handle_cancel(shared: &DaemonShared, req: &Request) -> Response {
         return Response::err(req.id, ERR_BAD_PARAMS, "near_signup_unknown");
     };
     if matches!(a.state.status, "starting" | "waiting_for_wallet") {
+        if super::commons_credentials::invalidate(&shared.store).is_err() {
+            return Response::err(
+                req.id,
+                ERR_UNAVAILABLE,
+                "commons_credential_storage_unavailable",
+            );
+        }
         a.state.status = "cancelled";
         if let Some(task) = &a.abort {
             task.abort();
@@ -507,6 +514,8 @@ async fn prepare(
     ingest: trace_commons_operator_client::Client,
     id: &str,
 ) -> Result<serde_json::Value> {
+    let credential_snapshot =
+        super::commons_credentials::snapshot(store, super::commons_credentials::Kind::Account)?;
     let (issuer, audience, witness, published) =
         validated_capability(&options.ingest_url, Path::Wallet)
             .await
@@ -539,7 +548,7 @@ async fn prepare(
     }
     options.issuer_url = issuer;
     options.audience = audience;
-    let identity = DeviceIdentity::load_or_generate(store)?;
+    let identity = DeviceIdentity::load_or_generate_async(store).await?;
     let verifier = random()?;
     let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .encode(Sha256::digest(verifier.as_bytes()));
@@ -627,24 +636,30 @@ async fn prepare(
             .await
         }
         .await;
+        let publish_dir = dir.clone();
+        let published = tokio::task::spawn_blocking(move || {
+            result.and_then(|completed| {
+                persist(
+                    &publish_dir,
+                    &options,
+                    &identity,
+                    completed,
+                    Some(&credential_snapshot),
+                    witness,
+                    receipt_endpoint,
+                )
+            })
+        })
+        .await;
         let mut map = attempts().lock().expect("signup state lock");
         if let Some(entry) = map
             .get_mut(&dir)
             .filter(|a| a.state.attempt_id == attempt_id && a.state.status == "waiting_for_wallet")
         {
-            entry.state.status = match result.and_then(|completed| {
-                persist(
-                    &dir,
-                    &options,
-                    &identity,
-                    completed,
-                    &attempt_id,
-                    witness,
-                    receipt_endpoint,
-                )
-            }) {
-                Ok(()) => "complete",
-                Err(_) => "failed",
+            entry.state.status = if matches!(published, Ok(Ok(()))) {
+                "complete"
+            } else {
+                "failed"
             };
             entry.abort = None;
         }
@@ -823,7 +838,7 @@ pub(super) fn signup_written_config(
         &options,
         &identity,
         completed,
-        "fixture",
+        None,
         witness,
         receipt_endpoint,
     )
@@ -839,7 +854,7 @@ fn persist(
     options: &Options,
     identity: &DeviceIdentity,
     result: Completed,
-    id: &str,
+    expected: Option<&super::commons_credentials::Snapshot>,
     witness: WitnessSettings,
     receipt_endpoint: Option<String>,
 ) -> Result<()> {
@@ -887,25 +902,29 @@ fn persist(
         expires_at: Utc::now() + chrono::Duration::seconds(result.expires_in_secs),
         account_id: result.account_id,
     };
-    let session_bytes = serde_json::to_vec(&session)?;
-    // Stage the config, then persist the session before publishing enrollment.
-    // A failed session write leaves no enrolled config to block a fresh attempt.
-    // The final create-only link still cannot replace concurrent invite enrollment.
-    let temporary = format!("near-signup-{id}.json");
-    store.write_daemon_file(&temporary, &serde_json::to_vec(&config)?)?;
-    let published = store
-        .write_daemon_file(ACCOUNT_SESSION_FILE, &session_bytes)
-        .and_then(|()| {
-            std::fs::hard_link(dir.join(&temporary), dir.join("contributor.json"))
-                .map_err(Into::into)
-        });
-    let _ = store.remove_daemon_file(&temporary);
-    published
+    let fresh;
+    let expected = match expected {
+        Some(expected) => expected,
+        None => {
+            fresh = super::commons_credentials::snapshot(
+                &store,
+                super::commons_credentials::Kind::Account,
+            )?;
+            &fresh
+        }
+    };
+    super::commons_credentials::replace(
+        &store,
+        expected,
+        &serde_json::to_vec(&session)?,
+        Some(&config),
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ACCOUNT_SESSION_FILE;
     #[test]
     fn callback_requires_exact_path_state_and_single_result() {
         let state = "expected";
@@ -1349,7 +1368,7 @@ mod tests {
                     &options,
                     &identity,
                     completed(),
-                    "failed-session",
+                    None,
                     witness.clone(),
                     None
                 )
@@ -1363,7 +1382,7 @@ mod tests {
                 &options,
                 &identity,
                 completed(),
-                "first",
+                None,
                 witness.clone(),
                 receipt_endpoint.clone(),
             )
@@ -1384,7 +1403,7 @@ mod tests {
                     &options,
                     &identity,
                     completed(),
-                    "second",
+                    None,
                     witness,
                     None
                 )

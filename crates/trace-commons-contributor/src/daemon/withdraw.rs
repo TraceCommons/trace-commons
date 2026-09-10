@@ -40,8 +40,8 @@ pub const ERR_ACCOUNT_SESSION_REQUIRED: &str = "account-session-required";
 /// be): the caller must then report [`ERR_ACCOUNT_SESSION_REQUIRED`] rather
 /// than fall back to the device key, which is deliberately not accepted for
 /// withdrawal.
-fn account_session_token(shared: &DaemonShared) -> Option<String> {
-    crate::account_auth::load_token(&shared.store)
+fn account_session_token(shared: &DaemonShared) -> anyhow::Result<Option<String>> {
+    super::run_blocking(|| crate::account_auth::try_load_token(&shared.store))
 }
 
 fn parse_submission_id(params: &serde_json::Value) -> Result<Uuid, &'static str> {
@@ -78,8 +78,16 @@ pub(super) async fn handle_withdraw(shared: &DaemonShared, req: &Request) -> Res
         Ok(id) => id,
         Err(m) => return Response::err(req.id, ERR_BAD_PARAMS, m),
     };
-    let Some(token) = account_session_token(shared) else {
-        return Response::err(req.id, ERR_UNAVAILABLE, ERR_ACCOUNT_SESSION_REQUIRED);
+    let token = match account_session_token(shared) {
+        Ok(Some(token)) => token,
+        Ok(None) => return Response::err(req.id, ERR_UNAVAILABLE, ERR_ACCOUNT_SESSION_REQUIRED),
+        Err(_) => {
+            return Response::err(
+                req.id,
+                ERR_UNAVAILABLE,
+                "commons_credential_storage_unavailable",
+            );
+        }
     };
     let Ok(Some(cfg)) = shared.store.load_config() else {
         return Response::err(req.id, ERR_UNAVAILABLE, "not-logged-in");
@@ -126,8 +134,16 @@ pub(super) async fn handle_withdraw_bulk(shared: &DaemonShared, req: &Request) -
         Some(_) => return Response::err(req.id, ERR_BAD_PARAMS, "status-invalid"),
         None => return Response::err(req.id, ERR_BAD_PARAMS, "status-required"),
     };
-    let Some(token) = account_session_token(shared) else {
-        return Response::err(req.id, ERR_UNAVAILABLE, ERR_ACCOUNT_SESSION_REQUIRED);
+    let token = match account_session_token(shared) {
+        Ok(Some(token)) => token,
+        Ok(None) => return Response::err(req.id, ERR_UNAVAILABLE, ERR_ACCOUNT_SESSION_REQUIRED),
+        Err(_) => {
+            return Response::err(
+                req.id,
+                ERR_UNAVAILABLE,
+                "commons_credential_storage_unavailable",
+            );
+        }
     };
     let Ok(Some(cfg)) = shared.store.load_config() else {
         return Response::err(req.id, ERR_UNAVAILABLE, "not-logged-in");
@@ -273,7 +289,7 @@ mod tests {
         // withdrawal reports `account-session-required` rather than reaching
         // for the device key.
         let s = shared();
-        assert_eq!(account_session_token(&s), None);
+        assert_eq!(account_session_token(&s).unwrap(), None);
     }
 
     #[test]
@@ -295,7 +311,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            account_session_token(&s).as_deref(),
+            account_session_token(&s).unwrap().as_deref(),
             Some("tcn1_dGVuYW50.secret")
         );
     }

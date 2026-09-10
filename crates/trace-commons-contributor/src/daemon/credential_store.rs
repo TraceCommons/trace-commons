@@ -278,14 +278,25 @@ impl<B: SecretBackend> CredentialStore<B> {
         reference: &CredentialReference,
         bundle: &SecretBundle,
     ) -> Result<(), CredentialError> {
+        self.prepare_bytes_at(reference, &bundle.encode()?)
+    }
+
+    /// Shared immutable publication primitive for separately typed credential domains.
+    pub(crate) fn prepare_bytes_at(
+        &self,
+        reference: &CredentialReference,
+        bytes: &[u8],
+    ) -> Result<(), CredentialError> {
         reference.validate()?;
-        let bytes = bundle.encode()?;
+        if bytes.is_empty() || bytes.len() > MAX_SECRET_BYTES {
+            return Err(CredentialError::TooLarge);
+        }
         match self.backend.read(reference) {
             Err(CredentialError::NoEntry) => {}
             Ok(_) => return Err(CredentialError::AlreadyExists),
             Err(error) => return Err(error),
         }
-        let result = self.backend.write(reference, &bytes).and_then(|()| {
+        let result = self.backend.write(reference, bytes).and_then(|()| {
             let persisted = self.backend.read(reference)?;
             if persisted != bytes {
                 return Err(CredentialError::VerificationFailed);
@@ -299,6 +310,18 @@ impl<B: SecretBackend> CredentialStore<B> {
             return Err(error);
         }
         Ok(())
+    }
+
+    pub(crate) fn load_bytes(
+        &self,
+        reference: &CredentialReference,
+    ) -> Result<Vec<u8>, CredentialError> {
+        reference.validate()?;
+        let bytes = self.backend.read(reference)?;
+        if bytes.len() > MAX_SECRET_BYTES {
+            return Err(CredentialError::TooLarge);
+        }
+        Ok(bytes)
     }
 
     pub(crate) fn load(

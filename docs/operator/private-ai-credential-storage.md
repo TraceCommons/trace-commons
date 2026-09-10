@@ -12,12 +12,10 @@ An older app ignores the new credential reference and sees no Private AI sign-in
 
 ## What moves
 
-Only the Private AI inference key and renewable Private AI sign-in move. The TraceCommons account access token in `account-session.json` and the device identity private key remain in local files, protected by the existing file permissions. The next credential-storage change must cover those two independently of Cloud authentication.
+The Private AI inference key and renewable Private AI sign-in use the Cloud credential lifecycle. The Commons account session and device identity now use a separate OS namespace and binding domains; see [Commons credential storage](commons-credential-storage.md) for migration, rollback, and recovery behavior.
 
 Copying or synchronizing the settings directory no longer copies the migrated Cloud secrets. Historical copies can still contain plaintext credentials, and the operating system's own credential-store backup rules still apply. This migration does not protect against every process running with the contributor's authority.
 
-## Follow-up: Commons credential storage
+## Commons credentials
 
-Move the Commons account session and device identity into OS storage with independently reviewed migration and recovery behavior. Preserve the existing device identity through upgrade; replacing it would change the server's device binding.
-
-Acceptance requires verified write-before-removal, unavailable-store recovery, withdrawal and sign-out races, restart during migration, rollback behavior, and real platform round-trips. Account switching must never expose a previous contributor's account token. Track the account-session and device-key work together while retaining separate authority from the Cloud credential pair.
+Commons credentials retain separate authority from Cloud authentication. Their migration preserves the enrolled device key and rejects stale sign-in and sign-out operations. Validation and platform-test instructions are recorded in the [Commons storage runbook](commons-credential-storage.md).
