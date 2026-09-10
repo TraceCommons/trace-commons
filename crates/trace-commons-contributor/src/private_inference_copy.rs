@@ -1096,8 +1096,7 @@ pub const CREDENTIAL_COST: &str = "Sign in through your browser. The app creates
      The app also keeps you signed in to check your balance and, when you ask, \
      join a commons. This saved sign-in can read your account and create more keys.\n\n\
      Your key and saved sign-in are stored in this computer's system credential store. \
-     You may be asked to allow access when the app starts. Your commons sign-in and \
-     device identity are stored separately in local files.";
+     You may be asked to allow access when the app starts.";
 
 /// The button that starts the ceremony.
 pub const CREDENTIAL_OBTAIN: &str = "Sign in with NEAR AI";
