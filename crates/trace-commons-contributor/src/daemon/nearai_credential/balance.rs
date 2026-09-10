@@ -232,8 +232,7 @@ fn stored_connection(shared: &DaemonShared) -> Result<Option<Connection>> {
         .commit
         .lock()
         .map_err(|_| anyhow::anyhow!("near_ai_credential_unavailable"))?;
-    // A ceremony may have changed disk before the proxy adopted its key.
-    let settings = crate::daemon::settings::DaemonSettings::load(&shared.store)?;
+    let settings = crate::daemon::nearai_credential::session::runtime_snapshot(shared, &_commit)?;
     Ok(settings.near_ai_session.map(|session| Connection {
         session,
         organization: settings.near_ai_inference.map(|key| key.organization_id),
@@ -418,7 +417,7 @@ mod tests {
             refresh_token_expires_at: None,
             stored_at: Utc::now(),
         });
-        settings.save(&shared.store).unwrap();
+        settings.save_for_test(&shared.store).unwrap();
     }
 
     /// Every bearer the stub was shown, in order, so a test can prove which
@@ -577,7 +576,7 @@ mod tests {
         // The rotation reached disk, not only memory. The token that bought
         // this balance is dead at the service; a daemon restarting on the old
         // one would be locked out until the contributor re-ran the ceremony.
-        let on_disk = DaemonSettings::load(&s.store)
+        let on_disk = DaemonSettings::load_with_cloud_credentials(&s.store)
             .unwrap()
             .near_ai_session
             .unwrap();
@@ -647,7 +646,7 @@ mod tests {
         // recovery is to re-run the ceremony, which overwrites both records
         // without a forget first.
         assert_eq!(
-            DaemonSettings::load(&s.store)
+            DaemonSettings::load_with_cloud_credentials(&s.store)
                 .unwrap()
                 .near_ai_session
                 .unwrap()
@@ -726,7 +725,7 @@ mod tests {
         assert!(report.to_value()["remaining_nanos"].is_null());
         // Unreachable is not spent: the token stays put.
         assert_eq!(
-            DaemonSettings::load(&s.store)
+            DaemonSettings::load_with_cloud_credentials(&s.store)
                 .unwrap()
                 .near_ai_session
                 .unwrap()

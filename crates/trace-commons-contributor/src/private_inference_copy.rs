@@ -1105,7 +1105,7 @@ pub const CREDENTIAL_WHAT: &str = "For Private AI to answer your calls, this com
 /// [`CREDENTIAL_FORGET_EXPLAINS`] says so again at the moment it matters.
 pub const CREDENTIAL_COST: &str = "Signing in opens your browser and creates an inference key in your own \
      Private AI account. This app keeps that key and a renewable Private AI sign-in \
-     on this computer. The saved sign-in can read your account and create more \
+     in this computer's system credential store. The saved sign-in can read your account and create more \
      keys; the app uses it to read your balance and, when you ask, join a commons. \
      You can remove the inference key in your Private AI account.";
 
@@ -1224,6 +1224,12 @@ pub enum CredentialAction {
 #[must_use]
 pub fn credential_state_line(label: &str) -> &'static str {
     match label {
+        LABEL_CREDENTIAL_STORAGE_UNAVAILABLE => {
+            "Private AI sign-in could not be read. Unlock your system credential store and restart the app."
+        }
+        LABEL_CREDENTIAL_CLEANUP_REQUIRED => {
+            "Private AI sign-in is disabled here, but its saved credentials could not be deleted. Unlock your system credential store, then choose Forget again."
+        }
         "" => CREDENTIAL_UNREPORTED,
         LABEL_CREDENTIAL_ABSENT => CREDENTIAL_ABSENT,
         LABEL_CREDENTIAL_OBTAINING => CREDENTIAL_OBTAINING,
@@ -1271,7 +1277,9 @@ pub fn credential_action(label: &str) -> CredentialAction {
             CredentialAction::Obtain
         }
         LABEL_CREDENTIAL_OBTAINING => CredentialAction::Cancel,
-        LABEL_CREDENTIAL_PRESENT => CredentialAction::Forget,
+        LABEL_CREDENTIAL_PRESENT
+        | LABEL_CREDENTIAL_STORAGE_UNAVAILABLE
+        | LABEL_CREDENTIAL_CLEANUP_REQUIRED => CredentialAction::Forget,
         _ => CredentialAction::None,
     }
 }
@@ -2487,8 +2495,9 @@ pub use crate::daemon::nearai_credential::balance::{
 /// produces them -- the same rule the listener labels below follow, and for
 /// the same reason.
 pub use crate::daemon::nearai_credential::{
-    LABEL_CREDENTIAL_ABSENT, LABEL_CREDENTIAL_CANCELLED, LABEL_CREDENTIAL_FAILED,
-    LABEL_CREDENTIAL_OBTAINING, LABEL_CREDENTIAL_PRESENT,
+    LABEL_CREDENTIAL_ABSENT, LABEL_CREDENTIAL_CANCELLED, LABEL_CREDENTIAL_CLEANUP_REQUIRED,
+    LABEL_CREDENTIAL_FAILED, LABEL_CREDENTIAL_OBTAINING, LABEL_CREDENTIAL_PRESENT,
+    LABEL_CREDENTIAL_STORAGE_UNAVAILABLE,
 };
 pub use crate::daemon::private_inference::{
     LABEL_CRASHED, LABEL_OFF, LABEL_PORT_IN_USE, LABEL_RUNNING, LABEL_RUNNING_ANSWERED_ELSEWHERE,
@@ -3229,7 +3238,7 @@ mod tests {
         for fragment in [
             "browser",
             "creates an inference key",
-            "on this computer",
+            "system credential store",
             "renewable Private AI sign-in",
             "can read your account and create more keys",
         ] {

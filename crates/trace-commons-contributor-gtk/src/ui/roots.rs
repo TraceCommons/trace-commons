@@ -37,8 +37,13 @@ use trace_commons_contributor::source::discovery::{self, SourceCandidate};
 use super::style::{self, space};
 use crate::copy;
 
+#[cfg(test)]
+#[path = "roots_submission_tests.rs"]
+mod submission_tests;
+
 /// One agent's row: the discovered evidence, and the two answers.
 struct Choice {
+    group: gtk::Box,
     /// The folder [`SourceDeclaration::Watch`] would name. Starts at the
     /// discovered path and changes only if the contributor picks another.
     ///
@@ -187,12 +192,17 @@ fn present_with<F>(
     // Re-evaluated on every toggle rather than tracked incrementally: the
     // rule is "both answered", and reading both is cheaper than keeping a
     // counter honest across three widgets per row.
+    let pending = Rc::new(std::cell::Cell::new(false));
     let refresh = {
         let choices = choices.clone();
         let continue_button = continue_button.clone();
+        let pending = pending.clone();
         move || {
             let complete = choices.iter().all(|c| c.declaration().is_some());
-            continue_button.set_sensitive(complete);
+            for choice in choices.iter() {
+                choice.group.set_sensitive(!pending.get());
+            }
+            continue_button.set_sensitive(complete && !pending.get());
         }
     };
     let refresh = Rc::new(refresh);
@@ -221,6 +231,10 @@ fn present_with<F>(
         let failure = failure.clone();
         let on_declared = Rc::new(on_declared);
         move |_| {
+            if pending.replace(true) {
+                return;
+            }
+            refresh();
             // Every answered choice, not a hand-listed pair: this screen
             // renders one row per discovered source, so a source it can
             // show is a source whose answer must be written. The button is
@@ -228,21 +242,38 @@ fn present_with<F>(
             // re-reads rather than trusting that -- an unanswered row is
             // simply absent, and `declare_sources` refuses an incomplete
             // declaration.
-            let answers: Vec<(&str, SourceDeclaration)> = choices
+            let answers: Vec<(String, SourceDeclaration)> = choices
                 .iter()
-                .filter_map(|c| c.declaration().map(|d| (c.source.as_str(), d)))
+                .filter_map(|c| c.declaration().map(|d| (c.source.clone(), d)))
                 .collect();
-            match crate::backend::declare_sources(&dir, &answers) {
-                Ok(()) => {
-                    failure.set_visible(false);
-                    window.close();
-                    on_declared();
+            let (tx, rx) = async_channel::bounded(1);
+            let dir = dir.clone();
+            std::thread::spawn(move || {
+                let answers: Vec<_> = answers
+                    .iter()
+                    .map(|(source, declaration)| (source.as_str(), declaration.clone()))
+                    .collect();
+                let _ = tx.send_blocking(crate::backend::declare_sources(&dir, &answers));
+            });
+            let pending = pending.clone();
+            let refresh = refresh.clone();
+            let failure = failure.clone();
+            let window = window.clone();
+            let on_declared = on_declared.clone();
+            gtk::glib::spawn_future_local(async move {
+                let result = rx.recv().await;
+                pending.set(false);
+                refresh();
+                match result {
+                    Ok(Ok(())) => {
+                        failure.set_visible(false);
+                        window.close();
+                        on_declared();
+                    }
+                    // Fixed copy keeps paths and OS errors out of the UI.
+                    _ => failure.set_visible(true),
                 }
-                // The label is fixed and never carries the path: a settings
-                // failure here is the one input that is itself a filesystem
-                // location.
-                Err(_) => failure.set_visible(true),
-            }
+            });
         }
     });
 
@@ -309,11 +340,15 @@ fn build_choice(
     let path = Rc::new(RefCell::new(candidate.path.clone()));
 
     choose.connect_clicked({
+        let group = group.clone();
         let window = window.clone();
         let path_label = path_label.clone();
         let watch = watch.clone();
         let path = path.clone();
         move |_| {
+            if !group.is_sensitive() {
+                return;
+            }
             let chooser = gtk::FileChooserNative::new(
                 Some(copy::ROOTS_CHOOSE),
                 Some(&window),
@@ -324,8 +359,10 @@ fn build_choice(
             let path_label = path_label.clone();
             let watch = watch.clone();
             let path = path.clone();
+            let group = group.clone();
             chooser.connect_response(move |chooser, response| {
-                if response == gtk::ResponseType::Accept
+                if group.is_sensitive()
+                    && response == gtk::ResponseType::Accept
                     && let Some(chosen) = chooser.file().and_then(|f| f.path())
                 {
                     path_label.set_label(chosen.to_string_lossy().as_ref());
@@ -344,6 +381,7 @@ fn build_choice(
     });
 
     Choice {
+        group,
         path,
         watch,
         off,

@@ -86,6 +86,22 @@ if [ "$WESTON_UP" -ne 1 ]; then
 else
   echo "weston headless compositor is up on $WAYLAND_SOCKET"
 
+  # Drive the real roots controls while settings publication is blocked,
+  # then refused, then retried. The normal test step has no display.
+  GTK_MANIFEST="$(dirname "$SHELL_BIN")/../../Cargo.toml"
+  if ! WAYLAND_DISPLAY="$WAYLAND_SOCKET" GDK_BACKEND=wayland GSETTINGS_BACKEND=memory \
+      cargo test --locked --manifest-path "$GTK_MANIFEST" --lib \
+      ui::roots::submission_tests::pending_submission_is_single_and_failure_allows_retry \
+      -- --exact --ignored --test-threads=1; then
+    fail "roots submission did not preserve pending, failure and retry behavior"
+  fi
+  if ! WAYLAND_DISPLAY="$WAYLAND_SOCKET" GDK_BACKEND=wayland GSETTINGS_BACKEND=memory \
+      cargo test --locked --manifest-path "$GTK_MANIFEST" --bin trace-commons-shell \
+      startup_tests::quit_during_pending_start_suppresses_completion_and_releases_daemon \
+      -- --exact --ignored --test-threads=1; then
+    fail "application shutdown did not retire pending startup"
+  fi
+
   # --- axis 2: a real portal daemon ------------------------------------------
   #
   # ORDER MATTERS, and getting it wrong is why the first run of this job proved
@@ -250,4 +266,3 @@ else
     echo "RequestBackground reached the live portal daemon and got a real (non-absence) reply"
   fi
 fi
-

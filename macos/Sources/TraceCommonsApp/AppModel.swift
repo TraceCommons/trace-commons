@@ -74,6 +74,12 @@ final class AppModel: ObservableObject {
     }
 
     @Published private(set) var startup: Startup = .starting
+    @Published private(set) var isStartingDaemon = false
+    private let daemonStartup: DaemonStartup
+
+    init(daemonStartup: DaemonStartup? = nil) {
+        self.daemonStartup = daemonStartup ?? DaemonStartup()
+    }
     @Published private(set) var status: DaemonStatus = .unknown
     @Published private(set) var pending: [QueueEntry] = [] {
         didSet { recomputeWaiting() }
@@ -881,22 +887,30 @@ final class AppModel: ObservableObject {
     /// `settingsJSON` is the roots screen's mechanism: the C ABI persists it
     /// and only then evaluates whether both session roots are declared, so
     /// one call both records the contributor's answer and starts the watcher.
-    func startDaemon(at path: String, settingsJSON: String?) {
-        do {
-            let daemon = try TCDaemon(configDir: path, settingsJSON: settingsJSON)
-            let client = DaemonClient(daemon: daemon)
-            self.daemon = daemon
-            self.client = client
-            startup = .running
-            subscribe()
-            refreshAll()
-        } catch TCDaemon.TCError.rootsNotDeclared {
-            // Not a dead end any more: the roots screen renders on this
-            // state and calls back into `startDaemon` with the two folders
-            // the contributor picked.
-            startup = .needsRoots
-        } catch {
-            startup = .refused("\(error)")
+    func startDaemon(
+        at path: String,
+        settingsJSON: String?,
+        completion: (@MainActor @Sendable (Startup) -> Void)? = nil
+    ) {
+        guard daemon == nil, !daemonStartup.isStarting else { return }
+        isStartingDaemon = true
+        daemonStartup.start(configDirectory: path, settingsJSON: settingsJSON) { [weak self] result in
+            guard let self else { return false }
+            self.isStartingDaemon = false
+            switch result {
+            case .success(let daemon):
+                self.daemon = daemon
+                self.client = DaemonClient(daemon: daemon)
+                self.startup = .running
+                self.subscribe()
+                self.refreshAll()
+            case .failure(TCDaemon.TCError.rootsNotDeclared):
+                self.startup = .needsRoots
+            case .failure(let error):
+                self.startup = .refused("\(error)")
+            }
+            completion?(self.startup)
+            return true
         }
     }
 
@@ -1000,6 +1014,8 @@ final class AppModel: ObservableObject {
     /// a few seconds in the bad case; that is the correct trade against
     /// freeing memory another thread is reading.
     func shutdown() {
+        daemonStartup.cancel()
+        isStartingDaemon = false
         undoTask?.cancel()
         let subscription = self.subscription
         let daemon = self.daemon

@@ -187,6 +187,12 @@ impl std::fmt::Debug for NearAiSession {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DaemonSettings {
+    /// Opaque OS entry and Cloud metadata. Legacy documents omit this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloud_credentials: Option<crate::daemon::stored_cloud_credentials::StoredCloudCredentials>,
+    /// Runtime-only failure, never a credential or a platform error string.
+    #[serde(skip)]
+    pub cloud_storage_unavailable: bool,
     pub schema_version: String,
     pub poll_interval_secs: u64,
     pub quiescence_secs: u64,
@@ -234,10 +240,9 @@ pub struct DaemonSettings {
     /// IronWire's own `config.json`, which a contributor may edit and which
     /// `StartupProbes::Configured` exists to respect. Writing a minted key
     /// into that file would be exactly the violation the rule forbids. So the
-    /// credential lives here instead, in the daemon's own settings document,
-    /// which is written 0600 inside a 0700 directory and is already in the
-    /// account-removal inventory -- meaning wiping an account erases this key
-    /// with no further change.
+    /// credential is resolved here in memory from the OS store. Settings
+    /// persist only `cloud_credentials` metadata after verified migration;
+    /// this field remains readable for upgrades from the old plaintext format.
     ///
     /// `#[serde(default)]` so a settings file written before this field
     /// existed loads without one rather than failing to parse.
@@ -718,6 +723,8 @@ impl Default for DaemonSettings {
             near_ai: None,
             near_ai_inference: None,
             near_ai_session: None,
+            cloud_credentials: None,
+            cloud_storage_unavailable: false,
             claude_source: None,
             codex_source: None,
             gemini_source: None,
@@ -734,6 +741,23 @@ impl Default for DaemonSettings {
 }
 
 impl DaemonSettings {
+    /// May prompt for OS storage. Call on a blocking worker before starting
+    /// Cloud consumers.
+    pub fn load_with_cloud_credentials(store: &ConfigStore) -> Result<Self> {
+        crate::daemon::cloud_credential_lifecycle::load_for_runtime(store)
+    }
+
+    /// Preserve existing metadata during preference edits without requiring an
+    /// available OS entry. Legacy plaintext must migrate before the next save.
+    /// Call on a blocking worker: migration may prompt for OS storage.
+    pub fn load_for_preferences(store: &ConfigStore) -> Result<Self> {
+        let settings = Self::load(store)?;
+        if settings.near_ai_inference.is_some() || settings.near_ai_session.is_some() {
+            Self::load_with_cloud_credentials(store)
+        } else {
+            Ok(settings)
+        }
+    }
     /// Load persisted settings, falling back to defaults when the daemon has
     /// never been configured on this machine.
     pub fn load(store: &ConfigStore) -> Result<Self> {
@@ -822,7 +846,32 @@ impl DaemonSettings {
     }
 
     pub fn save(&self, store: &ConfigStore) -> Result<()> {
-        let body = serde_json::to_vec_pretty(self).context("serializing daemon settings")?;
+        let locks = crate::daemon::nearai_credential::session::coordination(store.dir())?;
+        let _commit = locks.commit.lock()?;
+        // A preference writer may not restore a connection replaced since
+        // its snapshot was read. Credential mutations use the lifecycle.
+        crate::daemon::cloud_credential_lifecycle::ensure_current(&Self::load(store)?, self)?;
+        self.save_locked(store)
+    }
+
+    pub(crate) fn save_locked(&self, store: &ConfigStore) -> Result<()> {
+        let has_secrets = self.near_ai_inference.is_some() || self.near_ai_session.is_some();
+        if has_secrets
+            && !self.cloud_credentials.as_ref().is_some_and(|metadata| {
+                metadata.matches(
+                    self.near_ai_inference.as_ref(),
+                    self.near_ai_session.as_ref(),
+                )
+            })
+        {
+            return Err(anyhow::anyhow!(
+                "near_ai_credential_storage_migration_required"
+            ));
+        }
+        let mut persisted = self.clone();
+        persisted.near_ai_inference = None;
+        persisted.near_ai_session = None;
+        let body = serde_json::to_vec_pretty(&persisted).context("serializing daemon settings")?;
         store.write_daemon_file(DAEMON_SETTINGS_FILE, &body)
     }
 }
@@ -1157,13 +1206,15 @@ mod tests {
     #[test]
     fn the_credential_round_trips_and_an_older_settings_file_still_loads() {
         let (_dir, store) = temp_store();
-        let settings = DaemonSettings {
+        let mut settings = DaemonSettings {
             near_ai_inference: Some(credential()),
             ..Default::default()
         };
-        settings.save(&store).unwrap();
+        settings.save_for_test(&store).unwrap();
         assert_eq!(
-            DaemonSettings::load(&store).unwrap().near_ai_inference,
+            DaemonSettings::load_with_cloud_credentials(&store)
+                .unwrap()
+                .near_ai_inference,
             settings.near_ai_inference
         );
 
@@ -1171,6 +1222,7 @@ mod tests {
             serde_json::from_slice(&std::fs::read(store.dir().join(DAEMON_SETTINGS_FILE)).unwrap())
                 .unwrap();
         older.as_object_mut().unwrap().remove("near_ai_inference");
+        older.as_object_mut().unwrap().remove("cloud_credentials");
         std::fs::write(
             store.dir().join(DAEMON_SETTINGS_FILE),
             serde_json::to_vec(&older).unwrap(),

@@ -69,7 +69,7 @@ pub const ERR_UNKNOWN_SOURCE: &str = "unknown-source";
 /// thing to leave behind than an unanswered question.
 pub fn declare_sources(dir: &std::path::Path, answers: &[(&str, SourceDeclaration)]) -> Result<()> {
     let store = ConfigStore::open(dir.to_path_buf())?;
-    let mut settings = daemon::settings::DaemonSettings::load(&store)?;
+    let mut settings = daemon::settings::DaemonSettings::load_for_preferences(&store)?;
     // Every answer the screen collected, keyed by adapter name rather than
     // by a list of fields kept here. A source the roots screen can now
     // discover but this function had never heard of would otherwise be

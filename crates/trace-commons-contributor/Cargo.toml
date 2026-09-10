@@ -34,6 +34,8 @@ chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive", "env"] }
 dirs = "6"
 hex = "0.4"
+# OS credential stores approved by the operator on 2026-09-09.
+keyring-core = "=1.0.0"
 # IronWire's proxy, run in-process behind the private_inference switch.
 #
 # Measured normal-dependency cost (deduplicated package names): 220 before,
@@ -593,6 +595,7 @@ url = "2"
 # this). Building that descriptor requires Win32 directly: tokio exposes only
 # `create_with_security_attributes_raw`, which takes a raw pointer.
 [target.'cfg(windows)'.dependencies]
+windows-native-keyring-store = "=1.1.0"
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Security",
@@ -600,6 +603,12 @@ windows-sys = { version = "0.61", features = [
     "Win32_Storage_FileSystem",
     "Win32_System_Threading",
 ] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+apple-native-keyring-store = { version = "=1.0.2", features = ["keychain"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus-secret-service-keyring-store = { version = "=1.0.1", default-features = false, features = ["rt-tokio-crypto-rust"] }
 
 [dev-dependencies]
 axum = "0.8"

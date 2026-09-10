@@ -535,6 +535,7 @@ fn adopt_state_dir(preferred: &Path, legacy: &Path) -> PathBuf {
 }
 
 /// Filesystem-backed store for contributor config, device key, and receipts.
+#[derive(Clone)]
 pub struct ConfigStore {
     dir: PathBuf,
 }
@@ -810,6 +811,7 @@ pub(crate) mod tests_support {
     pub(crate) fn temp_store() -> (tempfile::TempDir, ConfigStore) {
         let dir = tempfile::tempdir().unwrap();
         let store = ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        crate::daemon::cloud_credential_test_support::install(&store);
         (dir, store)
     }
 
@@ -940,12 +942,46 @@ fn write_atomic_0600(dir: &Path, path: &Path, body: &[u8]) -> Result<()> {
         tmp.sync_all()
             .with_context(|| format!("syncing temp file {}", tmp_path.display()))?;
     }
-    if let Err(e) = std::fs::rename(&tmp_path, path) {
+    if let Err(e) = durable_rename(&tmp_path, path) {
         let _ = std::fs::remove_file(&tmp_path);
         return Err(e)
             .with_context(|| format!("renaming {} to {}", tmp_path.display(), path.display()));
     }
     Ok(())
+}
+
+#[cfg(not(windows))]
+fn durable_rename(source: &Path, destination: &Path) -> std::io::Result<()> {
+    std::fs::rename(source, destination)
+}
+
+#[cfg(windows)]
+fn durable_rename(source: &Path, destination: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    };
+    let source: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
+    let destination: Vec<u16> = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    // SAFETY: both paths are owned, NUL-terminated UTF-16 buffers, alive
+    // throughout this synchronous call. Write-through completes publication
+    // before an old OS credential may be retired.
+    let moved = unsafe {
+        MoveFileExW(
+            source.as_ptr(),
+            destination.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if moved == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
 }
 
 #[cfg(test)]

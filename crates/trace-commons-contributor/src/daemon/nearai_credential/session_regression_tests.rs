@@ -79,13 +79,14 @@ impl Fixture {
             minted_at: now,
         });
         settings
-            .save(&self.shared.store)
+            .save_for_test(&self.shared.store)
             .expect("save synthetic connection");
         session
     }
 
     fn persisted(&self) -> DaemonSettings {
-        DaemonSettings::load(&self.shared.store).expect("reload isolated settings")
+        DaemonSettings::load_with_cloud_credentials(&self.shared.store)
+            .expect("reload isolated settings")
     }
 
     fn retained(&self) -> NearAiSession {
@@ -264,7 +265,7 @@ async fn balance(
         .expect("fixture settings lock")
         .near_ai_session
         .clone();
-    let disk = DaemonSettings::load(&state.shared.store)
+    let disk = DaemonSettings::load_with_cloud_credentials(&state.shared.store)
         .expect("read settings before balance is served")
         .near_ai_session;
     if memory != disk || disk.is_none_or(|session| session.refresh_token != refresh) {
@@ -474,7 +475,7 @@ async fn failed_rotation_save_withholds_access_and_preserves_memory() {
             // cannot be created after Cloud has already rotated the token.
             std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o500)).unwrap();
             assert!(std::fs::File::create(dir.join("write-must-fail")).is_err());
-            assert!(DaemonSettings::load(&fixture.shared.store).is_ok());
+            assert!(DaemonSettings::load_with_cloud_credentials(&fixture.shared.store).is_ok());
             release.send(()).unwrap();
         })
     })
