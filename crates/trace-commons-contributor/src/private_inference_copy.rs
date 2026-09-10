@@ -696,7 +696,7 @@ pub const TRAY_OPEN_TO_TURN_ON: &str = "Route AI requests through NEAR AI…";
 /// a tool is the unit a contributor can decide about. Answering model calls
 /// at all is a consequence of connecting one, not a question to be settled
 /// first.
-pub const HARNESSES_TITLE: &str = "Tools on this computer";
+pub const HARNESSES_TITLE: &str = "Your tools";
 
 /// The one line under that heading.
 ///
@@ -706,9 +706,8 @@ pub const HARNESSES_TITLE: &str = "Tools on this computer";
 /// unqualified list reads as the second, and a contributor whose tool is
 /// missing from it would conclude their tool cannot be connected rather than
 /// that this app has not been taught about it yet.
-pub const HARNESSES_WHAT: &str = "Each of these can be set to send its model calls to this computer, one \
-     tool at a time. The list is what this app knows how to look for, not \
-     every tool there is.";
+pub const HARNESSES_WHAT: &str =
+    "Choose which tools send AI requests through this app. Supported tools are listed below.";
 
 /// What the amount [`harness_spend_line`] names does and does not cover.
 ///
@@ -748,8 +747,7 @@ pub const HARNESS_NOT_INSTALLED: &str = "Not found on this computer. This app lo
 ///
 /// Said as a fact about the tool's settings rather than as a fault. Nothing
 /// is wrong with a tool nobody has connected.
-pub const HARNESS_NOT_CONNECTED: &str = "Not connected. Its own settings still send its calls wherever they went \
-     before.";
+pub const HARNESS_NOT_CONNECTED: &str = "Not connected. Using its existing settings.";
 
 /// A tool whose settings are right and from which nothing has arrived yet.
 ///
@@ -770,21 +768,21 @@ pub const HARNESS_ANSWERING: &str =
     "Answering. A call from it reached this computer and was answered here.";
 
 /// The action that connects one tool.
-pub const HARNESS_CONNECT: &str = "Send this tool's calls here";
+pub const HARNESS_CONNECT: &str = "Connect";
 
 /// The action that disconnects one tool.
 ///
 /// Says what the tool stops doing, not what this app stops doing: the file
 /// being changed is the tool's, and the listener is left exactly as it was
 /// for every other tool.
-pub const HARNESS_DISCONNECT: &str = "Stop sending this tool's calls here";
+pub const HARNESS_DISCONNECT: &str = "Disconnect";
 
 /// The heading over the preview shown before anything is written.
 ///
 /// This app is about to edit a file it does not own, so the change is shown
 /// before it is made. The same reason the destination exists at all: the
 /// consequence is stated where the decision is taken.
-pub const HARNESS_PREVIEW_TITLE: &str = "What would change in this tool's own settings file";
+pub const HARNESS_PREVIEW_TITLE: &str = "Connection settings";
 
 /// The button that writes the change.
 pub const HARNESS_PREVIEW_CONFIRM: &str = "Make this change";
@@ -3015,7 +3013,7 @@ mod tests {
             copy.harnesses_none_found
         );
         assert!(
-            copy.harnesses_what.contains("not"),
+            copy.harnesses_what.contains("Supported tools"),
             "the list's line stopped qualifying what the list is: {}",
             copy.harnesses_what
         );
