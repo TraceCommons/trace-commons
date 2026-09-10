@@ -604,6 +604,7 @@ pub(crate) fn logout_with(
             );
         }
     }
+    crate::daemon::nearai_credential::ceremony::forget(store)?;
     store.wipe().context("wiping contributor state")?;
     let _ = store.remove_daemon_file(crate::config::DAEMON_SOCK_FILE);
     let _ = store.remove_daemon_file(crate::config::DAEMON_LOCK_FILE);

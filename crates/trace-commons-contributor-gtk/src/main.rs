@@ -12,6 +12,10 @@
 use adw::prelude::*;
 use trace_commons_contributor_gtk::{ui, worker::Worker};
 
+#[cfg(test)]
+#[path = "../tests/support/main_startup_tests.rs"]
+mod startup_tests;
+
 fn main() -> anyhow::Result<()> {
     // Answered before anything is initialised, so a person can identify the
     // build they installed without a display or a daemon. Same ad hoc argument
@@ -111,13 +115,30 @@ fn main() -> anyhow::Result<()> {
         show_toast,
     });
 
-    application.connect_activate(move |application| {
-        start_or_ask(application, dir.clone(), drivers.clone());
-    });
+    connect_startup(&application, dir, drivers);
 
     // GTK's own argument parsing would choke on the flags above.
     application.run_with_args::<&str>(&[]);
     Ok(())
+}
+
+fn connect_startup(
+    application: &adw::Application,
+    dir: std::path::PathBuf,
+    drivers: std::rc::Rc<Drivers>,
+) -> std::rc::Rc<std::cell::Cell<StartupState>> {
+    let startup = std::rc::Rc::new(std::cell::Cell::new(StartupState::Idle));
+    application.connect_shutdown({
+        let startup = startup.clone();
+        move |_| startup.set(StartupState::Stopped)
+    });
+    application.connect_activate({
+        let startup = startup.clone();
+        move |application| {
+            start_or_ask(application, dir.clone(), drivers.clone(), startup.clone());
+        }
+    });
+    startup
 }
 
 /// The headless-run drivers, carried together so the start path can be
@@ -131,6 +152,13 @@ struct Drivers {
     start_page: Option<String>,
     onboarding_page: Option<String>,
     show_toast: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StartupState {
+    Idle,
+    Starting,
+    Stopped,
 }
 
 /// Start the shell, or ask which folders it may watch and then start it.
@@ -149,8 +177,36 @@ fn start_or_ask(
     application: &adw::Application,
     dir: std::path::PathBuf,
     drivers: std::rc::Rc<Drivers>,
+    startup: std::rc::Rc<std::cell::Cell<StartupState>>,
 ) {
-    let worker = match Worker::start(dir.clone()) {
+    if startup.get() != StartupState::Idle {
+        return;
+    }
+    startup.set(StartupState::Starting);
+    let application = application.clone();
+    // Keep the application alive before its first window without blocking
+    // its event loop on a system credential prompt.
+    let hold = application.hold();
+    gtk::glib::spawn_future_local(async move {
+        let result = Worker::start(dir.clone()).await;
+        if startup.get() != StartupState::Stopped {
+            startup.set(StartupState::Idle);
+            finish_start(&application, dir, drivers, startup, result);
+        }
+        // An unadopted worker drops its job sender; its owning thread then
+        // retires the backend, including a daemon that finished after Quit.
+        drop(hold);
+    });
+}
+
+fn finish_start(
+    application: &adw::Application,
+    dir: std::path::PathBuf,
+    drivers: std::rc::Rc<Drivers>,
+    startup: std::rc::Rc<std::cell::Cell<StartupState>>,
+    result: anyhow::Result<Worker>,
+) {
+    let worker = match result {
         Ok(worker) => worker,
         Err(error)
             if error.to_string()
@@ -176,7 +232,7 @@ fn start_or_ask(
                 // is on disk now, so this is an ordinary start, and the
                 // second refusal that cannot happen would still be handled
                 // the same way if it did.
-                start_or_ask(&reentry, ask_dir.clone(), drivers.clone());
+                start_or_ask(&reentry, ask_dir.clone(), drivers.clone(), startup.clone());
             });
             return;
         }

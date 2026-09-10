@@ -224,7 +224,13 @@ pub async fn begin(store: &ConfigStore, provider: &str) -> Result<serde_json::Va
             // balance does: every management route on cloud-api is
             // session-only. What is retained is the refresh token alone, and
             // `NearAiSession` states what that is authority over.
-            persist_attempt(&finished_dir, &finished_id, minted, session.refresh_token)
+            let persist_dir = finished_dir.clone();
+            let persist_id = finished_id.clone();
+            tokio::task::spawn_blocking(move || {
+                persist_attempt(&persist_dir, &persist_id, minted, session.refresh_token)
+            })
+            .await
+            .map_err(|_| anyhow!("near_ai_credential_unavailable"))?
         }
         .await;
         let mut map = attempts().lock().expect("ceremony state lock");
@@ -286,12 +292,7 @@ pub(crate) fn persist(
     minted: super::api::MintedKey,
     refresh_token: String,
 ) -> Result<()> {
-    let locks = crate::daemon::nearai_credential::session::coordination(dir)?;
-    let _commit = locks
-        .commit
-        .lock()
-        .map_err(|_| anyhow::anyhow!("near_ai_credential_unavailable"))?;
-    persist_locked(dir, minted, refresh_token)
+    persist_checked(dir, minted, refresh_token, || Ok(()))
 }
 
 fn persist_attempt(
@@ -300,30 +301,28 @@ fn persist_attempt(
     minted: crate::daemon::nearai_credential::api::MintedKey,
     refresh_token: String,
 ) -> Result<()> {
-    let locks = crate::daemon::nearai_credential::session::coordination(dir)?;
-    let _commit = locks
-        .commit
-        .lock()
-        .map_err(|_| anyhow::anyhow!("near_ai_credential_unavailable"))?;
-    let map = attempts()
-        .lock()
-        .map_err(|_| anyhow::anyhow!("near_ai_credential_unavailable"))?;
-    if !map.get(dir).is_some_and(|attempt| {
-        attempt.state.attempt_id == attempt_id && attempt.state.status == "waiting_for_browser"
-    }) {
-        return Err(anyhow::anyhow!("near_ai_credential_cancelled"));
-    }
-    persist_locked(dir, minted, refresh_token)
+    persist_checked(dir, minted, refresh_token, || {
+        let map = attempts()
+            .lock()
+            .map_err(|_| anyhow!("near_ai_credential_unavailable"))?;
+        if !map.get(dir).is_some_and(|attempt| {
+            attempt.state.attempt_id == attempt_id && attempt.state.status == "waiting_for_browser"
+        }) {
+            return Err(anyhow!("near_ai_credential_cancelled"));
+        }
+        Ok(())
+    })
 }
 
-fn persist_locked(
+fn persist_checked(
     dir: &std::path::Path,
     minted: crate::daemon::nearai_credential::api::MintedKey,
     refresh_token: String,
+    accept: impl FnOnce() -> Result<()>,
 ) -> Result<()> {
     let store = ConfigStore::open(dir.to_path_buf())?;
-    let mut settings = DaemonSettings::load(&store)?;
-    settings.near_ai_inference = Some(NearAiInferenceCredential {
+    let expected = DaemonSettings::load(&store)?;
+    let inference = Some(NearAiInferenceCredential {
         key: minted.key,
         key_id: minted.key_id,
         key_prefix: minted.key_prefix,
@@ -331,14 +330,22 @@ fn persist_locked(
         workspace_id: minted.workspace_id,
         minted_at: Utc::now(),
     });
-    settings.near_ai_session = Some(NearAiSession {
+    let session = Some(NearAiSession {
         refresh_token,
         refresh_token_expires_at: None,
         stored_at: Utc::now(),
     });
 
-    settings.save(&store)?;
-    record_change(dir);
+    crate::daemon::cloud_credential_lifecycle::native(&store)?.replace(
+        &expected,
+        inference,
+        session,
+        accept,
+        |_| {
+            record_change(dir);
+            Ok(())
+        },
+    )?;
     Ok(())
 }
 
@@ -395,7 +402,13 @@ pub fn attempt_status(dir: &std::path::Path) -> Option<&'static str> {
 /// unnamed cancel is answered with a lifecycle word alone, never with the
 /// attempt id, so this cannot be used to *learn* one.
 pub fn cancel(dir: &std::path::Path, attempt_id: Option<&str>) -> Option<Status> {
-    let mut map = attempts().lock().expect("ceremony state lock");
+    let locks = crate::daemon::nearai_credential::session::coordination(dir).ok()?;
+    let _commit = locks.commit.lock().ok()?;
+    cancel_locked(dir, attempt_id)
+}
+
+fn cancel_locked(dir: &std::path::Path, attempt_id: Option<&str>) -> Option<Status> {
+    let mut map = attempts().lock().ok()?;
     let entry = map
         .get_mut(dir)
         // `None` matches the attempt in flight; `Some` must name it.
@@ -434,21 +447,21 @@ pub fn forget(store: &ConfigStore) -> Result<bool> {
         .commit
         .lock()
         .map_err(|_| anyhow::anyhow!("near_ai_credential_unavailable"))?;
-    forget_locked(store)
+    let removed = forget_locked(store)?;
+    drop(_commit);
+    crate::daemon::cloud_credential_lifecycle::cleanup_native(store)?;
+    Ok(removed)
 }
 
 pub(super) fn forget_locked(store: &ConfigStore) -> Result<bool> {
-    cancel(store.dir(), None);
-    let mut settings = DaemonSettings::load(store)?;
-    let had = settings.near_ai_inference.take().is_some();
-    let had_session = settings.near_ai_session.take().is_some();
-    settings.save(store)?;
-    if had || had_session {
+    cancel_locked(store.dir(), None);
+    let had = crate::daemon::cloud_credential_lifecycle::forget_locked(store)?;
+    if had {
         // Reconciliation also adopts the session. Only an inference-key
         // change advances the proxy generation there.
         record_change(store.dir());
     }
-    Ok(had || had_session)
+    Ok(had)
 }
 
 #[cfg(test)]
@@ -473,12 +486,12 @@ mod tests {
         // A setting written before the ceremony must survive it: this writes
         // the whole document back, so a read-modify-write that read the wrong
         // copy would revert it.
-        let mut settings = DaemonSettings::load(&store).unwrap();
+        let mut settings = DaemonSettings::load_with_cloud_credentials(&store).unwrap();
         settings.max_uploads_per_day = 7;
-        settings.save(&store).unwrap();
+        settings.save_for_test(&store).unwrap();
 
         persist(dir.path(), minted(), "rt_session-secret".into()).unwrap();
-        let stored = DaemonSettings::load(&store).unwrap();
+        let stored = DaemonSettings::load_with_cloud_credentials(&store).unwrap();
         assert_eq!(stored.max_uploads_per_day, 7);
         let credential = stored.near_ai_inference.unwrap();
         assert_eq!(credential.key, "sk-minted-secret");
@@ -495,7 +508,7 @@ mod tests {
         );
 
         // The session is retained, because the balance is session-only.
-        let session = DaemonSettings::load(&store)
+        let session = DaemonSettings::load_with_cloud_credentials(&store)
             .unwrap()
             .near_ai_session
             .unwrap();
@@ -506,7 +519,7 @@ mod tests {
         );
 
         assert!(forget(&store).unwrap());
-        let after = DaemonSettings::load(&store).unwrap();
+        let after = DaemonSettings::load_with_cloud_credentials(&store).unwrap();
         assert!(after.near_ai_inference.is_none());
         // A residual session after a forget would leave the daemon holding
         // the wider of the two credentials while the contributor believed

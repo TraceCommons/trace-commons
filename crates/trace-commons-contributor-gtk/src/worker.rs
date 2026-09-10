@@ -19,6 +19,10 @@ use anyhow::Result;
 use crate::backend::{Backend, DaemonEvent};
 use crate::model::PreviewSummary;
 
+#[cfg(test)]
+#[path = "../tests/support/worker_startup_tests.rs"]
+mod startup_tests;
+
 pub enum Job {
     Call {
         method: String,
@@ -66,22 +70,34 @@ pub struct Worker {
 }
 
 impl Worker {
-    pub fn start(dir: std::path::PathBuf) -> Result<Self> {
+    pub async fn start(dir: std::path::PathBuf) -> Result<Self> {
+        Self::start_with(dir, Backend::open).await
+    }
+
+    async fn start_with(
+        dir: std::path::PathBuf,
+        open: impl FnOnce(std::path::PathBuf) -> Result<Backend> + Send + 'static,
+    ) -> Result<Self> {
         let (job_tx, job_rx) = mpsc::channel::<(u64, Job)>();
         let (result_tx, results) = async_channel::unbounded();
         let (event_tx, events) = async_channel::unbounded();
-        let (ready_tx, ready_rx) = mpsc::channel::<Result<bool, String>>();
+        let (ready_tx, ready_rx) = async_channel::bounded::<Result<bool, String>>(1);
         let held = dir.clone();
 
         std::thread::spawn(move || {
-            let backend = match Backend::open(dir) {
+            let backend = match open(dir) {
                 Ok(b) => b,
                 Err(e) => {
-                    let _ = ready_tx.send(Err(e.to_string()));
+                    let _ = ready_tx.send_blocking(Err(e.to_string()));
                     return;
                 }
             };
-            let _ = ready_tx.send(Ok(backend.hosts_the_loop()));
+            if ready_tx
+                .send_blocking(Ok(backend.hosts_the_loop()))
+                .is_err()
+            {
+                return;
+            }
 
             if let Ok(mut stream) = backend.events() {
                 std::thread::spawn(move || {
@@ -113,6 +129,7 @@ impl Worker {
 
         let hosts_the_loop = ready_rx
             .recv()
+            .await
             .map_err(|_| anyhow::anyhow!("the daemon worker stopped before it started"))?
             .map_err(|label| anyhow::anyhow!("{label}"))?;
 

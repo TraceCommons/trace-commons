@@ -13,7 +13,7 @@ private final class OnboardingSessionDaemon: DaemonCalling {
         let params: String
     }
 
-    private enum Phase { case legacyKey, waiting, signedIn }
+    private enum Phase { case legacyKey, waiting, signedIn, storageUnavailable }
     private let lock = NSLock()
     private var phase: Phase = .legacyKey
     private var recorded: [Call] = []
@@ -35,6 +35,12 @@ private final class OnboardingSessionDaemon: DaemonCalling {
         phase = .signedIn
     }
 
+    func makeStorageUnavailable() {
+        lock.lock()
+        defer { lock.unlock() }
+        phase = .storageUnavailable
+    }
+
     func call(_ method: String, params paramsJSON: String) -> String {
         lock.lock()
         defer { lock.unlock() }
@@ -48,6 +54,8 @@ private final class OnboardingSessionDaemon: DaemonCalling {
                 return #"{"id":1,"result":{"state":"obtaining","session_state":"obtaining","attempt_id":"synthetic-attempt","attempt_status":"waiting_for_browser"}}"#
             case .signedIn:
                 return #"{"id":1,"result":{"state":"present","session_state":"present"}}"#
+            case .storageUnavailable:
+                return #"{"id":1,"result":{"state":"storage_unavailable","session_state":"storage_unavailable"}}"#
             }
         case "near_ai_balance":
             return #"{"id":1,"result":{"state":"no_session","remaining_nanos":null,"spend_limit_nanos":null,"total_spent_nanos":null,"scale":9,"observed_at":null}}"#
@@ -151,6 +159,27 @@ final class NearAiOnboardingSessionTests: XCTestCase {
         await action()
         await fulfillment(of: [published], timeout: 3)
         XCTAssertEqual(model.credentialStatus.sessionState, state)
+    }
+
+    @MainActor
+    func testUnavailableStoreWithholdsSignInAndKeepsRemovalExplicit() async throws {
+        let unexpected = expectation(description: "An unavailable store must not start sign-in or enroll")
+        unexpected.isInverted = true
+        let daemon = OnboardingSessionDaemon(unexpectedCall: unexpected)
+        daemon.makeStorageUnavailable()
+        let model = AppModel()
+        model.setClientForTesting(DaemonClient(daemon: daemon))
+        let copy = try XCTUnwrap(model.privateInferenceCopy)
+        await awaitSession(model, state: "storage_unavailable") {
+            model.refreshNearAiCredential()
+        }
+        XCTAssertEqual(CredentialSurface.action(model.credentialStatus, calls: model.credentialCalls), .forget)
+        XCTAssertTrue(CredentialSurface.stateLine(model.credentialStatus, copy: copy, calls: model.credentialCalls).contains("Unlock"))
+        var enrolled = 0
+        try await captureMatrix(model: model, name: "near-ai-storage-unavailable") { enrolled += 1 }
+        await fulfillment(of: [unexpected], timeout: 0.2)
+        XCTAssertEqual(enrolled, 0)
+        XCTAssertEqual(Set(daemon.calls.map(\.method)), ["near_ai_credential_status", "near_ai_balance"])
     }
 
     @MainActor

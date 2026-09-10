@@ -413,7 +413,7 @@ pub struct DaemonShared {
     pub queue: Mutex<Queue>,
     pub policy: Mutex<ProjectPolicy>,
     pub state: Mutex<DaemonState>,
-    pub settings: Mutex<DaemonSettings>,
+    pub settings: Arc<Mutex<DaemonSettings>>,
     pub health: Mutex<HealthState>,
     pub paused: AtomicBool,
     /// Uploads are parked for an update swap.
@@ -606,7 +606,13 @@ impl DaemonShared {
         let _ = super::approved_envelope::sweep(&store, &queue.pinned_entry_ids());
         let policy = ProjectPolicy::load(&store)?;
         let state = DaemonState::load(&store)?;
-        let settings = DaemonSettings::load(&store)?;
+        let settings = DaemonSettings::load_with_cloud_credentials(&store).or_else(|_| {
+            let mut settings = DaemonSettings::load(&store)?;
+            settings.near_ai_inference = None;
+            settings.near_ai_session = None;
+            settings.cloud_storage_unavailable = true;
+            Ok::<_, anyhow::Error>(settings)
+        })?;
         // Built here from the declaration this settings file carries at
         // startup. A later edit does not wait for a restart:
         // `set_settings` rebuilds the instance in place.
@@ -622,7 +628,7 @@ impl DaemonShared {
             queue: Mutex::new(queue),
             policy: Mutex::new(policy),
             state: Mutex::new(state),
-            settings: Mutex::new(settings),
+            settings: Arc::new(Mutex::new(settings)),
             health: Mutex::new(HealthState::default()),
             paused: AtomicBool::new(paused),
             quiesced: AtomicBool::new(false),
@@ -702,7 +708,19 @@ impl DaemonShared {
     /// The observed count is stored only once the change has been applied. A
     /// settings document that will not load leaves it where it was, so the
     /// next pass tries again rather than dropping the credential forever.
-    fn absorb_near_ai_credential_change(&self) {
+    async fn absorb_near_ai_credential_change(&self) {
+        let observed = super::nearai_credential::ceremony::change_count(self.store.dir());
+        if observed == self.near_ai_credential_changes.load(Ordering::Acquire) {
+            return;
+        }
+        let store = self.store.clone();
+        let Ok(Ok(stored)) = tokio::task::spawn_blocking(move || {
+            DaemonSettings::load_with_cloud_credentials(&store)
+        })
+        .await
+        else {
+            return;
+        };
         let Ok(locks) = crate::daemon::nearai_credential::session::coordination(self.store.dir())
         else {
             return;
@@ -710,13 +728,12 @@ impl DaemonShared {
         let Ok(_commit) = locks.commit.lock() else {
             return;
         };
-        let observed = super::nearai_credential::ceremony::change_count(self.store.dir());
-        if observed == self.near_ai_credential_changes.load(Ordering::Acquire) {
-            return;
-        }
-        let Ok(stored) = super::settings::DaemonSettings::load(&self.store) else {
+        let Ok(disk) = super::settings::DaemonSettings::load(&self.store) else {
             return;
         };
+        if crate::daemon::cloud_credential_lifecycle::ensure_current(&disk, &stored).is_err() {
+            return;
+        }
         let mut settings = self.settings.lock().expect("settings lock");
         if settings.near_ai_inference != stored.near_ai_inference {
             settings.near_ai_inference = stored.near_ai_inference;
@@ -732,6 +749,8 @@ impl DaemonShared {
                 .fetch_add(1, Ordering::Release);
         }
         settings.near_ai_session = stored.near_ai_session;
+        settings.cloud_credentials = stored.cloud_credentials;
+        settings.cloud_storage_unavailable = false;
         drop(settings);
         self.near_ai_credential_changes
             .store(observed, Ordering::Release);
@@ -741,10 +760,11 @@ impl DaemonShared {
         if self.private_inference_terminating.load(Ordering::Acquire) {
             return;
         }
+        // OS reads may wait for an unlock prompt. They must not hold proxy
+        // ownership while Forget or shutdown needs to withdraw a live key.
+        // Absorption rechecks disk authority under the credential commit lock.
+        self.absorb_near_ai_credential_change().await;
         let mut held = self.private_inference.lock().await;
-        // Under the lifecycle lock, so the generation this may advance is
-        // observed by the read below rather than by a pass already past it.
-        self.absorb_near_ai_credential_change();
         // Read after acquiring lifecycle ownership: a queued reconciliation
         // must not replay a setting superseded while it waited for that lock.
         let (on, generation, credential) = {
@@ -2542,13 +2562,24 @@ fn handle_set_settings(shared: &DaemonShared, req: &Request) -> Response {
     let mut candidate = settings.clone();
     // A browser ceremony writes outside this daemon's in-memory settings.
     // Preserve its newest credentials when editing unrelated preferences.
-    let credential_changed = candidate.near_ai_inference != persisted.near_ai_inference;
-    candidate.near_ai_inference = persisted.near_ai_inference;
-    candidate.near_ai_session = persisted.near_ai_session;
+    let credential_changed = if persisted.cloud_credentials.is_some() {
+        if crate::daemon::cloud_credential_lifecycle::ensure_current(&persisted, &candidate)
+            .is_err()
+        {
+            return Response::err(req.id, ERR_UNAVAILABLE, "settings-write-failed");
+        }
+        false
+    } else {
+        let changed = candidate.near_ai_inference != persisted.near_ai_inference;
+        candidate.near_ai_inference = persisted.near_ai_inference;
+        candidate.near_ai_session = persisted.near_ai_session;
+        changed
+    };
+    candidate.cloud_credentials = persisted.cloud_credentials;
     match super::settings::apply_settings_object(&mut candidate, &req.params) {
         Ok(false) => Response::err(req.id, ERR_BAD_PARAMS, "no-known-setting-supplied"),
         Ok(true) => {
-            if let Err(_e) = candidate.save(&shared.store) {
+            if let Err(_e) = candidate.save_locked(&shared.store) {
                 return Response::err(req.id, ERR_UNAVAILABLE, "settings-write-failed");
             }
             *settings = candidate;
@@ -2583,6 +2614,7 @@ fn handle_set_settings(shared: &DaemonShared, req: &Request) -> Response {
 /// The reported state is re-read after the reconcile so the answer describes
 /// what happened rather than what was true a moment before it.
 async fn handle_set_settings_async(shared: &DaemonShared, req: &Request) -> Response {
+    shared.absorb_near_ai_credential_change().await;
     let mut response = handle_set_settings(shared, req);
     if response.error.is_some() {
         return response;
@@ -4296,6 +4328,7 @@ fn redacted_settings(s: &DaemonSettings) -> serde_json::Value {
         // one that sees `false` knows to offer the ceremony instead.
         let session_retained = s.near_ai_session.is_some();
         obj.remove("near_ai_session");
+        obj.remove("cloud_credentials");
         obj.insert(
             "near_ai_session_retained".to_string(),
             serde_json::Value::Bool(session_retained),
@@ -4957,6 +4990,10 @@ fn routed_tools(body: &[u8]) -> Vec<serde_json::Value> {
         .take(ROUTED_TOOLS_LIMIT)
         .collect()
 }
+
+#[cfg(test)]
+#[path = "cloud_credential_recovery_tests.rs"]
+mod cloud_credential_recovery_tests;
 
 #[cfg(test)]
 mod tests {
@@ -7414,7 +7451,7 @@ mod tests {
                 workspace_id: "ws-1".into(),
                 minted_at: chrono::Utc::now(),
             });
-        s.settings.lock().unwrap().save(&s.store).unwrap();
+        s.settings.lock().unwrap().save_for_test(&s.store).unwrap();
         // A stored key reads as present, and the state says so without the
         // key, the prefix or an account of any kind crossing the socket.
         let r = handle_request(&s, &req("near_ai_credential_status", serde_json::json!({})));
@@ -7648,7 +7685,7 @@ mod tests {
                 refresh_token_expires_at: None,
                 stored_at: chrono::Utc::now(),
             });
-            settings.save(&s.store).unwrap();
+            settings.save_for_test(&s.store).unwrap();
         }
 
         let r = handle_request_async(&s, &req("near_ai_credential_forget", serde_json::json!({})))

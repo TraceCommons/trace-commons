@@ -490,13 +490,13 @@ mod tests {
             refresh_token_expires_at: None,
             stored_at: Utc::now(),
         });
-        settings.save(&shared.store).unwrap();
+        settings.save_for_test(&shared.store).unwrap();
         drop(settings);
         shared
     }
 
     fn stored_refresh(shared: &DaemonShared) -> Option<String> {
-        crate::daemon::settings::DaemonSettings::load(&shared.store)
+        crate::daemon::settings::DaemonSettings::load_with_cloud_credentials(&shared.store)
             .unwrap()
             .near_ai_session
             .map(|s| s.refresh_token)

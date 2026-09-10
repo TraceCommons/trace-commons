@@ -636,7 +636,8 @@ unsafe fn apply_pre_start_settings(
     }
     let value: serde_json::Value =
         serde_json::from_str(text).map_err(|_| ERR_SETTINGS_INVALID_JSON)?;
-    let mut settings = DaemonSettings::load(store).map_err(|_| ERR_SETTINGS_LOAD_FAILED)?;
+    let mut settings =
+        DaemonSettings::load_for_preferences(store).map_err(|_| ERR_SETTINGS_LOAD_FAILED)?;
     let changed = apply_settings_object(&mut settings, &value)?;
     if changed {
         settings

@@ -76,7 +76,7 @@ impl Fixture {
             minted_at: now,
         });
         settings
-            .save(&self.shared.store)
+            .save_for_test(&self.shared.store)
             .expect("save synthetic connection");
     }
 

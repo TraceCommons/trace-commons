@@ -71,8 +71,12 @@ pub const LABEL_CREDENTIAL_FAILED: &str = "failed";
 pub const LABEL_CREDENTIAL_CANCELLED: &str = "cancelled";
 /// A key is stored on this machine.
 pub const LABEL_CREDENTIAL_PRESENT: &str = "present";
+/// The OS entry could not be read; no plaintext fallback is permitted.
+pub const LABEL_CREDENTIAL_STORAGE_UNAVAILABLE: &str = "storage_unavailable";
+/// Authority was removed locally, but OS deletion still needs a retry.
+pub const LABEL_CREDENTIAL_CLEANUP_REQUIRED: &str = "cleanup_required";
 
-/// The one state this machine is in, resolved in one place.
+/// Resolve one credential's presence after storage-state precedence.
 ///
 /// The precedence is the whole of the decision, and it is here rather than
 /// in three shells:
@@ -100,15 +104,58 @@ fn state_from(attempt: Option<&str>, stored: bool) -> &'static str {
     }
 }
 
+struct CredentialStates {
+    inference: &'static str,
+    session: &'static str,
+    cleanup_pending: bool,
+}
+
+impl CredentialStates {
+    /// An active ceremony wins; otherwise unreadable storage wins over
+    /// presence. Pending cleanup requires recovery only after both local
+    /// credentials are gone, so an old entry never hides a usable new one.
+    fn resolve(
+        attempt: Option<&str>,
+        settings: &crate::daemon::settings::DaemonSettings,
+        cleanup_pending: bool,
+    ) -> Self {
+        let common = match attempt {
+            Some("starting" | "waiting_for_browser") => Some(LABEL_CREDENTIAL_OBTAINING),
+            _ if settings.cloud_storage_unavailable => Some(LABEL_CREDENTIAL_STORAGE_UNAVAILABLE),
+            _ if cleanup_pending
+                && settings.near_ai_inference.is_none()
+                && settings.near_ai_session.is_none() =>
+            {
+                Some(LABEL_CREDENTIAL_CLEANUP_REQUIRED)
+            }
+            _ => None,
+        };
+        Self {
+            inference: common
+                .unwrap_or_else(|| state_from(attempt, settings.near_ai_inference.is_some())),
+            session: common
+                .unwrap_or_else(|| state_from(attempt, settings.near_ai_session.is_some())),
+            cleanup_pending,
+        }
+    }
+}
+
+fn credential_states(shared: &DaemonShared) -> Option<CredentialStates> {
+    let pending =
+        crate::daemon::cloud_credential_lifecycle::cleanup_pending(&shared.store).unwrap_or(true);
+    let settings = shared.settings.lock().ok()?;
+    Some(CredentialStates::resolve(
+        ceremony::attempt_status(shared.store.dir()),
+        &settings,
+        pending,
+    ))
+}
+
 /// This machine's credential state, as `near_ai_credential_status` reports it.
 pub fn credential_state(shared: &DaemonShared) -> &'static str {
-    let stored = shared
-        .settings
-        .lock()
-        .expect("settings lock")
-        .near_ai_inference
-        .is_some();
-    state_from(ceremony::attempt_status(shared.store.dir()), stored)
+    credential_states(shared)
+        .map(|states| states.inference)
+        .unwrap_or(LABEL_CREDENTIAL_STORAGE_UNAVAILABLE)
 }
 
 /// Begin a ceremony and hand back where to open the browser.
@@ -202,17 +249,16 @@ fn reports_a_finished_ceremony(response: &Response) -> bool {
 /// re-serves it.
 pub fn handle_status(shared: &DaemonShared, req: &Request) -> Response {
     let attempt = req.params.get("attempt_id").and_then(|v| v.as_str());
-    let Ok(settings) = shared.settings.lock() else {
+    let Some(states) = credential_states(shared) else {
         return Response::err(req.id, ERR_UNAVAILABLE, "near_ai_credential_unavailable");
     };
-    let attempt_state = ceremony::attempt_status(shared.store.dir());
     // Inference keys can outlive a Cloud session. Enrollment and account
     // management require the session; neither may infer it from the key.
     let mut body = serde_json::json!({
-        "state": state_from(attempt_state, settings.near_ai_inference.is_some()),
-        "session_state": state_from(attempt_state, settings.near_ai_session.is_some()),
+        "state": states.inference,
+        "session_state": states.session,
+        "cleanup_pending": states.cleanup_pending,
     });
-    drop(settings);
     // `attempt_status` and not `status`: the ceremony's own lifecycle word
     // sits beside a `state` that is a fact about the machine, and one field
     // called `status` next to another called `state` is a shell reading the
@@ -276,7 +322,7 @@ pub fn handle_cancel(shared: &DaemonShared, req: &Request) -> Response {
 /// The memory clear is conditional on the disk write having succeeded. The
 /// other order -- clear memory, then fail to write -- reports a removal that
 /// the next start silently undoes.
-pub fn handle_forget(shared: &DaemonShared, req: &Request) -> Response {
+fn forget_local(shared: &DaemonShared, req: &Request) -> Response {
     let Ok(locks) = session::coordination(shared.store.dir()) else {
         return Response::err(req.id, ERR_UNAVAILABLE, "near_ai_credential_unavailable");
     };
@@ -302,6 +348,8 @@ pub fn handle_forget(shared: &DaemonShared, req: &Request) -> Response {
                 // cleared here.
                 let mut settings = shared.settings.lock().expect("settings lock");
                 settings.near_ai_session = None;
+                settings.cloud_credentials = None;
+                settings.cloud_storage_unavailable = false;
             }
             // Any balance this directory had cached was read with the session
             // just removed. Serving it again would put a figure from a
@@ -316,6 +364,20 @@ pub fn handle_forget(shared: &DaemonShared, req: &Request) -> Response {
     }
 }
 
+pub fn handle_forget(shared: &DaemonShared, req: &Request) -> Response {
+    let response = forget_local(shared, req);
+    if response.error.is_none()
+        && crate::daemon::cloud_credential_lifecycle::cleanup_native(&shared.store).is_err()
+    {
+        return Response::err(
+            req.id,
+            ERR_UNAVAILABLE,
+            "near_ai_credential_cleanup_required",
+        );
+    }
+    response
+}
+
 /// `handle_forget`, plus the one thing it cannot do synchronously: take the
 /// key back out of the running proxy.
 ///
@@ -326,9 +388,23 @@ pub fn handle_forget(shared: &DaemonShared, req: &Request) -> Response {
 /// forgets a credential has said stop using it, and "stopped, at some point
 /// in the next minute" is not that.
 pub async fn handle_forget_async(shared: &DaemonShared, req: &Request) -> Response {
-    let response = handle_forget(shared, req);
+    let response = forget_local(shared, req);
     if response.error.is_none() {
         shared.reconcile_private_inference().await;
+        let store = shared.store.clone();
+        if !matches!(
+            tokio::task::spawn_blocking(move || {
+                crate::daemon::cloud_credential_lifecycle::cleanup_native(&store)
+            })
+            .await,
+            Ok(Ok(()))
+        ) {
+            return Response::err(
+                req.id,
+                ERR_UNAVAILABLE,
+                "near_ai_credential_cleanup_required",
+            );
+        }
     }
     response
 }
@@ -350,6 +426,83 @@ pub async fn handle_balance(shared: &DaemonShared, req: &Request) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn storage_state_precedence_preserves_active_attempts_and_usable_sessions() {
+        for (attempt, unavailable, cleanup, retained, inference, session) in [
+            (None, false, false, false, "absent", "absent"),
+            (
+                None,
+                false,
+                true,
+                false,
+                "cleanup_required",
+                "cleanup_required",
+            ),
+            (
+                None,
+                true,
+                true,
+                false,
+                "storage_unavailable",
+                "storage_unavailable",
+            ),
+            (None, false, true, true, "absent", "present"),
+            (
+                None,
+                true,
+                false,
+                true,
+                "storage_unavailable",
+                "storage_unavailable",
+            ),
+            (
+                Some("starting"),
+                true,
+                true,
+                false,
+                "obtaining",
+                "obtaining",
+            ),
+            (
+                Some("waiting_for_browser"),
+                true,
+                true,
+                true,
+                "obtaining",
+                "obtaining",
+            ),
+            (
+                Some("failed"),
+                false,
+                true,
+                false,
+                "cleanup_required",
+                "cleanup_required",
+            ),
+            (
+                Some("cancelled"),
+                false,
+                false,
+                true,
+                "cancelled",
+                "present",
+            ),
+        ] {
+            let settings = crate::daemon::settings::DaemonSettings {
+                cloud_storage_unavailable: unavailable,
+                near_ai_session: retained.then(|| crate::daemon::settings::NearAiSession {
+                    refresh_token: "synthetic-state-fixture".into(),
+                    refresh_token_expires_at: None,
+                    stored_at: chrono::Utc::now(),
+                }),
+                ..Default::default()
+            };
+            let states = CredentialStates::resolve(attempt, &settings, cleanup);
+            assert_eq!((states.inference, states.session), (inference, session));
+            assert_eq!(states.cleanup_pending, cleanup);
+        }
+    }
 
     /// The precedence, pinned. Each arm here is a sentence a contributor
     /// reads, and the ordering is the part a shell would otherwise invent.

@@ -26,8 +26,14 @@ pub mod approved_envelope;
 pub mod attestation_mark;
 pub mod audit;
 pub mod client;
+pub(crate) mod cloud_credential_lifecycle;
+#[cfg(test)]
+mod cloud_credential_lifecycle_tests;
+#[cfg(test)]
+pub(crate) mod cloud_credential_test_support;
 pub mod community;
 pub mod contribution_eligibility;
+pub(crate) mod credential_store;
 pub mod eligibility;
 pub mod enroll;
 pub mod harness;
@@ -40,6 +46,7 @@ pub mod native_flow;
 pub mod nearai_credential;
 pub mod nearai_onboarding;
 pub mod notify;
+pub(crate) mod os_secret_store;
 pub mod policy;
 pub mod preview;
 pub mod preview_scheduler;
@@ -49,6 +56,7 @@ pub mod project_key;
 pub mod queue;
 pub mod settings;
 pub mod state;
+pub mod stored_cloud_credentials;
 #[cfg(test)]
 pub(crate) mod test_paths;
 #[cfg(test)]
@@ -283,7 +291,8 @@ pub async fn start_embedded(store: ConfigStore) -> Result<EmbeddedDaemon> {
     // a zero-byte `daemon.lock` from a failed start was read as proof the
     // daemon had started, and produced a confident wrong diagnosis.
     let started = async {
-        let shared = Arc::new(ipc::DaemonShared::load(store)?);
+        let shared =
+            Arc::new(tokio::task::spawn_blocking(move || ipc::DaemonShared::load(store)).await??);
         // Claim this runtime for anything the daemon hosts that outlives one
         // request. This block is `async` and runs on the real daemon runtime
         // in both entry points, which is the whole reason the call belongs

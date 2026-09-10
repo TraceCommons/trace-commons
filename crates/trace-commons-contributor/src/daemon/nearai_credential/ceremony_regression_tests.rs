@@ -31,9 +31,12 @@ struct Fixture {
 impl Fixture {
     fn new() -> Self {
         let (directory, store) = temp_store();
-        let mut settings = DaemonSettings::load(&store).expect("load synthetic settings");
+        let mut settings =
+            DaemonSettings::load_with_cloud_credentials(&store).expect("load synthetic settings");
         settings.max_uploads_per_day = 7;
-        settings.save(&store).expect("save synthetic preference");
+        settings
+            .save_for_test(&store)
+            .expect("save synthetic preference");
         // Seed the already-connected account, not the attempted publication.
         // Every publication under test below goes through persist_attempt.
         persist(store.dir(), minted("previous"), refresh("previous"))
@@ -58,7 +61,8 @@ impl Fixture {
     }
 
     fn snapshot(&self) -> Snapshot {
-        let settings = DaemonSettings::load(&self.store).expect("load persisted credentials");
+        let settings = DaemonSettings::load_with_cloud_credentials(&self.store)
+            .expect("load persisted credentials");
         Snapshot {
             inference: settings.near_ai_inference,
             session: settings.near_ai_session,
@@ -170,7 +174,7 @@ fn the_current_waiting_attempt_publishes_both_credentials_once() {
     );
     assert_eq!(after.changes, before.changes + 1);
     assert_eq!(
-        DaemonSettings::load(&fixture.store)
+        DaemonSettings::load_with_cloud_credentials(&fixture.store)
             .expect("reload persisted preference")
             .max_uploads_per_day,
         7

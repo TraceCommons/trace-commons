@@ -700,6 +700,15 @@ jobs:
       # (41 tests) were never executed by CI at all, and a new crate joins the
       # workspace untested by default.
       - run: cargo test --workspace
+      - uses: ./.github/actions/apt-update-ubuntu-only
+      - name: Install a Secret Service provider for credential tests
+        run: sudo apt-get install -y --no-install-recommends gnome-keyring dbus-x11
+      - name: Verify real Secret Service storage
+        run: |
+          dbus-run-session -- sh -eu -c '
+            printf "\n" | gnome-keyring-daemon --unlock --components=secrets
+            cargo test -p trace-commons-contributor --lib real_os_round_trip_removes_only_its_synthetic_entry -- --ignored
+          '
       # Last, so every step above still has its binaries; see the action for
       # what is removed and why. Only a finished job saves its cache, so this
       # runs exactly when a save is about to happen.
@@ -981,6 +990,8 @@ jobs:
       # unix jobs.
       - name: Test the contributor and FFI crates
         run: cargo test -p trace-commons-contributor -p trace-commons-contributor-ffi
+      - name: Verify real Windows Credential Manager storage
+        run: cargo test -p trace-commons-contributor --lib real_os_round_trip_removes_only_its_synthetic_entry -- --ignored
       # Last, so every step above still has its binaries; see the action for
       # what is removed and why. Only a finished job saves its cache, so this
       # runs exactly when a save is about to happen.
