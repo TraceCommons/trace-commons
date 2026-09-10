@@ -5124,6 +5124,7 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         near_attestation_client: None,
         near_attestation_key_report_client: None,
         near_attestation_verification_clock: None,
+        near_ai_introspection_base_url: None,
         driver_liveness: Arc::new(
             trace_commons_server::driver_liveness::DriverLivenessRegistry::default(),
         ),
@@ -26073,6 +26074,7 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         near_attestation_client: None,
         near_attestation_key_report_client: None,
         near_attestation_verification_clock: None,
+        near_ai_introspection_base_url: None,
         driver_liveness: Arc::new(
             trace_commons_server::driver_liveness::DriverLivenessRegistry::default(),
         ),
@@ -91247,6 +91249,16 @@ async fn near_provisioning_default_disabled_returns_uniform_denial() {
 }
 #[path = "admission_pg_tests.rs"]
 mod admission_pg_tests;
+
+/// The NEAR AI enrolment ceremony, both halves, over a real PostgreSQL.
+///
+/// **The module name is load-bearing.** The `postgres-suites` job selects this
+/// suite with `cargo test --bin trace-commons-ingest nearai_ceremony_pg_tests
+/// -- --ignored`, a substring match on the test path. A rename that does not
+/// change the workflow leaves these tests reporting `ignored` forever, which
+/// is the failure mode that step exists to prevent.
+#[path = "nearai_ceremony_pg_tests.rs"]
+mod nearai_ceremony_pg_tests;
 
 /// The nineteen `validate_*_reason` / `validate_*_purpose` wrappers all reduce
 /// to this, so the trim / reject-empty / reject-over-1024 contract and the two
