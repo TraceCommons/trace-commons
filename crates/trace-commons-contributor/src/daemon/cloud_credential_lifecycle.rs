@@ -64,14 +64,18 @@ pub(crate) fn cleanup_pending(store: &ConfigStore) -> Result<bool> {
 
 #[derive(Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Journal {
-    references: Vec<CredentialReference>,
+pub(crate) struct Journal {
+    pub(crate) references: Vec<CredentialReference>,
 }
 
 impl Journal {
     fn read(store: &ConfigStore) -> Result<Self> {
+        Self::read_named(store, JOURNAL)
+    }
+
+    pub(crate) fn read_named(store: &ConfigStore, name: &str) -> Result<Self> {
         use std::io::Read;
-        let file = match std::fs::File::open(store.daemon_path(JOURNAL)) {
+        let file = match std::fs::File::open(store.daemon_path(name)) {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 return Ok(Self::default());
@@ -96,7 +100,7 @@ impl Journal {
         Ok(journal)
     }
 
-    fn retain(&mut self, reference: CredentialReference) -> Result<()> {
+    pub(crate) fn retain(&mut self, reference: CredentialReference) -> Result<()> {
         if !self.references.contains(&reference) {
             if self.references.len() == MAX_REFERENCES {
                 return Err(anyhow!("near_ai_credential_cleanup_required"));
@@ -107,9 +111,13 @@ impl Journal {
     }
 
     fn save(&self, store: &ConfigStore) -> Result<()> {
+        self.save_named(store, JOURNAL)
+    }
+
+    pub(crate) fn save_named(&self, store: &ConfigStore, name: &str) -> Result<()> {
         let bytes =
             serde_json::to_vec(self).map_err(|_| anyhow!("near_ai_credential_cleanup_invalid"))?;
-        store.write_daemon_file(JOURNAL, &bytes)?;
+        store.write_daemon_file(name, &bytes)?;
         sync_directory(store)
     }
 }
@@ -290,7 +298,7 @@ fn unavailable() -> anyhow::Error {
     anyhow!("near_ai_credential_storage_unavailable")
 }
 
-fn sync_directory(store: &ConfigStore) -> Result<()> {
+pub(crate) fn sync_directory(store: &ConfigStore) -> Result<()> {
     #[cfg(unix)]
     std::fs::File::open(store.dir())
         .and_then(|dir| dir.sync_all())

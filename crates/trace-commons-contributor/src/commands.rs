@@ -128,7 +128,9 @@ pub(crate) async fn enroll_core(
         anyhow::bail!("--grant and --invite are alternative enrollment paths; pass only one");
     }
 
-    let device = DeviceIdentity::load_or_generate(store).context("loading device identity")?;
+    let device = DeviceIdentity::load_or_generate_async(store)
+        .await
+        .context("loading device identity")?;
 
     if let Some(invite) = invite {
         let cfg =

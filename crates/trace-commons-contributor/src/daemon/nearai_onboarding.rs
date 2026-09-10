@@ -55,9 +55,7 @@
 use super::account_onboarding::{client, signup_allowlist};
 use super::ipc::{DaemonShared, ERR_BAD_PARAMS, ERR_UNAVAILABLE, Request, Response};
 use super::nearai_credential::api::CloudApi;
-use crate::config::{
-    ACCOUNT_SESSION_FILE, CONTRIBUTOR_CONFIG_SCHEMA_VERSION, ConfigStore, ContributorConfig,
-};
+use crate::config::{CONTRIBUTOR_CONFIG_SCHEMA_VERSION, ConfigStore, ContributorConfig};
 use crate::identity::DeviceIdentity;
 use anyhow::{Result, anyhow, bail};
 use base64::Engine;
@@ -218,6 +216,10 @@ async fn enroll(
     api: &CloudApi,
     ingest_url: &str,
 ) -> Result<serde_json::Value> {
+    let expected = super::commons_credentials::snapshot(
+        &shared.store,
+        super::commons_credentials::Kind::Account,
+    )?;
     if shared.store.load_config()?.is_some() {
         bail!("near_ai_enroll_already_enrolled")
     }
@@ -272,7 +274,7 @@ async fn enroll(
             }
         })?;
 
-    let identity = DeviceIdentity::load_or_generate(&shared.store)?;
+    let identity = DeviceIdentity::load_or_generate_async(&shared.store).await?;
     let verifier = random()?;
     let code_challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .encode(Sha256::digest(verifier.as_bytes()));
@@ -321,18 +323,25 @@ async fn enroll(
         .await
         .map_err(|_| anyhow!("near_ai_enroll_verification_failed"))?;
 
-    persist(
-        shared,
-        Commons {
-            ingest_url,
-            issuer_url: &issuer_url,
-            audience: &audience,
-            witness,
-            receipt_endpoint,
-        },
-        &identity,
-        finished,
-    )
+    let store = shared.store.clone();
+    let ingest_url = ingest_url.to_string();
+    tokio::task::spawn_blocking(move || {
+        persist(
+            &store,
+            Commons {
+                ingest_url: &ingest_url,
+                issuer_url: &issuer_url,
+                audience: &audience,
+                witness,
+                receipt_endpoint,
+            },
+            &identity,
+            finished,
+            Some(&expected),
+        )
+    })
+    .await
+    .map_err(|_| anyhow!("commons_credential_worker_unavailable"))?
 }
 
 fn random() -> Result<String> {
@@ -360,10 +369,11 @@ struct Commons<'a> {
 }
 
 fn persist(
-    shared: &DaemonShared,
+    store: &ConfigStore,
     commons: Commons<'_>,
     identity: &DeviceIdentity,
     result: Finished,
+    expected: Option<&super::commons_credentials::Snapshot>,
 ) -> Result<serde_json::Value> {
     if result.token_type != "Bearer"
         || !result.access_token.starts_with("tcn1_")
@@ -382,7 +392,7 @@ fn persist(
         bail!("near_ai_enroll_invalid")
     }
 
-    let dir = shared.store.dir().to_path_buf();
+    let dir = store.dir().to_path_buf();
     let store = ConfigStore::open(dir.clone())?;
     if store.load_config()?.is_some()
         || DeviceIdentity::load(&store)?.is_none_or(|k| k.device_key_id != identity.device_key_id)
@@ -416,19 +426,23 @@ fn persist(
         account_id: result.account_id.clone(),
     };
 
-    let temporary = format!(
-        "near-ai-enroll-{}.json",
-        identity.device_key_id.replace(':', "-")
-    );
-    store.write_daemon_file(&temporary, &serde_json::to_vec(&config)?)?;
-    let published = store
-        .write_daemon_file(ACCOUNT_SESSION_FILE, &serde_json::to_vec(&session)?)
-        .and_then(|()| {
-            std::fs::hard_link(dir.join(&temporary), dir.join("contributor.json"))
-                .map_err(Into::into)
-        });
-    let _ = store.remove_daemon_file(&temporary);
-    published.map_err(|_| anyhow!("near_ai_enroll_unavailable"))?;
+    let fresh;
+    let expected = match expected {
+        Some(expected) => expected,
+        None => {
+            fresh = super::commons_credentials::snapshot(
+                &store,
+                super::commons_credentials::Kind::Account,
+            )?;
+            &fresh
+        }
+    };
+    super::commons_credentials::replace(
+        &store,
+        expected,
+        &serde_json::to_vec(&session)?,
+        Some(&config),
+    )?;
 
     // Deliberately not the account id or anything token-shaped beyond what a
     // shell needs to render "you are enrolled".
@@ -619,7 +633,7 @@ mod tests {
         let mut result = finished();
         result.device_key_id = identity.device_key_id.clone();
 
-        let reply = persist(&shared, commons(), &identity, result).unwrap();
+        let reply = persist(&shared.store, commons(), &identity, result, None).unwrap();
         let rendered = serde_json::to_string(&reply).unwrap();
         for secret in ["tcn1_fixture", REFRESH, "rt_"] {
             assert!(
@@ -704,7 +718,7 @@ mod tests {
             let mut result = good();
             mutate(&mut result);
             assert!(
-                persist(&shared, commons(), &identity, result).is_err(),
+                persist(&shared.store, commons(), &identity, result, None).is_err(),
                 "{name} was accepted"
             );
             assert!(
@@ -714,7 +728,7 @@ mod tests {
         }
         // And the unmutated fixture is accepted, so the cases above fail for
         // their own reason rather than because the fixture never worked.
-        assert!(persist(&shared, commons(), &identity, good()).is_ok());
+        assert!(persist(&shared.store, commons(), &identity, good(), None).is_ok());
     }
 
     #[test]

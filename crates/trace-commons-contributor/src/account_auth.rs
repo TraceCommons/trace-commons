@@ -23,8 +23,8 @@
 //!
 //! # The token is a secret at rest
 //!
-//! It is written to the same 0700 state directory as the device key, at 0600,
-//! through the same atomic writer. It appears in no log line and no error
+//! It is stored in the OS credential store. The 0700 state directory holds
+//! only an opaque reference, replaced after readback verification. It appears in no log line and no error
 //! string: every error below is a fixed label, like every other boundary in
 //! this crate.
 
@@ -87,15 +87,22 @@ pub struct SignInOutcome {
 /// absent, unparseable, or expired (or about to be). Fail closed: the caller
 /// then reports "sign in again" rather than making a call that will 401.
 pub fn load_token(store: &ConfigStore) -> Option<String> {
-    let raw = store
-        .read_daemon_file(ACCOUNT_SESSION_FILE)
-        .ok()
-        .flatten()?;
-    let session: AccountSession = serde_json::from_slice(&raw).ok()?;
+    try_load_token(store).ok().flatten()
+}
+
+/// Distinguish an unavailable OS store from a signed-out account. Callers may
+/// ask the user to unlock the system store without starting a new login flow.
+pub fn try_load_token(store: &ConfigStore) -> Result<Option<String>> {
+    let Some(raw) = store.read_daemon_file(ACCOUNT_SESSION_FILE)? else {
+        return Ok(None);
+    };
+    let Ok(session) = serde_json::from_slice::<AccountSession>(&raw) else {
+        return Ok(None);
+    };
     if session.expires_at <= Utc::now() + EXPIRY_SKEW {
-        return None;
+        return Ok(None);
     }
-    Some(session.access_token)
+    Ok(Some(session.access_token))
 }
 
 /// Whether a usable token is stored, without handing the token out. For status
@@ -109,7 +116,8 @@ pub fn session_status(store: &ConfigStore) -> Option<DateTime<Utc>> {
     (session.expires_at > Utc::now()).then_some(session.expires_at)
 }
 
-/// Persist a token at 0600 inside the 0700 state directory.
+/// Persist a token through the shared Commons credential lifecycle.
+#[cfg(test)]
 fn save_session(store: &ConfigStore, session: &AccountSession) -> Result<()> {
     let body = serde_json::to_vec(session).context("serializing the account session")?;
     store.write_daemon_file(ACCOUNT_SESSION_FILE, &body)
@@ -296,6 +304,7 @@ pub async fn sign_in<F>(
 where
     F: FnOnce(&str),
 {
+    let expected = crate::daemon::commons_credentials::account_snapshot(store, cfg)?;
     // Bind BEFORE registering the redirect, so the port we register is the port
     // we are actually listening on.
     let (listener, port) = bind_loopback().await?;
@@ -357,7 +366,17 @@ where
         expires_at,
         account_id: exchanged.account_id.clone(),
     };
-    save_session(store, &session)?;
+    let owned_store = store.clone();
+    tokio::task::spawn_blocking(move || {
+        crate::daemon::commons_credentials::replace(
+            &owned_store,
+            &expected,
+            &serde_json::to_vec(&session)?,
+            None,
+        )
+    })
+    .await
+    .context("commons_credential_worker_unavailable")??;
 
     Ok(SignInOutcome {
         account_id: exchanged.account_id,
@@ -371,8 +390,22 @@ where
 /// asked to sign out must not be left holding a live token on disk because the
 /// network was down. The token expires on its own regardless.
 pub async fn sign_out(store: &ConfigStore, cfg: &ContributorConfig) -> Result<()> {
-    let token = load_token(store);
-    let result = match token {
+    let expected = crate::daemon::commons_credentials::account_snapshot(store, cfg)?;
+    crate::daemon::commons_credentials::clear_expected(store, &expected)?;
+    let owned_store = store.clone();
+    let token = tokio::task::spawn_blocking(move || {
+        let raw = crate::daemon::commons_credentials::removed_payload(&owned_store, &expected)
+            .ok()
+            .flatten();
+        let token = raw
+            .and_then(|bytes| serde_json::from_slice::<AccountSession>(&bytes).ok())
+            .map(|session| session.access_token);
+        let _ = crate::daemon::commons_credentials::cleanup(&owned_store);
+        token
+    })
+    .await
+    .context("commons_credential_worker_unavailable")?;
+    match token {
         Some(token) => {
             let client = Client::builder(
                 &cfg.ingest_url,
@@ -389,9 +422,7 @@ pub async fn sign_out(store: &ConfigStore, cfg: &ContributorConfig) -> Result<()
                 .context("revoking the account session")
         }
         None => Ok(()),
-    };
-    clear_token(store)?;
-    result
+    }
 }
 
 #[cfg(test)]

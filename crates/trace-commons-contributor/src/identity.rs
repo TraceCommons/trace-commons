@@ -36,6 +36,21 @@ pub struct DeviceIdentity {
 }
 
 impl DeviceIdentity {
+    /// Native credential access may prompt; keep it off async runtime workers.
+    pub async fn load_async(store: &ConfigStore) -> Result<Option<Self>> {
+        let store = store.clone();
+        tokio::task::spawn_blocking(move || Self::load(&store))
+            .await
+            .context("commons_credential_worker_unavailable")?
+    }
+
+    pub async fn load_or_generate_async(store: &ConfigStore) -> Result<Self> {
+        let store = store.clone();
+        tokio::task::spawn_blocking(move || Self::load_or_generate(&store))
+            .await
+            .context("commons_credential_worker_unavailable")?
+    }
+
     /// Load and validate the persisted device key without creating one.
     pub fn load(store: &ConfigStore) -> Result<Option<Self>> {
         store
@@ -47,14 +62,17 @@ impl DeviceIdentity {
 
     /// Load the persisted device key, or generate and persist a new one.
     pub fn load_or_generate(store: &ConfigStore) -> Result<Self> {
+        use crate::daemon::commons_credentials::{self, Kind};
+        let expected = commons_credentials::snapshot(store, Kind::Device)?;
         if let Some(identity) = Self::load(store)? {
             return Ok(identity);
         }
         let doc = Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new())
             .map_err(|_| anyhow!("generating device keypair"))?;
         let pkcs8_der = doc.as_ref().to_vec();
-        store
-            .save_device_key(&pkcs8_der)
+        // Capture before generation so logout or another creator cannot be
+        // mistaken for permission to publish this in-flight candidate.
+        commons_credentials::replace(store, &expected, &pkcs8_der, None)
             .context("saving device key")?;
         Self::from_pkcs8(&pkcs8_der)
     }

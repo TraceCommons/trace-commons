@@ -1698,3 +1698,5 @@ mod tests {
         embedded.close();
     }
 }
+
+pub(crate) mod commons_credentials;

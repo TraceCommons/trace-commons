@@ -9,7 +9,7 @@ use crate::daemon::credential_store::{CredentialError, CredentialReference, Secr
 use crate::daemon::settings::DaemonSettings;
 
 #[derive(Default)]
-struct MemoryBackend(Mutex<HashMap<String, Vec<u8>>>);
+pub(crate) struct MemoryBackend(Mutex<HashMap<String, Vec<u8>>>);
 
 impl SecretBackend for MemoryBackend {
     fn read(&self, reference: &CredentialReference) -> Result<Vec<u8>, CredentialError> {

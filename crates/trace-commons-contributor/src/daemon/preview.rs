@@ -797,9 +797,10 @@ pub async fn build_witnessed_preview(
         remediate_quarantined: false,
         verdict: options.verdict,
     };
-    let mut context =
+    let mut context = super::run_blocking(|| {
         crate::submit::SubmitContext::new(store, cfg, &submit_options, near_ai.clone())
-            .map_err(|_| anyhow::anyhow!("witness-review-unavailable"))?;
+    })
+    .map_err(|_| anyhow::anyhow!("witness-review-unavailable"))?;
     let (response, attested_inference) = context
         .prepare_witnessed_review(
             &transcript,
