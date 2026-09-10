@@ -38,8 +38,8 @@ jobs:
     steps:
     - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
       with:
-        path: dist
-        pattern: macos-dmg
+        path: dist/macos-dmg
+        name: macos-dmg
         run-id: '34501588678'
         github-token: ${{ github.token }}
     - name: Add missing verified macOS assets without replacing downloads
