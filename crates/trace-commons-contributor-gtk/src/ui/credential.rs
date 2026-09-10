@@ -278,7 +278,7 @@ pub(super) fn act(app: &Rc<App>, action: CredentialAction) {
         CredentialAction::None => {
             view.pending.set(false);
         }
-        CredentialAction::Obtain => start(app),
+        CredentialAction::Obtain => choose_provider(app),
         CredentialAction::Cancel => cancel(app),
         CredentialAction::Forget => forget(app),
     }
@@ -292,6 +292,30 @@ pub(super) fn act(app: &Rc<App>, action: CredentialAction) {
 /// to either is the same.
 fn open_browser(url: &str) -> bool {
     gtk::gio::AppInfo::launch_default_for_uri(url, None::<&gtk::gio::AppLaunchContext>).is_ok()
+}
+
+/// Choose an identity provider before starting any browser ceremony.
+fn choose_provider(app: &Rc<App>) {
+    let dialog = adw::MessageDialog::new(Some(&app.window), Some(copy::CREDENTIAL_OBTAIN), None);
+    dialog.add_responses(&[
+        ("google", copy::CREDENTIAL_GOOGLE),
+        ("github", copy::CREDENTIAL_GITHUB),
+        ("cancel", copy::CREDENTIAL_CANCEL),
+    ]);
+    dialog.set_close_response("cancel");
+    dialog.set_default_response(Some("cancel"));
+    let app = Rc::clone(app);
+    dialog.connect_response(None, move |dialog, response| {
+        dialog.close();
+        match response {
+            "google" | "github" => start(&app, response),
+            _ => {
+                app.private_inference.credential.pending.set(false);
+                refresh(&app);
+            }
+        }
+    });
+    dialog.present();
 }
 
 /// Start the ceremony and open the browser it minted a URL for.
@@ -313,10 +337,10 @@ fn open_browser(url: &str) -> bool {
 /// that did not start, and inventing one in this shell is the thing this whole
 /// surface is written against -- so the answer to a refusal is to ask the
 /// daemon what is true and draw that.
-fn start(app: &Rc<App>) {
+fn start(app: &Rc<App>, provider: &str) {
     app.call(
         "near_ai_credential_start",
-        serde_json::json!({}),
+        serde_json::json!({"provider": provider}),
         |app, result| {
             let view = &app.private_inference.credential;
             let opened = match result {
@@ -735,7 +759,7 @@ mod tests {
     #[test]
     fn a_browser_that_did_not_open_cancels_the_attempt_it_belongs_to() {
         let body = code()
-            .split("fn start(app: &Rc<App>) {")
+            .split("fn start(app: &Rc<App>, provider: &str) {")
             .nth(1)
             .expect("start is in this file")
             .split("\n}\n")

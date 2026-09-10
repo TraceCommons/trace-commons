@@ -73,6 +73,7 @@ enum PrivateInferenceCopyFixture {
          "near_ai_enroll_verification_failed":"NEAR-AI-ENROLL-VERIFICATION-FAILED",
          "near_ai_enroll_unavailable":"NEAR-AI-ENROLL-UNAVAILABLE","credential_what":"C-WHAT",
          "credential_cost":"C-COST","credential_obtain":"C-OBTAIN",
+         "credential_google":"Continue with Google","credential_github":"Continue with GitHub",
          "credential_cancel":"C-CANCEL","credential_forget":"C-FORGET",
          "credential_forget_explains":"C-FORGET-EXPLAINS",
          "credential_absent":"C-ABSENT","credential_obtaining":"C-OBTAINING",

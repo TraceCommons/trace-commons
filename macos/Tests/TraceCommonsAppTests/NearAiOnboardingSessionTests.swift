@@ -106,7 +106,17 @@ final class NearAiOnboardingSessionTests: XCTestCase {
     }
 
     @MainActor
-    func testSuccessfulSignInLeavesJoiningAsASeparateAction() async throws {
+    func testGoogleSignInLeavesJoiningAsASeparateAction() async throws {
+        try await assertSignIn(provider: .google)
+    }
+
+    @MainActor
+    func testGithubSignInLeavesJoiningAsASeparateAction() async throws {
+        try await assertSignIn(provider: .github)
+    }
+
+    @MainActor
+    private func assertSignIn(provider: NearAiSignInProvider) async throws {
         let unexpected = expectation(description: "Sign-in must not enroll or grant consent")
         unexpected.isInverted = true
         let daemon = OnboardingSessionDaemon(unexpectedCall: unexpected)
@@ -120,7 +130,7 @@ final class NearAiOnboardingSessionTests: XCTestCase {
         var browserURL: URL?
         await awaitSession(model, state: "obtaining") {
             // Exercise the model action without opening a browser or spending.
-            browserURL = await model.startNearAiCredential()
+            browserURL = await model.startNearAiCredential(provider: provider)
         }
         XCTAssertEqual(browserURL?.absoluteString, "https://cloud.example.invalid/native-login")
         XCTAssertEqual(model.credentialAttempt?.attemptID, "synthetic-attempt")
@@ -144,7 +154,8 @@ final class NearAiOnboardingSessionTests: XCTestCase {
         XCTAssertEqual(starts.count, 1)
         let start = try XCTUnwrap(starts.first)
         let params = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(start.params.utf8)) as? [String: Any])
-        XCTAssertTrue(params.isEmpty, "Sign-in must not carry enrollment or consent parameters")
+        XCTAssertEqual(params as? [String: String], ["provider": provider.rawValue],
+                       "Sign-in must carry only the chosen provider, without enrollment or consent parameters")
         XCTAssertEqual(Set(daemon.calls.map(\.method)), ["near_ai_credential_start", "near_ai_credential_status", "near_ai_balance"])
     }
 

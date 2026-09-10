@@ -14,8 +14,9 @@ struct HarnessListSection: View {
     let copy: PrivateInferenceCopy
 
     var body: some View {
-        VStack(alignment: .leading, spacing: TC.Space.sm) {
-            TCSectionHeader(title: copy.harnessesTitle)
+        VStack(alignment: .leading, spacing: TC.Space.l) {
+            Text(copy.harnessesTitle)
+                .font(TC.Font_.sectionTitle)
             // Says the choice is per tool AND that the list is what this app
             // knows how to look for. Without the second half a contributor
             // whose tool is missing concludes it cannot be connected.
@@ -94,16 +95,22 @@ private struct HarnessRowView: View {
     @EnvironmentObject private var model: AppModel
     let row: HarnessRow
     let copy: PrivateInferenceCopy
+    @State private var settingsExpanded = false
 
     var body: some View {
         let state = HarnessSurface.state(row, calls: model.harnessCalls)
         let tone = PrivateInferenceIndicator.palette(HarnessSurface.tone(state))
-        VStack(alignment: .leading, spacing: TC.Space.xs) {
-            HStack(alignment: .firstTextBaseline, spacing: TC.Space.m) {
-                // IronWire's name for the tool, never spelled by this shell.
-                Text(row.name).font(TC.Font_.cardTitle)
-                Spacer(minLength: TC.Space.m)
-                actionButton
+        VStack(alignment: .leading, spacing: TC.Space.m) {
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: TC.Space.l) {
+                    toolHeading.fixedSize()
+                    Spacer(minLength: TC.Space.l)
+                    actionButton.fixedSize()
+                }
+                VStack(alignment: .leading, spacing: TC.Space.m) {
+                    toolHeading
+                    actionButton
+                }
             }
             // The one state that means a call arrived is the only one drawn
             // as working, and the two that cannot be attributed say nothing
@@ -132,23 +139,43 @@ private struct HarnessRowView: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            // The file this app would change, always. A tool nobody expected
-            // to be set up is a question about which file, every time.
-            if let path = row.configPath {
-                Text(path)
-                    .font(TC.Font_.monoCode)
-                    .foregroundStyle(.secondary)
-                    .textSelection(.enabled)
-            }
-            // What to run instead. A command, not prose, so it is monospaced
-            // and selectable and never restated in words.
-            Text(row.connectCommand)
+            DisclosureGroup(isExpanded: $settingsExpanded) {
+                VStack(alignment: .leading, spacing: TC.Space.m) {
+                    if let path = row.configPath {
+                        Label(path, systemImage: "doc.text")
+                            .textSelection(.enabled)
+                    }
+                    Label(row.connectCommand, systemImage: "terminal")
+                        .textSelection(.enabled)
+                }
                 .font(TC.Font_.monoCode)
-                .foregroundStyle(.secondary)
-                .textSelection(.enabled)
+                .foregroundStyle(TC.inkSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.top, TC.Space.s)
+            } label: {
+                Text(copy.harnessPreviewTitle)
+                    .font(TC.Font_.meta)
+                    .foregroundStyle(TC.inkSecondary)
+            }
         }
+        .padding(TC.Space.xl)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .tcCard()
+        .background(TC.surfaceInset, in: RoundedRectangle(cornerRadius: TC.Radius.card))
+    }
+
+    private var toolHeading: some View {
+        HStack(spacing: TC.Space.m) {
+            Image(systemName: "terminal")
+                .font(TC.Font_.sectionTitle)
+                .foregroundStyle(TC.greenText)
+                .padding(TC.Space.m)
+                .background(TC.surface, in: RoundedRectangle(cornerRadius: TC.Radius.inset))
+                .accessibilityHidden(true)
+            Text(row.name)
+                .font(TC.Font_.cardTitle)
+                .foregroundStyle(TC.inkPrimary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
     }
 
     /// One button, or none. Which action it offers is the shared table's
@@ -157,12 +184,22 @@ private struct HarnessRowView: View {
     @ViewBuilder
     private var actionButton: some View {
         if let action = HarnessSurface.action(row, calls: model.harnessCalls) {
-            Button(HarnessSurface.actionLabel(action, copy: copy)) {
-                model.beginHarnessAction(id: row.id, action: action)
+            if action == .connect {
+                harnessButton(action)
+                    .tcPrimaryAction()
+            } else {
+                harnessButton(action)
+                    .buttonStyle(.bordered)
             }
-            .buttonStyle(.bordered)
-            .disabled(model.harnessBusy)
         }
+    }
+
+    private func harnessButton(_ action: HarnessAction) -> some View {
+        Button(HarnessSurface.actionLabel(action, copy: copy)) {
+            model.beginHarnessAction(id: row.id, action: action)
+        }
+        .accessibilityLabel(Text(row.name) + Text(verbatim: ": ") + Text(HarnessSurface.actionLabel(action, copy: copy)))
+        .disabled(model.harnessBusy)
     }
 }
 

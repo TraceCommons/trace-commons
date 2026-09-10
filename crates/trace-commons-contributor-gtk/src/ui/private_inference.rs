@@ -128,7 +128,12 @@ impl PrivateInferenceView {
 
         let tools = style::card(gtk::Orientation::Vertical, space::M);
         // Tools follow account setup; the kill switch stays below both.
-        tools.append(&style::section(copy::HARNESSES_TITLE));
+        let tools_title = gtk::Label::builder()
+            .label(copy::HARNESSES_TITLE)
+            .xalign(0.0)
+            .build();
+        tools_title.add_css_class("tc-screen-title");
+        tools.append(&tools_title);
         style::append_body(&tools, copy::HARNESSES_WHAT);
         let spend = gtk::Box::new(gtk::Orientation::Vertical, space::S);
         tools.append(&spend);
@@ -346,7 +351,14 @@ pub fn render_harnesses(app: &Rc<App>) {
             return;
         };
         let view = &app.private_inference;
+        // Keep expanded details open when the daemon refreshes the list.
+        let mut expanded = std::collections::HashSet::new();
         while let Some(child) = view.harnesses.first_child() {
+            if let Some(details) = child.last_child().and_downcast::<gtk::Expander>() {
+                if details.is_expanded() {
+                    expanded.insert(child.widget_name().to_string());
+                }
+            }
             view.harnesses.remove(&child);
         }
         while let Some(child) = view.spend.first_child() {
@@ -381,6 +393,9 @@ pub fn render_harnesses(app: &Rc<App>) {
         }
         for row in &list.harnesses {
             let card = harness_card(app, row);
+            if let Some(details) = card.last_child().and_downcast::<gtk::Expander>() {
+                details.set_expanded(expanded.contains(&row.id));
+            }
             app.private_inference.harnesses.append(&card);
         }
     });
@@ -415,7 +430,14 @@ fn listener_on(app: &Rc<App>) -> bool {
 /// is selectable: doing it by hand instead is always available, and this
 /// window is the only place a GNOME contributor can find it.
 fn harness_card(app: &Rc<App>, row: &crate::model::Harness) -> gtk::Box {
-    let card = style::card(gtk::Orientation::Vertical, space::S);
+    let card = style::card(gtk::Orientation::Vertical, space::M);
+    card.add_css_class("tc-tool-card");
+    card.set_widget_name(&row.id);
+    let heading = gtk::Box::new(gtk::Orientation::Horizontal, space::M);
+    let icon = gtk::Image::from_icon_name("utilities-terminal-symbolic");
+    icon.add_css_class("tc-tool-icon");
+    icon.set_pixel_size(24);
+    heading.append(&icon);
 
     let name = gtk::Label::builder()
         .label(&row.name)
@@ -423,7 +445,9 @@ fn harness_card(app: &Rc<App>, row: &crate::model::Harness) -> gtk::Box {
         .wrap(true)
         .build();
     name.add_css_class("tc-card-title");
-    card.append(&name);
+    name.set_hexpand(true);
+    heading.append(&name);
+    card.append(&heading);
 
     // Three of the five states have a sentence and two deliberately do not.
     // An empty sentence is drawn as no row at all, never as a blank one at
@@ -456,19 +480,31 @@ fn harness_card(app: &Rc<App>, row: &crate::model::Harness) -> gtk::Box {
     if !last_call.is_empty() {
         style::append_meta(&card, last_call);
     }
-    if let Some(path) = row.config_path.as_deref() {
-        style::append_meta(&card, path);
-    }
-    if !row.connect_command.is_empty() {
-        let command = gtk::Label::builder()
-            .label(&row.connect_command)
+    let details = gtk::Expander::builder()
+        .label(copy::HARNESS_PREVIEW_TITLE)
+        .expanded(false)
+        .build();
+    let settings = gtk::Box::new(gtk::Orientation::Vertical, space::M);
+    settings.set_margin_top(space::S);
+    for text in row
+        .config_path
+        .iter()
+        .chain(std::iter::once(&row.connect_command))
+    {
+        if text.is_empty() {
+            continue;
+        }
+        let label = gtk::Label::builder()
+            .label(text)
             .xalign(0.0)
             .wrap(true)
             .selectable(true)
             .build();
-        command.add_css_class("tc-mono");
-        card.append(&command);
+        label.add_css_class("tc-mono");
+        label.add_css_class("tc-meta");
+        settings.append(&label);
     }
+    details.set_child(Some(&settings));
 
     // Chosen from the daemon's answer, not from `connected`.
     //
@@ -490,7 +526,11 @@ fn harness_card(app: &Rc<App>, row: &crate::model::Harness) -> gtk::Box {
     } else {
         copy::HARNESS_DISCONNECT
     });
-    button.set_halign(gtk::Align::Start);
+    button.set_halign(gtk::Align::End);
+    button.set_valign(gtk::Align::Center);
+    if connecting {
+        button.add_css_class("suggested-action");
+    }
     // The daemon's own answer to whether the action may be offered, rather
     // than this shell re-deriving it: a tool that is gone can still be
     // disconnected, because uninstalling it did not remove the line we put
@@ -518,7 +558,8 @@ fn harness_card(app: &Rc<App>, row: &crate::model::Harness) -> gtk::Box {
         }
         plan_harness(&app, &id, action);
     });
-    card.append(&button);
+    heading.append(&button);
+    card.append(&details);
 
     card
 }

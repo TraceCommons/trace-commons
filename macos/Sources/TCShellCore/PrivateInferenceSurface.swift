@@ -107,6 +107,8 @@ public struct PrivateInferenceCopy: Decodable, Equatable, Sendable {
     /// having read only its label was not told what they agreed to.
     public let credentialCost: String
     public let credentialObtain: String
+    public let credentialGoogle: String
+    public let credentialGithub: String
     public let credentialCancel: String
     public let credentialForget: String
     /// That forgetting is local: the key stays valid at the service until
@@ -298,6 +300,8 @@ public struct PrivateInferenceCopy: Decodable, Equatable, Sendable {
         case credentialWhat = "credential_what"
         case credentialCost = "credential_cost"
         case credentialObtain = "credential_obtain"
+        case credentialGoogle = "credential_google"
+        case credentialGithub = "credential_github"
         case credentialCancel = "credential_cancel"
         case credentialForget = "credential_forget"
         case credentialForgetExplains = "credential_forget_explains"

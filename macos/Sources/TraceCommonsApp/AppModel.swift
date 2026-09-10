@@ -516,11 +516,11 @@ final class AppModel: ObservableObject {
     /// means the ceremony did not begin in a way this shell can carry
     /// through, and nothing is left half-started -- the daemon's own attempt
     /// times out on the browser.
-    func startNearAiCredential() async -> URL? {
+    func startNearAiCredential(provider: NearAiSignInProvider) async -> URL? {
         guard let client, !credentialBusy else { return nil }
         credentialBusy = true
         let outcome = await Task.detached(priority: .userInitiated) {
-            Result { try client.nearAiCredentialStart() }
+            Result { try client.nearAiCredentialStart(provider: provider) }
         }.value
         credentialBusy = false
         guard case .success(let attempt) = outcome, let attempt else {

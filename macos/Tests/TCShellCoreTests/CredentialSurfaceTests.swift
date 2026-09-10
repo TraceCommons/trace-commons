@@ -24,6 +24,7 @@ final class CredentialSurfaceTests: XCTestCase {
     /// The 15 fields this surface added, so a test can delete each in turn.
     private static let credentialFields = [
         "credential_title", "credential_what", "credential_cost", "credential_obtain",
+        "credential_google", "credential_github",
         "credential_cancel", "credential_forget", "credential_forget_explains",
         "credential_absent", "credential_obtaining", "credential_failed",
         "credential_cancelled", "credential_present", "credential_unknown",
