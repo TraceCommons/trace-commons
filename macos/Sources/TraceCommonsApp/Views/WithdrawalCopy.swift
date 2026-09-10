@@ -157,8 +157,7 @@ enum WithdrawalCopy {
         case .unknown:
             return Confirmation(
                 question: "Withdraw this trace?",
-                ambiguity: "This app does not recognise what stage this trace reached, so "
-                    + "it cannot rule out the furthest one:",
+                ambiguity: "This session may already have been distributed. Withdrawal cannot recall distributed copies.",
                 bodies: [canonicalCommonsDistributed],
                 gravest: 0,
                 credit: creditNote,
@@ -235,12 +234,7 @@ enum WithdrawalCopy {
     /// counts, so afterwards there is no per-trace tier to report and rule 1
     /// -- never a generic "withdrawn" -- cannot be honoured at all.
     static let noBulkAction =
-        "There is no button here that withdraws all of them at once. The daemon's bulk "
-        + "call reports only how many succeeded, never what happened to any one trace, "
-        + "and it chooses what to withdraw from this machine's copy of your history, "
-        + "which can be out of date -- so it could not tell you afterwards which of "
-        + "these had already been distributed. Withdraw them one at a time below and "
-        + "each one tells you what it actually did."
+        "Withdraw sessions individually to see the result for each one."
 }
 
 /// Assertions that belong on the copy, not on the plumbing.

@@ -17,6 +17,7 @@ struct CredentialSection: View {
     @Environment(\.openURL) private var openURL
     let copy: PrivateInferenceCopy
     var requiresSession = false
+    var prominent = false
 
     /// How often a ceremony in flight is re-read.
     ///
@@ -34,7 +35,12 @@ struct CredentialSection: View {
             requiresSession ? CredentialStatus(state: status.sessionState) : status,
             calls: model.credentialCalls)
         VStack(alignment: .leading, spacing: TC.Space.sm) {
-            TCSectionHeader(title: copy.credentialTitle)
+            if prominent {
+                Label(copy.credentialTitle, systemImage: "person.crop.circle")
+                    .font(.title2.weight(.semibold))
+            } else {
+                TCSectionHeader(title: copy.credentialTitle)
+            }
             Text(copy.credentialWhat)
                 .font(TC.Font_.body)
                 .fixedSize(horizontal: false, vertical: true)
@@ -66,7 +72,7 @@ struct CredentialSection: View {
             // `credentialAction` is passed so the two rows cannot draw the
             // same sign-in button twice; the decision is
             // `BalanceSurface.actionToDraw`'s, not this view's.
-            if !requiresSession {
+            if !requiresSession && action != .obtain {
                 Divider().padding(.vertical, TC.Space.xs)
                 BalanceRow(copy: copy, credentialAction: action, run: run)
             }
@@ -95,9 +101,17 @@ struct CredentialSection: View {
     @ViewBuilder
     private func actionButton(_ action: CredentialAction) -> some View {
         if let label = CredentialSurface.actionLabel(action, copy: copy) {
-            Button(label) { run(action) }
-                .buttonStyle(.bordered)
-                .disabled(model.credentialBusy)
+            if prominent && action == .obtain {
+                Button(label) { run(action) }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+                    .tint(TC.green)
+                    .disabled(model.credentialBusy)
+            } else {
+                Button(label) { run(action) }
+                    .buttonStyle(.bordered)
+                    .disabled(model.credentialBusy)
+            }
         }
     }
 

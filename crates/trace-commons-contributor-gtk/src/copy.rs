@@ -635,16 +635,12 @@ pub fn undo_headline(project_label: &str) -> String {
     format!("Approved {project_label}. Still on this machine.")
 }
 
-/// The undo bar's body. The Linux wording, which drops the shared spec's
-/// middle clause ("This app cannot see when that lands, so it does not
-/// pretend to count it down") because the bar has less room and the
-/// remaining sentence already makes the promise the clause was defending.
-pub const UNDO_BODY: &str = "The watcher sends approved sessions on its next sweep. Undo works \
-     until the sweep starts, and says so plainly if it is already too late.";
+/// Explains automatic sending and when approval can still be undone.
+pub const UNDO_BODY: &str =
+    "Approved sessions will send automatically. You can undo until uploading starts.";
 
-/// The other half of the undo bar's pair. Not "Dismiss": what this button
-/// does is let the send happen, and it should say so.
-pub const LET_IT_SEND: &str = "Let it send";
+/// Closes the notice without changing the approval.
+pub const LET_IT_SEND: &str = "Dismiss";
 
 // --- Credit ------------------------------------------------------------
 
@@ -833,8 +829,7 @@ pub fn withdraw_confirmation(stage: WithdrawStage) -> WithdrawConfirmation {
         WithdrawStage::Unknown => WithdrawConfirmation {
             question: WITHDRAW_QUESTION,
             ambiguity: Some(
-                "This window does not recognise what stage this trace reached, so it cannot rule \
-                 out the furthest one:",
+                "This session may already have been distributed. Withdrawal cannot recall distributed copies.",
             ),
             bodies: &[WITHDRAW_BODY_COMMONS_DISTRIBUTED],
             gravest: Some(0),
@@ -918,11 +913,7 @@ pub fn withdraw_failure_sentence(label: &str) -> String {
 /// reason bulk is left out rather than worded around: `withdraw_bulk`
 /// reports only `withdrawn` and `failed` counts, so afterwards there is no
 /// per-trace tier to report and rule 1 cannot be honoured at all.
-pub const WITHDRAW_NO_BULK: &str = "There is no button here that withdraws all of them at once. The bulk call reports only how \
-     many succeeded, never what happened to any one trace, and it chooses what to withdraw from \
-     this machine's copy of your history, which can be out of date -- so it could not tell you \
-     afterwards which of these had already been distributed. Withdraw them one at a time below \
-     and each one tells you what it actually did.";
+pub const WITHDRAW_NO_BULK: &str = "Withdraw sessions individually to see the result for each one.";
 
 /// The row-level progress label while a withdrawal is in flight. Present
 /// tense, because nothing has happened yet.
@@ -1860,7 +1851,8 @@ pub fn submit_approved_clause(approved: u64) -> String {
 pub fn submit_scrub_clause(total_redactions: u64) -> String {
     match total_redactions {
         0 => "Scrubbing matched nothing.".to_string(),
-        n => format!("Scrubbing removed {n}."),
+        1 => "1 redaction applied.".to_string(),
+        n => format!("{n} redactions applied."),
     }
 }
 

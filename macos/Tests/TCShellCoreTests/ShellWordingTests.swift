@@ -83,11 +83,11 @@ final class ShellWordingTests: XCTestCase {
         // `tc_contribution_withheld_line`, assembled in the Rust and shared
         // with the other two shells. Do not raise this again for it.
         "TraceCommonsApp/Views/QueueFolderRow.swift": 3,
-        "TraceCommonsApp/Views/QueueView.swift": 26,
+        "TraceCommonsApp/Views/QueueView.swift": 25,
         "TraceCommonsApp/Views/ScrubbingCaveat.swift": 4,
         "TraceCommonsApp/Views/SettingsView.swift": 40,
         "TraceCommonsApp/Views/WhatGetsRemovedSheet.swift": 4,
-        "TraceCommonsApp/Views/WithdrawalCopy.swift": 55,
+        "TraceCommonsApp/Views/WithdrawalCopy.swift": 49,
     ]
 
     /// The surfaces whose wording already comes from Rust. Nothing may ever

@@ -67,7 +67,7 @@ struct PrivateInferenceContent: View {
     /// The same narrow prose column Settings uses. This screen is three
     /// paragraphs and a switch; the full window width would set them at a
     /// measure nobody reads.
-    private static let proseColumn: CGFloat = 520
+    private static let proseColumn: CGFloat = 640
 
     var body: some View {
         if let copy = model.privateInferenceCopy {
@@ -80,62 +80,78 @@ struct PrivateInferenceContent: View {
         let state = model.privateInferenceState
         let tone = PrivateInferenceIndicator.palette(
             PrivateInferenceSurface.tone(state, calls: model.privateInferenceCalls))
-        VStack(alignment: .leading, spacing: TC.Space.sm) {
-            // The list leads. Connecting a tool is the thing a contributor
-            // can decide about; answering model calls at all is what happens
-            // because they connected one, not a question to settle first.
+        VStack(alignment: .leading, spacing: TC.Space.l) {
+            // Sign-in comes first so setup starts with the account needed
+            // to connect tools. The section shows account controls once signed in.
+            CredentialSection(copy: copy, prominent: true)
+                .padding(TC.Space.l)
+                .tcCard()
             HarnessListSection(copy: copy)
-            Divider().padding(.vertical, TC.Space.s)
-            // The key the destination answers with, directly under the list
-            // that says a tool cannot be connected without one -- so the
-            // notice on a row points at something on the same screen rather
-            // than at a place a contributor has to go and find.
-            CredentialSection(copy: copy)
-            Divider().padding(.vertical, TC.Space.s)
+                .padding(TC.Space.l)
+                .tcCard()
             // The switch, below the list and unchanged: a kill switch, which
             // is what it always was.
-            TCSectionHeader(title: copy.settingsTitle)
-            Text(copy.offerWhat)
-                .font(TC.Font_.body)
-                .fixedSize(horizontal: false, vertical: true)
-            // The exposure paragraph in full, on the destination as well as
-            // in the offer. A contributor who declined and came back months
-            // later is making the same decision and is owed the same words.
-            Text(copy.offerExposure)
-                .font(TC.Font_.body)
-                .fixedSize(horizontal: false, vertical: true)
-            Toggle(
-                copy.settingsToggle,
-                isOn: Binding(
-                    get: { model.daemonSettings?.privateInferenceOn ?? false },
-                    set: { model.applyPrivateInference($0) }
-                )
-            )
-            .disabled(model.privateInferenceBusy || model.daemonSettings?.privateInference == nil)
-            .toggleStyle(.switch)
-            .tint(TC.green)
-            .font(TC.Font_.body)
-            // The switch above says what was asked for. This says what
-            // happened, and it is drawn from the tone -- never from the
-            // switch's own boolean, which stays on over a listener that
-            // refused to start.
-            Label(
-                PrivateInferenceSurface.stateLine(
-                    state, copy: copy, calls: model.privateInferenceCalls),
-                systemImage: tone.symbol
-            )
-            .font(TC.Font_.body)
-            .foregroundStyle(tone.textColor)
-            .fixedSize(horizontal: false, vertical: true)
-            if let serving = PrivateInferenceSurface.servingLine(
-                state, calls: model.privateInferenceCalls)
-            {
-                Text(serving).font(TC.Font_.meta).foregroundStyle(.secondary)
+            DisclosureGroup {
+                VStack(alignment: .leading, spacing: TC.Space.sm) {
+                    Text(copy.offerWhat)
+                        .font(TC.Font_.body)
+                        .fixedSize(horizontal: false, vertical: true)
+                    // The exposure paragraph in full, on the destination as well as
+                    // in the offer. A contributor who declined and came back months
+                    // later is making the same decision and is owed the same words.
+                    Text(copy.offerExposure)
+                        .font(TC.Font_.body)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Toggle(
+                        copy.settingsToggle,
+                        isOn: Binding(
+                            get: { model.daemonSettings?.privateInferenceOn ?? false },
+                            set: { model.applyPrivateInference($0) }
+                        )
+                    )
+                    .disabled(model.privateInferenceBusy || model.daemonSettings?.privateInference == nil)
+                    .toggleStyle(.switch)
+                    .tint(TC.green)
+                    .font(TC.Font_.body)
+                    // The switch above says what was asked for. This says what
+                    // happened, and it is drawn from the tone -- never from the
+                    // switch's own boolean, which stays on over a listener that
+                    // refused to start.
+                    Label(
+                        PrivateInferenceSurface.stateLine(
+                            state, copy: copy, calls: model.privateInferenceCalls),
+                        systemImage: tone.symbol
+                    )
+                    .font(TC.Font_.body)
+                    .foregroundStyle(tone.textColor)
+                    .fixedSize(horizontal: false, vertical: true)
+                    if let serving = PrivateInferenceSurface.servingLine(
+                        state, calls: model.privateInferenceCalls)
+                    {
+                        Text(serving).font(TC.Font_.meta).foregroundStyle(.secondary)
+                    }
+                    Text(copy.settingsAppliesAtOnce)
+                        .font(TC.Font_.meta)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(.top, TC.Space.sm)
+            } label: {
+                VStack(alignment: .leading, spacing: TC.Space.xs) {
+                    Text(copy.settingsTitle)
+                        .font(TC.Font_.bodyDense)
+                    Label(
+                        PrivateInferenceSurface.stateLine(
+                            state, copy: copy, calls: model.privateInferenceCalls),
+                        systemImage: tone.symbol
+                    )
+                    .font(TC.Font_.meta)
+                    .foregroundStyle(tone.textColor)
+                    .fixedSize(horizontal: false, vertical: true)
+                }
             }
-            Text(copy.settingsAppliesAtOnce)
-                .font(TC.Font_.meta)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+            .padding(TC.Space.l)
+            .tcCard()
             if let error = model.lastActionError {
                 ActionMessageBanner(text: error) { model.lastActionError = nil }
             }
