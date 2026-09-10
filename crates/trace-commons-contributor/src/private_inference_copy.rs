@@ -65,8 +65,8 @@
 //!
 //! # The words this surface may not use
 //!
-//! Swept by `the_offer_surface_says_nothing_it_should_not`: no vendor name,
-//! no "proxy"/"backend"/"route", and -- the important one -- no claim of
+//! Swept by `the_offer_surface_says_nothing_it_should_not`: the NEAR AI action
+//! label is allowed, but no other routing jargon and no claim of
 //! privacy, safety or encryption. Turning this on does not make a
 //! contributor's calls private. It moves where they are answered from and
 //! keeps the record here; each call still goes on to whoever was configured
@@ -110,19 +110,13 @@ pub const DESTINATION: &str = "Private AI";
 pub const SUBTITLE: &str = "Your AI calls go out through this computer, so you can see them and \
      choose who answers.";
 
-/// The offer's heading. Names the machine, because "on this computer" is the
-/// whole of what changes and the only part a contributor can check.
-pub const OFFER_TITLE: &str = "Answer model calls on this computer";
+/// The offer’s heading names the intended provider. The body explains that
+/// existing provider connections are not changed by enabling the service.
+pub const OFFER_TITLE: &str = "Route AI requests through NEAR AI";
 
-/// What saying yes does, with no claim attached to it.
-///
-/// The sentence deliberately ends by saying each call is still passed on. An
-/// earlier draft stopped after "keep the record of them on this computer",
-/// which reads as though the call never leaves -- the exact misreading
-/// [`crate::routing_copy::TOOL_PRIVATE`]'s doc is careful about.
-pub const OFFER_WHAT: &str = "This app can answer the model calls your tools make, from here, and keep \
-     the record of them on this computer. Each call is still passed on to \
-     whoever you have set up to answer it.";
+/// Requests still go to the configured provider; enabling the service does
+/// not change existing tool connections.
+pub const OFFER_WHAT: &str = "Connect your tools to NEAR AI through this app. Requests use the provider configured for each tool; enabling this alone does not switch existing provider connections to NEAR AI. A record of requests is kept on this computer.";
 
 /// What turning it on exposes. **Required, not optional.**
 ///
@@ -171,7 +165,7 @@ pub const OFFER_ASKED_ONCE: &str = "Either way, this is the only time you will b
 pub const SETTINGS_TITLE: &str = "Private AI on this computer";
 
 /// The settings switch.
-pub const SETTINGS_TOGGLE: &str = "Answer model calls on this computer";
+pub const SETTINGS_TOGGLE: &str = "Route AI requests through NEAR AI";
 
 /// Changes are not deferred to a restart, and the line beneath the switch is
 /// what actually happened rather than what was asked for.
@@ -251,8 +245,7 @@ pub const STATE_RUNNING_ELSEWHERE: &str = "Another program is using this compute
      app started nothing and stopped nothing; whether calls can get through is not confirmed.";
 
 /// `port_in_use`.
-pub const STATE_PORT_IN_USE: &str = "Not on. Something else on this computer is holding the number this needs. \
-     Free it up, then turn this off and on again.";
+pub const STATE_PORT_IN_USE: &str = "Private AI couldn’t start because another app is using its port. Close that app, then turn Private AI off and on again.";
 
 /// `start_failed`.
 pub const STATE_START_FAILED: &str =
@@ -695,7 +688,7 @@ pub const TRAY_TURN_OFF: &str = "Stop answering model calls";
 /// Trailing ellipsis because it opens the screen rather than acting: turning
 /// it ON changes what anything else on this computer may send through, and
 /// that is not a decision to take from a menu with the consequence off-screen.
-pub const TRAY_OPEN_TO_TURN_ON: &str = "Answer model calls on this computer…";
+pub const TRAY_OPEN_TO_TURN_ON: &str = "Route AI requests through NEAR AI…";
 
 /// The heading over the list of tools found on this computer.
 ///
@@ -809,9 +802,8 @@ pub const HARNESS_PREVIEW_CANCEL: &str = "Leave the file as it is";
 /// telling them. So this sentence reports what was left alone and stops
 /// there: it must not read as an error to be cleared, and it must not
 /// suggest that this app could take the slot if asked.
-pub const HARNESS_SLOT_TAKEN: &str = "This tool is already set to send those calls somewhere, so that setting \
-     was left exactly as you had it. Nothing here changed it, and nothing \
-     here will.";
+pub const HARNESS_SLOT_TAKEN: &str =
+    "This tool already has a connection configured. Its settings were left unchanged.";
 
 /// A tool holding an old setting in a process that is still running.
 ///
@@ -838,10 +830,7 @@ pub const HARNESSES_NONE_FOUND: &str = "None of the tools this app knows about w
 /// say the right thing or nothing at all; either way it is refused, so that
 /// somebody's own mistake in their own file never comes back looking like
 /// this app's.
-pub const HARNESS_UNREADABLE_CONFIG: &str = "This app could not make sense of the settings file named above, so it \
-     changed nothing in it. This is a refusal, not a file that already said \
-     the right thing: open it yourself, or use the command shown, and the \
-     file stays exactly as it is until you do.";
+pub const HARNESS_UNREADABLE_CONFIG: &str = "Couldn’t read this tool’s settings. No changes were made. Edit the file manually or use the command shown.";
 
 /// A plan that found the file already saying what the action wanted.
 ///
@@ -2916,7 +2905,7 @@ mod tests {
     fn an_occupied_slot_is_reported_and_never_offered() {
         let taken = private_inference_copy().harness_slot_taken;
         assert!(
-            taken.contains("left exactly as you had it"),
+            taken.contains("left unchanged"),
             "the occupied sentence stopped saying it was left alone: {taken}"
         );
         for word in ["error", "failed", "instead", "take over", "override"] {
@@ -2933,11 +2922,11 @@ mod tests {
     fn an_unreadable_file_is_a_refusal_and_not_a_no_op() {
         let refused = private_inference_copy().harness_unreadable_config;
         assert!(
-            refused.contains("refusal"),
-            "the unreadable sentence stopped naming itself a refusal: {refused}"
+            refused.contains("Couldn’t read"),
+            "the unreadable sentence stopped explaining the read failure: {refused}"
         );
         assert!(
-            refused.contains("changed nothing"),
+            refused.contains("No changes were made"),
             "the unreadable sentence stopped saying nothing was written: {refused}"
         );
     }
@@ -4568,7 +4557,7 @@ mod tests {
             "earn",
         ] {
             for text in &strings {
-                // The product name is stripped before the check, so
+                // Product names and the approved NEAR AI action label are stripped, so
                 // "Private AI" may be said and nothing else may say
                 // "private". The ban exists to stop a PROMISE -- "your calls
                 // are private" is false, because each call still goes on to
@@ -4577,7 +4566,9 @@ mod tests {
                 // never meant the destination cannot see you, and the
                 // exposure sentence still says in full what turning this on
                 // lets anything else on the machine do.
-                let text = text.replace(DESTINATION, "");
+                let text = text
+                    .replace(DESTINATION, "")
+                    .replace("Route AI requests through NEAR AI", "");
                 assert!(
                     !text.to_lowercase().contains(word),
                     "{word:?} appears in: {text}"

@@ -347,8 +347,7 @@ struct SettingsContent: View {
                 // already-downloaded update would be describing a
                 // configuration this app does not ship.
                 Text("""
-                    Trace Commons looks for new versions on its own. Nothing on \
-                    disk changes until you say yes.
+                    Trace Commons checks for updates automatically and asks before installing.
                     """)
                     .font(TC.Font_.meta)
                     .foregroundStyle(.secondary)

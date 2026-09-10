@@ -90,7 +90,8 @@ public struct SubmitToast: Equatable, Sendable {
     static func scrubClause(_ totalRedactions: UInt64) -> String {
         switch totalRedactions {
         case 0: return "Scrubbing matched nothing."
-        default: return "Scrubbing removed \(totalRedactions)."
+        case 1: return "1 redaction applied."
+        default: return "\(totalRedactions) redactions applied."
         }
     }
 
