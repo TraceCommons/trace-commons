@@ -20,6 +20,28 @@ namespace TraceCommons.Interop.Tests;
 /// </summary>
 public class NearAiCredentialTests
 {
+    [Theory]
+    [InlineData("github")]
+    [InlineData("google")]
+    [InlineData("near")]
+    public void SignInCarriesOnlyTheSelectedProvider(string provider)
+    {
+        using JsonDocument document = JsonDocument.Parse(NearAiCredentialSurface.SerializeStart(provider));
+        Assert.Single(document.RootElement.EnumerateObject());
+        Assert.Equal(provider, document.RootElement.GetProperty("provider").GetString());
+        Assert.Contains(NearAiCredentialSurface.Providers(Copy()), choice => choice.Id == provider);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("NEAR")]
+    [InlineData("near\"}")]
+    public void UnknownProvidersCannotBecomeStartRequests(string provider)
+    {
+        Assert.False(NearAiCredentialSurface.IsProvider(provider));
+        Assert.Throws<ArgumentException>(() => NearAiCredentialSurface.SerializeStart(provider));
+    }
+
     [Fact]
     public void InferenceKeyDoesNotImplyACloudSession()
     {
@@ -69,9 +91,12 @@ public class NearAiCredentialTests
             copy.CredentialForgetExplains, copy.CredentialAbsent, copy.CredentialObtaining,
             copy.CredentialFailed, copy.CredentialCancelled, copy.CredentialPresent,
             copy.CredentialUnknown, copy.CredentialUnreported,
+            copy.CredentialProviderLabel, copy.CredentialProviderGithub,
+            copy.CredentialProviderGoogle, copy.CredentialProviderNear,
+            copy.CredentialWalletNotice,
         };
 
-        Assert.Equal(14, credential.Length);
+        Assert.Equal(19, credential.Length);
         foreach (string sentence in credential)
         {
             Assert.False(string.IsNullOrWhiteSpace(sentence));
@@ -107,7 +132,7 @@ public class NearAiCredentialTests
             .Where(name => name.StartsWith("credential_", StringComparison.Ordinal))
             .ToList();
 
-        Assert.Equal(14, credentialFields.Count);
+        Assert.Equal(19, credentialFields.Count);
         var carriers = new HashSet<string>(StringComparer.Ordinal)
         {
             "key", "keys", "secret", "token", "prefix", "account", "email", "org", "workspace",
@@ -619,6 +644,7 @@ public class NearAiCredentialTests
             // Wire fields, the empty parameter body, and the optional
             // session state's empty default when an older daemon omits it.
             "state", "session_state", "attempt_id", "attempt_status", "browser_url", "{}", "",
+            "github", "google", "near",
         };
 
         foreach (Match match in Regex.Matches(uncommented, "\"([^\"\\\\]|\\\\.)*\""))

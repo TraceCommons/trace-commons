@@ -1,5 +1,5 @@
-//! The management-plane half: turn a session into an inference key, then stop
-//! holding the session.
+//! The management-plane half: authenticate, mint an inference key, and renew
+//! the separate session used for account management.
 //!
 //! Response shapes here were taken from the deployed service's own OpenAPI
 //! document (`https://cloud-api.near.ai/api-docs/openapi.json`), which is
@@ -21,6 +21,7 @@
 //! deployed cloud-api is `cloud-api.near.ai`, confirmed live.
 
 use super::loopback::{CALLBACK_PATH, SessionTokens};
+use crate::daemon::nearai_credential::near_wallet::VerifiedNearWalletSignIn;
 use anyhow::{Result, anyhow, bail};
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
@@ -30,12 +31,17 @@ use std::time::Duration;
 pub const CLOUD_API_ORIGIN: &str = "https://cloud-api.near.ai";
 /// The sign-in providers the service exposes as a browser redirect.
 pub const PROVIDERS: [&str; 2] = ["github", "google"];
+const USER_AGENT: &str = "TraceCommons/0.12";
 /// A whole ceremony's worth of HTTP is three small calls; none of them should
 /// ever take this long.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// A management response is a few kilobytes. Anything beyond this is not a
 /// response we understand and must not be buffered on a contributor's machine.
 const MAX_RESPONSE_BYTES: usize = 256 * 1024;
+
+#[cfg(test)]
+#[path = "near_wallet_api_tests.rs"]
+mod near_wallet_tests;
 
 #[derive(Deserialize)]
 struct Organization {
@@ -46,6 +52,14 @@ struct Organization {
 #[derive(Deserialize)]
 struct Organizations {
     organizations: Vec<Organization>,
+}
+
+/// Public organization context returned by the existing Cloud management API.
+#[derive(Deserialize)]
+pub struct FundingOrganization {
+    pub id: String,
+    pub name: String,
+    pub is_active: bool,
 }
 
 #[derive(Deserialize)]
@@ -79,19 +93,32 @@ struct AccessAndRefreshToken {
     refresh_token_expiration: DateTime<Utc>,
 }
 
-/// A rotated session, as returned by an exchange.
+#[derive(Deserialize)]
+struct NearAuthResponse {
+    #[serde(flatten)]
+    tokens: AccessAndRefreshToken,
+    user: NearAuthUser,
+}
+
+#[derive(Deserialize)]
+struct NearAuthUser {
+    provider: String,
+    email: String,
+}
+
+/// A session with the expiry supplied by sign-in or a refresh exchange.
 ///
 /// Deliberately not [`SessionTokens`]: that type is what the browser hand-off
 /// produces and carries no expiry, and conflating the two would lose the one
 /// piece of information an exchange adds.
-pub struct RefreshedSession {
+pub struct AuthenticatedSession {
     pub session: SessionTokens,
     pub refresh_token_expires_at: DateTime<Utc>,
 }
 
-impl std::fmt::Debug for RefreshedSession {
+impl std::fmt::Debug for AuthenticatedSession {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RefreshedSession")
+        f.debug_struct("AuthenticatedSession")
             .field("session", &self.session)
             .field("refresh_token_expires_at", &self.refresh_token_expires_at)
             .finish()
@@ -184,6 +211,8 @@ impl CloudApi {
             base,
             http: reqwest::Client::builder()
                 .timeout(REQUEST_TIMEOUT)
+                .user_agent(USER_AGENT)
+                .retry(reqwest::retry::never())
                 // A management redirect would move a session bearer to
                 // whatever host the response named. There is no legitimate one
                 // on any of these three calls.
@@ -198,6 +227,8 @@ impl CloudApi {
             base: reqwest::Url::parse(origin)?,
             http: reqwest::Client::builder()
                 .timeout(REQUEST_TIMEOUT)
+                .user_agent(USER_AGENT)
+                .retry(reqwest::retry::never())
                 .redirect(reqwest::redirect::Policy::none())
                 .build()?,
         })
@@ -282,14 +313,11 @@ impl CloudApi {
             .send()
             .await
             .map_err(|_| anyhow!("near_ai_credential_unavailable"))?;
+        Self::decode(response).await
+    }
+
+    async fn decode<T: serde::de::DeserializeOwned>(mut response: reqwest::Response) -> Result<T> {
         let status = response.status();
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|_| anyhow!("near_ai_credential_unavailable"))?;
-        if bytes.len() > MAX_RESPONSE_BYTES {
-            bail!("near_ai_credential_unavailable")
-        }
         if !status.is_success() {
             // The body is never relayed. It is the service's prose about a
             // request that carried a session bearer, and this crate's rule is
@@ -306,7 +334,57 @@ impl CloudApi {
             }
             bail!("near_ai_credential_refused")
         }
+        if response
+            .content_length()
+            .is_some_and(|size| size > MAX_RESPONSE_BYTES as u64)
+        {
+            bail!("near_ai_credential_unavailable")
+        }
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|_| anyhow!("near_ai_credential_unavailable"))?
+        {
+            if chunk.len() > MAX_RESPONSE_BYTES.saturating_sub(bytes.len()) {
+                bail!("near_ai_credential_unavailable")
+            }
+            bytes.extend_from_slice(&chunk);
+        }
         serde_json::from_slice(&bytes).map_err(|_| anyhow!("near_ai_credential_unexpected"))
+    }
+
+    /// Submit one locally verified proof. Cloud verifies current on-chain key
+    /// ownership and consumes its nonce; an ambiguous response is never retried.
+    pub(crate) async fn sign_in_near(
+        &self,
+        proof: VerifiedNearWalletSignIn,
+    ) -> Result<AuthenticatedSession> {
+        let expected_email = format!("{}@near", proof.account_id());
+        let response = self
+            .http
+            .post(self.url("/v1/auth/near")?)
+            .json(&proof)
+            .send()
+            .await
+            .map_err(|_| anyhow!("near_ai_credential_unavailable"))?;
+        let authenticated: NearAuthResponse = Self::decode(response).await?;
+        let tokens = authenticated.tokens;
+        if authenticated.user.provider != "near"
+            || authenticated.user.email != expected_email
+            || tokens.access_token.is_empty()
+            || tokens.refresh_token.is_empty()
+            || tokens.refresh_token_expiration <= Utc::now()
+        {
+            bail!("near_ai_credential_unexpected")
+        }
+        Ok(AuthenticatedSession {
+            session: SessionTokens {
+                access_token: tokens.access_token,
+                refresh_token: tokens.refresh_token,
+            },
+            refresh_token_expires_at: tokens.refresh_token_expiration,
+        })
     }
 
     /// Session in, inference key out.
@@ -349,9 +427,8 @@ impl CloudApi {
             .find(|w| w.is_active && !w.id.is_empty())
             .ok_or_else(|| anyhow!("near_ai_credential_no_workspace"))?;
         // `expires_at` is omitted, which the service accepts and reads as no
-        // expiry. That is the whole reason the session is discarded a moment
-        // later: a non-expiring inference key needs no refresh, where a held
-        // session would need one every seven days forever.
+        // expiry. Inference uses this key independently of the renewable
+        // session retained for account management.
         let minted: ApiKey = self
             .call(
                 reqwest::Method::POST,
@@ -393,7 +470,7 @@ impl CloudApi {
     /// A 401 here arrives as `near_ai_credential_session_expired`, which is
     /// the recoverable state: re-running the ceremony fixes it, and nothing
     /// this function does clears the stored token on its own.
-    pub async fn refresh_session(&self, refresh_token: &str) -> Result<RefreshedSession> {
+    pub async fn refresh_session(&self, refresh_token: &str) -> Result<AuthenticatedSession> {
         if refresh_token.is_empty() {
             bail!("near_ai_credential_session_missing")
         }
@@ -408,7 +485,7 @@ impl CloudApi {
         if refreshed.access_token.is_empty() || refreshed.refresh_token.is_empty() {
             bail!("near_ai_credential_unexpected")
         }
-        Ok(RefreshedSession {
+        Ok(AuthenticatedSession {
             session: SessionTokens {
                 access_token: refreshed.access_token,
                 refresh_token: refreshed.refresh_token,
@@ -436,6 +513,29 @@ impl CloudApi {
             .find(|o| o.is_active && !o.id.is_empty())
             .map(|o| o.id)
             .ok_or_else(|| anyhow!("near_ai_credential_no_organization"))
+    }
+
+    /// Resolve the selected inference key's organization before a credits handoff.
+    pub async fn funding_organization(
+        &self,
+        session: &SessionTokens,
+        organization_id: &str,
+    ) -> Result<FundingOrganization> {
+        if organization_id.is_empty()
+            || organization_id.len() > 128
+            || !organization_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        {
+            bail!("near_ai_credential_unexpected")
+        }
+        self.call(
+            reqwest::Method::GET,
+            &format!("/v1/organizations/{organization_id}"),
+            session,
+            None,
+        )
+        .await
     }
 
     /// Read one organization's balance.

@@ -103,6 +103,19 @@ else
   fi
 
   # --- axis 2: a real portal daemon ------------------------------------------
+  if ! WAYLAND_DISPLAY="$WAYLAND_SOCKET" GDK_BACKEND=wayland GSETTINGS_BACKEND=memory \
+      cargo test --locked --manifest-path "$GTK_MANIFEST" --lib \
+      ui::credential::provider_tests::wallet_provider_signals_preserve_pending_and_recover \
+      -- --exact --ignored --test-threads=1; then
+    fail "wallet provider controls did not preserve pending, failure and retry behavior"
+  fi
+  if ! WAYLAND_DISPLAY="$WAYLAND_SOCKET" GDK_BACKEND=wayland GSETTINGS_BACKEND=memory \
+      cargo test --locked --manifest-path "$GTK_MANIFEST" --lib \
+      ui::funding::widget_tests::billing_widgets_bind_and_invalidate_browser_handoffs \
+      -- --exact --ignored --test-threads=1; then
+    fail "billing controls did not preserve organization binding and invalidation"
+  fi
+
   #
   # ORDER MATTERS, and getting it wrong is why the first run of this job proved
   # nothing about the portal. xdg-desktop-portal-gtk is itself a GTK application

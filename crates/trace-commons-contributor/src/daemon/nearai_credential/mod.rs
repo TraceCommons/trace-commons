@@ -34,7 +34,11 @@
 pub mod api;
 pub mod balance;
 pub mod ceremony;
+pub mod funding;
 pub mod loopback;
+pub(crate) mod near_wallet;
+pub(crate) mod near_wallet_loopback;
+pub(crate) mod near_wallet_page;
 pub(crate) mod session;
 
 pub(super) use session::exchange;
@@ -164,11 +168,17 @@ pub fn credential_state(shared: &DaemonShared) -> &'static str {
 /// before it answers -- see [`ceremony::begin`] for why that ordering is not
 /// negotiable.
 pub async fn handle_start(shared: &DaemonShared, req: &Request) -> Response {
-    let provider = req
-        .params
-        .get("provider")
-        .and_then(|v| v.as_str())
-        .unwrap_or("github");
+    let provider = match req.params.get("provider") {
+        None => "github",
+        Some(serde_json::Value::String(provider)) => provider,
+        Some(_) => {
+            return Response::err(
+                req.id,
+                ERR_BAD_PARAMS,
+                "near_ai_credential_provider_unknown",
+            );
+        }
+    };
     match ceremony::begin(&shared.store, provider).await {
         Ok(value) => Response::ok(req.id, value),
         // One label for every failure. The service's own refusal is a 400
@@ -423,9 +433,58 @@ pub async fn handle_balance(shared: &DaemonShared, req: &Request) -> Response {
     Response::ok(req.id, balance::read(shared).await.to_value())
 }
 
+/// Read a verified credits destination, optionally bound to a displayed context.
+pub async fn handle_funding(shared: &DaemonShared, req: &Request) -> Response {
+    let report = match funding::parse_expected(&req.params) {
+        Err(report) => report,
+        Ok(expected) => match api::CloudApi::live() {
+            Ok(api) => funding::read(shared, &api, expected.as_ref()).await,
+            Err(_) => funding::FundingReport::Unavailable,
+        },
+    };
+    let message = crate::private_inference_copy::funding_message(&report);
+    match serde_json::to_value(report) {
+        Ok(mut value) => {
+            value["view"] = serde_json::json!({"message": message});
+            Response::ok(req.id, value)
+        }
+        Err(_) => Response::err(req.id, ERR_UNAVAILABLE, "near_ai_funding_unavailable"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn malformed_providers_never_start_a_ceremony_or_enroll() {
+        let (_directory, store) = crate::config::tests_support::temp_store();
+        let shared = DaemonShared::load(store).unwrap();
+        for provider in [
+            serde_json::Value::Null,
+            serde_json::json!(7),
+            serde_json::json!(["near"]),
+        ] {
+            let request = Request {
+                id: 17,
+                method: "near_ai_credential_start".into(),
+                params: serde_json::json!({ "provider": provider }),
+            };
+            let response = handle_start(&shared, &request).await;
+            assert_eq!(response.id, 17);
+            assert!(response.result.is_none());
+            let error = response.error.unwrap();
+            assert_eq!(error.code, ERR_BAD_PARAMS);
+            assert_eq!(error.message, "near_ai_credential_provider_unknown");
+            assert!(ceremony::attempt_status(shared.store.dir()).is_none());
+            assert!(shared.store.load_config().unwrap().is_none());
+            assert!(
+                crate::identity::DeviceIdentity::load(&shared.store)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+    }
 
     #[test]
     fn storage_state_precedence_preserves_active_attempts_and_usable_sessions() {

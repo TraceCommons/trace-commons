@@ -381,14 +381,23 @@ final class DaemonClient {
         BalanceStatus.parse(fromJSON: try rawResultJSON(BalanceSurface.statusMethod))
     }
 
+    func nearAiFunding(expected: FundingDestination?) throws -> FundingStatus {
+        let params: [String: Any] = expected.map {
+            ["expected_organization_id": $0.organizationID,
+             "expected_connection_revision": $0.connectionRevision]
+        } ?? [:]
+        return try call("near_ai_funding", params: params, as: FundingStatus.self)
+    }
+
     /// Begins the ceremony and hands back where to open the browser.
     ///
     /// The URL is served ONCE, here. Nothing re-serves it, so a caller that
     /// drops the returned attempt has to begin again -- which is why this
     /// returns the whole thing rather than just the id.
-    func nearAiCredentialStart() throws -> CredentialAttempt? {
-        CredentialAttempt.parse(
-            fromJSON: try rawResultJSON(CredentialSurface.startMethod))
+    func nearAiCredentialStart(provider: String? = nil) throws -> CredentialAttempt? {
+        let params: [String: Any] = provider.map { ["provider": $0] } ?? [:]
+        return CredentialAttempt.parse(
+            fromJSON: try rawResultJSON(CredentialSurface.startMethod, params: params))
     }
 
     /// Stops waiting on the browser. The attempt id is optional: the daemon

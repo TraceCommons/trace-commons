@@ -60,6 +60,47 @@ use crate::copy::CredentialAction;
 /// a sentence that stopped being true the moment the sign-in finished.
 const POLL_SECONDS: u32 = 2;
 
+pub(super) struct ProviderSelector {
+    pub root: gtk::Box,
+    pub selector: gtk::DropDown,
+}
+
+impl ProviderSelector {
+    pub fn new(selected: u32) -> Self {
+        let copy = trace_commons_contributor::private_inference_copy::private_inference_copy();
+        let root = gtk::Box::new(gtk::Orientation::Vertical, space::S);
+        style::append_body(&root, copy.credential_provider_label);
+        let selector = gtk::DropDown::from_strings(&[
+            copy.credential_provider_github,
+            copy.credential_provider_google,
+            copy.credential_provider_near,
+        ]);
+        selector.set_selected(selected);
+        selector.set_size_request(-1, 44);
+        let notice = gtk::Label::builder()
+            .label(copy.credential_wallet_notice)
+            .wrap(true)
+            .xalign(0.0)
+            .visible(selected == 2)
+            .build();
+        selector.connect_selected_notify({
+            let notice = notice.clone();
+            move |selector| notice.set_visible(selector.selected() == 2)
+        });
+        root.append(&selector);
+        root.append(&notice);
+        Self { root, selector }
+    }
+
+    pub fn provider(&self) -> Option<&'static str> {
+        provider_id(self.selector.selected())
+    }
+}
+
+fn provider_id(selected: u32) -> Option<&'static str> {
+    ["github", "google", "near"].get(selected as usize).copied()
+}
+
 /// The section's widgets. Built once and refilled, like every other screen in
 /// this window.
 pub struct CredentialView {
@@ -85,6 +126,7 @@ pub struct CredentialView {
     /// remove a key, and a second press before the first came back would ask
     /// for a second ceremony.
     pending: Cell<bool>,
+    provider: Cell<u32>,
 }
 
 impl Default for CredentialView {
@@ -120,6 +162,7 @@ impl CredentialView {
             attempt: RefCell::new(None),
             polling: Cell::new(false),
             pending: Cell::new(false),
+            provider: Cell::new(0),
         }
     }
 }
@@ -206,7 +249,9 @@ pub fn refresh(app: &Rc<App>) {
 /// the shared table renders that as unreported, separately from a nonempty
 /// label this build does not know.
 pub fn render(app: &Rc<App>, state: &str) {
+    crate::ui::funding::credential_changed(app, state);
     let view = &app.private_inference.credential;
+    view.action.set_sensitive(!view.pending.get());
     while let Some(child) = view.status.first_child() {
         view.status.remove(&child);
     }
@@ -236,6 +281,22 @@ pub fn render(app: &Rc<App>, state: &str) {
         let explains = action_explains(action);
         if !explains.is_empty() {
             style::append_body(&view.action, explains);
+        }
+        if action == CredentialAction::Obtain {
+            let providers = ProviderSelector::new(view.provider.get());
+            providers.root.set_sensitive(!view.pending.get());
+            providers.selector.connect_selected_notify({
+                let app = Rc::clone(app);
+                move |selector| {
+                    let view = &app.private_inference.credential;
+                    if view.pending.get() {
+                        selector.set_selected(view.provider.get());
+                    } else {
+                        view.provider.set(selector.selected());
+                    }
+                }
+            });
+            view.action.append(&providers.root);
         }
         let button = gtk::Button::with_label(label);
         button.set_halign(gtk::Align::Start);
@@ -270,6 +331,18 @@ pub fn render(app: &Rc<App>, state: &str) {
 /// second ceremony path with a second in-flight guard. One press at a time,
 /// wherever it was pressed.
 pub(super) fn act(app: &Rc<App>, action: CredentialAction) {
+    act_with_provider(
+        app,
+        action,
+        provider_id(app.private_inference.credential.provider.get()),
+    );
+}
+
+pub(super) fn pending(app: &Rc<App>) -> bool {
+    app.private_inference.credential.pending.get()
+}
+
+pub(super) fn act_with_provider(app: &Rc<App>, action: CredentialAction, provider: Option<&str>) {
     let view = &app.private_inference.credential;
     if view.pending.replace(true) {
         return;
@@ -278,10 +351,24 @@ pub(super) fn act(app: &Rc<App>, action: CredentialAction) {
         CredentialAction::None => {
             view.pending.set(false);
         }
-        CredentialAction::Obtain => start(app),
-        CredentialAction::Cancel => cancel(app),
-        CredentialAction::Forget => forget(app),
+        CredentialAction::Obtain => {
+            if let Some(provider) = provider {
+                crate::ui::funding::credential_pending(app);
+                start(app, provider);
+            } else {
+                view.pending.set(false);
+            }
+        }
+        CredentialAction::Cancel => {
+            crate::ui::funding::credential_pending(app);
+            cancel(app);
+        }
+        CredentialAction::Forget => {
+            crate::ui::funding::credential_pending(app);
+            forget(app);
+        }
     }
+    view.action.set_sensitive(!view.pending.get());
 }
 
 /// Open the sign-in page, and say whether anything took it.
@@ -313,10 +400,10 @@ fn open_browser(url: &str) -> bool {
 /// that did not start, and inventing one in this shell is the thing this whole
 /// surface is written against -- so the answer to a refusal is to ask the
 /// daemon what is true and draw that.
-fn start(app: &Rc<App>) {
+fn start(app: &Rc<App>, provider: &str) {
     app.call(
         "near_ai_credential_start",
-        serde_json::json!({}),
+        serde_json::json!({ "provider": provider }),
         |app, result| {
             let view = &app.private_inference.credential;
             let opened = match result {
@@ -735,7 +822,7 @@ mod tests {
     #[test]
     fn a_browser_that_did_not_open_cancels_the_attempt_it_belongs_to() {
         let body = code()
-            .split("fn start(app: &Rc<App>) {")
+            .split("fn start(")
             .nth(1)
             .expect("start is in this file")
             .split("\n}\n")
@@ -831,3 +918,6 @@ mod tests {
         );
     }
 }
+#[cfg(test)]
+#[path = "../../tests/support/credential_provider_tests.rs"]
+mod provider_tests;

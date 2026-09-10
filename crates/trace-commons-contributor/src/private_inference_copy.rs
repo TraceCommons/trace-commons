@@ -559,6 +559,11 @@ pub struct PrivateInferenceCopy {
     pub near_ai_enroll_unavailable: &'static str,
     pub credential_title: &'static str,
     pub credential_what: &'static str,
+    pub credential_provider_label: &'static str,
+    pub credential_provider_github: &'static str,
+    pub credential_provider_google: &'static str,
+    pub credential_provider_near: &'static str,
+    pub credential_wallet_notice: &'static str,
     pub credential_cost: &'static str,
     pub credential_obtain: &'static str,
     pub credential_cancel: &'static str,
@@ -651,6 +656,11 @@ pub struct PrivateInferenceCopy {
     pub attestation_reason_receipt_not_issued: &'static str,
     /// The balance row's heading. [`BALANCE_TITLE`].
     pub balance_title: &'static str,
+    pub funding_title: &'static str,
+    pub funding_what: &'static str,
+    pub funding_manage: &'static str,
+    pub funding_refresh: &'static str,
+    pub funding_unavailable: &'static str,
     /// [`BALANCE_WHAT`].
     pub balance_what: &'static str,
     /// [`BALANCE_NO_SESSION`].
@@ -1079,6 +1089,27 @@ pub const CREDENTIAL_TITLE: &str = "NEAR AI account";
 /// [`STATE_RUNNING_ANSWERED_ELSEWHERE`] says on the state row above.
 pub const CREDENTIAL_WHAT: &str = "Connect your tools to NEAR AI and view your account balance.";
 
+/// Provider selector copy shared by every native shell.
+pub const CREDENTIAL_PROVIDER_LABEL: &str = "Sign-in method";
+pub const CREDENTIAL_PROVIDER_GITHUB: &str = "GitHub";
+pub const CREDENTIAL_PROVIDER_GOOGLE: &str = "Google";
+pub const CREDENTIAL_PROVIDER_NEAR: &str = "NEAR wallet";
+pub const CREDENTIAL_WALLET_NOTICE: &str = "Your wallet signs a login message. Spending keys stay in your wallet; signing in does not stake or transfer funds.";
+
+pub(crate) fn wallet_browser_copy() -> serde_json::Value {
+    serde_json::json!({
+        "title": "Sign in with NEAR",
+        "choose": "Choose wallet",
+        "cancel": "Cancel sign-in",
+        "waiting": "Finish signing the login message in your wallet.",
+        "received": "Wallet response received. Return to Trace Commons to check sign-in.",
+        "refused": "The wallet response was refused. Start sign-in again in Trace Commons.",
+        "expired": "Sign-in expired. Start sign-in again in Trace Commons.",
+        "cancelled": "Sign-in cancelled. Return to Trace Commons.",
+        "unavailable": "The wallet connection failed. Choose a wallet to retry."
+    })
+}
+
 /// What getting one actually costs. **Required, not optional.**
 ///
 /// The counterpart of [`OFFER_EXPOSURE`], and it exists for the same reason:
@@ -1094,7 +1125,8 @@ pub const CREDENTIAL_WHAT: &str = "Connect your tools to NEAR AI and view your a
 pub const CREDENTIAL_COST: &str = "Signing in opens your browser and creates an inference key in your own \
      Private AI account. This app keeps that key and a renewable Private AI sign-in \
      in this computer's system credential store, which may ask for permission when the app starts. \
-     Your commons account sign-in and device identity remain in local files. \
+     Your commons account sign-in and device key use the system credential store too; \
+     existing credentials move there when next read. \
      The saved Private AI sign-in can read your account and create more \
      keys; the app uses it to read your balance and, when you ask, join a commons. \
      You can remove the inference key in your Private AI account.";
@@ -1572,6 +1604,37 @@ pub fn eligibility_reason_line(label: &str) -> &'static str {
 /// what this machine holds, and a balance is not. It is a fact about an
 /// account that other computers, and a browser, spend from too.
 pub const BALANCE_TITLE: &str = "What is left in your Private AI account";
+pub const FUNDING_TITLE: &str = "Cloud billing";
+pub const FUNDING_WHAT: &str = "Choose a payment method or staking option in Cloud. Your browser may ask you to sign in again.";
+pub const FUNDING_MANAGE: &str = "Manage billing";
+pub const FUNDING_REFRESH: &str = "Refresh account";
+pub const FUNDING_UNAVAILABLE: &str =
+    "The billing destination could not be verified. Refresh account to try again.";
+
+/// Canonical wording for the organization handoff; no shell chooses a payer.
+pub fn funding_message(
+    report: &crate::daemon::nearai_credential::funding::FundingReport,
+) -> String {
+    use crate::daemon::nearai_credential::funding::FundingReport;
+    match report {
+        FundingReport::Ready {
+            organization_name, ..
+        } => format!("Cloud organization: {organization_name}"),
+        FundingReport::NoSession | FundingReport::SessionExpired => {
+            "Sign in to Private AI to manage billing.".into()
+        }
+        FundingReport::NoInferenceKey => {
+            "Connect Private AI to choose its billing destination.".into()
+        }
+        FundingReport::NoOrganization => {
+            "The connected Cloud organization is unavailable. Sign in to Private AI again.".into()
+        }
+        FundingReport::Changed => {
+            "The Private AI connection changed. Refresh account to check its destination.".into()
+        }
+        FundingReport::InvalidRequest | FundingReport::Unavailable => FUNDING_UNAVAILABLE.into(),
+    }
+}
 
 /// What the figure covers, and what it therefore is not.
 ///
@@ -1935,6 +1998,11 @@ pub fn private_inference_copy() -> PrivateInferenceCopy {
         near_ai_enroll_unavailable: NEAR_AI_ENROLL_UNAVAILABLE_LINE,
         credential_title: CREDENTIAL_TITLE,
         credential_what: CREDENTIAL_WHAT,
+        credential_provider_label: CREDENTIAL_PROVIDER_LABEL,
+        credential_provider_github: CREDENTIAL_PROVIDER_GITHUB,
+        credential_provider_google: CREDENTIAL_PROVIDER_GOOGLE,
+        credential_provider_near: CREDENTIAL_PROVIDER_NEAR,
+        credential_wallet_notice: CREDENTIAL_WALLET_NOTICE,
         credential_cost: CREDENTIAL_COST,
         credential_obtain: CREDENTIAL_OBTAIN,
         credential_cancel: CREDENTIAL_CANCEL,
@@ -1990,6 +2058,11 @@ pub fn private_inference_copy() -> PrivateInferenceCopy {
         attestation_reason_receipt_unavailable: ATTESTATION_REASON_RECEIPT_UNAVAILABLE,
         attestation_reason_receipt_not_issued: ATTESTATION_REASON_RECEIPT_NOT_ISSUED,
         balance_title: BALANCE_TITLE,
+        funding_title: FUNDING_TITLE,
+        funding_what: FUNDING_WHAT,
+        funding_manage: FUNDING_MANAGE,
+        funding_refresh: FUNDING_REFRESH,
+        funding_unavailable: FUNDING_UNAVAILABLE,
         balance_what: BALANCE_WHAT,
         balance_no_session: BALANCE_NO_SESSION,
         balance_session_expired: BALANCE_SESSION_EXPIRED,
@@ -2298,7 +2371,8 @@ pub const NEAR_AI_ENROLL_TITLE: &str = "Join with your NEAR AI login";
 ///
 /// Says "wallet" out loud on purpose. Somebody looking at two ways to join
 /// needs to know which one saves them a step, and the wallet is the step.
-pub const NEAR_AI_ENROLL_WHAT: &str = "Use the NEAR AI account you already sign in with. No wallet, no seed phrase, and nothing else to set up.";
+pub const NEAR_AI_ENROLL_WHAT: &str =
+    "Use the NEAR AI account you already sign in with to join a commons. A wallet is optional.";
 
 /// The control.
 pub const NEAR_AI_ENROLL_ACTION: &str = "Join with NEAR AI";
@@ -4150,7 +4224,7 @@ mod tests {
         let fields = payload.as_object().expect("a JSON object");
         assert_eq!(
             fields.len(),
-            129,
+            139,
             "the payload's field count changed -- update the shells' decoders \
              and the tests that pin the set"
         );

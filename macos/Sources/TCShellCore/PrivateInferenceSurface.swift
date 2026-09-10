@@ -97,6 +97,11 @@ public struct PrivateInferenceCopy: Decodable, Equatable, Sendable {
     public let credentialTitle: String
     /// What holding a key of one's own changes about this destination.
     public let credentialWhat: String
+    public let credentialProviderLabel: String
+    public let credentialProviderGithub: String
+    public let credentialProviderGoogle: String
+    public let credentialProviderNear: String
+    public let credentialWalletNotice: String
     /// The three consequences of pressing Obtain: a browser opens, the
     /// contributor signs in with a company that is not this app, and a key
     /// is minted and kept here.
@@ -214,6 +219,11 @@ public struct PrivateInferenceCopy: Decodable, Equatable, Sendable {
     /// painted a low balance as a warning would be inventing a claim the
     /// Rust does not make.
     public let balanceTitle: String
+    public let fundingTitle: String
+    public let fundingWhat: String
+    public let fundingManage: String
+    public let fundingRefresh: String
+    public let fundingUnavailable: String
     public let balanceWhat: String
     public let balanceNoSession: String
     public let balanceSessionExpired: String
@@ -296,6 +306,11 @@ public struct PrivateInferenceCopy: Decodable, Equatable, Sendable {
         case nearAiEnrollUnavailable = "near_ai_enroll_unavailable"
         case credentialTitle = "credential_title"
         case credentialWhat = "credential_what"
+        case credentialProviderLabel = "credential_provider_label"
+        case credentialProviderGithub = "credential_provider_github"
+        case credentialProviderGoogle = "credential_provider_google"
+        case credentialProviderNear = "credential_provider_near"
+        case credentialWalletNotice = "credential_wallet_notice"
         case credentialCost = "credential_cost"
         case credentialObtain = "credential_obtain"
         case credentialCancel = "credential_cancel"
@@ -351,6 +366,11 @@ public struct PrivateInferenceCopy: Decodable, Equatable, Sendable {
         case attestationReasonReceiptUnavailable = "attestation_reason_receipt_unavailable"
         case attestationReasonReceiptNotIssued = "attestation_reason_receipt_not_issued"
         case balanceTitle = "balance_title"
+        case fundingTitle = "funding_title"
+        case fundingWhat = "funding_what"
+        case fundingManage = "funding_manage"
+        case fundingRefresh = "funding_refresh"
+        case fundingUnavailable = "funding_unavailable"
         case balanceWhat = "balance_what"
         case balanceNoSession = "balance_no_session"
         case balanceSessionExpired = "balance_session_expired"
