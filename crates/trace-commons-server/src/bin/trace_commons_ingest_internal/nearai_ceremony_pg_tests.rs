@@ -76,6 +76,29 @@ async fn ceremony_pg_admin() -> Arc<PgBackend> {
     Arc::new(admin)
 }
 
+/// The pepper and account-name key wallet provisioning already needs.
+///
+/// Same shape as `tests/account_onboarding_pg.rs`'s fixture: both arguments are
+/// required with no default, so an absent control refuses rather than falling
+/// back to something weaker.
+fn ceremony_identity() -> trace_commons_server::near_account_identity::NearAccountIdentity {
+    use base64::Engine as _;
+    let crypto = trace_commons_server::secrets::SecretsCrypto::new(SecretString::from(
+        "a".repeat(32),
+    ))
+    .expect("fixture SecretsCrypto");
+    let kek: Arc<dyn trace_commons_server::trace_artifact_kek::KmsKeyWrapper> =
+        Arc::new(trace_commons_server::trace_artifact_kek::LocalMasterKeyWrapper::new(
+            crypto,
+            "nearai-ceremony-fixture",
+        ));
+    trace_commons_server::near_account_identity::NearAccountIdentity::from_parts(
+        Some(&base64::engine::general_purpose::STANDARD.encode([9u8; 32])),
+        Some(kek),
+    )
+    .expect("fixture identity")
+}
+
 /// A local stand-in for NEAR AI's `GET /me`, and nothing else.
 ///
 /// Returns its base URL. This is the one thing the test stubs: it is not our
@@ -132,7 +155,7 @@ async fn ceremony_state(db: Arc<PgBackend>, near_ai_base: String) -> Arc<AppStat
     let s = Arc::make_mut(&mut state);
     s.near_provisioning_enabled = true;
     s.near_provisioning_admission_ready = true;
-    s.near_account_identity = Some(Arc::new(near_account_identity_for_test()));
+    s.near_account_identity = Some(Arc::new(ceremony_identity()));
     s.db_mirror = Some(db.clone() as Arc<dyn Database>);
     s.near_ai_introspection_base_url = Some(near_ai_base);
     state

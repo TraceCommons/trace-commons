@@ -4090,6 +4090,12 @@ impl AppState {
             near_attestation_client,
             near_attestation_key_report_client,
             near_attestation_verification_clock: None,
+            // `cfg(test)` because the field is: a `cargo test --bin` build
+            // compiles this constructor too. `None` unconditionally, like the
+            // clock above -- `from_env` never reads an override for it, so no
+            // configuration can reach it even in a test binary.
+            #[cfg(test)]
+            near_ai_introspection_base_url: None,
             driver_liveness: Arc::new(DriverLivenessRegistry::default()),
             tokens: Arc::new(tokens),
             signed_token_verifier,
