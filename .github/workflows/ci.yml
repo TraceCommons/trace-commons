@@ -1005,7 +1005,8 @@ jobs:
         run: cargo test -p trace-commons-contributor -p trace-commons-contributor-ffi
       - name: Verify real Windows Credential Manager storage
         run: cargo test -p trace-commons-contributor --lib real_os_round_trip_removes_only_its_synthetic_entry -- --ignored
-            cargo test -p trace-commons-contributor --lib real_commons_os_round_trip -- --ignored
+      - name: Verify real Commons Windows Credential Manager storage
+        run: cargo test -p trace-commons-contributor --lib real_commons_os_round_trip -- --ignored
       # Last, so every step above still has its binaries; see the action for
       # what is removed and why. Only a finished job saves its cache, so this
       # runs exactly when a save is about to happen.
