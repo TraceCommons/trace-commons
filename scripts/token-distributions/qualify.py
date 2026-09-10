@@ -116,7 +116,8 @@ def main():
                 "max_tokens": 32, "stream": streaming}
         if probabilities:
             body.update(logprobs=True, top_logprobs=args.top_k)
-        probe = {"requested_probabilities": probabilities, "streaming": streaming}
+        probe = {"requested_probabilities": probabilities, "streaming": streaming,
+                 "requested_top_k": args.top_k if probabilities else None}
         started = time.monotonic()
         try:
             request = urllib.request.Request(args.endpoint, data=json.dumps(body).encode(),
