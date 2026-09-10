@@ -270,10 +270,16 @@ pub async fn begin(store: &ConfigStore, provider: &str) -> Result<serde_json::Va
 /// No expiry is recorded for the refresh token here because the OAuth finish
 /// does not supply one -- it arrives in a URL fragment with the access token
 /// and nothing else. The first exchange fills it in.
-/// `pub(crate)` so the reconcile test can write a credential the way the
-/// ceremony does rather than the way a test finds convenient -- the coupling
-/// under test is precisely that this function, and not an IPC call, is what a
-/// running daemon has to notice.
+///
+/// **Test-only, and deliberately not the path a ceremony takes.** Production
+/// writes through [`persist_attempt`], which holds the same locks and then
+/// additionally refuses a mint whose attempt is no longer the waiting one --
+/// a cancel or a forget that landed while the browser leg was in flight. This
+/// entry point omits that check, so it still writes the credential the way the
+/// ceremony's final step does, and still exercises the coupling that this
+/// function and not an IPC call is what a running daemon has to notice, but it
+/// cannot stand in for the guard. A test about the guard must drive `begin` or
+/// call `persist_attempt` directly.
 #[cfg(test)]
 pub(crate) fn persist(
     dir: &std::path::Path,

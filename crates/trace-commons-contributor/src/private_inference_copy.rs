@@ -1104,7 +1104,7 @@ pub const CREDENTIAL_WHAT: &str = "For Private AI to answer your calls, this com
 /// there is the thing this app cannot do for them --
 /// [`CREDENTIAL_FORGET_EXPLAINS`] says so again at the moment it matters.
 pub const CREDENTIAL_COST: &str = "Signing in opens your browser and creates an inference key in your own \
-     Private AI account. This app keeps that key and a renewable Cloud sign-in \
+     Private AI account. This app keeps that key and a renewable Private AI sign-in \
      on this computer. The saved sign-in can read your account and create more \
      keys; the app uses it to read your balance and, when you ask, join a commons. \
      You can remove the inference key in your Private AI account.";
@@ -1126,11 +1126,12 @@ pub const CREDENTIAL_FORGET: &str = "Forget this key";
 ///
 /// **Local only, and the sentence says so.** The key stays valid at the
 /// service until the contributor removes it there. This action removes both
-/// locally stored credentials without revoking either at Cloud. A confirmation that said "removed" and let it
+/// locally stored credentials without revoking either at Private AI. A
+/// confirmation that said "removed" and let it
 /// be read as "revoked" would be the claim this codebase does not make --
 /// `handle_forget` answers `revoked: false` for the same reason.
-pub const CREDENTIAL_FORGET_EXPLAINS: &str = "Forgetting removes the inference key and saved Cloud sign-in from this \
-     computer. It does not revoke them at Cloud. Remove the key in your \
+pub const CREDENTIAL_FORGET_EXPLAINS: &str = "Forgetting removes the inference key and saved Private AI sign-in from this \
+     computer. It does not revoke them at Private AI. Remove the key in your \
      Private AI account to stop it working elsewhere.";
 
 /// `absent`.
@@ -3229,7 +3230,7 @@ mod tests {
             "browser",
             "creates an inference key",
             "on this computer",
-            "renewable Cloud sign-in",
+            "renewable Private AI sign-in",
             "can read your account and create more keys",
         ] {
             assert!(
@@ -3261,10 +3262,10 @@ mod tests {
             "the forget sentence stopped saying the key stays valid: {explains}"
         );
         assert!(
-            explains.contains("does not revoke them at Cloud"),
+            explains.contains("does not revoke them at Private AI"),
             "the forget sentence stopped distinguishing removal from revocation: {explains}"
         );
-        assert!(explains.contains("saved Cloud sign-in"));
+        assert!(explains.contains("saved Private AI sign-in"));
         assert!(!explains.contains("thrown away as soon"));
         for word in ["revoked", "cancelled", "deleted everywhere"] {
             assert!(
