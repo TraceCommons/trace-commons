@@ -4,6 +4,8 @@
 // The lifecycle owns journaling, OS access, publication, and deletion. This
 // module neither stores secrets in settings nor implements a plaintext fallback.
 //! Nonsecret Cloud metadata bound to an immutable OS entry and its secret pair.
+//! The persisted digest permits checking a guessed secret against the metadata;
+//! it relies on Cloud tokens' entropy and is not a password-hardening function.
 
 use std::fmt;
 

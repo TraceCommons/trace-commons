@@ -318,6 +318,8 @@ impl<B: SecretBackend> CredentialStore<B> {
     pub(crate) fn delete(&self, reference: &CredentialReference) -> Result<(), CredentialError> {
         reference.validate()?;
         match self.backend.delete(reference) {
+            // A crash can leave a journal reference before its OS entry exists.
+            // Treat absence as complete so recovery cannot wedge that journal.
             Ok(()) | Err(CredentialError::NoEntry) => Ok(()),
             Err(error) => Err(error),
         }

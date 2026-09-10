@@ -21,6 +21,8 @@ pub(crate) struct Coordination {
 
 /// Also serializes the FFI pre-start writer and a daemon in another process.
 /// Lock files remain in place: unlinking one would split locks across inodes.
+/// On Unix, std's OpenOptions opens with O_CLOEXEC: spawned proxy processes
+/// cannot retain this descriptor after exec and keep the file lock alive.
 pub(crate) struct CredentialFileLock {
     path: PathBuf,
     local: Mutex<()>,

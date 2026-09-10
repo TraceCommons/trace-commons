@@ -1105,7 +1105,9 @@ pub const CREDENTIAL_WHAT: &str = "For Private AI to answer your calls, this com
 /// [`CREDENTIAL_FORGET_EXPLAINS`] says so again at the moment it matters.
 pub const CREDENTIAL_COST: &str = "Signing in opens your browser and creates an inference key in your own \
      Private AI account. This app keeps that key and a renewable Private AI sign-in \
-     in this computer's system credential store. The saved sign-in can read your account and create more \
+     in this computer's system credential store, which may ask for permission when the app starts. \
+     Your commons account sign-in and device identity remain in local files. \
+     The saved Private AI sign-in can read your account and create more \
      keys; the app uses it to read your balance and, when you ask, join a commons. \
      You can remove the inference key in your Private AI account.";
 
