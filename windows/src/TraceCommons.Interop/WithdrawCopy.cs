@@ -119,8 +119,7 @@ public static class WithdrawCopy
         + "these two applies:";
 
     public const string AmbiguityUnknown =
-        "This window does not recognise what stage this trace reached, so it cannot rule out "
-        + "the furthest one:";
+        "This session may already have been distributed. Withdrawal cannot recall distributed copies.";
 
     /// <summary>
     /// Withdrawal is authenticated by an account session, which this build
@@ -169,11 +168,7 @@ public static class WithdrawCopy
     /// cannot be honoured at all.
     /// </remarks>
     public const string NoBulk =
-        "There is no button here that withdraws all of them at once. The bulk call reports only "
-        + "how many succeeded, never what happened to any one trace, and it chooses what to "
-        + "withdraw from this machine's copy of your history, which can be out of date -- so it "
-        + "could not tell you afterwards which of these had already been distributed. Withdraw "
-        + "them one at a time below and each one tells you what it actually did.";
+        "Withdraw sessions individually to see the result for each one.";
 
     /// <summary>
     /// The daemon labels that mean not-found.

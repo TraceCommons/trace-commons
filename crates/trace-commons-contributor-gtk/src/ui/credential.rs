@@ -95,11 +95,11 @@ impl Default for CredentialView {
 
 impl CredentialView {
     pub fn new() -> Self {
-        let root = gtk::Box::new(gtk::Orientation::Vertical, space::M);
+        let root = style::card(gtk::Orientation::Vertical, space::M);
         root.append(&style::section(copy::CREDENTIAL_TITLE));
         style::append_body(&root, copy::CREDENTIAL_WHAT);
 
-        let card = style::card(gtk::Orientation::Vertical, space::M);
+        let card = gtk::Box::new(gtk::Orientation::Vertical, space::M);
         // Drawn before anything has been asked, so the section never opens on
         // a blank space where the state will be. Unreported is what is true at
         // that moment, and the shared table has a sentence for it.
@@ -216,6 +216,10 @@ pub fn render(app: &Rc<App>, state: &str) {
     ));
 
     let action = copy::credential_action(state);
+    app.private_inference
+        .balance
+        .root
+        .set_visible(action != CredentialAction::Obtain);
     // The ceremony this shell started is over the moment nothing can be
     // cancelled, and the id stops being worth holding.
     if action != CredentialAction::Cancel {
@@ -235,6 +239,10 @@ pub fn render(app: &Rc<App>, state: &str) {
         }
         let button = gtk::Button::with_label(label);
         button.set_halign(gtk::Align::Start);
+        if action == CredentialAction::Obtain {
+            button.add_css_class("suggested-action");
+            button.add_css_class("pill");
+        }
         // The daemon accepts an unnamed cancel and stops the sign-in it is
         // holding, so a window that never saw the attempt id still sends one.
         // Only a call already in flight makes a control unpressable.

@@ -978,7 +978,7 @@ struct UndoBar: View {
                     .font(TC.Font_.bodyDense)
                     .foregroundStyle(TC.inkPrimary)
                 if undo.offerUndo {
-                    Text(held)
+                    Text(approvalAge)
                         .font(TC.Font_.ledger)
                         .monospacedDigit()
                         .foregroundStyle(TC.inkSecondary)
@@ -987,10 +987,7 @@ struct UndoBar: View {
             }
             if undo.offerUndo {
                 Text("""
-                The watcher sends approved sessions on its next sweep. This app \
-                cannot see when that lands, so it does not pretend to count it \
-                down: undo works until the sweep starts, and says so plainly if \
-                it is already too late.
+                Approved sessions will send automatically. You can undo until uploading starts.
                 """)
                 .tcType(TC.Font_.footnoteText)
                 .foregroundStyle(TC.inkSecondary)
@@ -1005,12 +1002,12 @@ struct UndoBar: View {
                         .tcPrimaryAction()
                         .keyboardShortcut(.defaultAction)
                 }
-                Button(undo.offerUndo ? "Let it send" : "Dismiss", action: onKeep)
+                Button("Dismiss", action: onKeep)
                     .tint(.primary)
                     .help(
                         undo.offerUndo
-                            ? "Puts this notice away. It does not change the decision."
-                            : "Puts this notice away."
+                            ? "Close this notice. Approved sessions will still send automatically."
+                            : "Close this notice."
                     )
                 Spacer(minLength: 0)
             }
@@ -1021,10 +1018,10 @@ struct UndoBar: View {
         .tcCard()
     }
 
-    private var held: String {
+    private var approvalAge: String {
         undo.heldSeconds >= AppModel.Undo.tickCeiling
-            ? "held \(AppModel.Undo.tickCeiling)s+"
-            : "held \(undo.heldSeconds)s"
+            ? "Approved \(AppModel.Undo.tickCeiling)s+ ago"
+            : "Approved \(undo.heldSeconds)s ago"
     }
 }
 

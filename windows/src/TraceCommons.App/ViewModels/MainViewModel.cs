@@ -33,8 +33,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     /// sentence claims this window can see the send land, because it cannot.
     /// </summary>
     public const string UndoBody =
-        "The watcher sends approved sessions on its next sweep. Undo works until the sweep "
-        + "starts, and says so plainly if it is already too late.";
+        "Approved sessions will send automatically. You can undo until uploading starts.";
 
     /// <summary>
     /// What is said when the daemon granted no hold. There is nothing to
@@ -873,7 +872,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     /// The other half of the pair. Not "Dismiss": what this button does is let
     /// the send happen, and it should say so.
     /// </summary>
-    public const string LetItSend = "Let it send";
+    public const string LetItSend = "Dismiss";
 
     /// <summary>
     /// Records what the preview sheet decided.

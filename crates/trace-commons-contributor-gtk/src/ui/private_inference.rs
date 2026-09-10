@@ -26,12 +26,10 @@
 //! `ui/mod.rs`), so the tray entry beside this is only ever a shortcut in:
 //! nothing on this screen may be reachable only from there.
 //!
-//! # The list leads, and the switch does not
+//! # Sign-in comes first
 //!
-//! A tool is the unit a contributor can decide about. "Answer model calls at
-//! all" is a consequence of connecting one, not a question to settle first,
-//! so the tools on this computer are the first thing on the screen and the
-//! switch below them is the kill switch.
+//! Account setup precedes connecting tools. The same credential section
+//! shows account controls after sign-in, followed by tools and the kill switch.
 //!
 //! # Nothing is written that was not shown first
 //!
@@ -80,9 +78,7 @@ pub struct PrivateInferenceView {
     /// Whether a key this computer can answer with is kept here, and the one
     /// thing that may be done about it.
     ///
-    /// Between the tools and the kill switch, because the fact it reports is
-    /// what decides whether a tool on that list can be connected at all: the
-    /// notice on the list points at the control in here.
+    /// Before the tools, so the account needed to connect them is visible first.
     pub credential: super::credential::CredentialView,
     /// What is left in the account that key spends from.
     ///
@@ -125,18 +121,21 @@ impl PrivateInferenceView {
         content.append(&style::section(copy::PRIVATE_INFERENCE_TITLE));
         style::append_body(&content, copy::PRIVATE_INFERENCE_SUBTITLE);
 
-        // The list first, and the switch below it. See the module note.
-        content.append(&style::section(copy::HARNESSES_TITLE));
-        style::append_body(&content, copy::HARNESSES_WHAT);
-        let spend = gtk::Box::new(gtk::Orientation::Vertical, space::S);
-        content.append(&spend);
-        let harnesses = gtk::Box::new(gtk::Orientation::Vertical, space::M);
-        content.append(&harnesses);
-
         let credential = super::credential::CredentialView::new();
         content.append(&credential.root);
         let balance = super::balance::BalanceSection::new();
         content.append(&balance.root);
+
+        let tools = style::card(gtk::Orientation::Vertical, space::M);
+        // Tools follow account setup; the kill switch stays below both.
+        tools.append(&style::section(copy::HARNESSES_TITLE));
+        style::append_body(&tools, copy::HARNESSES_WHAT);
+        let spend = gtk::Box::new(gtk::Orientation::Vertical, space::S);
+        tools.append(&spend);
+        let harnesses = gtk::Box::new(gtk::Orientation::Vertical, space::M);
+        tools.append(&harnesses);
+
+        content.append(&tools);
 
         let card = style::card(gtk::Orientation::Vertical, space::M);
         style::append_body(&card, copy::PRIVATE_INFERENCE_OFFER_WHAT);
@@ -179,9 +178,16 @@ impl PrivateInferenceView {
             copy::PRIVATE_INFERENCE_STATE_UNKNOWN,
             Tone::Neutral,
         ));
-        card.append(&status);
+
         style::append_caveat(&card, copy::PRIVATE_INFERENCE_APPLIES_AT_ONCE);
-        content.append(&card);
+        let service = style::card(gtk::Orientation::Vertical, space::M);
+        let expander = gtk::Expander::builder()
+            .label(copy::PRIVATE_INFERENCE_TITLE)
+            .child(&card)
+            .build();
+        service.append(&expander);
+        service.append(&status);
+        content.append(&service);
 
         let clamp = adw::Clamp::builder()
             .maximum_size(COLUMN_MAX)

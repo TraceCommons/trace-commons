@@ -281,9 +281,8 @@ public sealed class WithdrawCopyTests
         // Rule 6. `withdraw_bulk` reports only counts, so rule 1 cannot be
         // honoured for it at all -- and the shared design draws a button
         // here, so its absence is explained rather than left as a gap.
-        Assert.Contains("only", WithdrawCopy.NoBulk, StringComparison.Ordinal);
-        Assert.Contains("how many succeeded", WithdrawCopy.NoBulk, StringComparison.Ordinal);
-        Assert.Contains("one at a time", WithdrawCopy.NoBulk, StringComparison.Ordinal);
+        Assert.Contains("individually", WithdrawCopy.NoBulk, StringComparison.Ordinal);
+        Assert.Contains("result for each", WithdrawCopy.NoBulk, StringComparison.Ordinal);
     }
 
     [Fact]

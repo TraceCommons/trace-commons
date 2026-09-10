@@ -456,6 +456,10 @@ public sealed class PrivateInferenceViewModel : INotifyPropertyChanged
     /// Whether there is an action to draw at all. A state this build could
     /// not read offers nothing.
     /// </summary>
+    public bool ShowCredentialSignIn => HasCredentialAction && OfferedAction == CredentialAction.Obtain;
+    public bool ShowCredentialOtherAction => HasCredentialAction && OfferedAction != CredentialAction.Obtain;
+    public bool ShowAccountBalance => _copy is not null && OfferedAction != CredentialAction.Obtain;
+
     public bool HasCredentialAction =>
         OfferedAction != CredentialAction.None && _copy is not null;
 
@@ -721,6 +725,9 @@ public sealed class PrivateInferenceViewModel : INotifyPropertyChanged
         Raise(nameof(CredentialActionPreamble));
         Raise(nameof(HasCredentialActionPreamble));
         Raise(nameof(HasCredentialAction));
+        Raise(nameof(ShowCredentialSignIn));
+        Raise(nameof(ShowCredentialOtherAction));
+        Raise(nameof(ShowAccountBalance));
         Raise(nameof(CredentialControlsEnabled));
     }
 
