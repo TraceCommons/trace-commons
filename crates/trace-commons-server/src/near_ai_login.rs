@@ -38,6 +38,19 @@ use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 use std::time::Duration;
 
+/// The URL `GET`-ed to learn whose token this is.
+///
+/// **`/users/me`, not `/me`.** `cloud-api` defines the route as `/me` and then
+/// nests that router under `/users`, so the served path is `{base}/users/me`.
+/// Reading the route definition alone gives the wrong answer, which is how
+/// `/v1/me` shipped -- reported on #851.
+///
+/// Named rather than inlined so the test can assert the real constructed URL
+/// rather than a formatter against a fake base.
+fn introspection_url(base_url: &str) -> String {
+    format!("{}/users/me", base_url.trim_end_matches('/'))
+}
+
 /// The label a refused introspection reports. One label for every cause, on
 /// purpose: the causes are all "we could not establish who this is", and
 /// distinguishing them for the caller would describe our dependency's state to
@@ -119,8 +132,10 @@ fn normalise_auth_provider(raw: Option<&str>) -> String {
 
 /// Ask NEAR AI whose token this is.
 ///
-/// `base_url` is the API root; the caller supplies it so a deployment can point
-/// at a different one and so tests can point at a local server. `timeout`
+/// `base_url` is the API root -- the `/v1` prefix, **not** including
+/// `/users` -- so the constructed path is `{base}/users/me`. The caller
+/// supplies it so a deployment can point at a different one and so tests can
+/// point at a local server. `timeout`
 /// bounds the whole request: a hung dependency must not hang a request holding
 /// a database connection.
 pub async fn introspect_login(
@@ -128,7 +143,7 @@ pub async fn introspect_login(
     token: &SecretString,
     timeout: Duration,
 ) -> Result<VerifiedNearAiLogin, LoginIntrospectionRefused> {
-    let url = format!("{}/me", base_url.trim_end_matches('/'));
+    let url = introspection_url(base_url);
     let http = reqwest::Client::builder()
         .timeout(timeout)
         .build()
@@ -237,6 +252,35 @@ mod tests {
                 "IntrospectedUser gained a field for {personal}"
             );
         }
+    }
+
+    /// The constructed URL is the one `cloud-api` actually serves.
+    ///
+    /// Pinned against the **real** literal rather than against a formatter
+    /// with a fake base, because the defect was that the real path was wrong:
+    /// a test composing `"http://test/" + "/me"` would have passed throughout.
+    ///
+    /// `cloud-api` defines the route as `/me` and nests the router under
+    /// `/users`, so reading the route definition gives `/v1/me` and the served
+    /// path is `/v1/users/me`. That gap is why this assertion names the whole
+    /// URL and not a suffix.
+    #[test]
+    fn the_introspection_url_is_the_one_cloud_api_serves() {
+        // The production base, spelled here so a change to either side has to
+        // meet this assertion.
+        let base = "https://cloud-api.near.ai/v1";
+        assert_eq!(
+            introspection_url(base),
+            "https://cloud-api.near.ai/v1/users/me"
+        );
+        // A trailing slash on the base must not double the separator.
+        assert_eq!(
+            introspection_url("https://cloud-api.near.ai/v1/"),
+            "https://cloud-api.near.ai/v1/users/me"
+        );
+        // And the path we shipped is not the path we serve, kept as an
+        // assertion so a regression to it fails here rather than at runtime.
+        assert_ne!(introspection_url(base), format!("{base}/me"));
     }
 
     /// The refusal names a control and never a value.
