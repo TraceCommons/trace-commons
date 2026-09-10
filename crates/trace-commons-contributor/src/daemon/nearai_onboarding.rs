@@ -152,6 +152,67 @@ fn label(error: &anyhow::Error) -> &'static str {
 /// that, a test asserting "the refresh token was not spent" cannot tell a
 /// correct ordering from an exchange that merely failed for want of a network,
 /// and passes either way.
+/// Marshal one started ceremony into the device proof the commons will check.
+///
+/// # Why this is `pub` and a separate function
+///
+/// Not for reuse -- `enroll` is the only caller and must stay so. It is `pub`
+/// so the **wire contract is testable**: this is the step where the client
+/// decides how to read `nonce` off the response and what to feed the shared
+/// preimage function, and that decision is exactly where the two halves of
+/// #836 can disagree while each side's own tests stay green. Inline, it is
+/// reachable only by standing up a capability route, a host allowlist, a
+/// session and a NEAR AI token exchange -- four stubs that exercise none of it.
+///
+/// `witness::transport::witness_request_body` is `pub` for the same reason and
+/// says so; this is the same boundary. **Do not fold it back inline as a
+/// tidy-up** -- doing so removes the only seam at which a client and a server
+/// can be shown to agree about these five values.
+///
+/// One shared function computes the preimage on both sides, so the byte layout
+/// cannot diverge. What that does not close is whether both sides pass it the
+/// same arguments, and this is the client's half of that.
+///
+/// `now` is a parameter rather than read here so the freshness refusal can be
+/// tested without sleeping.
+pub fn device_proof_for_ceremony(
+    identity: &DeviceIdentity,
+    ceremony_id: &str,
+    nonce_wire: &str,
+    code_challenge: &str,
+    expires_at: i64,
+    now: i64,
+) -> Result<String> {
+    let device: [u8; 32] = base64::engine::general_purpose::STANDARD
+        .decode(&identity.public_key_b64)?
+        .try_into()
+        .map_err(|_| anyhow!("near_ai_enroll_invalid"))?;
+    let nonce: [u8; 32] = base64::engine::general_purpose::STANDARD
+        .decode(nonce_wire)
+        .map_err(|_| anyhow!("near_ai_enroll_invalid"))?
+        .try_into()
+        .map_err(|_| anyhow!("near_ai_enroll_invalid"))?;
+    // A ceremony that has already expired, or one whose window is longer than
+    // the server is allowed to offer, is refused before this device signs
+    // anything for it.
+    if ceremony_id.is_empty()
+        || ceremony_id.len() > 128
+        || expires_at <= now
+        || expires_at > now.saturating_add(600)
+    {
+        bail!("near_ai_enroll_invalid")
+    }
+    Ok(identity.sign_b64(
+        &trace_commons_protocol::onboarding::near_ai_provisioning_device_bytes(
+            &nonce,
+            ceremony_id,
+            &device,
+            code_challenge,
+            expires_at,
+        ),
+    ))
+}
+
 async fn enroll(
     shared: &DaemonShared,
     api: &CloudApi,
@@ -226,36 +287,14 @@ async fn enroll(
         .await
         .map_err(|_| anyhow!("near_ai_enroll_start_failed"))?;
 
-    let device: [u8; 32] = base64::engine::general_purpose::STANDARD
-        .decode(&identity.public_key_b64)?
-        .try_into()
-        .map_err(|_| anyhow!("near_ai_enroll_invalid"))?;
-    let nonce: [u8; 32] = base64::engine::general_purpose::STANDARD
-        .decode(&started.nonce)
-        .map_err(|_| anyhow!("near_ai_enroll_invalid"))?
-        .try_into()
-        .map_err(|_| anyhow!("near_ai_enroll_invalid"))?;
-    // A ceremony that has already expired, or one whose window is longer than
-    // the server is allowed to offer, is refused before this device signs
-    // anything for it.
-    let now = Utc::now().timestamp();
-    if started.ceremony_id.is_empty()
-        || started.ceremony_id.len() > 128
-        || started.expires_at <= now
-        || started.expires_at > now.saturating_add(600)
-    {
-        bail!("near_ai_enroll_invalid")
-    }
-
-    let device_signature = identity.sign_b64(
-        &trace_commons_protocol::onboarding::near_ai_provisioning_device_bytes(
-            &nonce,
-            &started.ceremony_id,
-            &device,
-            &code_challenge,
-            started.expires_at,
-        ),
-    );
+    let device_signature = device_proof_for_ceremony(
+        &identity,
+        &started.ceremony_id,
+        &started.nonce,
+        &code_challenge,
+        started.expires_at,
+        Utc::now().timestamp(),
+    )?;
 
     // Spend the refresh token as late as possible, for the reason above. The
     // rotation is persisted inside `exchange` before the JWT is used.

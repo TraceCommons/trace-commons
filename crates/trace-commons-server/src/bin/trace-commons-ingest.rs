@@ -1613,6 +1613,25 @@ struct AppState {
     /// the fixture's `nextUpdate` date rather than on a code change, and a
     /// test that fails on a calendar date is worse than no test.
     near_attestation_verification_clock: Option<DateTime<Utc>>,
+    /// Where NEAR AI login introspection is sent, **in test builds only**.
+    ///
+    /// `#[cfg(test)]` and not a plain `Option` like the clock above, and the
+    /// difference is deliberate. That field redirects a clock; this one would
+    /// redirect where a contributor's NEAR AI access token is sent. A runtime
+    /// field is one refactor away from being wired to configuration, and a
+    /// configurable introspection endpoint is a credential-exfiltration
+    /// surface: set it and the token goes to a host of the setter's choosing.
+    /// Gated on `cfg(test)`, the lever does not exist in a shipped binary --
+    /// there is no value to set, because there is no field.
+    ///
+    /// It exists because `near_ai_provision_finish_handler` calls NEAR AI as
+    /// its last step, so without this no test can reach what comes after:
+    /// `provision_near_ai_login` and the anchor row it writes. That was the
+    /// whole of the untested gap -- both halves of the ceremony had unit
+    /// suites and nothing had ever driven the handler far enough to write an
+    /// anchor.
+    #[cfg(test)]
+    near_ai_introspection_base_url: Option<String>,
     near_credit_submitter: Option<Arc<dyn TraceNearCreditSubmitter>>,
     near_credit_submitter_timeout_ms: Option<u64>,
     near_credit_submitter_auth_configured: bool,

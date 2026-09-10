@@ -925,6 +925,30 @@ fn near_ai_nonce_wire(nonce: &[u8; 32]) -> String {
     base64::engine::general_purpose::STANDARD.encode(nonce)
 }
 
+/// The base URL introspection actually uses.
+///
+/// In a shipped build this is [`NEAR_AI_API_BASE_URL`] and nothing else: the
+/// `cfg(not(test))` arm takes no state and has no branch, so there is no value
+/// anyone could set. That is the point, and it is why the constant's own note
+/// above still holds -- making the endpoint *configurable* would create the
+/// thing the host allowlist exists to prevent, and this does not.
+///
+/// The `cfg(test)` arm exists because introspection is the last step of
+/// `finish`, so before this nothing could drive the handler far enough to
+/// reach `provision_near_ai_login` and the anchor row it writes.
+#[cfg(not(test))]
+fn introspection_base_url(_state: &AppState) -> &str {
+    NEAR_AI_API_BASE_URL
+}
+
+#[cfg(test)]
+fn introspection_base_url(state: &AppState) -> &str {
+    state
+        .near_ai_introspection_base_url
+        .as_deref()
+        .unwrap_or(NEAR_AI_API_BASE_URL)
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct NearAiStartRequest {
@@ -1092,7 +1116,7 @@ async fn near_ai_finish(
     // leaves this machine, and a request that was going to be refused anyway
     // should not reach NEAR AI.
     let login = trace_commons_server::near_ai_login::introspect_login(
-        NEAR_AI_API_BASE_URL,
+        introspection_base_url(&state),
         &secrecy::SecretString::from(body.access_token),
         NEAR_AI_INTROSPECTION_TIMEOUT,
     )

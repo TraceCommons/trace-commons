@@ -245,6 +245,13 @@ jobs:
         run: cargo test --bin trace-commons-ingest admission_pg_tests -- --ignored
         env:
           TRACE_COMMONS_ADMISSION_INGEST_PG_TEST_URL: postgres://trace@127.0.0.1:5432/admission_test_ingest
+      # Selected by module name, like the step above. #836 shipped as two
+      # halves that had never run against each other; without `--ignored` this
+      # step passes having run neither.
+      - name: the NEAR AI enrolment ceremony, both halves
+        run: cargo test --bin trace-commons-ingest nearai_ceremony_pg_tests -- --ignored
+        env:
+          TRACE_COMMONS_ADMISSION_INGEST_PG_TEST_URL: postgres://trace@127.0.0.1:5432/admission_test_ingest
       # A suite that runs nothing passes, so the steps above cannot prove
       # themselves. `trace_invite_registry_pg` reports "21 passed" in 0.00s with
       # no database configured; a pass count is not evidence that anything ran.
