@@ -1467,6 +1467,20 @@ pub fn health_action(label: &str) -> Option<&'static str> {
 /// Plain-language renderings of `reason_label`, for entries that are on the
 /// queue but are not decisions owed.
 pub fn reason_sentence(label: &str) -> &'static str {
+    // A contribution the commons refused, before the table below. Those five
+    // labels reach this surface verbatim from the server, this table has
+    // never known any of them, and its default says NOTHING WAS SENT -- which
+    // on that path is false: the envelope was transmitted and the gate
+    // declined it after receiving it. See #810.
+    //
+    // Asked of the shared crate rather than answered here, so one sentence
+    // serves all three shells and the spelling comes from the protocol crate
+    // rather than from a literal typed twice.
+    if let Some(refused) =
+        trace_commons_contributor::private_inference_copy::outcome_refusal_line(label)
+    {
+        return refused;
+    }
     match label {
         "dismissed-by-contributor" => "You skipped this one.",
         "expired-without-decision" => "Dropped without a decision. Dropped means never sent.",
@@ -2350,6 +2364,53 @@ pub fn ironwire_last_checked(at: Option<chrono::DateTime<chrono::Utc>>) -> Optio
 
 #[cfg(test)]
 mod tests {
+    /// A refused contribution must not read as one that never left.
+    ///
+    /// This shell's outcome default is "Nothing was sent.", which on the
+    /// admission path is false: the envelope was transmitted and the gate
+    /// declined it after receiving it. Every one of the five refusal labels
+    /// reaches this surface verbatim from the server.
+    ///
+    /// **Keyed from `AdmissionRefusal::label()`, not from a literal typed
+    /// here.** Those labels are underscored -- the server's spelling -- while
+    /// `daemon::health`'s constants for the same events are hyphenated. A
+    /// test written against the wrong one would pass while the shell
+    /// reproduced the bug.
+    #[test]
+    fn a_refused_contribution_does_not_read_as_unsent() {
+        use trace_commons_protocol::admission::AdmissionRefusal;
+
+        for refusal in AdmissionRefusal::ALL {
+            let line = super::reason_sentence(refusal.label());
+            let lower = line.to_lowercase();
+            assert!(
+                !lower.contains("nothing was sent"),
+                "{} tells a contributor their work never left: {line}",
+                refusal.label()
+            );
+            assert_ne!(
+                line,
+                super::reason_sentence("a-label-this-shell-has-never-seen"),
+                "{} fell through to the default arm",
+                refusal.label()
+            );
+        }
+    }
+
+    /// The labels this shell already answered still reach their own
+    /// sentences: the refusal lookup is additive, not a takeover.
+    #[test]
+    fn the_existing_outcome_sentences_are_unchanged() {
+        assert_eq!(
+            super::reason_sentence("dismissed-by-contributor"),
+            "You skipped this one."
+        );
+        assert_eq!(
+            super::reason_sentence("a-label-this-shell-has-never-seen"),
+            "Nothing was sent."
+        );
+    }
+
     #[test]
     fn unsupported_export_uses_shared_recovery_sentence() {
         assert_eq!(

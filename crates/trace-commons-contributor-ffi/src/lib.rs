@@ -2832,6 +2832,43 @@ pub unsafe extern "C" fn tc_near_ai_credential_action(state: *const c_char) -> i
 pub const TC_CONTRIBUTION_CONTROL_NONE: i32 = 50;
 pub const TC_CONTRIBUTION_CONTROL_CONTRIBUTE: i32 = 51;
 
+/// What the outcome list says about a contribution the commons refused.
+///
+/// **The empty string means "not one of these" and is the caller's signal to
+/// use its own outcome table**, not a failure. Five labels are answered here;
+/// everything else on that surface is still each shell's own, pending the
+/// rest of `queue_outcome_counts` moving into the crate.
+///
+/// The one thing a caller must not do with a non-empty answer is combine it
+/// with a sentence saying nothing was sent. On this path the envelope WAS
+/// transmitted and the gate declined it after receiving it, which is why the
+/// shells' defaults are wrong here -- "Held" is vague and "Nothing was sent."
+/// is false. See #810.
+///
+/// `label` is the queue entry's `reason_label` in the server's own spelling,
+/// with underscores. The hyphenated constants in `daemon::health` name the
+/// same events for the health banner and are NOT what arrives here.
+///
+/// Returns an owned string; free it with `tc_string_free`. NULL only on a
+/// caught panic.
+///
+/// # Safety
+/// `label`, if non-null, must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_outcome_refusal_line(label: *const c_char) -> *mut c_char {
+    guarded_string_no_err(|| {
+        let label = if label.is_null() {
+            ""
+        } else {
+            unsafe { borrow_str(label) }.unwrap_or("")
+        };
+        Ok(to_owned_cstring(
+            trace_commons_contributor::private_inference_copy::outcome_refusal_line(label)
+                .unwrap_or(""),
+        ))
+    })
+}
+
 /// The sentence for one NEAR AI login-enrolment control name.
 ///
 /// Ten labels, each with its own sentence, and anything else -- including a

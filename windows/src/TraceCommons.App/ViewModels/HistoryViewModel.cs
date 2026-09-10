@@ -630,9 +630,14 @@ public sealed class OutcomeCountViewModel
 {
     public OutcomeCountViewModel(string label, int count)
     {
+        // A contribution the commons refused says so in words, from the
+        // shared crate. Everything else keeps the raw label with its
+        // separators swapped, which is what this shell has always shown --
+        // machine-shaped, but it was the only one of the three that was not
+        // misleading about a refusal. See #810.
         Label = string.IsNullOrWhiteSpace(label)
             ? "—"
-            : label.Replace('-', ' ').Replace('_', ' ');
+            : OutcomeRefusalSurface.Line(label) ?? label.Replace('-', ' ').Replace('_', ' ');
         CountText = count.ToString(CultureInfo.CurrentCulture);
     }
 

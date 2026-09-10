@@ -584,6 +584,14 @@ internal static class NativeMethods
     /// Never the empty string: a refusal this build cannot name is the whole
     /// of what a contributor is being told.
     /// </remarks>
+    /// <summary>
+    /// What the outcome list says about a refused contribution, or the empty
+    /// string when the label is not one of the five.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    internal static extern IntPtr tc_outcome_refusal_line(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? label);
+
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
     internal static extern IntPtr tc_near_ai_enroll_line(
         [MarshalAs(UnmanagedType.LPUTF8Str)] string? label);
