@@ -605,6 +605,17 @@ impl<'a> SubmitContext<'a> {
             "account_id": capability["account_id"],
         }))?;
         let lease = crate::daemon::token_capture::acquire(control, session, call).await?;
+        let lease_binding = lease.bundle_lease()?;
+        let lease_guard = match crate::token_review_lease::ReviewLeaseGuard::new(
+            &self.store.dir().join("token-bundles"),
+            lease_binding.clone(),
+        ) {
+            Ok(guard) => guard,
+            Err(error) => {
+                let _ = control.release(&lease_binding).await;
+                return Err(error);
+            }
+        };
         let source = lease
             .captures
             .first()
@@ -700,7 +711,11 @@ impl<'a> SubmitContext<'a> {
             manifest_digest: manifest.digest()?,
             attachment_bytes: manifest.attachments.iter().map(|a| a.size_bytes).sum(),
         };
-        journal.approve_payload(review.journal_id, payload)?;
+        if let Err(error) = journal.approve_payload(review.journal_id, payload) {
+            let _ = journal.abandon_review(review.journal_id);
+            return Err(error);
+        }
+        lease_guard.adopted()?;
         self.last_receipt_shipped = ReceiptShipped::Attached;
         Ok((response, record, review))
     }

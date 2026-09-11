@@ -146,6 +146,8 @@ pub(super) async fn begin(
             manifest,
             witness_headers,
             state: "staging".into(),
+            processing_state: "pending".into(),
+            processing_summary: None,
             expires_at: Utc::now() + chrono::Duration::hours(24),
             receipt: None,
             attachments: Vec::new(),
@@ -342,18 +344,20 @@ pub(super) async fn finalize(
         retain_until_unix: now + 30 * 86400,
         retention_policy_version: "private-revocable-30d-v1".into(),
     };
-    Ok(Json(
-        account_db(&state)?
-            .commit_token_bundle(
-                tenant.tenant_id(),
-                submission,
-                &revision,
-                tenant.principal_ref(),
-                receipt,
-            )
-            .await
-            .map_err(internal_error)?,
-    ))
+    let receipt = account_db(&state)?
+        .commit_token_bundle(
+            tenant.tenant_id(),
+            submission,
+            &revision,
+            tenant.principal_ref(),
+            receipt,
+        )
+        .await
+        .map_err(internal_error)?;
+    let _ = account_db(&state)?
+        .process_token_bundles(tenant.tenant_id(), store.store.as_ref())
+        .await;
+    Ok(Json(receipt))
 }
 pub(super) async fn status(
     State(state): State<Arc<AppState>>,
@@ -362,8 +366,25 @@ pub(super) async fn status(
 ) -> ApiResult<Json<serde_json::Value>> {
     let tenant = authenticate_ctx(&state, &headers)?;
     let bundle = owned(&state, &tenant, submission, &revision).await?;
+    let held = tenant
+        .read_submission_record(&state.root, submission)
+        .map_err(internal_error)?
+        .is_some_and(|record| {
+            state
+                .legal_hold_retention_policy_ids
+                .contains(&record.retention_policy_id)
+        });
+    let deletion_state = if bundle.state != "revoked" && bundle.expires_at > Utc::now() {
+        "retained"
+    } else if bundle.attachments.iter().all(|o| o.deleted) {
+        "completed"
+    } else if held {
+        "held"
+    } else {
+        "pending"
+    };
     Ok(Json(
-        serde_json::json!({"state":bundle.state,"receipt":bundle.receipt,"manifest":bundle.manifest,"ready":bundle.attachments.iter().filter(|o|o.ready&&!o.deleted).map(|o|&o.artifact_id).collect::<Vec<_>>()}),
+        serde_json::json!({"deletion_state":deletion_state,"state":bundle.state,"receipt":bundle.receipt,"manifest":bundle.manifest,"processing_state":bundle.processing_state,"processing_summary":bundle.processing_summary,"ready":bundle.attachments.iter().filter(|o|o.ready&&!o.deleted).map(|o|&o.artifact_id).collect::<Vec<_>>()}),
     ))
 }
 pub(super) async fn cleanup(
@@ -377,6 +398,11 @@ pub(super) async fn cleanup(
     if !db.supports_token_bundles() {
         return Ok(());
     }
+    if let Some(store) = state.artifact_store.as_ref() {
+        // Committed intents remain recoverable if a previous process stopped
+        // before producing their metadata. This never evaluates credit.
+        let _ = db.process_token_bundles(tenant, store.store.as_ref()).await;
+    }
     let pending = db
         .pending_token_bundle_deletions(tenant, submission)
         .await?;
@@ -387,14 +413,29 @@ pub(super) async fn cleanup(
         .artifact_store
         .as_ref()
         .context("token_bundle_storage_unavailable")?;
+    let held_policies = state
+        .legal_hold_retention_policy_ids
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>();
     for bundle in pending {
-        db.delete_token_objects(
-            tenant,
-            bundle.submission_id,
-            &bundle.revision,
-            store.store.as_ref(),
-        )
-        .await?;
+        let result = db
+            .delete_token_objects(
+                tenant,
+                bundle.submission_id,
+                &bundle.revision,
+                &held_policies,
+                store.store.as_ref(),
+            )
+            .await;
+        match result {
+            Err(trace_commons_server::error::DatabaseError::Query(ref tag))
+                if tag == "TokenBundleHeld" =>
+            {
+                continue;
+            }
+            result => result?,
+        }
     }
     Ok(())
 }
@@ -405,10 +446,36 @@ pub(super) async fn read(
     headers: HeaderMap,
     AxumPath((submission, revision, artifact)): AxumPath<(Uuid, String, String)>,
 ) -> ApiResult<Response> {
+    read_bundle(state, headers, submission, revision, artifact, false).await
+}
+pub(super) async fn research_read(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath((submission, revision, artifact)): AxumPath<(Uuid, String, String)>,
+) -> ApiResult<Response> {
+    read_bundle(state, headers, submission, revision, artifact, true).await
+}
+async fn read_bundle(
+    state: Arc<AppState>,
+    headers: HeaderMap,
+    submission: Uuid,
+    revision: String,
+    artifact: String,
+    research: bool,
+) -> ApiResult<Response> {
     let (store, _) = gate(&state)?;
     let tenant =
         authorize_tenant_access_grant_ctx(&state, authenticate_ctx(&state, &headers)?).await?;
-    let bundle = owned(&state, &tenant, submission, &revision).await?;
+    let bundle = if research {
+        research_gate(&state, &tenant)?;
+        account_db(&state)?
+            .get_token_bundle_for_export(tenant.tenant_id(), submission, &revision)
+            .await
+            .map_err(internal_error)?
+            .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "token_bundle_unavailable"))?
+    } else {
+        owned(&state, &tenant, submission, &revision).await?
+    };
     if bundle.state != "committed" || bundle.expires_at <= Utc::now() || artifact == "envelope" {
         return Err(api_error(StatusCode::NOT_FOUND, "token_bundle_unavailable"));
     }
@@ -427,6 +494,9 @@ pub(super) async fn read(
         .read_submission_record(&state.root, submission)
         .map_err(internal_error)?
         .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "token_bundle_unavailable"))?;
+    if research {
+        research_record(&state, &tenant, &record).await?;
+    }
     let envelope = read_envelope_by_record(&state, &record).map_err(internal_error)?;
     let text = envelope
         .events
@@ -480,9 +550,37 @@ pub(super) async fn read(
         .map_err(internal_error)?;
     // Recheck after object I/O: revocation/expiry observed during the read
     // must not return bytes from the earlier snapshot.
-    let current = owned(&state, &tenant, submission, &revision).await?;
+    let current = if research {
+        account_db(&state)?
+            .get_token_bundle_for_export(tenant.tenant_id(), submission, &revision)
+            .await
+            .map_err(internal_error)?
+            .ok_or_else(|| api_error(StatusCode::GONE, "token_bundle_revoked"))?
+    } else {
+        owned(&state, &tenant, submission, &revision).await?
+    };
     if current.state != "committed" || current.expires_at <= Utc::now() {
         return Err(api_error(StatusCode::GONE, "token_bundle_revoked"));
+    }
+    if research {
+        research_gate(&state, &tenant)?;
+        let current_record = tenant
+            .read_submission_record(&state.root, submission)
+            .map_err(internal_error)?
+            .ok_or_else(|| api_error(StatusCode::GONE, "token_bundle_revoked"))?;
+        research_record(&state, &tenant, &current_record).await?;
+        let current_envelope =
+            read_envelope_by_record(&state, &current_record).map_err(internal_error)?;
+        let current_text = current_envelope
+            .events
+            .iter()
+            .find(|e| e.event_id.to_string() == descriptor.event_id)
+            .and_then(|e| e.redacted_content.as_deref())
+            .ok_or_else(|| api_error(StatusCode::GONE, "token_bundle_rescrub_changed"))?;
+        current
+            .manifest
+            .verify_sanitized_attachment(&artifact, &bytes, current_text.as_bytes())
+            .map_err(|_| api_error(StatusCode::GONE, "token_bundle_rescrub_changed"))?;
     }
     let mut response = (
         [
@@ -514,4 +612,82 @@ pub(super) async fn capabilities(
     Ok(Json(
         serde_json::json!({"version":SCHEMA_VERSION,"server_id":server_id,"tenant_id":tenant.tenant_id(),"account_id":tenant.principal_ref(),"policy":TOKEN_BUNDLE_POLICY,"usage_profile":"restricted_research","max_attachment_bytes":MAX_ATTACHMENT_BYTES}),
     ))
+}
+
+fn research_gate(state: &AppState, tenant: &TenantCtx) -> ApiResult<()> {
+    if !env_truthy("TRACE_COMMONS_TOKEN_RESEARCH_EXPORTS") {
+        return Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "token_research_disabled",
+        ));
+    }
+    let _ = gate(state)?;
+    require_exporter(tenant.auth())
+}
+async fn research_record(
+    state: &AppState,
+    tenant: &TenantCtx,
+    record: &TraceCommonsSubmissionRecord,
+) -> ApiResult<()> {
+    let query = DatasetExportQuery {
+        limit: Some(1),
+        purpose: Some("restricted_token_distribution".into()),
+        status: Some(TraceCorpusStatus::Accepted),
+        privacy_risk: Some(ResidualPiiRisk::Low),
+        consent_scope: Some("debugging_evaluation".into()),
+    };
+    let (_, policy, _) = prepare_replay_export_execution(state, tenant.auth(), &query).await?;
+    if !record.is_export_eligible()
+        || record.privacy_risk != ResidualPiiRisk::Low
+        || !record_matches_export_policy_abac(
+            record,
+            tenant.auth(),
+            policy.as_ref(),
+            TraceAllowedUse::Evaluation,
+        )
+    {
+        return Err(api_error(StatusCode::NOT_FOUND, "token_bundle_unavailable"));
+    }
+    ensure_retention_metadata_within_server_policy(record).map_err(internal_error)
+}
+pub(super) async fn query(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(query): Json<TokenBundleQuery>,
+) -> ApiResult<Json<Vec<TokenBundleIndexEntry>>> {
+    let (_, _) = gate(&state)?;
+    let tenant =
+        authorize_tenant_access_grant_ctx(&state, authenticate_ctx(&state, &headers)?).await?;
+    let entries = account_db(&state)?
+        .query_token_bundles(tenant.tenant_id(), Some(tenant.principal_ref()), &query)
+        .await
+        .map_err(internal_error)?;
+    Ok(Json(entries))
+}
+
+/// Restricted summaries obey the same current consent and ABAC checks as downloads.
+pub(super) async fn research_query(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(query): Json<TokenBundleQuery>,
+) -> ApiResult<Json<Vec<TokenBundleIndexEntry>>> {
+    let tenant =
+        authorize_tenant_access_grant_ctx(&state, authenticate_ctx(&state, &headers)?).await?;
+    research_gate(&state, &tenant)?;
+    let entries = account_db(&state)?
+        .query_token_bundles(tenant.tenant_id(), None, &query)
+        .await
+        .map_err(internal_error)?;
+    let mut allowed = Vec::new();
+    for entry in entries {
+        if let Some(record) = tenant
+            .read_submission_record(&state.root, entry.submission_id)
+            .map_err(internal_error)?
+        {
+            if research_record(&state, &tenant, &record).await.is_ok() {
+                allowed.push(entry);
+            }
+        }
+    }
+    Ok(Json(allowed))
 }

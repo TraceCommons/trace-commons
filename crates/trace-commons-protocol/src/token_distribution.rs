@@ -302,9 +302,27 @@ pub struct SanitizedTokenRecord {
     pub alternatives: Vec<TokenValue>,
     pub returned_alternatives: u32,
 }
+/// Provider-reported values are distinct from verified serving identity.
+#[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TokenMetadata {
+    pub requested_alternatives: Option<u32>,
+    pub reported_model: Option<String>,
+    pub evidence: Option<EvidenceCoverage>,
+    pub sampling: std::collections::BTreeMap<String, f64>,
+    pub redacted_records: u64,
+    pub redacted_alternatives: u64,
+    pub unsupported_records: u64,
+    #[serde(default)]
+    pub unsupported_alternatives: u64,
+    pub budget_alternatives: u64,
+    pub provider_truncated_alternatives: u64,
+}
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SanitizedTokenAttachment {
+    #[serde(default)]
+    pub metadata: TokenMetadata,
     pub version: u32,
     pub capture_store_id: String,
     pub exchange_id: String,
@@ -372,6 +390,17 @@ where
         return Err(DistributionError::Redaction);
     }
     let mut output = SanitizedTokenAttachment {
+        metadata: TokenMetadata {
+            requested_alternatives: Some(source.requested_alternatives),
+            provider_truncated_alternatives: source
+                .records
+                .iter()
+                .map(|r| {
+                    u64::from(r.returned_alternatives).saturating_sub(r.alternatives.len() as u64)
+                })
+                .sum(),
+            ..Default::default()
+        },
         version: SCHEMA_VERSION,
         capture_store_id: source.capture_store_id.clone(),
         exchange_id: source.exchange_id.clone(),
@@ -403,12 +432,15 @@ where
             .is_some_and(|e| e.original.overlaps(record.span))
         {
             output.omitted_records += 1;
+            output.metadata.redacted_records += 1;
+            output.metadata.redacted_alternatives += record.alternatives.len() as u64;
             output.omitted_alternatives += record.alternatives.len() as u64;
             continue;
         }
         let Some(keep) =
             screen(source, position, original).filter(|v| v.len() == record.alternatives.len())
         else {
+            output.metadata.unsupported_records += 1;
             output.omitted_records += 1;
             output.omitted_alternatives += record.alternatives.len() as u64;
             continue;
@@ -431,6 +463,7 @@ where
                     Some(value.clone())
                 } else {
                     output.omitted_alternatives += 1;
+                    output.metadata.redacted_alternatives += 1;
                     None
                 }
             })
@@ -579,6 +612,30 @@ impl SanitizedTokenAttachment {
     /// Checks positions against the stored sanitized event. Use this again
     /// after any server rescrub; a changed event digest invalidates the link.
     pub fn validate(&self, sanitized: &[u8]) -> Result<(), DistributionError> {
+        if self.metadata.requested_alternatives.is_some_and(|k| k > 20)
+            || self.metadata.sampling.len() > 7
+        {
+            return Err(DistributionError::Invalid);
+        }
+        if let Some(model) = &self.metadata.reported_model {
+            identifier(model)?;
+        }
+        for (key, value) in &self.metadata.sampling {
+            if ![
+                "temperature",
+                "top_p",
+                "seed",
+                "presence_penalty",
+                "frequency_penalty",
+                "max_tokens",
+                "max_completion_tokens",
+            ]
+            .contains(&key.as_str())
+                || !value.is_finite()
+            {
+                return Err(DistributionError::Invalid);
+            }
+        }
         if self.version != SCHEMA_VERSION {
             return Err(DistributionError::Version);
         }

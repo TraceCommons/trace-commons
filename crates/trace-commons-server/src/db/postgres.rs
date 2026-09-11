@@ -1269,6 +1269,16 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "token_distribution_bundles",
         include_str!("../../../../migrations/V64__token_distribution_bundles.sql"),
     ),
+    (
+        65,
+        "token_bundle_processing",
+        include_str!("../../../../migrations/V65__token_bundle_processing.sql"),
+    ),
+    (
+        66,
+        "token_processing_retry",
+        include_str!("../../../../migrations/V66__token_processing_retry.sql"),
+    ),
 ];
 
 #[async_trait]

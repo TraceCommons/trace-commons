@@ -27,6 +27,7 @@ pub mod source_copy;
 pub mod submit;
 pub mod token_bundle;
 pub mod token_capture_client;
+pub mod token_review_lease;
 pub mod update;
 pub mod watch_events;
 pub mod withdraw;

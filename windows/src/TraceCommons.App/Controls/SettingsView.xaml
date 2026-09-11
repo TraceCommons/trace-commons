@@ -526,7 +526,13 @@
                         <TextBlock Text="{x:Bind Settings.TokenContributionDisclosure}" TextWrapping="Wrap" />
                         <TextBlock Text="{x:Bind Settings.TokenContributionCaptureNote}" TextWrapping="Wrap" />
                         <TextBlock Text="{x:Bind Settings.TokenContributionScopeNote}" TextWrapping="Wrap" />
-                        <TextBlock Text="{x:Bind Settings.TokenContributionState, Mode=OneWay}" TextWrapping="Wrap" />
+                        <TextBlock Text="{x:Bind Settings.ProbabilityStorage.CaptureNotice, Mode=OneWay}" TextWrapping="Wrap" />
+            <Button Content="{x:Bind Settings.ProbabilityStorage.CaptureLabel, Mode=OneWay}" Click="OnLocalProbabilityCapture" />
+            <TextBlock Text="{x:Bind Settings.ProbabilityStorage.StateLine, Mode=OneWay}" TextWrapping="Wrap" />
+            <TextBlock Text="{x:Bind Settings.ProbabilityStorage.ScopeNote, Mode=OneWay}" TextWrapping="Wrap" />
+            <Button Content="{x:Bind Settings.ProbabilityStorage.CleanupLabel, Mode=OneWay}" Click="OnCleanProbabilityStorage" />
+            <Button Content="{x:Bind Settings.ProbabilityStorage.DiscardLabel, Mode=OneWay}" Click="OnDiscardProbabilityStorage" />
+            <TextBlock Text="{x:Bind Settings.TokenContributionState, Mode=OneWay}" TextWrapping="Wrap" />
                         <Button Content="{x:Bind Settings.TokenContributionEnable, Mode=OneWay}"
                                 IsEnabled="{x:Bind Settings.TokenContributionControlsEnabled, Mode=OneWay}"
                                 Click="OnTokenContribution" />

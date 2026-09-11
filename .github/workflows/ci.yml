@@ -234,6 +234,11 @@ jobs:
         run: cargo test --locked -p trace-commons-server --test token_bundle_pg
         env:
           TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_tokens
+      - name: token bundle HTTP lost-response recovery
+        run: cargo test --locked -p trace-commons-server --bin trace-commons-ingest token_bundle_http_journey
+        env:
+          TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_tokens
+          TRACE_COMMONS_BUNDLE_SERVER_ID: journey-server
       - name: trace_corpus_pg_store
         run: cargo test -p trace-commons-server --test trace_corpus_pg_store
         env:

@@ -7571,6 +7571,15 @@ fn community_cors_origins() -> Vec<HeaderValue> {
 
 fn app(state: Arc<AppState>) -> Router {
     Router::new()
+        .route("/v1/token-bundles/query", post(token_bundles::query))
+        .route(
+            "/v1/research/token-bundles/query",
+            post(token_bundles::research_query),
+        )
+        .route(
+            "/v1/research/token-bundles/{submission}/{revision}/{artifact}",
+            get(token_bundles::research_read),
+        )
         .route(
             "/v1/token-bundles",
             post(token_bundles::begin).get(token_bundles::capabilities),
@@ -16215,6 +16224,8 @@ const TRACE_WITHDRAWAL_REASON: &str = "contributor_withdrawal";
 /// request body; every field comes from auth-derived tenant state.
 #[derive(Debug, Serialize)]
 struct AccountTraceWithdrawalResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    token_deletion_state: Option<&'static str>,
     submission_id: Uuid,
     withdrawn_at: DateTime<Utc>,
     /// Label of the corpus status held immediately before withdrawal.
@@ -16236,6 +16247,7 @@ impl AccountTraceWithdrawalResponse {
         let already_distributed =
             record.distribution_reach == TRACE_WITHDRAWAL_REACH_COMMONS_DISTRIBUTED;
         Self {
+            token_deletion_state: None,
             submission_id: record.submission_id,
             withdrawn_at: record.withdrawn_at,
             prior_status: record.prior_status,
@@ -16522,7 +16534,24 @@ async fn account_trace_withdraw_handler(
         );
     }
 
-    Ok(Json(AccountTraceWithdrawalResponse::from_record(tombstone)))
+    let mut response = AccountTraceWithdrawalResponse::from_record(tombstone);
+    if db.supports_token_bundles() {
+        let pending = db
+            .pending_token_bundle_deletions(&ctx.tenant_id, Some(submission_id))
+            .await
+            .map_err(internal_error)?;
+        response.token_deletion_state = Some(if pending.is_empty() {
+            "completed"
+        } else if state
+            .legal_hold_retention_policy_ids
+            .contains(&record.retention_policy_id)
+        {
+            "held"
+        } else {
+            "pending"
+        });
+    }
+    Ok(Json(response))
 }
 
 /// Mint a single-use login link for the authenticated device's principal.

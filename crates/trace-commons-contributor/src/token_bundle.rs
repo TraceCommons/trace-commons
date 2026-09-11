@@ -40,6 +40,12 @@ struct Entry {
     approved: bool,
     #[serde(default)]
     renew_after_unix: u64,
+    #[serde(default)]
+    cleanup_after_unix: u64,
+    #[serde(default)]
+    lease_expires_at_unix: Option<u64>,
+    #[serde(default)]
+    renewal_failed: bool,
     manifest: ContributionBundleManifest,
     destination: BundleDestination,
     lease: BundleLease,
@@ -59,6 +65,30 @@ pub struct TokenBundleReview {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary_line: Option<String>,
 }
+/// Abandon a prepared bundle if a later preview/queue pin fails or is canceled.
+pub(crate) struct ReviewPinGuard {
+    root: PathBuf,
+    id: Option<uuid::Uuid>,
+}
+impl ReviewPinGuard {
+    pub(crate) fn new(state: &Path, review: Option<&TokenBundleReview>) -> Self {
+        Self {
+            root: state.join("token-bundles"),
+            id: review.map(|r| r.journal_id),
+        }
+    }
+    pub(crate) fn disarm(&mut self) {
+        self.id = None;
+    }
+}
+impl Drop for ReviewPinGuard {
+    fn drop(&mut self) {
+        if let Some(id) = self.id {
+            let _ = BundleJournal::open(&self.root).and_then(|j| j.abandon_review(id));
+        }
+    }
+}
+
 /// Only the caller's immutable lease is released. Implementations must not
 /// delete a session directory or release another destination's lease.
 #[async_trait::async_trait]
@@ -264,6 +294,9 @@ impl BundleJournal {
                 expired: false,
                 approved: false,
                 renew_after_unix: 0,
+                cleanup_after_unix: 0,
+                lease_expires_at_unix: None,
+                renewal_failed: false,
                 manifest,
                 destination,
                 lease,
@@ -368,6 +401,34 @@ impl BundleJournal {
         }
         Ok(leases)
     }
+    /// Persist the expiry returned by the owning capture store, never an estimate.
+    pub fn record_renewal(&self, lease: &BundleLease, expiry: Option<u64>) -> Result<()> {
+        let _lock = self.lock()?;
+        for item in fs::read_dir(&self.root)? {
+            let path = item?.path();
+            if path.extension().is_none_or(|s| s != "json") {
+                continue;
+            }
+            let id = path
+                .file_stem()
+                .and_then(|v| v.to_str())
+                .and_then(|v| uuid::Uuid::parse_str(v).ok())
+                .context("bundle-journal-invalid")?;
+            let mut entry = self.read(id)?;
+            if entry.lease.capture_store_id == lease.capture_store_id
+                && entry.lease.lease_id == lease.lease_id
+                && entry.lease.owner == lease.owner
+                && entry.lease.snapshot_digest == lease.snapshot_digest
+            {
+                entry.renewal_failed = expiry.is_none();
+                if let Some(expiry) = expiry {
+                    entry.lease_expires_at_unix = Some(expiry);
+                }
+                self.write(id, &entry)?;
+            }
+        }
+        Ok(())
+    }
     /// A revoked or discarded local review no longer owns retained payloads.
     /// This never revokes a server contribution or fabricates a receipt.
     pub fn abandon_review(&self, id: uuid::Uuid) -> Result<()> {
@@ -411,6 +472,166 @@ impl BundleJournal {
             }
         }
         Ok(())
+    }
+    /// Metadata-only lifecycle status. No token text, paths, or lease handles.
+    pub fn storage_status(&self, now: u64) -> Result<serde_json::Value> {
+        let _lock = self.lock()?;
+        // Settings polling must not repeatedly decode up to 256 MiB of review
+        // payloads. Cache only content-free results and invalidate on every
+        // journal file's size/mtime, with a one-minute age bound.
+        type StatusCache = std::collections::BTreeMap<
+            PathBuf,
+            (
+                u64,
+                Vec<(PathBuf, u64, std::time::SystemTime)>,
+                serde_json::Value,
+            ),
+        >;
+        static CACHE: std::sync::OnceLock<std::sync::Mutex<StatusCache>> =
+            std::sync::OnceLock::new();
+        let cache = CACHE.get_or_init(Default::default);
+        let mut signature = Vec::new();
+        for item in fs::read_dir(&self.root)? {
+            let path = item?.path();
+            if path.extension().is_some_and(|e| e == "json") {
+                let meta = fs::symlink_metadata(&path)?;
+                signature.push((path, meta.len(), meta.modified()?));
+            }
+        }
+        signature.sort();
+        if let Some((at, previous, value)) = cache.lock().expect("status cache").get(&self.root) {
+            if now >= *at && now - at < 60 && *previous == signature {
+                return Ok(value.clone());
+            }
+        }
+        let mut bytes = 0u64;
+        let mut pending = 0u64;
+        let mut reviews = 0u64;
+        let mut oldest = now;
+        let mut renewal_failures = 0u64;
+        let mut earliest_expiry: Option<u64> = None;
+        for item in fs::read_dir(&self.root)? {
+            let path = item?.path();
+            if path.extension().is_none_or(|s| s != "json") {
+                continue;
+            }
+            let id = path
+                .file_stem()
+                .and_then(|v| v.to_str())
+                .and_then(|v| uuid::Uuid::parse_str(v).ok())
+                .context("bundle-journal-invalid")?;
+            let entry = self.read(id)?;
+            if entry.approved_payload.is_some() {
+                bytes = bytes.saturating_add(fs::symlink_metadata(path)?.len());
+            }
+            if (entry.receipt.is_some() || entry.expired) && !entry.released {
+                pending += 1;
+                oldest = oldest.min(entry.created_at_unix);
+            }
+            if entry.receipt.is_none() && !entry.expired {
+                reviews += 1;
+                renewal_failures += u64::from(entry.renewal_failed);
+                if let Some(expiry) = entry.lease_expires_at_unix {
+                    earliest_expiry = Some(earliest_expiry.map_or(expiry, |old| old.min(expiry)));
+                }
+            }
+        }
+        let expiry_line = match earliest_expiry {
+            Some(expiry) if expiry <= now => {
+                "A capture lease has expired. Recreate its review before submitting.".to_string()
+            }
+            Some(expiry) => format!(
+                "The earliest confirmed capture lease expires in {} hours.",
+                expiry.saturating_sub(now).div_ceil(3600)
+            ),
+            None if reviews > 0 => {
+                "Capture lease expiry has not been confirmed by the owning proxy.".to_string()
+            }
+            None => String::new(),
+        };
+        let value = serde_json::json!({"lease_expires_at_unix":earliest_expiry,"renewal_failures":renewal_failures,"retained_bytes":bytes,"cleanup_pending":pending,"unsubmitted_reviews":reviews,"oldest_pending_seconds":if pending>0 {now.saturating_sub(oldest)} else {0},
+            "state_line":format!("{bytes} bytes of local review data. {pending} capture releases pending. {reviews} unsubmitted reviews. {renewal_failures} lease renewals need retry. {expiry_line}"),
+            "scope_note":"Local cleanup preserves original agent files and server contributions. Withdraw a contribution separately to stop server use.",
+            "cleanup_label":"Remove submitted local copies","discard_label":"Discard unsubmitted token reviews",
+            "discard_confirmation":"Discard unsubmitted token reviews? Their local approval data will be removed and their capture leases released. Original agent files and submitted contributions are preserved.",
+            "cancel_label":"Cancel","confirm_label":"Discard reviews","failure_line":"Cleanup could not complete. Undo approval before discarding an approved review, then try again."});
+        let mut cached = cache.lock().expect("status cache");
+        if cached.len() >= 16 {
+            cached.clear();
+        }
+        cached.insert(self.root.clone(), (now, signature, value.clone()));
+        Ok(value)
+    }
+    /// A durable receipt already authorizes disposal of these client copies,
+    /// independently of whether the owning proxy is available to release raw data.
+    pub fn remove_local_copies(&self, discard: bool) -> Result<()> {
+        let _lock = self.lock()?;
+        for item in fs::read_dir(&self.root)? {
+            let path = item?.path();
+            if path.extension().is_none_or(|s| s != "json") {
+                continue;
+            }
+            let id = path
+                .file_stem()
+                .and_then(|v| v.to_str())
+                .and_then(|v| uuid::Uuid::parse_str(v).ok())
+                .context("bundle-journal-invalid")?;
+            let mut entry = self.read(id)?;
+            if entry.receipt.is_some() || entry.expired || discard {
+                if entry.receipt.is_none() {
+                    entry.expired = true;
+                }
+                entry.approved_payload = None;
+                entry.cleanup_after_unix = 0;
+                self.write(id, &entry)?;
+            }
+        }
+        Ok(())
+    }
+    pub(crate) fn owns_lease(&self, lease: &BundleLease) -> Result<bool> {
+        let _lock = self.lock()?;
+        for item in fs::read_dir(&self.root)? {
+            let path = item?.path();
+            if path.extension().is_none_or(|s| s != "json") {
+                continue;
+            }
+            let id = path
+                .file_stem()
+                .and_then(|v| v.to_str())
+                .and_then(|v| uuid::Uuid::parse_str(v).ok())
+                .context("bundle-journal-invalid")?;
+            let entry = self.read(id)?;
+            if entry.lease.capture_store_id == lease.capture_store_id
+                && entry.lease.lease_id == lease.lease_id
+                && entry.lease.snapshot_digest == lease.snapshot_digest
+                && entry.lease.owner == lease.owner
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+    /// Reserve retries durably before network I/O. A stale store cannot keep
+    /// its first directory entry at the head of every maintenance pass.
+    pub fn due_cleanup(&self, now: u64) -> Result<Vec<uuid::Uuid>> {
+        let ids = self.pending_cleanup()?;
+        let _lock = self.lock()?;
+        let mut due = Vec::new();
+        for id in ids {
+            let entry = self.read(id)?;
+            if !entry.released && entry.cleanup_after_unix <= now {
+                due.push((entry.cleanup_after_unix, id));
+            }
+        }
+        due.sort_unstable();
+        let mut batch = Vec::new();
+        for (_, id) in due.into_iter().take(8) {
+            let mut entry = self.read(id)?;
+            entry.cleanup_after_unix = now.saturating_add(3600);
+            self.write(id, &entry)?;
+            batch.push(id);
+        }
+        Ok(batch)
     }
     /// Acknowledged or explicitly expired intents are retried at startup.
     pub fn pending_cleanup(&self) -> Result<Vec<uuid::Uuid>> {
@@ -847,6 +1068,59 @@ mod tests {
         let recovered = journal.upload_approved(id, &client).await.unwrap();
         assert_eq!(recovered.manifest_digest, receipt.manifest_digest);
     }
+    #[test]
+    fn unavailable_cleanup_is_backed_off_without_starving_other_leases() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = BundleJournal::open(&dir.path().join("journal")).unwrap();
+        for _ in 0..10 {
+            let (manifest, destination, lease, _) = fixture();
+            let id = journal.prepare(manifest, destination, lease).unwrap();
+            journal.abandon_review(id).unwrap();
+        }
+        let first = journal.due_cleanup(100).unwrap();
+        assert_eq!(first.len(), 8);
+        let restarted = BundleJournal::open(&dir.path().join("journal")).unwrap();
+        let second = restarted.due_cleanup(101).unwrap();
+        assert_eq!(second.len(), 2);
+        assert!(second.iter().all(|id| !first.contains(id)));
+        assert!(restarted.due_cleanup(102).unwrap().is_empty());
+        assert_eq!(restarted.due_cleanup(3700).unwrap().len(), 8);
+        let (manifest, destination, lease, _) = fixture();
+        let id = restarted.prepare(manifest, destination, lease).unwrap();
+        restarted.mark_approved(id).unwrap();
+        assert_eq!(restarted.due_renewals(102).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn canceled_pin_is_abandoned_and_status_tracks_confirmed_expiry() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = BundleJournal::open(&dir.path().join("token-bundles")).unwrap();
+        let (manifest, destination, lease, _) = fixture();
+        let digest = manifest.digest().unwrap();
+        let id = journal
+            .prepare(manifest, destination, lease.clone())
+            .unwrap();
+        journal.record_renewal(&lease, Some(500)).unwrap();
+        assert_eq!(
+            journal.storage_status(100).unwrap()["lease_expires_at_unix"],
+            500
+        );
+        journal.record_renewal(&lease, None).unwrap();
+        let status = journal.storage_status(100).unwrap();
+        assert_eq!(status["renewal_failures"], 1);
+        assert_eq!(status["lease_expires_at_unix"], 500);
+        let review = TokenBundleReview {
+            journal_id: id,
+            manifest_digest: digest,
+            attachment_bytes: 0,
+            summary_line: None,
+        };
+        drop(ReviewPinGuard::new(dir.path(), Some(&review)));
+        let status = journal.storage_status(101).unwrap();
+        assert_eq!(status["unsubmitted_reviews"], 0);
+        assert_eq!(status["cleanup_pending"], 1);
+    }
+
     #[cfg(unix)]
     #[test]
     fn symlink_journal_is_refused() {

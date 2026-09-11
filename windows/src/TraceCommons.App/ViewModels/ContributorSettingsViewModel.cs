@@ -721,8 +721,36 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
     public string TokenContributionNotice => _tokenContributionNotice;
     public string TokenContributionNoticeGlyph => _tokenContributionNotice.Length > 0 ? _witnessCopy?.Wallet?.RefusedGlyph ?? "" : "";
 
+    public ProbabilityStorageView? ProbabilityStorage { get; private set; }
+    public async Task SetLocalProbabilityCaptureAsync(bool enabled) {
+        if (IsBusy || ProbabilityStorage is null) return;
+        IsBusy = true;
+        try {
+            var response = await _host.CallAsync("set_settings", enabled ? "{\"token_capture_enabled\":true}" : "{\"token_capture_enabled\":false}").ConfigureAwait(true);
+            if (response.IsError || response.ResultAs<DaemonSettingsSnapshot>() is not { } settings) throw new InvalidOperationException();
+            FillTokenContribution(settings);
+        } catch {
+            _tokenContributionNotice = ProbabilityStorage?.FailureLine ?? "";
+            Raise(nameof(TokenContributionNotice));
+        } finally { IsBusy = false; }
+    }
+    public async Task CleanProbabilityStorageAsync(bool discard) {
+        if (IsBusy || ProbabilityStorage is null) return;
+        IsBusy = true;
+        try {
+            var response = await _host.CallAsync(discard ? "discard_token_reviews" : "remove_token_local_copies", "{\"confirmed\":true}").ConfigureAwait(true);
+            if (response.IsError) throw new InvalidOperationException();
+            ProbabilityStorage = response.ResultAs<ProbabilityStorageView>();
+            Raise(nameof(ProbabilityStorage));
+        } catch {
+            _tokenContributionNotice = ProbabilityStorage?.FailureLine ?? "";
+            Raise(nameof(TokenContributionNotice));
+        } finally { IsBusy = false; }
+    }
     private void FillTokenContribution(DaemonSettingsSnapshot settings)
     {
+        ProbabilityStorage = settings.ProbabilityStorage;
+        Raise(nameof(ProbabilityStorage));
         _tokenContributionEnabled = settings.ProbabilityContributionEnabled;
         _tokenContributionSupported = settings.ProbabilityContributionAllowed.HasValue;
         Raise(nameof(TokenContributionControlsEnabled));

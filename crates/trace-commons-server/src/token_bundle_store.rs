@@ -20,6 +20,8 @@ pub struct StoredTokenBundle {
     pub manifest: ContributionBundleManifest,
     pub witness_headers: std::collections::BTreeMap<String, String>,
     pub state: String,
+    pub processing_state: String,
+    pub processing_summary: Option<serde_json::Value>,
     pub expires_at: DateTime<Utc>,
     pub receipt: Option<DurableBundleReceipt>,
     pub attachments: Vec<StoredTokenObject>,
@@ -32,4 +34,27 @@ pub struct StoredTokenObject {
     pub ready: bool,
     #[serde(skip)]
     pub prepared: Option<Vec<u8>>,
+}
+
+/// Metadata-only immutable revision cursor; never a plaintext-token search.
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TokenBundleQuery {
+    pub after_submission: Option<Uuid>,
+    pub after_revision: Option<String>,
+    pub model: Option<String>,
+    pub semantics: Option<String>,
+    pub evidence: Option<String>,
+    pub requested_alternatives: Option<u32>,
+    pub minimum_coverage: Option<f64>,
+    pub tokenizer_available: Option<bool>,
+    pub limit: Option<u32>,
+}
+#[derive(Clone, Serialize, Deserialize)]
+pub struct TokenBundleIndexEntry {
+    pub submission_id: Uuid,
+    pub revision: String,
+    pub manifest_digest: String,
+    pub policy_version: String,
+    pub summary: serde_json::Value,
 }

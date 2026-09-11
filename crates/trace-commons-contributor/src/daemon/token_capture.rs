@@ -29,7 +29,7 @@ pub async fn acquire(
     let request = hex::encode(Sha256::digest(call.request_body().as_bytes()));
     let response = hex::encode(Sha256::digest(call.response_body().as_bytes()));
     let matches = client
-        .list(session)
+        .find(session, &request, &response)
         .await?
         .into_iter()
         .filter(|c| {

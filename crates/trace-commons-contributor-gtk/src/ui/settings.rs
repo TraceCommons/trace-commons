@@ -199,6 +199,11 @@ pub struct SettingsView {
     inference_saving: std::cell::Cell<bool>,
     inference_supported: std::cell::Cell<bool>,
     token_status: gtk::Label,
+    token_storage_status: gtk::Label,
+    token_capture: gtk::Button,
+    token_cleanup: gtk::Button,
+    token_discard: gtk::Button,
+    token_storage: std::cell::RefCell<Option<crate::model::TokenStorage>>,
     token_error: gtk::Label,
     token_enable: gtk::Button,
     token_disable: gtk::Button,
@@ -478,6 +483,16 @@ impl SettingsView {
             label.add_css_class("tc-body");
             witness_card.append(&label);
         }
+        let token_storage_status = gtk::Label::builder().wrap(true).xalign(0.0).build();
+        witness_card.append(&token_storage_status);
+        let token_capture = gtk::Button::new();
+        let token_cleanup = gtk::Button::new();
+        let token_discard = gtk::Button::new();
+        for button in [&token_capture, &token_cleanup, &token_discard] {
+            button.set_halign(gtk::Align::Start);
+            button.set_visible(false);
+            witness_card.append(button);
+        }
         let token_status = gtk::Label::builder().wrap(true).xalign(0.0).build();
         witness_card.append(&token_status);
         let token_error = gtk::Label::builder().wrap(true).xalign(0.0).build();
@@ -680,6 +695,11 @@ impl SettingsView {
             inference_saving: std::cell::Cell::new(false),
             inference_supported: std::cell::Cell::new(false),
             token_status,
+            token_storage_status,
+            token_capture,
+            token_cleanup,
+            token_discard,
+            token_storage: std::cell::RefCell::new(None),
             token_error,
             token_enable,
             token_disable,
@@ -795,6 +815,7 @@ pub fn wire(app: &Rc<App>) {
     wire_witness(app);
     wire_inference_consent(app);
     wire_token_consent(app);
+    wire_token_storage(app);
     // Painted immediately rather than waiting on `get_settings`: the
     // witness is not a daemon setting, so no daemon answer is coming, and a
     // card that stayed blank until one arrived would say nothing about the
@@ -3301,6 +3322,7 @@ fn wire_inference_consent(app: &Rc<App>) {
 
 fn render_token_consent(app: &Rc<App>, settings: &Settings) {
     let view = &app.settings;
+    render_token_storage(app, settings.token_storage.clone());
     if view.token_saving.get() {
         return;
     }
@@ -5066,4 +5088,109 @@ mod tests {
         assert_eq!(IRONWIRE_TOOL_GEMINI, "gemini");
         assert_eq!(IRONWIRE_TOOL_CLINE, "cline");
     }
+}
+
+fn render_token_storage(app: &Rc<App>, storage: Option<crate::model::TokenStorage>) {
+    let view = &app.settings;
+    if let Some(value) = &storage {
+        view.token_storage_status
+            .set_text(&format!("{}\n{}\n{}", value.state_line, value.scope_note, value.capture_notice));
+        view.token_capture.set_label(&value.capture_label);
+        view.token_cleanup.set_label(&value.cleanup_label);
+        view.token_discard.set_label(&value.discard_label);
+    } else {
+        view.token_storage_status.set_text("");
+    }
+    view.token_capture.set_visible(storage.is_some());
+    view.token_cleanup.set_visible(storage.is_some());
+    view.token_discard.set_visible(storage.is_some());
+    *view.token_storage.borrow_mut() = storage;
+}
+fn save_token_storage(app: &Rc<App>, discard: bool) {
+    if app.settings.token_saving.replace(true) {
+        return;
+    }
+    app.settings.token_cleanup.set_sensitive(false);
+    app.settings.token_discard.set_sensitive(false);
+    app.call(
+        if discard {
+            "discard_token_reviews"
+        } else {
+            "remove_token_local_copies"
+        },
+        serde_json::json!({"confirmed":discard}),
+        move |app, result| {
+            app.settings.token_saving.set(false);
+            app.settings.token_cleanup.set_sensitive(true);
+            app.settings.token_discard.set_sensitive(true);
+            if let Ok(value) = result {
+                if let Ok(storage) = serde_json::from_value(value) {
+                    render_token_storage(app, Some(storage));
+                    return;
+                }
+            }
+            if let Some(storage) = app.settings.token_storage.borrow().as_ref() {
+                app.settings.token_error.set_text(&storage.failure_line);
+            }
+        },
+    );
+}
+fn save_local_capture(app: &Rc<App>, enabled: bool) {
+    if app.settings.token_saving.replace(true) { return; }
+    app.call("set_settings", serde_json::json!({"token_capture_enabled":enabled}), move |app, result| {
+        app.settings.token_saving.set(false);
+        if let Ok(value) = result {
+            if let Ok(storage) = serde_json::from_value(value["token_storage"].clone()) {
+                render_token_storage(app, Some(storage));
+                return;
+            }
+        }
+        if let Some(storage) = app.settings.token_storage.borrow().as_ref() { app.settings.token_error.set_text(&storage.failure_line); }
+    });
+}
+fn wire_token_storage(app: &Rc<App>) {
+    let a = Rc::clone(app);
+    app.settings.token_capture.connect_clicked(move |_| {
+        let Some(storage) = a.settings.token_storage.borrow().clone() else { return; };
+        if storage.capture_enabled { save_local_capture(&a, false); return; }
+        let dialog = adw::MessageDialog::new(Some(&a.window), Some(&storage.capture_label), Some(&storage.capture_confirmation));
+        dialog.add_responses(&[("cancel", &storage.cancel_label), ("enable", &storage.capture_label)]);
+        dialog.set_default_response(Some("cancel"));
+        dialog.set_close_response("cancel");
+        let a = Rc::clone(&a);
+        dialog.connect_response(None, move |dialog, response| {
+            dialog.close();
+            if response == "enable" { save_local_capture(&a, true); }
+        });
+        dialog.present();
+    });
+    let a = Rc::clone(app);
+    app.settings
+        .token_cleanup
+        .connect_clicked(move |_| save_token_storage(&a, false));
+    let a = Rc::clone(app);
+    app.settings.token_discard.connect_clicked(move |_| {
+        let Some(storage) = a.settings.token_storage.borrow().clone() else {
+            return;
+        };
+        let dialog = adw::MessageDialog::new(
+            Some(&a.window),
+            Some(&storage.discard_label),
+            Some(&storage.discard_confirmation),
+        );
+        dialog.add_responses(&[
+            ("cancel", &storage.cancel_label),
+            ("discard", &storage.confirm_label),
+        ]);
+        dialog.set_default_response(Some("cancel"));
+        dialog.set_close_response("cancel");
+        let a = Rc::clone(&a);
+        dialog.connect_response(None, move |dialog, response| {
+            dialog.close();
+            if response == "discard" {
+                save_token_storage(&a, true);
+            }
+        });
+        dialog.present();
+    });
 }

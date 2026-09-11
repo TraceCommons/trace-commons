@@ -1528,6 +1528,34 @@ final class AppModel: ObservableObject {
         }
     }
 
+    @Published private(set) var tokenStorageNotice = ""
+    func setLocalTokenCapture(_ enabled: Bool) async {
+        guard !tokenContributionBusy, let client else { return }
+        tokenContributionBusy = true
+        tokenStorageNotice = ""
+        defer { tokenContributionBusy = false }
+        let result = await Task.detached(priority: .userInitiated) {
+            Result { try client.setSettings(["token_capture_enabled": enabled]) }
+        }.value
+        switch result {
+        case .success(let settings): daemonSettings = settings
+        case .failure: tokenStorageNotice = daemonSettings?.tokenStorage?.failureLine ?? ""
+        }
+    }
+    func cleanTokenStorage(discard: Bool) async {
+        guard !tokenContributionBusy, let client else { return }
+        tokenContributionBusy = true
+        tokenStorageNotice = ""
+        defer { tokenContributionBusy = false }
+        let result = await Task.detached(priority: .userInitiated) {
+            Result { try client.tokenStorageAction(discard: discard) }
+        }.value
+        switch result {
+        case .success(let status): daemonSettings?.tokenStorage = status
+        case .failure: tokenStorageNotice = daemonSettings?.tokenStorage?.failureLine ?? ""
+        }
+    }
+
     @Published private(set) var tokenContributionBusy = false
     @Published private(set) var tokenContributionSaveFailed = false
 
@@ -2093,7 +2121,7 @@ final class AppModel: ObservableObject {
         /// The server withdrew it, and reported this tier. `nil` reach means
         /// the daemon sent a label this build does not know -- which is
         /// reported as not-knowable, never smoothed into the mild answer.
-        case withdrawn(WithdrawalReach?)
+        case withdrawn(WithdrawalReach?, String? = nil)
         /// The daemon has no account session, so the request was never made.
         case noAccountSession
         /// Anything else. Carries the daemon's fixed label, which by
@@ -2130,7 +2158,7 @@ final class AppModel: ObservableObject {
                 self.withdrawing.remove(id)
                 switch outcome {
                 case .success(let value):
-                    self.withdrawals[id] = .withdrawn(value.distributionReach)
+                    self.withdrawals[id] = .withdrawn(value.distributionReach, value.tokenDeletionNote)
                     self.refreshHistory()
                 case .failure(let error):
                     let label = (error as? DaemonClient.Failure)?.message ?? "withdraw-failed"

@@ -109,6 +109,24 @@ public sealed partial class SettingsView : UserControl
             _inferenceEvidenceDialogOpen = false;
         }
     }
+    private async void OnLocalProbabilityCapture(object sender, RoutedEventArgs e) {
+        if (Settings.ProbabilityStorage is not { } storage) return;
+        if (storage.CaptureEnabled) { await Settings.SetLocalProbabilityCaptureAsync(false); return; }
+        var dialog = new ContentDialog { XamlRoot = XamlRoot, Title = storage.CaptureLabel,
+            Content = storage.CaptureConfirmation, PrimaryButtonText = storage.CaptureLabel,
+            CloseButtonText = storage.CancelLabel, DefaultButton = ContentDialogButton.Close };
+        if (await dialog.ShowAsync() == ContentDialogResult.Primary) await Settings.SetLocalProbabilityCaptureAsync(true);
+    }
+    private async void OnCleanProbabilityStorage(object sender, RoutedEventArgs e) {
+        await Settings.CleanProbabilityStorageAsync(false);
+    }
+    private async void OnDiscardProbabilityStorage(object sender, RoutedEventArgs e) {
+        if (Settings.ProbabilityStorage is not { } storage) return;
+        var dialog = new ContentDialog { XamlRoot = XamlRoot, Title = storage.DiscardLabel,
+            Content = storage.DiscardConfirmation, PrimaryButtonText = storage.ConfirmLabel,
+            CloseButtonText = storage.CancelLabel, DefaultButton = ContentDialogButton.Close };
+        if (await dialog.ShowAsync() == ContentDialogResult.Primary) await Settings.CleanProbabilityStorageAsync(true);
+    }
     private async void OnDisableTokenContribution(object sender, RoutedEventArgs e)
     {
         await Settings.SetTokenContributionAsync(false);

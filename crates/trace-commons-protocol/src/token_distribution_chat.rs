@@ -19,6 +19,7 @@ pub enum ChatCaptureError {
 
 /// Content-bearing extraction results intentionally do not implement Debug.
 pub struct ChatTokenSegment {
+    pub reported_model: Option<String>,
     pub choice: u32,
     pub text: Vec<u8>,
     pub records: Vec<TokenRecord>,
@@ -163,7 +164,11 @@ impl Builder {
         }
         Ok(())
     }
-    fn finish(self, choice: u32) -> Result<ChatTokenSegment, ChatCaptureError> {
+    fn finish(
+        self,
+        choice: u32,
+        reported_model: Option<String>,
+    ) -> Result<ChatTokenSegment, ChatCaptureError> {
         if !self.finished {
             return Err(ChatCaptureError::Incomplete);
         }
@@ -181,6 +186,7 @@ impl Builder {
             }
         }
         Ok(ChatTokenSegment {
+            reported_model,
             choice,
             text: self.text,
             records: self.records,
@@ -199,9 +205,16 @@ pub fn extract_chat_tokens(
     }
     let mut builders: BTreeMap<u32, Builder> = BTreeMap::new();
     let mut response_id = None;
+    let mut reported_model: Option<String> = None;
     let mut frame = |value: Value| -> Result<(), ChatCaptureError> {
         if value.get("error").is_some() {
             return Err(ChatCaptureError::Unavailable);
+        }
+        if let Some(model) = value.get("model").and_then(Value::as_str) {
+            if model.len() > 256 || reported_model.as_deref().is_some_and(|old| old != model) {
+                return Err(ChatCaptureError::Malformed);
+            }
+            reported_model = Some(model.to_owned());
         }
         let id = value
             .get("id")
@@ -279,6 +292,6 @@ pub fn extract_chat_tokens(
     }
     builders
         .into_iter()
-        .map(|(choice, builder)| builder.finish(choice))
+        .map(|(choice, builder)| builder.finish(choice, reported_model.clone()))
         .collect()
 }

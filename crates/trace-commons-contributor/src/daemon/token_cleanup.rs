@@ -1,4 +1,4 @@
-//! Retry one durable lease-release intent per pass, including after restart.
+//! Fair, bounded renewal and cleanup batches, including after restart.
 use super::ipc::DaemonShared;
 use crate::{token_bundle::BundleJournal, token_capture_client::TokenCaptureClient};
 
@@ -53,11 +53,19 @@ pub(super) async fn pass(shared: &DaemonShared) -> anyhow::Result<()> {
     }
     let token = std::fs::read_to_string(path)?;
     let client = TokenCaptureClient::new(&format!("http://127.0.0.1:{port}"), token.trim().into())?;
-    if let Some(id) = journal.pending_cleanup()?.into_iter().next() {
-        journal.cleanup(id, &client).await?;
-    }
     for lease in journal.due_renewals(now)? {
-        let _ = client.renew_bundle(&lease, 3 * 86400).await;
+        let expiry = client
+            .renew_bundle(&lease, 3 * 86400)
+            .await
+            .ok()
+            .and_then(|v| u64::try_from(v).ok());
+        journal.record_renewal(&lease, expiry)?;
     }
+    for id in journal.due_cleanup(now)? {
+        // Failure belongs to this intent, not the rest of the batch. The
+        // journal already reserved its backoff before making the request.
+        let _ = journal.cleanup(id, &client).await;
+    }
+    crate::token_review_lease::cleanup(&root, &journal, &client, now).await?;
     Ok(())
 }

@@ -828,6 +828,8 @@ pub async fn build_witnessed_preview(
             .await?;
         (response, record, None)
     };
+    let mut pin_guard =
+        crate::token_bundle::ReviewPinGuard::new(store.dir(), token_bundle.as_ref());
     let fingerprint = input_fingerprint(cfg, near_ai.as_ref(), options.include_inference_bodies);
     let verdict = options.verdict.map(|verdict| match verdict {
         crate::envelope::ContributorVerdict::Worked => "worked",
@@ -867,11 +869,13 @@ pub async fn build_witnessed_preview(
             .would_send_bytes
             .saturating_add(bundle.attachment_bytes as usize);
     }
-    Ok(WitnessPreview {
+    let preview = WitnessPreview {
         summary,
         body: body_of(&envelope)?,
         artifact,
-    })
+    };
+    pin_guard.disarm();
+    Ok(preview)
 }
 
 /// Describe the certified envelope without invoking the remote redaction pipeline.

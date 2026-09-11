@@ -31,6 +31,7 @@ async fn bundle_staging_is_immutable_and_owner_scoped() {
     db.run_migrations().await.unwrap();
     let tenant = format!("bundle-test-{}", uuid::Uuid::new_v4());
     let submission = uuid::Uuid::new_v4();
+    let (envelope_bytes, token_bytes, event_id) = bundle_payloads(submission);
     let bundle = StoredTokenBundle {
         tenant_id: tenant.clone(),
         submission_id: submission,
@@ -41,18 +42,20 @@ async fn bundle_staging_is_immutable_and_owner_scoped() {
             usage_profile: TokenUsageProfile::RestrictedResearch,
             submission_id: submission.to_string(),
             bundle_revision: "revision".into(),
-            envelope_digest: ContentDigest::of(b"envelope"),
+            envelope_digest: ContentDigest::of(&envelope_bytes),
             consent_digest: ContentDigest::of(b"consent"),
             policy_version: "policy".into(),
             attachments: vec![AttachmentDescriptor {
                 artifact_id: "tokens".into(),
-                event_id: "event".into(),
-                content_digest: ContentDigest::of(b"tokens"),
-                size_bytes: 6,
+                event_id,
+                content_digest: ContentDigest::of(&token_bytes),
+                size_bytes: token_bytes.len() as u64,
             }],
         },
         witness_headers: BTreeMap::new(),
         state: "staging".into(),
+        processing_state: "pending".into(),
+        processing_summary: None,
         expires_at: Utc::now() + chrono::Duration::hours(1),
         receipt: None,
         attachments: Vec::new(),
@@ -165,7 +168,15 @@ async fn bundle_staging_is_immutable_and_owner_scoped() {
     excess.manifest.submission_id = excess.submission_id.to_string();
     assert!(db.begin_token_bundle(excess).await.is_err());
     db.begin_token_bundle(bundle.clone()).await.unwrap();
-    qualify_publication_commit_and_withdrawal(&db, &url, bundle, receipt).await;
+    qualify_publication_commit_and_withdrawal(
+        &db,
+        &url,
+        bundle,
+        receipt,
+        &envelope_bytes,
+        &token_bytes,
+    )
+    .await;
 }
 
 async fn qualify_publication_commit_and_withdrawal(
@@ -173,6 +184,8 @@ async fn qualify_publication_commit_and_withdrawal(
     url: &str,
     bundle: StoredTokenBundle,
     receipt: DurableBundleReceipt,
+    envelope_bytes: &[u8],
+    token_bytes: &[u8],
 ) {
     use trace_commons_server::secrets::SecretsCrypto;
     use trace_commons_server::token_bundle_store::StoredTokenObject;
@@ -219,15 +232,11 @@ async fn qualify_publication_commit_and_withdrawal(
         submission_storage_ref: submission.to_string(),
     };
     for (artifact, kind, bytes) in [
-        (
-            "tokens",
-            TraceArtifactKind::TokenDistribution,
-            b"tokens".as_slice(),
-        ),
+        ("tokens", TraceArtifactKind::TokenDistribution, token_bytes),
         (
             "envelope",
             TraceArtifactKind::ContributionEnvelope,
-            b"envelope".as_slice(),
+            envelope_bytes,
         ),
     ] {
         let prepared = store
@@ -270,6 +279,32 @@ async fn qualify_publication_commit_and_withdrawal(
         first.unwrap().manifest_digest,
         retry.unwrap().manifest_digest
     );
+    assert_eq!(db.process_token_bundles(tenant, &store).await.unwrap(), 1);
+    assert_eq!(db.process_token_bundles(tenant, &store).await.unwrap(), 0);
+    let query = trace_commons_server::token_bundle_store::TokenBundleQuery {
+        model: Some("fixture-model".into()),
+        requested_alternatives: Some(5),
+        minimum_coverage: Some(1.0),
+        ..Default::default()
+    };
+    let entries = db
+        .query_token_bundles(tenant, Some("owner"), &query)
+        .await
+        .unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].summary[0]["mean_chosen_surprisal"], 1.25);
+    assert!(
+        db.query_token_bundles(tenant, Some("other"), &query)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        db.query_token_bundles("other-tenant", None, &query)
+            .await
+            .unwrap()
+            .is_empty()
+    );
     let stored = db
         .get_token_bundle(tenant, submission, "revision", "owner")
         .await
@@ -302,6 +337,7 @@ async fn qualify_publication_commit_and_withdrawal(
             .is_err(),
         "begin must wait for the parent lifecycle lock"
     );
+    tx.execute("INSERT INTO trace_withdrawals(tenant_id,submission_id,withdrawn_at,prior_status,distribution_reach) VALUES($1,$2,NOW(),'accepted','not_distributed')", &[tenant,&submission]).await.unwrap();
     tx.execute("UPDATE trace_submissions SET status='revoked',withdrawn_at=NOW() WHERE tenant_id=$1 AND submission_id=$2", &[tenant, &submission]).await.unwrap();
     tx.commit().await.unwrap();
     assert!(
@@ -316,16 +352,58 @@ async fn qualify_publication_commit_and_withdrawal(
             .state,
         "revoked"
     );
+    // Simulate restoring stale child rows after the parent tombstone. Reads,
+    // metadata discovery and processing must still refuse the restored revision.
+    client.execute("UPDATE trace_token_bundles SET state='committed',processing_state='ready',processing_summary='[]' WHERE tenant_id=$1 AND submission_id=$2", &[tenant,&submission]).await.unwrap();
+    client.execute("UPDATE trace_submissions SET status='accepted',withdrawn_at=NULL WHERE tenant_id=$1 AND submission_id=$2", &[tenant,&submission]).await.unwrap();
+    let restored = db
+        .get_token_bundle(tenant, submission, "revision", "owner")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(restored.state, "revoked");
+    assert!(restored.processing_summary.is_none());
+    assert!(
+        db.query_token_bundles(tenant, None, &query)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(db.process_token_bundles(tenant, &store).await.unwrap(), 0);
+    db.pending_token_bundle_deletions(tenant, Some(submission))
+        .await
+        .unwrap();
     assert!(
         db.publish_token_object(tenant, submission, "revision", "owner", "tokens", &store)
             .await
             .is_err()
     );
+    assert!(
+        db.query_token_bundles(tenant, None, &query)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(db.process_token_bundles(tenant, &store).await.unwrap(), 0);
     assert!(db.begin_token_bundle(bundle.clone()).await.is_err());
-    db.delete_token_objects(tenant, submission, "revision", &store)
+    assert!(
+        db.delete_token_objects(
+            tenant,
+            submission,
+            "revision",
+            &["private_corpus_revocable".into()],
+            &store
+        )
+        .await
+        .is_err()
+    );
+    for object in &stored.attachments {
+        assert!(store.read_bundle_bytes(&scope, &object.object_ref).is_ok());
+    }
+    db.delete_token_objects(tenant, submission, "revision", &[], &store)
         .await
         .unwrap();
-    db.delete_token_objects(tenant, submission, "revision", &store)
+    db.delete_token_objects(tenant, submission, "revision", &[], &store)
         .await
         .unwrap();
     assert!(
@@ -340,4 +418,126 @@ async fn qualify_publication_commit_and_withdrawal(
     for object in stored.attachments {
         assert!(store.read_bundle_bytes(&scope, &object.object_ref).is_err());
     }
+}
+
+fn envelope_with_events(
+    events: Vec<trace_commons_protocol::trace_contribution::TraceContributionEvent>,
+) -> trace_commons_protocol::trace_contribution::TraceContributionEnvelope {
+    use trace_commons_protocol::trace_contribution::*;
+    use uuid::Uuid;
+    let now = Utc::now();
+    TraceContributionEnvelope {
+        schema_version: TRACE_CONTRIBUTION_SCHEMA_VERSION.to_string(),
+        trace_id: Uuid::new_v4(),
+        submission_id: Uuid::new_v4(),
+        created_at: now,
+        ironclaw: IronclawTraceMetadata {
+            version: "1".to_string(),
+            engine_version: None,
+            feature_flags: BTreeMap::new(),
+            channel: TraceChannel::Cli,
+            model_name: None,
+        },
+        consent: ConsentMetadata {
+            policy_version: TRACE_CONTRIBUTION_POLICY_VERSION.to_string(),
+            scopes: vec![ConsentScope::DebuggingEvaluation],
+            message_text_included: false,
+            tool_payloads_included: false,
+            correction_included: false,
+            routing_metadata_included: true,
+            revocable: true,
+        },
+        contributor: ContributorMetadata {
+            pseudonymous_contributor_id: None,
+            tenant_scope_ref: None,
+            credit_account_ref: None,
+            revocation_handle: Uuid::new_v4(),
+        },
+        privacy: PrivacyMetadata {
+            redaction_pipeline_version: DETERMINISTIC_REDACTION_PIPELINE_VERSION.to_string(),
+            redaction_counts: BTreeMap::new(),
+            redaction_distinct_counts: BTreeMap::new(),
+            privacy_filter_summary: None,
+            pii_labels_present: Vec::new(),
+            residual_pii_risk: ResidualPiiRisk::Low,
+            redaction_hash: "sha256:placeholder".to_string(),
+            warnings: Vec::new(),
+        },
+        events,
+        outcome: OutcomeMetadata::default(),
+        replay: ReplayMetadata {
+            replayable: false,
+            required_tools: Vec::new(),
+            tool_manifest_hashes: BTreeMap::new(),
+            expected_assertions: Vec::new(),
+            replay_notes: Vec::new(),
+        },
+        embedding_analysis: None,
+        value: ValueMetadata::default(),
+        conversation_id: None,
+        trace_card: TraceCard::default(),
+        value_card: TraceValueCard::default(),
+        hindsight: None,
+        training_dynamics: None,
+        process_evaluation: None,
+    }
+}
+
+fn bundle_payloads(submission: uuid::Uuid) -> (Vec<u8>, Vec<u8>, String) {
+    use trace_commons_protocol::trace_contribution::*;
+    let event_id = uuid::Uuid::new_v4();
+    let event = TraceContributionEvent {
+        event_id,
+        parent_event_id: None,
+        event_type: TraceContributionEventType::AssistantMessage,
+        timestamp: Utc::now(),
+        redacted_content: Some("blue".into()),
+        structured_payload: serde_json::json!({}),
+        tool_name: None,
+        tool_category: None,
+        tool_call_id: None,
+        latency_ms: None,
+        token_counts: None,
+        cost_usd: None,
+        success: None,
+        failure_modes: vec![],
+        side_effect: SideEffectLevel::None,
+    };
+    let mut envelope = envelope_with_events(vec![event]);
+    envelope.submission_id = submission;
+    let source = TokenDistribution {
+        version: 1,
+        capture_store_id: "store".into(),
+        exchange_id: "exchange".into(),
+        event_id: event_id.to_string(),
+        choice: 0,
+        segment: 0,
+        requested_model: "fixture-model".into(),
+        served_model: None,
+        tokenizer: None,
+        semantics: ProbabilitySemantics::Unknown,
+        conditioning: Conditioning::Unknown,
+        requested_alternatives: 5,
+        response_digest: ContentDigest::of(b"blue"),
+        records: vec![TokenRecord {
+            index: 0,
+            span: ByteSpan { start: 0, end: 4 },
+            chosen: TokenValue {
+                bytes: b"blue".to_vec(),
+                token_id: None,
+                logprob: LogProbability::Finite(-1.25),
+            },
+            alternatives: vec![],
+            returned_alternatives: 0,
+        }],
+    };
+    let attachment = filter_with_edits(&source, b"blue", b"blue", &[], "policy", |_, _, _| {
+        Some(vec![])
+    })
+    .unwrap();
+    (
+        serde_json::to_vec(&envelope).unwrap(),
+        serde_json::to_vec(&attachment).unwrap(),
+        event_id.to_string(),
+    )
 }

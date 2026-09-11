@@ -739,6 +739,8 @@ pub struct Settings {
     #[serde(default)]
     pub token_distributions_contribution: bool,
     #[serde(default)]
+    pub token_storage: Option<TokenStorage>,
+    #[serde(default)]
     pub ironwire_attested_bodies: bool,
     #[serde(default)]
     pub admission_evidence_required: Option<bool>,
@@ -1317,4 +1319,24 @@ fn routing_origin_is_only_the_reported_derived_flag() {
     assert_eq!(unknown.state, "unknown");
     assert!(!unknown.derived);
     assert!(serde_json::from_str::<RoutingStatus>(r#"{"derived":"true"}"#).is_err());
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct TokenStorage {
+    #[serde(default)]
+    pub capture_enabled: bool,
+    #[serde(default)]
+    pub capture_label: String,
+    #[serde(default)]
+    pub capture_confirmation: String,
+    #[serde(default)]
+    pub capture_notice: String,
+    pub state_line: String,
+    pub scope_note: String,
+    pub cleanup_label: String,
+    pub discard_label: String,
+    pub discard_confirmation: String,
+    pub cancel_label: String,
+    pub confirm_label: String,
+    pub failure_line: String,
 }

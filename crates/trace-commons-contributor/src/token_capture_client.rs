@@ -113,6 +113,19 @@ impl TokenCaptureClient {
         )
         .await
     }
+    pub async fn find(
+        &self,
+        session: &str,
+        request_digest: &str,
+        response_digest: &str,
+    ) -> Result<Vec<CaptureDescriptor>> {
+        self.request(
+            serde_json::json!({"operation":"find", "session":session,
+            "request_digest":request_digest,"response_digest":response_digest}),
+            16384,
+        )
+        .await
+    }
     pub async fn acquire(
         &self,
         session: &str,

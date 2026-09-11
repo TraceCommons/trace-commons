@@ -1444,14 +1444,46 @@ impl TraceCorpusStore for PgBackend {
         )
         .await
     }
+    async fn get_token_bundle_for_export(
+        &self,
+        tenant: &str,
+        submission: Uuid,
+        revision: &str,
+    ) -> Result<Option<crate::token_bundle_store::StoredTokenBundle>, DatabaseError> {
+        super::token_bundles::get_token_bundle_for_export(self, tenant, submission, revision).await
+    }
+    async fn process_token_bundles(
+        &self,
+        tenant: &str,
+        store: &dyn crate::trace_artifact_store::TraceArtifactStore,
+    ) -> Result<usize, DatabaseError> {
+        super::token_bundles::process_token_bundles(self, tenant, store).await
+    }
+    async fn query_token_bundles(
+        &self,
+        tenant: &str,
+        owner: Option<&str>,
+        query: &crate::token_bundle_store::TokenBundleQuery,
+    ) -> Result<Vec<crate::token_bundle_store::TokenBundleIndexEntry>, DatabaseError> {
+        super::token_bundles::query_token_bundles(self, tenant, owner, query).await
+    }
     async fn delete_token_objects(
         &self,
         tenant: &str,
         submission: Uuid,
         revision: &str,
+        held_policies: &[String],
         store: &dyn crate::trace_artifact_store::TraceArtifactStore,
     ) -> Result<(), DatabaseError> {
-        super::token_bundles::delete_token_objects(self, tenant, submission, revision, store).await
+        super::token_bundles::delete_token_objects(
+            self,
+            tenant,
+            submission,
+            revision,
+            held_policies,
+            store,
+        )
+        .await
     }
     async fn begin_token_bundle(
         &self,

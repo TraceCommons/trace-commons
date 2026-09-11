@@ -202,6 +202,21 @@ pub async fn witness_token_bundle(
         |source, index, _| Some(vec![true; source.records[index].alternatives.len()]),
     )
     .map_err(|_| refuse())?;
+    attachment.metadata.reported_model = segment.reported_model;
+    attachment.metadata.evidence = Some(EvidenceCoverage::ProviderResponseVerified);
+    for key in [
+        "temperature",
+        "top_p",
+        "seed",
+        "presence_penalty",
+        "frequency_penalty",
+        "max_tokens",
+        "max_completion_tokens",
+    ] {
+        if let Some(value) = request_json.get(key).and_then(serde_json::Value::as_f64) {
+            attachment.metadata.sampling.insert(key.into(), value);
+        }
+    }
     screen_alternatives(
         &mut attachment,
         &segment.text,
@@ -278,6 +293,10 @@ async fn screen_alternatives(
         let alternatives = std::mem::take(&mut record.alternatives);
         for alternative in alternatives {
             let mut keep = false;
+            let mut unsupported = false;
+            let mut budget = checks >= MAX_CANDIDATE_CHECKS
+                || sanitized.len() > MAX_CANDIDATE_BYTES
+                || removed_bytes > MAX_CANDIDATE_BYTES;
             let sensitive_fragment = removed_bytes > MAX_CANDIDATE_BYTES
                 || edits.iter().any(|edit| {
                     let removed =
@@ -306,13 +325,24 @@ async fn screen_alternatives(
                             return Err(WitnessError::RedactionFailed);
                         }
                         keep = filtered.redacted == candidate;
+                    } else {
+                        unsupported = true;
                     }
+                } else {
+                    budget = true;
                 }
             }
             if keep {
                 record.alternatives.push(alternative);
             } else {
                 attachment.omitted_alternatives += 1;
+                if budget {
+                    attachment.metadata.budget_alternatives += 1;
+                } else if unsupported {
+                    attachment.metadata.unsupported_alternatives += 1;
+                } else {
+                    attachment.metadata.redacted_alternatives += 1;
+                }
             }
         }
     }
@@ -418,6 +448,41 @@ mod tests {
         assert_eq!(last.span, ByteSpan { start: 11, end: 17 });
         filtered.validate(sanitized.as_bytes()).unwrap();
     }
+    #[tokio::test]
+    async fn final_allowed_classifier_check_is_redaction_not_budget_exhaustion() {
+        let words = vec![b"hello".as_slice(); 26];
+        let original = b"hello".repeat(26);
+        let mut raw = source(&words);
+        raw.requested_alternatives = 20;
+        for record in &mut raw.records {
+            record.alternatives = vec![token(b"Bob"); 20];
+            record.returned_alternatives = 20;
+        }
+        let mut filtered = filter_with_edits(&raw, &original, &original, &[], "p1", |_, _, _| {
+            Some(vec![true; 20])
+        })
+        .unwrap();
+        screen_alternatives(
+            &mut filtered,
+            &original,
+            std::str::from_utf8(&original).unwrap(),
+            &[],
+            "p1",
+            &Classifier { fails: false },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            filtered.metadata.redacted_alternatives,
+            MAX_CANDIDATE_CHECKS as u64
+        );
+        assert_eq!(
+            filtered.metadata.budget_alternatives,
+            520 - MAX_CANDIDATE_CHECKS as u64
+        );
+        assert_eq!(filtered.omitted_alternatives, 520);
+    }
+
     #[tokio::test]
     async fn classifier_outage_refuses_and_context_budget_omits_alternatives() {
         let source = source(&[b"hello"]);

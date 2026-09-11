@@ -2184,11 +2184,35 @@ pub trait TraceCorpusStore: Send + Sync {
     ) -> Result<(), DatabaseError> {
         Err(DatabaseError::Query("TokenBundleStorageUnavailable".into()))
     }
+    async fn get_token_bundle_for_export(
+        &self,
+        _tenant: &str,
+        _submission: Uuid,
+        _revision: &str,
+    ) -> Result<Option<crate::token_bundle_store::StoredTokenBundle>, DatabaseError> {
+        Err(DatabaseError::Query("TokenBundleStorageUnavailable".into()))
+    }
+    async fn process_token_bundles(
+        &self,
+        _tenant: &str,
+        _store: &dyn crate::trace_artifact_store::TraceArtifactStore,
+    ) -> Result<usize, DatabaseError> {
+        Err(DatabaseError::Query("TokenBundleStorageUnavailable".into()))
+    }
+    async fn query_token_bundles(
+        &self,
+        _tenant: &str,
+        _owner: Option<&str>,
+        _query: &crate::token_bundle_store::TokenBundleQuery,
+    ) -> Result<Vec<crate::token_bundle_store::TokenBundleIndexEntry>, DatabaseError> {
+        Err(DatabaseError::Query("TokenBundleStorageUnavailable".into()))
+    }
     async fn delete_token_objects(
         &self,
         _tenant: &str,
         _submission: Uuid,
         _revision: &str,
+        _held_policies: &[String],
         _store: &dyn crate::trace_artifact_store::TraceArtifactStore,
     ) -> Result<(), DatabaseError> {
         Err(DatabaseError::Query("TokenBundleStorageUnavailable".into()))
