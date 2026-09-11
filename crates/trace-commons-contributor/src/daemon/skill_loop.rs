@@ -196,11 +196,8 @@ impl SkillLoopState {
                 })
                 .min()
                 .map(|(_, position)| position);
-            if let Some(position) = removable {
-                self.workflows.remove(position);
-            } else {
-                return None;
-            }
+            let position = removable?;
+            self.workflows.remove(position);
         }
         self.workflows.push_back(SkillWorkflow {
             candidate: value.clone(),
