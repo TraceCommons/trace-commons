@@ -131,7 +131,7 @@ mod tests {
             &file,
             concat!(
                 "{\"role\":\"meta\",\"source\":\"claude-code\",\"model\":\"fixture\"}\n",
-                "{\"role\":\"user\",\"content\":\"PRIVATE_BODY\"}\n"
+                "{\"role\":\"user\",\"content\":\"PRIVATE_BODY\",\"timestamp\":\"2026-09-11T10:00:00Z\"}\n"
             ),
         )
         .unwrap();
