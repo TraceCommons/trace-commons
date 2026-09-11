@@ -711,11 +711,15 @@ impl<'a> SubmitContext<'a> {
             manifest_digest: manifest.digest()?,
             attachment_bytes: manifest.attachments.iter().map(|a| a.size_bytes).sum(),
         };
+        let mut pin_guard =
+            crate::token_bundle::ReviewPinGuard::new(self.store.dir(), Some(&review));
+        journal.record_renewal(&lease_binding, Some(u64::try_from(lease.expires_at)?))?;
         if let Err(error) = journal.approve_payload(review.journal_id, payload) {
             let _ = journal.abandon_review(review.journal_id);
             return Err(error);
         }
         lease_guard.adopted()?;
+        pin_guard.disarm();
         self.last_receipt_shipped = ReceiptShipped::Attached;
         Ok((response, record, review))
     }

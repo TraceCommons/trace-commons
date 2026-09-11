@@ -1279,6 +1279,11 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "token_processing_retry",
         include_str!("../../../../migrations/V66__token_processing_retry.sql"),
     ),
+    (
+        67,
+        "token_rescrub_revocation",
+        include_str!("../../../../migrations/V67__token_rescrub_revocation.sql"),
+    ),
 ];
 
 #[async_trait]

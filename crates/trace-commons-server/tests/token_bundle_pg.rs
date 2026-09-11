@@ -324,6 +324,13 @@ async fn qualify_publication_commit_and_withdrawal(
     tokio::spawn(async move {
         let _ = connection.await;
     });
+    let rescrub = client.transaction().await.unwrap();
+    rescrub.execute("UPDATE trace_submissions SET redaction_hash='changed-redaction' WHERE tenant_id=$1 AND submission_id=$2", &[tenant,&submission]).await.unwrap();
+    let invalidated = rescrub.query_one("SELECT state,processing_state,processing_summary FROM trace_token_bundles WHERE tenant_id=$1 AND submission_id=$2", &[tenant,&submission]).await.unwrap();
+    assert_eq!(invalidated.get::<_, String>(0), "revoked");
+    assert_eq!(invalidated.get::<_, String>(1), "revoked");
+    assert!(invalidated.get::<_, Option<serde_json::Value>>(2).is_none());
+    rescrub.rollback().await.unwrap();
     let tx = client.transaction().await.unwrap();
     tx.query_one("SELECT submission_id FROM trace_submissions WHERE tenant_id=$1 AND submission_id=$2 FOR UPDATE", &[tenant, &submission]).await.unwrap();
     let mut racing = bundle.clone();
