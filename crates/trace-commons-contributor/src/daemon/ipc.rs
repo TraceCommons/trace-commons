@@ -42,14 +42,15 @@
 //!
 //! # What crosses this socket
 //!
-//! No path, token, invite code, claim, device key, or trace content
-//! appears in any response, error string, or pushed event. `error.message`
+//! No token, invite code, claim, device private key, or unrestricted local
+//! path appears in a response, error string, or pushed event. `error.message`
 //! is a fixed label. Queue entries carry `project_label` and, for display
-//! only, `project_path` -- never `project_key` or `path`. The path is on
-//! this socket and nowhere else: see `display_path` for the bound, and
-//! `no_sink_carries_a_project_path` for what enforces it. Project labels
-//! are derived by the daemon from
-//! the key and are never a string a caller supplied.
+//! only, `project_path` -- never `project_key` or `path`. That bounded path is
+//! on this socket and nowhere else: see `display_path` and
+//! `no_sink_carries_a_project_path`. Skill-install responses use symbolic
+//! `$CODEX_HOME/skills/<name>` locations; their absolute `PathBuf` values stay
+//! in daemon memory and are skipped during serialization. Project labels are
+//! derived from the key and never copy a caller-supplied string.
 //!
 //! **The preview exemption.** `"preview"`'s `opening_prompt`,
 //! `"preview_body"`'s `chunk`, and the redacted body `open_preview` returns
@@ -58,7 +59,8 @@
 //! bounded to post-redaction content, only
 //! for an `entry_id` the caller already holds, and never onward into a log
 //! line, an audit entry, a history record, notification text, or a receipt.
-//! Everywhere else in this module the rule is absolute.
+//! The only other session-derived text is in the account-authenticated
+//! owned-session and tested-skill responses described below.
 //!
 //! `"preview_body"` is the *same* carve-out reaching the same body over the
 //! socket, not a second one. It exists because the body used to be
@@ -71,22 +73,39 @@
 //! is not the workaround it looks like: it rewrites the queue file and
 //! sweeps the pinned envelopes the running daemon is still holding.
 //!
-//! **The owned-session exemption.** `"history_detail"` returns bounded text
-//! from the permanently redacted envelope after an account-session read. It
-//! exists so the owner can inspect outcome, correction, and evidence before
-//! choosing an exact public excerpt. `"publish_public_run"` returns only the
-//! already public page. Neither response is logged, audited locally, copied to
-//! history, or available under the device upload key.
+//! **The owned-session exemption.** `"history_detail"` returns a bounded
+//! account-owned projection after an account-session read. Task and evidence
+//! text come from the permanently redacted envelope; the contributed correction
+//! is the exact credential-screened field. The owner can inspect outcome,
+//! correction, and evidence before choosing an exact public excerpt.
+//! `"publish_public_run"` returns only the already public page. Neither response
+//! is logged, audited locally, copied to history, or available under the device
+//! upload key.
+//!
+//! **The tested-skill exemption.** `"skill_candidate"` returns the bounded
+//! contributed correction and at most six post-redaction evidence excerpts
+//! from the same account-owned detail record. The correction is the exact
+//! credential-screened contribution field; evaluation never receives it.
+//! `"skill_review"` returns the owner's validated skill text.
+//! `"skill_evaluate"` returns bounded public-fixture
+//! tasks and model outputs. Evaluation sends no session task, correction, or
+//! evidence to NEAR AI: a local text-free fingerprint excludes source overlap,
+//! and only the approved generic skill enters candidate-arm prompts. Install
+//! plans carry the exact approved `SKILL.md`, signed marker, and their digests.
+//! These methods never return an absolute Codex path, credential, or private
+//! signing key, and their content never enters logs, audit records, history,
+//! notifications, or receipts.
 //!
 //! # Sync vs. async dispatch
 //!
 //! Most of this surface needs no `.await` and is answered by the synchronous
 //! `handle_request`. A few methods do real async work -- `"preview"` runs the
 //! redaction pipeline to report actual bytes and redactions, `"enroll"`
-//! registers this device with an issuer over the network -- and
-//! `handle_request` cannot run either of those to completion; its arms for
-//! them (where present) return an honest partial or deferred answer rather
-//! than a wrong one.
+//! registers this device with an issuer over the network -- or blocking
+//! filesystem work, as the `"skill_install_*"` methods do. Skill candidate
+//! loading and evaluation also await account or NEAR AI requests. The async
+//! dispatcher moves that blocking work off its Tokio worker; `handle_request`
+//! refuses those methods because it cannot do that safely.
 //!
 //! `handle_request_async` is the complete dispatcher: it answers the async
 //! methods for real and delegates everything else, unchanged, to
@@ -326,6 +345,13 @@ pub const METHODS: &[&str] = &[
     "set_public_profile",
     "set_settings",
     "shutdown",
+    "skill_candidate",
+    "skill_evaluate",
+    "skill_install_commit",
+    "skill_install_plan",
+    "skill_install_rollback",
+    "skill_install_status",
+    "skill_review",
     "status",
     "subscribe",
     "withdraw",
@@ -532,6 +558,10 @@ pub struct DaemonShared {
     /// shown, which is exactly what stops a shell asking for a write it did
     /// not preview. See `daemon::harness`.
     pub(crate) harness_plans: super::harness::PlanStore,
+    /// Reviewed skill state held between explicit steps. The installed marker
+    /// is the durable recovery source; these queues are bounded and local to
+    /// the daemon process.
+    pub(crate) skill_loop: Mutex<super::skill_loop::SkillLoopState>,
 }
 
 /// `status.routing.state`: the contributor never declared a proxy.
@@ -668,6 +698,7 @@ impl DaemonShared {
                 super::private_inference::PrivateInferenceState::Off,
             )),
             harness_plans: super::harness::PlanStore::default(),
+            skill_loop: Mutex::new(super::skill_loop::SkillLoopState::default()),
         })
     }
 
@@ -765,6 +796,10 @@ impl DaemonShared {
         drop(settings);
         self.near_ai_credential_changes
             .store(observed, Ordering::Release);
+    }
+
+    pub(crate) fn absorbed_near_ai_credential_change_count(&self) -> u64 {
+        self.near_ai_credential_changes.load(Ordering::Acquire)
     }
 
     pub(crate) async fn reconcile_private_inference(&self) {
@@ -1804,6 +1839,21 @@ const ASYNC_ONLY_METHODS: &[(&str, &str)] = &[
     ("withdraw", "withdraw-requires-async"),
     ("withdraw_bulk", "withdraw-requires-async"),
     ("history_detail", "session-detail-requires-async"),
+    ("skill_candidate", "skill-candidate-requires-async"),
+    ("skill_evaluate", "skill-evaluation-requires-async"),
+    ("skill_install_plan", "skill-install-plan-requires-async"),
+    (
+        "skill_install_commit",
+        "skill-install-commit-requires-async",
+    ),
+    (
+        "skill_install_status",
+        "skill-install-status-requires-async",
+    ),
+    (
+        "skill_install_rollback",
+        "skill-install-rollback-requires-async",
+    ),
     ("publish_public_run", "public-run-requires-async"),
     ("unpublish_public_run", "public-run-requires-async"),
     ("set_public_profile", "profile-requires-async"),
@@ -1954,6 +2004,7 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         "harness_list" => super::harness::handle_list(shared, req),
         "harness_plan" => super::harness::handle_plan(shared, req),
         "harness_commit" => super::harness::handle_commit(shared, req),
+        "skill_review" => super::skill_loop::handle_review(shared, req),
         "pause" => handle_pause(shared, req),
         "resume" => {
             shared.paused.store(false, Ordering::Relaxed);
@@ -2647,12 +2698,13 @@ async fn handle_set_settings_async(shared: &DaemonShared, req: &Request) -> Resp
 /// `"quiesce"`, `"enroll"`, `"near_ai_credential_status"`,
 /// `"near_ai_credential_forget"`,
 /// `"withdraw"`, `"withdraw_bulk"`, `"set_public_profile"`,
-/// `"clear_public_profile"`) for real and delegates every other method,
-/// unchanged, to the synchronous `handle_request`. See the module doc's
-/// "Sync vs. async dispatch" section for why this is the only place that
-/// decides which methods are async, and why both real callers (the socket
-/// loop and `handle_local`) always go through this function rather than
-/// `handle_request` directly.
+/// `"clear_public_profile"`, `"skill_candidate"`, `"skill_evaluate"`, and the
+/// four `"skill_install_*"` methods) for
+/// real and delegates every other method, unchanged, to the synchronous
+/// `handle_request`. See the module doc's "Sync vs. async dispatch" section
+/// for why this is the only place that decides which methods are async, and
+/// why both real callers (the socket loop and `handle_local`) always go
+/// through this function rather than `handle_request` directly.
 pub async fn handle_request_async(shared: &DaemonShared, req: &Request) -> Response {
     match req.method.as_str() {
         "native_wallet_flow" => super::native_flow::handle_wallet(shared, req).await,
@@ -2695,6 +2747,20 @@ pub async fn handle_request_async(shared: &DaemonShared, req: &Request) -> Respo
         "withdraw" => super::withdraw::handle_withdraw(shared, req).await,
         "withdraw_bulk" => super::withdraw::handle_withdraw_bulk(shared, req).await,
         "history_detail" => super::public_run::handle_detail(shared, req).await,
+        "skill_candidate" => super::skill_loop::handle_candidate(shared, req).await,
+        "skill_evaluate" => super::skill_loop::handle_evaluate(shared, req).await,
+        "skill_install_plan" => {
+            crate::daemon::run_blocking(|| super::skill_loop::handle_install_plan(shared, req))
+        }
+        "skill_install_commit" => {
+            crate::daemon::run_blocking(|| super::skill_loop::handle_install_commit(shared, req))
+        }
+        "skill_install_status" => {
+            crate::daemon::run_blocking(|| super::skill_loop::handle_install_status(shared, req))
+        }
+        "skill_install_rollback" => {
+            crate::daemon::run_blocking(|| super::skill_loop::handle_rollback(shared, req))
+        }
         "publish_public_run" => super::public_run::handle_publish(shared, req).await,
         "unpublish_public_run" => super::public_run::handle_unpublish(shared, req).await,
         "set_public_profile" => super::profile::handle_set_public_profile(shared, req).await,
@@ -9928,7 +9994,7 @@ mod tests {
     #[test]
     fn every_async_only_method_is_advertised_and_refused_synchronously() {
         let s = shared();
-        assert_eq!(ASYNC_ONLY_METHODS.len(), 21);
+        assert_eq!(ASYNC_ONLY_METHODS.len(), 27);
         let mut seen = std::collections::BTreeSet::new();
         for &(method, label) in ASYNC_ONLY_METHODS {
             assert!(
@@ -10357,8 +10423,8 @@ mod tests {
             src,
             "pub async fn handle_request_async(shared",
         ));
-        assert_eq!(sync.len(), 37, "synchronous dispatcher arms: {sync:?}");
-        assert_eq!(asy.len(), 28, "asynchronous dispatcher arms: {asy:?}");
+        assert_eq!(sync.len(), 38, "synchronous dispatcher arms: {sync:?}");
+        assert_eq!(asy.len(), 34, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();
         let advertised: std::collections::BTreeSet<String> =
@@ -10494,6 +10560,16 @@ mod tests {
         let error = handle_request(&shared, &req).error.expect("refused");
         assert_eq!(error.code, ERR_BAD_PARAMS);
         assert_eq!(error.message, "action-invalid");
+    }
+
+    #[test]
+    fn absorbed_credential_change_count_reports_the_daemon_revision() {
+        let shared = shared();
+        assert_eq!(shared.absorbed_near_ai_credential_change_count(), 0);
+        shared
+            .near_ai_credential_changes
+            .store(7, Ordering::Release);
+        assert_eq!(shared.absorbed_near_ai_credential_change_count(), 7);
     }
 
     /// A commit takes a plan id and nothing else, so an id this daemon does

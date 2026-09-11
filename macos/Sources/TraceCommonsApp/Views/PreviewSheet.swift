@@ -214,6 +214,11 @@ struct PreviewSheet: View {
     /// screen, because that is the number a person reads the body against.
     private var header: some View {
         VStack(alignment: .leading, spacing: TC.Space.sm) {
+            if let copy = model.publicRunCopy {
+                Text(copy.sessionDetail)
+                    .font(TC.Font_.sectionTitle)
+                    .foregroundStyle(TC.inkPrimary)
+            }
             HStack(alignment: .firstTextBaseline, spacing: TC.Space.s) {
                 Text(entry.projectLabel)
                     .font(TC.Font_.cardTitle)
@@ -264,6 +269,18 @@ struct PreviewSheet: View {
                     .accessibilityElement(children: .combine)
                 }
                 Spacer(minLength: 0)
+            }
+            if let summary, let copy = model.publicRunCopy {
+                VStack(alignment: .leading, spacing: TC.Space.xxs) {
+                    TCFieldLabel(copy.task)
+                    Text(summary.openingPrompt.isEmpty ? copy.noTask : summary.openingPrompt)
+                        .font(TC.Font_.body)
+                        .foregroundStyle(
+                            summary.openingPrompt.isEmpty ? TC.inkSecondary : TC.inkPrimary
+                        )
+                        .lineLimit(3)
+                        .textSelection(.enabled)
+                }
             }
             Text("Nothing has been sent. This is what would be.")
                 .font(TC.Font_.caption)

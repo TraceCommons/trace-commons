@@ -9,10 +9,11 @@ use uuid::Uuid;
 use trace_commons_operator_client::{Client, Error as OcError};
 use trace_commons_protocol::ACCOUNT_NATIVE_ROTATED_TOKEN_HEADER;
 use trace_commons_protocol::public_run::{
-    PublicRunPage, PublicRunPublishRequest, PublicRunSessionRecord, PublicRunUnpublishResult,
+    PublicRunContributionStatus, PublicRunPage, PublicRunPublishRequest, PublicRunSessionRecord,
+    PublicRunUnpublishResult,
 };
 use trace_commons_protocol::trace_contribution::{
-    TaskSuccess, TraceContributionEventType, UserFeedback,
+    TaskSuccess, TraceAllowedUse, TraceContributionEventType, UserFeedback,
 };
 
 use crate::config::allowlist_for;
@@ -24,17 +25,24 @@ pub use copy::*;
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct SessionEvidenceCandidate {
     pub event_id: Uuid,
-    pub kind: String,
-    pub label: &'static str,
+    pub kind: TraceContributionEventType,
     pub excerpt: String,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct SessionDetail {
-    pub task_success: String,
-    pub task_outcome: &'static str,
-    pub user_feedback: String,
-    pub feedback_line: Option<&'static str>,
+    pub content_unavailable: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub contribution_status: Option<PublicRunContributionStatus>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub permitted_uses: Vec<TraceAllowedUse>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task_success: Option<TaskSuccess>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_feedback: Option<UserFeedback>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub human_correction: Option<String>,
     pub evidence: Vec<SessionEvidenceCandidate>,
     pub contributed_version: String,
@@ -183,17 +191,18 @@ pub fn project_session_detail(record: PublicRunSessionRecord) -> SessionDetail {
         .into_iter()
         .map(|event| SessionEvidenceCandidate {
             event_id: event.event_id,
-            kind: event_kind(event.kind).to_string(),
-            label: event_label(event.kind),
+            kind: event.kind,
             excerpt: event.excerpt,
         })
         .collect();
     let owner_state = record.owner_state;
     SessionDetail {
-        task_success: task_success(record.task_success).to_string(),
-        task_outcome: task_outcome(record.task_success),
-        user_feedback: user_feedback(record.user_feedback).to_string(),
-        feedback_line: feedback_line(record.user_feedback),
+        content_unavailable: record.content_unavailable,
+        task: record.task,
+        contribution_status: record.contribution_status,
+        permitted_uses: record.permitted_uses,
+        task_success: record.task_success,
+        user_feedback: record.user_feedback,
         human_correction: record.human_correction,
         evidence,
         contributed_version: record.contributed_version,
@@ -202,68 +211,6 @@ pub fn project_session_detail(record: PublicRunSessionRecord) -> SessionDetail {
         publication: owner_state.publication,
         publication_version: owner_state.expected_publication_version,
         retained_source_slug: owner_state.retained_source_slug,
-    }
-}
-
-fn task_outcome(value: TaskSuccess) -> &'static str {
-    match value {
-        TaskSuccess::Success => "Completed",
-        TaskSuccess::Partial => "Partly completed",
-        TaskSuccess::Failure => "Did not complete",
-        TaskSuccess::Unknown => "No outcome reported",
-    }
-}
-
-fn feedback_line(value: UserFeedback) -> Option<&'static str> {
-    match value {
-        UserFeedback::ThumbsUp => Some("Feedback: thumbs up"),
-        UserFeedback::ThumbsDown => Some("Feedback: thumbs down"),
-        UserFeedback::Correction => Some("Feedback: correction supplied"),
-        UserFeedback::None => None,
-    }
-}
-
-fn task_success(value: TaskSuccess) -> &'static str {
-    match value {
-        TaskSuccess::Success => "success",
-        TaskSuccess::Partial => "partial",
-        TaskSuccess::Failure => "failure",
-        TaskSuccess::Unknown => "unknown",
-    }
-}
-
-fn user_feedback(value: UserFeedback) -> &'static str {
-    match value {
-        UserFeedback::ThumbsUp => "thumbs_up",
-        UserFeedback::ThumbsDown => "thumbs_down",
-        UserFeedback::Correction => "correction",
-        UserFeedback::None => "none",
-    }
-}
-
-fn event_kind(value: TraceContributionEventType) -> &'static str {
-    match value {
-        TraceContributionEventType::UserMessage => "user_message",
-        TraceContributionEventType::AssistantMessage => "assistant_message",
-        TraceContributionEventType::Reasoning => "reasoning",
-        TraceContributionEventType::ToolCall => "tool_call",
-        TraceContributionEventType::ToolResult => "tool_result",
-        TraceContributionEventType::RoutingDecision => "routing_decision",
-        TraceContributionEventType::Feedback => "feedback",
-        TraceContributionEventType::HttpExchange => "http_exchange",
-    }
-}
-
-fn event_label(value: TraceContributionEventType) -> &'static str {
-    match value {
-        TraceContributionEventType::UserMessage => "User message",
-        TraceContributionEventType::AssistantMessage => "Assistant message",
-        TraceContributionEventType::Reasoning => "Reasoning",
-        TraceContributionEventType::ToolCall => "Tool call",
-        TraceContributionEventType::ToolResult => "Tool result",
-        TraceContributionEventType::RoutingDecision => "Routing decision",
-        TraceContributionEventType::Feedback => "Feedback",
-        TraceContributionEventType::HttpExchange => "HTTP exchange",
     }
 }
 
@@ -302,13 +249,15 @@ mod tests {
     use chrono::Utc;
     use serde_json::json;
     use trace_commons_protocol::public_run::{
-        PUBLIC_RUN_DETAIL_EVIDENCE_MAX_ITEMS, PUBLIC_RUN_EVIDENCE_MAX_CHARS, PublicRunDraft,
-        PublicRunEvidence, PublicRunEvidenceDraft, PublicRunOwnerState, PublicRunReusePermission,
+        PUBLIC_RUN_DETAIL_EVIDENCE_MAX_ITEMS, PUBLIC_RUN_EVIDENCE_MAX_CHARS,
+        PUBLIC_RUN_TASK_MAX_CHARS, PublicRunDraft, PublicRunEvidence, PublicRunEvidenceDraft,
+        PublicRunOwnerState, PublicRunReusePermission,
     };
     use trace_commons_protocol::trace_contribution::{
         ConsentMetadata, ConsentScope, ContributorMetadata, IronclawTraceMetadata, OutcomeMetadata,
-        PrivacyMetadata, ReplayMetadata, ResidualPiiRisk, SideEffectLevel, TraceCard, TraceChannel,
-        TraceContributionEnvelope, TraceContributionEvent, TraceValueCard, ValueMetadata,
+        PrivacyMetadata, ReplayMetadata, ResidualPiiRisk, SideEffectLevel, TraceAllowedUse,
+        TraceCard, TraceChannel, TraceContributionEnvelope, TraceContributionEvent, TraceValueCard,
+        ValueMetadata,
     };
 
     use super::*;
@@ -395,29 +344,80 @@ mod tests {
 
     #[test]
     fn detail_uses_real_outcome_correction_evidence_and_versions() {
-        let detail = project_session_detail(PublicRunSessionRecord::from_envelope(
-            envelope(),
+        let mut source = envelope();
+        let template = source.events[0].clone();
+        let mut empty_task = template.clone();
+        empty_task.event_id = Uuid::new_v4();
+        empty_task.event_type = TraceContributionEventType::UserMessage;
+        empty_task.redacted_content = Some(" \n\t ".to_string());
+        let mut bounded_task = template;
+        bounded_task.event_id = Uuid::new_v4();
+        bounded_task.event_type = TraceContributionEventType::UserMessage;
+        bounded_task.redacted_content =
+            Some(format!("  {}  ", "t".repeat(PUBLIC_RUN_TASK_MAX_CHARS + 1)));
+        source.events.insert(0, bounded_task);
+        source.events.insert(0, empty_task);
+        source.trace_card.allowed_uses =
+            vec![TraceAllowedUse::Debugging, TraceAllowedUse::Evaluation];
+        let record = PublicRunSessionRecord::from_envelope(
+            source,
             PublicRunOwnerState {
                 publication: None,
                 expected_publication_version: 0,
                 retained_source_slug: Some("source-run".to_string()),
             },
-        ));
-        assert_eq!(detail.task_success, "partial");
-        assert_eq!(detail.task_outcome, "Partly completed");
-        assert_eq!(detail.user_feedback, "correction");
-        assert_eq!(detail.feedback_line, Some("Feedback: correction supplied"));
+        )
+        .with_contribution_state(
+            PublicRunContributionStatus::Accepted,
+            vec![TraceAllowedUse::Evaluation],
+        );
+        let detail = project_session_detail(record);
+        assert_eq!(
+            detail.contribution_status,
+            Some(PublicRunContributionStatus::Accepted)
+        );
+        assert!(!detail.content_unavailable);
+        assert_eq!(
+            detail.task.as_deref().map(|task| task.chars().count()),
+            Some(PUBLIC_RUN_TASK_MAX_CHARS)
+        );
+        assert!(
+            detail
+                .task
+                .as_deref()
+                .is_some_and(|task| task.chars().all(|character| character == 't'))
+        );
+        assert_eq!(
+            detail.contribution_status,
+            Some(PublicRunContributionStatus::Accepted)
+        );
+        assert_eq!(detail.permitted_uses, vec![TraceAllowedUse::Evaluation]);
+        assert_eq!(detail.task_success, Some(TaskSuccess::Partial));
+        assert_eq!(detail.user_feedback, Some(UserFeedback::Correction));
         assert_eq!(
             detail.human_correction.as_deref(),
             Some("Run the full build before publishing.")
         );
-        assert_eq!(detail.evidence[0].kind, "tool_result");
-        assert_eq!(detail.evidence[0].label, "Tool result");
-        assert_eq!(detail.evidence[0].event_id, Uuid::nil());
+        assert_eq!(
+            detail.evidence[1].kind,
+            TraceContributionEventType::ToolResult
+        );
+        assert_eq!(detail.evidence[1].event_id, Uuid::nil());
         assert_eq!(detail.contributed_version, "trace.contribution.v1");
         assert_eq!(detail.consent_policy_version, "policy-v1");
         assert_eq!(detail.redaction_pipeline_version, "privacy-v2");
         assert_eq!(detail.retained_source_slug.as_deref(), Some("source-run"));
+        let wire = serde_json::to_value(&detail).expect("serialize typed session detail");
+        assert_eq!(wire.get("task_success"), Some(&json!("partial")));
+        assert_eq!(wire.get("user_feedback"), Some(&json!("correction")));
+        assert_eq!(
+            wire.pointer("/evidence/1/kind"),
+            Some(&json!("tool_result"))
+        );
+        for presentation_field in ["task_outcome", "feedback_line"] {
+            assert!(wire.get(presentation_field).is_none());
+        }
+        assert!(wire.pointer("/evidence/1/label").is_none());
     }
 
     #[test]
@@ -434,14 +434,13 @@ mod tests {
         let mut oversized = template.clone();
         oversized.event_id = Uuid::new_v4();
         oversized.redacted_content = Some("x".repeat(PUBLIC_RUN_EVIDENCE_MAX_CHARS + 1));
-        events.push(oversized);
-
         for index in 0..30 {
             let mut event = template.clone();
             event.event_id = Uuid::new_v4();
             event.redacted_content = Some(format!("Synthetic evidence {index}"));
             events.push(event);
         }
+        events.push(oversized);
         source.events = events;
 
         let detail = project_session_detail(PublicRunSessionRecord::from_envelope(
@@ -454,7 +453,7 @@ mod tests {
         ));
         assert_eq!(detail.evidence.len(), PUBLIC_RUN_DETAIL_EVIDENCE_MAX_ITEMS);
         assert_eq!(
-            detail.evidence[0].excerpt.chars().count(),
+            detail.evidence.last().unwrap().excerpt.chars().count(),
             PUBLIC_RUN_EVIDENCE_MAX_CHARS
         );
         assert!(
@@ -463,10 +462,51 @@ mod tests {
                 .iter()
                 .all(|item| !item.excerpt.trim().is_empty())
         );
-        assert_eq!(
-            detail.evidence.last().unwrap().excerpt,
-            "Synthetic evidence 22"
+        assert!(
+            detail
+                .evidence
+                .iter()
+                .any(|item| item.excerpt == "Synthetic evidence 29")
         );
+        assert!(
+            !detail
+                .evidence
+                .iter()
+                .any(|item| item.excerpt == "Synthetic evidence 0")
+        );
+    }
+
+    #[test]
+    fn status_only_detail_does_not_turn_missing_outcome_into_display_copy() {
+        let record = PublicRunSessionRecord::status_only(
+            PublicRunContributionStatus::Revoked,
+            vec![TraceAllowedUse::Evaluation],
+            "trace.contribution.v1".to_string(),
+            "policy-v1".to_string(),
+            "privacy-v2".to_string(),
+            PublicRunOwnerState {
+                publication: None,
+                expected_publication_version: 2,
+                retained_source_slug: None,
+            },
+        )
+        .expect("revoked status-only record");
+
+        let detail = project_session_detail(record);
+        assert_ne!(
+            detail.contribution_status,
+            Some(PublicRunContributionStatus::Accepted)
+        );
+        assert!(detail.content_unavailable);
+        assert!(detail.task.is_none());
+        assert!(detail.task_success.is_none());
+        assert!(detail.user_feedback.is_none());
+        assert!(detail.human_correction.is_none());
+        assert!(detail.evidence.is_empty());
+        let json = serde_json::to_value(detail).expect("serialize status-only projection");
+        for absent in ["task", "task_success", "user_feedback", "human_correction"] {
+            assert!(json.get(absent).is_none(), "{absent} must stay absent");
+        }
     }
 
     fn page() -> PublicRunPage {
@@ -605,7 +645,7 @@ mod tests {
         .await
         .result
         .expect("detail response");
-        assert_eq!(detail.task_success, "partial");
+        assert_eq!(detail.task_success, Some(TaskSuccess::Partial));
         assert_eq!(
             detail.publication.as_ref().map(|run| run.slug.as_str()),
             Some("run-0123456789abcdef")

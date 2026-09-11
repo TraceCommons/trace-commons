@@ -70,6 +70,97 @@ async fn account_public_run_routes_require_a_valid_native_session() {
 }
 
 #[tokio::test]
+async fn owner_session_detail_returns_only_real_status_when_content_is_unavailable() {
+    use trace_commons_server::account_session::{
+        AccountAuthMethod, AccountCtx, AccountId, AccountPrincipalSet, account_actor_ref,
+    };
+
+    let db = Arc::new(NativeAuthTestDb::default());
+    let (_temp, state) = native_test_state(db.clone());
+    let account_id = AccountId::from_uuid(Uuid::new_v4());
+    let principal_ref = "principal:session-detail-owner";
+    let cases = [
+        (StorageTraceCorpusStatus::Received, "received"),
+        (StorageTraceCorpusStatus::Revoked, "revoked"),
+        (StorageTraceCorpusStatus::Expired, "expired"),
+        (StorageTraceCorpusStatus::Purged, "purged"),
+    ];
+    let mut first_submission_id = None;
+
+    for (status, expected_status) in cases {
+        let submission_id = Uuid::new_v4();
+        first_submission_id.get_or_insert(submission_id);
+        let mut stored =
+            seeded_storage_submission_record("tenant-status-only", submission_id, status);
+        stored.auth_principal_ref = principal_ref.to_string();
+        db.insert_trace_submission(stored);
+        let ctx = AccountCtx {
+            account_id,
+            principal_set: AccountPrincipalSet::from_iter_for_test_only(
+                [principal_ref.to_string()],
+            ),
+            auth_method: AccountAuthMethod::NativeToken,
+            tenant_id: "tenant-status-only".to_string(),
+            actor_ref: account_actor_ref(&account_id),
+            auth_credential_id: None,
+            client_kind: "native".to_string(),
+        };
+
+        let response = account_public_run_session_detail_handler(
+            State(state.clone()),
+            Extension(ctx),
+            AxumPath(submission_id),
+        )
+        .await
+        .expect("status-only owner detail response");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(axum::http::header::CACHE_CONTROL),
+            Some(&HeaderValue::from_static("no-store"))
+        );
+        let detail: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), 64 * 1024)
+                .await
+                .expect("read status-only owner detail"),
+        )
+        .expect("status-only owner detail JSON");
+        assert!(detail.get("accepted").is_none());
+        assert_eq!(detail["contribution_status"], expected_status);
+        assert_eq!(detail["permitted_uses"], serde_json::json!(["evaluation"]));
+        assert_eq!(detail["contributed_version"], "trace_contribution.v1");
+        assert_eq!(detail["consent_policy_version"], "trace-consent-v1");
+        assert_eq!(detail["redaction_pipeline_version"], "test-redactor-v1");
+        assert_eq!(detail["evidence"], serde_json::json!([]));
+        for absent in ["task", "task_success", "user_feedback", "human_correction"] {
+            assert!(
+                detail.get(absent).is_none(),
+                "{absent} must not be fabricated for {expected_status}"
+            );
+        }
+    }
+
+    let outsider_ctx = AccountCtx {
+        account_id,
+        principal_set: AccountPrincipalSet::from_iter_for_test_only([
+            "principal:different-owner".to_string()
+        ]),
+        auth_method: AccountAuthMethod::NativeToken,
+        tenant_id: "tenant-status-only".to_string(),
+        actor_ref: account_actor_ref(&account_id),
+        auth_credential_id: None,
+        client_kind: "native".to_string(),
+    };
+    let outsider = account_public_run_session_detail_handler(
+        State(state.clone()),
+        Extension(outsider_ctx),
+        AxumPath(first_submission_id.expect("received fixture id")),
+    )
+    .await
+    .expect_err("a different principal must not discover status-only detail");
+    assert_eq!(outsider.0, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn public_run_provenance_accepts_only_exact_redacted_sources() {
     use trace_commons_protocol::public_run::{
         PublicRunDraft, PublicRunEvidenceDraft, PublicRunReusePermission,
@@ -272,6 +363,10 @@ async fn account_public_run_publish_route_checks_owner_source_and_exact_approval
         detail["task_success"],
         serde_json::json!(request.task_success)
     );
+    assert!(detail.get("accepted").is_none());
+    assert_eq!(detail["task"], event.redacted_content.as_deref().unwrap());
+    assert_eq!(detail["contribution_status"], "accepted");
+    assert_eq!(detail["permitted_uses"], serde_json::json!(["debugging"]));
     assert_eq!(detail["owner_state"]["publication"]["slug"], body["slug"]);
     assert_eq!(detail["owner_state"]["expected_publication_version"], 1);
     assert_eq!(

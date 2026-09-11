@@ -39,6 +39,7 @@ use trace_commons_contributor_ffi::{
     tc_routing_last_checked, tc_routing_state_line, tc_routing_state_tone, tc_routing_token_line,
     tc_routing_tool_tone, tc_routing_tool_word, tc_routing_unreachable_line,
     tc_scrub_detector_names, tc_search_original, tc_session_detail_error_line,
+    tc_skill_draft_validate, tc_skill_learning_copy, tc_skill_learning_error_line,
     tc_source_check_line, tc_string_free, tc_subscribe, tc_unsubscribe, tc_witness_clear,
     tc_witness_configure, tc_witness_copy, tc_witness_last_result_json,
     tc_witness_last_result_line, tc_witness_last_result_tone, tc_witness_state_line,
@@ -3446,18 +3447,45 @@ fn the_public_run_payload_and_error_tables_cross_whole_and_finished() {
 
     let fields = value.as_object().expect("an object");
     for (field, value) in fields {
-        if field == "reuse_permissions" {
-            let choices = value.as_array().expect("reuse permissions are a list");
-            assert_eq!(choices.len(), 2);
-            continue;
-        }
-        let text = value.as_str().expect("every copy field is a string");
-        assert!(!text.trim().is_empty(), "{field} arrived empty");
-        for marker in ["{}", "%@", "%s", "%d"] {
-            assert!(
-                !text.contains(marker),
-                "{field} crossed as a template: {text}"
-            );
+        let expected_choice_count = match field.as_str() {
+            "task_outcome_choices" => Some(4),
+            "feedback_choices" => Some(3),
+            "evidence_kind_choices" => Some(9),
+            "contribution_status_choices" => Some(10),
+            "permitted_use_choices" => Some(6),
+            "reuse_permissions" => Some(2),
+            _ => None,
+        };
+        if let Some(expected_choice_count) = expected_choice_count {
+            let choices = value.as_array().expect("copy choices are a list");
+            assert_eq!(choices.len(), expected_choice_count, "{field} is complete");
+            for choice in choices {
+                let choice = choice.as_object().expect("each copy choice is an object");
+                for (choice_field, choice_value) in choice {
+                    let text = choice_value
+                        .as_str()
+                        .expect("each copy choice field is a string");
+                    assert!(
+                        !text.trim().is_empty(),
+                        "{field}.{choice_field} arrived empty"
+                    );
+                    for marker in ["{}", "%@", "%s", "%d"] {
+                        assert!(
+                            !text.contains(marker),
+                            "{field}.{choice_field} crossed as a template: {text}"
+                        );
+                    }
+                }
+            }
+        } else {
+            let text = value.as_str().expect("every copy field is a string");
+            assert!(!text.trim().is_empty(), "{field} arrived empty");
+            for marker in ["{}", "%@", "%s", "%d"] {
+                assert!(
+                    !text.contains(marker),
+                    "{field} crossed as a template: {text}"
+                );
+            }
         }
     }
 
@@ -3492,6 +3520,75 @@ fn the_public_run_payload_and_error_tables_cross_whole_and_finished() {
     assert!(validation.get("error").is_none());
     assert_eq!(validation["draft"]["title"], "Repair a stalled upload");
     assert_eq!(validation["draft"]["source_slug"], "run-source-workflow");
+}
+
+#[test]
+fn the_skill_learning_payload_and_error_table_cross_the_abi() {
+    let json = take_owned(tc_skill_learning_copy());
+    let value: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+    let expected =
+        serde_json::to_value(trace_commons_contributor::skill_loop::skill_learning_copy())
+            .expect("the Rust payload serialises");
+    assert_eq!(value, expected, "the export is not the shared payload");
+
+    let fields = value.as_object().expect("an object");
+    assert!(fields.len() >= 50, "the complete surface must cross once");
+    for (field, value) in fields {
+        let text = value.as_str().expect("every copy field is a string");
+        assert!(!text.trim().is_empty(), "{field} arrived empty");
+    }
+
+    let label = CString::new("skill-install-modified").expect("c string");
+    assert_eq!(
+        take_owned(unsafe { tc_skill_learning_error_line(label.as_ptr()) }),
+        trace_commons_contributor::skill_loop::skill_learning_error_line("skill-install-modified")
+    );
+    assert_eq!(
+        take_owned(unsafe { tc_skill_learning_error_line(std::ptr::null()) }),
+        trace_commons_contributor::skill_loop::skill_learning_copy().unavailable
+    );
+}
+
+#[test]
+fn skill_draft_validation_crosses_the_abi_without_echoing_draft_text() {
+    fn validate(value: serde_json::Value) -> serde_json::Value {
+        let input = CString::new(value.to_string()).expect("skill draft input");
+        let output = take_owned(unsafe { tc_skill_draft_validate(input.as_ptr()) });
+        serde_json::from_str(&output).expect("skill draft validation JSON")
+    }
+
+    let valid = validate(serde_json::json!({
+        "name": "repair-generated-sources",
+        "description": "Use when generated output has an authoritative source.",
+        "procedure": "# Procedure\n\nEdit the source, regenerate, and verify."
+    }));
+    assert_eq!(valid["valid"], true);
+    assert!(valid["error"].is_null());
+    assert_eq!(valid["name_max_chars"], 64);
+    assert_eq!(valid["description_max_chars"], 1_024);
+    assert_eq!(valid["procedure_max_chars"], 12_000);
+    assert!(!valid.to_string().contains("authoritative source"));
+
+    for (field, value, expected) in [
+        ("name", "Uppercase-Name", "skill-name-invalid"),
+        ("description", " trailing ", "skill-description-required"),
+        ("procedure", "recovery phrase", "skill-sensitive-text"),
+    ] {
+        let mut draft = serde_json::json!({
+            "name": "repair-generated-sources",
+            "description": "Use when generated output has an authoritative source.",
+            "procedure": "Edit the source, regenerate, and verify."
+        });
+        draft[field] = serde_json::Value::String(value.to_string());
+        let result = validate(draft);
+        assert_eq!(result["valid"], false);
+        assert_eq!(result["error"], expected);
+    }
+
+    let null = take_owned(unsafe { tc_skill_draft_validate(std::ptr::null()) });
+    let null: serde_json::Value = serde_json::from_str(&null).expect("null validation JSON");
+    assert_eq!(null["valid"], false);
+    assert_eq!(null["error"], "skill-draft-invalid");
 }
 
 #[test]

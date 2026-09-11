@@ -848,7 +848,9 @@ final class DaemonClient {
 
     // MARK: - Plumbing
 
-    private func call<T: Decodable>(
+    /// Shared by focused protocol extensions while raw daemon framing stays
+    /// centralized in this type.
+    func call<T: Decodable>(
         _ method: String,
         params: [String: Any] = [:],
         as type: T.Type

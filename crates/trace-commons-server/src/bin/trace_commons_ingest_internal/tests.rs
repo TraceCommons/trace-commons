@@ -86097,11 +86097,12 @@ struct NativeTestSession {
     revoked: bool,
 }
 
-/// In-memory `Database` covering only the handful of calls the native sign-in
-/// flow makes. Everything else keeps the trait's fail-closed default.
+/// In-memory `Database` covering native sign-in plus the owned session-detail
+/// read. Everything else keeps the trait's fail-closed default.
 #[derive(Default)]
 struct NativeAuthTestDb {
     sessions: std::sync::Mutex<Vec<NativeTestSession>>,
+    submissions: std::sync::Mutex<Vec<StorageTraceSubmissionRecord>>,
 }
 
 impl NativeAuthTestDb {
@@ -86127,6 +86128,10 @@ impl NativeAuthTestDb {
             expires_at,
             revoked: false,
         });
+    }
+
+    fn insert_trace_submission(&self, record: StorageTraceSubmissionRecord) {
+        self.submissions.lock().unwrap().push(record);
     }
 }
 
@@ -86683,10 +86688,9 @@ async fn logging_out_a_native_token_revokes_its_session_row() {
     assert_eq!(err.0, StatusCode::UNAUTHORIZED);
 }
 
-// The corpus-storage half of `Database` is unreachable from the native
-// sign-in flow: it touches only sessions, account principals, and the
-// account audit. Stubbed the same way every other focused test double in
-// this file stubs it.
+// Native sign-in does not use corpus storage. The owned session-detail tests
+// exercise only `get_trace_submission`; every other method stays stubbed like
+// the other focused doubles in this file.
 #[async_trait::async_trait]
 impl trace_commons_server::trace_corpus_storage::TraceCorpusStore for NativeAuthTestDb {
     async fn list_quarantined_with_only_residual_survivor(
@@ -86713,10 +86717,16 @@ impl trace_commons_server::trace_corpus_storage::TraceCorpusStore for NativeAuth
     }
     async fn get_trace_submission(
         &self,
-        _: &str,
-        _: Uuid,
+        tenant_id: &str,
+        submission_id: Uuid,
     ) -> Result<Option<StorageTraceSubmissionRecord>, DatabaseError> {
-        Ok(None)
+        Ok(self
+            .submissions
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|record| record.tenant_id == tenant_id && record.submission_id == submission_id)
+            .cloned())
     }
     async fn list_trace_submissions(
         &self,
