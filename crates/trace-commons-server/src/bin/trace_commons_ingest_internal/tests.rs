@@ -3,6 +3,11 @@
 
 use super::*;
 
+#[path = "tests/public_run_lifecycle_tests.rs"]
+mod public_run_lifecycle_tests;
+#[path = "tests/public_run_tests.rs"]
+mod public_run_tests;
+
 /// Shorthand for the direct-call handler tests. See [SubmitBody::for_test].
 fn submit_body(envelope: TraceContributionEnvelope) -> SubmitBody {
     SubmitBody::for_test(envelope)
@@ -3512,10 +3517,11 @@ async fn write_redacted_envelope_to_disk(
             ..Default::default()
         },
     );
-    let envelope = DeterministicTraceRedactor::default()
+    let mut envelope = DeterministicTraceRedactor::default()
         .redact_trace(raw)
         .await
         .expect("redaction succeeds");
+    envelope.submission_id = submission_id;
 
     let body = serde_json::to_vec(&envelope).expect("serialize envelope");
     let body_text = String::from_utf8(body.clone()).expect("utf8");
@@ -86251,6 +86257,19 @@ impl Database for NativeAuthTestDb {
     ) -> Result<(), DatabaseError> {
         Ok(())
     }
+
+    async fn get_owned_public_run_state(
+        &self,
+        _tenant_id: &str,
+        _account_id: Uuid,
+        _submission_id: Uuid,
+    ) -> Result<trace_commons_server::db::PublicRunOwnerData, DatabaseError> {
+        Ok(trace_commons_server::db::PublicRunOwnerData {
+            row: None,
+            page: None,
+            retained_source_slug: None,
+        })
+    }
 }
 
 fn native_test_state(db: Arc<NativeAuthTestDb>) -> (tempfile::TempDir, Arc<AppState>) {
@@ -86697,7 +86716,7 @@ impl trace_commons_server::trace_corpus_storage::TraceCorpusStore for NativeAuth
         _: &str,
         _: Uuid,
     ) -> Result<Option<StorageTraceSubmissionRecord>, DatabaseError> {
-        todo!("stub")
+        Ok(None)
     }
     async fn list_trace_submissions(
         &self,

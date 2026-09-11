@@ -1,6 +1,7 @@
 //! The daemon IPC contract, exercised over a real unix socket.
 //!
 //! These tests are the executable half of `docs/contributor-daemon-ipc-v1_1.md`.
+
 //! Three native applications will be written against this framing, so the
 //! properties asserted here -- id correlation, snapshot-before-delta, the
 //! authorization carve-out, and behaviour on malformed input -- are the ones
@@ -27,6 +28,25 @@ use trace_commons_contributor::daemon::preview_scheduler::{
     self, MAX_PREVIEW_SESSION_BYTES, STATE_QUEUED, STATE_READY,
 };
 use trace_commons_contributor::daemon::queue::{Queue, QueueEntry, QueueState, entry_id_for};
+
+#[test]
+fn publication_methods_are_documented_with_bounds_and_fixed_errors() {
+    let contract = include_str!("../../../docs/contributor-daemon-ipc-v1_1.md");
+    for required in [
+        "| `history_detail` |",
+        "| `publish_public_run` |",
+        "| `unpublish_public_run` |",
+        "up to 24 redacted evidence candidates",
+        "each excerpt capped at 700 characters",
+        "`public-run-trace-not-found`",
+        "`public-run-source-not-found`",
+    ] {
+        assert!(
+            contract.contains(required),
+            "missing IPC contract: {required}"
+        );
+    }
+}
 use trace_commons_contributor::daemon::settings::DaemonSettings;
 use trace_commons_contributor::identity::DeviceIdentity;
 use trace_commons_contributor::source::TraceSource;

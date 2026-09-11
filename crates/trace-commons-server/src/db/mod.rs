@@ -381,6 +381,66 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         ))
     }
 
+    /// Create or replace the one public page attached to an owned submission.
+    /// Implementations must keep the mutation and its account-audit row in one
+    /// tenant-scoped transaction.
+    async fn upsert_public_run(
+        &self,
+        _write: PublicRunWrite,
+    ) -> Result<PublicRunMutation, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "upsert_public_run not implemented".to_string(),
+        ))
+    }
+
+    /// Read the owner row, active public projection, and retained source slug
+    /// from one locked database snapshot.
+    async fn get_owned_public_run_state(
+        &self,
+        _tenant_id: &str,
+        _account_id: uuid::Uuid,
+        _submission_id: uuid::Uuid,
+    ) -> Result<PublicRunOwnerData, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "get_owned_public_run_state not implemented".to_string(),
+        ))
+    }
+
+    /// Withdraw the page owned by this account and submission. Idempotent.
+    async fn unpublish_public_run(
+        &self,
+        _tenant_id: &str,
+        _account_id: uuid::Uuid,
+        _submission_id: uuid::Uuid,
+    ) -> Result<PublicRunUnpublishMutation, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "unpublish_public_run not implemented".to_string(),
+        ))
+    }
+
+    /// Public, cross-tenant read through V64's SECURITY DEFINER projection.
+    /// The database function returns public fields only and its owner cannot be
+    /// assumed by the runtime role.
+    async fn get_public_run_page_by_slug(
+        &self,
+        _slug: &str,
+        _variation_limit: i64,
+    ) -> Result<Option<PublicRunPageData>, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "get_public_run_page_by_slug not implemented".to_string(),
+        ))
+    }
+
+    /// Resolve one active source page through V64's bounded internal function.
+    async fn resolve_public_run_source(
+        &self,
+        _slug: &str,
+    ) -> Result<Option<PublicRunSourceRow>, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "resolve_public_run_source not implemented".to_string(),
+        ))
+    }
+
     /// Compute the per-contributor leaderboard inputs for the given
     /// community tenant set and window. Implementations set the RLS tenant
     /// GUC for each tenant, so aggregation still respects per-table RLS.
@@ -1275,14 +1335,11 @@ pub trait Database: TraceCorpusStore + Send + Sync {
     /// The consume re-validates ownership (only A can execute its own proposal). B
     /// (absorbed) is re-checked still-open; if B closed mid-flight, return `Ok(None)`
     /// WITHOUT committing so the consume rolls back (the proposal stays usable). On the
-    /// happy path, in the SAME tx: active principal links move from B to A (collision-
-    /// free under `UNIQUE (tenant_id, principal_ref)`); active webauthn credentials and
-    /// NEAR identities re-key from B to A (NEAR rows have `payout_designated_at` cleared
-    /// so the per-account partial-unique payout index can never trip); ALL of B's live
-    /// sessions are revoked; B is closed; and a hash-only `account_merged` audit row
-    /// (counts only, no identifiers) is appended. The whole tx commits together; any
-    /// failure rolls everything back. Returns the move counts. Tenant-scoped under
-    /// forced RLS throughout.
+    /// happy path, in the SAME tx: active principal links, authenticators, and owned
+    /// public runs move from B to A; ALL of B's live sessions are revoked; B is closed;
+    /// and a count-only `account_merged` audit row is appended. The whole tx commits
+    /// together; any failure rolls everything back. Returns the principal and
+    /// authenticator move counts. Tenant-scoped under forced RLS throughout.
     async fn execute_merge(
         &self,
         _tenant_id: &str,
@@ -1798,6 +1855,110 @@ pub struct ContributorProfileRow {
     pub last_updated_at: chrono::DateTime<chrono::Utc>,
     pub update_count: i32,
 }
+
+/// Exact reviewed publication input for an account-owned accepted submission.
+/// `expected_publication_version` is the compare-and-swap version shown during review.
+#[derive(Debug, Clone)]
+pub struct PublicRunWrite {
+    pub tenant_id: String,
+    pub publication_id: uuid::Uuid,
+    pub account_id: uuid::Uuid,
+    pub submission_id: uuid::Uuid,
+    pub slug: String,
+    pub title: String,
+    pub outcome_summary: String,
+    pub correction_excerpt: Option<String>,
+    pub workflow: String,
+    pub reuse_permission: trace_commons_protocol::public_run::PublicRunReusePermission,
+    pub evidence: Vec<trace_commons_protocol::public_run::PublicRunEvidenceDraft>,
+    pub task_success: trace_commons_protocol::trace_contribution::TaskSuccess,
+    pub contributed_version: String,
+    pub approval_sha256: String,
+    pub source_publication_id: Option<uuid::Uuid>,
+    pub expected_publication_version: i32,
+}
+
+/// Private owner row, including approval and provenance fields plus an optional
+/// unpublication tombstone. This type must never cross the public run API.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublicRunRow {
+    pub tenant_id: String,
+    pub publication_id: uuid::Uuid,
+    pub account_id: uuid::Uuid,
+    pub submission_id: uuid::Uuid,
+    pub slug: String,
+    pub title: String,
+    pub outcome_summary: String,
+    pub correction_excerpt: Option<String>,
+    pub workflow: String,
+    pub reuse_permission: trace_commons_protocol::public_run::PublicRunReusePermission,
+    pub evidence: Vec<trace_commons_protocol::public_run::PublicRunEvidenceDraft>,
+    pub task_success: trace_commons_protocol::trace_contribution::TaskSuccess,
+    pub contributed_version: String,
+    pub approval_sha256: String,
+    pub source_publication_id: Option<uuid::Uuid>,
+    pub version: i32,
+    pub published_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+    pub unpublished_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// Active source identity resolved for a reviewed workflow variation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublicRunSourceRow {
+    pub publication_id: uuid::Uuid,
+    pub slug: String,
+    pub title: String,
+}
+
+/// Identifier-free projection safe for the public community route.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublicRunPageData {
+    pub slug: String,
+    pub title: String,
+    pub outcome_summary: String,
+    pub correction_excerpt: Option<String>,
+    pub workflow: String,
+    pub reuse_permission: trace_commons_protocol::public_run::PublicRunReusePermission,
+    pub evidence: Vec<trace_commons_protocol::public_run::PublicRunEvidence>,
+    pub task_success: trace_commons_protocol::trace_contribution::TaskSuccess,
+    pub contributed_version: String,
+    pub version: u32,
+    pub published_at: chrono::DateTime<chrono::Utc>,
+    pub source: Option<trace_commons_protocol::public_run::PublicRunLink>,
+    pub source_unavailable: bool,
+    pub variations: Vec<trace_commons_protocol::public_run::PublicRunLink>,
+}
+
+/// Atomic publication result containing the private owner row and its matching
+/// public projection from the same transaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublicRunMutation {
+    pub row: PublicRunRow,
+    pub page: PublicRunPageData,
+}
+
+/// Account-only publication snapshot. The row may be an unpublished tombstone;
+/// `page` is present only while the workflow remains public.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublicRunOwnerData {
+    pub row: Option<PublicRunRow>,
+    pub page: Option<PublicRunPageData>,
+    pub retained_source_slug: Option<String>,
+}
+
+/// Result of an idempotent unpublish, including the owner version to bind the
+/// next reviewed publication attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PublicRunUnpublishMutation {
+    pub unpublished: bool,
+    pub expected_publication_version: u32,
+}
+
+pub const PUBLIC_RUN_SOURCE_NOT_ACCEPTED: &str = "public_run_source_not_accepted";
+pub const PUBLIC_RUN_PROVENANCE_CYCLE: &str = "public_run_provenance_cycle";
+pub const PUBLIC_RUN_ACCOUNT_CLOSED: &str = "public_run_account_closed";
+pub const PUBLIC_RUN_VERSION_CONFLICT: &str = "public_run_version_conflict";
 
 /// Eviction receipt written atomically with a community-profile
 /// withdrawal. Proves the published snapshot surface was asked to drop

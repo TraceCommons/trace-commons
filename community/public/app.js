@@ -4,6 +4,11 @@ const state = {
   experience: null,
   source: "loading",
   error: null,
+  publicRun: null,
+  publicRunSlug: null,
+  publicRunStatus: "idle",
+  publicRunError: null,
+  publicRunRequest: 0,
 };
 
 const routes = new Set([
@@ -19,6 +24,10 @@ const routes = new Set([
 
 document.addEventListener("DOMContentLoaded", async () => {
   bindNavigation();
+  if (publicRunSlugFromPath(location.pathname)) {
+    renderRoute(location.pathname);
+    return;
+  }
   await loadData();
   renderRoute(location.pathname);
 });
@@ -27,6 +36,16 @@ window.addEventListener("popstate", () => renderRoute(location.pathname));
 
 function bindNavigation() {
   document.addEventListener("click", (event) => {
+    const retryPublicRun = event.target.closest("[data-retry-public-run]");
+    if (retryPublicRun && state.publicRunSlug) {
+      void loadPublicRun(state.publicRunSlug);
+      return;
+    }
+    const useWorkflow = event.target.closest("[data-use-workflow]");
+    if (useWorkflow) {
+      void copyPublicWorkflow(useWorkflow);
+      return;
+    }
     const link = event.target.closest("a[data-route]");
     if (!link) return;
     const url = new URL(link.href);
@@ -106,13 +125,38 @@ function renderRoute(pathname) {
   if (!app) return;
   const normalizedPath = normalizePathname(pathname);
   setActiveNav(normalizedPath);
+  const publicRunSlug = publicRunSlugFromPath(normalizedPath);
+  if (publicRunSlug) {
+    updatePublicRunChip();
+    app.innerHTML = renderPublicRunRoute(publicRunSlug);
+    app.focus();
+    if (state.publicRunSlug !== publicRunSlug || state.publicRunStatus === "idle") {
+      void loadPublicRun(publicRunSlug);
+    }
+    return;
+  }
+  if (state.publicRunSlug !== null) {
+    state.publicRunRequest += 1;
+    state.publicRunSlug = null;
+    state.publicRun = null;
+    state.publicRunStatus = "idle";
+    state.publicRunError = null;
+  }
+  updateSourceChip();
   if (normalizedPath === "/install") {
     app.innerHTML = renderInstall();
     app.focus();
     return;
   }
   if (!state.snapshot) {
-    app.innerHTML = renderSnapshotError();
+    if (state.source === "loading") {
+      app.innerHTML = renderSnapshotLoading();
+      void loadData().then(() => {
+        if (!publicRunSlugFromPath(location.pathname)) renderRoute(location.pathname);
+      });
+    } else {
+      app.innerHTML = renderSnapshotError();
+    }
     return;
   }
   if (normalizedPath.startsWith("/contributors/")) {
@@ -571,9 +615,9 @@ function renderAbout(path) {
       <p class="lede">${dataPolicy ? "The server computes leaderboard rows from accepted submissions and profile opt-ins, then publishes only snapshot contents cleared by release gates." : "Trace submission and public display are separate choices. Accepted traces can earn credit privately even when the contributor never publishes a handle."}</p>
     </section>
     <section class="about-grid">
-      <div class="panel"><h2>No raw traces</h2><p class="lede">The community site renders aggregate counts, credit totals, and handles. It does not render message text, tool payloads, or per-trace details.</p></div>
+      <div class="panel"><h2>No raw transcripts</h2><p class="lede">A workflow page contains only the outcome, instructions, correction, and redacted excerpts its creator reviewed for publication. It excludes the full transcript, tool payloads, and private identifiers.</p></div>
       <div class="panel"><h2>Pseudonymous handles</h2><p class="lede">A handle is self-declared public material. The server keeps the underlying contributor principal as the pseudonymous join key.</p></div>
-      <div class="panel"><h2>Withdrawal</h2><p class="lede">Withdrawing stamps the profile as no longer public. The next snapshot removes the profile and contributor page from the site.</p></div>
+      <div class="panel"><h2>Withdrawal</h2><p class="lede">Profile withdrawal takes effect in the next snapshot. Unpublishing a workflow removes its active page, subject to the public cache of up to 30 seconds.</p></div>
     </section>
   `;
 }
@@ -690,6 +734,17 @@ function renderSnapshotError() {
       <p class="eyebrow">Snapshot unavailable</p>
       <h1>The community snapshot could not be loaded.</h1>
       <p class="lede">${escapeHtml(state.error ? state.error.message : "Unknown error")}</p>
+    </section>
+  `;
+}
+
+function renderSnapshotLoading() {
+  return `
+    <section class="loading-band" aria-live="polite">
+      <div>
+        <p class="eyebrow">Pilot surface</p>
+        <h1>Reading the current community snapshot.</h1>
+      </div>
     </section>
   `;
 }

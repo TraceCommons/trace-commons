@@ -174,10 +174,17 @@ fn ensure_current(store: &ConfigStore, expected: &Snapshot) -> Result<()> {
 }
 
 pub(crate) fn load(store: &ConfigStore, kind: Kind) -> Result<Option<Vec<u8>>> {
+    Ok(load_with_snapshot(store, kind)?.map(|(payload, _)| payload))
+}
+
+pub(crate) fn load_with_snapshot(
+    store: &ConfigStore,
+    kind: Kind,
+) -> Result<Option<(Vec<u8>, Snapshot)>> {
     if needs_native_thread() {
         return std::thread::scope(|scope| {
             scope
-                .spawn(|| load(store, kind))
+                .spawn(|| load_with_snapshot(store, kind))
                 .join()
                 .map_err(|_| unavailable())?
         });
@@ -190,7 +197,7 @@ pub(crate) fn load(store: &ConfigStore, kind: Kind) -> Result<Option<Vec<u8>>> {
         // Migration keeps the original file intact until an immutable OS entry
         // has passed readback. The same filename then becomes a rollback guard.
         replace(store, &expected, bytes, None)?;
-        return load(store, kind);
+        return load_with_snapshot(store, kind);
     };
     if record.kind != kind
         || (kind == Kind::Account && record.authority != current_authority(store)?)
@@ -209,7 +216,7 @@ pub(crate) fn load(store: &ConfigStore, kind: Kind) -> Result<Option<Vec<u8>>> {
     let locks = coordination(store.dir())?;
     let _commit = locks.commit.lock()?;
     ensure_current(store, &expected)?;
-    Ok(Some(payload))
+    Ok(Some((payload, expected)))
 }
 
 /// Publish a secret, optionally publishing its first enrollment config in the
@@ -292,6 +299,30 @@ pub(crate) fn replace(
     // journaled; do not misreport the newly installed session as a failed login.
     let _ = cleanup_locked(store, &credentials);
     Ok(())
+}
+
+/// Persist a server-issued account-token rotation without overwriting a
+/// sign-out or configuration change. A concurrent token rotation wins; its
+/// immutable credential entry is already newer than this request's snapshot.
+pub(crate) fn replace_account_rotation(
+    store: &ConfigStore,
+    expected: &Snapshot,
+    payload: &[u8],
+) -> Result<()> {
+    match replace(store, expected, payload, None) {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            let current = snapshot(store, Kind::Account)?;
+            if current.generation == expected.generation
+                && current.config == expected.config
+                && current.previous != expected.previous
+            {
+                Ok(())
+            } else {
+                Err(changed())
+            }
+        }
+    }
 }
 
 /// Local invalidation never waits for the OS store. Cleanup is journaled for
@@ -409,6 +440,14 @@ fn test_backend(store: &ConfigStore) -> Arc<dyn SecretBackend> {
         .entry(store.dir().to_path_buf())
         .or_insert_with(|| Arc::new(super::cloud_credential_test_support::MemoryBackend::default()))
         .clone()
+}
+
+#[cfg(test)]
+pub(crate) fn install_test_backend(store: &ConfigStore, backend: Arc<dyn SecretBackend>) {
+    test_registry()
+        .lock()
+        .unwrap()
+        .insert(store.dir().to_path_buf(), backend);
 }
 
 /// Resolve only the token removed by sign-out, for best-effort server revocation.

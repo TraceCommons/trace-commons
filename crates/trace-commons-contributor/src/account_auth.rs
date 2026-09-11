@@ -74,6 +74,11 @@ pub struct AccountSession {
     pub account_id: String,
 }
 
+pub(crate) struct LoadedAccountSession {
+    pub session: AccountSession,
+    pub snapshot: crate::daemon::commons_credentials::Snapshot,
+}
+
 /// What a completed sign-in reports to a caller. Carries no token.
 #[derive(Debug, Clone)]
 pub struct SignInOutcome {
@@ -93,7 +98,17 @@ pub fn load_token(store: &ConfigStore) -> Option<String> {
 /// Distinguish an unavailable OS store from a signed-out account. Callers may
 /// ask the user to unlock the system store without starting a new login flow.
 pub fn try_load_token(store: &ConfigStore) -> Result<Option<String>> {
-    let Some(raw) = store.read_daemon_file(ACCOUNT_SESSION_FILE)? else {
+    Ok(try_load_session_with_snapshot(store)?.map(|loaded| loaded.session.access_token))
+}
+
+pub(crate) fn try_load_session_with_snapshot(
+    store: &ConfigStore,
+) -> Result<Option<LoadedAccountSession>> {
+    let Some((raw, snapshot)) = crate::daemon::commons_credentials::load_with_snapshot(
+        store,
+        crate::daemon::commons_credentials::Kind::Account,
+    )?
+    else {
         return Ok(None);
     };
     let Ok(session) = serde_json::from_slice::<AccountSession>(&raw) else {
@@ -102,7 +117,21 @@ pub fn try_load_token(store: &ConfigStore) -> Result<Option<String>> {
     if session.expires_at <= Utc::now() + EXPIRY_SKEW {
         return Ok(None);
     }
-    Ok(Some(session.access_token))
+    Ok(Some(LoadedAccountSession { session, snapshot }))
+}
+
+pub(crate) fn store_rotated_token(
+    store: &ConfigStore,
+    loaded: &LoadedAccountSession,
+    rotated_token: String,
+) -> Result<()> {
+    if rotated_token.trim().is_empty() || rotated_token.trim() != rotated_token {
+        bail!("account_session_rotation_invalid");
+    }
+    let mut session = loaded.session.clone();
+    session.access_token = rotated_token;
+    let body = serde_json::to_vec(&session).context("serializing the rotated account session")?;
+    crate::daemon::commons_credentials::replace_account_rotation(store, &loaded.snapshot, &body)
 }
 
 /// Whether a usable token is stored, without handing the token out. For status
@@ -591,5 +620,64 @@ mod tests {
 
         clear_token(&store).expect("clear");
         assert!(load_token(&store).is_none());
+    }
+
+    fn live_session(token: &str) -> AccountSession {
+        AccountSession {
+            access_token: token.to_string(),
+            expires_at: Utc::now() + chrono::TimeDelta::hours(6),
+            account_id: "synthetic-account".to_string(),
+        }
+    }
+
+    #[test]
+    fn a_server_rotation_replaces_the_os_stored_account_token() {
+        let (_dir, store) = crate::config::tests_support::temp_store();
+        save_session(&store, &live_session("synthetic-token-before")).expect("save session");
+        let loaded = try_load_session_with_snapshot(&store)
+            .expect("load account session")
+            .expect("account session exists");
+        store_rotated_token(&store, &loaded, "synthetic-token-after".to_string())
+            .expect("store rotated token");
+        assert_eq!(
+            try_load_token(&store).expect("reload token").as_deref(),
+            Some("synthetic-token-after")
+        );
+    }
+
+    #[test]
+    fn a_rotation_cannot_restore_a_concurrently_signed_out_session() {
+        let (_dir, store) = crate::config::tests_support::temp_store();
+        save_session(&store, &live_session("synthetic-token-before")).expect("save session");
+        let loaded = try_load_session_with_snapshot(&store)
+            .expect("load account session")
+            .expect("account session exists");
+        clear_token(&store).expect("sign out locally");
+        assert!(store_rotated_token(&store, &loaded, "synthetic-token-after".to_string()).is_err());
+        assert!(
+            try_load_token(&store)
+                .expect("reload signed-out state")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_concurrent_rotation_keeps_the_first_newer_token() {
+        let (_dir, store) = crate::config::tests_support::temp_store();
+        save_session(&store, &live_session("synthetic-token-before")).expect("save session");
+        let first = try_load_session_with_snapshot(&store)
+            .expect("load first account session")
+            .expect("first account session exists");
+        let second = try_load_session_with_snapshot(&store)
+            .expect("load second account session")
+            .expect("second account session exists");
+        store_rotated_token(&store, &first, "synthetic-token-newer".to_string())
+            .expect("store first rotation");
+        store_rotated_token(&store, &second, "synthetic-token-late".to_string())
+            .expect("accept concurrent rotation without rollback");
+        assert_eq!(
+            try_load_token(&store).expect("reload token").as_deref(),
+            Some("synthetic-token-newer")
+        );
     }
 }

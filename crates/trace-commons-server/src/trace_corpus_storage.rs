@@ -2574,7 +2574,8 @@ pub trait TraceCorpusStore: Send + Sync {
     /// `distribution_reach` never drift across retries. Implementations MUST
     /// also move the submission row out of consumer reach (status `revoked`,
     /// `withdrawn_at` set, `purged_at` set because the content is gone) in the
-    /// same transaction as the tombstone insert.
+    /// same transaction as the tombstone insert. Any active reviewed public
+    /// excerpt for the submission must be unpublished in that transaction too.
     async fn record_trace_withdrawal(
         &self,
         _tenant_id: &str,

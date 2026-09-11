@@ -454,6 +454,9 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `set_project_mode` | `project_id` **or** `project_key`, `mode` (`label` accepted and ignored) | `ok: true`, `purged: <count>` | socket clients send `project_id`; `auto_upload` no longer requires a terminal; see "Naming a project" above and "`set_project_mode` and the ignore purge" below |
 | `list_history` | `limit` (optional, default 50, max 1000) | `history[]` | |
 | `history_rollup` | — | see below | |
+| `history_detail` | `submission_id` | owned redacted outcome, correction, up to 24 evidence candidates, contributed versions, and publication state | one account-authenticated request; each excerpt capped at 700 characters |
+| `publish_public_run` | `submission_id`, `draft`, `task_success`, `contributed_version`, `expected_publication_version` | reviewed public page | computes the approval digest over every public field and owner-state version |
+| `unpublish_public_run` | `submission_id` | `unpublished`, `expected_publication_version` | idempotent account-authenticated request |
 | `refresh_history` | — | `requested: true` | |
 | `list_audit` | `limit` (optional, default 50, max 1000) | `entries[]`, newest first | see "Audit log" below |
 | `queue_outcome_counts` | — | `reasons: {label: count}` | see "queue_outcome_counts" below; does **not** cover sessions never queued |
@@ -2740,6 +2743,36 @@ There is no convention here to generalise from: read the contract for the
 field you are touching, and do not carry a habit across from another one.
 A field added later is a fourth answer to a fourth question, not a fourth
 instance of a pattern.
+
+### Session detail and publication
+
+These methods use the account session held in the operating system credential
+store. `history_detail` returns a bounded server projection of the owned,
+permanently redacted record. It includes the creator outcome, contributed
+correction, version labels, owner publication version, and up to 24 redacted evidence candidates, with each excerpt capped at 700 characters. The response
+excludes raw trace content, credentials, tenant or account identifiers, and
+server error bodies.
+
+`publish_public_run` accepts the exact reviewed public fields, one to four
+evidence selections, reuse permission, and an optional source slug. The daemon
+binds the approval digest to the displayed outcome, contributed version, and
+owner publication version; before writing, the server verifies ownership,
+acceptance, metadata, evidence, correction, and public-text privacy.
+Withdrawing a page advances the version, so an earlier approval cannot restore
+it; publication consent remains separate from contribution and profile consent.
+
+Every authenticated account response may rotate the native session token,
+including an error response. The daemon persists that header before handling
+the route result. A committed publication or withdrawal remains successful if
+the credential store fails afterward; the response carries
+`commons_credential_storage_unavailable` so the app can show the required
+sign-in action.
+
+Fixed route labels include `account-session-required`,
+`public-run-trace-not-found`, `public-run-source-not-found`,
+`public-run-conflict`, `public-run-invalid`, `public-run-publish-failed`, and
+`public-run-unpublish-failed`. They contain no contributed text, wallet
+material, identifier, URL, or response body.
 
 ### The public profile
 

@@ -3,6 +3,16 @@
 
 #[path = "trace_commons_ingest_internal/admission.rs"]
 mod admission;
+#[path = "trace_commons_ingest_internal/public_run.rs"]
+mod public_run;
+
+#[cfg(test)]
+use public_run::validate_public_run_provenance;
+use public_run::{
+    account_public_run_handler, account_public_run_publish_handler,
+    account_public_run_session_detail_handler, account_public_run_unpublish_handler,
+    community_public_run_handler,
+};
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
@@ -7443,6 +7453,10 @@ fn community_routes() -> Router<Arc<AppState>> {
             "/v1/community/analytics/summary",
             get(community_analytics_summary_handler),
         )
+        .route(
+            "/v1/community/runs/{slug}",
+            get(community_public_run_handler),
+        )
         .layer(community_cors_layer())
 }
 
@@ -7473,8 +7487,18 @@ fn authenticated_account_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
             get(account_trace_content_handler),
         )
         .route(
+            "/v1/account/traces/{submission_id}/session-detail",
+            get(account_public_run_session_detail_handler),
+        )
+        .route(
             "/v1/account/traces/{submission_id}/withdraw",
             post(account_trace_withdraw_handler),
+        )
+        .route(
+            "/v1/account/traces/{submission_id}/publication",
+            get(account_public_run_handler)
+                .put(account_public_run_publish_handler)
+                .delete(account_public_run_unpublish_handler),
         )
         .route("/v1/account/logout", post(account_logout_handler))
         .route(
@@ -16608,7 +16632,8 @@ async fn mint_login_link_handler(
 /// analogue of `Set-Cookie`, emitted by `account_auth_middleware` on the one
 /// response where rotation fired, to the already-authenticated caller that
 /// presented the old token.
-const ACCOUNT_NATIVE_ROTATED_TOKEN_HEADER: &str = "x-trace-commons-session-token";
+const ACCOUNT_NATIVE_ROTATED_TOKEN_HEADER: &str =
+    trace_commons_protocol::ACCOUNT_NATIVE_ROTATED_TOKEN_HEADER;
 
 /// Query/form field naming the pending native authorization request that the
 /// browser redeem should complete. Optional everywhere: a plain browser login

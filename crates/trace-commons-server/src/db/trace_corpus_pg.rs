@@ -3931,6 +3931,8 @@ impl TraceCorpusStore for PgBackend {
         )
         .await
         .map_err(DatabaseError::Postgres)?;
+        // V64's status-transition trigger revokes every derived public page in
+        // this transaction, including withdrawals initiated by other paths.
         let row = tx
             .query_one(
                 "SELECT tenant_id, submission_id, withdrawn_at, prior_status, distribution_reach
