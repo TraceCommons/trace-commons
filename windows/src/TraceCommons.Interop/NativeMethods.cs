@@ -116,6 +116,16 @@ internal static class NativeMethods
     internal static extern void tc_handle_free(IntPtr handle);
 
     /// <summary>
+    /// Account-free synchronous local Insights. Request is UTF-8 bytes without
+    /// a trailing NUL, at most 65536 bytes. Call off the UI thread and retain
+    /// the buffer until return. Returns owned JSON or NULL plus owned error;
+    /// both use tc_string_free. Closing a window does not cancel started IO.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_insights_call(
+        [In] byte[] request, UIntPtr requestLen, out IntPtr error);
+
+    /// <summary>
     /// Calls a daemon method in-process. Returns an owned NUL-terminated JSON
     /// response -- never NULL, even for a bad handle or malformed params; a
     /// JSON error frame comes back instead.

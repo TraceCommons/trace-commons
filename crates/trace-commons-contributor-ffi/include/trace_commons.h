@@ -116,6 +116,7 @@
 #define TRACE_COMMONS_H
 
 #include <stdint.h>
+#include <stddef.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -1765,6 +1766,19 @@ void        tc_handle_free(tc_handle*);
  * tc_daemon_stop and then tc_handle_free to do that.
  */
 char*       tc_call(tc_handle*, const char* method, const char* params_json);
+
+/* Handle-free local Insights, available before enrollment. Synchronous local IO;
+ * schedule off the UI thread. Closing a window does not cancel started writes.
+ * request is borrowed readable UTF-8 bytes (no trailing NUL), at most 65536.
+ * Example: {"operation":{"type":"list"}}. Optional top-level store_dir selects
+ * a dedicated store; omitted uses the platform local-data Insights directory.
+ * Operations: analyze {source:codex|trajectory,file,save:false}, list,
+ * explain {id}, delete {id}; each has a "type" discriminator.
+ * Returns owned JSON tagged by type, or NULL plus owned fixed-label *err.
+ * Free result/error with tc_string_free. err may be NULL; otherwise writable
+ * and cleared on success. Request buffers must remain valid until return. */
+char*       tc_insights_call(const uint8_t* request, size_t request_len, char** err);
+
 
 /* Events. cb is invoked on a background thread with a JSON event frame
  * each time the daemon publishes one, until tc_unsubscribe is called with
