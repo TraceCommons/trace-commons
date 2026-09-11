@@ -10,6 +10,35 @@ const PUBLIC_RUN_PER_IP_LIMIT: u32 = 120;
 const PUBLIC_RUN_GLOBAL_LIMIT: u32 = 2_000;
 const PUBLIC_RUN_GLOBAL_CONCURRENCY: u32 = 32;
 
+fn public_run_contribution_status(
+    status: StorageTraceCorpusStatus,
+) -> trace_commons_protocol::public_run::PublicRunContributionStatus {
+    use trace_commons_protocol::public_run::PublicRunContributionStatus;
+
+    match status {
+        StorageTraceCorpusStatus::Received => PublicRunContributionStatus::Received,
+        StorageTraceCorpusStatus::Accepted => PublicRunContributionStatus::Accepted,
+        StorageTraceCorpusStatus::Quarantined => PublicRunContributionStatus::Quarantined,
+        StorageTraceCorpusStatus::AwaitingPiiBackstop => {
+            PublicRunContributionStatus::AwaitingPiiBackstop
+        }
+        StorageTraceCorpusStatus::Rejected => PublicRunContributionStatus::Rejected,
+        StorageTraceCorpusStatus::Revoked => PublicRunContributionStatus::Revoked,
+        StorageTraceCorpusStatus::Expired => PublicRunContributionStatus::Expired,
+        StorageTraceCorpusStatus::Purged => PublicRunContributionStatus::Purged,
+    }
+}
+
+fn public_run_permitted_uses(values: &[String]) -> anyhow::Result<Vec<TraceAllowedUse>> {
+    values
+        .iter()
+        .map(|value| {
+            serde_json::from_value(serde_json::Value::String(value.clone()))
+                .context("failed to parse session-detail allowed use")
+        })
+        .collect()
+}
+
 fn validation_error(
     error: trace_commons_protocol::public_run::PublicRunValidationError,
 ) -> (StatusCode, Json<ApiError>) {
@@ -78,9 +107,8 @@ pub(super) async fn account_public_run_session_detail_handler(
         Some(record) if ctx.principal_set.contains(&record.auth_principal_ref) => record,
         _ => return Err(not_found()),
     };
-    let record = trace_commons_record_from_storage_submission(stored)
-        .ok_or_else(not_found)?
-        .map_err(internal_error)?;
+    let contribution_status = public_run_contribution_status(stored.status);
+    let permitted_uses = public_run_permitted_uses(&stored.allowed_uses).map_err(internal_error)?;
     let account_key = ctx.account_id.as_uuid().to_string();
     if !ACCOUNT_RATE_LIMITER.check(
         &format!("content-account:{account_key}"),
@@ -97,21 +125,52 @@ pub(super) async fn account_public_run_session_detail_handler(
     let _global_slot = ACCOUNT_RATE_LIMITER
         .acquire("public-run-detail-global", PUBLIC_RUN_GLOBAL_CONCURRENCY)
         .ok_or_else(|| api_error(StatusCode::TOO_MANY_REQUESTS, "rate limited"))?;
+    let owner_state = db
+        .get_owned_public_run_state(&ctx.tenant_id, ctx.account_id.as_uuid(), submission_id)
+        .await
+        .map_err(internal_error)?;
+    let owner_state = owner_state_from_data(owner_state).map_err(internal_error)?;
+    if let Some(status_only) =
+        trace_commons_protocol::public_run::PublicRunSessionRecord::status_only(
+            contribution_status,
+            permitted_uses.clone(),
+            stored.schema_version.clone(),
+            stored.consent_policy_version.clone(),
+            stored.redaction_pipeline_version.clone(),
+            owner_state.clone(),
+        )
+    {
+        return Ok(account_response(status_only));
+    }
+    let record = trace_commons_record_from_storage_submission(stored)
+        .ok_or_else(not_found)?
+        .map_err(internal_error)?;
     let read_state = Arc::clone(&state);
-    let envelope =
-        tokio::task::spawn_blocking(move || read_envelope_by_record(read_state.as_ref(), &record))
-            .await
-            .map_err(anyhow::Error::from)
-            .and_then(|result| result)
-            .inspect_err(|error| {
-                tracing::warn!(
-                    error_hash = %safe_display_error_hash(error),
-                    "Trace Commons session-detail source read failed; failing closed"
-                );
-            });
-    let envelope = match envelope {
-        Ok(envelope) if envelope.submission_id == submission_id => envelope,
-        Ok(_) | Err(_) => {
+    let projected = tokio::task::spawn_blocking(move || {
+        let envelope = read_envelope_by_record(read_state.as_ref(), &record)?;
+        if envelope.submission_id != submission_id {
+            anyhow::bail!("session-detail source submission mismatch");
+        }
+        Ok::<_, anyhow::Error>(
+            trace_commons_protocol::public_run::PublicRunSessionRecord::from_envelope(
+                envelope,
+                owner_state,
+            )
+            .with_contribution_state(contribution_status, permitted_uses),
+        )
+    })
+    .await
+    .map_err(anyhow::Error::from)
+    .and_then(|result| result)
+    .inspect_err(|error| {
+        tracing::warn!(
+            error_hash = %safe_display_error_hash(error),
+            "Trace Commons session-detail source read failed; failing closed"
+        );
+    });
+    let projected = match projected {
+        Ok(projected) => projected,
+        Err(_) => {
             return Err(audit_source_read_failure(
                 state.as_ref(),
                 &ctx,
@@ -121,11 +180,6 @@ pub(super) async fn account_public_run_session_detail_handler(
             .await);
         }
     };
-    let owner_state = db
-        .get_owned_public_run_state(&ctx.tenant_id, ctx.account_id.as_uuid(), submission_id)
-        .await
-        .map_err(internal_error)?;
-    let owner_state = owner_state_from_data(owner_state).map_err(internal_error)?;
     append_trace_content_read_audit_per_source(
         state.as_ref(),
         &account_audit_tenant(&ctx),
@@ -136,12 +190,7 @@ pub(super) async fn account_public_run_session_detail_handler(
     )
     .await
     .map_err(internal_error)?;
-    Ok(account_response(
-        trace_commons_protocol::public_run::PublicRunSessionRecord::from_envelope(
-            envelope,
-            owner_state,
-        ),
-    ))
+    Ok(account_response(projected))
 }
 
 pub(super) fn validate_public_run_provenance(
@@ -629,6 +678,63 @@ mod privacy_tests {
             }],
             source_slug: None,
         }
+    }
+
+    #[test]
+    fn session_detail_projects_every_stored_corpus_status() {
+        use trace_commons_protocol::public_run::PublicRunContributionStatus;
+
+        let cases = [
+            (
+                StorageTraceCorpusStatus::Received,
+                PublicRunContributionStatus::Received,
+            ),
+            (
+                StorageTraceCorpusStatus::Accepted,
+                PublicRunContributionStatus::Accepted,
+            ),
+            (
+                StorageTraceCorpusStatus::Quarantined,
+                PublicRunContributionStatus::Quarantined,
+            ),
+            (
+                StorageTraceCorpusStatus::AwaitingPiiBackstop,
+                PublicRunContributionStatus::AwaitingPiiBackstop,
+            ),
+            (
+                StorageTraceCorpusStatus::Rejected,
+                PublicRunContributionStatus::Rejected,
+            ),
+            (
+                StorageTraceCorpusStatus::Revoked,
+                PublicRunContributionStatus::Revoked,
+            ),
+            (
+                StorageTraceCorpusStatus::Expired,
+                PublicRunContributionStatus::Expired,
+            ),
+            (
+                StorageTraceCorpusStatus::Purged,
+                PublicRunContributionStatus::Purged,
+            ),
+        ];
+
+        for (stored, expected) in cases {
+            assert_eq!(public_run_contribution_status(stored), expected);
+        }
+    }
+
+    #[test]
+    fn session_detail_permitted_uses_are_typed_and_ordered() {
+        let uses =
+            public_run_permitted_uses(&["evaluation".to_string(), "model_training".to_string()])
+                .expect("stored allowed uses");
+
+        assert_eq!(
+            uses,
+            vec![TraceAllowedUse::Evaluation, TraceAllowedUse::ModelTraining]
+        );
+        assert!(public_run_permitted_uses(&["unsupported".to_string()]).is_err());
     }
 
     #[tokio::test]

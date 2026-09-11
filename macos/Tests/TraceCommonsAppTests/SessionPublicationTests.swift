@@ -18,6 +18,7 @@ private final class SessionPublicationDaemon: DaemonCalling, @unchecked Sendable
     private var failures: Set<String> = []
     private var credentialWarnings: Set<String> = []
     private var publicationVersion = 0
+    private var ownerScopeSHA256 = "sha256:owner-a"
 
     var calls: [Call] {
         lock.lock()
@@ -45,6 +46,12 @@ private final class SessionPublicationDaemon: DaemonCalling, @unchecked Sendable
         }
     }
 
+    func setOwnerScopeSHA256(_ value: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        ownerScopeSHA256 = value
+    }
+
     func call(_ method: String, params paramsJSON: String) -> String {
         lock.lock()
         defer { lock.unlock() }
@@ -61,7 +68,7 @@ private final class SessionPublicationDaemon: DaemonCalling, @unchecked Sendable
         }
         switch method {
         case "history_detail":
-            return #"{"id":1,"result":{"task_success":"partial","task_outcome":"Partly completed","user_feedback":"correction","feedback_line":"Feedback: correction supplied","human_correction":"Use the bounded retry path.","evidence":[{"event_id":"11111111-1111-4111-8111-111111111111","kind":"tool_result","label":"Tool result","excerpt":"The bounded retry completed on the second attempt."}],"contributed_version":"trace-contribution/1","consent_policy_version":"consent/1","redaction_pipeline_version":"redaction/3","publication":null,"publication_version":\#(publicationVersion),"retained_source_slug":"source-workflow"}}"#
+            return #"{"id":1,"result":{"owner_scope_sha256":"\#(ownerScopeSHA256)","task":"Repair the generated client without editing its checked-in output.","task_success":"partial","user_feedback":"correction","human_correction":"Use the bounded retry path.","evidence":[{"event_id":"11111111-1111-4111-8111-111111111111","kind":"tool_result","excerpt":"The bounded retry completed on the second attempt."}],"contribution_status":"accepted","permitted_uses":["debugging","evaluation"],"contributed_version":"trace-contribution/1","consent_policy_version":"consent/1","redaction_pipeline_version":"redaction/3","publication":null,"publication_version":\#(publicationVersion),"retained_source_slug":"source-workflow"}}"#
         case "publish_public_run":
             publicationVersion += 1
             let warning = credentialWarnings.contains(method)
@@ -97,21 +104,31 @@ final class SessionPublicationTests: XCTestCase {
 
     func testClientDecodesSessionDetailAndSendsOnlyTheReviewedDraft() throws {
         let detail = try client.sessionDetail(submissionID: record.submissionID)
+        XCTAssertEqual(
+            detail.task,
+            "Repair the generated client without editing its checked-in output."
+        )
         XCTAssertEqual(detail.taskSuccess, "partial")
-        XCTAssertEqual(detail.taskOutcome, "Partly completed")
-        XCTAssertEqual(detail.feedbackLine, "Feedback: correction supplied")
+        XCTAssertEqual(detail.ownerScopeSHA256, "sha256:owner-a")
+        let copy = try XCTUnwrap(PublicRunCopy.decode(fromJSON: TCPublicRun.copyJSON() ?? ""))
+        XCTAssertEqual(copy.taskOutcomeLabel(for: detail.taskSuccess), "Partly completed")
+        XCTAssertEqual(copy.feedbackLabel(for: detail.userFeedback), "Feedback: correction supplied")
         XCTAssertEqual(detail.humanCorrection, "Use the bounded retry path.")
         XCTAssertEqual(detail.evidence.map(\.eventID), ["11111111-1111-4111-8111-111111111111"])
-        XCTAssertEqual(detail.evidence.map(\.label), ["Tool result"])
+        XCTAssertEqual(detail.evidence.map(\.kind), [.toolResult])
+        XCTAssertEqual(detail.evidence.map { copy.evidenceKindLabel(for: $0.kind) }, ["Tool result"])
+        XCTAssertEqual(detail.contributionStatus, "accepted")
+        XCTAssertEqual(detail.permittedUses, ["debugging", "evaluation"])
         XCTAssertEqual(detail.consentPolicyVersion, "consent/1")
         XCTAssertNil(detail.publication)
         XCTAssertEqual(detail.publicationVersion, 0)
         XCTAssertEqual(detail.retainedSourceSlug, "source-workflow")
+        let taskSuccess = try XCTUnwrap(detail.taskSuccess)
 
         let page = try client.publishPublicRun(
             submissionID: record.submissionID,
             draft: draft,
-            taskSuccess: detail.taskSuccess,
+            taskSuccess: taskSuccess,
             contributedVersion: detail.contributedVersion,
             expectedPublicationVersion: detail.publicationVersion
         )
@@ -139,6 +156,76 @@ final class SessionPublicationTests: XCTestCase {
         XCTAssertEqual(sentDraft["workflow"] as? String, draft.workflow)
         XCTAssertNil(sentDraft["source_slug"], "An absent source must stay absent")
         XCTAssertNil(params["approval_sha256"], "The daemon derives approval from this exact draft")
+    }
+
+    func testSessionDetailDecodesRecordsFromAnOlderServerWithoutNewFields() throws {
+        let json = #"{"task_success":"success","task_outcome":"Completed","user_feedback":"none","evidence":[],"contributed_version":"trace-contribution/1","consent_policy_version":"consent/1","redaction_pipeline_version":"redaction/3","publication":null,"publication_version":0}"#
+        let detail = try JSONDecoder().decode(SessionDetail.self, from: Data(json.utf8))
+
+        XCTAssertNil(detail.task)
+        XCTAssertNil(detail.contentUnavailable)
+        XCTAssertNil(detail.contributionStatus)
+        XCTAssertNil(detail.permittedUses)
+        XCTAssertFalse(detail.accepted)
+    }
+
+    func testStatusOnlySessionDetailDoesNotFabricateAnOutcome() throws {
+        let json = #"{"content_unavailable":true,"task":null,"contribution_status":"received","permitted_uses":["debugging"],"evidence":[],"contributed_version":"trace-contribution/1","consent_policy_version":"consent/1","redaction_pipeline_version":"redaction/3","publication":null,"publication_version":0}"#
+        let detail = try JSONDecoder().decode(SessionDetail.self, from: Data(json.utf8))
+
+        XCTAssertEqual(detail.contentUnavailable, true)
+        XCTAssertNil(detail.taskSuccess)
+        let copy = try XCTUnwrap(PublicRunCopy.decode(fromJSON: TCPublicRun.copyJSON() ?? ""))
+        XCTAssertNil(copy.taskOutcomeLabel(for: detail.taskSuccess))
+        XCTAssertNil(detail.userFeedback)
+        XCTAssertNil(detail.humanCorrection)
+        XCTAssertTrue(detail.evidence.isEmpty)
+        XCTAssertEqual(detail.contributionStatus, "received")
+    }
+
+    func testUnknownEvidenceKindRemainsInspectable() throws {
+        let json = #"{"event_id":"11111111-1111-4111-8111-111111111111","kind":"future_event","excerpt":"Bounded evidence."}"#
+        let evidence = try JSONDecoder().decode(
+            SessionEvidenceCandidate.self,
+            from: Data(json.utf8)
+        )
+
+        XCTAssertEqual(evidence.kind, .unknown)
+        let copy = try XCTUnwrap(PublicRunCopy.decode(fromJSON: TCPublicRun.copyJSON() ?? ""))
+        XCTAssertEqual(copy.evidenceKindLabel(for: evidence.kind), "Evidence")
+        XCTAssertEqual(evidence.excerpt, "Bounded evidence.")
+    }
+
+    func testSharedCopyLabelsEveryContributionStateAndPermittedUse() throws {
+        let json = try XCTUnwrap(TCPublicRun.copyJSON())
+        let copy = try XCTUnwrap(PublicRunCopy.decode(fromJSON: json))
+
+        XCTAssertEqual(copy.contributionStatusChoices.count, 10)
+        XCTAssertEqual(copy.contributionStatusLabel(for: "submitted"), "Submitted")
+        XCTAssertEqual(copy.contributionStatusLabel(for: "accepted"), "Accepted into the commons")
+        XCTAssertEqual(copy.contributionStatusLabel(for: "future_state"), copy.unrecognizedValue)
+        XCTAssertEqual(copy.permittedUseChoices.count, 6)
+        XCTAssertEqual(copy.permittedUseLabel(for: "model_training"), "Model training")
+        XCTAssertEqual(copy.permittedUseLabel(for: "future_use"), copy.unrecognizedValue)
+        XCTAssertFalse(copy.permittedUsesUnavailable.isEmpty)
+    }
+
+    func testServerPreAcceptanceStatesUseTheNonDistributedWithdrawalCopy() {
+        for status in ["received", "quarantined", "awaiting_pii_backstop", "rejected"] {
+            let confirmation = WithdrawalCopy.confirmation(for: .init(status: status))
+            XCTAssertNil(confirmation.ambiguity, status)
+            XCTAssertEqual(confirmation.bodies, [WithdrawalCopy.canonicalNotDistributed], status)
+        }
+    }
+
+    func testEveryTerminalContributionStateSuppressesWithdrawal() {
+        for status in ["withdrawn", "revoked", "purged", "expired"] {
+            XCTAssertTrue(ContributionStatusPresentation.isTerminal(status), status)
+        }
+        for status in ["submitted", "received", "quarantined", "accepted", "rejected"] {
+            XCTAssertFalse(ContributionStatusPresentation.isTerminal(status), status)
+        }
+        XCTAssertFalse(ContributionStatusPresentation.isTerminal(nil))
     }
 
     func testEditorUsesTheSharedRustValidatorAndNormalizedDraft() throws {
@@ -310,6 +397,31 @@ final class SessionPublicationTests: XCTestCase {
     }
 
     @MainActor
+    func testAccountChangeClearsSessionAndSkillCaches() async throws {
+        let model = AppModel()
+        model.setClientForTesting(client)
+        model.loadSessionDetail(record)
+        try await waitUntil { model.sessionDetails[self.record.submissionID] != nil }
+        XCTAssertTrue(model.skillLearningStore.beginInstallStatusLoading(for: record.submissionID))
+        XCTAssertTrue(
+            model.skillLearningStore.finishInstallStatusLoading(
+                for: record.submissionID,
+                installed: nil
+            )
+        )
+        XCTAssertEqual(model.skillLearningStore.retainedSessionCount, 1)
+
+        daemon.setOwnerScopeSHA256("sha256:owner-b")
+        model.loadSessionDetail(record)
+        try await waitUntil {
+            model.sessionDetails[self.record.submissionID]?.ownerScopeSHA256 == "sha256:owner-b"
+        }
+
+        XCTAssertEqual(model.skillLearningStore.retainedSessionCount, 0)
+        XCTAssertEqual(model.sessionDetails.count, 1)
+    }
+
+    @MainActor
     func testSessionDetailRendersAtMobileAndDesktopWidths() async throws {
         let model = AppModel()
         model.setClientForTesting(client)
@@ -383,7 +495,10 @@ final class SessionPublicationTests: XCTestCase {
         window.appearance = NSAppearance(named: scheme == .dark ? .darkAqua : .aqua)
         window.contentView = hosting
         defer { window.close() }
-        await Task.yield()
+        // Attaching the window can emit app activation. SessionDetailView
+        // deliberately revalidates account-owned content on that event, so
+        // wait for the synthetic daemon round trip before measuring it.
+        try await Task.sleep(for: .milliseconds(100))
         hosting.layoutSubtreeIfNeeded()
         let height = ceil(hosting.fittingSize.height)
         XCTAssertGreaterThan(height, 300)

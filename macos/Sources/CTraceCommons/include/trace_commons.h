@@ -590,6 +590,14 @@ char*       tc_private_inference_copy(void);
  */
 char*       tc_public_run_copy(void);
 
+/* Every fixed word on the correction-derived skill surface, as one OWNED JSON
+ * object. Validate a skill editor payload with the Rust contract and receive
+ * validity, a fixed error label, character counts, and display limits without
+ * echoing the draft. Returned strings are owned; free with tc_string_free.
+ */
+char*       tc_skill_learning_copy(void);
+char*       tc_skill_draft_validate(const char* input_json);
+
 /* Validate and normalize a native publication editor payload through the
  * shared Rust protocol. Returns an owned JSON result; free it with
  * tc_string_free. input_json may be NULL, otherwise it must be NUL-terminated
@@ -603,6 +611,7 @@ char*       tc_public_run_validate_editor(const char* input_json);
  */
 char*       tc_session_detail_error_line(const char* label);
 char*       tc_public_run_error_line(const char* label);
+char*       tc_skill_learning_error_line(const char* label);
 
 /* Whether quitting may interrupt owned model-call work, including stopping.
  * requested_on is boolean (0/nonzero). Off and foreign ownership return 0;

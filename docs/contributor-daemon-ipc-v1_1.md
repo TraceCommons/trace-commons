@@ -1,4 +1,4 @@
-# Contributor daemon IPC — `trace_commons.daemon.v1_1`
+# Contributor daemon IPC: `trace_commons.daemon.v1_1`
 
 Status: **stable, additive, with one deliberate exception**. This is the
 contract the native menu-bar and window applications are built against, on
@@ -25,7 +25,7 @@ old behaviour, because no application has shipped against `v1` yet. See
   each validated against a fixed ceiling rather than left open (see
   [`set_settings`](#set_settings)). Before this, the only way to raise either
   cap was to stop the daemon and hand-edit `daemon-settings.json`.
-- `project_id` — an opaque, daemon-issued handle for a project. It appears
+- `project_id` is an opaque, daemon-issued handle for a project. It appears
   on every queue entry (`list_pending`, the `snapshot` event) and on every
   `list_projects` row, and `set_project_mode` accepts it in place of
   `project_key`. Before this, a socket client could not call
@@ -38,7 +38,7 @@ old behaviour, because no application has shipped against `v1` yet. See
   consent scope but had no way to claim the handle that scope is about, so
   the "Go public" flow and the settings profile panel were unreachable from
   every application. See ["The public profile"](#the-public-profile).
-- `status.routing` — whether the IronWire proxy overlay is declared and
+- `status.routing` reports whether the IronWire proxy overlay is declared and
   whether it is producing anything, in three states rather than two. Before
   this, a contributor who declared a proxy that never produced a row saw the
   same nothing as one who never declared it, and a declaration change did
@@ -48,9 +48,9 @@ old behaviour, because no application has shipped against `v1` yet. See
   ones, each with the mode actually in force and a `configured` boolean. An
   onboarding screen that asks a contributor to exclude a repository has to
   be able to list a repository nobody has ruled on yet.
-- `preview_turns` — an index of turn boundaries **into the body
+- `preview_turns` provides an index of turn boundaries **into the body
   `preview_body` already returns**. The transcript surface wants
-  `— user — turn 1 —` separators and a `144 more turns` footer, and had
+  separators that identify `user` and `turn 1`, plus a `144 more turns` footer. It had
   nothing to place them from. This is strictly an overlay: `preview_body`'s
   request and response shapes are untouched, its bytes are unchanged, and
   every offset indexes that same string. The daemon deliberately does not
@@ -59,7 +59,7 @@ old behaviour, because no application has shipped against `v1` yet. See
   contributor less than the artifact under a tab titled "exactly what would
   be sent". See ["`preview_turns`"](#preview_turns).
 - `preview_request`, `preview_visible`, `preview_cancel`, and the
-  `preview_ready` event — the **bounded** preview path. `preview` builds on
+  `preview_ready` event form the **bounded** preview path. `preview` builds on
   the connection's time, which meant a shell drawing a list of N cards
   started N full read-parse-redact-serialize passes at once; on one
   contributor's machine (about 500 queued sessions, 11.7 GB across 4,097
@@ -78,6 +78,13 @@ old behaviour, because no application has shipped against `v1` yet. See
   sense -- no existing `history_rollup` field changed shape, and a client
   that ignores the object is unaffected. See
   ["`history_rollup`"](#history_rollup).
+- `history_detail`, reviewed public pages, and the seven `skill_*` methods
+  add the account-owned session-to-skill flow. The daemon derives a candidate
+  from one accepted correction, freezes the owner-reviewed Agent Skill,
+  compares it with two controls through a NEAR-owned model, and exposes a
+  signed, preview-before-write Codex installation with rollback. See
+  ["Session detail and publication"](#session-detail-and-publication) and
+  ["Tested skill workflow"](#tested-skill-workflow).
 
 `crates/trace-commons-contributor/tests/daemon_ipc_contract.rs` is the
 executable half of this document. `hello` reports its own method list and a
@@ -98,7 +105,7 @@ containing directory: the daemon refuses to serve unless it is 0700, and a
 place a socket there either.
 
 **Windows**: a named pipe at `\\.\pipe\trace-commons-daemon-<16 hex>`, where
-the hex is a SHA-256 prefix over the state directory path — never the path
+the hex is a SHA-256 prefix over the state directory path. The path itself
 itself, which under the default layout carries the OS username, and which a
 pipe name would expose to every process on the machine.
 
@@ -107,7 +114,7 @@ matters. A named pipe does not live in the state directory; it lives in the
 machine-wide pipe namespace, where any local process may attempt to open it
 by name. **Its DACL is the only thing protecting it.** The daemon builds one
 granting the creating user's SID alone (`D:P(A;;GA;;;<sid>)`, protected so
-no inherited entry can widen it) and refuses to serve if it cannot — there is
+no inherited entry can widen it) and refuses to serve if it cannot. There is
 no fallback to a default-ACL pipe, because that fallback is the
 vulnerability. The first instance is created with `first_pipe_instance` so a
 squatter cannot pre-create the name under a weaker descriptor and be served
@@ -120,20 +127,20 @@ opens the pipe as a file handle, which has no equivalent of
 > **The Windows DACL is verified by CI, and that job has not yet run.**
 > Type-checking for `x86_64-pc-windows-gnu` establishes the FFI signatures
 > and the control flow and nothing about whether the descriptor actually
-> excludes another user — a runtime property no cross-compile can observe.
+> excludes another user, which is a runtime property no cross-compile can observe.
 > The observation is the `windows-pipe-acl` CI job
 > (`scripts/windows/verify-pipe-acl.ps1`, driving
 > `src/bin/win-pipe-acl-probe.rs`): on `windows-latest` it creates a second,
 > non-administrator local account, has it attempt to open the pipe, and
 > requires ERROR_ACCESS_DENIED, with a control confirming the owning user is
-> still admitted. The account is deliberately not an administrator — one can
+> still admitted. The account is deliberately not an administrator because one can
 > take ownership of any object and would reach the pipe regardless, so that
 > test would look like evidence while proving nothing.
 >
 > **That job has run and passed** (PR #247, run 31307072159): `DENIED 5` from
-> the second user — ERROR_ACCESS_DENIED, refused by the access check
+> the second user: ERROR_ACCESS_DENIED, refused by the access check
 > specifically rather than by pipe-busy or file-not-found, which the script
-> rejects so a coincidental refusal cannot pass as evidence — and `CONNECTED`
+> rejects so a coincidental refusal cannot pass as evidence. It also recorded `CONNECTED`
 > from the owner. The claim holds only while that job keeps running; weaken
 > or remove it and the verification lapses with it.
 
@@ -219,7 +226,7 @@ It does not prevent anything; it only lets a contributor later see that
 something happened. Do not build a security argument, a permission gate, or
 any enforcement logic on top of `list_audit` -- it is a record, not a guard.
 
-## Naming a project: ids, keys, and labels
+## Project identifiers
 
 A project has three names on this contract, and they are not
 interchangeable.
@@ -244,7 +251,7 @@ can see a project can name it. `set_project_mode` accepts it in place of
 `project_key`, and it is the identifier **every socket client should use**.
 `project_id` wins if both are sent.
 
-An id resolves only against projects the daemon already knows — one already
+An id resolves only against projects the daemon already knows: one already
 in the policy, one sitting in the queue, or the `unknown-project` sentinel.
 An id that resolves to none of those is refused with the fixed label
 `project-id-unrecognized`, and nothing is recorded.
@@ -253,13 +260,13 @@ Knowing an id confers nothing. It is an identifier, not a capability: the
 same call was always available to anyone who could name the directory, and
 resolution is still limited to projects the daemon discovered on its own.
 
-### `project_key`, and why it is still accepted
+### Accepted `project_key` use
 
 `project_key` is an absolute local path. It does not cross the socket in any
 response, and no GUI should ever hold one. It remains an accepted
 *parameter* for exactly one caller: a human in a terminal running
 `daemon project <path> --mode ignore` **before that project's first
-session** — the flow that excludes a repository pre-emptively. The daemon
+session**. This flow excludes a repository pre-emptively. The daemon
 cannot mint an id for a project it has never discovered, so an id cannot
 serve that flow, and the two coexist deliberately rather than one replacing
 the other.
@@ -315,7 +322,9 @@ something it can corroborate, rather than to a string a client invented.
 - `preview` returns a **summary** over the socket -- counts, labels, and
   sizes. The full redacted event body is a separate call, `preview_body`,
   because it does not fit one frame and has to be paged. Both carry trace
-  content under the one carve-out below; nothing else on this surface does.
+  content under the preview boundary below. Account-authenticated session
+  detail and tested-skill extraction have their own bounded content boundary;
+  no other method returns session-derived text.
   An earlier revision of this document said the body was deliberately
   in-process only, reachable through the crate's C ABI, on the reasoning
   that any process could compute a preview for itself. That reasoning does
@@ -327,15 +336,13 @@ something it can corroborate, rather than to a string a client invented.
   the running daemon is still holding. So the body is served over the
   socket, paged.
 
-### The preview exemption
+### The preview content boundary
 
-`preview` is the **one** interface that deliberately carries trace content,
-and this is a decision, not a contradiction left lying around. The socket's
+The preview interfaces deliberately carry trace content. The socket's
 `opening_prompt`, the socket's `preview_body` chunks, and the C ABI's
 `tc_preview_body` are all trace content. A contributor cannot consent to
 sending something they cannot see; an approval given against a byte count
-and a project name is not an informed one. So the rule has exactly one
-carve-out, and it is bounded:
+and a project name is not an informed one. This content is bounded:
 
 - **Post-redaction only.** What preview carries is what the real redaction
   pipeline produced. Raw session text never crosses either boundary.
@@ -389,9 +396,10 @@ the rest of the exemption, plus three of their own:
 They never cross the socket or the C ABI. `preview` reports the
 `envelope_digest` that identifies them; it does not serve them.
 
-Everywhere else the rule remains absolute: no path, token, invite code,
-claim, device key, or trace content in any log line, error string, receipt,
-history record, audit entry, notification text, or IPC response.
+Outside the preview, owned-session, and tested-skill response fields named in
+this contract, the rule remains absolute: no unrestricted local path, token,
+invite code, claim, device private key, or trace content appears in a log line,
+error string, receipt, audit entry, notification text, or IPC response.
 
 ## Native onboarding state and bootstrap trust
 
@@ -454,7 +462,14 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `set_project_mode` | `project_id` **or** `project_key`, `mode` (`label` accepted and ignored) | `ok: true`, `purged: <count>` | socket clients send `project_id`; `auto_upload` no longer requires a terminal; see "Naming a project" above and "`set_project_mode` and the ignore purge" below |
 | `list_history` | `limit` (optional, default 50, max 1000) | `history[]` | |
 | `history_rollup` | — | see below | |
-| `history_detail` | `submission_id` | owned redacted outcome, correction, up to 24 evidence candidates, contributed versions, and publication state | one account-authenticated request; each excerpt capped at 700 characters |
+| `history_detail` | `submission_id` | owned redacted outcome, correction, up to 24 evidence candidates, contributed versions, publication state, and an opaque local owner-scope digest | one account-authenticated request; each excerpt capped at 700 characters; native clients use the digest only to evict account-owned caches after sign-in changes |
+| `skill_candidate` | `submission_id` | candidate, correction, up to six evidence excerpts, default draft, manual control, evaluation contract, and optional replacement review id | reads the same account-owned redacted record as `history_detail`; no model call |
+| `skill_review` | `candidate_id`, `draft: {name, description, procedure}`, `replaces_review_id` (optional) | reviewed draft, complete `SKILL.md`, SHA-256, and source lineage | validates and freezes the exact skill locally; a changed prior review requires its id |
+| `skill_evaluate` | `review_id`, `skill_sha256` | bounded three-arm evaluation report, source-exclusion record, regressions, and install verdict | uses one eligible NEAR-owned model; sends public fixtures and approved generic skill content only |
+| `skill_install_plan` | `evaluation_id` | exact `SKILL.md`, signed marker JSON, separate preview digests, symbolic locations, occupancy, and install permission | performs blocking local inspection without writing the package |
+| `skill_install_commit` | `plan_id`, `as_previewed_sha256`, `as_previewed_marker_sha256` | installed package identity, source lineage, digests, time, and symbolic target location | one-use commit of both previewed files; never accepts paths from the client |
+| `skill_install_status` | `source_submission_id` | `installed`, plus verified `skill` or `null` | verifies exact signed on-disk state after restart |
+| `skill_install_rollback` | `install_id`, `source_submission_id` | `removed`, `retained_directory` | makes the skill unavailable with one quarantine rename and retains a non-loadable backup |
 | `publish_public_run` | `submission_id`, `draft`, `task_success`, `contributed_version`, `expected_publication_version` | reviewed public page | computes the approval digest over every public field and owner-state version |
 | `unpublish_public_run` | `submission_id` | `unpublished`, `expected_publication_version` | idempotent account-authenticated request |
 | `refresh_history` | — | `requested: true` | |
@@ -521,8 +536,8 @@ holding back.
 
 It is deliberately **not** routed through `health`. The daemon does set
 `daily-cap-reached` when a cap refuses an upload, but that label sits at the
-bottom of the precedence order, so any other condition — a full queue, in
-the case this field was added for — occupies the single
+bottom of the precedence order, so any other condition, including the full
+queue that prompted this field, occupies the single
 `health.last_error_label` slot and the cap becomes invisible. A client that
 only reads `health` therefore cannot tell a spent budget from a broken
 daemon. Read `daily_budget` independently of `health`.
@@ -542,7 +557,7 @@ stops at the first entry that does not fit rather than skipping past it, so
 a small entry queued behind a large one waits as well.
 
 `blocked` is false when the budget is spent but nothing is approved and
-waiting — there is no one to tell in that case.
+waiting. No contributor action is pending in that case.
 
 Counts and timestamps only. No entry id, hash, or path appears here.
 
@@ -553,9 +568,9 @@ no per-entry equivalent.
 #### `routing`
 
 Additive, and the protocol version is unchanged: `trace_commons.daemon.v1_1`
-stays as it is. Every shell ignores keys it does not know — the Swift models
+stays as it is. Every shell ignores keys it does not know. The Swift models
 decode declared keys only, the GTK models carry no `deny_unknown_fields`, and
-the Windows deserializer is left at its default — so an older shell against a
+the Windows deserializer is left at its default, so an older shell against a
 newer daemon behaves exactly as it did before, which is the rule this
 document's "additive" status already states.
 
@@ -591,28 +606,30 @@ This does not authenticate a later listener or cancel an already in-flight reque
 | `token_unreadable` | declared, and no ledger could be built: `control.token` could not be read |
 | `unknown` | internal routing state is unavailable; no configuration or token diagnosis is implied |
 
-Every routing snapshot includes `derived: true|false`. True identifies automatic
-metadata routing from this daemon's owned proxy; false identifies an explicit or
-absent declaration. With `state: "unknown"`, false is only a conservative default,
-not evidence that metadata is disabled. Shells use the effective status and its
-origin alongside the independent explicit declaration controls. The shared routing
-copy payload includes `derived_origin` for that explanation and `state_unknown`
-for unavailable nonempty labels. The origin is descriptive and never turns the
-explicit routing switch on or enables body reading. Older snapshots without
-`derived` omit that explanation; they do not synthesize it from a hosting flag.
+Every routing snapshot includes `derived: true|false`, with these meanings:
+
+- `true` identifies automatic metadata routing from this daemon's owned proxy.
+- `false` identifies an explicit or absent declaration.
+
+With `state: "unknown"`, false is a conservative default that provides no
+evidence about metadata status; shells should present the effective status,
+its origin, and the independent explicit declaration controls together. The
+shared routing copy includes `derived_origin` for that explanation and
+`state_unknown` for unavailable nonempty labels. `derived_origin` is descriptive
+and cannot enable routing or body reading; older snapshots omit the explanation.
 
 `token_unreadable` is what a declared proxy that is not running looks like,
 and it is the one state a contributor has to act on. It was reported as
 `not_declared` before it existed, which made a shell print "off" under a
 switch the contributor could see was on. It is not `awaiting_rows` either:
 that state says a reader exists and has seen nothing, and this one says no
-reader exists. `last_refresh_at` is always `null` under it — nothing was
+reader exists. `last_refresh_at` is always `null` under it because nothing was
 built, so nothing was ever checked.
 
 `awaiting_rows` is **not an error** and a client must not render it as one.
 A machine whose proxy was installed this morning reports it, and so does one
 whose declaration changed a second ago: `set_settings` rebuilds the ledger in
-place — no restart — and a rebuilt ledger starts cold by construction. Say
+place without a restart, and a rebuilt ledger starts cold by construction. Say
 "nothing seen yet", not "broken".
 
 The distinction `not_declared` carries cannot be recovered from row counts:
@@ -621,7 +638,7 @@ nothing both have zero rows, and reporting them the same way tells a
 contributor whose declaration never took that everything is fine.
 
 `last_refresh_at` is when a refresh last **reached** the proxy and came back
-readable — RFC 3339, or `null` when none ever has. It is not stamped on a
+readable (RFC 3339), or `null` when none ever has. It is not stamped on a
 failed attempt, which is what makes it useful: rows say data exists, not that
 the proxy answers now, and a proxy that died an hour ago still has rows. With
 `awaiting_rows`, a non-null `last_refresh_at` means the proxy answered and
@@ -682,7 +699,7 @@ No ordinal is exposed -- there is no "1 of 3" -- because nothing in the
 transcript format supplies one. Ordering delegated transcripts against each
 other would be a claim this daemon cannot verify.
 
-`opening_prompt` is redacted trace content -- see "The preview exemption"
+`opening_prompt` is redacted trace content -- see "The preview content boundary"
 above for why this one field is allowed to be, and what that permission does
 not extend to.
 
@@ -729,10 +746,10 @@ preview a local file; that requirement was incidental and is gone.
 
 `enrolled` says which kind of preview you got:
 
-- `true` — the ordinary case. Built from the real enrolled identity through
+- `true` is the ordinary case. It is built from the real enrolled identity through
   the configured privacy filter, and (as described above) **pinned**: the
   envelope is stored and a later `approve` covers exactly those bytes.
-- `false` — no enrollment on this device. The envelope is built from the
+- `false` means this device has no enrollment. The envelope is built from the
   same placeholder identity the CLI's unenrolled `--dry-run` uses, with a
   preview submission id disjoint from any real one, and through the
   **deterministic-only** redactor: any configured external privacy filter is
@@ -758,29 +775,29 @@ The handler enforces these conditions:
 
 1. Require an authenticated local IPC caller, an enrolled device, a pending entry
    the caller already holds, and explicit confirmation to send this session to
-   the configured remote witness before redaction. Body-export consent remains
-   separate: read `ironwire_attested_bodies` from current daemon settings, never
-   from a caller's inferred proxy/scanner state. No confirmation means no work.
+   the configured remote witness before redaction. Read the separate body-export
+   consent, `ironwire_attested_bodies`, from current daemon settings; a missing
+   confirmation ends the request before work begins.
 2. Snapshot the selected entry's source hash and current configuration, including
-   consent and witness pins. Call `preview::build_witnessed_preview` with
+   consent and witness pins, then call `preview::build_witnessed_preview` with
    `WitnessPreviewOptions { raw_session_confirmed, expected_session_hash,
    include_inference_bodies, verdict, correction }`. A missing/stale device,
    changed source, unpinned witness, failed claim, or unverified certificate
-   refuses. There is no local-redaction fallback.
-3. This is an ordinary authenticated upload-claim request, not an admission or
-   credit action. Its explicitly echoed grant must be fresh and no wider than
-   requested permissions. The granted scopes/uses are included in the bytes the
-   witness certifies. The helper never uploads a contribution or persists a token.
+   refuses without a local-redaction fallback.
+3. Use an ordinary authenticated upload-claim request, separate from admission
+   and credit. Its explicitly echoed grant must be fresh and no wider than the
+   requested permissions; the witness certifies bytes that include the granted
+   scopes and uses. The helper uploads no contribution and persists no token.
 4. On completion, take the queue lock and recheck that the entry is still pending
-   and its source/configuration/consent match the snapshot. Persist via
+   and its source/configuration/consent match the snapshot; persist via
    `approved_envelope::save_witnessed`, then pin `summary.envelope_digest` and save
-   the queue. A failed save must not allow approval without a persisted artifact.
-   Never route this result through the local-envelope `save` function.
+   the queue. A failed save blocks approval, and the result never passes through
+   the local-envelope `save` function.
 5. `witness-sha256:` pins identify the full versioned record: exact wire bytes,
    certificate/signature, source hash, configuration fingerprint, and approval
-   answers. Read through `load_witnessed`; check its digest and `validate` against
+   answers; read through `load_witnessed`, check its digest and `validate` against
    current context, then use `envelope()` for existing body/turn/summary rendering.
-   Missing, corrupt, partial, unknown-version, or legacy local records are refused.
+   Missing, corrupt, partial, unknown-version, and legacy local records are refused.
 6. The witnessed artifact is immutable. Corrections/verdicts must be supplied
    before that explicit review, and approval must match those answers exactly.
    A changed answer requires another explicit review; neither ordinary `approve`
@@ -818,7 +835,7 @@ revision" note for what that measured out to on a real machine.
 on-screen entries first, and refuses sessions too large to be worth parsing
 for a card.
 
-**`preview_request`** — params `{entry_id}`. Returns immediately, always,
+**`preview_request`** takes `{entry_id}`. It always returns immediately,
 with an object whose `state` is one of:
 
 | `state` | Also carries | Meaning |
@@ -842,14 +859,14 @@ Calling this repeatedly for the same entry is free and is the intended
 usage: a cached result comes straight back, and an entry already queued or
 building is not enqueued twice.
 
-**`preview_visible`** — params `{entry_ids: [...]}`. Replaces the daemon's
+**`preview_visible`** takes `{entry_ids: [...]}` and replaces the daemon's
 idea of what is on screen, wholesale. Send it after each scroll settles; it
 takes one lock and moves no work. Visibility decides the **order** previews
 are built in, never whether they are built: an entry that scrolls away keeps
 its place in the queue. An unparseable id is `bad_params` /
 `entry-ids-invalid`; an empty array is valid and means nothing is on screen.
 
-**`preview_cancel`** — params `{entry_id}`. Returns `{entry_id, dropped}`.
+**`preview_cancel`** takes `{entry_id}` and returns `{entry_id, dropped}`.
 `dropped: false` means there was nothing to drop -- already finished, never
 requested, already cancelled -- and is not an error, because a client that
 cancels on every card leaving the list will hit it constantly.
@@ -879,9 +896,8 @@ already `approved`, so a declined conversation uploaded unattended.
 addresses every session -- by its path. Once dismissed, the watcher skips
 that session for good: no new `pending` card, no `approved` one, and no
 re-read (the skip sits in front of the load, so a declined conversation
-someone keeps working in costs nothing per poll). Arming a project does not
-override it -- `auto_upload` is a standing yes to sessions the contributor
-has not ruled on, not to one they have.
+someone keeps working in costs nothing per poll); arming a project cannot
+override it because `auto_upload` applies only to sessions without a ruling.
 
 There is no un-dismiss. The record is the dismissed entry itself, which
 lives in the queue file with reason `dismissed-by-contributor` and is never
@@ -961,12 +977,11 @@ Response:
 ```
 
 **It is paged, and you must page it.** A redacted envelope can approach the
-1.5 MB envelope ceiling; a socket line is capped at `max_line_bytes` (1 MiB).
-A single frame therefore cannot be promised, so there is none: read from
-`offset: 0`, append `chunk`, and follow `next_offset` until it is `null`.
-Nothing is ever silently truncated -- `total_bytes` is the length of the
-whole body, and a client that has not received `[0, total_bytes)` has not
-read the trace.
+1.5 MB envelope ceiling while a socket line is capped at `max_line_bytes`
+(1 MiB), so the method promises no single frame. Read from `offset: 0`, append
+each `chunk`, and follow `next_offset` until it is `null`; `total_bytes` gives
+the whole length, and receiving less than `[0, total_bytes)` means the trace
+remains incomplete.
 
 **Continuation pages must be anchored.** Every response carries
 `body_digest`, a SHA-256 over the complete body. Send it back on every
@@ -1020,7 +1035,7 @@ the body it is showing belongs to the summary it displayed.
 ### `preview_turns`
 
 Where the turns begin inside the body `preview_body` returns, so a client
-can draw `— user — turn 1 —` separators and a `144 more turns` footer over a
+can draw separators that identify `user` and `turn 1`, plus a `144 more turns` footer over a
 transcript it is rendering verbatim.
 
 **This adds nothing to the body and changes nothing about it.** It is an
@@ -1068,7 +1083,7 @@ event names a tool. `byte_offset` and `byte_len` are a half-open range of
 **Grouping: a tool call and its result are one turn.** A `tool_call`
 followed immediately by the `tool_result` carrying the same `tool_call_id`
 is indexed as a single turn spanning both events, so the separator reads
-`— tool: bash — turn 3 —` once rather than putting a boundary between a
+`tool: bash, turn 3` once rather than putting a boundary between a
 command and its output. The pairing must be explicit and adjacent:
 an unmatched call, a result whose call is missing, a pair reordered by the
 source, and a pair with no `tool_call_id` to correlate on are all one turn
@@ -1159,20 +1174,19 @@ eligibility" below.
 
 Every project the daemon knows about, in two kinds:
 
-- **configured** (`configured: true`, `added_at` set) — the contributor has
+- **configured** (`configured: true`, `added_at` set) means the contributor has
   ruled on it with `set_project_mode`.
-- **discovered** (`configured: false`, `added_at: null`) — the daemon has
+- **discovered** (`configured: false`, `added_at: null`) means the daemon has
   seen a session for it and nobody has ruled on it. `mode` is the effective
   mode, which for an unruled project is the `notify_only` default.
 
 #### `is_unresolved_bucket`
 
 True for exactly one row: the bucket holding sessions whose working directory
-had no usable final segment. Sessions in it can never be armed for automatic
-upload — `Policy` refuses `auto_upload` for that key independently of any
-client — so a shell showing the row with a permanent note is **reporting**
-enforcement, not performing it. `Ignore` still applies: the bucket can be
-silenced even though it cannot be armed.
+had no usable final segment. `Policy` prevents those sessions from being armed
+for automatic upload, independently of any client, so a shell showing the row
+with a permanent note is **reporting** enforcement. `Ignore` still applies and
+can silence the bucket.
 
 The flag is sent rather than left for clients to derive, because the daemon is
 the only side that knows it for free. Deriving it means re-implementing the
@@ -1187,7 +1201,7 @@ the moment that wording improves, and does it silently.
 Discovered rows are reported because the onboarding "which of these should
 never be uploaded" screen has to list precisely the projects nobody has
 decided about yet. A project becomes configured only by being ruled on, so a
-configured-only list is a list of decisions already made — it can never
+configured-only list contains decisions already made, so it can never
 contain the repository the contributor is being asked to exclude. Nothing
 new crosses the socket: a discovered row carries the same two
 daemon-derived fields (`project_id`, `project_label`) that the queue entry
@@ -1199,13 +1213,11 @@ file says `auto_upload`, because the daemon refuses to act on that.
 
 ### The `outcome` verdict
 
-`approve` accepts an optional `outcome` parameter: the contributor's own
-verdict on how the session went. It is optional; the accepted values are
-`worked`, `partly`, or `failed`. Absent means `TaskSuccess::Unknown`, and the
-approval proceeds normally -- no verdict is not an error. Any other value is
-refused with `bad_params` (`outcome-invalid`) and approves nothing. A value
-supplied alongside `all` or `project_id` applies to every entry that
-approval covers, not just one.
+`approve` accepts an optional `outcome` parameter for the contributor's verdict
+on the session. Accepted values are `worked`, `partly`, and `failed`; absence
+maps to `TaskSuccess::Unknown` and allows approval to proceed. Any other value
+returns `bad_params` (`outcome-invalid`) without approving an entry, while a
+valid value sent with `all` or `project_id` applies across that approval.
 
 ### The `correction` parameter
 
@@ -1366,10 +1378,9 @@ This is the whole signal a one-click submit needs: a client that never calls
   cannot happen. An `entry_id` naming no entry at all is refused before any
   of this runs -- see below.
 - **An unrecognized `entry_id`** is refused the same way `preview` refuses
-  the same input: `bad_params` / `unknown-entry-id`, not a `skipped` entry.
-  This applies only to the single-`entry_id` form. `all` and `project_id`
-  cannot produce this case: their ids are read from the queue itself at
-  selection time, so every id they act on already names a real entry.
+  the same input: `bad_params` / `unknown-entry-id`, before a `skipped` entry
+  can be produced; this applies only to the single-`entry_id` form because
+  `all` and `project_id` select existing ids from the queue.
 - **An unrecognized `project_id`** is refused the same way
   `set_project_mode` refuses it: `bad_params` / `project-id-unrecognized`.
   A handle the daemon cannot resolve is a client bug, and answering it
@@ -1838,8 +1849,8 @@ second edit to the same file, and on a file that did not exist before.
 
 ### `set_settings`
 
-Takes a JSON object of settings to change. Every top-level key must be one
-of `quiescence_secs`, `digest_interval_secs`, `approval_hold_secs`,
+Takes a JSON object whose top-level keys must come from
+`quiescence_secs`, `digest_interval_secs`, `approval_hold_secs`,
 `local_notifications`, `claude_root`, `codex_root`, `claude_source`,
 `codex_source`, `gemini_source`, `cline_source`, `opencode_source`, `ironwire`,
 `ironwire_attested_bodies`, `private_inference`,
@@ -1850,21 +1861,20 @@ not recognize is
 refused outright (`bad_params` / `settings-unknown-field`), not silently
 ignored, so a caller that mistypes a key gets a definite signal rather than
 a daemon that quietly kept the old value. A recognized key holding the
-wrong JSON type is refused the same way (`bad_params` /
-`settings-invalid-value`). An object with no keys at all is refused
-(`bad_params` / `no-known-setting-supplied`).
+wrong JSON type returns `bad_params` / `settings-invalid-value`; an empty
+object returns `bad_params` / `no-known-setting-supplied`.
 
 `opencode_source` takes `{"mode":"watch","path":"/chosen/export-directory"}`,
-`{"mode":"off"}`, or `null`. Absent/null and Off construct no adapter, including
-when loading older settings. Watch reads direct `.json` children exported with
-`opencode export SESSION_ID`; it does not scan OpenCode's database. Export
-version support and routing limits are recorded in
-[the qualification report](superpowers/reports/2026-09-07-opencode-export-qualification.md).
-This source declaration does not enable body capture or remote submission.
+`{"mode":"off"}`, or `null`; absent, null, and Off construct no adapter, including
+when older settings load. Watch reads direct `.json` children exported with
+`opencode export SESSION_ID` without scanning OpenCode's database; the
+[qualification report](superpowers/reports/2026-09-07-opencode-export-qualification.md)
+records version support and routing limits, and the declaration grants neither
+body capture nor remote submission.
 
 `approval_hold_secs` takes a non-negative integer: how long an approval is
-held before the uploader will touch it, i.e. how long the contributor's undo
-really lasts. Default 10; `0` disables the hold, and `approve` then reports
+held before the uploader will touch it, which sets the duration of the
+contributor's undo; the default is 10, while `0` disables the hold and makes `approve` report
 `hold_until: null` so a client knows to offer no undo. It is read at each
 upload pass, so a change applies to approvals already sitting in the queue,
 and a shortened hold can release an entry a client is still counting down
@@ -1873,9 +1883,11 @@ approval it accompanied, and do not change this setting mid-countdown.
 
 `claude_root` and `codex_root` each take a JSON string (a filesystem path)
 or `null` (clear the override, falling back to the conventional per-user
-location). Setting either here only takes effect from the daemon's *next*
+location); setting either here only takes effect from the daemon's *next*
 supervisor tick onward -- the tick already scheduled or in flight when this
-call returns has already read the old value. A caller that needs the
+call returns has already read the old value.
+
+A caller that needs the
 watcher to scan a non-default location from the very first tick -- most
 importantly a native host embedding the daemon via the C ABI, or a test
 harness that must never scan the real `~/.claude`/`~/.codex` -- cannot get
@@ -1883,26 +1895,26 @@ that through `set_settings`, since it only works on an already-running
 daemon and the first tick fires immediately on start. That is what the C
 ABI's `tc_daemon_start_with_settings` is for: it applies the same object
 this method validates, but before starting the daemon, so the first tick
-already observes the override. See `include/trace_commons.h`.
+already observes the override; see `include/trace_commons.h`.
 
 `ironwire_attested_bodies` takes a boolean, and it is a **second, separate
-answer from `ironwire`** rather than a detail of it. `ironwire` declares a
+answer from `ironwire`** rather than a detail of it; `ironwire` declares a
 local inference proxy whose ledger the daemon may read: metadata about model
 calls -- how many, what they cost, which backend served them. This key says
 that the final call's verbatim request and response bodies -- the
 contributor's own prompt, in the clear -- may additionally be carried to a
 configured redaction witness, which verifies an inference receipt against
-them inside its enclave, strips them, and certifies what is left. Declaring
+them inside its enclave, strips them, and certifies what is left; declaring
 the proxy therefore never switches this on: cost attribution is not consent
 to send a prompt, and a client that sets `ironwire` alone gets routing
 telemetry and no bodies.
 
 Default `false`, and a settings file written before this key existed loads
-with it off. Turning it on moves the approval fingerprint, so approvals
+with it off; turning it on moves the approval fingerprint, so approvals
 already given are re-asked rather than honoured under the new terms. The
 directory read is not configurable and is not this key: it is
 `bodies/` inside whichever proxy home the control token resolved in, so the
-body store and the ledger always belong to the same proxy. With no proxy
+body store and the ledger always belong to the same proxy; with no proxy
 declared, with the proxy declared off, or with no witness configured,
 setting this changes nothing that leaves the machine.
 
@@ -1965,17 +1977,26 @@ dropping the embedded daemon requests cleanup without blocking synchronously.
 Drop-based cleanup requires unwinding; a `panic=abort` build terminates the
 process instead and cannot finish in-flight requests.
 
-Existing-instance discovery reads at most 64 KiB from an opened regular pointer
-file and probes only the fixed IPv4 loopback health path. Accepted hosts are
-`127.0.0.1` and `localhost`; an IPv6-only pointer is not discovered through an
-unrelated IPv4 port. URL-shape restrictions are defense in depth because the
-request URL is constructed from the validated port, not used verbatim. On supported Unix targets,
-the opened object must match the checked device/inode and effective-user owner,
-remain unwritable by others, and is opened with no-follow/nonblocking flags so a
-replacement symlink or FIFO cannot bypass the check or block the open. Windows
-checks regular-file/reparse shape on the opened handle; this is not a DACL or
-Unix ownership guarantee. Advisory discovery fails closed on Unix targets other
-than shipped macOS and Linux x86_64/aarch64. The probe sends no token,
+Existing-instance discovery has two fixed bounds:
+
+- Read at most 64 KiB from an opened regular pointer file.
+- Probe only the fixed IPv4 loopback health path.
+
+Accepted hosts are `127.0.0.1` and `localhost`; an IPv6-only pointer is not
+discovered through an unrelated IPv4 port, while URL-shape restrictions add
+defense in depth because the request URL is constructed from the validated port.
+
+Platform checks differ:
+
+- On supported Unix targets, the opened object must match the checked
+  device/inode and effective-user owner, remain unwritable by others, and use
+  no-follow/nonblocking flags so a replacement symlink or FIFO cannot bypass
+  the check or block the open.
+- Windows checks regular-file/reparse shape on the opened handle. This check
+  supplies neither a DACL nor a Unix ownership guarantee.
+
+Advisory discovery fails closed on Unix targets other than shipped macOS and
+Linux x86_64/aarch64. The probe sends no token,
 ignores environment proxies, and never follows redirects. A successful health
 response is advisory: it conservatively avoids takeover but does not authenticate
 the endpoint. The exclusive home lock remains authoritative when starting.
@@ -2051,7 +2072,9 @@ Queue entries carry two additive fields. They appear on **every** surface that
 hands a client an entry object -- `list_pending`, the `snapshot` event, and
 the `entry` object both `preview` responses carry (the async-dispatch one and
 the built card) -- and on no other, because `entry_value` is the only thing
-that serialises a queue entry and those are all of its callers. `approve` and
+that serialises a queue entry and those are all of its callers.
+
+`approve` and
 the `preview_ready` event do not carry an entry object at all; they carry an
 `entry_id`. A client MUST NOT reconstruct eligibility from an entry it cached
 from some other path.
@@ -2385,7 +2408,7 @@ older attempt; `absent` is the answer only when there is nothing else to say.
 
 `attempt_id` and `attempt_status` are echoed only to a caller that already
 named the current attempt. A caller that names none, or names a stale one,
-still gets `state` -- the resting state is not a secret -- but learns nothing
+still gets `state`, since the resting state may be disclosed. The response reveals nothing
 that would let it cancel somebody else's ceremony, and the browser URL is
 never re-served.
 
@@ -2417,7 +2440,7 @@ calls wherever they went before.
 
 `harnesses_spend_scope` is the sentence that has to accompany the amount
 `tc_harness_spend_line` assembles: only calls answered on **this** computer
-are in the figure, and work a monthly plan has already paid for is not. A
+are in the figure. Work already covered by a monthly plan is excluded. A
 contributor signed in to the same account on a second machine, or in a
 browser, has spent more than the figure says, and the number without this
 sentence is a lie of omission. It is drawn beside the amount and only when
@@ -2521,7 +2544,7 @@ per upload, and no two read-backs are ever less than two minutes apart. A
 verdict, a quarantine, or a withdrawal moves the row out of `submitted` on
 the next refresh; the count can go down as well as up.
 
-Render `submitted` in the contributor's words — sent, waiting to hear back —
+Render `submitted` in the contributor's words: sent, waiting to hear back;
 and never as an error.
 
 The answer additionally carries a `community` object when, and only when,
@@ -2748,7 +2771,9 @@ instance of a pattern.
 
 These methods use the account session held in the operating system credential
 store. `history_detail` returns a bounded server projection of the owned,
-permanently redacted record. It includes the creator outcome, contributed
+permanently redacted record.
+
+It includes the creator outcome, contributed
 correction, version labels, owner publication version, and up to 24 redacted evidence candidates, with each excerpt capped at 700 characters. The response
 excludes raw trace content, credentials, tenant or account identifiers, and
 server error bodies.
@@ -2774,6 +2799,181 @@ Fixed route labels include `account-session-required`,
 `public-run-unpublish-failed`. They contain no contributed text, wallet
 material, identifier, URL, or response body.
 
+### Tested skill workflow
+
+The seven `skill_*` methods form one account-bound state machine. Every call
+requires the current account session from the operating system credential
+store. The daemon derives an opaque owner-scope SHA-256 from the ingest origin,
+tenant, instance, user subject, device key id, and NEAR account id; the source
+values stay inside the daemon. A changed scope clears held candidates, reviews,
+evaluations, plans, and in-memory installation receipts before the new owner can
+name them. Evaluation snapshots this scope and checks it again after all Cloud
+calls, returning `skill-owner-changed` rather than retaining a result for a
+different owner.
+
+Install methods also load the existing `DeviceIdentity` and require its key id
+to match the enrolled configuration. The public identity verifies markers
+after a restart. Its Ed25519 private key remains inside `DeviceIdentity` and is
+never serialized, logged, placed in a marker, or returned over IPC.
+
+#### Candidate and review
+
+`skill_candidate {submission_id}` re-reads the submission through the same
+account-authenticated owner route as `history_detail`. It accepts only an
+`accepted` record whose feedback is `correction`, whose correction matches the
+generated-source-repair family, and whose task can produce a bounded text-free
+fingerprint. This call performs no model inference.
+
+The candidate may return session-derived text from that owned record under
+these limits:
+
+- `source_correction` is the exact contributed correction, bounded by the
+  2,000-character approval limit and admitted only after credential-shape
+  screening. The correction is deliberately preserved as the owner's decisive
+  instruction; it never enters an evaluation prompt.
+- `source_evidence` contains no more than six items selected from the
+  permanently redacted envelope. Each excerpt remains within the session-detail
+  limit of 700 characters and retains its event id and fixed label.
+- The source task text is absent. `source_task_fingerprint` contains a SHA-256,
+  a 128-bit similarity hash, and a bounded token count so local fixture
+  selection can reject exact and lexical near-overlap.
+
+The response also carries the default draft, the disclosed simple control,
+the evaluation contract, and `replaces_review_id` when this source already has
+a review. At most 12 workflows remain in memory. When capacity is full, the
+daemon may evict an idle candidate, review, or completed evaluation; it refuses
+with `skill-workflow-capacity` when every slot has active or unexpired work.
+
+`skill_review {candidate_id, draft, replaces_review_id?}` validates and freezes
+the owner-edited draft locally. Names contain at most 64 lowercase ASCII
+letters, digits, or single internal hyphens. Descriptions contain 1 to 1,024
+characters, procedures contain 1 to 12,000 characters, and both pass the public
+text privacy validator and control-character checks. The response contains the
+rendered `SKILL.md`, its SHA-256, and source submission and evidence lineage.
+Changing an existing review requires its current `review_id`; an identical
+draft returns the frozen review.
+
+#### Evaluation
+
+`skill_evaluate {review_id, skill_sha256}` checks the supplied digest against
+the rendered review before the first catalog or completion request. A completed
+report for that review is idempotently returned. One comparison may run per
+daemon; another request receives `skill-evaluation-in-progress` for the same
+review or `skill-evaluation-busy` for a different review.
+
+The held-out contract is fixed and inspectable:
+
+- A client-shipped public fixture pool contains seven repository incidents.
+  Local SHA-256 and 128-bit SimHash comparison excludes exact or lexical
+  near-overlap with the source task. The first six eligible fixtures are scored,
+  remaining eligible ids are disclosed as reserves, and evaluation refuses
+  unless six remain.
+- Two metadata-only probes test whether the skill applies to one relevant task
+  and stays inactive for one unrelated task. Together with the six repository
+  plans, they produce eight tasks.
+- Every task runs through baseline, the disclosed simple manual instruction,
+  and the candidate skill, for 24 Cloud completion requests. Plan scheduling
+  starts independently at position zero and puts each arm twice in every
+  position.
+- Every request uses temperature zero, structured JSON, disabled reasoning, a
+  900-output-token ceiling, and a 90-second timeout. At most two requests run
+  concurrently.
+
+The daemon selects one model from the live NEAR AI catalog. An eligible record
+must report `ownedBy: nearai`, `isReady: true`, JSON-mode or structured-output
+support, and text output. `/v1/models` is consulted only when the current
+`/v1/model/list` route is unavailable. A deterministic compatibility list
+prefers models already exercised against the fixture contract, then falls back
+to the lexically first eligible model. Updating the list requires rerunning the
+transport and scoring suites. The selected id is pinned for the whole comparison;
+each completion response must report that same model or the daemon aborts with
+`skill-evaluation-model-changed`.
+
+Prompts contain public fixture evidence and the arm-specific control. The
+baseline receives neither instruction, the manual arm receives the fixed
+one-line instruction, and the candidate arm receives the frozen generic skill.
+They contain no session task, correction, evidence excerpt, account id, wallet
+material, host rule, host skill, or local repository file. Fixture selection is
+explicit through `selected_plan_task_ids`, `excluded_source_overlap_task_ids`,
+and `reserve_plan_task_ids`. Each trial carries its model output and scoring
+failures; the response also records model identity, usage, aggregate scores,
+and regressions. The catalog is capped at 2 MiB. A completion response is capped
+at 128 KiB, retained raw model output at 8 KiB, and the serialized report at
+768 KiB.
+
+Installation is allowed only when the candidate passes more of the six plan
+tasks than baseline and manual control, passes both applicability probes, and
+has no failure on a task either control passed. Replacing or forgetting the
+inference credential increments its local revision, races the active operation,
+and discards the result with `skill-evaluation-credential-changed`.
+
+#### Installation and recovery
+
+`skill_install_plan {evaluation_id}` requires a passing report whose digest
+still matches its review; the daemon resolves the absolute Codex skills root
+internally and never accepts a client path. Its response uses only
+`$CODEX_HOME/skills/<name>` symbolic locations and contains the exact
+`skill_md`, canonical signed `marker_json`, `skill_sha256`, and separate
+`marker_file_sha256`.
+
+`occupied: true` makes `can_install` false without
+changing the destination. An installable plan is held for ten minutes.
+
+The schema-v2 marker binds the install id, evaluation id, source submission and
+evidence ids, tool, name, skill digest, installation time, owner-scope SHA-256,
+and device key id. It contains a digest over the domain-separated canonical
+signing bytes and an Ed25519 device signature; unknown fields or non-canonical
+JSON fail verification.
+
+`skill_install_commit` accepts only `plan_id`, `as_previewed_sha256`, and
+`as_previewed_marker_sha256`. Both digests must match the exact bytes returned
+by the plan, and the signed marker must still match the identity, owner scope,
+review, and evaluation. A plan is single-use, including after a refused commit;
+the client must request another plan before retrying.
+
+Commit assembles and syncs the complete marker and `SKILL.md` package in a
+private sibling directory, then publishes it with one exclusive atomic
+directory rename. Platform-specific publication refuses to replace an existing
+target, and the daemon verifies the staged directory identity after the rename.
+Failures before publication clean only the unchanged staging directory created
+by that transaction. `skill_install_status` repeats exact signed-package
+verification after restart and refuses multiple matching lineage records. A
+root scan stops after 512 entries.
+
+`skill_install_rollback {install_id, source_submission_id}` first resolves the
+signed status and validates the exact two-file package. It then renames the
+whole target directory to an ignored quarantine name, which is the logical
+rollback commit. Validation or namespace failure before that rename leaves the
+loadable target in place. After the rename, the daemon retains the package in
+quarantine and renames `SKILL.md` and the marker to names Codex and status do
+not recognize. Success returns `removed: true, retained_directory: true`; a
+post-rename cleanup race never deletes the retained package.
+
+#### Errors, dispatch, and interruption
+
+Errors use the ordinary response code plus a fixed `error.message`; contributed
+text, paths, model bodies, credentials, and private keys never enter a label.
+The method-specific labels are:
+
+| Phase | Fixed labels |
+|---|---|
+| Account and ownership | `account-session-required`, `commons_credential_storage_unavailable`, `session-detail-not-found`, `session-detail-unavailable`, `skill-owner-changed`, `skill-install-identity-unavailable` |
+| Candidate | `submission_id-invalid`, `skill-session-not-accepted`, `skill-correction-required`, `skill-family-not-supported`, `skill-source-task-fingerprint-unavailable`, `skill-workflow-capacity`, `skill-candidate-unavailable` |
+| Review | `skill-review-invalid`, `skill-candidate-unknown`, `skill-name-invalid`, `skill-description-required`, `skill-description-too-long`, `skill-procedure-required`, `skill-procedure-too-long`, `skill-control-character`, `skill-sensitive-text`, `skill-review-unavailable` |
+| Evaluation | `skill-evaluation-invalid`, `skill-review-unknown`, `skill-review-changed`, `skill-evaluation-in-progress`, `skill-evaluation-busy`, `skill-evaluation-credential-changed`, `skill-evaluation-credential-required`, `skill-evaluation-client-unavailable`, `skill-evaluation-catalog-unavailable`, `skill-evaluation-private-model-unavailable`, `skill-evaluation-request-unavailable`, `skill-evaluation-provider-rejected`, `skill-evaluation-funding-required`, `skill-evaluation-response-too-large`, `skill-evaluation-model-changed`, `skill-evaluation-held-out-set-unavailable`, `skill-evaluation-internal`, `skill-evaluation-unavailable` |
+| Install plan and commit | `evaluation_id-invalid`, `skill-evaluation-unknown`, `skill-evaluation-did-not-pass`, `skill-install-plan-unknown`, `skill-install-commit-invalid`, `skill-home-unavailable`, `skill-install-root-invalid`, `skill-install-occupied`, `skill-install-plan-changed`, `skill-install-write-failed`, `skill-install-plan-unavailable`, `skill-install-commit-unavailable`, `skill-install-rollback-incomplete` |
+| Status and rollback | `skill-install-status-invalid`, `install_id-invalid`, `skill-install-unknown`, `skill-install-not-owned`, `skill-install-modified`, `skill-install-extra-files`, `skill-install-multiple-matches`, `skill-install-scan-limit`, `skill-install-status-unavailable`, `skill-rollback-unavailable` |
+
+Candidate, evaluation, and all four install methods require async dispatch; a
+synchronous call returns the matching `skill-*-requires-async` label. Review is
+local and remains available through the synchronous dispatcher.
+
+There is no separate skill cancellation method. A credential revision cancels
+evaluation as described above, an owner change drops the previous owner's held
+state, and operation guards restore `Reviewed` or `Evaluated` when evaluation,
+planning, or installation exits before its success transition. Expired and
+consumed plans return `skill-install-plan-unknown` and require a fresh preview.
+
 ### The public profile
 
 Three methods, one shape. `set_public_profile` and `clear_public_profile`
@@ -2798,7 +2998,7 @@ a client parses one profile whichever call it made.
 `public_attribution` added to the scope list, and then
 `set_public_profile`. Neither implies the other: the scope records what the
 contributor agreed to, and the second call is what actually puts a row on
-the roster. A dialog that only sets the scope leaves the contributor
+the roster; a dialog that only sets the scope leaves the contributor
 believing they are listed when nothing was published.
 
 **The server authorizes against the claim's grant ceiling, not the local
@@ -2998,10 +3198,10 @@ race `list_pending` against the stream at startup. On `resync_required`, call
 `pending`, `approved`, `uploading`, `uploaded`, `refused`, `failed`,
 `expired`, `superseded`.
 
-- `expired` — aged out after the TTL (14 days) without a decision. The clock
+- `expired` means the entry aged out after the TTL (14 days) without a decision. The clock
   is **suspended** while the daemon is unhealthy, so an outage does not
   silently discard traces.
-- `superseded` — the session changed after it was offered. The daemon re-hashes
+- `superseded` means the session changed after it was offered. The daemon re-hashes
   before uploading; on a mismatch it sends nothing and creates a fresh
   `pending` entry for the new content. An approval covers content, not a
   filename.
@@ -3071,7 +3271,7 @@ trust.
 
 Because `daily-cap-reached` is last, it is the label most often masked by
 another condition. That is why the daily caps are also reported in full on
-`status.daily_budget`, outside the precedence order — see above. A client
+`status.daily_budget`, outside the precedence order described above. A client
 should render the budget condition from `daily_budget`, not by waiting for
 `daily-cap-reached` to reach the health slot.
 

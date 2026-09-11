@@ -37,9 +37,10 @@ import Foundation
 ///
 /// So the confirmation is keyed on what this machine actually knows:
 ///
-/// - `submitted` / `quarantined` -> `not_distributed`, unambiguously. The
-///   server's own rule is `status != Accepted`, so this mapping is exact and
-///   the canonical `not_distributed` body is shown alone.
+/// - Pre-acceptance states (`submitted`, `received`, `quarantined`,
+///   `awaiting_pii_backstop`, or `rejected`) -> `not_distributed`,
+///   unambiguously. The server's own rule is `status != Accepted`, so this
+///   mapping is exact and the canonical `not_distributed` body is shown alone.
 /// - `accepted` -> either of the two commons tiers, and **this app cannot
 ///   tell which.** Showing only the `commons_not_distributed` body would be
 ///   claiming more erasure than may have been achieved, which is rule 2. So
@@ -96,7 +97,8 @@ enum WithdrawalCopy {
     /// off the history record's status. Not the server's tier: this is the
     /// weaker thing the client knows before it asks.
     enum Stage {
-        /// `submitted` or `quarantined`. `not_distributed`, exactly.
+        /// Any current server state other than accepted or terminal.
+        /// `not_distributed`, exactly.
         case notInTheCommons
         /// `accepted`. One of the two commons tiers; not knowable which.
         case inTheCommons
@@ -105,7 +107,8 @@ enum WithdrawalCopy {
 
         init(status: String) {
             switch status {
-            case "submitted", "quarantined": self = .notInTheCommons
+            case "submitted", "received", "quarantined", "awaiting_pii_backstop", "rejected":
+                self = .notInTheCommons
             case "accepted": self = .inTheCommons
             default: self = .unknown
             }

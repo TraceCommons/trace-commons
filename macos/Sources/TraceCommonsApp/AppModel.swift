@@ -737,6 +737,7 @@ final class AppModel: ObservableObject {
 
     private var daemon: TCDaemon?
     private var client: DaemonClient?
+    var skillLearningClient: DaemonClient? { client }
     private var subscription: TCSubscription?
     private var undoTask: Task<Void, Never>?
 
@@ -2089,6 +2090,12 @@ final class AppModel: ObservableObject {
     @Published private(set) var loadingSessionDetails: Set<String> = []
     @Published private(set) var publicRunErrors: [String: String] = [:]
     @Published private(set) var publicRunWorking: Set<String> = []
+    @Published var skillLearningStore = SkillLearningStore()
+    private var accountOwnedContentScope: String?
+    private var sessionDetailRequestSequence: UInt64 = 0
+    @Published private(set) var skillLearningCopy: SkillLearningCopy? = SkillLearningCopy.decode(
+        fromJSON: TCSkillLearning.copyJSON() ?? ""
+    )
     @Published private(set) var publicRunCopy: PublicRunCopy? = PublicRunCopy.decode(
         fromJSON: TCPublicRun.copyJSON() ?? ""
     )
@@ -2136,28 +2143,57 @@ final class AppModel: ObservableObject {
         let id = record.submissionID
         guard !loadingSessionDetails.contains(id) else { return }
         guard !publicRunWorking.contains(id) else { return }
+        sessionDetailRequestSequence &+= 1
+        let requestSequence = sessionDetailRequestSequence
         loadingSessionDetails.insert(id)
+        sessionDetails[id] = nil
         sessionDetailErrors[id] = nil
         Task.detached(priority: .userInitiated) {
             let result = Result { try client.sessionDetail(submissionID: id) }
             await MainActor.run {
                 self.loadingSessionDetails.remove(id)
+                guard requestSequence == self.sessionDetailRequestSequence else { return }
                 switch result {
                 case .success(let detail):
+                    self.reconcileAccountOwnedContent(scope: detail.ownerScopeSHA256)
                     self.sessionDetails[id] = detail
                 case .failure(let error):
                     self.sessionDetails[id] = nil
                     let label = (error as? DaemonClient.Failure)?.message ?? ""
+                    if label == "account-session-required"
+                        || label == "session-detail-not-found"
+                        || label == "session-owner-changed"
+                    {
+                        self.clearAccountOwnedContent()
+                    }
                     self.sessionDetailErrors[id] = TCPublicRun.sessionDetailErrorLine(label: label)
                 }
             }
         }
     }
 
+    private func reconcileAccountOwnedContent(scope: String?) {
+        guard let scope else { return }
+        if let previous = accountOwnedContentScope, previous != scope {
+            clearAccountOwnedContent()
+        }
+        accountOwnedContentScope = scope
+    }
+
+    private func clearAccountOwnedContent() {
+        accountOwnedContentScope = nil
+        sessionDetails.removeAll()
+        sessionDetailErrors.removeAll()
+        publicRunErrors.removeAll()
+        skillLearningStore = SkillLearningStore()
+    }
+
     func publishPublicRun(_ record: HistoryRecord, draft: PublicRunDraftInput) {
         guard let client else { return }
         let id = record.submissionID
-        guard let detail = sessionDetails[id] else { return }
+        guard let detail = sessionDetails[id],
+              let taskSuccess = detail.taskSuccess
+        else { return }
         guard !publicRunWorking.contains(id) else { return }
         guard !loadingSessionDetails.contains(id) else { return }
         publicRunWorking.insert(id)
@@ -2167,7 +2203,7 @@ final class AppModel: ObservableObject {
                 try client.publishPublicRun(
                     submissionID: id,
                     draft: draft,
-                    taskSuccess: detail.taskSuccess,
+                    taskSuccess: taskSuccess,
                     contributedVersion: detail.contributedVersion,
                     expectedPublicationVersion: detail.publicationVersion
                 )

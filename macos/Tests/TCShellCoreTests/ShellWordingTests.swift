@@ -97,11 +97,14 @@ final class ShellWordingTests: XCTestCase {
         "TCBridge/TCConsentCopy.swift",
         "TCBridge/TCContributionEligibility.swift",
         "TCBridge/TCRoutingCopy.swift",
+        "TCBridge/TCSkillLearning.swift",
         "TCShellCore/ConsentCopy.swift",
         "TCShellCore/EligibilitySurface.swift",
         "TCShellCore/ReadGate.swift",
         "TCShellCore/RoutingCopy.swift",
         "TCShellCore/RoutingSurface.swift",
+        "TraceCommonsApp/SkillLearningModels.swift",
+        "TraceCommonsApp/Views/SkillLearningView.swift",
     ]
 
     /// Words a sentence has and an identifier, a wire key, a symbol name or

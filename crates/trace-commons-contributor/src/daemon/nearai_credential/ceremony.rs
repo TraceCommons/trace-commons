@@ -112,6 +112,11 @@ fn record_change(dir: &std::path::Path) {
         .or_default() += 1;
 }
 
+#[cfg(test)]
+pub(crate) fn record_change_for_test(dir: &std::path::Path) {
+    record_change(dir);
+}
+
 /// How many credential changes this process has made for `dir`.
 ///
 /// Zero for a directory nothing has written, which is the ordinary case: a
