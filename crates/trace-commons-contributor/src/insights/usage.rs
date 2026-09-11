@@ -38,6 +38,7 @@ pub enum UsageUnavailableReason {
     NoUsage,
     IncompleteOrInvalidUsage,
     CumulativeReset,
+    MultipleSessions,
     Overflow,
 }
 
@@ -59,6 +60,8 @@ pub struct UsageSummary {
     pub model_labels_omitted: bool,
     /// Native candidate records; duplicates are included in this denominator.
     pub usage_records: u64,
+    /// Candidates with valid counters and required deduplication identity;
+    /// inconsistent repeated snapshots do not count as complete.
     pub complete_records: u64,
     /// None when any candidate is incomplete, inconsistent, or overflows.
     pub counts: Option<NativeTokenCounts>,
@@ -132,6 +135,8 @@ pub fn extract_usage(source: UsageSource, bytes: &[u8]) -> Result<UsageSummary> 
     };
     let mut models = BTreeSet::new();
     let mut latest: Option<[u64; 5]> = None;
+    let mut session_id: Option<String> = None;
+    let mut multiple_sessions = false;
     let mut messages: BTreeMap<String, ([u64; 5], Option<String>)> = BTreeMap::new();
     let mut problem = None;
     for line in text.lines().filter(|line| !line.trim().is_empty()) {
@@ -141,6 +146,23 @@ pub fn extract_usage(source: UsageSource, bytes: &[u8]) -> Result<UsageSummary> 
             bail!("insights_usage_invalid_jsonl");
         }
         let kind = row.get("type").and_then(Value::as_str);
+        if source == UsageSource::Codex && kind == Some("session_meta") {
+            match row
+                .pointer("/payload/id")
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty() && id.len() <= 256)
+            {
+                Some(id) => {
+                    if session_id.as_deref().is_some_and(|previous| previous != id) {
+                        multiple_sessions = true;
+                    }
+                    session_id = Some(id.to_owned());
+                }
+                None => {
+                    problem.get_or_insert(UsageUnavailableReason::IncompleteOrInvalidUsage);
+                }
+            }
+        }
         let raw_model = match source {
             UsageSource::Codex if kind == Some("turn_context") => row.pointer("/payload/model"),
             UsageSource::ClaudeCode if kind == Some("assistant") => row.pointer("/message/model"),
@@ -172,13 +194,14 @@ pub fn extract_usage(source: UsageSource, bytes: &[u8]) -> Result<UsageSummary> 
             problem.get_or_insert(UsageUnavailableReason::IncompleteOrInvalidUsage);
             continue;
         };
-        summary.complete_records += 1;
         match source {
             UsageSource::Codex => {
                 if latest.is_some_and(|previous| current.iter().zip(previous).any(|(a, b)| *a < b))
                 {
                     problem = Some(UsageUnavailableReason::CumulativeReset);
+                    continue;
                 }
+                summary.complete_records += 1;
                 latest = Some(current);
             }
             UsageSource::ClaudeCode => {
@@ -195,7 +218,9 @@ pub fn extract_usage(source: UsageSource, bytes: &[u8]) -> Result<UsageSummary> 
                         || previous_model != &model)
                 {
                     problem.get_or_insert(UsageUnavailableReason::IncompleteOrInvalidUsage);
+                    continue;
                 }
+                summary.complete_records += 1;
                 messages.insert(id.to_owned(), (current, model));
             }
         }
@@ -212,6 +237,9 @@ pub fn extract_usage(source: UsageSource, bytes: &[u8]) -> Result<UsageSummary> 
             }
         }
         latest = Some(total);
+    }
+    if multiple_sessions {
+        problem = Some(UsageUnavailableReason::MultipleSessions);
     }
     summary.observed_models = models.into_iter().collect();
     summary.unavailable_reason =
@@ -381,6 +409,49 @@ mod tests {
         assert_eq!(s.observed_models.len(), 32);
         assert!(s.model_labels_omitted);
         assert_eq!(s.unavailable_reason, Some(UsageUnavailableReason::NoUsage));
+    }
+    #[test]
+    fn missing_claude_identity_is_not_complete() {
+        for id in [None, Some(json!("")), Some(json!("x".repeat(257)))] {
+            let mut row = claude("msg", 1);
+            match id {
+                Some(value) => {
+                    row["message"]["id"] = value;
+                }
+                None => {
+                    row["message"].as_object_mut().unwrap().remove("id");
+                }
+            }
+            let summary = run(UsageSource::ClaudeCode, vec![row]);
+            assert_eq!(summary.usage_records, 1);
+            assert_eq!(summary.complete_records, 0);
+            assert!(summary.counts.is_none());
+        }
+    }
+    #[test]
+    fn concatenated_codex_sessions_are_not_one_cumulative_total() {
+        let rows = vec![
+            json!({"type":"session_meta","payload":{"id":"session_a"}}),
+            codex(100, 20),
+            json!({"type":"session_meta","payload":{"id":"session_b"}}),
+            codex(200, 40),
+        ];
+        let summary = run(UsageSource::Codex, rows);
+        assert_eq!(
+            summary.unavailable_reason,
+            Some(UsageUnavailableReason::MultipleSessions)
+        );
+        assert!(summary.counts.is_none());
+        let same = run(
+            UsageSource::Codex,
+            vec![
+                json!({"type":"session_meta","payload":{"id":"session_a"}}),
+                codex(100, 20),
+                json!({"type":"session_meta","payload":{"id":"session_a"}}),
+                codex(200, 40),
+            ],
+        );
+        assert!(same.counts.is_some());
     }
     #[test]
     fn malformed_json_has_static_error() {

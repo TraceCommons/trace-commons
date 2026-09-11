@@ -13,6 +13,8 @@ Supported synthetic fixture contracts:
   cumulative snapshot is retained; repeated snapshots and `last_token_usage`
   are not added. Cached input and reasoning output are subsets. A counter reset
   makes the aggregate unavailable, because session continuity is unproven.
+  Distinct `session_meta.payload.id` values also refuse aggregation, even when
+  their counters happen to increase; invalid stated session IDs are rejected.
 - Claude Code `assistant` / `message.usage`: input, cache-read input,
   cache-creation input, and output, all required nonnegative u64 integers.
   Separate cache categories remain separate. Repeated `message.id` records use
@@ -21,7 +23,8 @@ Supported synthetic fixture contracts:
   the aggregate. Cache-duration splits and service modifiers are not priced.
 
 `usage_records` counts candidate native records, including repeated snapshots;
-`complete_records` counts candidates with structurally valid numeric usage.
+`complete_records` counts candidates with valid numeric usage and required
+deduplication identity; inconsistent repeated snapshots are excluded.
 These are record coverage, not API-call, task, or session completeness. An
 incomplete candidate makes the aggregate unavailable even if others are valid;
 absence never becomes zero. Arithmetic overflow also makes totals unavailable.
