@@ -2,7 +2,7 @@
 
 The implementation is in Trace Commons PR #866 and nearai/ironwire PR #57.
 The contributor, both lockfiles, and generated Flatpak sources pin Ironwire
-`886f8754792ffa5386f89ca3e2dbe7185c675fdb`. Registry packages and the Ironclaw
+`d622d11417f1e70f3eada0877673e3866ba5f31f`. Registry packages and the Ironclaw
 revision are unchanged. No dependency packages were added.
 
 The [accepted plan](2026-09-10-token-logprobs-lifecycle.md) remains the reference.

@@ -1751,11 +1751,25 @@ mod tests {
             PrivateInferenceState::Running { port } => port,
             other => panic!("expected Running, got {other:?}"),
         };
-        assert!(
-            reqwest::get(format!("http://127.0.0.1:{port}/_ironwire/health"))
-                .await
-                .is_ok_and(|r| r.status().is_success())
-        );
+        let http = reqwest::Client::builder()
+            .pool_max_idle_per_host(0)
+            .build()
+            .unwrap();
+        let health = http
+            .get(format!("http://127.0.0.1:{port}/_ironwire/health"))
+            .send()
+            .await
+            .unwrap();
+        assert!(health.status().is_success());
+        health.bytes().await.unwrap();
+        drop(http);
+        // Close the fixture's client connection before stopping the listener.
+        // Otherwise Windows may keep the accepted socket's port in TIME_WAIT
+        // even after the owner correctly joins and drops its listener.
+        #[cfg(windows)]
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        #[cfg(not(windows))]
+        tokio::task::yield_now().await;
 
         host.apply(false).await;
         assert!(host.finish_stop().await);
