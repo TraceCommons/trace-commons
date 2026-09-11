@@ -8,11 +8,9 @@
 //! Two things are genuinely different and are the reason this is not that
 //! file with the URLs changed:
 //!
-//! - **Nothing is signed here.** The enrollment ceremony spends forty lines
-//!   proving that the bytes it is about to sign are the bytes the protocol
-//!   says, recomputed from a server-issued challenge. There is no challenge in
-//!   this flow and nothing to sign; the local binding is the `state` value the
-//!   served page carries back, and that is all it is.
+//! - **The external wallet signs only a login message.** NEAR sign-in verifies
+//!   the callback locally and submits the proof to Cloud for authentication.
+//!   OAuth providers return a session through the existing loopback callback.
 //! - **The result is a credential, not an enrollment.** Nothing here touches
 //!   `contributor.json`, the device identity, or the account session. A
 //!   contributor may obtain an inference key before enrolling, after
@@ -22,9 +20,11 @@
 use super::api::CloudApi;
 use super::loopback;
 use crate::config::ConfigStore;
+use crate::daemon::nearai_credential::near_wallet::NearWalletError;
+use crate::daemon::nearai_credential::near_wallet_loopback::{self, NearWalletListener};
 use crate::daemon::settings::{DaemonSettings, NearAiInferenceCredential, NearAiSession};
 use anyhow::{Result, anyhow, bail};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use serde::Serialize;
 use std::{
     collections::HashMap,
@@ -163,6 +163,52 @@ fn key_name(attempt_id: &str) -> String {
     format!("trace-commons-{suffix}")
 }
 
+enum BrowserSignIn {
+    OAuth {
+        listener: std::net::TcpListener,
+        state: String,
+    },
+    Near(NearWalletListener),
+}
+
+impl BrowserSignIn {
+    async fn prepare(api: &CloudApi, provider: &str) -> Result<(String, Self)> {
+        if provider == "near" {
+            let (url, listener) = near_wallet_loopback::bind().await?;
+            return Ok((url, Self::Near(listener)));
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let url = api.authorize_url(provider, listener.local_addr()?.port())?;
+        Ok((
+            url,
+            Self::OAuth {
+                listener: listener.into_std()?,
+                state: loopback::random_state()?,
+            },
+        ))
+    }
+
+    async fn receive(
+        self,
+        api: &CloudApi,
+    ) -> Result<(loopback::SessionTokens, Option<DateTime<Utc>>)> {
+        match self {
+            Self::OAuth { listener, state } => {
+                let listener = tokio::net::TcpListener::from_std(listener)?;
+                let session = loopback::receive_session(listener, &state).await?;
+                Ok((session, None))
+            }
+            Self::Near(listener) => {
+                let authenticated = api.sign_in_near(listener.wait().await?).await?;
+                Ok((
+                    authenticated.session,
+                    Some(authenticated.refresh_token_expires_at),
+                ))
+            }
+        }
+    }
+}
+
 /// Begin a ceremony: bind the listener, hand back where to send the browser.
 ///
 /// The listener is bound *before* anything is returned, so the port in the
@@ -172,11 +218,8 @@ fn key_name(attempt_id: &str) -> String {
 pub async fn begin(store: &ConfigStore, provider: &str) -> Result<serde_json::Value> {
     let api = CloudApi::live()?;
     let attempt_id = loopback::random_state()?;
-    let state = loopback::random_state()?;
     let dir = store.dir().to_path_buf();
-
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-    let browser_url = api.authorize_url(provider, listener.local_addr()?.port())?;
+    let (browser_url, sign_in) = BrowserSignIn::prepare(&api, provider).await?;
 
     {
         let mut map = attempts().lock().expect("ceremony state lock");
@@ -204,19 +247,18 @@ pub async fn begin(store: &ConfigStore, provider: &str) -> Result<serde_json::Va
     // Hand the listener across as a std listener: it must be re-registered on
     // the ceremony runtime's reactor, not the caller's, or a dropped IPC
     // runtime takes the half-finished ceremony down with it.
-    let listener = listener.into_std()?;
     let finished_id = attempt_id.clone();
     let finished_dir = dir.clone();
     let task = ceremony_runtime()?.spawn(async move {
         let outcome = async {
-            let listener = tokio::net::TcpListener::from_std(listener)?;
-            let session =
-                tokio::time::timeout(BROWSER_TIMEOUT, loopback::receive_session(listener, &state))
+            let api = CloudApi::live()?;
+            let (session, expires_at) =
+                tokio::time::timeout(BROWSER_TIMEOUT, sign_in.receive(&api))
                     .await
                     .map_err(|_| anyhow!("near_ai_credential_expired"))??;
             // A fresh client, on this runtime: never a connection pool
             // attached to the reactor the caller may already have dropped.
-            let minted = CloudApi::live()?
+            let minted = api
                 .mint_inference_key(&session, &key_name(&finished_id))
                 .await?;
             // The session is kept, not dropped. Inference does not need it --
@@ -227,7 +269,13 @@ pub async fn begin(store: &ConfigStore, provider: &str) -> Result<serde_json::Va
             let persist_dir = finished_dir.clone();
             let persist_id = finished_id.clone();
             tokio::task::spawn_blocking(move || {
-                persist_attempt(&persist_dir, &persist_id, minted, session.refresh_token)
+                persist_attempt(
+                    &persist_dir,
+                    &persist_id,
+                    minted,
+                    session.refresh_token,
+                    expires_at,
+                )
             })
             .await
             .map_err(|_| anyhow!("near_ai_credential_unavailable"))?
@@ -237,10 +285,15 @@ pub async fn begin(store: &ConfigStore, provider: &str) -> Result<serde_json::Va
         if let Some(entry) = map.get_mut(&finished_dir).filter(|a| {
             a.state.attempt_id == finished_id && a.state.status == "waiting_for_browser"
         }) {
-            entry.state.status = if outcome.is_ok() {
-                STATUS_COMPLETE
-            } else {
-                "failed"
+            entry.state.status = match outcome {
+                Ok(()) => STATUS_COMPLETE,
+                Err(error)
+                    if error.downcast_ref::<NearWalletError>()
+                        == Some(&NearWalletError::Cancelled) =>
+                {
+                    "cancelled"
+                }
+                Err(_) => "failed",
             };
             entry.abort = None;
         }
@@ -292,7 +345,7 @@ pub(crate) fn persist(
     minted: super::api::MintedKey,
     refresh_token: String,
 ) -> Result<()> {
-    persist_checked(dir, minted, refresh_token, || Ok(()))
+    persist_checked(dir, minted, refresh_token, None, || Ok(()))
 }
 
 fn persist_attempt(
@@ -300,8 +353,9 @@ fn persist_attempt(
     attempt_id: &str,
     minted: crate::daemon::nearai_credential::api::MintedKey,
     refresh_token: String,
+    expires_at: Option<DateTime<Utc>>,
 ) -> Result<()> {
-    persist_checked(dir, minted, refresh_token, || {
+    persist_checked(dir, minted, refresh_token, expires_at, || {
         let map = attempts()
             .lock()
             .map_err(|_| anyhow!("near_ai_credential_unavailable"))?;
@@ -318,6 +372,7 @@ fn persist_checked(
     dir: &std::path::Path,
     minted: crate::daemon::nearai_credential::api::MintedKey,
     refresh_token: String,
+    expires_at: Option<DateTime<Utc>>,
     accept: impl FnOnce() -> Result<()>,
 ) -> Result<()> {
     let store = ConfigStore::open(dir.to_path_buf())?;
@@ -332,7 +387,7 @@ fn persist_checked(
     });
     let session = Some(NearAiSession {
         refresh_token,
-        refresh_token_expires_at: None,
+        refresh_token_expires_at: expires_at,
         stored_at: Utc::now(),
     });
 
@@ -635,18 +690,16 @@ mod tests {
         assert!(begin(&store, "github").await.is_ok());
     }
 
-    /// The provider is gated in one place, `authorize_url`, which is where
-    /// the whole callback contract is checked. `begin` deliberately does not
-    /// re-check it: a second copy of the rule was there, it refused with the
-    /// same label at the same moment, and no test could tell the two apart --
-    /// which is exactly the kind of control that rots unnoticed. The cost of
-    /// the single gate is that a listener is bound and immediately dropped on
-    /// the refusal path.
+    /// The wallet branch has its own transport; unsupported OAuth names still
+    /// fail the authorize_url gate before registering an attempt.
     #[tokio::test]
     async fn an_unknown_provider_is_refused_and_leaves_no_ceremony_behind() {
         let (dir, store) = temp_store();
         assert_eq!(
-            begin(&store, "near").await.unwrap_err().to_string(),
+            begin(&store, "unsupported-provider")
+                .await
+                .unwrap_err()
+                .to_string(),
             "near_ai_credential_provider_unknown"
         );
         assert!(status(dir.path(), None).is_none());
@@ -676,5 +729,36 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn near_wallet_start_binds_before_open_and_cancel_releases_the_listener() {
+        let (dir, store) = temp_store();
+        let started = begin(&store, "near").await.unwrap();
+        let id = started["attempt_id"].as_str().unwrap();
+        let url = reqwest::Url::parse(started["browser_url"].as_str().unwrap()).unwrap();
+        assert_eq!(url.host_str(), Some("127.0.0.1"));
+        assert_eq!(
+            url.path(),
+            crate::daemon::nearai_credential::near_wallet::CALLBACK_PATH
+        );
+        assert!(url.query().is_none());
+        assert_eq!(url.fragment().unwrap().len(), 43);
+        let address = ("127.0.0.1", url.port().unwrap());
+        assert!(tokio::net::TcpListener::bind(address).await.is_err());
+        assert!(begin(&store, "github").await.is_err());
+        assert!(store.load_config().unwrap().is_none());
+        assert_eq!(cancel(dir.path(), Some(id)).unwrap().status, "cancelled");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if tokio::net::TcpListener::bind(address).await.is_ok() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(status(dir.path(), Some(id)).unwrap().status, "cancelled");
     }
 }

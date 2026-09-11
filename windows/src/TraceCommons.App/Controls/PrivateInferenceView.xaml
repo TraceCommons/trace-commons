@@ -109,6 +109,16 @@
                                    Visibility="{x:Bind ViewModel.HasCredentialActionPreamble, Mode=OneWay}"
                                    Style="{StaticResource TcCaptionTextStyle}"
                                    TextWrapping="Wrap" />
+                        <ComboBox Header="{x:Bind ViewModel.CredentialProviderLabel}"
+                                  ItemsSource="{x:Bind ViewModel.CredentialProviders}"
+                                  DisplayMemberPath="Label" SelectedValuePath="Id"
+                                  SelectedValue="{x:Bind ViewModel.CredentialProvider, Mode=TwoWay}"
+                                  Visibility="{x:Bind ViewModel.HasCredentialProvider, Mode=OneWay}"
+                                  IsEnabled="{x:Bind ViewModel.CredentialControlsEnabled, Mode=OneWay}"
+                                  MinHeight="44" HorizontalAlignment="Stretch" />
+                        <TextBlock Text="{x:Bind ViewModel.CredentialWalletNotice}"
+                                   Visibility="{x:Bind ViewModel.HasCredentialWalletNotice, Mode=OneWay}"
+                                   TextWrapping="Wrap" />
                         <Button Content="{x:Bind ViewModel.CredentialActionText, Mode=OneWay}"
                                 Visibility="{x:Bind ViewModel.ShowCredentialSignIn, Mode=OneWay}"
                                 IsEnabled="{x:Bind ViewModel.CredentialControlsEnabled, Mode=OneWay}"
@@ -242,6 +252,12 @@
                                 IsEnabled="{x:Bind ViewModel.CredentialControlsEnabled, Mode=OneWay}"
                                 HorizontalAlignment="Left"
                                 Click="OnBalanceAction" />
+                        <TextBlock Text="{x:Bind ViewModel.Funding.Title}" Style="{StaticResource TcTitleSectionTextStyle}" TextWrapping="Wrap" />
+                        <TextBlock Text="{x:Bind ViewModel.Funding.Message, Mode=OneWay}" Style="{StaticResource TcBodyTextStyle}" TextWrapping="Wrap" />
+                        <TextBlock Text="{x:Bind ViewModel.Funding.What}" Style="{StaticResource TcCaptionTextStyle}" TextWrapping="Wrap" />
+                        <Button Content="{x:Bind ViewModel.Funding.Action, Mode=OneWay}"
+                                IsEnabled="{x:Bind ViewModel.Funding.Enabled, Mode=OneWay}"
+                                HorizontalAlignment="Left" MinHeight="44" Click="OnFundingAction" />
                     </StackPanel>
                 </Border>
 

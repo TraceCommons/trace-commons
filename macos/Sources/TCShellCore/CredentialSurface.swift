@@ -139,12 +139,6 @@ public struct CredentialCalls: Sendable {
     }
 }
 
-/// The identity providers accepted by the NEAR AI browser sign-in flow.
-public enum NearAiSignInProvider: String, Sendable {
-    case google
-    case github
-}
-
 /// What this shell renders about the key that lets this destination answer.
 ///
 /// Holds no words and takes no branch of its own. Every sentence is a field

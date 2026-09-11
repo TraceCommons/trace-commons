@@ -9,6 +9,7 @@ pub mod balance;
 pub mod community_brand;
 pub mod credential;
 mod css_contract;
+pub mod funding;
 pub mod history;
 pub mod mark;
 pub mod onboarding;
@@ -413,6 +414,7 @@ impl App {
         queue::wire(&app);
         history::wire(&app);
         private_inference::wire(&app);
+        funding::wire(&app);
         settings::wire(&app);
         update::wire(&app);
         app.refresh();

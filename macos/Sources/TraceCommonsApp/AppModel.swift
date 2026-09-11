@@ -509,6 +509,15 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func nearAiFunding(expected: FundingDestination?) async -> FundingStatus? {
+        guard let client, !credentialBusy else { return nil }
+        let result = await Task.detached(priority: .userInitiated) {
+            try? client.nearAiFunding(expected: expected)
+        }.value
+        guard self.client === client, !Task.isCancelled, !credentialBusy else { return nil }
+        return result
+    }
+
     /// Begins the ceremony and hands back the one URL that was served.
     ///
     /// The URL is returned rather than opened here: opening a browser is the
@@ -516,7 +525,7 @@ final class AppModel: ObservableObject {
     /// means the ceremony did not begin in a way this shell can carry
     /// through, and nothing is left half-started -- the daemon's own attempt
     /// times out on the browser.
-    func startNearAiCredential(provider: NearAiSignInProvider) async -> URL? {
+    func startNearAiCredential(provider: String? = nil) async -> URL? {
         guard let client, !credentialBusy else { return nil }
         credentialBusy = true
         let outcome = await Task.detached(priority: .userInitiated) {

@@ -294,6 +294,21 @@ public sealed record PrivateInferenceCopy
     [JsonPropertyName("credential_what")]
     public string CredentialWhat { get; init; } = string.Empty;
 
+    [JsonPropertyName("credential_provider_label")]
+    public string CredentialProviderLabel { get; init; } = string.Empty;
+
+    [JsonPropertyName("credential_provider_github")]
+    public string CredentialProviderGithub { get; init; } = string.Empty;
+
+    [JsonPropertyName("credential_provider_google")]
+    public string CredentialProviderGoogle { get; init; } = string.Empty;
+
+    [JsonPropertyName("credential_provider_near")]
+    public string CredentialProviderNear { get; init; } = string.Empty;
+
+    [JsonPropertyName("credential_wallet_notice")]
+    public string CredentialWalletNotice { get; init; } = string.Empty;
+
     /// <summary>
     /// What obtaining one costs, in all three of its consequences: a browser
     /// opens, the contributor signs in with a company that is not this app,
@@ -310,12 +325,6 @@ public sealed record PrivateInferenceCopy
 
     [JsonPropertyName("credential_obtain")]
     public string CredentialObtain { get; init; } = string.Empty;
-
-    [JsonPropertyName("credential_google")]
-    public string CredentialGoogle { get; init; } = string.Empty;
-
-    [JsonPropertyName("credential_github")]
-    public string CredentialGithub { get; init; } = string.Empty;
 
     [JsonPropertyName("credential_cancel")]
     public string CredentialCancel { get; init; } = string.Empty;
@@ -583,6 +592,17 @@ public sealed record PrivateInferenceCopy
     [JsonPropertyName("balance_title")]
     public string BalanceTitle { get; init; } = string.Empty;
 
+    [JsonPropertyName("funding_title")]
+    public string FundingTitle { get; init; } = string.Empty;
+    [JsonPropertyName("funding_what")]
+    public string FundingWhat { get; init; } = string.Empty;
+    [JsonPropertyName("funding_manage")]
+    public string FundingManage { get; init; } = string.Empty;
+    [JsonPropertyName("funding_refresh")]
+    public string FundingRefresh { get; init; } = string.Empty;
+    [JsonPropertyName("funding_unavailable")]
+    public string FundingUnavailable { get; init; } = string.Empty;
+
     /// <summary>What the figures on the row are a fact about.</summary>
     [JsonPropertyName("balance_what")]
     public string BalanceWhat { get; init; } = string.Empty;
@@ -669,10 +689,13 @@ public sealed record PrivateInferenceCopy
             HarnessPlanNoConfigPath,
             CredentialTitle,
             CredentialWhat,
+            CredentialProviderLabel,
+            CredentialProviderGithub,
+            CredentialProviderGoogle,
+            CredentialProviderNear,
+            CredentialWalletNotice,
             CredentialCost,
             CredentialObtain,
-            CredentialGoogle,
-            CredentialGithub,
             CredentialCancel,
             CredentialForget,
             CredentialForgetExplains,
@@ -742,6 +765,11 @@ public sealed record PrivateInferenceCopy
             AttestationReasonReceiptUnavailable,
             AttestationReasonReceiptNotIssued,
             BalanceTitle,
+            FundingTitle,
+            FundingWhat,
+            FundingManage,
+            FundingRefresh,
+            FundingUnavailable,
             BalanceWhat,
             BalanceNoSession,
             BalanceSessionExpired,

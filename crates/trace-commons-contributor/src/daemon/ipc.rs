@@ -285,6 +285,7 @@ pub const METHODS: &[&str] = &[
     "near_ai_credential_cancel",
     "near_ai_credential_forget",
     "near_ai_balance",
+    "near_ai_funding",
     "get_public_profile",
     "get_settings",
     "harness_commit",
@@ -1782,6 +1783,7 @@ const ASYNC_ONLY_METHODS: &[(&str, &str)] = &[
         "near-ai-credential-requires-async",
     ),
     ("native_wallet_flow", "near-signup-requires-async"),
+    ("near_ai_funding", "near-ai-funding-requires-async"),
     ("witness_preview_request", "witness-review-requires-async"),
     ("preview_body", "preview-body-requires-async"),
     ("preview_turns", "preview-turns-requires-async"),
@@ -2660,6 +2662,7 @@ pub async fn handle_request_async(shared: &DaemonShared, req: &Request) -> Respo
             super::nearai_credential::handle_forget_async(shared, req).await
         }
         "near_ai_balance" => super::nearai_credential::handle_balance(shared, req).await,
+        "near_ai_funding" => crate::daemon::nearai_credential::handle_funding(shared, req).await,
         "near_account_capabilities" => {
             super::account_onboarding::handle_capabilities(shared, req).await
         }
@@ -7721,6 +7724,40 @@ mod tests {
         assert_eq!(body["scale"], 9);
     }
 
+    #[tokio::test]
+    async fn funding_dispatch_preserves_id_and_returns_canonical_refusals() {
+        use crate::daemon::nearai_credential::funding::FundingReport;
+        let s = shared();
+        for (params, expected) in [
+            (serde_json::json!({}), FundingReport::NoSession),
+            (serde_json::Value::Null, FundingReport::InvalidRequest),
+            (
+                serde_json::json!({"expected_organization_id": "org-synthetic"}),
+                FundingReport::InvalidRequest,
+            ),
+        ] {
+            let request = Request {
+                id: 7361,
+                method: "near_ai_funding".into(),
+                params,
+            };
+            let response = handle_request_async(&s, &request).await;
+            assert_eq!(response.id, request.id);
+            assert!(response.error.is_none());
+            let body = response.result.unwrap();
+            assert_eq!(
+                body["state"],
+                serde_json::to_value(&expected).unwrap()["state"]
+            );
+            assert_eq!(
+                body["view"]["message"],
+                crate::private_inference_copy::funding_message(&expected)
+            );
+            assert!(body.get("browser_url").is_none());
+            assert!(body.get("organization_id").is_none());
+        }
+    }
+
     #[test]
     fn get_settings_never_carries_a_local_filesystem_path() {
         // The wholesale-serialized settings blob used to leak claude_root /
@@ -9875,7 +9912,7 @@ mod tests {
     #[test]
     fn every_async_only_method_is_advertised_and_refused_synchronously() {
         let s = shared();
-        assert_eq!(ASYNC_ONLY_METHODS.len(), 17);
+        assert_eq!(ASYNC_ONLY_METHODS.len(), 18);
         let mut seen = std::collections::BTreeSet::new();
         for &(method, label) in ASYNC_ONLY_METHODS {
             assert!(
@@ -10305,7 +10342,7 @@ mod tests {
             "pub async fn handle_request_async(shared",
         ));
         assert_eq!(sync.len(), 37, "synchronous dispatcher arms: {sync:?}");
-        assert_eq!(asy.len(), 24, "asynchronous dispatcher arms: {asy:?}");
+        assert_eq!(asy.len(), 25, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();
         let advertised: std::collections::BTreeSet<String> =

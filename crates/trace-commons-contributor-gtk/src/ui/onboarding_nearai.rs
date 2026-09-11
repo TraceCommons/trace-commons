@@ -37,6 +37,7 @@ struct NearAiJoin {
     message: gtk::Label,
     sign_in: gtk::Button,
     sign_in_explains: gtk::Label,
+    providers: credential::ProviderSelector,
     sign_in_action: Cell<copy::CredentialAction>,
     polling: Cell<bool>,
     reading_status: Cell<bool>,
@@ -105,6 +106,7 @@ pub(super) fn build(app: &Rc<App>, onboarding: &Rc<Onboarding>) -> gtk::Box {
         message: body_label(""),
         sign_in: gtk::Button::new(),
         sign_in_explains: body_label(""),
+        providers: credential::ProviderSelector::new(0),
         sign_in_action: Cell::new(copy::CredentialAction::None),
         polling: Cell::new(false),
         reading_status: Cell::new(false),
@@ -117,13 +119,20 @@ pub(super) fn build(app: &Rc<App>, onboarding: &Rc<Onboarding>) -> gtk::Box {
     card.root.append(&card.join);
     card.root.append(&card.message);
     card.root.append(&card.sign_in_explains);
+    card.providers.root.set_visible(false);
+    card.root.append(&card.providers.root);
     card.root.append(&card.sign_in);
 
     let sign_in_card = card.clone();
     let sign_in_app = app.clone();
     card.sign_in.connect_clicked(move |button| {
         button.set_sensitive(false);
-        credential::act(&sign_in_app, sign_in_card.sign_in_action.get());
+        sign_in_card.providers.root.set_sensitive(false);
+        credential::act_with_provider(
+            &sign_in_app,
+            sign_in_card.sign_in_action.get(),
+            sign_in_card.providers.provider(),
+        );
     });
 
     let entry_card = card.clone();
@@ -196,7 +205,7 @@ fn refresh_sign_in(app: &Rc<App>, card: &Rc<NearAiJoin>) {
     app.call(
         "near_ai_credential_status",
         serde_json::json!({}),
-        move |_, result| {
+        move |app, result| {
             status_card.reading_status.set(false);
             let value = result.ok();
             let state = value
@@ -209,6 +218,14 @@ fn refresh_sign_in(app: &Rc<App>, card: &Rc<NearAiJoin>) {
             let action = copy::credential_action(state);
             status_card.sign_in_action.set(action);
             status_card
+                .providers
+                .root
+                .set_visible(!present && action == copy::CredentialAction::Obtain);
+            status_card
+                .providers
+                .root
+                .set_sensitive(!status_card.pending.get() && !credential::pending(app));
+            status_card
                 .sign_in
                 .set_visible(!present && credential::action_label(action).is_some());
             status_card
@@ -216,7 +233,7 @@ fn refresh_sign_in(app: &Rc<App>, card: &Rc<NearAiJoin>) {
                 .set_label(credential::action_label(action).unwrap_or_default());
             status_card
                 .sign_in
-                .set_sensitive(!status_card.pending.get());
+                .set_sensitive(!status_card.pending.get() && !credential::pending(app));
             status_card.sign_in_explains.set_label(if present {
                 ""
             } else {

@@ -21,10 +21,11 @@ final class CredentialSurfaceTests: XCTestCase {
         XCTAssertEqual(CredentialStatus.parse(fromJSON: #"{"session_state":true}"#).sessionState, "")
     }
 
-    /// The 15 fields this surface added, so a test can delete each in turn.
+    /// The required credential fields, so a test can delete each in turn.
     private static let credentialFields = [
         "credential_title", "credential_what", "credential_cost", "credential_obtain",
-        "credential_google", "credential_github",
+        "credential_provider_label", "credential_provider_github", "credential_provider_google",
+        "credential_provider_near", "credential_wallet_notice",
         "credential_cancel", "credential_forget", "credential_forget_explains",
         "credential_absent", "credential_obtaining", "credential_failed",
         "credential_cancelled", "credential_present", "credential_unknown",

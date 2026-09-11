@@ -1,0 +1,210 @@
+{
+  "version": "1.1.0",
+  "wallets": [
+    {
+      "id": "hot-wallet",
+      "name": "HOT Wallet",
+      "icon": "https://app.hot-labs.org/images/hot/hot-icon.png",
+      "description": "Secure Multichain wallet. Manage assets, refuel gas, and mine $HOT on any device with HOT Wallet",
+      "website": "https://hot-labs.org/wallet",
+      "version": "1.0.0",
+      "executor": "https://raw.githubusercontent.com/azbang/near-connect/f9c8ae802068a7992ace8e1c2187664429d3cb4b/repository/hotwallet.js",
+      "type": "sandbox",
+      "platform": {
+        "android": "https://play.google.com/store/apps/details?id=app.herewallet.hot&hl=en",
+        "ios": "https://apps.apple.com/us/app/hot-wallet/id6740916148",
+        "chrome": "https://chromewebstore.google.com/detail/hot-wallet/mpeengabcnhhjjgleiodimegnkpcenbk",
+        "firefox": "https://addons.mozilla.org/en-US/firefox/addon/hot-wallet",
+        "tga": "https://t.me/hot_wallet/app"
+      },
+      "features": {
+        "signMessage": true,
+        "signInWithoutAddKey": true,
+        "signAndSendTransaction": true,
+        "signAndSendTransactions": true
+      },
+      "permissions": {
+        "storage": true,
+        "allowsOpen": [
+          "https://download.hot-labs.org",
+          "https://hot-labs.org/wallet",
+          "https://t.me/hot_wallet/app",
+          "https://play.google.com",
+          "https://apps.apple.com",
+          "hotwallet://",
+          "https://wallet.near.org"
+        ]
+      },
+      "sha256": "8a160fe1edb6836d24802a13da44f17ca3584f11c3f642ac93f53ca55f31e154"
+    },
+    {
+      "id": "meteor-wallet",
+      "name": "Meteor Wallet",
+      "icon": "https://raw.githubusercontent.com/Meteor-Wallet/meteor_wallet_sdk/main/assets/meteor-logo-svg.svg",
+      "description": "The most simple and secure wallet to manage your crypto, access DeFi, and explore Web3",
+      "website": "https://meteorwallet.app/",
+      "version": "1.1.0",
+      "executor": "https://raw.githubusercontent.com/Meteor-Wallet/meteor_wallet_sdk/8c4ca0849244907551dbf7edbd65bd2db0189ccd/storage/meteor-near-connect-latest.js",
+      "type": "sandbox",
+      "features": {
+        "signMessage": true,
+        "signInWithoutAddKey": true,
+        "signInAndSignMessage": true,
+        "signAndSendTransaction": true,
+        "signAndSendTransactions": true,
+        "signInWithFunctionCallKey": true,
+        "signDelegateActions": true,
+        "mainnet": true,
+        "testnet": true
+      },
+      "platform": {
+        "web": "https://wallet.meteorwallet.app",
+        "chrome": "https://chromewebstore.google.com/detail/meteor-wallet/pcndjhkinnkaohffealmlmhaepkpmgkb"
+      },
+      "permissions": {
+        "storage": true,
+        "allowsOpen": [
+          "https://chromewebstore.google.com",
+          "https://wallet.meteorwallet.app",
+          "https://meteorwallet.app"
+        ],
+        "external": [
+          "meteorCom",
+          "meteorComV2"
+        ]
+      },
+      "sha256": "30f015e149fff43c1134df1440cb0b676a19f00b87de27cca85194ea9a4eab4f"
+    },
+    {
+      "id": "near-mobile",
+      "name": "NEAR Mobile",
+      "icon": "https://storage.herewallet.app/upload/179839f01189bc54afea2fd34eb092ddb6d63c97b5c8c9e418317285fd751f0c.webp",
+      "description": "Discover the only NEAR wallet you will need: NEAR Mobile, the most secure and comprehensive mobile wallet designed exclusively for the NEAR Blockchain",
+      "website": "https://nearmobile.app",
+      "executor": "https://near-mobile-production.aws.peersyst.tech/connector/near-connect.js",
+      "type": "sandbox",
+      "version": "1.0.0",
+      "features": {
+        "signMessage": true,
+        "signInWithoutAddKey": true,
+        "signInAndSignMessage": true,
+        "signInWithFunctionCallKey": true,
+        "signAndSendTransaction": true,
+        "signAndSendTransactions": true,
+        "signDelegateActions": true,
+        "verifyOwner": false,
+        "mainnet": true,
+        "testnet": false
+      },
+      "platform": {
+        "android": "https://play.google.com/store/apps/details?id=com.peersyst.nearmobilewallet",
+        "ios": "https://apps.apple.com/us/app/near-mobile-crypto-wallet/id6443501225"
+      },
+      "permissions": {
+        "storage": true,
+        "location": true,
+        "allowsOpen": [
+          "https://nearmobile.app",
+          "https://play.google.com",
+          "https://apps.apple.com",
+          "https://near-mobile-production.aws.peersyst.tech",
+          "near-mobile-wallet://"
+        ]
+      },
+      "sha256": "df84681559dee638491c158377627a78819fe96fe4be7f8cbad2c756e4e913e7"
+    },
+    {
+      "id": "nightly-wallet",
+      "name": "Nightly Wallet",
+      "icon": "https://storage.herewallet.app/upload/6947eb5c14c65a715fb49a08e5937dcecc994bf224b3869b9878bd7a7db068f9.webp",
+      "description": "Surf through the multichain Metaverse with Nightly",
+      "website": "https://nightly.app",
+      "version": "1.0.0",
+      "executor": "https://raw.githubusercontent.com/azbang/near-connect/f9c8ae802068a7992ace8e1c2187664429d3cb4b/repository/nightly.js",
+      "type": "sandbox",
+      "platform": {
+        "chrome": "https://chromewebstore.google.com/detail/nightly/fiikommddbeccaoicoejoniammnalkfa"
+      },
+      "permissions": {
+        "storage": true,
+        "external": [
+          "nightly.near"
+        ],
+        "allowsOpen": [
+          "https://nightly.app",
+          "https://chromewebstore.google.com/detail/nightly/fiikommddbeccaoicoejoniammnalkfa"
+        ]
+      },
+      "features": {
+        "signMessage": true,
+        "signInWithoutAddKey": true,
+        "signInAndSignMessage": true,
+        "signInWithFunctionCallKey": true,
+        "signAndSendTransaction": true,
+        "signAndSendTransactions": true,
+        "testnet": true
+      },
+      "sha256": "6e769f105fb30d37501439287ec901b4d858a503ab195e2e99c06c172c5b5d48"
+    },
+    {
+      "id": "hana-wallet",
+      "name": "Hana Wallet",
+      "icon": "https://res.cloudinary.com/reliantnode/image/upload/v1779783598/hana/token-logos/Hana_Icon.svg",
+      "description": "Hana Wallet is a powerful, yet simple-to-use cryptocurrency wallet available as both a mobile app and a desktop extension.",
+      "website": "https://www.hana.money",
+      "version": "1.0.0",
+      "executor": "https://raw.githubusercontent.com/Hana-Technology/near-connect/93237ea1b59d439451b7a08a97085f411274c250/repository/hana.js",
+      "type": "sandbox",
+      "platform": {
+        "web": "https://www.hana.money",
+        "chrome": "https://chromewebstore.google.com/detail/hana-wallet/jfdlamikmbghhapbgfoogdffldioobgl",
+        "android": "https://play.google.com/store/apps/details?id=com.HanaTech.Wallet",
+        "ios": "https://apps.apple.com/us/app/hana-wallet/id6447821572"
+      },
+      "permissions": {
+        "storage": true,
+        "external": [
+          "hanaWallet.near"
+        ],
+        "allowsOpen": [
+          "https://www.hana.money",
+          "https://chromewebstore.google.com/detail/hana-wallet/jfdlamikmbghhapbgfoogdffldioobgl"
+        ]
+      },
+      "features": {
+        "signMessage": true,
+        "signInWithoutAddKey": true,
+        "signAndSendTransaction": true,
+        "signAndSendTransactions": true
+      },
+      "sha256": "ef6c88f45bb7ea68e0c5878d4b135c2b4d3e0b0544a3c952a5aae72dcb1bdd62"
+    },
+    {
+      "id": "near-cli",
+      "name": "NEAR CLI",
+      "icon": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='64' height='64' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%231a1a2e'/%3E%3Cpolyline points='18 40 28 30 18 20' fill='none' stroke='%2300d4aa' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cline x1='32' y1='42' x2='46' y2='42' stroke='%2300d4aa' stroke-width='3' stroke-linecap='round'/%3E%3C/svg%3E",
+      "description": "Sign transactions using near-cli-rs in your terminal",
+      "website": "https://near.cli.rs",
+      "version": "1.0.0",
+      "executor": "https://raw.githubusercontent.com/near/near-cli-connect/dc5cb123e3a8e42ed095739f4ea058b767a80ad2/dist/near-cli.js",
+      "type": "sandbox",
+      "platform": {},
+      "features": {
+        "signMessage": true,
+        "signInWithoutAddKey": true,
+        "signInAndSignMessage": true,
+        "signAndSendTransaction": true,
+        "signAndSendTransactions": true,
+        "signDelegateActions": true,
+        "signInWithFunctionCallKey": true,
+        "mainnet": true,
+        "testnet": true
+      },
+      "permissions": {
+        "storage": true,
+        "clipboardWrite": true
+      },
+      "sha256": "522f2a52403f6da84384a409718c54b49ed4432cdfd583363d35109be8c8e318"
+    }
+  ]
+}

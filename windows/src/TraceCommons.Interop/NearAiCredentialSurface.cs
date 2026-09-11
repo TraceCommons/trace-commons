@@ -4,8 +4,6 @@ using System.Text.Json;
 
 namespace TraceCommons.Interop;
 
-public enum NearAiSignInProvider { Google, GitHub }
-
 /// <summary>
 /// The one action a shell may offer for one credential state.
 /// </summary>
@@ -74,16 +72,27 @@ public readonly record struct NearAiCredentialStatus(
 /// </summary>
 public static class NearAiCredentialSurface
 {
-    public static string StartParameters(NearAiSignInProvider provider) =>
-        JsonSerializer.Serialize(new Dictionary<string, object?>
-        {
-            ["provider"] = provider switch
-            {
-                NearAiSignInProvider.Google => "google",
-                NearAiSignInProvider.GitHub => "github",
-                _ => throw new ArgumentOutOfRangeException(nameof(provider)),
-            },
-        });
+    public const string ProviderGithub = "github";
+    public const string ProviderGoogle = "google";
+    public const string ProviderNear = "near";
+
+    public sealed record ProviderChoice(string Id, string Label);
+
+    public static ProviderChoice[] Providers(PrivateInferenceCopy copy) =>
+    [
+        new(ProviderGithub, copy.CredentialProviderGithub),
+        new(ProviderGoogle, copy.CredentialProviderGoogle),
+        new(ProviderNear, copy.CredentialProviderNear),
+    ];
+
+    public static bool IsProvider(string? provider) =>
+        provider is ProviderGithub or ProviderGoogle or ProviderNear;
+
+    public static string SerializeStart(string provider)
+    {
+        if (!IsProvider(provider)) throw new ArgumentException(null, nameof(provider));
+        return JsonSerializer.Serialize(new { provider });
+    }
 
     /// <summary>
     /// What the daemon reported, or <see cref="NearAiCredentialStatus.Unreported"/>

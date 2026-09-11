@@ -143,7 +143,7 @@ final class CredentialExportTests: XCTestCase {
         let copy = try XCTUnwrap(copy())
         let sentences = [
             copy.credentialTitle, copy.credentialWhat, copy.credentialCost,
-            copy.credentialObtain, copy.credentialGoogle, copy.credentialGithub, copy.credentialCancel, copy.credentialForget,
+            copy.credentialObtain, copy.credentialCancel, copy.credentialForget,
             copy.credentialForgetExplains, copy.credentialAbsent, copy.credentialObtaining,
             copy.credentialFailed, copy.credentialCancelled, copy.credentialPresent,
             copy.credentialUnknown, copy.credentialUnreported, copy.harnessNeedsCredential,

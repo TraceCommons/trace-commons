@@ -205,8 +205,8 @@ public class BalanceShellWiringTests
             StringComparison.Ordinal);
         Assert.Matches(
             new Regex(
-                @"public Task<NearAiCredentialAttempt\?> PressBalanceAsync\(NearAiSignInProvider\? provider = null\)"
-                + @"(?:(?!\n    \}).)*StartCredentialAsync\(selected\)",
+                @"public Task<NearAiCredentialAttempt\?> PressBalanceAsync\(\)"
+                + @"(?:(?!\n    \}).)*StartCredentialAsync\(\)",
                 RegexOptions.Singleline),
             source);
 

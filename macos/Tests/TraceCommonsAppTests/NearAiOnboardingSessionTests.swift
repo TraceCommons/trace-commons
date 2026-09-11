@@ -78,6 +78,70 @@ private final class OnboardingSessionDaemon: DaemonCalling {
 
 final class NearAiOnboardingSessionTests: XCTestCase {
     @MainActor
+    func testNativePickerOffersNearWithoutStartingSignIn() async throws {
+        let unexpected = expectation(description: "Native controls must not enroll or grant consent")
+        unexpected.isInverted = true
+        let daemon = OnboardingSessionDaemon(unexpectedCall: unexpected)
+        let model = AppModel()
+        model.setClientForTesting(DaemonClient(daemon: daemon))
+        let copy = try XCTUnwrap(model.privateInferenceCopy)
+        await awaitSession(model, state: "absent") { model.refreshNearAiCredential() }
+
+        let content = CredentialSection(copy: copy, requiresSession: true)
+            .environmentObject(model)
+            .padding(24)
+            .frame(width: 375)
+        let hosting = NSHostingView(rootView: content)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 375, height: 900),
+                              styleMask: [.borderless], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = hosting
+        defer { window.close() }
+        await Task.yield()
+        hosting.layoutSubtreeIfNeeded()
+        let picker = try XCTUnwrap(descendants(hosting).compactMap { $0 as? NSPopUpButton }.first)
+        XCTAssertEqual(picker.itemTitles, [copy.credentialProviderGithub, copy.credentialProviderGoogle, copy.credentialProviderNear])
+        picker.selectItem(at: 2)
+        picker.sendAction(picker.action, to: picker.target)
+        await Task.yield()
+        hosting.layoutSubtreeIfNeeded()
+        XCTAssertEqual(picker.titleOfSelectedItem, copy.credentialProviderNear)
+        XCTAssertFalse(daemon.calls.contains { $0.method == "near_ai_credential_start" })
+        XCTAssertFalse(model.status.loggedIn)
+        await fulfillment(of: [unexpected], timeout: 0.2)
+    }
+
+    @MainActor
+    private func descendants(_ view: NSView) -> [NSView] {
+        [view] + view.subviews.flatMap { descendants($0) }
+    }
+
+    @MainActor
+    func testNearWalletSignInSendsOnlyTheProviderWithoutEnrolling() async throws {
+        let unexpected = expectation(description: "Wallet login must not enroll or grant consent")
+        unexpected.isInverted = true
+        let daemon = OnboardingSessionDaemon(unexpectedCall: unexpected)
+        let model = AppModel()
+        model.setClientForTesting(DaemonClient(daemon: daemon))
+        await awaitSession(model, state: "absent") { model.refreshNearAiCredential() }
+
+        var browserURL: URL?
+        await awaitSession(model, state: "obtaining") {
+            browserURL = await model.startNearAiCredential(provider: "near")
+        }
+        XCTAssertEqual(browserURL?.absoluteString, "https://cloud.example.invalid/native-login")
+        let starts = daemon.calls.filter { $0.method == "near_ai_credential_start" }
+        XCTAssertEqual(starts.count, 1)
+        let start = try XCTUnwrap(starts.first)
+        let params = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(start.params.utf8)) as? [String: String])
+        XCTAssertEqual(params, ["provider": "near"])
+        XCTAssertFalse(model.status.loggedIn)
+        XCTAssertNil(model.status.tenantID)
+        XCTAssertFalse(model.isOnboardingComplete)
+        await fulfillment(of: [unexpected], timeout: 0.2)
+    }
+
+    @MainActor
     func testLegacyKeyWithoutSessionOffersSignInWithoutEnrolling() async throws {
         let unexpected = expectation(description: "Rendering must not write or enroll")
         unexpected.isInverted = true
@@ -106,17 +170,7 @@ final class NearAiOnboardingSessionTests: XCTestCase {
     }
 
     @MainActor
-    func testGoogleSignInLeavesJoiningAsASeparateAction() async throws {
-        try await assertSignIn(provider: .google)
-    }
-
-    @MainActor
-    func testGithubSignInLeavesJoiningAsASeparateAction() async throws {
-        try await assertSignIn(provider: .github)
-    }
-
-    @MainActor
-    private func assertSignIn(provider: NearAiSignInProvider) async throws {
+    func testSuccessfulSignInLeavesJoiningAsASeparateAction() async throws {
         let unexpected = expectation(description: "Sign-in must not enroll or grant consent")
         unexpected.isInverted = true
         let daemon = OnboardingSessionDaemon(unexpectedCall: unexpected)
@@ -130,7 +184,7 @@ final class NearAiOnboardingSessionTests: XCTestCase {
         var browserURL: URL?
         await awaitSession(model, state: "obtaining") {
             // Exercise the model action without opening a browser or spending.
-            browserURL = await model.startNearAiCredential(provider: provider)
+            browserURL = await model.startNearAiCredential()
         }
         XCTAssertEqual(browserURL?.absoluteString, "https://cloud.example.invalid/native-login")
         XCTAssertEqual(model.credentialAttempt?.attemptID, "synthetic-attempt")
@@ -154,8 +208,7 @@ final class NearAiOnboardingSessionTests: XCTestCase {
         XCTAssertEqual(starts.count, 1)
         let start = try XCTUnwrap(starts.first)
         let params = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(start.params.utf8)) as? [String: Any])
-        XCTAssertEqual(params as? [String: String], ["provider": provider.rawValue],
-                       "Sign-in must carry only the chosen provider, without enrollment or consent parameters")
+        XCTAssertTrue(params.isEmpty, "Sign-in must not carry enrollment or consent parameters")
         XCTAssertEqual(Set(daemon.calls.map(\.method)), ["near_ai_credential_start", "near_ai_credential_status", "near_ai_balance"])
     }
 

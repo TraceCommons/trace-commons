@@ -48,12 +48,13 @@ const MAX_BODY_BYTES: usize = 8192;
 /// How long one connection may take to deliver its request.
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// The session credentials the OAuth finish hands back.
+/// The session credentials a successful Cloud sign-in returns.
 ///
 /// A session, never an inference credential: every management route on
 /// cloud-api is `session_token`-only and every inference route is
-/// `api_key`-only, with no fallback in either direction. These two strings buy
-/// exactly one thing, which is the right to mint the key we actually want.
+/// `api_key`-only, with no fallback in either direction. The access token
+/// authorizes management calls, including minting the inference key. The
+/// refresh token is retained in OS storage for subsequent account reads.
 pub struct SessionTokens {
     pub access_token: String,
     pub refresh_token: String,

@@ -58,7 +58,14 @@ public sealed class PrivateInferenceViewModel : INotifyPropertyChanged
     {
         _host = host ?? throw new ArgumentNullException(nameof(host));
         _requiresSession = requiresSession;
+        Funding = new NearAiFunding(_copy,
+            parameters => _host.CallAsync(NearAiFunding.Method, parameters),
+            () => _host.IsRunning,
+            async uri => await Windows.System.Launcher.LaunchUriAsync(uri),
+            () => _host.ConnectionGeneration);
     }
+
+    public NearAiFunding Funding { get; }
 
     public event PropertyChangedEventHandler? PropertyChanged;
 
@@ -420,6 +427,28 @@ public sealed class PrivateInferenceViewModel : INotifyPropertyChanged
 
     public string CredentialWhat => _copy?.CredentialWhat ?? string.Empty;
 
+    public NearAiCredentialSurface.ProviderChoice[] CredentialProviders =>
+        _copy is null ? [] : NearAiCredentialSurface.Providers(_copy);
+
+    private string _credentialProvider = NearAiCredentialSurface.ProviderGithub;
+    public string CredentialProvider
+    {
+        get => _credentialProvider;
+        set
+        {
+            if (_credentialBusy || !NearAiCredentialSurface.IsProvider(value)) return;
+            _credentialProvider = value;
+            Raise(nameof(CredentialProvider));
+            Raise(nameof(CredentialWalletNotice));
+            Raise(nameof(HasCredentialWalletNotice));
+        }
+    }
+
+    public string CredentialProviderLabel => _copy?.CredentialProviderLabel ?? string.Empty;
+    public bool HasCredentialProvider => _copy is not null && OfferedAction == CredentialAction.Obtain;
+    public bool HasCredentialWalletNotice => HasCredentialProvider && CredentialProvider == NearAiCredentialSurface.ProviderNear;
+    public string CredentialWalletNotice => _copy?.CredentialWalletNotice ?? string.Empty;
+
     /// <summary>The sentence for whatever the daemon last reported.</summary>
     public string CredentialStateText => _copy is null
         ? string.Empty
@@ -464,10 +493,6 @@ public sealed class PrivateInferenceViewModel : INotifyPropertyChanged
 
     public bool HasCredentialActionPreamble => CredentialActionPreamble.Length > 0;
 
-    public string CredentialGoogle => _copy?.CredentialGoogle ?? string.Empty;
-    public string CredentialGithub => _copy?.CredentialGithub ?? string.Empty;
-    public string CredentialCancel => _copy?.CredentialCancel ?? string.Empty;
-
     /// <summary>
     /// Whether there is an action to draw at all. A state this build could
     /// not read offers nothing.
@@ -502,13 +527,12 @@ public sealed class PrivateInferenceViewModel : INotifyPropertyChanged
     /// mints a key at a third party cannot be reached from a state this build
     /// could not read.
     /// </remarks>
-    public async Task<NearAiCredentialAttempt?> PressCredentialAsync(NearAiSignInProvider? provider = null)
+    public async Task<NearAiCredentialAttempt?> PressCredentialAsync()
     {
         switch (OfferedAction)
         {
             case CredentialAction.Obtain:
-                return provider is { } selected
-                    ? await StartCredentialAsync(selected).ConfigureAwait(true) : null;
+                return await StartCredentialAsync().ConfigureAwait(true);
             case CredentialAction.Cancel:
                 await CancelCredentialAsync().ConfigureAwait(true);
                 return null;
@@ -565,6 +589,7 @@ public sealed class PrivateInferenceViewModel : INotifyPropertyChanged
             _attemptId = null;
         }
 
+        Funding.CredentialChanged(_credential.SessionState, _credentialBusy);
         RaiseCredential();
 
         // And what is left in the account that key belongs to. Not while a
@@ -588,7 +613,7 @@ public sealed class PrivateInferenceViewModel : INotifyPropertyChanged
     /// which is a second browser tab in front of somebody already looking at
     /// one.
     /// </remarks>
-    public async Task<NearAiCredentialAttempt?> StartCredentialAsync(NearAiSignInProvider provider)
+    public async Task<NearAiCredentialAttempt?> StartCredentialAsync()
     {
         if (_copy is null || _credentialBusy)
         {
@@ -596,11 +621,13 @@ public sealed class PrivateInferenceViewModel : INotifyPropertyChanged
         }
 
         _credentialBusy = true;
+        Funding.CredentialChanged(_credential.SessionState, true);
         Raise(nameof(CredentialControlsEnabled));
         try
         {
             DaemonResponse response = await _host
-                .CallAsync(DaemonProtocol.Methods.NearAiCredentialStart, NearAiCredentialSurface.StartParameters(provider))
+                .CallAsync(DaemonProtocol.Methods.NearAiCredentialStart,
+                    NearAiCredentialSurface.SerializeStart(CredentialProvider))
                 .ConfigureAwait(true);
             if (response.IsError || response.Result is null)
             {
@@ -629,6 +656,7 @@ public sealed class PrivateInferenceViewModel : INotifyPropertyChanged
         finally
         {
             _credentialBusy = false;
+            Funding.CredentialChanged(_credential.SessionState, false);
             Raise(nameof(CredentialControlsEnabled));
         }
     }
@@ -704,6 +732,7 @@ public sealed class PrivateInferenceViewModel : INotifyPropertyChanged
     private async Task CallThenRefreshAsync(string method, string? parameters = null)
     {
         _credentialBusy = true;
+        Funding.CredentialChanged(_credential.SessionState, true);
         Raise(nameof(CredentialControlsEnabled));
         try
         {
@@ -724,6 +753,7 @@ public sealed class PrivateInferenceViewModel : INotifyPropertyChanged
         finally
         {
             _credentialBusy = false;
+            Funding.CredentialChanged(_credential.SessionState, false);
             Raise(nameof(CredentialControlsEnabled));
         }
 
@@ -732,6 +762,8 @@ public sealed class PrivateInferenceViewModel : INotifyPropertyChanged
 
     private void RaiseCredential()
     {
+        Raise(nameof(HasCredentialProvider));
+        Raise(nameof(HasCredentialWalletNotice));
         Raise(nameof(HasCloudSession));
         Raise(nameof(CredentialStateText));
         Raise(nameof(CredentialIsNeutral));
@@ -895,9 +927,9 @@ public sealed class PrivateInferenceViewModel : INotifyPropertyChanged
     /// records, so forgetting would throw away a working key to fix an
     /// unrelated sign-in.
     /// </remarks>
-    public Task<NearAiCredentialAttempt?> PressBalanceAsync(NearAiSignInProvider? provider = null) =>
-        BalanceOfferedAction == CredentialAction.Obtain && provider is { } selected
-            ? StartCredentialAsync(selected)
+    public Task<NearAiCredentialAttempt?> PressBalanceAsync() =>
+        BalanceOfferedAction == CredentialAction.Obtain
+            ? StartCredentialAsync()
             : Task.FromResult<NearAiCredentialAttempt?>(null);
 
     /// <summary>

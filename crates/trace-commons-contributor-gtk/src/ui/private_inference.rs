@@ -86,6 +86,7 @@ pub struct PrivateInferenceView {
     /// fact: the key says whether this computer can answer a call, and the
     /// balance says how many more it can pay for.
     pub balance: super::balance::BalanceSection,
+    pub funding: crate::ui::funding::FundingSection,
     /// What was asked for. Insensitive until the daemon's own answer has
     /// arrived, so a press cannot write a value nothing confirmed.
     switch: gtk::Switch,
@@ -125,6 +126,8 @@ impl PrivateInferenceView {
         content.append(&credential.root);
         let balance = super::balance::BalanceSection::new();
         content.append(&balance.root);
+        let funding = crate::ui::funding::FundingSection::default();
+        content.append(&funding.root);
 
         let tools = style::card(gtk::Orientation::Vertical, space::M);
         // Tools follow account setup; the kill switch stays below both.
@@ -214,6 +217,7 @@ impl PrivateInferenceView {
             harnesses,
             credential,
             balance,
+            funding,
             switch,
             status,
             filling: std::cell::Cell::new(false),

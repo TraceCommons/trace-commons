@@ -20,6 +20,8 @@
   <ItemGroup>
     <ProjectReference Include="../../src/TraceCommons.Interop/TraceCommons.Interop.csproj" />
     <Compile Include="../../src/TraceCommons.App/ViewModels/CredentialBrowser.cs" Link="CredentialBrowser.cs" />
+    <Compile Include="../../src/TraceCommons.App/ViewModels/PrivateInferenceViewModel.cs" Link="PrivateInferenceViewModel.cs" />
+    <Compile Include="../../src/TraceCommons.App/ViewModels/HarnessRowViewModel.cs" Link="HarnessRowViewModel.cs" />
   </ItemGroup>
 
   <!--

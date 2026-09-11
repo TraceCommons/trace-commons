@@ -70,6 +70,32 @@ pub struct Worker {
 }
 
 impl Worker {
+    /// Channels for widget tests; no daemon or credential store is opened.
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn fixture(
+        dir: std::path::PathBuf,
+    ) -> (
+        Self,
+        mpsc::Receiver<(u64, Job)>,
+        async_channel::Sender<(u64, Outcome)>,
+    ) {
+        let (jobs, requests) = mpsc::channel();
+        let (responses, results) = async_channel::unbounded();
+        let (_, events) = async_channel::unbounded();
+        (
+            Self {
+                jobs,
+                results,
+                events,
+                hosts_the_loop: false,
+                next_id: std::cell::Cell::new(1),
+                dir,
+            },
+            requests,
+            responses,
+        )
+    }
+
     pub async fn start(dir: std::path::PathBuf) -> Result<Self> {
         Self::start_with(dir, Backend::open).await
     }
