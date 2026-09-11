@@ -82765,6 +82765,7 @@ impl trace_commons_protocol::trace_contribution::PrivacyFilterAdapter for Backst
             ..Default::default()
         };
         Ok(Some(SafePrivacyFilterRedaction {
+            private_edits: None,
             redacted_text: text.replace(&self.needle, "[REDACTED:private_email]"),
             summary: SafePrivacyFilterSummary {
                 schema_version: 1,
@@ -90689,7 +90690,7 @@ mod witness_receipt {
         SigningKey::from_slice(&bytes).expect("seed is a valid scalar")
     }
 
-    fn signing_address() -> String {
+    pub(super) fn signing_address() -> String {
         let point = signing_key().verifying_key().to_encoded_point(false);
         let digest = Keccak256::digest(&point.as_bytes()[1..]);
         format!("0x{}", hex::encode(&digest[12..]))
@@ -90701,10 +90702,17 @@ mod witness_receipt {
     /// Built from the real digest of the real bytes and signed with the real
     /// key, so nothing here can pass by a fixture agreeing with a bug.
     fn certificate_over(body: &[u8], verdict: &str) -> (String, String) {
+        certificate_for_policy(body, verdict, ALIAS)
+    }
+    pub(super) fn certificate_for_policy(
+        body: &[u8],
+        verdict: &str,
+        policy: &str,
+    ) -> (String, String) {
         let json = serde_json::json!({
             "redacted_sha256": hex::encode(sha2::Sha256::digest(body)),
             "residual_risk_verdict": verdict,
-            "redaction_policy_version": ALIAS,
+            "redaction_policy_version": policy,
             "witness_measurement": MEASUREMENT,
             "timestamp": chrono::Utc::now().timestamp(),
         });
@@ -91514,3 +91522,5 @@ async fn wallet_readiness_refuses_missing_identity_before_starting_a_ceremony() 
     .unwrap();
     assert_eq!(body["ready"], false);
 }
+
+include!("token_bundle_journey_test.rs");

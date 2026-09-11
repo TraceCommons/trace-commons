@@ -229,8 +229,8 @@ struct WithdrawalOutcomeView: View {
     var body: some View {
         let (text, tone): (String, TC.Tone) = {
             switch result {
-            case .withdrawn(let reach):
-                return (WithdrawalCopy.resultSentence(reach), .refused)
+            case .withdrawn(let reach, let note):
+                return ([WithdrawalCopy.resultSentence(reach), note].compactMap { $0 }.joined(separator: "\n"), .refused)
             case .noAccountSession:
                 return (WithdrawalCopy.accountSessionRequired, .attention)
             case .failed(let label):

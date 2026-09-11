@@ -169,6 +169,8 @@ pub const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "trace_credit_ledger",
     "trace_tombstones",
     "trace_withdrawals",
+    "trace_token_bundles",
+    "trace_token_attachments",
     "trace_vector_entries",
     "trace_export_manifests",
     "trace_export_manifest_items",
@@ -1269,6 +1271,26 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         64,
         "trace_public_runs",
         include_str!("../../../../migrations/V64__trace_public_runs.sql"),
+    ),
+    (
+        65,
+        "token_distribution_bundles",
+        include_str!("../../../../migrations/V65__token_distribution_bundles.sql"),
+    ),
+    (
+        66,
+        "token_bundle_processing",
+        include_str!("../../../../migrations/V66__token_bundle_processing.sql"),
+    ),
+    (
+        67,
+        "token_processing_retry",
+        include_str!("../../../../migrations/V67__token_processing_retry.sql"),
+    ),
+    (
+        68,
+        "token_rescrub_revocation",
+        include_str!("../../../../migrations/V68__token_rescrub_revocation.sql"),
     ),
 ];
 
@@ -6367,6 +6389,7 @@ mod tests {
             include_str!("../../../../migrations/V43__trace_withdrawal.sql"),
             include_str!("../../../../migrations/V56__community_withdrawal_eviction_rls.sql"),
             include_str!("../../../../migrations/V58__near_account_provisioning.sql"),
+            include_str!("../../../../migrations/V65__token_distribution_bundles.sql"),
             include_str!("../../../../migrations/V64__trace_public_runs.sql"),
         ];
         let force_rls_migrations = [
@@ -6386,6 +6409,7 @@ mod tests {
             include_str!("../../../../migrations/V43__trace_withdrawal.sql"),
             include_str!("../../../../migrations/V56__community_withdrawal_eviction_rls.sql"),
             include_str!("../../../../migrations/V58__near_account_provisioning.sql"),
+            include_str!("../../../../migrations/V65__token_distribution_bundles.sql"),
             include_str!("../../../../migrations/V64__trace_public_runs.sql"),
         ];
 
