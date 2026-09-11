@@ -49,6 +49,7 @@ toml = "1"
 zstd = "0.13"
 tokio-postgres = { version = "0.7", features = ["with-uuid-1", "with-chrono-0_4", "with-serde_json-1"] }
 trace-commons-build-info = { path = "../trace-commons-build-info" }
+trace-commons-gate-api = { path = "../trace-commons-gate-api" }
 trace-commons-gate-enclave = { path = "../trace-commons-gate-enclave" }
 trace-commons-operator-client = { path = "../trace-commons-operator-client" }
 trace-commons-protocol = { path = "../trace-commons-protocol", features = ["near-ai-privacy-filter"] }

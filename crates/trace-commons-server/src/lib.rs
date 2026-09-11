@@ -28,5 +28,6 @@ pub mod trace_score_attestation;
 pub mod trace_upload_claim_allowlist;
 pub mod trace_upload_claim_issuer;
 pub mod trace_upload_claim_issuer_admin;
+pub mod versioned_pipeline;
 
 pub const TRACE_COMMONS_SERVER_EXTRACTION_STAGE: &str = "server-storage-owned";

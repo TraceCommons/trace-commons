@@ -1,0 +1,809 @@
+//! Local/test HTTP runner and corpus client for versioned pipeline Phase 1.
+
+use std::collections::BTreeMap;
+use std::net::{IpAddr, SocketAddr};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use axum::body::Bytes;
+use axum::extract::{Path as AxumPath, Query, State};
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
+use axum::routing::{get, post};
+use axum::{Json, Router};
+use chrono::{DateTime, Utc};
+use clap::{Parser, Subcommand};
+use secrecy::SecretString;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use trace_commons_gate_api::pipeline::{Microcredits, Phase};
+use trace_commons_protocol::trace_contribution::{
+    DeterministicTraceRedactor, RawTraceCaptureTurn, RawTraceContribution,
+    RecordedTraceContributionOptions, TraceRedactor,
+};
+use trace_commons_server::config::DatabaseConfig;
+use trace_commons_server::db::Database;
+use trace_commons_server::db::postgres::PgBackend;
+use trace_commons_server::secrets::SecretsCrypto;
+use trace_commons_server::trace_artifact_store::{
+    LocalEncryptedTraceArtifactStore, TraceArtifactStore,
+};
+use trace_commons_server::trace_corpus_storage::TraceCorpusStore;
+use trace_commons_server::versioned_pipeline::{
+    PhaseOutcomeRecord, PipelineInspection, PipelineReceiptResult, PipelineRunState,
+    PipelineService, PipelineSubmitReceipt,
+};
+use uuid::Uuid;
+
+#[derive(Debug, Parser)]
+#[command(name = "trace-commons-pipeline-local")]
+#[command(about = "Local/test-only Phase 1 pipeline")]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Debug, Subcommand)]
+enum Command {
+    Serve(ServeArgs),
+    Corpus(CorpusArgs),
+}
+
+#[derive(Debug, clap::Args)]
+struct ServeArgs {
+    #[arg(long, env = "TRACE_COMMONS_DATABASE_URL")]
+    database_url: String,
+    #[arg(long, default_value = "127.0.0.1:3917")]
+    bind: SocketAddr,
+    #[arg(long, default_value = ".local/pipeline-artifacts")]
+    artifact_root: PathBuf,
+    #[arg(long)]
+    allow_minimal_policies: bool,
+    #[arg(long)]
+    skip_migrations: bool,
+    #[arg(long)]
+    fail_phase: Option<PhaseArg>,
+}
+
+#[derive(Debug, Clone, Copy, clap::ValueEnum, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum PhaseArg {
+    Admission,
+    Review,
+    Score,
+    Settle,
+}
+
+impl From<PhaseArg> for Phase {
+    fn from(value: PhaseArg) -> Self {
+        match value {
+            PhaseArg::Admission => Self::Admission,
+            PhaseArg::Review => Self::Review,
+            PhaseArg::Score => Self::Score,
+            PhaseArg::Settle => Self::Settle,
+        }
+    }
+}
+
+#[derive(Debug, clap::Args)]
+struct CorpusArgs {
+    #[arg(long, default_value = "http://127.0.0.1:3917")]
+    base_url: String,
+    #[arg(long, env = "TRACE_COMMONS_PIPELINE_CORPUS_SUBMIT_TOKEN")]
+    submit_token: String,
+    #[arg(long, env = "TRACE_COMMONS_PIPELINE_CORPUS_WORKER_TOKEN")]
+    worker_token: String,
+    #[arg(long, env = "TRACE_COMMONS_PIPELINE_CORPUS_INSPECT_TOKEN")]
+    inspect_token: String,
+    #[arg(long, default_value = "docs/redesign/fixtures/minimal-corpus-v1.json")]
+    fixtures: PathBuf,
+    #[arg(long, default_value = ".local/pipeline-report-v1.json")]
+    json_report: PathBuf,
+    #[arg(long, default_value = ".local/pipeline-report-v1.md")]
+    markdown_report: PathBuf,
+    #[arg(long, default_value_t = 30)]
+    timeout_seconds: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LocalRole {
+    Contributor,
+    Worker,
+    Operator,
+}
+
+#[derive(Debug, Clone)]
+struct LocalAuth {
+    tenant_id: String,
+    principal_ref: String,
+    role: LocalRole,
+}
+
+struct HttpState {
+    pipeline: Arc<PipelineService>,
+    backend: Arc<PgBackend>,
+    tokens: BTreeMap<String, LocalAuth>,
+}
+
+#[derive(Debug)]
+struct HttpError {
+    status: StatusCode,
+    label: &'static str,
+}
+
+impl IntoResponse for HttpError {
+    fn into_response(self) -> Response {
+        (
+            self.status,
+            Json(serde_json::json!({ "error": self.label })),
+        )
+            .into_response()
+    }
+}
+
+type HttpResult<T> = Result<T, HttpError>;
+
+#[derive(Debug, Deserialize)]
+struct WorkerQuery {
+    stop_before: Option<PhaseArg>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CorpusFile {
+    schema: String,
+    fixtures: Vec<CorpusFixture>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CorpusFixture {
+    label: String,
+    trace_id: Uuid,
+    submission_id: Uuid,
+    created_at: DateTime<Utc>,
+    input: String,
+    secret_probe: String,
+}
+
+#[derive(Debug, Serialize)]
+struct CorpusReport {
+    schema: &'static str,
+    corpus_digest: String,
+    code_revision: &'static str,
+    bundle_id: String,
+    configuration_identities: BTreeMap<&'static str, &'static str>,
+    expected_fixture_count: usize,
+    expected_outcomes_per_fixture: usize,
+    completed_fixture_count: usize,
+    failure_count: usize,
+    duration_ms: u128,
+    fixtures: Vec<FixtureReport>,
+}
+
+#[derive(Debug, Serialize)]
+struct FixtureReport {
+    label: String,
+    request_content_hash: String,
+    run_id: Uuid,
+    submission_id: Uuid,
+    state: PipelineRunState,
+    phase_count: usize,
+    phases: Vec<PhaseReport>,
+    approved_revision_id: Option<Uuid>,
+    index_membership: String,
+    score_microcredits: Option<u64>,
+    finalized_microcredits: Option<u64>,
+    batch_hash: Option<String>,
+    replay_same_run: bool,
+    changed_content_refused: bool,
+    failure_label: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct PhaseReport {
+    outcome_id: Uuid,
+    phase: Phase,
+    outcome_schema_id: String,
+    outcome_schema_version: u32,
+    decision: serde_json::Value,
+    evidence: serde_json::Value,
+    evaluation: serde_json::Value,
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .try_init();
+    let cli = Cli::parse();
+    match cli.command {
+        Command::Serve(args) => serve(args).await,
+        Command::Corpus(args) => run_corpus(args).await,
+    }
+}
+
+async fn serve(args: ServeArgs) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        args.allow_minimal_policies,
+        "minimal policies require --allow-minimal-policies"
+    );
+    anyhow::ensure!(
+        args.bind.ip() == IpAddr::from([127, 0, 0, 1]) || args.bind.ip().is_loopback(),
+        "minimal policies may bind only to loopback"
+    );
+    anyhow::ensure!(
+        !matches!(args.fail_phase, Some(PhaseArg::Admission)),
+        "Phase 1 failure injection supports asynchronous phases only"
+    );
+    let master_key = std::env::var("TRACE_COMMONS_PIPELINE_MASTER_KEY")
+        .map_err(|_| anyhow::anyhow!("TRACE_COMMONS_PIPELINE_MASTER_KEY is required"))?;
+    let tokens = parse_tokens(
+        &std::env::var("TRACE_COMMONS_PIPELINE_TOKENS")
+            .map_err(|_| anyhow::anyhow!("TRACE_COMMONS_PIPELINE_TOKENS is required"))?,
+    )?;
+    let backend =
+        Arc::new(PgBackend::new(&DatabaseConfig::from_postgres_url(&args.database_url, 8)).await?);
+    if !args.skip_migrations {
+        backend.run_migrations().await?;
+    }
+    let artifact_store: Arc<dyn TraceArtifactStore> =
+        Arc::new(LocalEncryptedTraceArtifactStore::new(
+            args.artifact_root,
+            SecretsCrypto::new(SecretString::from(master_key))?,
+        ));
+    let pipeline = Arc::new(PipelineService::new(
+        backend.clone(),
+        artifact_store,
+        args.fail_phase.map(Into::into),
+    )?);
+    let bundle_id = pipeline.bundle_id().to_string();
+    let state = Arc::new(HttpState {
+        pipeline,
+        backend,
+        tokens,
+    });
+    let app = Router::new()
+        .route("/healthz", get(|| async { "ok" }))
+        .route("/v1/pipeline/submissions", post(submit_handler))
+        .route("/v1/pipeline/worker", post(worker_handler))
+        .route("/v1/pipeline/runs/{run_id}", get(inspect_handler))
+        .with_state(state);
+    let listener = tokio::net::TcpListener::bind(args.bind).await?;
+    tracing::info!(
+        bind = %args.bind,
+        bundle_id = %bundle_id,
+        "local versioned pipeline listening"
+    );
+    axum::serve(listener, app).await?;
+    Ok(())
+}
+
+async fn submit_handler(
+    State(state): State<Arc<HttpState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> HttpResult<Json<PipelineSubmitReceipt>> {
+    let auth = authenticate(&state, &headers, LocalRole::Contributor)?;
+    let idempotency_key = headers
+        .get("idempotency-key")
+        .and_then(|value| value.to_str().ok())
+        .ok_or(HttpError {
+            status: StatusCode::BAD_REQUEST,
+            label: "idempotency_key_required",
+        })?;
+    let result = state
+        .pipeline
+        .submit(&auth.tenant_id, &auth.principal_ref, idempotency_key, &body)
+        .await
+        .map_err(|_| HttpError {
+            status: StatusCode::BAD_REQUEST,
+            label: "submission_failed",
+        })?;
+    match result {
+        PipelineReceiptResult::Created(run) => Ok(Json(receipt(run, false))),
+        PipelineReceiptResult::Replayed(run) => Ok(Json(receipt(run, true))),
+        PipelineReceiptResult::ContentConflict => Err(HttpError {
+            status: StatusCode::CONFLICT,
+            label: "idempotency_content_conflict",
+        }),
+    }
+}
+
+async fn worker_handler(
+    State(state): State<Arc<HttpState>>,
+    headers: HeaderMap,
+    Query(query): Query<WorkerQuery>,
+) -> HttpResult<Json<Option<PipelineInspection>>> {
+    let auth = authenticate(&state, &headers, LocalRole::Worker)?;
+    let processed = state
+        .pipeline
+        .process_one(&auth.tenant_id, query.stop_before.map(Into::into))
+        .await
+        .map_err(|_| HttpError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            label: "worker_failed",
+        })?;
+    let inspection = match processed {
+        Some(run) => state
+            .pipeline
+            .inspect(&auth.tenant_id, run.run_id)
+            .await
+            .map_err(|_| HttpError {
+                status: StatusCode::INTERNAL_SERVER_ERROR,
+                label: "inspection_failed",
+            })?,
+        None => None,
+    };
+    Ok(Json(inspection))
+}
+
+async fn inspect_handler(
+    State(state): State<Arc<HttpState>>,
+    headers: HeaderMap,
+    AxumPath(run_id): AxumPath<Uuid>,
+) -> HttpResult<Json<PipelineInspection>> {
+    let auth = authenticate_any(&state, &headers)?;
+    let inspection = state
+        .pipeline
+        .inspect(&auth.tenant_id, run_id)
+        .await
+        .map_err(|_| HttpError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            label: "inspection_failed",
+        })?
+        .ok_or(HttpError {
+            status: StatusCode::NOT_FOUND,
+            label: "pipeline_run_not_found",
+        })?;
+    if auth.role == LocalRole::Contributor {
+        let submission = state
+            .backend
+            .get_trace_submission(&auth.tenant_id, inspection.run.submission_id)
+            .await
+            .map_err(|_| HttpError {
+                status: StatusCode::INTERNAL_SERVER_ERROR,
+                label: "inspection_failed",
+            })?;
+        if !submission.is_some_and(|row| row.auth_principal_ref == auth.principal_ref) {
+            return Err(HttpError {
+                status: StatusCode::NOT_FOUND,
+                label: "pipeline_run_not_found",
+            });
+        }
+    }
+    Ok(Json(inspection))
+}
+
+fn authenticate(
+    state: &HttpState,
+    headers: &HeaderMap,
+    required: LocalRole,
+) -> HttpResult<LocalAuth> {
+    let auth = authenticate_any(state, headers)?;
+    if auth.role != required {
+        return Err(HttpError {
+            status: StatusCode::FORBIDDEN,
+            label: "role_forbidden",
+        });
+    }
+    Ok(auth)
+}
+
+fn authenticate_any(state: &HttpState, headers: &HeaderMap) -> HttpResult<LocalAuth> {
+    let token = headers
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .ok_or(HttpError {
+            status: StatusCode::UNAUTHORIZED,
+            label: "authentication_required",
+        })?;
+    state.tokens.get(token).cloned().ok_or(HttpError {
+        status: StatusCode::UNAUTHORIZED,
+        label: "authentication_required",
+    })
+}
+
+fn parse_tokens(value: &str) -> anyhow::Result<BTreeMap<String, LocalAuth>> {
+    let mut tokens = BTreeMap::new();
+    for entry in value.split(';').filter(|entry| !entry.trim().is_empty()) {
+        let fields = entry.split(',').collect::<Vec<_>>();
+        anyhow::ensure!(
+            fields.len() == 4,
+            "pipeline token entries require token,tenant,principal,role"
+        );
+        let role = match fields[3] {
+            "contributor" => LocalRole::Contributor,
+            "worker" => LocalRole::Worker,
+            "operator" => LocalRole::Operator,
+            _ => anyhow::bail!("unknown pipeline token role"),
+        };
+        anyhow::ensure!(
+            !fields[..3].iter().any(|field| field.trim().is_empty()),
+            "pipeline token fields cannot be empty"
+        );
+        anyhow::ensure!(
+            is_safe_principal_ref(fields[2]),
+            "pipeline principal must be a hash-shaped role reference"
+        );
+        tokens.insert(
+            fields[0].to_string(),
+            LocalAuth {
+                tenant_id: fields[1].to_string(),
+                principal_ref: fields[2].to_string(),
+                role,
+            },
+        );
+    }
+    anyhow::ensure!(
+        !tokens.is_empty(),
+        "at least one pipeline token is required"
+    );
+    Ok(tokens)
+}
+
+fn is_safe_principal_ref(value: &str) -> bool {
+    ["principal_sha256:", "worker_sha256:", "operator_sha256:"]
+        .iter()
+        .find_map(|prefix| value.strip_prefix(prefix))
+        .is_some_and(|hash| {
+            hash.len() == 64
+                && hash
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+        })
+}
+
+fn receipt(
+    run: trace_commons_server::versioned_pipeline::PipelineRunRecord,
+    replayed: bool,
+) -> PipelineSubmitReceipt {
+    PipelineSubmitReceipt {
+        run_id: run.run_id,
+        submission_id: run.submission_id,
+        bundle_id: run.bundle_id,
+        request_content_hash: run.request_content_hash,
+        replayed,
+        state: run.state,
+        next_phase: run.next_phase,
+    }
+}
+
+async fn run_corpus(args: CorpusArgs) -> anyhow::Result<()> {
+    let started = Instant::now();
+    let fixture_bytes = tokio::fs::read(&args.fixtures).await?;
+    let corpus_digest = sha256_prefixed(&fixture_bytes);
+    let corpus: CorpusFile = serde_json::from_slice(&fixture_bytes)?;
+    anyhow::ensure!(
+        corpus.schema == "trace_commons.pipeline_corpus.v1",
+        "unsupported corpus schema"
+    );
+    let client = reqwest::Client::new();
+    let mut reports = Vec::new();
+    let mut bundle_id = None;
+    for fixture in &corpus.fixtures {
+        let request_bytes = build_request_bytes(fixture).await?;
+        anyhow::ensure!(
+            !request_bytes
+                .windows(fixture.secret_probe.len())
+                .any(|window| window == fixture.secret_probe.as_bytes()),
+            "fixture secret survived local redaction"
+        );
+        let key = format!("corpus-v1:{}", fixture.label);
+        let first = submit_http(
+            &client,
+            &args.base_url,
+            &args.submit_token,
+            &key,
+            &request_bytes,
+        )
+        .await?;
+        bundle_id.get_or_insert_with(|| first.bundle_id.clone());
+        let replay = submit_http(
+            &client,
+            &args.base_url,
+            &args.submit_token,
+            &key,
+            &request_bytes,
+        )
+        .await?;
+        let mut changed_request = request_bytes.clone();
+        changed_request.push(b' ');
+        let changed_content_refused = submit_conflict_http(
+            &client,
+            &args.base_url,
+            &args.submit_token,
+            &key,
+            &changed_request,
+        )
+        .await?;
+        let deadline = Instant::now() + Duration::from_secs(args.timeout_seconds);
+        let inspection = loop {
+            let current =
+                inspect_http(&client, &args.base_url, &args.inspect_token, first.run_id).await?;
+            if matches!(
+                current.run.state,
+                PipelineRunState::Complete | PipelineRunState::Failed
+            ) {
+                break current;
+            }
+            anyhow::ensure!(Instant::now() < deadline, "pipeline completion timed out");
+            run_worker_http(&client, &args.base_url, &args.worker_token).await?;
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        };
+        reports.push(fixture_report(
+            fixture,
+            inspection,
+            replay.run_id == first.run_id,
+            changed_content_refused,
+        )?);
+    }
+    let failure_count = reports
+        .iter()
+        .filter(|report| {
+            report.state != PipelineRunState::Complete
+                || report.phase_count != 4
+                || !report.replay_same_run
+                || !report.changed_content_refused
+        })
+        .count();
+    let report = CorpusReport {
+        schema: "trace_commons.pipeline_corpus_report.v1",
+        corpus_digest,
+        code_revision: trace_commons_build_info::COMMIT,
+        bundle_id: bundle_id.unwrap_or_default(),
+        configuration_identities: BTreeMap::from([
+            ("artifact_store", "local_encrypted_v1"),
+            ("database", "postgresql"),
+            ("external_payout", "disabled"),
+        ]),
+        expected_fixture_count: corpus.fixtures.len(),
+        expected_outcomes_per_fixture: 4,
+        completed_fixture_count: reports
+            .iter()
+            .filter(|report| report.state == PipelineRunState::Complete)
+            .count(),
+        failure_count,
+        duration_ms: started.elapsed().as_millis(),
+        fixtures: reports,
+    };
+    let json = serde_json::to_vec_pretty(&report)?;
+    for fixture in &corpus.fixtures {
+        anyhow::ensure!(
+            !json
+                .windows(fixture.secret_probe.len())
+                .any(|window| window == fixture.secret_probe.as_bytes()),
+            "fixture secret appeared in report"
+        );
+    }
+    write_parent(&args.json_report, &json).await?;
+    let markdown = markdown_report(&report);
+    write_parent(&args.markdown_report, markdown.as_bytes()).await?;
+    anyhow::ensure!(failure_count == 0, "corpus report contains failures");
+    Ok(())
+}
+
+async fn build_request_bytes(fixture: &CorpusFixture) -> anyhow::Result<Vec<u8>> {
+    let turn = RawTraceCaptureTurn {
+        user_input: fixture.input.clone(),
+        response: Some("Completed the local fixture safely.".to_string()),
+        tool_calls: Vec::new(),
+        started_at: fixture.created_at,
+        completed_at: Some(fixture.created_at + chrono::Duration::seconds(1)),
+        state: Some("completed".to_string()),
+    };
+    let mut raw = RawTraceContribution::from_capture_turns(
+        &[turn],
+        RecordedTraceContributionOptions {
+            include_message_text: true,
+            ..RecordedTraceContributionOptions::default()
+        },
+    );
+    raw.trace_id = fixture.trace_id;
+    raw.submission_id = fixture.submission_id;
+    raw.created_at = fixture.created_at;
+    raw.contributor.revocation_handle = Uuid::new_v5(
+        &Uuid::NAMESPACE_URL,
+        format!("tracecommons:corpus-revocation:{}", fixture.label).as_bytes(),
+    );
+    for (index, event) in raw.events.iter_mut().enumerate() {
+        event.event_id = Uuid::new_v5(
+            &Uuid::NAMESPACE_URL,
+            format!("tracecommons:corpus-event:{}:{index}", fixture.label).as_bytes(),
+        );
+    }
+    let redactor = DeterministicTraceRedactor::try_default()?;
+    let envelope = redactor.redact_trace(raw).await?;
+    Ok(serde_json::to_vec(&envelope)?)
+}
+
+async fn submit_http(
+    client: &reqwest::Client,
+    base_url: &str,
+    token: &str,
+    key: &str,
+    body: &[u8],
+) -> anyhow::Result<PipelineSubmitReceipt> {
+    let response = client
+        .post(format!("{base_url}/v1/pipeline/submissions"))
+        .bearer_auth(token)
+        .header("idempotency-key", key)
+        .header("content-type", "application/json")
+        .body(body.to_vec())
+        .send()
+        .await?;
+    anyhow::ensure!(
+        response.status().is_success(),
+        "submission returned {}",
+        response.status()
+    );
+    Ok(response.json().await?)
+}
+
+async fn run_worker_http(
+    client: &reqwest::Client,
+    base_url: &str,
+    token: &str,
+) -> anyhow::Result<()> {
+    let response = client
+        .post(format!("{base_url}/v1/pipeline/worker"))
+        .bearer_auth(token)
+        .send()
+        .await?;
+    anyhow::ensure!(
+        response.status().is_success(),
+        "worker returned {}",
+        response.status()
+    );
+    Ok(())
+}
+
+async fn submit_conflict_http(
+    client: &reqwest::Client,
+    base_url: &str,
+    token: &str,
+    key: &str,
+    body: &[u8],
+) -> anyhow::Result<bool> {
+    let response = client
+        .post(format!("{base_url}/v1/pipeline/submissions"))
+        .bearer_auth(token)
+        .header("idempotency-key", key)
+        .header("content-type", "application/json")
+        .body(body.to_vec())
+        .send()
+        .await?;
+    Ok(response.status() == StatusCode::CONFLICT)
+}
+
+async fn inspect_http(
+    client: &reqwest::Client,
+    base_url: &str,
+    token: &str,
+    run_id: Uuid,
+) -> anyhow::Result<PipelineInspection> {
+    let response = client
+        .get(format!("{base_url}/v1/pipeline/runs/{run_id}"))
+        .bearer_auth(token)
+        .send()
+        .await?;
+    anyhow::ensure!(
+        response.status().is_success(),
+        "inspection returned {}",
+        response.status()
+    );
+    Ok(response.json().await?)
+}
+
+fn fixture_report(
+    fixture: &CorpusFixture,
+    inspection: PipelineInspection,
+    replay_same_run: bool,
+    changed_content_refused: bool,
+) -> anyhow::Result<FixtureReport> {
+    let score_microcredits =
+        outcome_microcredits(&inspection.outcomes, Phase::Score, "credit_microcredits");
+    let finalized_microcredits = outcome_microcredits(
+        &inspection.outcomes,
+        Phase::Settle,
+        "credit_microcredits_finalized",
+    );
+    let batch_hash = inspection
+        .outcomes
+        .iter()
+        .find(|outcome| outcome.phase == Phase::Settle)
+        .and_then(|outcome| outcome.decision.get("settlement_batch_ref_hash"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    let phases: Vec<PhaseReport> = inspection.outcomes.into_iter().map(phase_report).collect();
+    Ok(FixtureReport {
+        label: fixture.label.clone(),
+        request_content_hash: inspection.run.request_content_hash.clone(),
+        run_id: inspection.run.run_id,
+        submission_id: inspection.run.submission_id,
+        state: inspection.run.state,
+        phase_count: phases.len(),
+        phases,
+        approved_revision_id: inspection.run.approved_revision_id,
+        index_membership: inspection.run.index_membership,
+        score_microcredits,
+        finalized_microcredits,
+        batch_hash,
+        replay_same_run,
+        changed_content_refused,
+        failure_label: inspection.run.last_error_label,
+    })
+}
+
+fn phase_report(outcome: PhaseOutcomeRecord) -> PhaseReport {
+    PhaseReport {
+        outcome_id: outcome.outcome_id,
+        phase: outcome.phase,
+        outcome_schema_id: outcome.outcome_schema.id,
+        outcome_schema_version: outcome.outcome_schema.version,
+        decision: outcome.decision,
+        evidence: outcome.evidence,
+        evaluation: outcome.evaluation,
+    }
+}
+
+fn outcome_microcredits(outcomes: &[PhaseOutcomeRecord], phase: Phase, field: &str) -> Option<u64> {
+    outcomes
+        .iter()
+        .find(|outcome| outcome.phase == phase)
+        .and_then(|outcome| outcome.decision.get(field))
+        .and_then(|value| serde_json::from_value::<Microcredits>(value.clone()).ok())
+        .map(Microcredits::get)
+}
+
+fn markdown_report(report: &CorpusReport) -> String {
+    let mut output = format!(
+        "# Minimal pipeline corpus\n\nBundle: `{}`\n\nCompleted: {}/{}. Failures: {}.\n\n",
+        report.bundle_id,
+        report.completed_fixture_count,
+        report.expected_fixture_count,
+        report.failure_count
+    );
+    for fixture in &report.fixtures {
+        output.push_str(&format!(
+            "- `{}`: state `{:?}`, {} outcomes, score {} microcredits, index `{}`\n",
+            fixture.label,
+            fixture.state,
+            fixture.phase_count,
+            fixture.score_microcredits.unwrap_or(0),
+            fixture.index_membership
+        ));
+    }
+    output
+}
+
+async fn write_parent(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    tokio::fs::write(path, bytes).await?;
+    Ok(())
+}
+
+fn sha256_prefixed(bytes: &[u8]) -> String {
+    format!("sha256:{:x}", Sha256::digest(bytes))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn token_configuration_rejects_raw_principal_identity() {
+        assert!(parse_tokens("token,tenant,user@example.com,contributor").is_err());
+        assert!(
+            parse_tokens(&format!(
+                "token,tenant,principal_sha256:{},contributor",
+                "a".repeat(64)
+            ))
+            .is_ok()
+        );
+    }
+}

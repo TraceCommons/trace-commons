@@ -102,6 +102,10 @@ path must wait for pipeline completion and inspect the results.
 through all four phases. The results can be explained without a model, vector
 service, or credit settlement dependency.
 
+**Implementation:** The isolated local/test path is documented in
+[phase-1.md](./phase-1.md). Its contract evidence manifest is
+[contract-test-manifest.json](./contract-test-manifest.json).
+
 ### Ordered review steps
 
 1. **Small types and one bundle.** Define the initial typed phase contracts,

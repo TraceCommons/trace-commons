@@ -1,0 +1,200 @@
+{
+  "schema": "trace_commons.contract_test_manifest.v1",
+  "updated_for_phase": 1,
+  "status_values": ["planned", "partial", "passing", "deferred"],
+  "contract_groups": [
+    {
+      "contract_ids": ["SYS-001", "SYS-002"],
+      "boundary": "tenant authority and content access",
+      "implementation_phase": 2,
+      "evidence_status": "planned",
+      "test_ids": []
+    },
+    {
+      "contract_ids": ["SYS-003", "SYS-004", "SYS-009"],
+      "boundary": "encrypted storage, safe output, and audit integrity",
+      "implementation_phase": 1,
+      "evidence_status": "partial",
+      "test_ids": ["versioned_pipeline_pg", "minimal_pipeline_corpus"]
+    },
+    {
+      "contract_ids": ["SYS-005", "SYS-010"],
+      "boundary": "retryable mutations and visible failure",
+      "implementation_phase": 2,
+      "evidence_status": "partial",
+      "test_ids": ["versioned_pipeline_pg::policy_failure_records_an_error_without_a_decision"]
+    },
+    {
+      "contract_ids": ["SYS-006", "SYS-007", "SYS-008"],
+      "boundary": "provenance, immutable outcomes, and versioned readers",
+      "implementation_phase": 1,
+      "evidence_status": "partial",
+      "test_ids": ["versioned_pipeline_pg", "pipeline::package_validation_binds_manifest_and_all_artifacts"]
+    },
+    {
+      "contract_ids": ["AUTH-001", "AUTH-002", "AUTH-003", "AUTH-004", "AUTH-005"],
+      "boundary": "public and worker authentication",
+      "implementation_phase": 6,
+      "evidence_status": "planned",
+      "test_ids": []
+    },
+    {
+      "contract_ids": ["SUB-001", "SUB-002"],
+      "boundary": "submission protocol validation",
+      "implementation_phase": 6,
+      "evidence_status": "partial",
+      "test_ids": ["minimal_pipeline_corpus"]
+    },
+    {
+      "contract_ids": ["SUB-003", "SUB-004"],
+      "boundary": "receipt identity and exact replay",
+      "implementation_phase": 2,
+      "evidence_status": "partial",
+      "test_ids": ["versioned_pipeline_pg", "minimal_pipeline_corpus"]
+    },
+    {
+      "contract_ids": ["SUB-005", "SUB-006", "SUB-007"],
+      "boundary": "admission policy, limits, and tombstones",
+      "implementation_phase": 4,
+      "evidence_status": "planned",
+      "test_ids": []
+    },
+    {
+      "contract_ids": ["BND-001", "BND-002", "BND-003", "BND-004"],
+      "boundary": "bundle identity, traits, binding, and integrity",
+      "implementation_phase": 1,
+      "evidence_status": "partial",
+      "test_ids": ["pipeline::package_validation_binds_manifest_and_all_artifacts", "versioned_pipeline_pg"]
+    },
+    {
+      "contract_ids": ["REV-001", "REV-002", "REV-003", "REV-004"],
+      "boundary": "review source binding, revision commit, and assessment",
+      "implementation_phase": 4,
+      "evidence_status": "partial",
+      "test_ids": ["versioned_pipeline_pg"]
+    },
+    {
+      "contract_ids": ["SCR-001", "SCR-002", "SCR-003", "SCR-004"],
+      "boundary": "score policy, capabilities, units, and credit event",
+      "implementation_phase": 5,
+      "evidence_status": "partial",
+      "test_ids": ["pipeline::checked_microcredit_conversion_is_exact", "minimal_policies_produce_explicit_zero_credit_completion"]
+    },
+    {
+      "contract_ids": ["SCR-005"],
+      "boundary": "external valuation protocol",
+      "implementation_phase": null,
+      "evidence_status": "deferred",
+      "deferral": "Deferred until the external valuation protocol is adopted.",
+      "test_ids": []
+    },
+    {
+      "contract_ids": ["STL-001", "STL-002", "STL-003", "STL-004", "STL-005"],
+      "boundary": "index and credit settlement operations",
+      "implementation_phase": 3,
+      "evidence_status": "partial",
+      "test_ids": ["minimal_policies_produce_explicit_zero_credit_completion"]
+    },
+    {
+      "contract_ids": ["RUN-001", "RUN-002", "RUN-003", "RUN-004"],
+      "boundary": "run state, uniqueness, leases, and crash recovery",
+      "implementation_phase": 3,
+      "evidence_status": "partial",
+      "test_ids": ["versioned_pipeline_pg"]
+    },
+    {
+      "contract_ids": ["RUN-005"],
+      "boundary": "backup and restore",
+      "implementation_phase": 7,
+      "evidence_status": "planned",
+      "test_ids": []
+    },
+    {
+      "contract_ids": ["GRD-001", "GRD-002", "GRD-003", "GRD-004"],
+      "boundary": "phase guards and interventions",
+      "implementation_phase": 4,
+      "evidence_status": "planned",
+      "test_ids": []
+    },
+    {
+      "contract_ids": ["STA-001", "STA-002", "STA-003", "STA-004", "STA-005"],
+      "boundary": "contributor and operator status",
+      "implementation_phase": 6,
+      "evidence_status": "partial",
+      "test_ids": ["minimal_pipeline_corpus"]
+    },
+    {
+      "contract_ids": ["CRD-001", "CRD-002", "CRD-003", "CRD-004", "CRD-005"],
+      "boundary": "ledger, approvals, holds, caps, and no clawback",
+      "implementation_phase": 4,
+      "evidence_status": "planned",
+      "test_ids": []
+    },
+    {
+      "contract_ids": ["LIF-001", "LIF-002", "LIF-003"],
+      "boundary": "withdrawal, retention, and invalidation",
+      "implementation_phase": 6,
+      "evidence_status": "planned",
+      "test_ids": []
+    },
+    {
+      "contract_ids": ["EXP-001", "EXP-002", "EXP-003", "EXP-004"],
+      "boundary": "exports and derived artifacts",
+      "implementation_phase": 6,
+      "evidence_status": "planned",
+      "test_ids": []
+    },
+    {
+      "contract_ids": ["COM-001", "COM-002"],
+      "boundary": "optional community interfaces",
+      "implementation_phase": 6,
+      "evidence_status": "planned",
+      "test_ids": []
+    },
+    {
+      "contract_ids": ["OPS-001", "OPS-002", "OPS-003", "OPS-004", "OPS-005", "OPS-006"],
+      "boundary": "readiness, limits, diagnostics, and drills",
+      "implementation_phase": 7,
+      "evidence_status": "partial",
+      "test_ids": ["minimal_pipeline_corpus"]
+    },
+    {
+      "contract_ids": ["LAB-001", "LAB-002", "LAB-003"],
+      "boundary": "corpus, test levels, and lab separation",
+      "implementation_phase": 7,
+      "evidence_status": "partial",
+      "test_ids": ["minimal_pipeline_corpus", "versioned_pipeline_pg"]
+    },
+    {
+      "contract_ids": ["CMP-001", "CMP-002"],
+      "boundary": "public compatibility and prohibited dependencies",
+      "implementation_phase": 6,
+      "evidence_status": "planned",
+      "test_ids": []
+    },
+    {
+      "contract_ids": ["CMP-003", "CMP-004"],
+      "boundary": "specification scope and product decisions",
+      "implementation_phase": 1,
+      "evidence_status": "partial",
+      "test_ids": ["contract_test_manifest"]
+    }
+  ],
+  "scenarios": [
+    {"scenario_id": "SCN-001", "implementation_phase": 6, "evidence_status": "partial", "test_ids": ["minimal_pipeline_corpus"]},
+    {"scenario_id": "SCN-002", "implementation_phase": 3, "evidence_status": "planned", "test_ids": []},
+    {"scenario_id": "SCN-003", "implementation_phase": 4, "evidence_status": "planned", "test_ids": []},
+    {"scenario_id": "SCN-004", "implementation_phase": 4, "evidence_status": "planned", "test_ids": []},
+    {"scenario_id": "SCN-005", "implementation_phase": 5, "evidence_status": "partial", "test_ids": ["versioned_pipeline_pg::policy_failure_records_an_error_without_a_decision"]},
+    {"scenario_id": "SCN-006", "implementation_phase": 3, "evidence_status": "planned", "test_ids": []},
+    {"scenario_id": "SCN-007", "implementation_phase": 2, "evidence_status": "planned", "test_ids": []},
+    {"scenario_id": "SCN-008", "implementation_phase": 4, "evidence_status": "planned", "test_ids": []},
+    {"scenario_id": "SCN-009", "implementation_phase": 4, "evidence_status": "planned", "test_ids": []},
+    {"scenario_id": "SCN-010", "implementation_phase": 6, "evidence_status": "planned", "test_ids": []},
+    {"scenario_id": "SCN-011", "implementation_phase": 3, "evidence_status": "planned", "test_ids": []},
+    {"scenario_id": "SCN-012", "implementation_phase": 7, "evidence_status": "partial", "test_ids": ["contract_test_manifest"]},
+    {"scenario_id": "SCN-013", "implementation_phase": 7, "evidence_status": "partial", "test_ids": ["contract_test_manifest"]},
+    {"scenario_id": "SCN-014", "implementation_phase": 6, "evidence_status": "planned", "test_ids": []},
+    {"scenario_id": "SCN-015", "implementation_phase": 7, "evidence_status": "planned", "test_ids": []}
+  ]
+}

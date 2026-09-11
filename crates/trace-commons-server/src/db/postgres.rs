@@ -180,6 +180,8 @@ const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "trace_webauthn_credentials",
     "trace_near_identities",
     "trace_account_merge_proposals",
+    "pipeline_runs",
+    "phase_outcomes",
 ];
 
 const TRACE_COMMONS_RLS_POLICY_EXPRESSION_VARIANTS: &[&str] = &[
@@ -1820,6 +1822,26 @@ impl Database for PgBackend {
                 .execute(
                     "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
                     &[&46_i32, &"community_snapshot_withdrawal_eviction"],
+                )
+                .await?;
+        }
+        let already_applied = client
+            .query_opt(
+                "SELECT 1 FROM _trace_commons_migrations WHERE version = $1",
+                &[&47_i32],
+            )
+            .await?
+            .is_some();
+        if !already_applied {
+            client
+                .batch_execute(include_str!(
+                    "../../../../migrations/V47__versioned_pipeline.sql"
+                ))
+                .await?;
+            client
+                .execute(
+                    "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
+                    &[&47_i32, &"versioned_pipeline"],
                 )
                 .await?;
         }
