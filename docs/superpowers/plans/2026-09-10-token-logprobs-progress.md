@@ -46,6 +46,9 @@ Research access additionally requires `TRACE_COMMONS_TOKEN_RESEARCH_EXPORTS`, an
 exporter role, tenant grant, current evaluation consent, low residual risk,
 retention eligibility and the ordinary export ABAC policy. Downloads register
 export lineage and recheck state, policy and event bytes after object I/O.
+Research downloads include the exact attachment and manifest bytes as base64,
+the manifest certificate/signature, corresponding sanitized event text and
+processing summary. Owner downloads retain their exact attachment-byte response.
 Parent tombstones and withdrawal records override restored child state. Object
 retention holds prevent erasure, not revocation of access.
 

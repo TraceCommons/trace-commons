@@ -582,6 +582,24 @@ async fn read_bundle(
             .verify_sanitized_attachment(&artifact, &bytes, current_text.as_bytes())
             .map_err(|_| api_error(StatusCode::GONE, "token_bundle_rescrub_changed"))?;
     }
+    let bytes = if research {
+        use base64::Engine;
+        let base64 = base64::engine::general_purpose::STANDARD;
+        serde_json::to_vec(&serde_json::json!({
+            "version":SCHEMA_VERSION,
+            "export_id":export_id,
+            "artifact_id":artifact,
+            "event_id":descriptor.event_id,
+            "event_text":text,
+            "attachment_base64":base64.encode(&bytes),
+            "manifest_base64":base64.encode(bundle.manifest.canonical_bytes().map_err(internal_error)?),
+            "manifest_certificate":bundle.witness_headers.get(CERTIFICATE_HEADER),
+            "manifest_signature":bundle.witness_headers.get(SIGNATURE_HEADER),
+            "processing_summary":current.processing_summary,
+        })).map_err(internal_error)?
+    } else {
+        bytes
+    };
     let mut response = (
         [
             (header::CONTENT_TYPE, "application/json"),

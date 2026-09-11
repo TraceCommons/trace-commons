@@ -5093,8 +5093,10 @@ mod tests {
 fn render_token_storage(app: &Rc<App>, storage: Option<crate::model::TokenStorage>) {
     let view = &app.settings;
     if let Some(value) = &storage {
-        view.token_storage_status
-            .set_text(&format!("{}\n{}\n{}", value.state_line, value.scope_note, value.capture_notice));
+        view.token_storage_status.set_text(&format!(
+            "{}\n{}\n{}",
+            value.state_line, value.scope_note, value.capture_notice
+        ));
         view.token_capture.set_label(&value.capture_label);
         view.token_cleanup.set_label(&value.cleanup_label);
         view.token_discard.set_label(&value.discard_label);
@@ -5136,31 +5138,53 @@ fn save_token_storage(app: &Rc<App>, discard: bool) {
     );
 }
 fn save_local_capture(app: &Rc<App>, enabled: bool) {
-    if app.settings.token_saving.replace(true) { return; }
-    app.call("set_settings", serde_json::json!({"token_capture_enabled":enabled}), move |app, result| {
-        app.settings.token_saving.set(false);
-        if let Ok(value) = result {
-            if let Ok(storage) = serde_json::from_value(value["token_storage"].clone()) {
-                render_token_storage(app, Some(storage));
-                return;
+    if app.settings.token_saving.replace(true) {
+        return;
+    }
+    app.call(
+        "set_settings",
+        serde_json::json!({"token_capture_enabled":enabled}),
+        move |app, result| {
+            app.settings.token_saving.set(false);
+            if let Ok(value) = result {
+                if let Ok(storage) = serde_json::from_value(value["token_storage"].clone()) {
+                    render_token_storage(app, Some(storage));
+                    return;
+                }
             }
-        }
-        if let Some(storage) = app.settings.token_storage.borrow().as_ref() { app.settings.token_error.set_text(&storage.failure_line); }
-    });
+            if let Some(storage) = app.settings.token_storage.borrow().as_ref() {
+                app.settings.token_error.set_text(&storage.failure_line);
+            }
+        },
+    );
 }
 fn wire_token_storage(app: &Rc<App>) {
     let a = Rc::clone(app);
     app.settings.token_capture.connect_clicked(move |_| {
-        let Some(storage) = a.settings.token_storage.borrow().clone() else { return; };
-        if storage.capture_enabled { save_local_capture(&a, false); return; }
-        let dialog = adw::MessageDialog::new(Some(&a.window), Some(&storage.capture_label), Some(&storage.capture_confirmation));
-        dialog.add_responses(&[("cancel", &storage.cancel_label), ("enable", &storage.capture_label)]);
+        let Some(storage) = a.settings.token_storage.borrow().clone() else {
+            return;
+        };
+        if storage.capture_enabled {
+            save_local_capture(&a, false);
+            return;
+        }
+        let dialog = adw::MessageDialog::new(
+            Some(&a.window),
+            Some(&storage.capture_label),
+            Some(&storage.capture_confirmation),
+        );
+        dialog.add_responses(&[
+            ("cancel", &storage.cancel_label),
+            ("enable", &storage.capture_label),
+        ]);
         dialog.set_default_response(Some("cancel"));
         dialog.set_close_response("cancel");
         let a = Rc::clone(&a);
         dialog.connect_response(None, move |dialog, response| {
             dialog.close();
-            if response == "enable" { save_local_capture(&a, true); }
+            if response == "enable" {
+                save_local_capture(&a, true);
+            }
         });
         dialog.present();
     });

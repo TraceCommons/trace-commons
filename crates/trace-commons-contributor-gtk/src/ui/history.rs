@@ -721,7 +721,11 @@ fn withdraw_control(app: &Rc<App>, record: &HistoryRecord) -> gtk::Box {
             // server actually applied, and says so plainly when the server
             // reported a tier this build does not know.
             let done = gtk::Label::builder()
-                .label(format!("{}{}", copy::withdraw_result_sentence(reach.as_deref()), note.as_ref().map(|n| format!("\n{n}")).unwrap_or_default()))
+                .label(format!(
+                    "{}{}",
+                    copy::withdraw_result_sentence(reach.as_deref()),
+                    note.as_ref().map(|n| format!("\n{n}")).unwrap_or_default()
+                ))
                 .xalign(0.0)
                 .wrap(true)
                 .build();
@@ -830,7 +834,10 @@ fn withdraw(app: &Rc<App>, submission_id: &str) {
                         .get("distribution_reach")
                         .and_then(|v| v.as_str())
                         .map(str::to_string),
-                    value.get("token_deletion_note").and_then(|v|v.as_str()).map(str::to_string),
+                    value
+                        .get("token_deletion_note")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string),
                 ),
                 // A fixed label by contract, so carrying it into the row
                 // cannot leak a path or a token.
