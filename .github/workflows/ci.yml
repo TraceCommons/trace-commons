@@ -699,6 +699,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
+      - name: Verify native wallet browser state transitions
+        run: node scripts/ci/test-near-wallet-browser.cjs
       - uses: dtolnay/rust-toolchain@stable
       - uses: actions/cache@v5
         with:
@@ -718,6 +720,13 @@ jobs:
       - uses: ./.github/actions/apt-update-ubuntu-only
       - name: Install a Secret Service provider for credential tests
         run: sudo apt-get install -y --no-install-recommends gnome-keyring dbus-x11
+      - name: Install the pinned wallet browser test runtime
+        run: |
+          npm install --prefix "$RUNNER_TEMP/trace-commons-wallet-ci" \
+            --ignore-scripts --omit=optional --no-audit --no-fund --save-exact \
+            playwright@1.63.0 playwright-core@1.63.0
+          node "$RUNNER_TEMP/trace-commons-wallet-ci/node_modules/playwright/cli.js" \
+            install --with-deps chromium
       - name: Run workspace tests with Secret Service
         run: |
           dbus-run-session -- sh -eu -c '
@@ -731,6 +740,13 @@ jobs:
             cargo test -p trace-commons-contributor --lib real_os_round_trip_removes_only_its_synthetic_entry -- --ignored
             cargo test -p trace-commons-contributor --lib real_commons_os_round_trip -- --ignored
           '
+      - name: Verify the real wallet SDK and production CSP
+        run: |
+          export TC_PLAYWRIGHT_MODULE="$RUNNER_TEMP/trace-commons-wallet-ci/node_modules/playwright"
+          node scripts/ci/test-near-wallet-sdk.cjs
+          cargo test --locked -p trace-commons-contributor --lib \
+            near_wallet_page::tests::pinned_wallet_controls_obey_production_csp \
+            -- --ignored --test-threads=1
       # Last, so every step above still has its binaries; see the action for
       # what is removed and why. Only a finished job saves its cache, so this
       # runs exactly when a save is about to happen.

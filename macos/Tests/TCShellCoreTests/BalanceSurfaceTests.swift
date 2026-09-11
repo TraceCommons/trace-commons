@@ -329,16 +329,13 @@ final class BalanceSurfaceTests: XCTestCase {
             .obtain)
     }
 
-    /// One card must not draw the same button twice. When the sign-in row is
-    /// already offering exactly this action, the balance row defers to it --
-    /// and defers ONLY on an exact match, so a balance that says the session
-    /// was refused still offers a sign-in beside a credential row that is
-    /// offering something else, or nothing.
-    func testTheBalanceDefersOnlyWhenTheSignInRowOffersTheSameButton() {
+    /// Renewal remains available for retained keys, but not during a ceremony.
+    func testTheBalanceDefersToDuplicateOrPendingSignIn() {
         XCTAssertEqual(BalanceSurface.actionToDraw(balance: .obtain, credential: .obtain), .none)
         XCTAssertEqual(BalanceSurface.actionToDraw(balance: .obtain, credential: .none), .obtain)
         XCTAssertEqual(BalanceSurface.actionToDraw(balance: .obtain, credential: .forget), .obtain)
-        XCTAssertEqual(BalanceSurface.actionToDraw(balance: .obtain, credential: .cancel), .obtain)
+        XCTAssertEqual(BalanceSurface.actionToDraw(balance: .obtain, credential: .cancel), .none,
+                       "A pending sign-in must finish or be cancelled before another starts")
         XCTAssertEqual(BalanceSurface.actionToDraw(balance: .none, credential: .obtain), .none)
     }
 

@@ -109,6 +109,16 @@
                                    Visibility="{x:Bind ViewModel.HasCredentialActionPreamble, Mode=OneWay}"
                                    Style="{StaticResource TcCaptionTextStyle}"
                                    TextWrapping="Wrap" />
+                        <ComboBox Header="{x:Bind ViewModel.CredentialProviderLabel}"
+                                  ItemsSource="{x:Bind ViewModel.CredentialProviders}"
+                                  DisplayMemberPath="Label" SelectedValuePath="Id"
+                                  SelectedValue="{x:Bind ViewModel.CredentialProvider, Mode=TwoWay}"
+                                  Visibility="{x:Bind ViewModel.HasCredentialProvider, Mode=OneWay}"
+                                  IsEnabled="{x:Bind ViewModel.CredentialControlsEnabled, Mode=OneWay}"
+                                  MinHeight="44" HorizontalAlignment="Stretch" />
+                        <TextBlock Text="{x:Bind ViewModel.CredentialWalletNotice}"
+                                   Visibility="{x:Bind ViewModel.HasCredentialWalletNotice, Mode=OneWay}"
+                                   TextWrapping="Wrap" />
                         <Button Content="{x:Bind ViewModel.CredentialActionText, Mode=OneWay}"
                                 Visibility="{x:Bind ViewModel.ShowCredentialSignIn, Mode=OneWay}"
                                 IsEnabled="{x:Bind ViewModel.CredentialControlsEnabled, Mode=OneWay}"
@@ -242,6 +252,12 @@
                                 IsEnabled="{x:Bind ViewModel.CredentialControlsEnabled, Mode=OneWay}"
                                 HorizontalAlignment="Left"
                                 Click="OnBalanceAction" />
+                        <TextBlock Text="{x:Bind ViewModel.Funding.Title}" Style="{StaticResource TcTitleSectionTextStyle}" TextWrapping="Wrap" />
+                        <TextBlock Text="{x:Bind ViewModel.Funding.Message, Mode=OneWay}" Style="{StaticResource TcBodyTextStyle}" TextWrapping="Wrap" />
+                        <TextBlock Text="{x:Bind ViewModel.Funding.What}" Style="{StaticResource TcCaptionTextStyle}" TextWrapping="Wrap" />
+                        <Button Content="{x:Bind ViewModel.Funding.Action, Mode=OneWay}"
+                                IsEnabled="{x:Bind ViewModel.Funding.Enabled, Mode=OneWay}"
+                                HorizontalAlignment="Left" MinHeight="44" Click="OnFundingAction" />
                     </StackPanel>
                 </Border>
 
@@ -312,35 +328,36 @@
                         <ItemsControl ItemsSource="{x:Bind ViewModel.Harnesses, Mode=OneWay}">
                             <ItemsControl.ItemTemplate>
                                 <DataTemplate x:DataType="vm:HarnessRowViewModel">
-                                    <StackPanel Spacing="4"
-                                                Margin="0,10,0,0"
-                                                BorderBrush="{ThemeResource TcHairlineDividerBrush}"
-                                                BorderThickness="0,1,0,0"
-                                                Padding="0,10,0,0">
-                                        <!--
-                                            The tool's own name, off the wire.
-                                            No shell spells one: a tool renamed
-                                            upstream must not go on being called
-                                            the old thing here.
-                                        -->
-                                        <TextBlock Text="{x:Bind Name}"
-                                                   Style="{StaticResource TcTitleCardTextStyle}"
-                                                   TextWrapping="Wrap" />
-                                        <!--
-                                            The file an action would change,
-                                            shown to the contributor. It goes on
-                                            no log line and into no audit row.
-                                        -->
-                                        <TextBlock Text="{x:Bind ConfigPath}"
-                                                   Visibility="{x:Bind HasConfigPath}"
-                                                   Style="{StaticResource TcMonoCodeTextStyle}"
-                                                   IsTextSelectionEnabled="True"
-                                                   TextWrapping="Wrap" />
-                                        <!--
-                                            Two lines, one state, chosen from
-                                            the state rather than from the text.
-                                            Only the answering one is green.
-                                        -->
+                                    <StackPanel Spacing="12" Margin="0,12,0,0" Padding="20"
+                                                Background="{ThemeResource TcSurfaceInsetBrush}"
+                                                CornerRadius="{StaticResource TcCardCornerRadius}">
+                                        <Grid ColumnSpacing="12">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="Auto" />
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="Auto" />
+                                            </Grid.ColumnDefinitions>
+                                            <Border Padding="12" Background="{ThemeResource TcSurfaceCardBrush}"
+                                                    CornerRadius="{StaticResource TcCardCornerRadius}">
+                                                <FontIcon Glyph="&#xE756;" FontSize="20"
+                                                          Foreground="{ThemeResource TcGreenTextBrush}"
+                                                          AutomationProperties.AccessibilityView="Raw" />
+                                            </Border>
+                                            <TextBlock Grid.Column="1" Text="{x:Bind Name}"
+                                                       VerticalAlignment="Center"
+                                                       Style="{StaticResource TcTitleCardTextStyle}"
+                                                       TextWrapping="Wrap" />
+                                            <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="8"
+                                                        VerticalAlignment="Center">
+                                                <Button Content="{x:Bind ConnectText}"
+                                                        Style="{StaticResource TcPrimaryButtonStyle}"
+                                                        Visibility="{x:Bind CanConnect}"
+                                                        Tag="{x:Bind Id}" Click="OnConnectHarness" />
+                                                <Button Content="{x:Bind DisconnectText}"
+                                                        Visibility="{x:Bind CanDisconnect}"
+                                                        Tag="{x:Bind Id}" Click="OnDisconnectHarness" />
+                                            </StackPanel>
+                                        </Grid>
                                         <TextBlock Text="{x:Bind StateText}"
                                                    Visibility="{x:Bind StateIsPlain}"
                                                    Style="{StaticResource TcCaptionTextStyle}"
@@ -350,46 +367,25 @@
                                                    Style="{StaticResource TcCaptionTextStyle}"
                                                    Foreground="{ThemeResource TcGreenTextBrush}"
                                                    TextWrapping="Wrap" />
-                                        <!--
-                                            When a call last arrived, assembled
-                                            across the ABI and absent when
-                                            there is nothing to report, which
-                                            draws no line at all.
-                                        -->
                                         <TextBlock Text="{x:Bind LastCallText}"
                                                    Visibility="{x:Bind HasLastCallText}"
                                                    Style="{StaticResource TcCaptionTextStyle}"
                                                    TextWrapping="Wrap" />
-                                        <StackPanel Orientation="Horizontal" Spacing="8" Margin="0,4,0,0">
-                                            <Button Content="{x:Bind ConnectText}"
-                                                    Visibility="{x:Bind CanConnect}"
-                                                    Tag="{x:Bind Id}"
-                                                    Click="OnConnectHarness" />
-                                            <!--
-                                                Offered whenever the tool is
-                                                connected, installed or not:
-                                                uninstalling a coding tool does
-                                                not remove the line we put in
-                                                its file, and "remove only what
-                                                we put there" is worth nothing
-                                                if this control is hidden.
-                                            -->
-                                            <Button Content="{x:Bind DisconnectText}"
-                                                    Visibility="{x:Bind CanDisconnect}"
-                                                    Tag="{x:Bind Id}"
-                                                    Click="OnDisconnectHarness" />
-                                        </StackPanel>
-                                        <!--
-                                            The same thing done outside this
-                                            app, verbatim and selectable, for a
-                                            contributor who would rather not
-                                            have an app edit their files.
-                                        -->
-                                        <TextBlock Text="{x:Bind ConnectCommand}"
-                                                   Visibility="{x:Bind HasConnectCommand}"
-                                                   Style="{StaticResource TcMonoCodeTextStyle}"
-                                                   IsTextSelectionEnabled="True"
-                                                   TextWrapping="Wrap" />
+                                        <Expander Header="{x:Bind SettingsTitle}"
+                                                  IsExpanded="{x:Bind IsSettingsExpanded, Mode=TwoWay}"
+                                                  HorizontalAlignment="Stretch"
+                                                  HorizontalContentAlignment="Stretch">
+                                            <StackPanel Spacing="12">
+                                                <TextBlock Text="{x:Bind ConfigPath}"
+                                                           Visibility="{x:Bind HasConfigPath}"
+                                                           Style="{StaticResource TcMonoCodeTextStyle}"
+                                                           IsTextSelectionEnabled="True" TextWrapping="Wrap" />
+                                                <TextBlock Text="{x:Bind ConnectCommand}"
+                                                           Visibility="{x:Bind HasConnectCommand}"
+                                                           Style="{StaticResource TcMonoCodeTextStyle}"
+                                                           IsTextSelectionEnabled="True" TextWrapping="Wrap" />
+                                            </StackPanel>
+                                        </Expander>
                                     </StackPanel>
                                 </DataTemplate>
                             </ItemsControl.ItemTemplate>

@@ -96,7 +96,7 @@ impl Fixture {
                 release_rx
                     .recv_timeout(DEADLINE)
                     .expect("release late publication");
-                persist_attempt(&directory, &attempt_id, key, session)
+                persist_attempt(&directory, &attempt_id, key, session, None)
             });
             ready_rx
                 .recv_timeout(DEADLINE)
@@ -152,11 +152,13 @@ fn the_current_waiting_attempt_publishes_both_credentials_once() {
     let fixture = Fixture::new();
     fixture.waiting("current");
     let before = fixture.snapshot();
+    let expires_at = chrono::Utc::now() + chrono::Duration::hours(1);
     persist_attempt(
         fixture.store.dir(),
         "current",
         minted("current"),
         refresh("current"),
+        Some(expires_at),
     )
     .expect("the current waiting attempt must publish");
 
@@ -165,13 +167,9 @@ fn the_current_waiting_attempt_publishes_both_credentials_once() {
     assert_eq!(key.key, "synthetic-key-current");
     assert_eq!(key.organization_id, "organization-current");
     assert_eq!(key.workspace_id, "workspace-current");
-    assert_eq!(
-        after
-            .session
-            .expect("published retained session")
-            .refresh_token,
-        refresh("current")
-    );
+    let session = after.session.expect("published retained session");
+    assert_eq!(session.refresh_token, refresh("current"));
+    assert_eq!(session.refresh_token_expires_at, Some(expires_at));
     assert_eq!(after.changes, before.changes + 1);
     assert_eq!(
         DaemonSettings::load_with_cloud_credentials(&fixture.store)
@@ -226,6 +224,7 @@ fn a_late_mint_cannot_replace_a_new_waiting_attempts_credentials() {
             "replacement",
             minted("replacement"),
             refresh("replacement"),
+            None,
         )
         .expect("publish replacement account");
         // Keep the new entry waiting: only its different ID can reject the old

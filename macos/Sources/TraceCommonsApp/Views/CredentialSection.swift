@@ -18,6 +18,7 @@ struct CredentialSection: View {
     let copy: PrivateInferenceCopy
     var requiresSession = false
     var prominent = false
+    @State private var provider = "github"
 
     /// How often a ceremony in flight is re-read.
     ///
@@ -34,6 +35,9 @@ struct CredentialSection: View {
         let action = CredentialSurface.action(
             requiresSession ? CredentialStatus(state: status.sessionState) : status,
             calls: model.credentialCalls)
+        let balanceAction = requiresSession ? CredentialAction.none : BalanceSurface.actionToDraw(
+            balance: BalanceSurface.action(model.balanceStatus, calls: model.balanceCalls),
+            credential: action)
         VStack(alignment: .leading, spacing: TC.Space.sm) {
             if prominent {
                 Label(copy.credentialTitle, systemImage: "person.crop.circle")
@@ -62,6 +66,20 @@ struct CredentialSection: View {
                     .font(TC.Font_.body)
                     .fixedSize(horizontal: false, vertical: true)
             }
+            if action == .obtain || balanceAction == .obtain {
+                Picker(copy.credentialProviderLabel, selection: $provider) {
+                    Text(copy.credentialProviderGithub).tag("github")
+                    Text(copy.credentialProviderGoogle).tag("google")
+                    Text(copy.credentialProviderNear).tag("near")
+                }
+                .frame(minHeight: 44)
+                .disabled(model.credentialBusy)
+                if provider == "near" {
+                    Text(copy.credentialWalletNotice)
+                        .font(TC.Font_.body)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
             actionButton(action)
             // What the key is worth, on the same card as the key. A balance
             // is the one fact on this screen about an ACCOUNT rather than
@@ -75,6 +93,8 @@ struct CredentialSection: View {
             if !requiresSession && action != .obtain {
                 Divider().padding(.vertical, TC.Space.xs)
                 BalanceRow(copy: copy, credentialAction: action, run: run)
+                Divider().padding(.vertical, TC.Space.xs)
+                FundingRow(copy: copy)
             }
         }
         .task(id: action) {
@@ -121,7 +141,7 @@ struct CredentialSection: View {
             Task {
                 // The URL is served once, by start. Opening it is this
                 // view's environment; the model has no window.
-                guard let url = await model.startNearAiCredential() else { return }
+                guard let url = await model.startNearAiCredential(provider: provider) else { return }
                 let accepted = await withCheckedContinuation { continuation in
                     openURL(url) { continuation.resume(returning: $0) }
                 }

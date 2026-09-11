@@ -273,11 +273,9 @@ public enum BalanceSurface {
     /// buttons on one card is a defect a contributor reads as two different
     /// sign-ins.
     ///
-    /// The balance defers ONLY on an exact match, and that limit is the
-    /// point. A stored key with a refused session is the state where the
-    /// sign-in row has nothing to offer and the balance row is the only thing
-    /// saying the session must be renewed; suppressing on anything looser
-    /// would take that button away.
+    /// A pending ceremony suppresses renewal until it finishes or is cancelled.
+    /// A retained key with a refused session still offers renewal alongside
+    /// the credential row's forget action.
     ///
     /// This changes nothing the ABI decided. Both tables are still asked, and
     /// the action offered is still the one they answered; only the second
@@ -285,7 +283,7 @@ public enum BalanceSurface {
     public static func actionToDraw(
         balance: CredentialAction, credential: CredentialAction
     ) -> CredentialAction {
-        balance == credential ? .none : balance
+        credential == .cancel || balance == credential ? .none : balance
     }
 
     // MARK: - The figures
