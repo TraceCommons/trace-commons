@@ -75,20 +75,12 @@ struct MainWindowView: View {
     }
 
     /// Only trace destinations pass through enrollment and session-root gates.
-    /// The sidebar and Compute remain reachable in every watcher startup state.
+    /// Compute and Private AI have their own activation paths.
     @ViewBuilder
     private var traceContent: some View {
         switch model.startup {
-        case .starting:
-            CenteredNotice(
-                title: "Starting…",
-                detail: "Nothing has been sent."
-            )
-            .onAppear { model.refreshAll() }
-        case .refused(let reason):
-            // Not-running is a first-class state, not a spinner that never
-            // resolves.
-            CenteredNotice(title: "The watcher isn't running.", detail: reason)
+        case .starting, .refused:
+            DaemonStartupNotice(startup: model.startup)
                 .onAppear { model.refreshAll() }
         case .needsRoots, .running:
             // One branch for BOTH states, deliberately: `.needsRoots` is the
@@ -155,6 +147,9 @@ struct MainWindowView: View {
                 if navigation.displaysCompute {
                     contentHeader
                     ComputeView(model: compute)
+                } else if section == .privateInference {
+                    contentHeader
+                    PrivateInferenceActivationView()
                 } else {
                     if model.traceNavigationReady { contentHeader }
                     traceContent
@@ -174,7 +169,7 @@ struct MainWindowView: View {
         case .history: HistoryView()
         case .settings: SettingsView(navigation: navigation)
         case .compute: EmptyView()
-        case .privateInference: PrivateInferenceView()
+        case .privateInference: EmptyView()
         }
     }
 
@@ -329,7 +324,7 @@ struct MainWindowView: View {
                     .foregroundStyle(TC.inkSecondary)
             }
             Spacer(minLength: TC.Space.m)
-            if section != .compute {
+            if section != .compute && section != .privateInference {
                 watchChip
                 watchControl
             }
@@ -686,6 +681,22 @@ enum MacGlyphs: Equatable {
         path.move(to: CGPoint(x: 8, y: 6.6))
         path.addLine(to: CGPoint(x: 8, y: 9.6))
         path.addEllipse(in: CGRect(x: 7.5, y: 11.2, width: 1, height: 1))
+    }
+}
+
+/// Shared startup states for the contribution and Private AI destinations.
+struct DaemonStartupNotice: View {
+    let startup: AppModel.Startup
+
+    var body: some View {
+        switch startup {
+        case .starting:
+            CenteredNotice(title: "Starting…", detail: "Nothing has been sent.")
+        case .refused(let reason):
+            CenteredNotice(title: "The watcher isn't running.", detail: reason)
+        case .needsRoots, .running:
+            EmptyView()
+        }
     }
 }
 
