@@ -467,21 +467,27 @@ struct HistoryRow: View {
             }
 
             if let result = model.withdrawals[record.submissionID] {
-                outcome(result)
+                WithdrawalOutcomeView(result: result)
+                sessionAction
             } else if confirming || initiallyConfirming {
-                confirmation
+                WithdrawalConfirmationView(
+                    status: record.status,
+                    keepLabel: "Keep it",
+                    inFlight: model.withdrawing.contains(record.submissionID),
+                    onKeep: { confirming = false },
+                    onConfirm: { model.withdraw(record) }
+                )
+                sessionAction
             } else {
                 HStack(spacing: TC.Space.s) {
-                    if let onOpen, isWithdrawable, let copy = model.publicRunCopy {
-                        Button(copy.viewSession, action: onOpen)
-                            .buttonStyle(SmallSecondaryButtonStyle())
-                    }
+                    sessionAction
                     if isWithdrawable {
                         // Plain, not filled. The filled action in this app is
                         // the one a person is being invited to take; this one
                         // only opens a question.
                         Button("Withdraw") { confirming = true }
                             .buttonStyle(SmallSecondaryButtonStyle())
+                            .frame(minHeight: 44)
                     }
                 }
             }
@@ -492,88 +498,20 @@ struct HistoryRow: View {
         .tcCard()
     }
 
+    @ViewBuilder
+    private var sessionAction: some View {
+        if let onOpen, let copy = model.publicRunCopy {
+            Button(copy.viewSession, action: onOpen)
+                .buttonStyle(SmallSecondaryButtonStyle())
+                .frame(minHeight: 44)
+        }
+    }
+
     /// Whether there is anything to withdraw. A trace already withdrawn is
     /// not offered again -- the daemon would treat it as a no-op, and an
     /// enabled button on it would suggest the first one did not take.
     private var isWithdrawable: Bool {
-        record.status != "withdrawn"
-    }
-
-    /// The confirmation, shown BEFORE anything is asked of the server and
-    /// worded for this trace's stage. See `WithdrawalCopy` for why the
-    /// wording is keyed on the local status and why the ambiguous case
-    /// states the worse outcome.
-    private var confirmation: some View {
-        let copy = WithdrawalCopy.confirmation(for: .init(status: record.status))
-        let inFlight = model.withdrawing.contains(record.submissionID)
-        return VStack(alignment: .leading, spacing: TC.Space.s) {
-            Text(copy.question).font(TC.Font_.cardTitle)
-            if let ambiguity = copy.ambiguity {
-                Text(ambiguity)
-                    .font(TC.Font_.footnote)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            ForEach(Array(copy.bodies.enumerated()), id: \.offset) { index, body in
-                // The body carrying the cannot-be-recalled clause is the one
-                // that must not be skimmed past, so it takes the coral text
-                // token and a glyph. Coral is this app's "refused / cannot
-                // proceed" role; it is on type here, never as a fill, and
-                // `coralText` is the darkened light-mode twin measured to
-                // clear 4.5:1 on a card face.
-                let gravest = index == copy.gravest
-                HStack(alignment: .firstTextBaseline, spacing: TC.Space.xs) {
-                    Image(systemName: gravest ? "exclamationmark.triangle" : "info.circle")
-                        .imageScale(.small)
-                        .accessibilityHidden(true)
-                    Text(body).fixedSize(horizontal: false, vertical: true)
-                }
-                .font(TC.Font_.footnote)
-                .foregroundStyle(gravest ? AnyShapeStyle(TC.coralText) : AnyShapeStyle(.primary))
-            }
-            Text(copy.credit)
-                .font(TC.Font_.footnote)
-                .foregroundStyle(.secondary)
-            HStack(spacing: TC.Space.s) {
-                // Escape backs out. Nothing binds Return: withdrawal is
-                // irreversible, and this app binds Return to nothing
-                // irreversible anywhere.
-                Button("Keep it") { confirming = false }
-                    .keyboardShortcut(.cancelAction)
-                Button(inFlight ? "Withdrawing..." : copy.confirmLabel) {
-                    model.withdraw(record)
-                }
-                .tcPrimaryAction()
-                .disabled(inFlight)
-            }
-            .font(TC.Font_.footnote)
-        }
-        .frame(maxWidth: TC.Measure.prose, alignment: .leading)
-        .padding(TC.Space.m)
-        .background(TC.surfaceInset, in: RoundedRectangle(cornerRadius: TC.Radius.inset))
-    }
-
-    /// What actually happened, on the row it happened to.
-    @ViewBuilder
-    private func outcome(_ result: AppModel.WithdrawalResult) -> some View {
-        let (text, tone): (String, TC.Tone) = {
-            switch result {
-            case .withdrawn(let reach, let note):
-                return ([WithdrawalCopy.resultSentence(reach), note].compactMap { $0 }.joined(separator: "\n"), .refused)
-            case .noAccountSession:
-                return (WithdrawalCopy.accountSessionRequired, .attention)
-            case .failed(let label):
-                return (WithdrawalCopy.failureSentence(label: label), .attention)
-            }
-        }()
-        HStack(alignment: .firstTextBaseline, spacing: TC.Space.xs) {
-            Image(systemName: tone.symbol)
-                .imageScale(.small)
-                .accessibilityHidden(true)
-            Text(text).fixedSize(horizontal: false, vertical: true)
-        }
-        .font(TC.Font_.footnote)
-        .foregroundStyle(tone.textColor)
-        .frame(maxWidth: TC.Measure.prose, alignment: .leading)
+        !ContributionStatusPresentation.isTerminal(record.status)
     }
 
     private var statusSentence: String {
@@ -629,8 +567,8 @@ enum HistoryCopy {
 
 // MARK: - Small secondary action
 
-/// The small outlined button the design gives "Withdraw": 11pt on a card
-/// face, hairline bordered, sized to the row rather than to the screen.
+/// The compact outlined button the design gives secondary row actions: 11pt
+/// type on a hairline border with a full 44pt pointer and keyboard target.
 ///
 /// It is a style rather than a bare `Button` because the point of the
 /// treatment is that this action is NOT the filled one. `TCPrimaryButtonStyle`
@@ -644,7 +582,7 @@ private struct SmallSecondaryButtonStyle: ButtonStyle {
             .font(TC.Font_.meta)
             .foregroundStyle(TC.inkPrimary)
             .padding(.horizontal, TC.Space.sm)
-            .padding(.vertical, TC.Space.tiny)
+            .frame(minHeight: 44)
             .background(TC.surface, in: RoundedRectangle(cornerRadius: TC.Radius.control))
             .overlay {
                 RoundedRectangle(cornerRadius: TC.Radius.control)

@@ -9,6 +9,12 @@ pub struct PublicRunReuseChoice {
     pub explanation: &'static str,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+pub struct PublicRunValueLabel {
+    pub value: &'static str,
+    pub label: &'static str,
+}
+
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct PublicRunEditorInput {
     pub title: String,
@@ -41,13 +47,28 @@ pub struct PublicRunCopy {
     pub session_detail: &'static str,
     pub reading_record: &'static str,
     pub retry_read: &'static str,
+    pub content_unavailable: &'static str,
+    pub unavailable_value: &'static str,
     pub creator_report: &'static str,
+    pub task: &'static str,
+    pub no_task: &'static str,
+    pub outcome: &'static str,
+    pub outcome_unavailable: &'static str,
     pub decisive_correction: &'static str,
     pub no_correction: &'static str,
     pub supporting_evidence: &'static str,
     pub observed_in_version: &'static str,
     pub no_evidence: &'static str,
     pub contributed_version: &'static str,
+    pub contribution_details: &'static str,
+    pub processing_status: &'static str,
+    pub permitted_uses: &'static str,
+    pub no_permitted_uses: &'static str,
+    pub permitted_uses_unavailable: &'static str,
+    pub unrecognized_value: &'static str,
+    pub next_action: &'static str,
+    pub withdraw: &'static str,
+    pub keep_contribution: &'static str,
     pub envelope_version: &'static str,
     pub consent_policy_version: &'static str,
     pub redaction_version: &'static str,
@@ -94,6 +115,11 @@ pub struct PublicRunCopy {
     pub publication_invalid: &'static str,
     pub publication_unavailable: &'static str,
     pub credential_storage_warning: &'static str,
+    pub task_outcome_choices: [PublicRunValueLabel; 4],
+    pub feedback_choices: [PublicRunValueLabel; 3],
+    pub evidence_kind_choices: [PublicRunValueLabel; 9],
+    pub contribution_status_choices: [PublicRunValueLabel; 10],
+    pub permitted_use_choices: [PublicRunValueLabel; 6],
     pub reuse_permissions: [PublicRunReuseChoice; 2],
 }
 
@@ -105,13 +131,28 @@ pub fn public_run_copy() -> PublicRunCopy {
         session_detail: "Session detail",
         reading_record: "Reading your redacted contribution record…",
         retry_read: "Retry read",
+        content_unavailable: "Session content is unavailable. Status and contribution metadata remain.",
+        unavailable_value: "Unavailable",
         creator_report: "Creator report",
+        task: "Task",
+        no_task: "No redacted task text is available for this contribution.",
+        outcome: "Outcome",
+        outcome_unavailable: "No outcome was recorded for this contribution.",
         decisive_correction: "Decisive correction",
         no_correction: "No correction was contributed for this session.",
         supporting_evidence: "Supporting evidence",
         observed_in_version: "Observed in the contributed version",
         no_evidence: "No redacted text evidence is available.",
         contributed_version: "Contributed version",
+        contribution_details: "Contribution details",
+        processing_status: "Processing status",
+        permitted_uses: "Permitted uses",
+        no_permitted_uses: "No permitted uses were recorded for this contribution.",
+        permitted_uses_unavailable: "Permitted-use details are unavailable from this version of the server.",
+        unrecognized_value: "Unrecognized",
+        next_action: "Contribution controls",
+        withdraw: "Withdraw",
+        keep_contribution: "Keep it",
         envelope_version: "Envelope",
         consent_policy_version: "Consent policy",
         redaction_version: "Redaction",
@@ -158,6 +199,144 @@ pub fn public_run_copy() -> PublicRunCopy {
         publication_invalid: "The page was refused. Remove private data, verify the evidence, and review it again.",
         publication_unavailable: "The public page could not be changed. Retry the request.",
         credential_storage_warning: "The page changed, but the rotated account session could not be saved. Sign in again before the next account action.",
+        task_outcome_choices: [
+            PublicRunValueLabel {
+                value: "success",
+                label: "Completed",
+            },
+            PublicRunValueLabel {
+                value: "partial",
+                label: "Partly completed",
+            },
+            PublicRunValueLabel {
+                value: "failure",
+                label: "Did not complete",
+            },
+            PublicRunValueLabel {
+                value: "unknown",
+                label: "No outcome reported",
+            },
+        ],
+        feedback_choices: [
+            PublicRunValueLabel {
+                value: "thumbs_up",
+                label: "Feedback: thumbs up",
+            },
+            PublicRunValueLabel {
+                value: "thumbs_down",
+                label: "Feedback: thumbs down",
+            },
+            PublicRunValueLabel {
+                value: "correction",
+                label: "Feedback: correction supplied",
+            },
+        ],
+        evidence_kind_choices: [
+            PublicRunValueLabel {
+                value: "user_message",
+                label: "User message",
+            },
+            PublicRunValueLabel {
+                value: "assistant_message",
+                label: "Assistant message",
+            },
+            PublicRunValueLabel {
+                value: "reasoning",
+                label: "Reasoning",
+            },
+            PublicRunValueLabel {
+                value: "tool_call",
+                label: "Tool call",
+            },
+            PublicRunValueLabel {
+                value: "tool_result",
+                label: "Tool result",
+            },
+            PublicRunValueLabel {
+                value: "routing_decision",
+                label: "Routing decision",
+            },
+            PublicRunValueLabel {
+                value: "feedback",
+                label: "Feedback",
+            },
+            PublicRunValueLabel {
+                value: "http_exchange",
+                label: "HTTP exchange",
+            },
+            PublicRunValueLabel {
+                value: "unknown",
+                label: "Evidence",
+            },
+        ],
+        contribution_status_choices: [
+            PublicRunValueLabel {
+                value: "submitted",
+                label: "Submitted",
+            },
+            PublicRunValueLabel {
+                value: "received",
+                label: "Received",
+            },
+            PublicRunValueLabel {
+                value: "accepted",
+                label: "Accepted into the commons",
+            },
+            PublicRunValueLabel {
+                value: "quarantined",
+                label: "Held for privacy review",
+            },
+            PublicRunValueLabel {
+                value: "awaiting_pii_backstop",
+                label: "Waiting for privacy review",
+            },
+            PublicRunValueLabel {
+                value: "rejected",
+                label: "Rejected",
+            },
+            PublicRunValueLabel {
+                value: "revoked",
+                label: "Withdrawn",
+            },
+            PublicRunValueLabel {
+                value: "withdrawn",
+                label: "Withdrawn",
+            },
+            PublicRunValueLabel {
+                value: "expired",
+                label: "Expired",
+            },
+            PublicRunValueLabel {
+                value: "purged",
+                label: "Purged",
+            },
+        ],
+        permitted_use_choices: [
+            PublicRunValueLabel {
+                value: "debugging",
+                label: "Debugging",
+            },
+            PublicRunValueLabel {
+                value: "evaluation",
+                label: "Evaluation",
+            },
+            PublicRunValueLabel {
+                value: "benchmark_generation",
+                label: "Benchmark creation",
+            },
+            PublicRunValueLabel {
+                value: "ranking_model_training",
+                label: "Ranking-model training",
+            },
+            PublicRunValueLabel {
+                value: "model_training",
+                label: "Model training",
+            },
+            PublicRunValueLabel {
+                value: "aggregate_analytics",
+                label: "Aggregate analytics",
+            },
+        ],
         reuse_permissions: [
             PublicRunReuseChoice {
                 permission: PublicRunReusePermission::CcBy40,
@@ -298,6 +477,21 @@ mod tests {
     fn publication_copy_is_complete_and_error_labels_have_fixed_fallbacks() {
         let copy = public_run_copy();
         assert_eq!(copy.reuse_permissions.len(), 2);
+        assert_eq!(copy.task_outcome_choices.len(), 4);
+        assert_eq!(copy.feedback_choices.len(), 3);
+        assert_eq!(copy.evidence_kind_choices.len(), 9);
+        assert_eq!(copy.contribution_status_choices.len(), 10);
+        assert_eq!(copy.permitted_use_choices.len(), 6);
+        assert!(
+            copy.contribution_status_choices
+                .iter()
+                .any(|choice| choice.value == "awaiting_pii_backstop")
+        );
+        assert!(
+            copy.permitted_use_choices
+                .iter()
+                .any(|choice| choice.value == "model_training")
+        );
         assert_eq!(
             copy.reuse_permissions[0].permission,
             PublicRunReusePermission::CcBy40

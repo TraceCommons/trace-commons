@@ -56,6 +56,7 @@ pub mod project_key;
 pub mod public_run;
 pub mod queue;
 pub mod settings;
+pub mod skill_loop;
 pub mod state;
 pub mod stored_cloud_credentials;
 #[cfg(test)]

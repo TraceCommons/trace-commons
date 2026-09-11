@@ -10,7 +10,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use chrono::{DateTime, Utc};
-use ring::signature::{Ed25519KeyPair, KeyPair};
+use ring::signature::{ED25519, Ed25519KeyPair, KeyPair, UnparsedPublicKey};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -96,6 +96,24 @@ impl DeviceIdentity {
     pub fn sign_b64(&self, bytes: &[u8]) -> String {
         let sig = self.keypair.sign(bytes);
         BASE64.encode(sig.as_ref())
+    }
+
+    /// Verify a Base64-STANDARD Ed25519 signature with this device's public
+    /// key. The persisted private key never leaves `DeviceIdentity`.
+    pub(crate) fn verifies_b64(&self, bytes: &[u8], signature_b64: &str) -> bool {
+        let Ok(signature) = BASE64.decode(signature_b64) else {
+            return false;
+        };
+        UnparsedPublicKey::new(&ED25519, self.keypair.public_key().as_ref())
+            .verify(bytes, &signature)
+            .is_ok()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn generate_for_test() -> Result<Self> {
+        let document = Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new())
+            .map_err(|_| anyhow!("generating test device keypair"))?;
+        Self::from_pkcs8(document.as_ref())
     }
 }
 

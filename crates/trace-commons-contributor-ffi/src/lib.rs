@@ -2577,6 +2577,64 @@ pub extern "C" fn tc_public_run_copy() -> *mut c_char {
     })
 }
 
+/// Every fixed word on the correction-derived skill surface, as one owned
+/// JSON object. Free it with [`tc_string_free`].
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_skill_learning_copy() -> *mut c_char {
+    guarded_string_no_err(|| {
+        let copy = trace_commons_contributor::skill_loop::skill_learning_copy();
+        let json = serde_json::to_string(&copy).unwrap_or_else(|_| "{}".to_string());
+        Ok(to_owned_cstring(&json))
+    })
+}
+
+/// Validate a native skill editor payload through the Rust skill contract.
+/// Returns only validity, a fixed error label, exact Rust character counts,
+/// and display limits. The draft text is never echoed across the ABI.
+///
+/// # Safety
+/// `input_json`, if non-null, must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_skill_draft_validate(input_json: *const c_char) -> *mut c_char {
+    guarded_string_no_err(|| {
+        let draft = if input_json.is_null() {
+            None
+        } else {
+            unsafe { borrow_str(input_json) }.ok().and_then(|input| {
+                serde_json::from_str::<trace_commons_contributor::skill_loop::SkillDraft>(input)
+                    .ok()
+            })
+        };
+        let (valid, error, name_chars, description_chars, procedure_chars) = match draft {
+            Some(draft) => {
+                let error = trace_commons_contributor::skill_loop::validate_draft(&draft)
+                    .err()
+                    .map(|error| error.label());
+                (
+                    error.is_none(),
+                    error,
+                    draft.name.chars().count(),
+                    draft.description.chars().count(),
+                    draft.procedure.chars().count(),
+                )
+            }
+            None => (false, Some("skill-draft-invalid"), 0, 0, 0),
+        };
+        let validation = serde_json::json!({
+            "valid": valid,
+            "error": error,
+            "name_chars": name_chars,
+            "description_chars": description_chars,
+            "procedure_chars": procedure_chars,
+            "name_max_chars": trace_commons_contributor::skill_loop::SKILL_NAME_MAX_CHARS,
+            "description_max_chars": trace_commons_contributor::skill_loop::SKILL_DESCRIPTION_MAX_CHARS,
+            "procedure_max_chars": trace_commons_contributor::skill_loop::SKILL_PROCEDURE_MAX_CHARS,
+        });
+        let json = serde_json::to_string(&validation).unwrap_or_else(|_| "{}".to_string());
+        Ok(to_owned_cstring(&json))
+    })
+}
+
 /// Validate and normalize one loose native publication editor payload through
 /// the shared Rust protocol. Returns an owned JSON validation result.
 ///
@@ -2641,6 +2699,24 @@ pub unsafe extern "C" fn tc_public_run_error_line(label: *const c_char) -> *mut 
         };
         Ok(to_owned_cstring(
             trace_commons_contributor::public_run::publication_error_line(label),
+        ))
+    })
+}
+
+/// The contributor-facing sentence for one tested-skill error label.
+///
+/// # Safety
+/// `label`, if non-null, must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_skill_learning_error_line(label: *const c_char) -> *mut c_char {
+    guarded_string_no_err(|| {
+        let label = if label.is_null() {
+            ""
+        } else {
+            unsafe { borrow_str(label) }.unwrap_or("")
+        };
+        Ok(to_owned_cstring(
+            trace_commons_contributor::skill_loop::skill_learning_error_line(label),
         ))
     })
 }
