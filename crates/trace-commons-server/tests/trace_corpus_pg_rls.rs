@@ -1539,7 +1539,10 @@ fn force_rls_migration_covers_every_trace_rls_table() {
         "../../../migrations/V58__near_account_provisioning.sql"
     ));
     sql.push_str(include_str!(
-        "../../../migrations/V64__token_distribution_bundles.sql"
+        "../../../migrations/V64__trace_public_runs.sql"
+    ));
+    sql.push_str(include_str!(
+        "../../../migrations/V65__token_distribution_bundles.sql"
     ));
     // `trace_pii_backstop` carries the same tenant-isolation policy but is not
     // in `TRACE_COMMONS_RLS_TABLES`, so assert it here rather than lose the
@@ -1616,7 +1619,10 @@ fn central_rls_tenant_predicate_migration_covers_every_trace_rls_table() {
         "../../../migrations/V58__near_account_provisioning.sql"
     ));
     sql.push_str(include_str!(
-        "../../../migrations/V64__token_distribution_bundles.sql"
+        "../../../migrations/V64__trace_public_runs.sql"
+    ));
+    sql.push_str(include_str!(
+        "../../../migrations/V65__token_distribution_bundles.sql"
     ));
     assert!(sql.contains("CREATE OR REPLACE FUNCTION trace_current_tenant_id()"));
     assert!(sql.contains("RETURNS TEXT"));

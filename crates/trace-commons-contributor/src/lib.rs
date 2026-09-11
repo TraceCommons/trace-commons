@@ -35,3 +35,4 @@ pub mod witness;
 pub mod witness_copy;
 
 pub mod evidence_import;
+pub mod public_run;

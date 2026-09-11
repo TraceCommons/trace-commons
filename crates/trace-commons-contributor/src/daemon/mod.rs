@@ -53,6 +53,7 @@ pub mod preview_scheduler;
 pub mod private_inference;
 pub mod profile;
 pub mod project_key;
+pub mod public_run;
 pub mod queue;
 pub mod settings;
 pub mod state;

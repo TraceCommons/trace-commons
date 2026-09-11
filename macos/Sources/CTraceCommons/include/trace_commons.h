@@ -584,6 +584,26 @@ char*       tc_routing_last_checked(const char* when);
  */
 char*       tc_private_inference_copy(void);
 
+/* Every fixed word on owned session detail and reviewed publication, as one
+ * OWNED JSON object; free it with tc_string_free. Needs no handle because it
+ * describes the build. NULL only on a caught panic.
+ */
+char*       tc_public_run_copy(void);
+
+/* Validate and normalize a native publication editor payload through the
+ * shared Rust protocol. Returns an owned JSON result; free it with
+ * tc_string_free. input_json may be NULL, otherwise it must be NUL-terminated
+ * UTF-8.
+ */
+char*       tc_public_run_validate_editor(const char* input_json);
+
+/* Contributor-facing sentences for fixed daemon error labels. Each returns
+ * an owned string; free it with tc_string_free. label may be NULL, otherwise
+ * it must be a NUL-terminated UTF-8 string.
+ */
+char*       tc_session_detail_error_line(const char* label);
+char*       tc_public_run_error_line(const char* label);
+
 /* Whether quitting may interrupt owned model-call work, including stopping.
  * requested_on is boolean (0/nonzero). Off and foreign ownership return 0;
  * owned running/stopping return 1. Unknown/invalid status or panic retains

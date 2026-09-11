@@ -26,6 +26,7 @@ struct HistoryView: View {
     /// whose records leave -- a refresh that drops them -- returns to the
     /// list rather than rendering an empty detail view.
     @State private var location: QueueLocation = .root
+    @State private var selectedSubmissionID: String?
 
     var body: some View {
         ScrollView {
@@ -89,19 +90,27 @@ struct HistoryView: View {
         let folders = self.folders
         let here = QueueNavigation.resolve(location, in: folders)
         VStack(alignment: .leading, spacing: TC.Space.m) {
-            switch here {
-            case .root:
-                TCSectionHeader(
-                    title: "Everything you've contributed",
-                    trailing: "\(model.history.count)"
-                )
-                copyDefects
-                ForEach(folders) { group in
-                    historyFolderRow(group)
+            if let selectedSubmissionID,
+               let record = model.history.first(where: { $0.submissionID == selectedSubmissionID })
+            {
+                SessionDetailView(record: record) {
+                    self.selectedSubmissionID = nil
                 }
-            case .project(let id):
-                if let group = folders.first(where: { $0.id == id }) {
-                    historyFolderDetail(group)
+            } else {
+                switch here {
+                case .root:
+                    TCSectionHeader(
+                        title: "Everything you've contributed",
+                        trailing: "\(model.history.count)"
+                    )
+                    copyDefects
+                    ForEach(folders) { group in
+                        historyFolderRow(group)
+                    }
+                case .project(let id):
+                    if let group = folders.first(where: { $0.id == id }) {
+                        historyFolderDetail(group)
+                    }
                 }
             }
         }
@@ -184,7 +193,9 @@ struct HistoryView: View {
 
             copyDefects
             ForEach(group.entries) { record in
-                HistoryRow(record: record)
+                HistoryRow(record: record) {
+                    selectedSubmissionID = record.submissionID
+                }
             }
         }
     }
@@ -413,6 +424,17 @@ struct HistoryRow: View {
     /// Screenshot hook only: opens the row with its confirmation already
     /// showing, since `ImageRenderer` never delivers a click.
     var initiallyConfirming: Bool = false
+    var onOpen: (() -> Void)?
+
+    init(
+        record: HistoryRecord,
+        initiallyConfirming: Bool = false,
+        onOpen: (() -> Void)? = nil
+    ) {
+        self.record = record
+        self.initiallyConfirming = initiallyConfirming
+        self.onOpen = onOpen
+    }
 
     @EnvironmentObject private var model: AppModel
     @State private var confirming = false
@@ -448,12 +470,20 @@ struct HistoryRow: View {
                 outcome(result)
             } else if confirming || initiallyConfirming {
                 confirmation
-            } else if isWithdrawable {
-                // Plain, not filled. The filled action in this app is the
-                // one a person is being invited to take; this one only
-                // opens a question.
-                Button("Withdraw") { confirming = true }
-                    .buttonStyle(SmallSecondaryButtonStyle())
+            } else {
+                HStack(spacing: TC.Space.s) {
+                    if let onOpen, isWithdrawable, let copy = model.publicRunCopy {
+                        Button(copy.viewSession, action: onOpen)
+                            .buttonStyle(SmallSecondaryButtonStyle())
+                    }
+                    if isWithdrawable {
+                        // Plain, not filled. The filled action in this app is
+                        // the one a person is being invited to take; this one
+                        // only opens a question.
+                        Button("Withdraw") { confirming = true }
+                            .buttonStyle(SmallSecondaryButtonStyle())
+                    }
+                }
             }
         }
         .padding(.vertical, TC.Space.m)

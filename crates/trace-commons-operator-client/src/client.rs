@@ -36,6 +36,14 @@ pub struct ClientBuilder {
     explicit_bearer: Option<String>,
 }
 
+/// A typed response plus one selected header, even when the response itself
+/// is an HTTP or decoding error. This shape lets account clients persist a
+/// server-issued session rotation before they handle the route outcome.
+pub struct CallWithResponseHeader<T> {
+    pub result: Result<T>,
+    pub response_header: Option<String>,
+}
+
 impl Client {
     pub fn builder(
         endpoint: impl Into<String>,
@@ -94,6 +102,67 @@ impl Client {
             body: response_body,
             source,
         })
+    }
+
+    /// Issue a typed JSON request and return one selected response header.
+    ///
+    /// The header value is treated as opaque secret material: parsing errors
+    /// report only the header name, and the value never enters an error body.
+    pub async fn call_json_with_response_header<Req, Resp>(
+        &self,
+        method: Method,
+        path: &str,
+        query: &[(&str, &str)],
+        body: Option<&Req>,
+        response_header: &str,
+    ) -> CallWithResponseHeader<Resp>
+    where
+        Req: Serialize + ?Sized,
+        Resp: DeserializeOwned,
+    {
+        let url = match self.compose_url(path, query) {
+            Ok(url) => url,
+            Err(error) => {
+                return CallWithResponseHeader {
+                    result: Err(error),
+                    response_header: None,
+                };
+            }
+        };
+        if let Err(error) = self.host_allowlist.check(&url) {
+            return CallWithResponseHeader {
+                result: Err(error),
+                response_header: None,
+            };
+        }
+        let mut request = self.inner.request(method, url.clone());
+        request = request.bearer_auth(&self.bearer_token);
+        if let Some(body) = body {
+            request = request.json(body);
+        }
+        let response = self
+            .send_and_read_with_header(request, url.clone(), response_header)
+            .await;
+        let result = response.result.and_then(|response_body| {
+            if response_body.trim().is_empty() {
+                let source = serde_json::from_str::<serde_json::Value>("")
+                    .expect_err("empty input is not valid JSON");
+                return Err(Error::MalformedResponse {
+                    url: url.to_string(),
+                    body: response_body,
+                    source,
+                });
+            }
+            serde_json::from_str(&response_body).map_err(|source| Error::MalformedResponse {
+                url: url.to_string(),
+                body: response_body,
+                source,
+            })
+        });
+        CallWithResponseHeader {
+            result,
+            response_header: response.response_header,
+        }
     }
 
     /// Issue an untyped JSON request and return the raw response body.
@@ -191,32 +260,114 @@ impl Client {
         request: reqwest::RequestBuilder,
         url: url::Url,
     ) -> Result<String> {
-        let response = request.send().await.map_err(|source| Error::Transport {
-            url: url.to_string(),
-            source,
-        })?;
+        self.send_and_read_with_optional_header(request, url, None)
+            .await
+            .result
+    }
+
+    async fn send_and_read_with_header(
+        &self,
+        request: reqwest::RequestBuilder,
+        url: url::Url,
+        response_header: &str,
+    ) -> CallWithResponseHeader<String> {
+        self.send_and_read_with_optional_header(request, url, Some(response_header))
+            .await
+    }
+
+    async fn send_and_read_with_optional_header(
+        &self,
+        request: reqwest::RequestBuilder,
+        url: url::Url,
+        response_header: Option<&str>,
+    ) -> CallWithResponseHeader<String> {
+        let header_name = match response_header
+            .map(|name| {
+                reqwest::header::HeaderName::from_bytes(name.as_bytes()).map_err(|_| {
+                    Error::HeaderMalformed {
+                        name: name.to_string(),
+                    }
+                })
+            })
+            .transpose()
+        {
+            Ok(header_name) => header_name,
+            Err(error) => {
+                return CallWithResponseHeader {
+                    result: Err(error),
+                    response_header: None,
+                };
+            }
+        };
+        let response = match request.send().await {
+            Ok(response) => response,
+            Err(source) => {
+                return CallWithResponseHeader {
+                    result: Err(Error::Transport {
+                        url: url.to_string(),
+                        source,
+                    }),
+                    response_header: None,
+                };
+            }
+        };
         let status = response.status();
-        let response_body = response.text().await.map_err(|source| Error::Transport {
-            url: url.to_string(),
-            source,
-        })?;
-
-        if status.is_success() {
-            return Ok(response_body);
-        }
-
-        match parse_error_label(&response_body) {
-            Some(label) => Err(Error::ServerLabel {
-                url: url.to_string(),
-                status,
-                label,
-                body: response_body,
-            }),
-            None => Err(Error::HttpFailure {
-                url: url.to_string(),
-                status,
-                body: response_body,
-            }),
+        let selected_header = match header_name.as_ref() {
+            Some(name) => response
+                .headers()
+                .get(name)
+                .map(|value| {
+                    value
+                        .to_str()
+                        .map(str::to_string)
+                        .map_err(|_| Error::HeaderMalformed {
+                            name: name.as_str().to_string(),
+                        })
+                })
+                .transpose(),
+            None => Ok(None),
+        };
+        let selected_header = match selected_header {
+            Ok(selected_header) => selected_header,
+            Err(error) => {
+                return CallWithResponseHeader {
+                    result: Err(error),
+                    response_header: None,
+                };
+            }
+        };
+        let response_body = match response.text().await {
+            Ok(response_body) => response_body,
+            Err(source) => {
+                return CallWithResponseHeader {
+                    result: Err(Error::Transport {
+                        url: url.to_string(),
+                        source,
+                    }),
+                    response_header: selected_header,
+                };
+            }
+        };
+        let result = if status.is_success() {
+            Ok(response_body)
+        } else {
+            match parse_error_label(&response_body) {
+                Some(label) => Err(Error::ServerLabel {
+                    url: url.to_string(),
+                    status,
+                    label,
+                    body: response_body,
+                }),
+                None => Err(Error::HttpFailure {
+                    url: url.to_string(),
+                    status,
+                    body: response_body,
+                }),
+            }
+        };
+        CallWithResponseHeader {
+            result,
+            response_header: selected_header,
         }
     }
 
@@ -427,6 +578,75 @@ mod tests {
             ListResponse {
                 items: vec!["sub-1".into(), "sub-2".into()],
             }
+        );
+    }
+
+    #[tokio::test]
+    async fn call_json_returns_the_selected_response_header() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/account/state"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("x-trace-commons-session-token", "rotated-synthetic-token")
+                    .set_body_json(serde_json::json!({"items": []})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = Client::builder(server.uri(), "unused")
+            .bearer_token("synthetic-token")
+            .build()
+            .expect("client builds");
+        let response = client
+            .call_json_with_response_header::<(), ListResponse>(
+                Method::GET,
+                "/v1/account/state",
+                &[],
+                None,
+                "x-trace-commons-session-token",
+            )
+            .await;
+        let decoded = response
+            .result
+            .expect("typed response with selected header");
+        assert!(decoded.items.is_empty());
+        assert_eq!(
+            response.response_header.as_deref(),
+            Some("rotated-synthetic-token")
+        );
+    }
+
+    #[tokio::test]
+    async fn call_json_keeps_the_selected_header_on_an_http_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/v1/account/state"))
+            .respond_with(
+                ResponseTemplate::new(409)
+                    .insert_header("x-trace-commons-session-token", "rotated-synthetic-token")
+                    .set_body_json(serde_json::json!({"error": "StateChanged"})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = Client::builder(server.uri(), "unused")
+            .bearer_token("synthetic-token")
+            .build()
+            .expect("client builds");
+        let response = client
+            .call_json_with_response_header::<serde_json::Value, serde_json::Value>(
+                Method::PUT,
+                "/v1/account/state",
+                &[],
+                Some(&serde_json::json!({"state": "reviewed"})),
+                "x-trace-commons-session-token",
+            )
+            .await;
+        assert!(matches!(response.result, Err(Error::ServerLabel { .. })));
+        assert_eq!(
+            response.response_header.as_deref(),
+            Some("rotated-synthetic-token")
         );
     }
 

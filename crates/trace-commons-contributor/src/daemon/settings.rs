@@ -2110,6 +2110,22 @@ mod tests {
     }
 
     #[test]
+    fn token_collection_stays_opt_in_for_new_and_existing_settings() {
+        let (_d, store) = temp_store();
+        let fresh = DaemonSettings::load(&store).unwrap();
+        assert!(!fresh.token_distributions_contribution);
+        assert_eq!(fresh.token_capture_enabled, None);
+
+        let mut legacy = serde_json::to_value(&fresh).unwrap();
+        let object = legacy.as_object_mut().unwrap();
+        object.remove("token_distributions_contribution");
+        object.remove("token_capture_enabled");
+        let upgraded: DaemonSettings = serde_json::from_value(legacy).unwrap();
+        assert!(!upgraded.token_distributions_contribution);
+        assert_eq!(upgraded.token_capture_enabled, None);
+    }
+
+    #[test]
     fn the_approval_hold_defaults_to_more_than_the_five_second_undo() {
         // The client-side undo is five seconds. A hold shorter than that
         // would leave the same race the hold exists to remove, so the

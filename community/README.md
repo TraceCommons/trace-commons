@@ -8,7 +8,12 @@ The site renders:
 - `GET /api/v1/community/leaderboard`
 - `GET /api/v1/community/contributors/{handle}`
 - `GET /api/v1/community/analytics/summary`
+- `GET /api/v1/community/runs/{slug}`
 - `PUT` / `DELETE /api/v1/community/profile`
+
+Reviewed pages render at `/runs/{slug}` and let a recipient copy the approved
+workflow with its canonical source URL. Source and variation links resolve
+through the same public endpoint.
 
 Cloudflare Pages Functions proxy `/api/v1/community/*` to
 `https://ingest.tracecommons.ai/v1/community/*`, keeping browser traffic
