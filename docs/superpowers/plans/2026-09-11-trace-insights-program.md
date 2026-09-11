@@ -16,6 +16,7 @@ Trace Commons owns a unified product with Insights, Coaching, and Missions. Mult
 | Participant | Contribution | Trace Commons responsibility |
 | --- | --- | --- |
 | Analytics or coaching provider | Structured findings and specialist methods | Common evidence standards, presentation, qualification, and default selection. |
+| Mission scout | Discover external developments and turn them into evidence-linked mission drafts | Source provenance, deduplication, draft validation, publication policy, and a unified discovery feed. |
 | Mission author or sponsor | Versioned tasks, budgets, success criteria, and proposed rewards | Mission discovery, participation flow, attribution, and published rules. |
 | Evaluator | Assessments tied to evidence and rubric versions | Result validation, conflict disclosures, challenges, and reproducibility requirements. |
 | Contributor | Authorized evidence or mission attempts | Clear permissions, evidence access, and lifecycle controls. |
@@ -58,7 +59,9 @@ Separate, explicit hosted-sharing path (later):
 Separate community path (later):
     eligible sources -> approved privacy mechanism -> community comparisons
 
-Mission definitions -> controlled task runs -> same evidence contracts
+External sources -> mission scouts -> validated drafts -> publication review
+    -> versioned mission definitions -> controlled task runs
+    -> same evidence contracts -> findings in Insights and mission results
 ```
 
 Use one versioned provider interface for the first-party implementation and later independent implementations. Requests carry bounded evidence references/projections, permitted purpose, requested capability, execution policy, deadline, and cost limit. Responses carry structured evaluations, evidence references, coverage/abstention states, and provenance. Enforce schema validation, authorization, cancellation, idempotency, resource limits, and lifecycle invalidation at the host boundary. Signing and key rotation are required for externally supplied remote results; local results identify the installed implementation and version.
@@ -80,6 +83,7 @@ Proposed concepts, not existing type or table names:
 | Evaluation | Input digest, provider identity, evaluator/rubric version, execution mode, structured judgments, supporting event references, confidence, coverage, and verifiable provenance where remote. |
 | Insight | Metric and denominator, filters/cohort, date window, missingness, uncertainty, supporting evaluations, validity state, and human-readable explanation. |
 | Mission | Author/sponsor identity, immutable definition version, starting artifact, allowed tools/models, budget, success rubric, declared evaluators/conflicts, evidence rules, challenge process, and separate reward terms. |
+| Mission proposal | Scout identity/version, source URL and retrieval time in an authorized content artifact, source/content digest, attributed claim, reproducible task proposal, evaluator requirements, duplicate lineage, and review/publication state. Operational logs retain hashes and safe labels only. |
 
 One session can contain several episodes; one episode can span sessions and models. Preserve those relationships. Prefer explicit task identifiers and user confirmation; semantic boundary detection is a labeled inference. Do not award all credit to the final model. Report mixed-model episodes separately until a defensible attribution policy exists.
 
@@ -192,6 +196,31 @@ Acceptance:
 - Privacy qualification, consent, abuse controls, and release/revocation behavior are demonstrated before public publication.
 - If these gates fail, private insights remain available and community analytics stays withheld.
 
+### Mission scouts and discovery
+
+Support agents that discover candidate missions from sources such as X, Hugging Face, papers and associated code, and Hacker News. These are candidate source categories, not confirmed integrations. Audit each source's current API/access rules and retrieval capabilities before choosing adapters. Start with manual URL intake and one qualified read-only source adapter; do not make the mission program depend on broad scraping or paid source access.
+
+Scouts translate an external development into a testable proposal. For example, a model release claiming improved tool use could become a mission comparing that model with a declared baseline on a reproducible task. Preserve the distinction between the source's claim, the scout's interpretation, and the eventual experimental finding.
+
+The lifecycle is discover -> draft -> validate -> review -> publish -> collect attempts -> evaluate -> report. Proposals can also be rejected, superseded, or withdrawn with reasons. Each draft must include source attribution, the claim being tested, an obtainable starting artifact, a concrete task, allowed tools/models, execution and cost budgets, success criteria, an evaluator, and required evidence. A discussion thread alone is not a runnable task.
+
+Before publication, check reproducibility, artifact availability and rights, evaluator availability, duplicate/related missions, budget limits, and mission safety. External text is untrusted input: it cannot grant permissions, execute code, alter the rubric, or authorize spending, rewards, or publication. Fetching a source is distinct from downloading and executing its code; any execution uses the mission sandbox and its qualification rules. Inaccessible or changing sources remain explicitly unresolved or superseded rather than silently supporting a published claim.
+
+Initially, scouts create drafts for an authorized curator to review inside Trace Commons. Record the reviewed proposal digest and bind the published mission to that version. Later automatic publication requires a separately qualified policy limited to approved scout identities, task templates, sources, evaluators, budgets, and rate limits, with suspension and audit controls. That policy does not authorize automatic funding or payouts.
+
+Present published proposals in a shared Discover missions feed. Cards show why the task matters, source attribution, expected effort/cost, required capabilities, sponsor/scout/evaluator identities, and mission status. Users can follow topics or scouts within the same product. Keep unpublished drafts in curator views; apply feed eligibility, deduplication, expiration, and disclosed ranking rules so volume or sponsorship does not become evidence quality.
+
+Completed attempts feed the existing evaluation and Insights contracts. Link findings back to the originating claim and mission version, including negative and inconclusive results. Personal recommendations require the same evidence rules as other insights; public findings still pass community publication gates. Discovery popularity does not improve a model's measured score.
+
+Acceptance:
+
+- An authorized curator can take a sourced scout draft through review and publish it in the existing mission experience, without a separate provider account or dashboard.
+- Fixtures cover duplicate proposals, source edits/deletion, inaccessible artifacts, unsupported claims, prompt injection, unavailable evaluators, and unauthorized budget/publication requests.
+- Publication fails when the task, rubric, required evidence, or reviewed version is missing; retries cannot publish duplicate missions.
+- A bounded pilot produces one reproducible mission from an external source and reports its evaluated findings with source/attempt provenance and uncertainty.
+- Users can follow a topic or scout, understand why a mission appears, and navigate from mission results to supporting evidence and eligible Insights findings.
+- Scout disablement blocks new drafts/publication; published mission history retains provenance and exposes withdrawn or superseded status.
+
 ## Work packets and sequencing
 
 Each packet should become a focused PR with its own fixtures, review evidence, and rollback notes. Use isolated worktrees during implementation and preserve unrelated dirty files.
@@ -210,10 +239,14 @@ Each packet should become a focused PR with its own fixtures, review evidence, a
 | 10 | Hosted consent/storage design, scoped provider grants, APIs, lifecycle qualification | 7; explicit hosted product decision |
 | 11 | Controlled mission pilot with separate author/evaluator roles and unified participation | 6, 7; sandbox and rubric qualification |
 | 12 | Community privacy qualification and public comparisons | 11; independent publication gates |
+| 13 | Mission scout contracts, manual intake, one source adapter, draft validation, curator review, unified discovery feed | 2, 11; source-access qualification |
+| 14 | Bounded scout pilot and mission-to-Insights feedback | 7, 13; public findings additionally require 12 |
 
 First release boundary: packets 1–5. Outcome linkage should follow immediately; broad comparative claims wait for packet 7. No time estimate is committed until packet 1 identifies adapter and local-storage gaps.
 
 Provider extensibility is an internal architectural requirement from packet 2. The first release remains a curated first-party experience. A public provider catalog, self-service onboarding, provider billing, and automated mission reward settlement are deferred; two independent evaluators must first pass conformance and product usability checks.
+
+Scouts extend the mission program after its core participation and evaluation flow works. Packets 13–14 do not expand the first private-insights release. Unattended scout publication and additional live source adapters are follow-on decisions based on the bounded pilot, not prerequisites.
 
 ## Verification and rollout
 
