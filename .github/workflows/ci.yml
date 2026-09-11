@@ -230,6 +230,8 @@ jobs:
       # and asserts the role it reaches is not a superuser and holds no
       # table-wide SELECT on trace_gate_decisions. Setting the variable to this
       # job's own URL is precisely the vacuous pass #751 resolved.
+      - name: synthetic token qualification matrix
+        run: python3 -m unittest discover -s scripts/token-distributions
       - name: token bundle durability and withdrawal
         run: cargo test --locked -p trace-commons-server --test token_bundle_pg
         env:

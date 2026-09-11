@@ -33,7 +33,9 @@ summary discovery additionally requires processing to finish. Retry returns the
 same durable receipt. The HTTP fixture verifies unchanged parent score/credit
 across receipt recovery. Processing keys are tenant/submission/revision and do
 not insert a second vector or reevaluate credit. Existing text indexing retains
-its ordinary submission identity.
+its ordinary submission identity. Configure the existing retention maintenance
+scheduler to drain pending processing and deletion after restart; foreground
+bundle requests also run a bounded recovery pass.
 
 The outbox stores no token strings or probability arrays. Summary records include
 counts, coverage, provenance and finite chosen-token mean surprisal under
