@@ -189,8 +189,13 @@ fn read_checked_regular_file_if_present_inner(
     if metadata.len() > max_bytes {
         return Err(changed_error);
     }
+    #[cfg(windows)]
+    let checked_file = open_checked_windows_file(path, max_bytes, changed_error)?;
     after_metadata();
+    #[cfg(not(windows))]
     let file = open_same_regular_file(path, &metadata, changed_error)?;
+    #[cfg(windows)]
+    let file = open_same_regular_file(path, &checked_file, changed_error)?;
     let opened_metadata = file
         .metadata()
         .map_err(|_| SkillInstallError::InstallNotOwned)?;
@@ -208,6 +213,7 @@ fn read_checked_regular_file_if_present_inner(
     Ok(Some(body))
 }
 
+#[cfg(not(windows))]
 fn open_same_regular_file(
     path: &Path,
     checked: &fs::Metadata,
@@ -225,19 +231,66 @@ fn open_same_regular_file(
             return Err(changed_error);
         }
     }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
-        if opened.file_attributes()
+    Ok(file)
+}
+
+#[cfg(windows)]
+fn open_checked_windows_file(
+    path: &Path,
+    max_bytes: u64,
+    changed_error: SkillInstallError,
+) -> Result<fs::File, SkillInstallError> {
+    use std::os::windows::fs::MetadataExt;
+
+    let file = crate::evidence_import::open_import_file(path).map_err(|_| changed_error)?;
+    let metadata = file.metadata().map_err(|_| changed_error)?;
+    if !metadata.file_type().is_file()
+        || metadata.file_attributes()
             & windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT
             != 0
-            || opened.volume_serial_number() != checked.volume_serial_number()
-            || opened.file_index() != checked.file_index()
-        {
-            return Err(changed_error);
-        }
+        || metadata.len() > max_bytes
+    {
+        return Err(changed_error);
     }
     Ok(file)
+}
+
+#[cfg(windows)]
+fn open_same_regular_file(
+    path: &Path,
+    checked: &fs::File,
+    changed_error: SkillInstallError,
+) -> Result<fs::File, SkillInstallError> {
+    let file = crate::evidence_import::open_import_file(path).map_err(|_| changed_error)?;
+    if windows_file_identity(&file, changed_error)?
+        != windows_file_identity(checked, changed_error)?
+    {
+        return Err(changed_error);
+    }
+    Ok(file)
+}
+
+#[cfg(windows)]
+fn windows_file_identity(
+    file: &fs::File,
+    changed_error: SkillInstallError,
+) -> Result<(u32, u64), SkillInstallError> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+    };
+
+    let mut information = BY_HANDLE_FILE_INFORMATION::default();
+    // SAFETY: `file` owns a valid handle for the duration of the call and
+    // `information` points to writable storage of the required type.
+    let succeeded =
+        unsafe { GetFileInformationByHandle(file.as_raw_handle().cast(), &mut information) };
+    if succeeded == 0 {
+        return Err(changed_error);
+    }
+    let file_index =
+        (u64::from(information.nFileIndexHigh) << 32) | u64::from(information.nFileIndexLow);
+    Ok((information.dwVolumeSerialNumber, file_index))
 }
 
 pub(super) fn directory_names(target: &Path) -> Result<BTreeSet<String>, SkillInstallError> {

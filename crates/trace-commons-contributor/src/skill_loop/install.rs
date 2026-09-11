@@ -1,7 +1,7 @@
 //! INTEGRATION: supplies the review-before-write and digest-checked rollback
 //! boundary for the first Codex Agent Skill installation target.
 
-use std::fs::{self, OpenOptions};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
@@ -22,12 +22,14 @@ use marker::{
     canonical_marker_json, installed_from_marker, marker_has_valid_authentication,
     marker_matches_installed, sign_install_marker,
 };
+#[cfg(test)]
+use ownership::directory_names;
+#[cfg(all(test, unix))]
+use ownership::restore_quarantine;
 use ownership::{
     OwnedTargetState, directory_identity, inspect_owned_target, quarantine_target,
     retain_quarantined_package,
 };
-#[cfg(test)]
-use ownership::{directory_names, restore_quarantine};
 use publication::{publish_staged_install, stage_install};
 
 const MARKER_NAME: &str = ".trace-commons-install.json";
@@ -638,11 +640,11 @@ fn create_private_directories(root: &Path) -> Result<(), SkillInstallError> {
     set_private_directory_permissions(root)
 }
 
-fn set_private_directory_permissions(path: &Path) -> Result<(), SkillInstallError> {
+fn set_private_directory_permissions(_path: &Path) -> Result<(), SkillInstallError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+        fs::set_permissions(_path, fs::Permissions::from_mode(0o700))
             .map_err(|_| SkillInstallError::WriteFailed)?;
     }
     Ok(())
@@ -656,7 +658,7 @@ fn sync_directory(path: &Path) -> Result<(), SkillInstallError> {
     }
     #[cfg(not(windows))]
     {
-        let directory = OpenOptions::new()
+        let directory = std::fs::OpenOptions::new()
             .read(true)
             .open(path)
             .map_err(|_| SkillInstallError::WriteFailed)?;

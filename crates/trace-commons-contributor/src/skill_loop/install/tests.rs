@@ -763,6 +763,28 @@ fn checked_read_rejects_a_regular_file_replaced_by_a_fifo_before_open() {
     assert_eq!(result, Err(SkillInstallError::SkillChanged));
 }
 
+#[cfg(windows)]
+#[test]
+fn checked_read_rejects_a_regular_file_replaced_by_another_file_before_open() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let checked = directory.path().join("checked.json");
+    let replacement = directory.path().join("replacement.json");
+    fs::write(&checked, b"original").expect("checked file");
+    fs::write(&replacement, b"replacement").expect("replacement file");
+
+    let result = ownership::read_checked_regular_file_if_present_after(
+        &checked,
+        64,
+        SkillInstallError::SkillChanged,
+        || {
+            fs::remove_file(&checked).expect("remove checked file");
+            fs::rename(&replacement, &checked).expect("replace checked file");
+        },
+    );
+
+    assert_eq!(result, Err(SkillInstallError::SkillChanged));
+}
+
 #[cfg(unix)]
 #[test]
 fn quarantine_restore_does_not_overwrite_a_concurrent_replacement() {
