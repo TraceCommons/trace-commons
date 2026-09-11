@@ -184,7 +184,7 @@ pub fn read_import(path: &std::path::Path) -> Result<PreparedImport> {
     PreparedImport::parse(&bytes)
 }
 
-fn open_import_file(path: &std::path::Path) -> Result<std::fs::File> {
+pub(crate) fn open_import_file(path: &std::path::Path) -> Result<std::fs::File> {
     let mut options = std::fs::OpenOptions::new();
     options.read(true);
     #[cfg(unix)]

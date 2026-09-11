@@ -2,6 +2,7 @@ pub mod admission;
 pub mod canonical_json;
 pub mod community_handle;
 pub mod insights;
+pub mod mission_draft;
 pub mod llm;
 pub mod onboarding;
 pub mod public_run;

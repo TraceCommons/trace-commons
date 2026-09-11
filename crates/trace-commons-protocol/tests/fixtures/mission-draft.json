@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "author_id": "example-scout",
+  "title": "Example mission: reproduce a tool-use claim",
+  "source_urls": ["https://example.com/paper"],
+  "claim_to_test": "Replace this illustrative claim with an attributed source claim.",
+  "task": "Replace this example with a reproducible task and starting conditions.",
+  "starting_artifact": {
+    "url": "https://example.com/artifact",
+    "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "evaluator_id": "example-evaluator",
+  "rubric_version": "rubric-1",
+  "success_criteria": ["Specify an independently checkable acceptance condition."],
+  "required_evidence": ["Attempt trace", "Independent test results"],
+  "allowed_models": ["Specify an exact model version"],
+  "allowed_tools": ["Specify the permitted tools"],
+  "budget": {"max_duration_seconds": 1800, "max_input_tokens": 100000, "max_output_tokens": 10000}
+}
