@@ -7,7 +7,8 @@ use chrono::{SubsecRound, Utc};
 use secrecy::SecretString;
 use trace_commons_server::config::{DatabaseConfig, SslMode};
 use trace_commons_server::db::{
-    Database, InstanceEnrollmentOutcome, InstanceUserProvision, postgres::PgBackend,
+    Database, InstanceEnrollmentOutcome, InstanceUserProvision, PUBLIC_RUN_PROVENANCE_CYCLE,
+    PUBLIC_RUN_VERSION_CONFLICT, PublicRunWrite, postgres::PgBackend,
 };
 use trace_commons_server::error::DatabaseError;
 use trace_commons_server::trace_corpus_storage::{
@@ -37,6 +38,11 @@ use trace_commons_server::trace_corpus_storage::{
     TraceVectorEntryStatus, TraceVectorEntryWrite, TraceWorkerKind,
 };
 use uuid::Uuid;
+
+use trace_commons_protocol::public_run::{PublicRunEvidenceDraft, PublicRunReusePermission};
+
+#[path = "trace_corpus_pg_store/public_run_tests.rs"]
+mod public_run_tests;
 
 const TEST_NEAR_TX_HASH: &str = "11111111111111111111111111111111111111111111";
 

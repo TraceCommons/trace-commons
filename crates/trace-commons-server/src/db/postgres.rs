@@ -7,6 +7,8 @@ use std::collections::HashSet;
 
 #[path = "postgres_account_onboarding.rs"]
 mod account_onboarding;
+#[path = "postgres_public_run.rs"]
+mod public_run;
 
 use async_trait::async_trait;
 use deadpool_postgres::Pool;
@@ -204,6 +206,7 @@ pub const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "trace_near_provisioned_devices",
     "trace_account_merge_proposals",
     "trace_community_withdrawal_evictions",
+    "trace_public_runs",
 ];
 
 const TRACE_COMMONS_RLS_POLICY_EXPRESSION_VARIANTS: &[&str] = &[
@@ -1262,6 +1265,11 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "near_ai_login_provisioning",
         include_str!("../../../../migrations/V63__near_ai_login_provisioning.sql"),
     ),
+    (
+        64,
+        "trace_public_runs",
+        include_str!("../../../../migrations/V64__trace_public_runs.sql"),
+    ),
 ];
 
 #[async_trait]
@@ -1875,6 +1883,48 @@ impl Database for PgBackend {
         .map_err(DatabaseError::Postgres)?;
         tx.commit().await.map_err(DatabaseError::Postgres)?;
         Ok(())
+    }
+
+    async fn upsert_public_run(
+        &self,
+        write: crate::db::PublicRunWrite,
+    ) -> Result<crate::db::PublicRunMutation, DatabaseError> {
+        self.public_run_upsert(write).await
+    }
+
+    async fn get_owned_public_run_state(
+        &self,
+        tenant_id: &str,
+        account_id: Uuid,
+        submission_id: Uuid,
+    ) -> Result<crate::db::PublicRunOwnerData, DatabaseError> {
+        self.public_run_owner_state(tenant_id, account_id, submission_id)
+            .await
+    }
+
+    async fn unpublish_public_run(
+        &self,
+        tenant_id: &str,
+        account_id: Uuid,
+        submission_id: Uuid,
+    ) -> Result<crate::db::PublicRunUnpublishMutation, DatabaseError> {
+        self.public_run_unpublish(tenant_id, account_id, submission_id)
+            .await
+    }
+
+    async fn get_public_run_page_by_slug(
+        &self,
+        slug: &str,
+        variation_limit: i64,
+    ) -> Result<Option<crate::db::PublicRunPageData>, DatabaseError> {
+        self.public_run_page(slug, variation_limit).await
+    }
+
+    async fn resolve_public_run_source(
+        &self,
+        slug: &str,
+    ) -> Result<Option<crate::db::PublicRunSourceRow>, DatabaseError> {
+        self.public_run_source(slug).await
     }
 
     async fn compute_leaderboard_inputs(
@@ -4178,7 +4228,8 @@ impl Database for PgBackend {
             .query_one(
                 "SELECT closed_at FROM trace_accounts
                   WHERE tenant_id = trace_current_tenant_id()
-                    AND account_id = $1",
+                    AND account_id = $1
+                  FOR UPDATE",
                 &[&absorbed_account_id],
             )
             .await
@@ -4284,7 +4335,8 @@ impl Database for PgBackend {
             .query_one(
                 "SELECT closed_at FROM trace_accounts
                   WHERE tenant_id = trace_current_tenant_id()
-                    AND account_id = $1",
+                    AND account_id = $1
+                  FOR UPDATE",
                 &[&absorbed_account_id],
             )
             .await
@@ -4340,6 +4392,20 @@ impl Database for PgBackend {
             .map_err(DatabaseError::Postgres)? as i64;
         let authenticators_moved = webauthn_moved + near_moved;
 
+        // Public pages remain attached to their accepted submissions, but their
+        // account owner must follow the principals into the surviving account.
+        // The submission uniqueness constraint makes this re-key collision-free.
+        let public_runs_moved = tx
+            .execute(
+                "UPDATE trace_public_runs
+                    SET account_id = $1, updated_at = now()
+                  WHERE tenant_id = trace_current_tenant_id()
+                    AND account_id = $2",
+                &[&surviving_account_id, &absorbed_account_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)? as i64;
+
         // Revoke ALL of B's live sessions (mirror revoke_all_account_sessions):
         // B's credentials now belong to A, so its old sessions must die.
         tx.execute(
@@ -4372,6 +4438,7 @@ impl Database for PgBackend {
         let safe_metadata = serde_json::json!({
             "principals_moved": principals_moved,
             "authenticators_moved": authenticators_moved,
+            "public_runs_moved": public_runs_moved,
         });
         tx.execute(
             "INSERT INTO trace_account_audit (
@@ -6300,6 +6367,7 @@ mod tests {
             include_str!("../../../../migrations/V43__trace_withdrawal.sql"),
             include_str!("../../../../migrations/V56__community_withdrawal_eviction_rls.sql"),
             include_str!("../../../../migrations/V58__near_account_provisioning.sql"),
+            include_str!("../../../../migrations/V64__trace_public_runs.sql"),
         ];
         let force_rls_migrations = [
             include_str!("../../../../migrations/V6__trace_force_rls.sql"),
@@ -6318,6 +6386,7 @@ mod tests {
             include_str!("../../../../migrations/V43__trace_withdrawal.sql"),
             include_str!("../../../../migrations/V56__community_withdrawal_eviction_rls.sql"),
             include_str!("../../../../migrations/V58__near_account_provisioning.sql"),
+            include_str!("../../../../migrations/V64__trace_public_runs.sql"),
         ];
 
         for table in TRACE_COMMONS_RLS_TABLES {

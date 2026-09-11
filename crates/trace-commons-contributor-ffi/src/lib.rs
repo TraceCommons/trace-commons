@@ -2563,6 +2563,88 @@ pub extern "C" fn tc_private_inference_copy() -> *mut c_char {
     })
 }
 
+/// Every fixed word on the owned session-detail and reviewed-publication
+/// surface, as one owned JSON object. Free it with [`tc_string_free`].
+///
+/// Needs no handle because it describes the build. Returns NULL only on a
+/// caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_public_run_copy() -> *mut c_char {
+    guarded_string_no_err(|| {
+        let copy = trace_commons_contributor::public_run::public_run_copy();
+        let json = serde_json::to_string(&copy).unwrap_or_else(|_| "{}".to_string());
+        Ok(to_owned_cstring(&json))
+    })
+}
+
+/// Validate and normalize one loose native publication editor payload through
+/// the shared Rust protocol. Returns an owned JSON validation result.
+///
+/// # Safety
+/// `input_json`, if non-null, must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_public_run_validate_editor(input_json: *const c_char) -> *mut c_char {
+    guarded_string_no_err(|| {
+        let input = if input_json.is_null() {
+            None
+        } else {
+            unsafe { borrow_str(input_json) }.ok().and_then(|input| {
+                serde_json::from_str::<trace_commons_contributor::public_run::PublicRunEditorInput>(
+                    input,
+                )
+                .ok()
+            })
+        };
+        let validation = match input {
+            Some(input) => trace_commons_contributor::public_run::validate_public_run_editor(input),
+            None => trace_commons_contributor::public_run::PublicRunEditorValidation {
+                draft: None,
+                error: Some(
+                    trace_commons_contributor::public_run::public_run_copy().publication_invalid,
+                ),
+            },
+        };
+        let json = serde_json::to_string(&validation).unwrap_or_else(|_| "{}".to_string());
+        Ok(to_owned_cstring(&json))
+    })
+}
+
+/// The contributor-facing sentence for one session-detail error label.
+///
+/// # Safety
+/// `label`, if non-null, must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_session_detail_error_line(label: *const c_char) -> *mut c_char {
+    guarded_string_no_err(|| {
+        let label = if label.is_null() {
+            ""
+        } else {
+            unsafe { borrow_str(label) }.unwrap_or("")
+        };
+        Ok(to_owned_cstring(
+            trace_commons_contributor::public_run::session_detail_error_line(label),
+        ))
+    })
+}
+
+/// The contributor-facing sentence for one publication error label.
+///
+/// # Safety
+/// `label`, if non-null, must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_public_run_error_line(label: *const c_char) -> *mut c_char {
+    guarded_string_no_err(|| {
+        let label = if label.is_null() {
+            ""
+        } else {
+            unsafe { borrow_str(label) }.unwrap_or("")
+        };
+        Ok(to_owned_cstring(
+            trace_commons_contributor::public_run::publication_error_line(label),
+        ))
+    })
+}
+
 /// Whether quitting may interrupt owned model-call work, including draining.
 /// Unknown/invalid status and caught panics conservatively retain requested_on.
 ///

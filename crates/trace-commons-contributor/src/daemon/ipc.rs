@@ -54,8 +54,8 @@
 //! **The preview exemption.** `"preview"`'s `opening_prompt`,
 //! `"preview_body"`'s `chunk`, and the redacted body `open_preview` returns
 //! to the C ABI, *are* trace content, deliberately. A contributor cannot
-//! consent to sending something they cannot see, so preview is the one
-//! interface allowed to carry it -- bounded to post-redaction content, only
+//! consent to sending something they cannot see, so preview carries it --
+//! bounded to post-redaction content, only
 //! for an `entry_id` the caller already holds, and never onward into a log
 //! line, an audit entry, a history record, notification text, or a receipt.
 //! Everywhere else in this module the rule is absolute.
@@ -70,6 +70,13 @@
 //! or awkward there, they were impossible. Loading a second `DaemonShared`
 //! is not the workaround it looks like: it rewrites the queue file and
 //! sweeps the pinned envelopes the running daemon is still holding.
+//!
+//! **The owned-session exemption.** `"history_detail"` returns bounded text
+//! from the permanently redacted envelope after an account-session read. It
+//! exists so the owner can inspect outcome, correction, and evidence before
+//! choosing an exact public excerpt. `"publish_public_run"` returns only the
+//! already public page. Neither response is logged, audited locally, copied to
+//! history, or available under the device upload key.
 //!
 //! # Sync vs. async dispatch
 //!
@@ -292,6 +299,7 @@ pub const METHODS: &[&str] = &[
     "harness_list",
     "harness_plan",
     "hello",
+    "history_detail",
     "history_rollup",
     "list_audit",
     "list_history",
@@ -307,6 +315,7 @@ pub const METHODS: &[&str] = &[
     "preview_visible",
     "probe_routed_tools",
     "probe_routing",
+    "publish_public_run",
     "queue_outcome_counts",
     "quiesce",
     "refresh_history",
@@ -321,6 +330,7 @@ pub const METHODS: &[&str] = &[
     "subscribe",
     "withdraw",
     "withdraw_bulk",
+    "unpublish_public_run",
 ];
 
 pub const EVENT_SNAPSHOT: &str = "snapshot";
@@ -1793,6 +1803,9 @@ const ASYNC_ONLY_METHODS: &[(&str, &str)] = &[
     ("enroll", "enroll-requires-async"),
     ("withdraw", "withdraw-requires-async"),
     ("withdraw_bulk", "withdraw-requires-async"),
+    ("history_detail", "session-detail-requires-async"),
+    ("publish_public_run", "public-run-requires-async"),
+    ("unpublish_public_run", "public-run-requires-async"),
     ("set_public_profile", "profile-requires-async"),
     ("clear_public_profile", "profile-requires-async"),
 ];
@@ -2681,6 +2694,9 @@ pub async fn handle_request_async(shared: &DaemonShared, req: &Request) -> Respo
         "enroll" => enroll::handle_enroll(shared, req).await,
         "withdraw" => super::withdraw::handle_withdraw(shared, req).await,
         "withdraw_bulk" => super::withdraw::handle_withdraw_bulk(shared, req).await,
+        "history_detail" => super::public_run::handle_detail(shared, req).await,
+        "publish_public_run" => super::public_run::handle_publish(shared, req).await,
+        "unpublish_public_run" => super::public_run::handle_unpublish(shared, req).await,
         "set_public_profile" => super::profile::handle_set_public_profile(shared, req).await,
         "clear_public_profile" => super::profile::handle_clear_public_profile(shared, req).await,
         _ => handle_request(shared, req),
@@ -9912,7 +9928,7 @@ mod tests {
     #[test]
     fn every_async_only_method_is_advertised_and_refused_synchronously() {
         let s = shared();
-        assert_eq!(ASYNC_ONLY_METHODS.len(), 18);
+        assert_eq!(ASYNC_ONLY_METHODS.len(), 21);
         let mut seen = std::collections::BTreeSet::new();
         for &(method, label) in ASYNC_ONLY_METHODS {
             assert!(
@@ -10342,7 +10358,7 @@ mod tests {
             "pub async fn handle_request_async(shared",
         ));
         assert_eq!(sync.len(), 37, "synchronous dispatcher arms: {sync:?}");
-        assert_eq!(asy.len(), 25, "asynchronous dispatcher arms: {asy:?}");
+        assert_eq!(asy.len(), 28, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();
         let advertised: std::collections::BTreeSet<String> =

@@ -2084,6 +2084,14 @@ final class AppModel: ObservableObject {
 
     @Published private(set) var withdrawals: [String: WithdrawalResult] = [:]
     @Published private(set) var withdrawing: Set<String> = []
+    @Published private(set) var sessionDetails: [String: SessionDetail] = [:]
+    @Published private(set) var sessionDetailErrors: [String: String] = [:]
+    @Published private(set) var loadingSessionDetails: Set<String> = []
+    @Published private(set) var publicRunErrors: [String: String] = [:]
+    @Published private(set) var publicRunWorking: Set<String> = []
+    @Published private(set) var publicRunCopy: PublicRunCopy? = PublicRunCopy.decode(
+        fromJSON: TCPublicRun.copyJSON() ?? ""
+    )
 
     /// Withdraws one trace.
     ///
@@ -2118,6 +2126,96 @@ final class AppModel: ObservableObject {
                     self.withdrawals[id] = label == "account-session-required"
                         ? .noAccountSession
                         : .failed(label)
+                }
+            }
+        }
+    }
+
+    func loadSessionDetail(_ record: HistoryRecord) {
+        guard let client else { return }
+        let id = record.submissionID
+        guard !loadingSessionDetails.contains(id) else { return }
+        guard !publicRunWorking.contains(id) else { return }
+        loadingSessionDetails.insert(id)
+        sessionDetailErrors[id] = nil
+        Task.detached(priority: .userInitiated) {
+            let result = Result { try client.sessionDetail(submissionID: id) }
+            await MainActor.run {
+                self.loadingSessionDetails.remove(id)
+                switch result {
+                case .success(let detail):
+                    self.sessionDetails[id] = detail
+                case .failure(let error):
+                    self.sessionDetails[id] = nil
+                    let label = (error as? DaemonClient.Failure)?.message ?? ""
+                    self.sessionDetailErrors[id] = TCPublicRun.sessionDetailErrorLine(label: label)
+                }
+            }
+        }
+    }
+
+    func publishPublicRun(_ record: HistoryRecord, draft: PublicRunDraftInput) {
+        guard let client else { return }
+        let id = record.submissionID
+        guard let detail = sessionDetails[id] else { return }
+        guard !publicRunWorking.contains(id) else { return }
+        guard !loadingSessionDetails.contains(id) else { return }
+        publicRunWorking.insert(id)
+        publicRunErrors[id] = nil
+        Task.detached(priority: .userInitiated) {
+            let result = Result {
+                try client.publishPublicRun(
+                    submissionID: id,
+                    draft: draft,
+                    taskSuccess: detail.taskSuccess,
+                    contributedVersion: detail.contributedVersion,
+                    expectedPublicationVersion: detail.publicationVersion
+                )
+            }
+            await MainActor.run {
+                self.publicRunWorking.remove(id)
+                switch result {
+                case .success(let page):
+                    if var detail = self.sessionDetails[id] {
+                        detail.publication = page
+                        detail.publicationVersion = page.version
+                        self.sessionDetails[id] = detail
+                    }
+                    if let warning = page.credentialWarning {
+                        self.publicRunErrors[id] = TCPublicRun.publicationErrorLine(label: warning)
+                    }
+                case .failure(let error):
+                    let label = (error as? DaemonClient.Failure)?.message ?? ""
+                    self.publicRunErrors[id] = TCPublicRun.publicationErrorLine(label: label)
+                }
+            }
+        }
+    }
+
+    func unpublishPublicRun(_ record: HistoryRecord) {
+        guard let client else { return }
+        let id = record.submissionID
+        guard !publicRunWorking.contains(id) else { return }
+        guard !loadingSessionDetails.contains(id) else { return }
+        publicRunWorking.insert(id)
+        publicRunErrors[id] = nil
+        Task.detached(priority: .userInitiated) {
+            let result = Result { try client.unpublishPublicRun(submissionID: id) }
+            await MainActor.run {
+                self.publicRunWorking.remove(id)
+                switch result {
+                case .success(let outcome):
+                    if var detail = self.sessionDetails[id] {
+                        detail.publication = nil
+                        detail.publicationVersion = outcome.expectedPublicationVersion
+                        self.sessionDetails[id] = detail
+                    }
+                    if let warning = outcome.credentialWarning {
+                        self.publicRunErrors[id] = TCPublicRun.publicationErrorLine(label: warning)
+                    }
+                case .failure(let error):
+                    let label = (error as? DaemonClient.Failure)?.message ?? ""
+                    self.publicRunErrors[id] = TCPublicRun.publicationErrorLine(label: label)
                 }
             }
         }

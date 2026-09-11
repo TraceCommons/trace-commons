@@ -163,6 +163,47 @@ final class DaemonClient {
         _ = try rawResult("refresh_history")
     }
 
+    func sessionDetail(submissionID: String) throws -> SessionDetail {
+        try call(
+            "history_detail",
+            params: ["submission_id": submissionID],
+            as: SessionDetail.self
+        )
+    }
+
+    func publishPublicRun(
+        submissionID: String,
+        draft: PublicRunDraftInput,
+        taskSuccess: String,
+        contributedVersion: String,
+        expectedPublicationVersion: Int
+    ) throws -> PublicRunPage {
+        let encoded = try JSONEncoder().encode(draft)
+        guard let draftObject = try JSONSerialization.jsonObject(with: encoded) as? [String: Any]
+        else {
+            throw Failure(code: "bad_params", message: "public-run-invalid")
+        }
+        return try call(
+            "publish_public_run",
+            params: [
+                "submission_id": submissionID,
+                "draft": draftObject,
+                "task_success": taskSuccess,
+                "contributed_version": contributedVersion,
+                "expected_publication_version": expectedPublicationVersion,
+            ],
+            as: PublicRunPage.self
+        )
+    }
+
+    func unpublishPublicRun(submissionID: String) throws -> PublicRunUnpublishResult {
+        try call(
+            "unpublish_public_run",
+            params: ["submission_id": submissionID],
+            as: PublicRunUnpublishResult.self
+        )
+    }
+
     /// The local change log, newest first. `limit` defaults to 20 here
     /// rather than the contract's 50 to match the Linux shell, which asks
     /// for 20 on the same screen -- this is a "what did I change lately"

@@ -34,13 +34,15 @@ use trace_commons_contributor_ffi::{
     tc_preview_summary_json, tc_preview_turns_json, tc_private_inference_copy,
     tc_private_inference_quit_needs_notice, tc_private_inference_serving_line,
     tc_private_inference_should_offer, tc_private_inference_state_line,
-    tc_private_inference_state_tone, tc_routing_copy, tc_routing_discovery_line,
+    tc_private_inference_state_tone, tc_public_run_copy, tc_public_run_error_line,
+    tc_public_run_validate_editor, tc_routing_copy, tc_routing_discovery_line,
     tc_routing_last_checked, tc_routing_state_line, tc_routing_state_tone, tc_routing_token_line,
     tc_routing_tool_tone, tc_routing_tool_word, tc_routing_unreachable_line,
-    tc_scrub_detector_names, tc_search_original, tc_source_check_line, tc_string_free,
-    tc_subscribe, tc_unsubscribe, tc_witness_clear, tc_witness_configure, tc_witness_copy,
-    tc_witness_last_result_json, tc_witness_last_result_line, tc_witness_last_result_tone,
-    tc_witness_state_line, tc_witness_state_tone, tc_witness_status_json, tc_witness_trust_state,
+    tc_scrub_detector_names, tc_search_original, tc_session_detail_error_line,
+    tc_source_check_line, tc_string_free, tc_subscribe, tc_unsubscribe, tc_witness_clear,
+    tc_witness_configure, tc_witness_copy, tc_witness_last_result_json,
+    tc_witness_last_result_line, tc_witness_last_result_tone, tc_witness_state_line,
+    tc_witness_state_tone, tc_witness_status_json, tc_witness_trust_state,
 };
 use trace_commons_contributor_ffi::{
     tc_harness_action_available, tc_harness_last_call_line, tc_harness_outcome_line,
@@ -3432,6 +3434,106 @@ fn the_private_inference_payload_crosses_whole_and_finished() {
     let exposure = fields["offer_exposure"].as_str().unwrap();
     assert!(exposure.contains("anything else running"), "{exposure}");
     assert!(exposure.contains("accounts"), "{exposure}");
+}
+
+#[test]
+fn the_public_run_payload_and_error_tables_cross_whole_and_finished() {
+    let json = take_owned(tc_public_run_copy());
+    let value: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+    let expected = serde_json::to_value(trace_commons_contributor::public_run::public_run_copy())
+        .expect("the Rust payload serialises");
+    assert_eq!(value, expected, "the export is not the shared payload");
+
+    let fields = value.as_object().expect("an object");
+    for (field, value) in fields {
+        if field == "reuse_permissions" {
+            let choices = value.as_array().expect("reuse permissions are a list");
+            assert_eq!(choices.len(), 2);
+            continue;
+        }
+        let text = value.as_str().expect("every copy field is a string");
+        assert!(!text.trim().is_empty(), "{field} arrived empty");
+        for marker in ["{}", "%@", "%s", "%d"] {
+            assert!(
+                !text.contains(marker),
+                "{field} crossed as a template: {text}"
+            );
+        }
+    }
+
+    let session_label = CString::new("session-detail-not-found").expect("c string");
+    let publication_label = CString::new("public-run-conflict").expect("c string");
+    assert_eq!(
+        take_owned(unsafe { tc_session_detail_error_line(session_label.as_ptr()) }),
+        trace_commons_contributor::public_run::session_detail_error_line(
+            "session-detail-not-found"
+        )
+    );
+    assert_eq!(
+        take_owned(unsafe { tc_public_run_error_line(publication_label.as_ptr()) }),
+        trace_commons_contributor::public_run::publication_error_line("public-run-conflict")
+    );
+
+    let editor = CString::new(
+        serde_json::json!({
+            "title": "  Repair a stalled upload  ",
+            "outcome_summary": "The upload completed.",
+            "correction_excerpt": null,
+            "workflow": "Renew the session, then retry once.",
+            "reuse_permission": "cc_by_4_0",
+            "evidence": [{"event_id": "00000000-0000-0000-0000-000000000000", "excerpt": "The retry succeeded."}],
+            "source": "https://tracecommons.ai/runs/run-source-workflow"
+        })
+        .to_string(),
+    )
+    .expect("editor input");
+    let validation = take_owned(unsafe { tc_public_run_validate_editor(editor.as_ptr()) });
+    let validation: serde_json::Value = serde_json::from_str(&validation).expect("validation JSON");
+    assert!(validation.get("error").is_none());
+    assert_eq!(validation["draft"]["title"], "Repair a stalled upload");
+    assert_eq!(validation["draft"]["source_slug"], "run-source-workflow");
+}
+
+#[test]
+fn the_public_run_validator_rejects_null_malformed_and_oversized_inputs() {
+    let parse = |value: String| {
+        serde_json::from_str::<serde_json::Value>(&value).expect("validator response is JSON")
+    };
+
+    let null_result = parse(take_owned(unsafe {
+        tc_public_run_validate_editor(std::ptr::null())
+    }));
+    assert!(null_result.get("draft").is_none());
+    assert!(null_result["error"].as_str().is_some());
+
+    for bytes in [b"{bad".as_slice(), [0xff_u8].as_slice()] {
+        let input = CString::new(bytes).expect("synthetic invalid input");
+        let result = parse(take_owned(unsafe {
+            tc_public_run_validate_editor(input.as_ptr())
+        }));
+        assert!(result.get("draft").is_none());
+        assert!(result["error"].as_str().is_some());
+    }
+
+    let oversized_title = "t".repeat(101);
+    let input = CString::new(
+        serde_json::json!({
+            "title": oversized_title,
+            "outcome_summary": "The synthetic task completed.",
+            "correction_excerpt": null,
+            "workflow": "Apply the bounded synthetic steps.",
+            "reuse_permission": "cc_by_4_0",
+            "evidence": [{"event_id": "00000000-0000-0000-0000-000000000000", "excerpt": "The synthetic result was observed."}],
+            "source": ""
+        })
+        .to_string(),
+    )
+    .expect("oversized editor input");
+    let raw_result = take_owned(unsafe { tc_public_run_validate_editor(input.as_ptr()) });
+    let result = parse(raw_result.clone());
+    assert!(result.get("draft").is_none());
+    assert!(result["error"].as_str().is_some());
+    assert!(!raw_result.contains(&oversized_title));
 }
 
 /// The state sentence and its tone are one decision, and they cross as one.

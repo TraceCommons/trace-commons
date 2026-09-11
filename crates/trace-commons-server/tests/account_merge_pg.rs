@@ -20,8 +20,10 @@
 
 use secrecy::SecretString;
 use tokio_postgres::types::ToSql;
+use trace_commons_protocol::public_run::{PublicRunEvidenceDraft, PublicRunReusePermission};
+use trace_commons_protocol::trace_contribution::TaskSuccess;
 use trace_commons_server::config::{DatabaseConfig, SslMode};
-use trace_commons_server::db::{Database, postgres::PgBackend};
+use trace_commons_server::db::{Database, PublicRunWrite, postgres::PgBackend};
 use uuid::Uuid;
 
 /// Run a tenant-scoped statement on the raw test pool (RLS GUC set for
@@ -205,6 +207,30 @@ async fn seed_session(backend: &PgBackend, tenant_id: &str, account_id: Uuid) ->
     token_hash
 }
 
+async fn seed_accepted_submission(
+    backend: &PgBackend,
+    tenant_id: &str,
+    submission_id: Uuid,
+    principal_ref: &str,
+) {
+    let principal_ref = principal_ref.to_string();
+    raw_execute(
+        backend,
+        tenant_id,
+        "INSERT INTO trace_submissions (
+            tenant_id, submission_id, trace_id, auth_principal_ref,
+            schema_version, consent_policy_version, retention_policy_id,
+            status, privacy_risk, redaction_pipeline_version, redaction_hash
+         ) VALUES (
+            trace_current_tenant_id(), $1, $2, $3,
+            'trace.contribution.v1', 'consent.v1', 'retention.v1',
+            'accepted', 'low', 'redaction.v1', 'sha256:synthetic'
+         )",
+        &[&submission_id, &Uuid::new_v4(), &principal_ref],
+    )
+    .await;
+}
+
 /// Count active (unlinked_at IS NULL) principals for `account_id`.
 async fn active_principal_count(backend: &PgBackend, tenant_id: &str, account_id: Uuid) -> i64 {
     raw_scalar_i64(
@@ -349,6 +375,40 @@ async fn merge_round_trip_moves_everything_and_closes_absorbed() {
         .expect("seed near for B");
     let session_hash = seed_session(&backend, &tenant, account_b).await;
 
+    let public_submission_id = Uuid::new_v4();
+    seed_accepted_submission(
+        &backend,
+        &tenant,
+        public_submission_id,
+        "principal:merge-b-p2",
+    )
+    .await;
+    let public_run = PublicRunWrite {
+        tenant_id: tenant.clone(),
+        publication_id: Uuid::new_v4(),
+        account_id: account_b,
+        submission_id: public_submission_id,
+        slug: format!("run-{}", &Uuid::new_v4().simple().to_string()[..16]),
+        title: "Synthetic merge workflow".to_string(),
+        outcome_summary: "The synthetic merge workflow completed.".to_string(),
+        correction_excerpt: None,
+        workflow: "Apply the bounded synthetic merge steps.".to_string(),
+        reuse_permission: PublicRunReusePermission::CcBy40,
+        evidence: vec![PublicRunEvidenceDraft {
+            event_id: Uuid::new_v4(),
+            excerpt: "The synthetic merge result was observed.".to_string(),
+        }],
+        task_success: TaskSuccess::Success,
+        contributed_version: "trace.contribution.v1".to_string(),
+        approval_sha256: format!("sha256:{}", "a".repeat(64)),
+        source_publication_id: None,
+        expected_publication_version: 0,
+    };
+    backend
+        .upsert_public_run(public_run.clone())
+        .await
+        .expect("publish absorbed account workflow");
+
     // A login-link for B is the proof-of-control device B presents.
     let code_hash = unique_code_hash();
     seed_login_link(&backend, &tenant, account_b, &code_hash, false, false).await;
@@ -404,6 +464,47 @@ async fn merge_round_trip_moves_everything_and_closes_absorbed() {
     assert!(account_closed(&backend, &tenant, account_b).await);
     // An account_merged audit row exists.
     assert_eq!(merge_audit_count(&backend, &tenant).await, 1);
+
+    let moved_public_run = backend
+        .get_owned_public_run_state(&tenant, account_a, public_submission_id)
+        .await
+        .expect("read moved public workflow")
+        .row
+        .expect("moved public workflow exists");
+    assert_eq!(moved_public_run.account_id, account_a);
+    assert!(
+        backend
+            .get_owned_public_run_state(&tenant, account_b, public_submission_id)
+            .await
+            .expect("read absorbed account workflow")
+            .row
+            .is_none()
+    );
+
+    let mut update = public_run;
+    update.account_id = account_a;
+    update.publication_id = Uuid::new_v4();
+    update.title = "Synthetic merge workflow revised".to_string();
+    update.approval_sha256 = format!("sha256:{}", "b".repeat(64));
+    update.expected_publication_version = 1;
+    let updated = backend
+        .upsert_public_run(update)
+        .await
+        .expect("surviving account updates workflow");
+    assert_eq!(updated.row.version, 2);
+    assert_eq!(updated.row.publication_id, moved_public_run.publication_id);
+    let first_unpublish = backend
+        .unpublish_public_run(&tenant, account_a, public_submission_id)
+        .await
+        .expect("surviving account unpublishes workflow");
+    assert!(first_unpublish.unpublished);
+    assert_eq!(first_unpublish.expected_publication_version, 3);
+    let repeated_unpublish = backend
+        .unpublish_public_run(&tenant, account_a, public_submission_id)
+        .await
+        .expect("repeat unpublish is idempotent");
+    assert!(!repeated_unpublish.unpublished);
+    assert_eq!(repeated_unpublish.expected_publication_version, 3);
 }
 
 #[tokio::test]
