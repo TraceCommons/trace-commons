@@ -764,7 +764,7 @@ fn expected_models_card(request: &InsightCardRequest) -> Result<InsightCard, Car
         if snapshot.model_observed_records > 0 {
             observed_snapshots += 1;
         }
-        source_omission |= snapshot.model_labels_omitted;
+        source_omission |= snapshot.model_labels_omitted || snapshot.omitted_model_records > 0;
         for model in &snapshot.models {
             let entry = labels.entry(model.label.clone()).or_default();
             *entry = checked_add(*entry, model.observed_records)?;
@@ -998,10 +998,8 @@ fn validate_snapshot(s: &SnapshotCardInput) -> Result<(), CardValidationError> {
     }
     if s.models.len() > MAX_CARD_MODEL_LABELS
         || s.model_observed_records > s.model_eligible_records
-        || ((s.model_labels_omitted || s.omitted_model_records > 0)
-            && (s.models.len() != MAX_CARD_MODEL_LABELS
-                || !s.model_labels_omitted
-                || s.omitted_model_records == 0))
+        || (s.model_labels_omitted
+            && (s.models.len() != MAX_CARD_MODEL_LABELS || s.omitted_model_records == 0))
     {
         return Err(CardValidationError::InvalidInput);
     }
@@ -2089,6 +2087,25 @@ mod tests {
         assert_eq!(cards[0].state, CardState::Partial);
         assert_eq!(cards[0].rows[0].label.as_deref(), Some("model-000"));
         assert_eq!(cards[0].rows[63].label.as_deref(), Some("model-063"));
+    }
+
+    #[test]
+    fn repeated_model_reference_omission_does_not_require_label_omission() {
+        let mut r = request();
+        r.questions = vec![InsightQuestionId::ObservedModels];
+        r.snapshots[0].models = vec![ModelFact {
+            label: "one-model".into(),
+            observed_records: 1,
+        }];
+        r.snapshots[0].model_labels_omitted = false;
+        r.snapshots[0].omitted_model_records = 1;
+        r.snapshots[0].model_eligible_records = 2;
+        r.snapshots[0].model_observed_records = 2;
+        r.validate().unwrap();
+        let cards = expected_cards(&r).unwrap();
+        assert_eq!(cards[0].rows.len(), 1);
+        assert!(cards[0].rows_omitted);
+        assert_eq!(cards[0].state, CardState::Partial);
     }
 
     #[test]
