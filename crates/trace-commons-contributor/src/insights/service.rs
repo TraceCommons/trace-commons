@@ -26,7 +26,7 @@ pub enum LocalInsightsOperation {
         #[serde(default)]
         save: bool,
     },
-    List,
+    List {},
     Explain {
         id: String,
     },
@@ -71,7 +71,7 @@ pub fn execute(request: LocalInsightsRequest) -> Result<LocalInsightsResponse> {
                 insight: Box::new(insight),
             }
         }
-        LocalInsightsOperation::List => LocalInsightsResponse::List {
+        LocalInsightsOperation::List {} => LocalInsightsResponse::List {
             insights: store()?.list()?,
         },
         LocalInsightsOperation::Explain { id } => LocalInsightsResponse::Explain {
@@ -131,7 +131,7 @@ mod tests {
             &file,
             concat!(
                 "{\"role\":\"meta\",\"source\":\"claude-code\",\"model\":\"fixture\"}\n",
-                "{\"role\":\"user\",\"content\":\"PRIVATE_BODY\",\"timestamp\":\"2026-09-11T10:00:00Z\"}\n"
+                "{\"role\":\"user\",\"content\":\"PRIVATE_BODY\",\"timestamp\":\"2026-09-11T12:00:00Z\"}\n"
             ),
         )
         .unwrap();
@@ -173,7 +173,7 @@ mod tests {
             LocalInsightsResponse::Delete { deleted: true }
         ));
         assert!(
-            matches!(call(LocalInsightsOperation::List), LocalInsightsResponse::List { insights } if insights.is_empty())
+            matches!(call(LocalInsightsOperation::List {}), LocalInsightsResponse::List { insights } if insights.is_empty())
         );
         assert!(file.exists());
     }
@@ -183,7 +183,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let request = LocalInsightsRequest {
             store_dir: Some(temp.path().join("insights")),
-            operation: LocalInsightsOperation::List,
+            operation: LocalInsightsOperation::List {},
         };
         let response = dispatch_json(&serde_json::to_vec(&request).unwrap()).unwrap();
         assert_eq!(
