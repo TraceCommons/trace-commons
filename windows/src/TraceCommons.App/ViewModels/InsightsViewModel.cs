@@ -225,7 +225,7 @@ public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
                 var episode = InsightEpisodeResponses.DecodeMutation(response, responseType);
                 if (episode.Id != target.Id) throw new InvalidOperationException("insights-response-invalid");
                 bool reconciled = await RefreshEpisodesCoreAsync(token, target.Id);
-                string committed = successKey == "episode_members_saved" && reconciled && CurrentEpisodeMembershipRevision != target.MembershipRevision
+                string committed = successKey == "episode_members_saved" && episode.MembershipRevision != target.MembershipRevision
                     ? this[successKey] + "\n" + this["episode_membership_changed"] : this[successKey];
                 EpisodeStatus = reconciled ? committed : committed + "\n" + EpisodeStatus;
             }

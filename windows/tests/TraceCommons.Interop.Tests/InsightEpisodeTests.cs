@@ -154,6 +154,20 @@ public sealed class InsightEpisodeTests
     }
 
     [Fact]
+    public async Task CommittedMembershipChangeKeepsAssessmentClearedNoticeWhenRefreshFails()
+    {
+        var service = new Service();
+        using var model = new InsightsViewModel(service);
+        await model.LoadAsync();
+        await model.OpenEpisodeAsync(EpisodeId);
+        var target = model.CaptureEpisodeTarget()!;
+        service.FailDetail = true;
+        await model.ReplaceEpisodeMembersAsync(target, new[] { SnapshotId });
+        Assert.Null(model.CaptureEpisodeTarget());
+        Assert.Equal("Members saved\nAssessment cleared\nDetail unavailable", model.EpisodeStatus);
+    }
+
+    [Fact]
     public async Task MismatchedDetailIdIsNeverPresented()
     {
         var service = new Service { MismatchedDetail = true };
