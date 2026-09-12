@@ -102,6 +102,21 @@ else
     fail "application shutdown did not retire pending startup"
   fi
 
+  # Insights must work before contributor state exists, and its bounded
+  # worker must not publish after a window is hidden or closed.
+  if ! WAYLAND_DISPLAY="$WAYLAND_SOCKET" GDK_BACKEND=wayland GSETTINGS_BACKEND=memory \
+      cargo test --locked --manifest-path "$GTK_MANIFEST" --lib \
+      ui::insights::tests::account_free_view_analyzes_saves_explains_deletes_and_ignores_closed_results \
+      -- --exact --ignored --test-threads=1; then
+    fail "local Insights lifecycle or close cancellation failed"
+  fi
+  if ! WAYLAND_DISPLAY="$WAYLAND_SOCKET" GDK_BACKEND=wayland GSETTINGS_BACKEND=memory \
+      cargo test --locked --manifest-path "$GTK_MANIFEST" --bin trace-commons-shell \
+      insights_startup_tests::first_run_local_window_does_not_create_contributor_state \
+      -- --exact --ignored --test-threads=1; then
+    fail "first-run Insights created contributor state"
+  fi
+
   # --- axis 2: a real portal daemon ------------------------------------------
   if ! WAYLAND_DISPLAY="$WAYLAND_SOCKET" GDK_BACKEND=wayland GSETTINGS_BACKEND=memory \
       cargo test --locked --manifest-path "$GTK_MANIFEST" --lib \

@@ -70,8 +70,9 @@ fn main() -> anyhow::Result<()> {
         Some(i) => std::env::args()
             .nth(i + 1)
             .map(std::path::PathBuf::from)
-            .ok_or_else(|| anyhow::anyhow!("--state-dir needs a directory"))?,
-        None => trace_commons_contributor_gtk::state_dir()?,
+            .ok_or_else(|| anyhow::anyhow!("--state-dir needs a directory"))
+            .map(Some)?,
+        None => None,
     };
 
     // The `x-scheme-handler/tracecommons` registration in the desktop entry
@@ -115,11 +116,67 @@ fn main() -> anyhow::Result<()> {
         show_toast,
     });
 
-    connect_startup(&application, dir, drivers);
+    if local_start(&drivers) {
+        connect_local_startup(&application, dir, drivers);
+    } else {
+        let dir = match dir {
+            Some(dir) => dir,
+            None => trace_commons_contributor_gtk::state_dir()?,
+        };
+        connect_startup(&application, dir, drivers);
+    }
 
     // GTK's own argument parsing would choke on the flags above.
     application.run_with_args::<&str>(&[]);
     Ok(())
+}
+
+fn local_start(drivers: &Drivers) -> bool {
+    drivers.start_page.as_deref() == Some("insights")
+        || (!drivers.exit_after_realize
+            && drivers.start_page.is_none()
+            && drivers.onboarding_page.is_none())
+}
+
+fn connect_local_startup(
+    application: &adw::Application,
+    dir: Option<std::path::PathBuf>,
+    drivers: std::rc::Rc<Drivers>,
+) {
+    let startup = std::rc::Rc::new(std::cell::Cell::new(StartupState::Idle));
+    let stopped = startup.clone();
+    application.connect_shutdown(move |_| stopped.set(StartupState::Stopped));
+    application.connect_activate(move |application| {
+        if let Some(window) = application.active_window() {
+            window.present();
+            return;
+        }
+        let next = application.clone();
+        let dir = dir.clone();
+        let next_drivers = drivers.clone();
+        let startup = startup.clone();
+        ui::insights::present_local(application, move || {
+            let dir = match dir
+                .clone()
+                .map(Ok)
+                .unwrap_or_else(trace_commons_contributor_gtk::state_dir)
+            {
+                Ok(dir) => dir,
+                Err(_) => {
+                    eprintln!("contributor-state-unavailable");
+                    return;
+                }
+            };
+            start_or_ask(&next, dir, next_drivers.clone(), startup.clone());
+        });
+        if drivers.exit_after_realize {
+            let app = application.clone();
+            gtk::glib::timeout_add_seconds_local(drivers.realize_seconds, move || {
+                app.quit();
+                gtk::glib::ControlFlow::Break
+            });
+        }
+    });
 }
 
 fn connect_startup(
@@ -310,5 +367,59 @@ fn finish_start(
             application.quit();
             gtk::glib::ControlFlow::Break
         });
+    }
+}
+
+#[cfg(test)]
+mod insights_startup_tests {
+    use super::*;
+    fn drivers() -> std::rc::Rc<Drivers> {
+        std::rc::Rc::new(Drivers {
+            exit_after_realize: false,
+            realize_seconds: 0,
+            open_preview: false,
+            search_term: None,
+            preview_tab: None,
+            start_page: None,
+            onboarding_page: None,
+            show_toast: false,
+        })
+    }
+    #[test]
+    fn ordinary_start_opens_local_insights_and_explicit_contribution_driver_keeps_existing_route() {
+        let mut d = drivers();
+        assert!(local_start(&d));
+        std::rc::Rc::get_mut(&mut d).unwrap().start_page = Some("queue".into());
+        assert!(!local_start(&d));
+        std::rc::Rc::get_mut(&mut d).unwrap().start_page = Some("insights".into());
+        assert!(local_start(&d));
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "requires a Linux GTK display; run alone with --ignored --test-threads=1"]
+    fn first_run_local_window_does_not_create_contributor_state() {
+        let context = gtk::glib::MainContext::default();
+        let _owner = context.acquire().unwrap();
+        adw::init().expect("GTK display unavailable");
+        let dir =
+            std::env::temp_dir().join(format!("tc-insights-first-run-{}", uuid::Uuid::new_v4()));
+        let application = adw::Application::builder()
+            .application_id("ai.tracecommons.InsightsFirstRunTest")
+            .flags(gtk::gio::ApplicationFlags::NON_UNIQUE)
+            .build();
+        connect_local_startup(&application, Some(dir.clone()), drivers());
+        let observed = std::rc::Rc::new(std::cell::Cell::new(false));
+        let flag = observed.clone();
+        let check_dir = dir.clone();
+        application.connect_activate(move |app| {
+            assert!(!check_dir.exists());
+            assert_eq!(app.windows().len(), 1);
+            flag.set(true);
+            let app = app.clone();
+            gtk::glib::idle_add_local_once(move || app.quit());
+        });
+        application.run_with_args::<&str>(&[]);
+        assert!(observed.get());
+        assert!(!dir.exists());
     }
 }
