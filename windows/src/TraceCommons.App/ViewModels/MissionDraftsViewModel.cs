@@ -31,6 +31,34 @@ public sealed class MissionDraftsViewModel : INotifyPropertyChanged, IDisposable
     public bool CanAct => !IsBusy;
     public bool IsEmpty => Drafts.Count == 0;
     public string this[string key] => _copy.TryGetValue(key, out string? value) ? value : string.Empty;
+    public string Title => this["title"];
+    public string Intro => this["intro"];
+    public string ReviewNotice => this["review_notice"];
+    public string AuthorityNotice => this["authority_notice"];
+    public string ChooseFile => this["choose_file"];
+    public string Import => this["import"];
+    public string Refresh => this["refresh"];
+    public string Show => this["show"];
+    public string Delete => this["delete"];
+    public string DisplayNotice => this["display_notice"];
+    public string ProposalSha256 => this["proposal_sha256"];
+    public string ProposalTitle => this["proposal_title"];
+    public string AuthorUnverified => this["author_unverified"];
+    public string EvaluatorUnverified => this["evaluator_unverified"];
+    public string RubricVersion => this["rubric_version"];
+    public string SourceClaim => this["source_claim"];
+    public string Task => this["task"];
+    public string StartingArtifact => this["starting_artifact"];
+    public string StartingArtifactDigest => this["starting_artifact_digest"];
+    public string SourceUrls => this["source_urls"];
+    public string SuccessCriteria => this["success_criteria"];
+    public string RequiredEvidence => this["required_evidence"];
+    public string AllowedModels => this["allowed_models"];
+    public string AllowedTools => this["allowed_tools"];
+    public string ProposedBudget => this["proposed_budget"];
+    public string DurationSeconds => this["duration_seconds"];
+    public string InputTokens => this["input_tokens"];
+    public string OutputTokens => this["output_tokens"];
 
     public async Task LoadAsync()
     {
@@ -158,6 +186,6 @@ public sealed class MissionDraftsViewModel : INotifyPropertyChanged, IDisposable
     private void End(long ticket) { if (CurrentTicket(ticket)) IsBusy = false; }
     private bool Contains(string id) { foreach (var draft in Drafts) if (draft.Id == id) return true; return false; }
     private void Replace(IReadOnlyList<MissionDraftSummary> drafts) { Drafts.Clear(); foreach (var draft in drafts) Drafts.Add(draft); Raise(nameof(IsEmpty)); }
-    private void RaiseCopy() { Raise("Item[]"); Raise(nameof(Status)); }
+    private void RaiseCopy() { Raise(string.Empty); }
     private void Raise([CallerMemberName] string? name = null) => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
 }
