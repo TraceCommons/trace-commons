@@ -2171,6 +2171,14 @@ fn source_label(source: SourceFormat) -> &'static str {
         SourceFormat::Trajectory => "trajectory",
     })
 }
+#[cfg(test)]
+fn source_index(source: SourceFormat) -> u32 {
+    match source {
+        SourceFormat::Codex => 0,
+        SourceFormat::ClaudeCode => 1,
+        SourceFormat::Trajectory => 2,
+    }
+}
 fn category_label(category: TaskCategory) -> &'static str {
     copy(match category {
         TaskCategory::Unknown => "category_unknown",
@@ -2549,7 +2557,8 @@ mod tests {
             "initial summary must not initialize storage"
         );
         assert!(view.summary.text().contains(copy("summary_empty")));
-        view.source.set_selected(1);
+        view.source
+            .set_selected(source_index(SourceFormat::Trajectory));
         *view.selected.borrow_mut() = Some(file.clone());
         view.analyze(false);
         settle();
