@@ -2,6 +2,8 @@
 //!
 //! No discovery, enrollment, network, or contribution path is invoked. A file
 //! is a provisional session boundary, never an inferred completed task.
+pub mod episode_store;
+pub mod episodes;
 pub mod models;
 pub mod outcomes;
 pub mod service;
@@ -24,7 +26,7 @@ use trace_commons_protocol::insights::{
 use crate::source::SessionEventKind;
 
 const MAX_SOURCE_BYTES: u64 = 16 * 1024 * 1024;
-const STORE_VERSION: u32 = 3;
+const STORE_VERSION: u32 = 4;
 const MAX_OUTCOME_LINKS: usize = 128;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -287,18 +289,44 @@ pub fn analyze_file(format: SourceFormat, path: &Path) -> Result<LocalInsight> {
     })
 }
 
+/// Effects committed atomically with a snapshot mutation. Never persisted as evidence.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MutationEffects {
+    pub invalidated_episode_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SnapshotMutation<T> {
+    pub value: T,
+    pub mutation_effects: MutationEffects,
+}
+
 #[derive(Serialize, Deserialize)]
 struct Index {
     version: u32,
     /// Canonical path hashes only; never source paths or bodies.
     aliases: BTreeMap<String, String>,
     reports: BTreeMap<String, LocalInsight>,
+    #[serde(default)]
+    episodes: BTreeMap<String, episodes::LocalEpisode>,
 }
 
 /// Dedicated local directory, independent of the enrollment/config store.
 /// The lock remains on a stable file while the JSON index is atomically replaced.
 pub struct LocalInsightStore {
     dir: PathBuf,
+}
+
+// Closing only this descriptor is insufficient when a concurrent process spawn
+// inherited the same open file description. Explicit unlock ends our transaction
+// independently of when a child reaches exec or exits.
+struct StoreLock {
+    file: File,
+}
+impl Drop for StoreLock {
+    fn drop(&mut self) {
+        let _ = self.file.unlock();
+    }
 }
 
 impl LocalInsightStore {
@@ -329,7 +357,7 @@ impl LocalInsightStore {
         Ok(Self { dir })
     }
 
-    fn locked(&self) -> Result<(File, Index)> {
+    fn locked(&self) -> Result<(StoreLock, Index)> {
         reject_symlinks(&self.dir)?;
         let lock_path = self.dir.join("store.lock");
         reject_symlinks(&lock_path)?;
@@ -351,6 +379,7 @@ impl LocalInsightStore {
             .map_err(|_| anyhow!("insights_store_lock_unavailable"))?;
         lock.try_lock()
             .map_err(|_| anyhow!("insights_store_busy"))?;
+        let lock = StoreLock { file: lock };
         let path = self.dir.join("index.json");
         reject_symlinks(&path)?;
         let mut index = match fs::symlink_metadata(&path) {
@@ -363,6 +392,7 @@ impl LocalInsightStore {
                 version: STORE_VERSION,
                 aliases: BTreeMap::new(),
                 reports: BTreeMap::new(),
+                episodes: BTreeMap::new(),
             },
             Err(_) => bail!("insights_store_unreadable"),
         };
@@ -428,7 +458,8 @@ impl LocalInsightStore {
         {
             bail!("insights_store_invalid");
         }
-        // Legacy snapshots remain readable; the next mutation persists v3.
+        episode_store::validate_index_episodes(&index)?;
+        // Legacy snapshots remain readable; the next mutation persists v4.
         index.version = STORE_VERSION;
         Ok((lock, index))
     }
@@ -445,6 +476,14 @@ impl LocalInsightStore {
     /// Reimport replaces this path's snapshot. Identical copies share a report;
     /// a replaced report survives only while another imported alias references it.
     pub fn import(&self, format: SourceFormat, path: &Path) -> Result<LocalInsight> {
+        Ok(self.import_with_effects(format, path)?.value)
+    }
+
+    pub fn import_with_effects(
+        &self,
+        format: SourceFormat,
+        path: &Path,
+    ) -> Result<SnapshotMutation<LocalInsight>> {
         // Analyze the selected leaf through the same no-follow reader used by
         // unsaved analysis. Canonicalization is only for deduplication identity.
         let mut insight = analyze_file(format, path)?;
@@ -463,8 +502,12 @@ impl LocalInsightStore {
         index.reports.insert(insight.id.clone(), insight.clone());
         let referenced = index.aliases.values().cloned().collect::<BTreeSet<_>>();
         index.reports.retain(|id, _| referenced.contains(id));
+        let mutation_effects = episode_store::invalidate_missing_members(&mut index);
         self.save(&index)?;
-        Ok(insight)
+        Ok(SnapshotMutation {
+            value: insight,
+            mutation_effects,
+        })
     }
 
     /// Replace the user assessment on an existing saved snapshot. Both labels
@@ -571,13 +614,21 @@ impl LocalInsightStore {
     /// Removes the derived report and all imported aliases. Does not delete the
     /// user's original file. An explicit later import can analyze it again.
     pub fn delete(&self, id: &str) -> Result<bool> {
+        Ok(self.delete_with_effects(id)?.value)
+    }
+
+    pub fn delete_with_effects(&self, id: &str) -> Result<SnapshotMutation<bool>> {
         let (_lock, mut index) = self.locked()?;
         let removed = index.reports.remove(id).is_some();
+        let mutation_effects = episode_store::invalidate_missing_members(&mut index);
         if removed {
             index.aliases.retain(|_, value| value != id);
             self.save(&index)?;
         }
-        Ok(removed)
+        Ok(SnapshotMutation {
+            value: removed,
+            mutation_effects,
+        })
     }
 }
 
@@ -659,6 +710,30 @@ fn reject_symlinks(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn dropping_store_guard_releases_lock_even_with_an_inherited_descriptor() {
+        let root = tempfile::tempdir().unwrap();
+        let store = LocalInsightStore::open(&root.path().join("store")).unwrap();
+        let (guard, _) = store.locked().unwrap();
+        let inherited = guard.file.try_clone().unwrap();
+        let contender = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(store.dir.join("store.lock"))
+            .unwrap();
+        assert!(matches!(
+            contender.try_lock(),
+            Err(std::fs::TryLockError::WouldBlock)
+        ));
+        drop(guard);
+        contender
+            .try_lock()
+            .expect("a completed store operation must not leave a lock in an inherited descriptor");
+        contender.unlock().unwrap();
+        drop(inherited);
+    }
 
     fn trajectory(path: &Path, suffix: &str) {
         fs::write(

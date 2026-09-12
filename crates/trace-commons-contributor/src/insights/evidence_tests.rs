@@ -120,7 +120,7 @@ fn legacy_v2_stays_unknown_until_reimport_and_new_fields_are_digest_validated() 
             .is_some()
     );
     let valid: serde_json::Value = serde_json::from_slice(&fs::read(&index_path).unwrap()).unwrap();
-    assert_eq!(valid["version"], 3);
+    assert_eq!(valid["version"], super::STORE_VERSION);
     for field in ["model_observations", "outcome_links"] {
         let mut corrupt = valid.clone();
         if field == "model_observations" {
