@@ -78,12 +78,20 @@ enum ExactCandidateEvaluationStatus {
 #[serde(deny_unknown_fields)]
 struct ExactCandidateEvaluationWire {
     status: ExactCandidateEvaluationStatus,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "present_non_null")]
     first_components: Option<[ExactCandidateComponentInterval; 3]>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "present_non_null")]
     second_components: Option<[ExactCandidateComponentInterval; 3]>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "present_non_null")]
     contrasts: Option<[ExactCandidateContrast; 3]>,
+}
+
+fn present_non_null<'de, D, T>(deserializer: D) -> std::result::Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
 }
 
 impl<'de> Deserialize<'de> for ExactCandidateEvaluation {

@@ -153,10 +153,37 @@ public enum ExactCandidateDecision: String, Decodable, Sendable, Equatable {
 }
 public struct ExactCandidateComponentInterval: Decodable, Sendable, Equatable {
     public let lower_millionths, upper_millionths: UInt32
+    private enum Keys: String, CodingKey, CaseIterable { case lower_millionths, upper_millionths }
+    public init(from decoder: Decoder) throws {
+        try Self.requireKeys(decoder, Keys.allCases.map(\.rawValue))
+        let values = try decoder.container(keyedBy: Keys.self)
+        lower_millionths = try values.decode(UInt32.self, forKey: .lower_millionths)
+        upper_millionths = try values.decode(UInt32.self, forKey: .upper_millionths)
+    }
+    private static func requireKeys(_ decoder: Decoder, _ expected: [String]) throws {
+        let dynamic = try decoder.container(keyedBy: ComparisonDynamicKey.self)
+        guard Set(dynamic.allKeys.map(\.stringValue)) == Set(expected) else {
+            throw InsightsError.invalidResponse
+        }
+    }
 }
 public struct ExactCandidateContrast: Decodable, Sendable, Equatable {
     public let lower_millionths, upper_millionths, width_millionths: Int64
     public let decision: ExactCandidateDecision
+    private enum Keys: String, CodingKey, CaseIterable {
+        case lower_millionths, upper_millionths, width_millionths, decision
+    }
+    public init(from decoder: Decoder) throws {
+        let dynamic = try decoder.container(keyedBy: ComparisonDynamicKey.self)
+        guard Set(dynamic.allKeys.map(\.stringValue)) == Set(Keys.allCases.map(\.rawValue)) else {
+            throw InsightsError.invalidResponse
+        }
+        let values = try decoder.container(keyedBy: Keys.self)
+        lower_millionths = try values.decode(Int64.self, forKey: .lower_millionths)
+        upper_millionths = try values.decode(Int64.self, forKey: .upper_millionths)
+        width_millionths = try values.decode(Int64.self, forKey: .width_millionths)
+        decision = try values.decode(ExactCandidateDecision.self, forKey: .decision)
+    }
 }
 public enum ExactCandidateEvaluation: Decodable, Sendable, Equatable {
     case supported(first: [ExactCandidateComponentInterval], second: [ExactCandidateComponentInterval],
@@ -188,6 +215,18 @@ public enum ExactCandidateEvaluation: Decodable, Sendable, Equatable {
 }
 public struct AssessedCategoricalCounts: Decodable, Sendable, Equatable {
     public let accepted, partial, rejected, total: UInt64
+    private enum Keys: String, CodingKey, CaseIterable { case accepted, partial, rejected, total }
+    public init(from decoder: Decoder) throws {
+        let dynamic = try decoder.container(keyedBy: ComparisonDynamicKey.self)
+        guard Set(dynamic.allKeys.map(\.stringValue)) == Set(Keys.allCases.map(\.rawValue)) else {
+            throw InsightsError.invalidResponse
+        }
+        let values = try decoder.container(keyedBy: Keys.self)
+        accepted = try values.decode(UInt64.self, forKey: .accepted)
+        partial = try values.decode(UInt64.self, forKey: .partial)
+        rejected = try values.decode(UInt64.self, forKey: .rejected)
+        total = try values.decode(UInt64.self, forKey: .total)
+    }
 }
 public struct QualifiedExactEstimation: Decodable, Sendable, Equatable {
     public let cohort_labels: [String]
@@ -195,6 +234,21 @@ public struct QualifiedExactEstimation: Decodable, Sendable, Equatable {
     public let assessed_estimation_input_digest: String
     public let evaluation: ExactCandidateEvaluation
     public let output_digest: String
+    private enum Keys: String, CodingKey, CaseIterable {
+        case cohort_labels, assessed_counts, assessed_estimation_input_digest, evaluation, output_digest
+    }
+    public init(from decoder: Decoder) throws {
+        let dynamic = try decoder.container(keyedBy: ComparisonDynamicKey.self)
+        guard Set(dynamic.allKeys.map(\.stringValue)) == Set(Keys.allCases.map(\.rawValue)) else {
+            throw InsightsError.invalidResponse
+        }
+        let values = try decoder.container(keyedBy: Keys.self)
+        cohort_labels = try values.decode([String].self, forKey: .cohort_labels)
+        assessed_counts = try values.decode([AssessedCategoricalCounts].self, forKey: .assessed_counts)
+        assessed_estimation_input_digest = try values.decode(String.self, forKey: .assessed_estimation_input_digest)
+        evaluation = try values.decode(ExactCandidateEvaluation.self, forKey: .evaluation)
+        output_digest = try values.decode(String.self, forKey: .output_digest)
+    }
 }
 public struct DescriptiveComparisonResult: Decodable, Sendable, Equatable {
     public let schema_version: UInt32; public let specification_id, specification_digest: String

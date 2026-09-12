@@ -1469,6 +1469,20 @@ mod tests {
         .unwrap();
         result["exact_estimation"]["evaluation"]["contrasts"] = serde_json::json!([]);
         assert!(serde_json::from_value::<DescriptiveComparisonResultV1>(result).is_err());
+
+        let mut suppressed = serde_json::to_value(
+            project_descriptive_comparison(
+                &qualified_spec(),
+                &[
+                    fact(1, "model-a", DescriptiveOutcome::Accepted),
+                    fact(3, "model-b", DescriptiveOutcome::Rejected),
+                ],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        suppressed["exact_estimation"]["evaluation"]["first_components"] = serde_json::Value::Null;
+        assert!(serde_json::from_value::<DescriptiveComparisonResultV1>(suppressed).is_err());
     }
 
     #[test]
