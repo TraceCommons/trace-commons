@@ -43,6 +43,11 @@ public struct ComparisonSpecification: Decodable, Sendable, Equatable, Identifia
               outcome_rubric_version == "categorical-user-report-v1",
               estimands == ["categorical-outcome-distribution-v1"], estimator_state == "not_yet_calibrated"
         else { throw InsightsError.invalidResponse }
+        guard Set(cutoff_task_evidence.map(\.task_id)).count == cutoff_task_evidence.count,
+              cutoff_task_evidence.allSatisfy({ LocalComparisonTask.uuid($0.task_id)
+                  && LocalComparisonTask.digest($0.material_digest)
+                  && LocalComparisonTask.digest($0.substantive_material_digest) })
+        else { throw InsightsError.invalidResponse }
     }
 }
 public enum ComparisonExclusionReason: String, Decodable, Sendable, CaseIterable {
@@ -80,11 +85,20 @@ public struct DescriptiveComparisonResult: Decodable, Sendable, Equatable {
               [specification_digest, specification_record_digest, audit_digest, estimation_input_digest]
                 .allSatisfy(LocalComparisonTask.digest),
               Set(included_task_ids).count == included_task_ids.count,
+              included_task_ids.allSatisfy(LocalComparisonTask.uuid),
               Set(excluded_tasks.map(\.id)).count == excluded_tasks.count,
+              excluded_tasks.allSatisfy({ LocalComparisonTask.uuid($0.task_id) && !$0.reasons.isEmpty }),
               Set(cohorts.map(\.id)).count == cohorts.count,
               expectedSpecification == nil || (expectedSpecification?.id == specification_id
                 && expectedSpecification?.specification_digest == specification_digest
                 && expectedSpecification?.saved_record_digest == specification_record_digest)
         else { throw InsightsError.invalidResponse }
+        guard cohorts.allSatisfy({ cohort in
+            cohort.included_tasks == cohort.outcomes.accepted + cohort.outcomes.partial
+                + cohort.outcomes.rejected + cohort.outcomes.pending + cohort.outcomes.unknown
+                + cohort.outcomes.unassessed
+                && cohort.outcomes.assessed == cohort.outcomes.accepted + cohort.outcomes.partial
+                    + cohort.outcomes.rejected
+        }) else { throw InsightsError.invalidResponse }
     }
 }

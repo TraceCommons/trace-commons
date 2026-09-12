@@ -6,6 +6,8 @@ struct ComparisonStratumOption: Identifiable, Equatable, Sendable {
     let stratum: ExactComparisonStratum
     let taskIDs: [String]
     let cohortCandidates: [String]
+    let label: String
+    let taskLabels: [String: String]
     var id: String { "\(stratum.project_id):\(stratum.language):\(stratum.configuration_fingerprint)" }
 }
 
@@ -44,22 +46,30 @@ final class ComparisonSpecificationsModel {
     func close() {
         active = false; generation = UUID(); presentation = UUID(); readTask?.cancel(); readTask = nil
         if saveTask == nil { busy = false }
-        selected = nil; result = nil; previewSpecification = nil; previewResult = nil
+        selected = nil; result = nil; previewSpecification = nil; previewResult = nil; previewInput = nil
     }
     func updateSources(tasks: [ComparisonTaskDetail], snapshots: [LocalInsight]) {
         let snapshotByID = Dictionary(uniqueKeysWithValues: snapshots.map { ($0.id, $0) })
-        let grouped = Dictionary(grouping: tasks.compactMap { detail -> (ExactComparisonStratum, String, Set<String>)? in
+        let grouped = Dictionary(grouping: tasks.compactMap { detail -> (ExactComparisonStratum, String, Set<String>, String, String)? in
             guard let context = detail.task.context, context.isComplete,
                   case .known(let language) = context.language else { return nil }
             let stratum = ExactComparisonStratum(projectID: context.project_id, language: language,
                 configurationFingerprint: context.configuration_fingerprint)
             let ids = detail.task.episodes.flatMap(\.members).map(\.snapshot_id)
             let labels = Set(ids.flatMap { snapshotByID[$0]?.model_observations?.declared_models ?? [] })
-            return (stratum, detail.id, labels)
+            let configuration = context.configuration
+            let harness = Self.known(configuration.harness_id)
+            let version = Self.known(configuration.harness_version)
+            let policy = Self.known(configuration.tool_policy_id)
+            let project = String(context.project_id.prefix(8))
+            let stratumLabel = "\(project) · \(language) · \(harness) \(version) · \(configuration.reasoning_effort.rawValue) · \(policy)"
+            let taskLabel = "\(context.task_date) · \(detail.task.episodes.count) episode\(detail.task.episodes.count == 1 ? "" : "s")"
+            return (stratum, detail.id, labels, stratumLabel, taskLabel)
         }, by: { $0.0 })
         options = grouped.map { stratum, rows in
             ComparisonStratumOption(stratum: stratum, taskIDs: rows.map(\.1).sorted(),
-                cohortCandidates: Set(rows.flatMap(\.2)).sorted())
+                cohortCandidates: Set(rows.flatMap(\.2)).sorted(), label: rows[0].3,
+                taskLabels: Dictionary(uniqueKeysWithValues: rows.map { ($0.1, $0.4) }))
         }.sorted { $0.id < $1.id }
         if !options.contains(where: { $0.id == selectedStratumID }) {
             selectedStratumID = options.first?.id ?? ""; selectedCohorts = []
@@ -73,6 +83,9 @@ final class ComparisonSpecificationsModel {
         invalidatePreview()
     }
     var selectedOption: ComparisonStratumOption? { options.first { $0.id == selectedStratumID } }
+    func taskLabel(_ id: String) -> String {
+        options.lazy.compactMap { $0.taskLabels[id] }.first ?? String(id.prefix(8))
+    }
     var canDraft: Bool { selectedOption != nil && selectedCohorts.count == 2 && dateStart <= dateEnd }
     func preview() { guard let input = draftInput() else { return }; runPreview(input) }
     func save() { guard let input = previewInput, saveTask == nil else { return }; runSave(input) }
@@ -118,8 +131,10 @@ final class ComparisonSpecificationsModel {
             do {
                 let response = try await service(.init(operation: .init("comparison_preview_spec", input: input)))
                 guard let self, self.active, self.generation == screen, self.presentation == token,
-                      !Task.isCancelled, response.type == "comparison_preview_spec",
-                      let spec = response.specification, let result = response.comparisonResult else { return }
+                      !Task.isCancelled else { return }
+                guard response.type == "comparison_preview_spec",
+                      let spec = response.specification, let result = response.comparisonResult
+                else { throw InsightsError.invalidResponse }
                 try spec.validateStructure(); try result.validateStructure(expectedSpecification: spec)
                 self.previewSpecification = spec; self.previewResult = result; self.previewInput = input
                 self.notice = "comparison_preview_notice"; self.finish()
@@ -127,7 +142,7 @@ final class ComparisonSpecificationsModel {
         }
     }
     private func runSave(_ input: ComparisonSpecificationDraftInput) {
-        busy = true; error = nil; notice = nil; let screen = generation; let service = service
+        busy = true; error = nil; notice = nil; let service = service
         saveTask = Task { [weak self] in
             do {
                 let response = try await service(.init(operation: .init("comparison_save_spec", input: input)))
@@ -138,7 +153,7 @@ final class ComparisonSpecificationsModel {
                 try spec.validateStructure()
                 guard self.active else { return }
                 self.notice = "comparison_specification_saved_notice"
-                self.reconcileSaved(id: spec.id, screen: screen)
+                self.reconcileSaved(id: spec.id)
             } catch {
                 guard let self else { return }; self.saveTask = nil; self.busy = false
                 guard self.active else { return }; self.error = "comparison_specification_error"
@@ -146,17 +161,22 @@ final class ComparisonSpecificationsModel {
             }
         }
     }
-    private func reconcileSaved(id: String, screen: UUID) {
-        let retained = notice; presentation = UUID(); selected = nil; result = nil; busy = true
+    private func reconcileSaved(id: String) {
+        let retained = notice; let screen = generation
+        presentation = UUID(); selected = nil; result = nil; busy = true
         let service = service; let token = presentation
         readTask = Task { [weak self] in
             do {
                 let list = try await service(.init(operation: .init("comparison_list_specs")))
-                guard let self, self.active, list.type == "comparison_specification_list",
+                guard let self, self.active, self.generation == screen, self.presentation == token,
+                      !Task.isCancelled else { return }
+                guard list.type == "comparison_specification_list",
                       let specs = list.specifications else { throw InsightsError.invalidResponse }
                 try specs.forEach { try $0.validateStructure() }; self.specifications = specs
                 let response = try await service(.init(operation: .init("comparison_get_spec", id: id)))
-                guard self.presentation == token, response.type == "comparison_specification",
+                guard self.active, self.generation == screen, self.presentation == token,
+                      !Task.isCancelled else { return }
+                guard response.type == "comparison_specification",
                       let spec = response.specification else { throw InsightsError.invalidResponse }
                 try spec.validateStructure(); self.selected = spec; self.notice = retained; self.finish()
             } catch {
@@ -211,5 +231,13 @@ final class ComparisonSpecificationsModel {
         return .init(evidenceCutoff: evidenceCutoff.ISO8601Format(), cohortLabels: Array(selectedCohorts),
                      dateStart: Self.day(dateStart), dateEnd: Self.day(dateEnd), stratum: option.stratum)
     }
-    private static func day(_ date: Date) -> String { String(date.ISO8601Format().prefix(10)) }
+    static func day(_ date: Date, calendar: Calendar = .current) -> String {
+        let parts = calendar.dateComponents([.year, .month, .day], from: date)
+        guard let year = parts.year, let month = parts.month, let day = parts.day else { return "" }
+        return String(format: "%04d-%02d-%02d", year, month, day)
+    }
+    private static func known(_ value: ComparisonContextString) -> String {
+        if case .known(let text) = value { return text }
+        return "?"
+    }
 }
