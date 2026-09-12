@@ -14,14 +14,8 @@ struct MainWindowView: View {
         // The raw value is an identity, not a label: this destination takes
         // its words from the Rust copy payload, the way `compute` does.
         case privateInference = "privateInference"
-        // Settings is last, and last on every shell. GTK and Windows already
-        // ordered it that way; this shell had it third, which put two
-        // destinations BELOW the settings row and made the sidebar disagree
-        // with itself across platforms. Declaration order is the sidebar
-        // order and, through `shortcut`, the Cmd-N numbering -- so this move
-        // renumbers Settings from Cmd-3 to Cmd-5, Compute to Cmd-3 and
-        // Private AI to Cmd-4, which is the intended coupling, not a side
-        // effect of it.
+        // Keep Settings last; declaration order also defines Cmd-N shortcuts.
+        case insights = "Insights"
         case settings = "Settings"
         var id: String { rawValue }
 
@@ -39,6 +33,7 @@ struct MainWindowView: View {
             case .settings: return .gear
             case .compute: return .monitor
             case .privateInference: return .exchange
+            case .insights: return .clock
             }
         }
 
@@ -59,6 +54,7 @@ struct MainWindowView: View {
         /// before they need to know what to do.
         var subtitle: String {
             switch self {
+            case .insights: return ""
             case .queue: return "Nothing is sent unless you say so."
             case .history: return "What you have contributed, and what is still being reviewed."
             case .settings: return "What this machine watches, and what your traces are allowed to do."
@@ -75,7 +71,7 @@ struct MainWindowView: View {
     }
 
     /// Only trace destinations pass through enrollment and session-root gates.
-    /// Compute and Private AI have their own activation paths.
+    /// Insights is local and account-free. Compute and Private AI have their own activation paths.
     @ViewBuilder
     private var traceContent: some View {
         switch model.startup {
@@ -147,6 +143,9 @@ struct MainWindowView: View {
                 if navigation.displaysCompute {
                     contentHeader
                     ComputeView(model: compute)
+                } else if section == .insights {
+                    contentHeader
+                    InsightsView()
                 } else if section == .privateInference {
                     contentHeader
                     PrivateInferenceActivationView()
@@ -170,6 +169,7 @@ struct MainWindowView: View {
         case .settings: SettingsView(navigation: navigation)
         case .compute: EmptyView()
         case .privateInference: EmptyView()
+        case .insights: EmptyView()
         }
     }
 
@@ -195,7 +195,7 @@ struct MainWindowView: View {
         switch item {
         case .compute: return compute?.destination ?? ""
         case .privateInference: return privateInference?.destination ?? ""
-        case .queue, .history, .settings: return item.rawValue
+        case .queue, .history, .settings, .insights: return item.rawValue
         }
     }
 
@@ -206,7 +206,7 @@ struct MainWindowView: View {
         switch item {
         case .compute: return compute?.subtitle ?? ""
         case .privateInference: return privateInference.map(\.subtitle) ?? ""
-        case .queue, .history, .settings: return item.subtitle
+        case .queue, .history, .settings, .insights: return item.subtitle
         }
     }
 
@@ -324,7 +324,7 @@ struct MainWindowView: View {
                     .foregroundStyle(TC.inkSecondary)
             }
             Spacer(minLength: TC.Space.m)
-            if section != .compute && section != .privateInference {
+            if section != .compute && section != .privateInference && section != .insights {
                 watchChip
                 watchControl
             }
