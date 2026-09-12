@@ -3,6 +3,9 @@ use std::path::PathBuf;
 use trace_commons_contributor::commands;
 use trace_commons_contributor::config::ConfigStore;
 
+#[path = "contributor_cli/insights.rs"]
+mod insights_cli;
+
 #[derive(Parser)]
 #[command(
     name = "trace-commons-contributor",
@@ -25,6 +28,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Analyze explicitly selected local sessions without enrollment or contribution
+    Insights(insights_cli::InsightsArgs),
     /// Locally redact and preview a versioned explicit import; never uploads or grants admission
     ImportPreview {
         /// User-selected local evidence-import-v1 JSON file (no URL retrieval)
@@ -391,6 +396,9 @@ async fn main() -> std::process::ExitCode {
 }
 
 async fn run(cli: Cli) -> anyhow::Result<()> {
+    if let Command::Insights(args) = &cli.command {
+        return insights_cli::run(args, cli.json);
+    }
     if let Command::ImportPreview { file, cwd } = &cli.command {
         let prepared = trace_commons_contributor::evidence_import::read_import(file)?;
         let preview = prepared.local_preview(cwd).await?;
@@ -456,7 +464,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             };
             commands::submit(&store, &sel).await
         }
-        Command::ImportPreview { .. } => {
+        Command::ImportPreview { .. } | Command::Insights(_) => {
             anyhow::bail!("import-preview-dispatch-invalid")
         }
         Command::ImportAntigravity { project, all } => {

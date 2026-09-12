@@ -90,6 +90,40 @@ it.
    trace-commons-contributor submit --since 7d
    ```
 
+## Private local insights
+
+Analyze a selected Codex rollout or trajectory file without enrollment or upload:
+
+```bash
+trace-commons-contributor insights analyze --source codex --file session.jsonl
+trace-commons-contributor --json insights analyze --source trajectory --file trajectory.jsonl
+```
+
+Analysis reads only the selected file and does not save results unless `--save`
+is supplied. The first local provider reports session/event counts, tool calls,
+and explicitly reported tool failures with coverage. These adapters do not yet
+preserve enough usage for token or cost estimates; task outcomes and model
+comparisons remain unknown. A session is a provisional boundary, not a verified
+completed task. Evidence references identify the exact source snapshot by digest;
+event-level explanations and desktop views are follow-on work.
+
+Save and manage derived observations in a dedicated local directory:
+
+```bash
+trace-commons-contributor insights --store-dir ./private-insights analyze --source codex --file session.jsonl --save
+trace-commons-contributor insights --store-dir ./private-insights list
+trace-commons-contributor insights --store-dir ./private-insights explain INSIGHT_ID
+trace-commons-contributor insights --store-dir ./private-insights delete INSIGHT_ID
+```
+
+Without `--store-dir`, saved insights use `trace-commons/insights` under the OS
+local data directory, independently of contributor enrollment configuration.
+The store contains derived observations and hashed references, without transcript
+bodies or original paths. Reimporting the same file replaces its prior snapshot;
+identical copies share a result. Saved snapshots are not monitored for changes to
+the original files: reimport to refresh, or use `delete` to remove the saved result
+and its references. Deletion leaves the original transcript intact.
+
 ## Consent model
 
 - The instance's onboarding policy template sets a **ceiling**: it lists the
