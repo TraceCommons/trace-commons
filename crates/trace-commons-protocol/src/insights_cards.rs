@@ -494,6 +494,9 @@ impl InsightCardResult {
         if self.cards.len() != request.questions.len() {
             return Err(CardValidationError::MissingCard);
         }
+        if self.cards != expected_cards(request)? {
+            return Err(CardValidationError::InvalidRow);
+        }
         Ok(())
     }
 }
@@ -1654,6 +1657,60 @@ mod tests {
             episodes: vec![],
         }
     }
+    #[test]
+    fn every_deterministic_value_and_coverage_is_bound_to_selected_facts() {
+        let mut request = request();
+        request.questions = InsightQuestionId::ALL.to_vec();
+        request.snapshots[0].models = vec![ModelFact {
+            label: "declared-model".into(),
+            observed_records: 1,
+        }];
+        request.snapshots[0].model_eligible_records = 1;
+        request.snapshots[0].model_observed_records = 1;
+        let result = InsightCardResult {
+            schema_version: 1,
+            provider: request.expected_provider.clone(),
+            input_digest: request.input_digest().unwrap(),
+            cards: expected_cards(&request).unwrap(),
+        };
+        result.validate_for(&request).unwrap();
+        for (card_index, card) in result.cards.iter().enumerate() {
+            for (row_index, row) in card.rows.iter().enumerate() {
+                if let Some(CardValue::Count(count)) = row.value {
+                    let mut forged = result.clone();
+                    forged.cards[card_index].rows[row_index].value =
+                        Some(CardValue::Count(count + 1));
+                    assert!(
+                        forged.validate_for(&request).is_err(),
+                        "accepted invented {:?}",
+                        row.id
+                    );
+                }
+            }
+            for coverage_index in 0..card.coverage.len() {
+                let mut forged = result.clone();
+                forged.cards[card_index].coverage[coverage_index].eligible += 1;
+                assert!(
+                    forged.validate_for(&request).is_err(),
+                    "accepted invented coverage"
+                );
+            }
+        }
+        let mut forged = result;
+        let models = forged
+            .cards
+            .iter_mut()
+            .find(|card| card.question == InsightQuestionId::ObservedModels)
+            .unwrap();
+        let model = models
+            .rows
+            .iter_mut()
+            .find(|row| row.id == CardRowId::ObservedModel)
+            .unwrap();
+        model.label = Some("invented-model".into());
+        assert!(forged.validate_for(&request).is_err());
+    }
+
     fn result(req: &InsightCardRequest) -> InsightCardResult {
         let count_row = |id| CardRow {
             id,
