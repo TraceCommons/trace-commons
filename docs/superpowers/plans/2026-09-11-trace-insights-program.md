@@ -1,7 +1,28 @@
 # Trace insights implementation program
 
 Date: 2026-09-11
-Status: Proposed implementation sequence; no deployment or new dependencies authorized by this document.
+Updated: 2026-09-12
+Status: Delivery sequence revised around a complete personal-comparison workflow. Implementation remains in open PRs; this document does not authorize merging, deployment, new dependencies, hosted processing, or public publication.
+
+## Canonical plan and implementation status
+
+[PR #870](https://github.com/TraceCommons/trace-commons/pull/870) is the single review entry point and source of truth for this program. Update its program plan, linked delivery plan, and pilot runbook when scope or sequence changes; implementation PRs link here rather than becoming competing plans. Historical branch snapshots are not the current authority.
+
+- [Personal refactor delivery plan](2026-09-12-personal-refactor-comparison.md): task evidence, comparison rules, qualification, native workflow, and bounded mission sequence.
+- [Private pilot runbook](2026-09-12-private-refactor-pilot.md): selected tasks, local commands, explicit user review, and coverage/usability observations.
+- [Context contract](../specs/2026-09-12-comparison-context-v1.md), [canonical configuration encoding](../specs/2026-09-12-comparison-configuration-encoding-v1.md), and [Codex source profile](../specs/2026-09-12-codex-comparison-source-profile.md): current bounded evidence contracts.
+
+Current implementation checkpoints are draft PRs, not releases:
+
+| Work | PRs and remaining evidence |
+| --- | --- |
+| Shared task lifecycle, macOS task editing, saved specifications | [#932](https://github.com/TraceCommons/trace-commons/pull/932), [#933](https://github.com/TraceCommons/trace-commons/pull/933), [#934](https://github.com/TraceCommons/trace-commons/pull/934). |
+| Bounded released-Codex admission and macOS saved-comparison workflow | [#935](https://github.com/TraceCommons/trace-commons/pull/935), [#936](https://github.com/TraceCommons/trace-commons/pull/936). Synthetic two-cohort wiring is verified; it does not qualify model advantage. |
+| Pilot preparation and overall-plan review follow-through | [#937](https://github.com/TraceCommons/trace-commons/pull/937); its plan updates are consolidated here. |
+| Estimator experiments | [#938](https://github.com/TraceCommons/trace-commons/pull/938). Test-only candidates; percentile undercoverage found. A reviewed, useful interval method remains required before admission. |
+| Native Claude local import | [#939](https://github.com/TraceCommons/trace-commons/pull/939). Three authorized real-file drafts imported and user outcomes recorded as accepted. Task boundaries, complete attempt linkage, model attribution, and cohort eligibility remain unqualified; one recorded model label does not supply two cohorts. |
+
+The pilot exposed a missing native Claude importer and incremental records sharing message IDs; those findings changed implementation and regression coverage. Further pilot work measures whether users can complete the flow and make a decision, including excluded and abandoned cases. Runtime/platform CI is tracked on each PR at its actual head; these checkpoint links are not a broad readiness claim. Rewards for missions and insights are excluded and owned by Abhishek, as specified below.
 
 ## Outcome
 
@@ -11,17 +32,42 @@ Start with a private Insights view in the contributor product that works without
 
 Trace Commons owns a unified product with Insights, Coaching, and Missions. Multiple participants may supply analytics, specialist coaching, missions, and evaluations through shared interfaces. Users receive a useful default experience without selecting a provider or creating provider-specific accounts. Local use remains available without a Trace Commons account; hosted features use one Trace Commons account and permission surface.
 
+## Rewards ownership and scope
+
+Abhishek owns the system for rewarding users for missions and insights. Reward design and implementation are outside this program's scope, not deferred work for this agent team. Do not add reward eligibility, points/credits, reward terms, funding, wallets, redemption, settlement, payouts, or reward-specific UI/API/schema requirements. Analytics evidence and mission results remain within scope; they do not determine or promise compensation. Any future integration with Abhishek's work needs a separately agreed interface and authorization and is not a completion dependency here. Execution-resource budgets remain in scope and are distinct from user rewards.
+
+## Current delivery priority
+
+The architecture and full user-story scope remain intact. The sequence below supersedes the numerical order of the phase and packet inventory. Progress is measured by user questions answered with inspectable evidence, not by contracts, test counts, or platform implementations completed.
+
+The next product milestone is: **a user can compare two models on their own refactor tasks, understand the evidence and limitations, and make a better choice.** A justified uncertain result is useful; a workflow that always abstains because required evidence cannot be collected is not completion of this milestone.
+
+The existing stack supplies local analysis and saved history, episode grouping and user assessments, model declarations and Git/test evidence links, descriptive cards, usage observations, pricing contracts, and local mission draft inboxes across desktop shells. These are implemented foundations in open PRs, not a released comparison product. Price tables remain unqualified for automatic real-cost claims; model declarations and partial token intervals do not establish exclusive model use or full-task cost.
+
+| Milestone | Work and exit evidence |
+| --- | --- |
+| A — Consolidate the existing stack | Resolve review findings and dependency conflicts, verify CI at the actual PR heads, and record platform qualification and remaining release gates. Keep commit/PR provenance while reducing simultaneous integration work. Prepare the existing private Insights experience for release; merge and release remain separate authorized actions. |
+| B — Qualify comparison evidence | Audit representative synthetic and explicitly authorized traces against pinned source versions. Establish supported task boundaries, repeated/resumed attempts, model attribution and identity scope, and outcome capture. Implement and qualify any missing extraction rule needed for the refactor workflow. Publish supported cases, exclusions, and evidence fixtures before adding ranking machinery. |
+| C — Deliver one complete comparison | Build the shared engine and CLI, then macOS as the first desktop pilot. A user groups attempts into tasks, confirms context, records outcomes, reviews stale or overlapping evidence, selects two models, and inspects comparable outcome distributions and justified uncertainty. Complete an authorized human pilot for linkage correctness and comprehension. Scope conclusions to the observed cohort; do not claim causal superiority. |
+| D — Expand the validated experience | Correct problems found in the pilot, then implement Windows and GTK comparison parity using the same contract and qualify each platform. Preserve existing shell features throughout. Extend categories to tests and docs only when their outcome definitions and evidence are qualified. |
+| E — Complete one mission loop | After the personal-comparison pilot, qualify one read-only source, one reproducible task, and one evaluator. Take a sourced draft through curator review, controlled participation, evaluation, and evidence-linked results in the same product. Validate this loop before broad discovery or more adapters. |
+| Later program work | Continue calibrated coaching, independent provider conformance, hosted team analytics, and qualified community comparisons under the phases below. They remain part of the program; they are not prerequisites for the first personal comparison. |
+
+Use Sol for bounded implementation and Astra for independent review, including re-review of fixes. A review is not a substitute for tests, platform checks, or a human evidence pilot. Limit concurrent work to the next milestone and genuinely independent consolidation tasks. Do not start another round of generic framework expansion or three-platform parity before the first complete flow is validated.
+
+The detailed comparison plan is [Personal refactor comparison delivery](2026-09-12-personal-refactor-comparison.md). A separate evidence design is still required for billed cost, exact code rejection, and time saved. Keep those user stories visible: observed intervals are not full-task cost, rejected tasks are not rejected code, and elapsed trace span is not time saved.
+
 ## Unified product and participant model
 
 | Participant | Contribution | Trace Commons responsibility |
 | --- | --- | --- |
 | Analytics or coaching provider | Structured findings and specialist methods | Common evidence standards, presentation, qualification, and default selection. |
 | Mission scout | Discover external developments and turn them into evidence-linked mission drafts | Source provenance, deduplication, draft validation, publication policy, and a unified discovery feed. |
-| Mission author or sponsor | Versioned tasks, budgets, success criteria, and proposed rewards | Mission discovery, participation flow, attribution, and published rules. |
+| Mission author or sponsor | Versioned tasks, execution-resource budgets, and success criteria | Mission discovery, participation flow, attribution, and published rules. |
 | Evaluator | Assessments tied to evidence and rubric versions | Result validation, conflict disclosures, challenges, and reproducibility requirements. |
 | Contributor | Authorized evidence or mission attempts | Clear permissions, evidence access, and lifecycle controls. |
 
-An organization may hold several roles. Record and display sponsor/evaluator relationships, including evaluation of a provider's own models. Mission rewards, contribution credits, and analytics scores remain separate concepts and accounting paths; a mission definition does not authorize payouts.
+An organization may hold several roles. Record and display sponsor/evaluator relationships, including evaluation of a provider's own models. Analytics scores and mission results do not grant compensation. Reward systems for both missions and insights belong to Abhishek and are outside this plan.
 
 Trace Commons supplies shared cards, terminology, comparison views, evidence drilldowns, and permission controls. Providers return structured results rather than arbitrary UI or competing dashboards. Provider attribution is available on each result and prominent where sponsorship or conflicts affect interpretation. Specialist capabilities appear in task context; a provider catalog is deferred until independent implementations prove useful within the shared experience.
 
@@ -82,10 +128,10 @@ Proposed concepts, not existing type or table names:
 | Provider manifest | Stable identity, implementation version, capabilities, execution mode, input needs, output schema, retention policy, budget model, and qualification status. |
 | Evaluation | Input digest, provider identity, evaluator/rubric version, execution mode, structured judgments, supporting event references, confidence, coverage, and verifiable provenance where remote. |
 | Insight | Metric and denominator, filters/cohort, date window, missingness, uncertainty, supporting evaluations, validity state, and human-readable explanation. |
-| Mission | Author/sponsor identity, immutable definition version, starting artifact, allowed tools/models, budget, success rubric, declared evaluators/conflicts, evidence rules, challenge process, and separate reward terms. |
+| Mission | Author/sponsor identity, immutable definition version, starting artifact, allowed tools/models, budget, success rubric, declared evaluators/conflicts, evidence rules, and challenge process. Reward terms are outside this contract’s scope. |
 | Mission proposal | Scout identity/version, source URL and retrieval time in an authorized content artifact, source/content digest, attributed claim, reproducible task proposal, evaluator requirements, duplicate lineage, and review/publication state. Operational logs retain hashes and safe labels only. |
 
-One session can contain several episodes; one episode can span sessions and models. Preserve those relationships. Prefer explicit task identifiers and user confirmation; semantic boundary detection is a labeled inference. Do not award all credit to the final model. Report mixed-model episodes separately until a defensible attribution policy exists.
+One session can contain several episodes; one episode can span sessions and models. Preserve those relationships. Prefer explicit task identifiers and user confirmation; semantic boundary detection is a labeled inference. Do not attribute all work to the final model. Report mixed-model episodes separately until a defensible attribution policy exists.
 
 Distinguish observed facts, user reports, evaluator judgments, and estimates in both storage and UI. A model saying “tests passed” is not a test-run record. Record evidence freshness and delayed outcomes; later reviews and reverts can revise insights. Preserve native usage categories and pricing version. Missing usage is never zero, and list-price estimates are not billed spend.
 
@@ -135,13 +181,13 @@ This phase delivers descriptive value, not a model leaderboard, time-saved estim
 
 Add opt-in local Git/change linkage and structured test-run evidence. Support many-to-many links between episodes and commits; branch proximity alone is only a candidate match. Add a lightweight accepted/partial/rejected/unknown user outcome control with provenance. Scope any Git-host or CI integration explicitly and implement read access first; it must not install sharing hooks or publish trace URLs implicitly.
 
-Produce personal comparisons for matched task categories, project/language context, model versions, and harness configurations. Include failed attempts in episode cost, report outcome/usage coverage, separate pending outcomes, and avoid bias from counting repeated attempts as independent tasks. Use predeclared comparison rules, confidence intervals, and suppression for inadequate precision. The calibration packet must choose minimum evidence rules before evaluating ranking results; no universal sample count proves a winner.
+Start with the complete refactor workflow in milestones B–C; expand task categories after the pilot. Produce personal comparisons for matched task categories, project/language context, qualified model identity scopes, and harness configurations. Include failed and abandoned attempts in task coverage and any qualified task-usage or cost estimand. Report outcome/usage coverage and separate pending outcomes; missing cost does not block an otherwise qualified outcome comparison. Avoid bias from counting repeated attempts as independent tasks. Use predeclared comparison rules, confidence intervals, and suppression for inadequate precision. The calibration packet must choose minimum evidence rules before evaluating ranking results; no universal sample count proves a winner.
 
 Acceptance:
 
 - Test cases cover merged-but-later-reverted work, abandoned tasks, multiple contributing models, and uncertain commit attribution.
 - Rankings cannot be emitted from raw transcript sentiment, code churn, or unverified success assertions.
-- A comparison includes counts, date range, configuration, missingness, and uncertainty; ties/insufficient evidence are normal results.
+- A comparison includes counts, date range, configuration, missingness, and uncertainty. Uncertain or insufficient evidence is distinct from demonstrated equivalence; any tie claim needs a defined equivalence criterion.
 - A manually reviewed, authorized pilot sample validates linkage accuracy before release.
 
 ## Phase 3 — Semantic evaluation and prompting coach
@@ -182,7 +228,7 @@ Acceptance:
 
 Version mission definitions: task, starting artifact, permitted models/tools, budget, time rules, independent success rubric, and submission evidence. Isolate any code execution in a qualified sandbox; replaying arbitrary traces is not authorized by this plan. Evaluate mission success independently from contribution credits and keep named participation consent separate from analytics permissions.
 
-Allow distinct authors, sponsors, and evaluators to participate through the common mission contract. Publish attribution, conflicts, evaluator versions, reward terms, and challenge rules before an attempt starts; bind attempts to that immutable version. Results and participation stay in Trace Commons Missions. Qualification and moderation can suspend a provider or mission while retaining audit provenance and a clear participant status.
+Allow distinct authors, sponsors, and evaluators to participate through the common mission contract. Publish attribution, conflicts, evaluator versions, and challenge rules before an attempt starts; bind attempts to that immutable version. Results and participation stay in Trace Commons Missions. Qualification and moderation can suspend a provider or mission while retaining audit provenance and a clear participant status.
 
 Start with a bounded mission that has objectively testable outcomes. Control or record harness/settings and use randomized or counterbalanced assignments where feasible. Handle duplicate submissions, repeated attempts, leakage, and evaluator gaming. Predeclare analysis rules before collecting the comparison set.
 
@@ -223,7 +269,7 @@ Acceptance:
 
 ## Work packets and sequencing
 
-Each packet should become a focused PR with its own fixtures, review evidence, and rollback notes. Use isolated worktrees during implementation and preserve unrelated dirty files.
+The packets below are a scope/dependency inventory, not an instruction to finish each layer on every platform before testing a user workflow. Follow milestones A–E above. Each implementation slice should become a focused PR with fixtures, Astra review evidence, and rollback notes. Consolidate existing PRs before growing another long stack; use isolated worktrees and preserve unrelated dirty files.
 
 | Packet | Scope | Depends on |
 | --- | --- | --- |
@@ -242,11 +288,23 @@ Each packet should become a focused PR with its own fixtures, review evidence, a
 | 13 | Mission scout contracts, manual intake, one source adapter, draft validation, curator review, unified discovery feed | 2, 11; source-access qualification |
 | 14 | Bounded scout pilot and mission-to-Insights feedback | 7, 13; public findings additionally require 12 |
 
-First release boundary: packets 1–5. Outcome linkage should follow immediately; broad comparative claims wait for packet 7. No time estimate is committed until packet 1 identifies adapter and local-storage gaps.
+The descriptive release boundary remains packets 1–5 and needs consolidation and rollout qualification. Much of outcome linkage has been implemented in the open stack. The next development milestone combines the necessary parts of packets 1, 6, and 7 with a single macOS pilot flow; packet completion alone does not prove that milestone. No schedule is committed before evidence qualification identifies the remaining extraction and pilot gaps.
 
-Provider extensibility is an internal architectural requirement from packet 2. The first release remains a curated first-party experience. A public provider catalog, self-service onboarding, provider billing, and automated mission reward settlement are deferred; two independent evaluators must first pass conformance and product usability checks.
+Provider extensibility is an internal architectural requirement from packet 2. The first release remains a curated first-party experience. User rewards and reward settlement are excluded and owned by Abhishek. A public provider catalog, self-service onboarding, and provider billing are deferred; two independent evaluators must first pass conformance and product usability checks.
 
 Scouts extend the mission program after its core participation and evaluation flow works. Packets 13–14 do not expand the first private-insights release. Unattended scout publication and additional live source adapters are follow-on decisions based on the bounded pilot, not prerequisites.
+
+## Review follow-through
+
+[Kristi’s review of the original plan](https://github.com/TraceCommons/trace-commons/pull/870#issuecomment-5645229086) supports the direction and identifies evidence and product risks. These requirements attach to existing milestones:
+
+- **Current pilot:** follow the [private pilot runbook](2026-09-12-private-refactor-pilot.md). Report the full reviewed-task denominator, mixed-model/delegated/unsupported/missing-context exclusions, boundary split/merge and omitted-attempt corrections, time and manual effort to a reviewed result, abandonment, and decision usefulness. Report overlapping exclusion reasons separately without double-counting the total excluded tasks. User confirmation is an assertion to assess, not validation by itself.
+- **Provider recommendations:** disclosure alone is insufficient for a provider's self-model evaluation. Require independent, unaffiliated evaluation before promoting such a finding into a model recommendation. Attributed descriptive findings can remain available within their evidence limits.
+- **Phase 3 / packet 8:** publish the semantic execution decision before implementation: rules, local model, or attested remote; supported hardware and licensing; history/input caps; CPU/GPU/RAM/time and monetary budgets; cancellation; and cache invalidation. Choose the method from qualification evidence.
+- **Bounded mission path:** distinguish technical access, permitted collection, retained excerpts, attribution, artifact redistribution, and mission publication rights. Treat starting artifacts and dependencies as untrusted. Bind execution to reviewed digests and test substitution plus prohibited filesystem/network access. Reward accounting, mission funding for user rewards, and redemption are outside this work and owned by Abhishek; no reward contract or counsel checklist is a delivery requirement here.
+- **Phase 5 / packet 12:** require a reviewed privacy design with an accountable owner, privacy unit, named mechanism, contribution bounds, repeated-query composition/accounting, cumulative release budget, and revocation limits before public analytics implementation. This remains a later gate.
+
+External lessons are patterns to evaluate, not permission to import another product's schemas or text. These requirements strengthen the existing sequence; they do not make hosted analytics or public missions prerequisites for the local pilot.
 
 ## Verification and rollout
 
