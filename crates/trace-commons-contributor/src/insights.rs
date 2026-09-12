@@ -13,6 +13,7 @@ pub mod pricing_catalog;
 pub mod provider;
 pub mod service;
 pub mod summary;
+pub mod task_attribution;
 pub mod time_evidence;
 pub mod usage;
 pub mod usage_evidence;
