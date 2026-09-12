@@ -166,6 +166,43 @@ deduplicate, and changed source bytes do not inherit old links. The
 [model and outcome evidence plan](../../docs/superpowers/plans/2026-09-11-insights-model-outcome-evidence.md)
 describes report schema, authority, limits, and store v3 migration.
 
+Group whole saved snapshots into an episode:
+
+```bash
+trace-commons-contributor insights episode-create --snapshot FIRST_INSIGHT_ID --snapshot SECOND_INSIGHT_ID
+trace-commons-contributor insights episode-list
+trace-commons-contributor --json insights episode-explain EPISODE_ID
+trace-commons-contributor insights episode-annotate EPISODE_ID --expected-revision 1 --category tests --outcome accepted
+trace-commons-contributor insights episode-replace-members EPISODE_ID --expected-revision 2 --snapshot FIRST_INSIGHT_ID
+trace-commons-contributor insights episode-delete EPISODE_ID --expected-revision 3
+```
+
+Use the same store directory as the saved snapshots. The revision numbers above
+illustrate consecutive edits; use the current revision returned by your own
+create, list, or explain command. A stale revision refuses the edit so you can
+refresh and review another client's changes. `episode-clear-assessment` takes the
+same episode ID and `--expected-revision` to clear only its assessment.
+
+These are groups you select, not detected task boundaries. Groups may overlap;
+list and explain identify shared members. An episode assessment is independent
+of its members' assessments and linked Git/test evidence. Changing membership
+clears that assessment. Snapshot summaries remain snapshot-scoped and do not
+count groups as independent tasks or rank their models.
+
+Deleting or replacing the final saved reference to any member removes the entire
+affected episode and its assessment. Mutation output identifies the removed
+groups; surviving snapshots and original files remain. Deleting only an episode
+preserves all its snapshots. Byte-identical reimports preserve groups, and reads
+resolve current member evidence without reopening original source files.
+
+The local store supports up to 256 episodes with 64 distinct members each.
+Episode mutations use store v4; older clients must be upgraded before sharing
+that store. Episode management is currently exposed through the CLI and shared
+service. Desktop snapshot mutations also display group-removal notices; native
+episode-management controls remain follow-on work. See the
+[episode implementation plan](../../docs/superpowers/plans/2026-09-11-insights-whole-snapshot-episodes.md)
+for lifecycle and qualification details.
+
 Inspect native usage separately from the saved descriptive report:
 
 ```bash
