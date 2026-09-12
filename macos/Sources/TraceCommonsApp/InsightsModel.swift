@@ -13,6 +13,9 @@ final class InsightsModel {
     private(set) var copy: [String: String] = [:]
     func text(_ key: String) -> String { copy[key] ?? "" }
     private(set) var error: String?
+    private(set) var summary: SavedInsightsSummary?
+    private(set) var summaryError: String?
+    private(set) var loadingSummary = false
     private(set) var snapshots: [LocalInsight] = []
     var assessmentCategory = "unknown"
     var assessmentOutcome = "unknown"
@@ -38,6 +41,7 @@ final class InsightsModel {
     func open() { active = true; perform(.init("copy")) }
     func close() {
         active = false; generation = UUID(); task?.cancel(); task = nil; busy = false
+        loadingSummary = false
     }
     func refresh() { perform(.init("list")) }
     func analyze(file: URL, source: String) {
@@ -52,7 +56,11 @@ final class InsightsModel {
         guard let selectedFile, selected != nil, !selectedIsSaved else { return }
         perform(.init("analyze", source: selectedSource, file: selectedFile.path, save: true))
     }
-    func explain(_ id: String) { perform(.init("explain", id: id)) }
+    func explain(_ id: String) {
+        guard active, !busy else { return }
+        selected = nil; selectedIsSaved = false; selectedFile = nil
+        perform(.init("explain", id: id))
+    }
     func delete() {
         guard selectedIsSaved, let selected else { return }
         perform(.init("delete", id: selected.id))
@@ -68,6 +76,11 @@ final class InsightsModel {
     private func perform(_ operation: InsightsRequest.Operation) {
         guard active, !busy else { return }
         busy = true; error = nil
+        if operation.type == "copy" || operation.type == "list" || operation.type == "summary"
+            || operation.type == "delete" || operation.type == "annotate"
+            || operation.type == "clear_annotation" || operation.save == true {
+            summary = nil; summaryError = nil; loadingSummary = true
+        }
         let token = generation
         let service = service
         task = Task { [weak self] in
@@ -88,6 +101,11 @@ final class InsightsModel {
                             self.selectedFile = nil; self.selectedIsSaved = false
                         }
                     }
+                case "summary":
+                    guard let summary = response.summary else { throw InsightsError.invalidResponse }
+                    try summary.validateSupportedSchema()
+                    self.summary = summary
+                    self.loadingSummary = false
                 case "delete":
                     guard response.deleted != nil else { throw InsightsError.invalidResponse }
                     self.snapshots.removeAll { $0.id == operation.id }
@@ -102,10 +120,20 @@ final class InsightsModel {
                     }
                 }
                 self.busy = false
-                if operation.type == "copy" || operation.save == true { self.refresh() }
+                if operation.type == "copy" || operation.save == true || operation.type == "delete"
+                    || operation.type == "annotate" || operation.type == "clear_annotation" {
+                    self.refresh()
+                } else if operation.type == "list" {
+                    self.perform(.init("summary"))
+                }
             } catch {
                 guard let self, self.active, self.generation == token, !Task.isCancelled else { return }
                 self.error = self.copy["error"] ?? "insights-operation-failed"
+                if self.loadingSummary {
+                    self.summary = nil
+                    self.summaryError = self.copy["summary_unavailable"] ?? self.error
+                    self.loadingSummary = false
+                }
                 self.busy = false
             }
         }
