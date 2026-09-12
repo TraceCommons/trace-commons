@@ -6,6 +6,8 @@ import TCBridge
 final class ComparisonTasksModel {
     typealias Service = @Sendable (InsightsRequest) async throws -> InsightsResponse
     private let service: Service
+    private let calendar: Calendar
+    private let now: @Sendable () -> Date
     private var active = false
     private var generation = UUID()
     private var presentation = UUID()
@@ -22,7 +24,7 @@ final class ComparisonTasksModel {
     var editSelection = Set<String>()
     private(set) var editingEpisodes = false
     var projectID = UUID().uuidString.lowercased()
-    var taskDate = String(Date().ISO8601Format().prefix(10))
+    var taskDate = ""
     var language = ""
     var harnessID = ""
     var harnessVersion = ""
@@ -32,9 +34,13 @@ final class ComparisonTasksModel {
     var promptTemplateDigest = ""
     var outcome = ComparisonTaskOutcome.pending
 
-    init(service: @escaping Service = { request in
+    init(calendar: Calendar = .current, now: @escaping @Sendable () -> Date = { Date() },
+         service: @escaping Service = { request in
         try await Task.detached { try TCInsights.call(request) }.value
-    }) { self.service = service }
+    }) {
+        self.calendar = calendar; self.now = now; self.service = service
+        taskDate = ComparisonLocalCalendar.day(now(), calendar: calendar)
+    }
 
     func open() { active = true; if mutationTask == nil { refresh() } }
     func close() {
@@ -260,7 +266,7 @@ final class ComparisonTasksModel {
         detail = value; presentation = UUID(); editingEpisodes = false; editSelection = []
         outcome = value.task.outcome?.value ?? .pending
         projectID = UUID().uuidString.lowercased()
-        taskDate = String(Date().ISO8601Format().prefix(10))
+        taskDate = ComparisonLocalCalendar.day(now(), calendar: calendar)
         language = ""; harnessID = ""; harnessVersion = ""; reasoningEffort = .unknown
         toolPolicyID = ""; toolPolicyVersion = ""; promptTemplateDigest = ""
         if let context = value.task.context {
