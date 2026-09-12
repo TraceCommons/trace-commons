@@ -1476,7 +1476,11 @@ jobs:
         working-directory: windows
         env:
           TC_FFI_LIB_DIR: ${{ github.workspace }}\target\release
-        run: dotnet test tests/TraceCommons.Interop.Tests/TraceCommons.Interop.Tests.csproj --configuration Release
+        run: >-
+          dotnet test tests/TraceCommons.Interop.Tests/TraceCommons.Interop.Tests.csproj
+          --configuration Release
+          --blame-hang
+          --blame-hang-timeout 2m
 
       # Building the WinUI project is the only verification the XAML and the
       # Windows App SDK wiring get: neither can be compiled anywhere but
