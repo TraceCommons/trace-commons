@@ -126,6 +126,23 @@ public sealed class MissionDraftTests
     }
 
     [Fact]
+    public async Task NamedCopyPropertiesPopulateAndNotifyCompiledBindings()
+    {
+        var service = new Service();
+        using var model = new MissionDraftsViewModel(service);
+        bool allPropertiesChanged = false;
+        model.PropertyChanged += (_, change) => allPropertiesChanged |= string.IsNullOrEmpty(change.PropertyName);
+
+        await model.LoadAsync();
+
+        Assert.True(allPropertiesChanged);
+        Assert.Equal("title", model.Title);
+        Assert.Equal("choose_file", model.ChooseFile);
+        Assert.Equal("display_notice", model.DisplayNotice);
+        Assert.Equal("output_tokens", model.OutputTokens);
+    }
+
+    [Fact]
     public async Task FailedInspectPreservesDetailAndNavigationDiscardsLateResponse()
     {
         var service = new Service(); using var model = new MissionDraftsViewModel(service);
@@ -231,6 +248,8 @@ public sealed class MissionDraftTests
         Assert.DoesNotContain("StartContributionsAsync", handler);
         string view = File.ReadAllText(Path.Combine(root, "Controls", "MissionDraftsView.xaml.txt"));
         Assert.DoesNotContain("Hyperlink", view); Assert.DoesNotContain("NavigateUri", view);
+        Assert.DoesNotContain("ViewModel[", view);
+        Assert.Contains("ViewModel.Title", view); Assert.Contains("ViewModel.OutputTokens", view);
         Assert.Contains("StartingArtifact.Url", view); Assert.Contains("SourceUrls", view);
         Assert.Equal(4, view.Split("IsEnabled=\"{x:Bind ViewModel.CanAct, Mode=OneWay}\"", StringSplitOptions.None).Length - 1);
         Assert.Contains("IsEnabled=\"{x:Bind CanImport, Mode=OneWay}\"", view);
