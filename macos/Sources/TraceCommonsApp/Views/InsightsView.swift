@@ -8,52 +8,67 @@ struct InsightsView: View {
     @State private var source = "codex"
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                Text(model.text("intro"))
-                HStack {
-                    Picker(model.text("source"), selection: $source) {
-                        Text(model.text("codex")).tag("codex")
-                        Text(model.text("trajectory")).tag("trajectory")
-                    }.frame(maxWidth: 260)
-                    Button(model.text("choose_file")) { choosingFile = true }
-                    Button(model.text("refresh")) { model.refresh() }
-                    if model.busy { ProgressView().controlSize(.small) }
-                }.disabled(model.busy)
-                if let error = model.error { Text(error).foregroundStyle(.red) }
-                Text(model.text("snapshot_notice"))
-                    .font(.callout).foregroundStyle(.secondary)
-                if let insight = model.selected {
-                    InsightDetail(insight: insight, copy: model.copy)
+        ScrollViewReader { proxy in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    Text(model.text("intro"))
                     HStack {
-                        if model.selectedIsSaved {
-                            Button(model.text("delete"), role: .destructive) { model.delete() }
-                        } else {
-                            VStack(alignment: .leading) {
-                                Text(model.text("save_notice")).font(.caption)
-                                Button(model.text("save")) { model.save() }
-                            }
-                        }
+                        Picker(model.text("source"), selection: $source) {
+                            Text(model.text("codex")).tag("codex")
+                            Text(model.text("trajectory")).tag("trajectory")
+                        }.frame(maxWidth: 260)
+                        Button(model.text("choose_file")) { choosingFile = true }
+                        Button(model.text("refresh")) { model.refresh() }
+                        if model.busy { ProgressView().controlSize(.small) }
                     }.disabled(model.busy)
-                    if model.selectedIsSaved {
-                        assessment
+                    if let error = model.error { Text(error).foregroundStyle(.red) }
+                    Text(model.text("snapshot_notice"))
+                        .font(.callout).foregroundStyle(.secondary)
+                    if model.loadingSummary {
+                        ProgressView(model.text("summary_title"))
+                    } else if let summaryError = model.summaryError {
+                        Text(summaryError).foregroundStyle(.red)
+                    } else if let summary = model.summary {
+                        InsightsSummaryView(summary: summary, copy: model.copy, openSnapshot: model.explain)
+                            .disabled(model.busy)
                     }
-                }
-                Divider()
-                Text(model.text("saved")).font(.headline)
-                if model.snapshots.isEmpty { Text(model.text("empty")) }
-                ForEach(model.snapshots) { insight in
-                    Button { model.explain(insight.id) } label: {
-                        VStack(alignment: .leading) {
-                            Text(model.text(insight.source_format))
-                            Text(InsightsDate.label(insight.analyzed_at)).font(.caption)
-                            Text(insight.id).font(.caption.monospaced()).lineLimit(1)
-                        }.frame(maxWidth: .infinity, alignment: .leading)
-                    }.disabled(model.busy)
-                }
-                Text(model.text("cancellation_notice"))
-                    .font(.caption).foregroundStyle(.secondary)
-            }.padding(24).frame(maxWidth: .infinity, alignment: .leading)
+                    Divider()
+                    if let insight = model.selected {
+                        InsightDetail(insight: insight, copy: model.copy)
+                            .id("insight-detail")
+                        HStack {
+                            if model.selectedIsSaved {
+                                Button(model.text("delete"), role: .destructive) { model.delete() }
+                            } else {
+                                VStack(alignment: .leading) {
+                                    Text(model.text("save_notice")).font(.caption)
+                                    Button(model.text("save")) { model.save() }
+                                }
+                            }
+                        }.disabled(model.busy)
+                        if model.selectedIsSaved {
+                            assessment
+                        }
+                    }
+                    Divider()
+                    Text(model.text("saved")).font(.headline)
+                    if model.snapshots.isEmpty { Text(model.text("empty")) }
+                    ForEach(model.snapshots) { insight in
+                        Button { model.explain(insight.id) } label: {
+                            VStack(alignment: .leading) {
+                                Text(model.text(insight.source_format))
+                                Text(InsightsDate.label(insight.analyzed_at)).font(.caption)
+                                Text(insight.id).font(.caption.monospaced()).lineLimit(1)
+                            }.frame(maxWidth: .infinity, alignment: .leading)
+                        }.disabled(model.busy)
+                    }
+                    Text(model.text("cancellation_notice"))
+                        .font(.caption).foregroundStyle(.secondary)
+                }.padding(24).frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .onChange(of: model.selected?.id) { _, id in
+                if id != nil { proxy.scrollTo("insight-detail", anchor: .top) }
+            }
         }
         .fileImporter(isPresented: $choosingFile, allowedContentTypes: [.data]) { result in
             if case .success(let file) = result { model.analyze(file: file, source: source) }

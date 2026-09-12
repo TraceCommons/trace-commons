@@ -50,6 +50,7 @@ public struct InsightsResponse: Decodable, Sendable {
     public let insights: [LocalInsight]?
     public let deleted: Bool?
     public let copy: [String: String]?
+    public let summary: SavedInsightsSummary?
 }
 public struct LocalInsight: Decodable, Sendable, Identifiable {
     public let id, source_format, boundary, analyzed_at: String
@@ -77,4 +78,75 @@ public struct LocalInsight: Decodable, Sendable, Identifiable {
     }
     public struct Coverage: Decodable, Sendable { public let observed, total: UInt64 }
     public struct Evidence: Decodable, Sendable, Identifiable { public let id, source_digest: String }
+}
+
+/// Shared saved-history reducer output. Counts are supplied by Rust, never
+/// reconstructed from snapshot rows or interpreted as model performance.
+public struct SavedInsightsSummary: Decodable, Sendable {
+    public let schema_version: UInt32
+    public let scope: Scope
+    public let limitations: [Limitation]
+    public let provider: LocalInsight.Provider
+    public let saved_snapshots: UInt64
+    public let snapshot_analysis_range: AnalysisRange?
+    public let user_reported: Assessments
+    public let metrics: [Metric]
+    public let snapshots: [Snapshot]
+
+    public enum Scope: String, Decodable, Sendable {
+        case allSavedSelectedSessionSnapshots = "all_saved_selected_session_snapshots"
+    }
+    public enum Limitation: String, Decodable, Sendable, CaseIterable, Hashable {
+        case selectedSavedSessionsAreNotVerifiedTasks = "selected_saved_sessions_are_not_verified_tasks"
+        case assessmentsAreUserReported = "assessments_are_user_reported"
+        case observedSumsRequireBothCoverages = "observed_sums_require_both_coverages"
+        case analysisDatesAreNotActivityTime = "analysis_dates_are_not_activity_time"
+        case sourceFormatsAreNotModelIdentity = "source_formats_are_not_model_identity"
+        case noModelRankingsTimeSavingsOrCost = "no_model_rankings_time_savings_or_cost"
+    }
+    public enum CoverageUnit: String, Decodable, Sendable {
+        case sessionSnapshots = "session_snapshots"
+        case normalizedEvents = "normalized_events"
+        case toolResults = "tool_results"
+    }
+    public struct AnalysisRange: Decodable, Sendable {
+        public let oldest, newest: String
+    }
+    public struct Assessments: Decodable, Sendable {
+        public let assessed_snapshots, unassessed_snapshots: UInt64
+        public let categories: [Category]
+        public let outcomes: [Outcome]
+    }
+    public struct Category: Decodable, Sendable, Identifiable {
+        public let category: String
+        public let snapshots: UInt64
+        public let evidence_snapshot_ids: [String]
+        public var id: String { category }
+    }
+    public struct Outcome: Decodable, Sendable, Identifiable {
+        public let outcome: String
+        public let snapshots: UInt64
+        public let evidence_snapshot_ids: [String]
+        public var id: String { outcome }
+    }
+    public struct Metric: Decodable, Sendable, Identifiable {
+        public let id: String
+        public let observed_value_sum: UInt64?
+        public let available_snapshots, missing_snapshots: UInt64
+        public let record_coverage: LocalInsight.Coverage
+        public let coverage_unit: CoverageUnit
+        public let evidence_snapshot_ids: [String]
+    }
+    public struct Snapshot: Decodable, Sendable, Identifiable {
+        public let id, source_format, analyzed_at: String
+        public let evidence: [LocalInsight.Evidence]
+    }
+
+    /// Reject unsupported summary meaning before a native view presents it.
+    public func validateSupportedSchema() throws {
+        guard schema_version == 1,
+              Set(limitations) == Set(Limitation.allCases) else {
+            throw InsightsError.invalidResponse
+        }
+    }
 }

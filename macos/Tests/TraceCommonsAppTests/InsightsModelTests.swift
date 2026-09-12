@@ -50,7 +50,8 @@ final class InsightsModelTests: XCTestCase {
         for _ in 0..<500 where model.busy { try await Task.sleep(for: .milliseconds(10)) }
         XCTAssertEqual(model.text("title"), "Insights")
         let operations = await recorder.operations
-        XCTAssertEqual(operations, ["copy", "list"])
+        XCTAssertEqual(operations, ["copy", "list", "summary"])
+        XCTAssertEqual(model.summary?.saved_snapshots, 0)
         XCTAssertTrue(model.snapshots.isEmpty)
         model.close()
     }
@@ -73,6 +74,11 @@ private actor Recorder {
     var operations: [String] = []
     func call(_ request: InsightsRequest) throws -> InsightsResponse {
         operations.append(request.operation.type)
+        if request.operation.type == "summary" {
+            return try TCInsights.call(.init(
+                storeDirectory: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path,
+                operation: .init("summary")))
+        }
         let json = request.operation.type == "copy"
             ? "{\"type\":\"copy\",\"copy\":{\"title\":\"Insights\"}}"
             : "{\"type\":\"list\",\"insights\":[]}"
@@ -102,6 +108,8 @@ extension InsightsModelTests {
             XCTFail("Local operation did not finish")
         }
         model.open(); try await settle()
+        XCTAssertEqual(model.summary?.saved_snapshots, 0)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: store.path))
         model.analyze(file: file, source: "trajectory"); try await settle()
         XCTAssertNotNil(model.selected)
         XCTAssertFalse(model.selectedIsSaved)
@@ -109,10 +117,15 @@ extension InsightsModelTests {
         model.save(); try await settle()
         XCTAssertTrue(model.selectedIsSaved)
         XCTAssertEqual(model.snapshots.count, 1)
+        XCTAssertEqual(model.summary?.saved_snapshots, 1)
+        XCTAssertEqual(model.summary?.user_reported.unassessed_snapshots, 1)
         model.annotate(category: "docs", outcome: "accepted"); try await settle()
         XCTAssertEqual(model.selected?.manual_annotation?.provenance, "user_reported")
         XCTAssertEqual(model.assessmentCategory, "docs")
         XCTAssertEqual(model.assessmentOutcome, "accepted")
+        XCTAssertEqual(model.summary?.user_reported.assessed_snapshots, 1)
+        XCTAssertEqual(model.summary?.user_reported.unassessed_snapshots, 0)
+        XCTAssertEqual(model.summary?.user_reported.outcomes.first { $0.outcome == "accepted" }?.snapshots, 1)
         let savedID = try XCTUnwrap(model.selected?.id)
         model.analyze(file: file, source: "trajectory"); try await settle()
         XCTAssertEqual(model.assessmentCategory, "unknown")
@@ -136,6 +149,7 @@ extension InsightsModelTests {
         XCTAssertEqual(model.assessmentOutcome, "unknown")
         model.annotate(category: "tests", outcome: "partial"); try await settle()
         model.clearAnnotation(); try await settle()
+        XCTAssertEqual(model.summary?.user_reported.unassessed_snapshots, 1)
         XCTAssertEqual(model.assessmentCategory, "unknown")
         XCTAssertEqual(model.assessmentOutcome, "unknown")
         let oldID = model.selected?.id
@@ -149,6 +163,8 @@ extension InsightsModelTests {
         model.delete(); try await settle()
         XCTAssertNil(model.selected)
         XCTAssertTrue(model.snapshots.isEmpty)
+        XCTAssertEqual(model.summary?.saved_snapshots, 0)
+        XCTAssertNil(model.summary?.snapshot_analysis_range)
         XCTAssertTrue(FileManager.default.fileExists(atPath: file.path))
         model.close()
     }
