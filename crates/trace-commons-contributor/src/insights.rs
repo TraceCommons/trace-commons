@@ -2,6 +2,8 @@
 //!
 //! No discovery, enrollment, network, or contribution path is invoked. A file
 //! is a provisional session boundary, never an inferred completed task.
+pub mod card_presentation;
+pub mod card_store;
 pub mod cards;
 pub mod episode_store;
 pub mod episodes;

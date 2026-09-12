@@ -15,6 +15,10 @@ use trace_commons_contributor::insights::service::{MAX_REQUEST_BYTES, dispatch_j
 /// Native usage: `{"type":"usage","source":"claude_code","file":"/chosen/file"}`.
 /// Saved-history summary: `{"type":"summary"}`. Reads derived observations only.
 /// Shared UI vocabulary: `{"type":"copy"}`. List/summary create no absent store.
+/// Deterministic question cards: `{"type":"question_cards","questions":[
+/// "recorded_activity","episode_outcomes","observed_models","estimated_cost"],
+/// "snapshot_ids":[],"episode_ids":[]}`. This read returns typed `result`
+/// cards plus shared rendered `text`; empty selections create no absent store.
 /// Whole-snapshot episodes: `{"type":"episode_create","snapshot_ids":["..."]}`;
 /// `episode_list`, and `episode_explain` with an episode UUID `id`.
 /// Edits require `id` and `expected_revision`: `episode_replace_members` also
@@ -207,5 +211,134 @@ mod tests {
             json_call(&store, serde_json::json!({"type":"episode_list"})).unwrap_err(),
             "insights-operation-failed"
         );
+    }
+
+    fn all_questions() -> serde_json::Value {
+        serde_json::json!([
+            "recorded_activity",
+            "episode_outcomes",
+            "observed_models",
+            "estimated_cost"
+        ])
+    }
+
+    #[test]
+    fn question_cards_abi_reads_an_absent_store_without_creating_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = temp.path().join("insights");
+        let response = json_call(
+            &store,
+            serde_json::json!({
+                "type":"question_cards",
+                "questions":all_questions(),
+                "snapshot_ids":[],
+                "episode_ids":[]
+            }),
+        )
+        .unwrap();
+        assert_eq!(response["type"], "question_cards");
+        assert_eq!(response["result"]["schema_version"], 1);
+        let cards = response["result"]["cards"].as_array().unwrap();
+        assert_eq!(cards.len(), 4);
+        assert_eq!(cards[0]["question"], "recorded_activity");
+        assert_eq!(cards[1]["question"], "episode_outcomes");
+        assert_eq!(cards[2]["question"], "observed_models");
+        assert_eq!(cards[3]["question"], "estimated_cost");
+        assert!(
+            response["text"]
+                .as_str()
+                .unwrap()
+                .contains("Recorded activity")
+        );
+        assert!(!store.exists());
+    }
+
+    #[test]
+    fn question_cards_abi_returns_fixed_selection_errors() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = temp.path().join("insights");
+        assert_eq!(
+            json_call(
+                &store,
+                serde_json::json!({
+                    "type":"question_cards",
+                    "questions":["recorded_activity","recorded_activity"],
+                    "snapshot_ids":[],
+                    "episode_ids":[]
+                })
+            )
+            .unwrap_err(),
+            "insights_card_invalid_selection"
+        );
+        assert_eq!(
+            json_call(
+                &store,
+                serde_json::json!({
+                    "type":"question_cards",
+                    "questions":["recorded_activity"],
+                    "snapshot_ids":["a".repeat(64)],
+                    "episode_ids":[]
+                })
+            )
+            .unwrap_err(),
+            "insights_card_snapshot_not_found"
+        );
+        assert_eq!(
+            json_call(
+                &store,
+                serde_json::json!({
+                    "type":"question_cards",
+                    "questions":["episode_outcomes"],
+                    "snapshot_ids":[],
+                    "episode_ids":["00000000-0000-4000-8000-000000000001"]
+                })
+            )
+            .unwrap_err(),
+            "insights_card_episode_not_found"
+        );
+        assert!(!store.exists());
+    }
+
+    #[test]
+    fn question_cards_abi_projects_a_saved_snapshot_and_shared_text() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = temp.path().join("insights");
+        let source = temp.path().join("source.jsonl");
+        std::fs::write(
+            &source,
+            b"{\"role\":\"meta\",\"source\":\"claude-code\",\"model\":\"fixture-model\"}\n{\"role\":\"user\",\"timestamp\":\"2026-09-11T12:00:00.123Z\",\"content\":\"PRIVATE_BODY\"}\n{\"role\":\"assistant\",\"timestamp\":\"2026-09-11T12:00:01.124Z\",\"content\":\"done\"}\n",
+        )
+        .unwrap();
+        let saved = json_call(
+            &store,
+            serde_json::json!({"type":"analyze","source":"trajectory","file":source,"save":true}),
+        )
+        .unwrap();
+        let snapshot = saved["insight"]["id"].as_str().unwrap();
+        let response = json_call(
+            &store,
+            serde_json::json!({
+                "type":"question_cards",
+                "questions":all_questions(),
+                "snapshot_ids":[snapshot],
+                "episode_ids":[]
+            }),
+        )
+        .unwrap();
+        let result = &response["result"];
+        assert_eq!(result["cards"].as_array().unwrap().len(), 4);
+        assert_eq!(
+            result["cards"][0]["evidence_ids"],
+            serde_json::json!([snapshot])
+        );
+        assert_eq!(
+            result["cards"][0]["rows"][10]["value"],
+            serde_json::json!({"type":"milliseconds","value":1001})
+        );
+        assert_eq!(result["cards"][2]["rows"][0]["label"], "fixture-model");
+        let text = response["text"].as_str().unwrap();
+        assert!(text.contains("Recorded activity"));
+        assert!(text.contains("Saved usage evidence is not available."));
+        assert!(!text.contains("PRIVATE_BODY"));
     }
 }

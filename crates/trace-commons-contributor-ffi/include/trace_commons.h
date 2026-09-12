@@ -1778,6 +1778,10 @@ char*       tc_call(tc_handle*, const char* method, const char* params_json);
  * Explicit links: link_git {id,repository,commit}, link_test_report {id,file},
  * unlink_evidence {id,evidence_id}. Links do not establish verified task success.
  * copy returns shared UI vocabulary. list/summary create no state for an absent store.
+ * Question cards: question_cards {questions,snapshot_ids,episode_ids} returns
+ * a typed result plus shared rendered text. It is a read-only local operation;
+ * an empty selection creates no absent store. Questions are recorded_activity,
+ * episode_outcomes, observed_models, and estimated_cost.
  * Episodes: episode_create {snapshot_ids}, episode_list, episode_explain {id}.
  * Episode edits require {id,expected_revision}: episode_replace_members also
  * takes snapshot_ids; episode_annotate takes category,outcome;
