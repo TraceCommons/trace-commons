@@ -26,6 +26,7 @@ pub mod driver_liveness;
 pub mod error;
 pub mod inference_funding;
 pub mod instance_enroll_guard;
+pub mod mission_rewards;
 pub mod near_account_identity;
 pub mod near_ai_login;
 pub mod near_attestation;

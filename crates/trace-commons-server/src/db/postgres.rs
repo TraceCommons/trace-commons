@@ -209,6 +209,12 @@ pub const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "trace_account_merge_proposals",
     "trace_community_withdrawal_evictions",
     "trace_public_runs",
+    "trace_reward_operators",
+    "trace_reward_programs",
+    "trace_reward_reservations",
+    "trace_reward_decisions",
+    "trace_reward_awards",
+    "trace_reward_invalidations",
 ];
 
 const TRACE_COMMONS_RLS_POLICY_EXPRESSION_VARIANTS: &[&str] = &[
@@ -1291,6 +1297,11 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         68,
         "token_rescrub_revocation",
         include_str!("../../../../migrations/V68__token_rescrub_revocation.sql"),
+    ),
+    (
+        69,
+        "mission_insight_rewards",
+        include_str!("../../../../migrations/V69__mission_insight_rewards.sql"),
     ),
 ];
 
@@ -6391,6 +6402,7 @@ mod tests {
             include_str!("../../../../migrations/V58__near_account_provisioning.sql"),
             include_str!("../../../../migrations/V65__token_distribution_bundles.sql"),
             include_str!("../../../../migrations/V64__trace_public_runs.sql"),
+            include_str!("../../../../migrations/V69__mission_insight_rewards.sql"),
         ];
         let force_rls_migrations = [
             include_str!("../../../../migrations/V6__trace_force_rls.sql"),
@@ -6411,6 +6423,7 @@ mod tests {
             include_str!("../../../../migrations/V58__near_account_provisioning.sql"),
             include_str!("../../../../migrations/V65__token_distribution_bundles.sql"),
             include_str!("../../../../migrations/V64__trace_public_runs.sql"),
+            include_str!("../../../../migrations/V69__mission_insight_rewards.sql"),
         ];
 
         for table in TRACE_COMMONS_RLS_TABLES {

@@ -170,6 +170,7 @@ jobs:
           for db in onboarding ledger migration ingest invite merge rls store tokens; do
             PGPASSWORD=trace createdb -h 127.0.0.1 -U trace "admission_test_$db"
           done
+          PGPASSWORD=trace createdb -h 127.0.0.1 -U trace reward_test_missions
       # Each step carries only the variables its own suite reads, NOT a job-wide
       # `env:` block. That is not tidiness: `trace_invite_registry_pg` reads
       # `TRACE_COMMONS_PG_TEST_DATABASE_URL` as its own main URL, so setting
@@ -245,6 +246,15 @@ jobs:
         run: cargo test -p trace-commons-server --test trace_corpus_pg_store
         env:
           TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_store
+      - name: mission and insight reward ledger
+        run: |
+          set -euo pipefail
+          cargo test -p trace-commons-server --test mission_rewards_pg -- --ignored --test-threads=1
+          # Prove the ignored test executed real award writes.
+          test "$(PGPASSWORD=trace psql -qtA -h 127.0.0.1 -U trace reward_test_missions \
+            -c 'SELECT count(*) > 0 FROM trace_reward_awards;')" = t
+        env:
+          TRACE_COMMONS_REWARDS_PG_TEST_URL: postgres://trace@127.0.0.1:5432/reward_test_missions
       # `--ignored` is not optional for these three. Without it they report
       # `ignored`, the step passes having run nothing, and this job becomes the
       # thing it was built to replace.
