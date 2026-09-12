@@ -162,6 +162,14 @@ pub fn state_copy(value: CardState) -> (&'static str, &'static str) {
 
 pub fn ui_copy() -> BTreeMap<String, String> {
     let mut copy = BTreeMap::new();
+    copy.insert("card_title".into(), "Questions about saved evidence".into());
+    copy.insert(
+        "card_selection_notice".into(),
+        "Choose saved snapshots and episode groups to include. An empty selection has no evidence."
+            .into(),
+    );
+    copy.insert("card_update".into(), "Update cards".into());
+    copy.insert("card_choose_evidence".into(), "Choose evidence".into());
     for value in [
         InsightQuestionId::RecordedActivity,
         InsightQuestionId::EpisodeOutcomes,
