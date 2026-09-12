@@ -1,0 +1,124 @@
+# Private refactor pilot
+
+Status: preparation; the user authorized locating candidate traces in local Claude history. Source-to-task matching, qualification, and user outcome reviews remain pending.
+Parent: [personal refactor comparison delivery plan](2026-09-12-personal-refactor-comparison.md).
+
+Reward systems for both missions and insights are outside scope and owned by Abhishek. This pilot collects evidence and user assessments without reward eligibility, compensation, or payout features.
+
+## First repository and tasks
+
+Use Trace Commons for the first local retrospective pilot. Start with these completed refactors, then add other accepted, revised, or abandoned work to reach roughly 6–10 tasks if suitable traces exist. That is a usability sample, not a statistical sample-size claim.
+
+| Candidate | Review focus |
+| --- | --- |
+| [#616: source-root resolution](https://github.com/TraceCommons/trace-commons/pull/616) | Small shared-helper extraction; behavior preservation. |
+| [#606: operator CLI plumbing](https://github.com/TraceCommons/trace-commons/pull/606) | Several callers; request/output compatibility. |
+| [#632: daemon IPC handlers](https://github.com/TraceCommons/trace-commons/pull/632) | Larger extraction; handler behavior and lock lifetime. |
+
+These PRs are merged, but neither merge status nor passing tests supplies the user's outcome assessment. Original traces have not been inspected or qualified. A PR is a candidate work item, not automatically one independent task: check whether several PRs arose from one session or one task spanned multiple PRs.
+
+The user selects the original trace paths or an explicit directory to inspect. Do not synthesize a replacement historical trace, alter model labels to create cohorts, infer an outcome from merge status, or replay completed work and call it historical evidence. Keep source files and pilot observations local.
+
+## Prepare the local workflow
+
+Use a build containing the task, specification, and released-source layers (#932–#936). The CLI below works independently of the macOS shell. The macOS Insights workflow offers task editing, evidence review, specification saving, evaluation, and drilldown through the same shared service.
+
+Set `TC_BIN` to the chosen contributor binary and `TC_PILOT_STORE` to a new local pilot directory. Neither variable changes enrollment or the normal Insights store. Examples use shell placeholders; replace them with reviewed values before running. JSON responses provide IDs, revisions, and digests for subsequent commands.
+
+```sh
+TC_BIN='/absolute/path/to/trace-commons-contributor'
+TC_PILOT_STORE='/absolute/path/to/private-refactor-pilot/insights'
+"$TC_BIN" --json insights --store-dir "$TC_PILOT_STORE" list
+```
+
+An empty-store read should leave the store absent. Record the application commit and source format/version in the local pilot notes. A version label alone does not qualify a source. The [source profile](../specs/2026-09-12-codex-comparison-source-profile.md) currently admits only bounded Codex 0.154.0 exec traces. Older, interactive, delegated, or unsupported traces may still import generically but remain unavailable for comparison; record that as coverage feedback.
+
+## Import and review one task
+
+1. Import only an authorized original trace, then create an episode and task using the returned identifiers:
+
+```sh
+"$TC_BIN" --json insights --store-dir "$TC_PILOT_STORE" analyze \
+  --source codex --file "$TC_TRACE_FILE" --save
+"$TC_BIN" --json insights --store-dir "$TC_PILOT_STORE" episode-create \
+  --snapshot "$TC_SNAPSHOT_ID"
+"$TC_BIN" --json insights --store-dir "$TC_PILOT_STORE" comparison-task create \
+  --episode "$TC_EPISODE_ID"
+"$TC_BIN" --json insights --store-dir "$TC_PILOT_STORE" comparison-task explain "$TC_TASK_ID"
+```
+
+2. Review the whole task boundary and every attempt. Multiple turns never count as multiple independent tasks. Reuse one user-selected project UUID across worktrees of this repository. Set only known context fields:
+
+```sh
+"$TC_BIN" --json insights --store-dir "$TC_PILOT_STORE" comparison-task set-context "$TC_TASK_ID" \
+  --expected-revision "$TC_REVISION" --project-id "$TC_PROJECT_ID" \
+  --task-date "$TC_TASK_DATE" --language "$TC_LANGUAGE" \
+  --harness-id "$TC_HARNESS_ID" --harness-version "$TC_HARNESS_VERSION" \
+  --reasoning-effort "$TC_REASONING_EFFORT" \
+  --tool-policy-id "$TC_TOOL_POLICY_ID" --tool-policy-version "$TC_TOOL_POLICY_VERSION" \
+  --prompt-template-digest "$TC_PROMPT_TEMPLATE_DIGEST"
+```
+
+Omit unknown optional flags; reasoning effort defaults to `unknown`, which is different from known `none`. A prompt-template digest is SHA-256 of the exact UTF-8 template before task-specific substitution. A policy identity must describe the actual tool permissions; do not copy fixture settings or invent missing historical context to admit a task. See the [context contract](../specs/2026-09-12-comparison-context-v1.md).
+
+3. Ask the user to assess the bound work as `accepted`, `partial`, `rejected`, `pending`, or `unknown`. Record substantial human rework separately in local pilot notes; it is not currently a quantified result field. Use the latest returned task revision for each mutation:
+
+```sh
+"$TC_BIN" --json insights --store-dir "$TC_PILOT_STORE" comparison-task set-outcome "$TC_TASK_ID" \
+  --expected-revision "$TC_REVISION" --outcome "$TC_OUTCOME"
+"$TC_BIN" --json insights --store-dir "$TC_PILOT_STORE" comparison-task explain "$TC_TASK_ID"
+```
+
+4. After the user reviews the displayed frozen/current evidence and overlap information and confirms independence, use that displayed task revision and material digest:
+
+```sh
+"$TC_BIN" --json insights --store-dir "$TC_PILOT_STORE" comparison-task reconfirm "$TC_TASK_ID" \
+  --expected-revision "$TC_REVISION" --material-digest "$TC_MATERIAL_DIGEST"
+```
+
+Do not automate confirmation or retry a conflict with a freshly fetched digest without another review. Changing context or evidence requires reviewing stale outcome/confirmation bindings. Unsupported attribution cannot be repaired through confirmation.
+
+## Save and inspect a comparison
+
+Proceed when two recorded declaration cohorts have matching reviewed context. Read cohort labels from `detail.source_qualification.declared_model_cohort` and the context fingerprint from `detail.task.context.configuration_fingerprint`. If qualification is absent or only one cohort exists, report that limitation; do not manufacture the second cohort.
+
+After recording the intended task evidence and outcomes, choose an explicit UTC evidence cutoff. Task dates are calendar dates, while the cutoff controls when material evidence and outcomes were recorded locally. Importing old tasks today does not backdate those records.
+
+```sh
+"$TC_BIN" --json insights --store-dir "$TC_PILOT_STORE" comparison preview-spec \
+  --evidence-cutoff "$TC_CUTOFF_UTC" --cohort "$TC_COHORT_A" "$TC_COHORT_B" \
+  --date-start "$TC_DATE_START" --date-end "$TC_DATE_END" --project-id "$TC_PROJECT_ID" \
+  --language "$TC_LANGUAGE" --configuration-fingerprint "$TC_CONFIGURATION_FINGERPRINT"
+```
+
+Review the preview; use the same arguments with `save-spec` to save the immutable retrospective specification. Then use the returned specification ID:
+
+```sh
+"$TC_BIN" --json insights --store-dir "$TC_PILOT_STORE" comparison evaluate "$TC_SPECIFICATION_ID"
+"$TC_BIN" --json insights --store-dir "$TC_PILOT_STORE" comparison explain-result "$TC_SPECIFICATION_ID" \
+  --audit-digest "$TC_AUDIT_DIGEST"
+```
+
+Set `TC_AUDIT_DIGEST` to `result.audit_digest` from the evaluated response before explaining it. If the audit is stale, evaluate and review the changed result again; do not silently replace the digest.
+
+Inspect included and excluded tasks, categorical outcome denominators, and coverage/missingness. Pending, unknown, and unassessed outcomes are not rejected work. Observed tokens are not complete task usage, dollar cost, or human time saved. Descriptive or suppressed output is a valid pilot result; it does not prove a model advantage. The interval estimator remains unqualified.
+
+## Observe the product, then make corrections
+
+Keep a local record with one row per reviewed task and a separate specification/result record. Use task IDs and structured statuses; keep free-text outcome commentary and original traces out of PRs.
+
+| Observation | What to record |
+| --- | --- |
+| Source coverage | Full reviewed-task denominator; import success, producer version, attribution availability; mixed-model, delegated, and unsupported counts/fractions with typed exclusions. |
+| Task boundary | Number of attempts, user confirmation, same-session overlap, unresolved ambiguity; user corrections that split/merge tasks or restore omitted attempts. |
+| Context completion | Missing fields, whether values were known or only guessed, difficulty selecting project/policy/template; time to first reviewed result and where the user abandons the workflow. |
+| Outcome | User report, delayed assessment, substantial human rework noted separately. |
+| Staleness | Which edit invalidated a result or binding; whether the next required review was understandable. |
+| Comparison | Exact context, cohort declarations, included/assessed counts, exclusions, coverage and suppression. |
+| Comprehension | Can the user distinguish recorded model labels, user-reported outcomes, task counts, and observed usage? What decision, if any, would the result change? |
+
+On a disposable copy of the pilot store, exercise context edits, delayed outcomes, duplicate-session imports, and deletion. Confirm stale results disappear, old cutoff specifications exclude later evidence, overlapping exports do not become independent after deletion, and reconfirmation requires explicit review. Preserve the original pilot store; never delete real evidence just to perform a drill.
+
+The pilot report should separate real-task observations, synthetic regression results, unresolved source gaps, and product changes. Apply observed corrections before Windows/GTK parity. A subsequent prospective pilot can use two models through a supported harness with consistent settings and comparable scopes; it still requires reviewed independent tasks and a qualified interval method before drawing comparison claims.
+
+These observations address the immediate representativeness and usability concerns in [Kristi’s overall-plan review](https://github.com/TraceCommons/trace-commons/pull/870#issuecomment-5645229086). Keep every selected task in the coverage denominator, including abandoned or unsupported cases; analyzing only admitted tasks would hide whether this product serves the actual workflow.
