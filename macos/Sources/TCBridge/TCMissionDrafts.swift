@@ -68,9 +68,29 @@ public enum MissionDraftResponse: Decodable, Sendable {
 
     private enum Keys: String, CodingKey { case type, draft, drafts, copy }
 
+    private struct AnyKey: CodingKey {
+        let stringValue: String
+        let intValue: Int? = nil
+        init?(stringValue: String) { self.stringValue = stringValue }
+        init?(intValue: Int) { return nil }
+    }
+
     public init(from decoder: Decoder) throws {
+        let raw = try decoder.container(keyedBy: AnyKey.self)
         let values = try decoder.container(keyedBy: Keys.self)
         let type = try values.decode(String.self, forKey: .type)
+        let allowed: Set<String>
+        switch type {
+        case "import": allowed = ["type", "draft"]
+        case "list": allowed = ["type", "drafts"]
+        case "show": allowed = ["type", "draft"]
+        case "delete": allowed = ["type", "draft"]
+        case "copy": allowed = ["type", "copy"]
+        default: throw MissionDraftBridgeError.invalidResponse
+        }
+        guard Set(raw.allKeys.map(\.stringValue)) == allowed else {
+            throw MissionDraftBridgeError.invalidResponse
+        }
         switch type {
         case "import": self = .imported(try values.decode(MissionDraftImport.self, forKey: .draft))
         case "list": self = .list(try values.decode([MissionDraftSummary].self, forKey: .drafts))
@@ -79,12 +99,6 @@ public enum MissionDraftResponse: Decodable, Sendable {
         case "copy": self = .copy(try values.decode([String: String].self, forKey: .copy))
         default: throw MissionDraftBridgeError.invalidResponse
         }
-        let allowed: Set<Keys> = switch self {
-        case .imported, .show, .deleted: [.type, .draft]
-        case .list: [.type, .drafts]
-        case .copy: [.type, .copy]
-        }
-        guard Set(values.allKeys) == allowed else { throw MissionDraftBridgeError.invalidResponse }
     }
 
     public func validate(for operation: MissionDraftRequest.Operation) throws {

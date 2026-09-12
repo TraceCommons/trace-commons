@@ -96,6 +96,29 @@ final class MissionDraftsModelTests: XCTestCase {
     }
 
     @MainActor
+    func testCloseAndReopenWaitsForNativelyNoncancellableMutationThenRefreshes() async throws {
+        let service = MissionDraftFakeService()
+        let model = MissionDraftsModel(service: { try await service.call($0) })
+        model.open(); try await settle(model)
+        var listCalls = await service.listCalls
+        XCTAssertEqual(listCalls, 1)
+        await service.holdNextImport()
+        model.importFile(URL(fileURLWithPath: "/synthetic/draft.json"))
+        model.close()
+        model.open()
+        try await Task.sleep(for: .milliseconds(30))
+        XCTAssertTrue(model.mutationBusy)
+        listCalls = await service.listCalls
+        XCTAssertEqual(listCalls, 1, "reopen must not list before native commit")
+        await service.releaseImport()
+        try await settle(model)
+        XCTAssertEqual(model.drafts.map(\.id), [MissionDraftFakeService.id])
+        XCTAssertNil(model.notice, "notice belongs to the closed presentation")
+        listCalls = await service.listCalls
+        XCTAssertEqual(listCalls, 2)
+    }
+
+    @MainActor
     func testMissionNavigationDoesNotActivateEnrollmentServices() async throws {
         let navigation = MainWindowNavigation()
         var starts = 0
@@ -127,9 +150,12 @@ private actor MissionDraftFakeService {
     private var holdShow = false
     private var failShow = false
     private var showContinuation: CheckedContinuation<Void, Never>?
+    private var holdImport = false
+    private var importContinuation: CheckedContinuation<Void, Never>?
     private var failList = false
     private var failDelete = false
     private(set) var deleteCalls = 0
+    private(set) var listCalls = 0
 
     init(seed: Bool = false) { seeded = seed }
 
@@ -138,6 +164,8 @@ private actor MissionDraftFakeService {
     func releaseShow() { showContinuation?.resume(); showContinuation = nil }
     func failNextList() { failList = true }
     func failNextDelete() { failDelete = true }
+    func holdNextImport() { holdImport = true }
+    func releaseImport() { importContinuation?.resume(); importContinuation = nil }
 
     func call(_ request: MissionDraftRequest) async throws -> MissionDraftResponse {
         switch request.operation.type {
@@ -147,9 +175,14 @@ private actor MissionDraftFakeService {
             "duplicate":"duplicate copy","deleted":"deleted copy","error":"error copy"}}
             """)
         case "list":
+            listCalls += 1
             if failList { failList = false; throw MissionDraftBridgeError.service("list-failed") }
             return try decode(seeded ? Self.listJSON : "{\"type\":\"list\",\"drafts\":[]}")
         case "import":
+            if holdImport {
+                holdImport = false
+                await withCheckedContinuation { importContinuation = $0 }
+            }
             let inserted = !seeded
             seeded = true
             return try decode("""

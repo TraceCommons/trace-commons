@@ -11,6 +11,11 @@ final class MissionDraftsModel {
         fileprivate let presentation: UUID
     }
 
+    private enum MutationEffect {
+        case imported(inserted: Bool)
+        case deleted(id: String)
+    }
+
     private let service: Service
     private var active = false
     private var generation = UUID()
@@ -64,7 +69,7 @@ final class MissionDraftsModel {
     func open() {
         active = true
         loadCopy()
-        refresh(showNotice: false)
+        if !mutationBusy { refresh(showNotice: false) }
     }
 
     func close() {
@@ -76,8 +81,10 @@ final class MissionDraftsModel {
         copyTask?.cancel(); copyTask = nil
         listTask?.cancel(); listTask = nil
         detailTask?.cancel(); detailTask = nil
-        mutationTask?.cancel(); mutationTask = nil
-        loading = false; detailBusy = false; mutationBusy = false
+        // A handle-free FFI mutation runs on a detached task and cannot be
+        // cancelled. Keep its wrapper alive so a reopened screen refreshes
+        // only after the native operation has actually finished.
+        loading = false; detailBusy = false
         selectedID = nil; detail = nil
     }
 
@@ -155,27 +162,23 @@ final class MissionDraftsModel {
         let id = confirmation.id
         detailPresentation = UUID()
         detailTask?.cancel(); detailTask = nil; detailBusy = false
-        beginMutation(.init("delete", id: id)) { [weak self] response in
-            guard case .deleted(let deleted) = response, deleted.id == id, deleted.deleted else { return false }
-            self?.invalidateDetail()
-            self?.drafts.removeAll { $0.id == id }
-            self?.notice = self?.text("deleted")
-            return true
+        beginMutation(.init("delete", id: id)) { response in
+            guard case .deleted(let deleted) = response, deleted.id == id, deleted.deleted else { return nil }
+            return .deleted(id: id)
         }
     }
 
     func importFile(_ file: URL) {
         guard active, !mutationBusy else { return }
-        beginMutation(.init("import", file: file.path)) { [weak self] response in
-            guard case .imported(let imported) = response else { return false }
-            self?.notice = self?.text(imported.inserted ? "added" : "duplicate")
-            return true
+        beginMutation(.init("import", file: file.path)) { response in
+            guard case .imported(let imported) = response else { return nil }
+            return .imported(inserted: imported.inserted)
         }
     }
 
     private func beginMutation(
         _ operation: MissionDraftRequest.Operation,
-        accept: @escaping @MainActor (MissionDraftResponse) -> Bool
+        accept: @escaping @MainActor (MissionDraftResponse) -> MutationEffect?
     ) {
         mutationPresentation = UUID()
         let presentation = mutationPresentation
@@ -184,24 +187,50 @@ final class MissionDraftsModel {
         error = nil
         notice = nil
         let service = service
-        mutationTask?.cancel()
         mutationTask = Task { [weak self] in
             do {
                 let response = try await service(.init(operation: operation))
-                guard let self, self.active, self.generation == screen,
-                      self.mutationPresentation == presentation, !Task.isCancelled else { return }
-                guard accept(response) else {
-                    self.mutationBusy = false
-                    self.error = self.errorText()
+                guard let self else { return }
+                self.mutationTask = nil
+                self.mutationBusy = false
+                guard let effect = accept(response) else {
+                    if self.active { self.error = self.errorText() }
+                    if self.active, self.generation != screen { self.refresh(showNotice: false) }
                     return
                 }
-                self.mutationBusy = false
+                guard self.active, self.generation == screen,
+                      self.mutationPresentation == presentation else {
+                    if self.active {
+                        self.notice = nil
+                        self.error = nil
+                        self.invalidateDetail()
+                        self.refresh(showNotice: false)
+                    }
+                    return
+                }
+                switch effect {
+                case .imported(let inserted):
+                    self.notice = self.text(inserted ? "added" : "duplicate")
+                case .deleted(let id):
+                    self.invalidateDetail()
+                    self.drafts.removeAll { $0.id == id }
+                    self.notice = self.text("deleted")
+                }
                 self.refresh(showNotice: false)
             } catch {
-                guard let self, self.active, self.generation == screen,
-                      self.mutationPresentation == presentation, !Task.isCancelled else { return }
+                guard let self else { return }
+                self.mutationTask = nil
                 self.mutationBusy = false
-                self.error = self.errorText()
+                guard self.active else { return }
+                if self.generation == screen, self.mutationPresentation == presentation {
+                    self.error = self.errorText()
+                } else {
+                    self.notice = nil
+                    self.mutationBusy = false
+                    self.error = self.errorText()
+                    self.invalidateDetail()
+                    self.refresh(showNotice: false)
+                }
             }
         }
     }

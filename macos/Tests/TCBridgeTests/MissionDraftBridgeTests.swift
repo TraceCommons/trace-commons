@@ -35,7 +35,7 @@ final class MissionDraftBridgeTests: XCTestCase {
           {"id":"\(a)","source_count":1,"status":"needs_curator_review"}
         ]}
         """).validate(for: .init("list")))
-        XCTAssertThrowsError(try decode("{" + "\"type\":\"copy\",\"copy\":{\"title\":\"Inbox\"},\"drafts\":[]}"))
+        XCTAssertThrowsError(try decode("{" + "\"type\":\"list\",\"drafts\":[],\"unexpected\":true}"))
     }
 
     func testRequestUsesHandleFreeTaggedShape() throws {
