@@ -92,6 +92,8 @@
 
 mod insights;
 pub use insights::tc_insights_call;
+mod mission_drafts;
+pub use mission_drafts::tc_mission_drafts_call;
 
 use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_char, c_void};
