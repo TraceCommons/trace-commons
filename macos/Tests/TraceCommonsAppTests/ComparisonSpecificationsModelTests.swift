@@ -113,6 +113,34 @@ final class ComparisonSpecificationsModelTests: XCTestCase {
         XCTAssertNil(model.error)
     }
 
+    @MainActor
+    func testFailedReevaluationAfterEvidenceChangeLeavesNoOldResultOrConfirmation() async throws {
+        let service = SpecificationFakeService(seed: true)
+        let model = ComparisonSpecificationsModel(service: { try await service.call($0) })
+        model.open(); try await settle(model); model.select(SpecificationFakeService.specID); try await settle(model)
+        model.evaluate(); try await settle(model); XCTAssertNotNil(model.resultConfirmation())
+        await service.failNextEvaluation()
+        model.sourceEvidenceChanged(tasks: [try Self.task(revision: 2, outcomeRecordedAt: "2026-09-12T02:00:00Z")],
+                                    snapshots: try Self.snapshots())
+        XCTAssertNil(model.result); XCTAssertNil(model.resultConfirmation())
+        try await settle(model)
+        XCTAssertNil(model.result); XCTAssertNil(model.resultConfirmation())
+        XCTAssertEqual(model.error, "comparison_specification_error")
+    }
+
+    @MainActor
+    func testHeldPreviewCannotRepopulateAfterEvidenceInvalidation() async throws {
+        let service = SpecificationFakeService()
+        let model = ComparisonSpecificationsModel(service: { try await service.call($0) })
+        model.open(); try await settle(model); model.updateSources(tasks: [try Self.task()], snapshots: try Self.snapshots())
+        model.setCohort("model-a", selected: true); model.setCohort("model-b", selected: true)
+        await service.holdPreview(); model.preview(); try await Task.sleep(for: .milliseconds(20))
+        model.sourceEvidenceChanged(tasks: [try Self.task(revision: 2)], snapshots: try Self.snapshots())
+        XCTAssertNil(model.previewSpecification); XCTAssertNil(model.previewResult)
+        await service.releasePreview(); try await settle(model)
+        XCTAssertNil(model.previewSpecification); XCTAssertNil(model.previewResult)
+    }
+
     @MainActor private func settle(_ model: ComparisonSpecificationsModel) async throws {
         for _ in 0..<300 { if !model.busy { return }; try await Task.sleep(for: .milliseconds(10)) }
         XCTFail("Specification model did not settle")
@@ -167,7 +195,9 @@ private actor SpecificationFakeService {
     private var saveContinuation: CheckedContinuation<Void, Never>?
     private var listContinuation: CheckedContinuation<Void, Never>?
     private var failListContinuation: CheckedContinuation<Void, Never>?
+    private var previewContinuation: CheckedContinuation<Void, Never>?
     private var holdFailListFlag = false
+    private var holdPreviewFlag = false, failEvaluationFlag = false
     init(seed: Bool = false) { if seed { saved = Self.specification() } }
     func operations() -> [String] { calls }
     func count(_ operation: String) -> Int { calls.filter { $0 == operation }.count }
@@ -176,6 +206,9 @@ private actor SpecificationFakeService {
     func holdList() { holdListFlag = true }
     func holdAndFailList() { holdFailListFlag = true }
     func malformedPreview() { malformedPreviewFlag = true }
+    func holdPreview() { holdPreviewFlag = true }
+    func releasePreview() { previewContinuation?.resume(); previewContinuation = nil }
+    func failNextEvaluation() { failEvaluationFlag = true }
     func releaseList() { listContinuation?.resume(); listContinuation = nil }
     func releaseFailingList() { failListContinuation?.resume(); failListContinuation = nil }
     func call(_ request: InsightsRequest) async throws -> InsightsResponse {
@@ -191,6 +224,10 @@ private actor SpecificationFakeService {
             if holdListFlag { holdListFlag = false; await withCheckedContinuation { listContinuation = $0 } }
             payload["type"] = "comparison_specification_list"; payload["specifications"] = captured
         case "comparison_preview_spec":
+            if holdPreviewFlag {
+                holdPreviewFlag = false
+                await withCheckedContinuation { previewContinuation = $0 }
+            }
             if !malformedPreviewFlag {
                 payload["specification"] = Self.specification(); payload["result"] = Self.result()
             }
@@ -201,6 +238,7 @@ private actor SpecificationFakeService {
         case "comparison_get_spec":
             payload["type"] = "comparison_specification"; payload["specification"] = saved
         case "comparison_evaluate", "comparison_explain_result":
+            if failEvaluationFlag { failEvaluationFlag = false; throw InsightsError.invalidResponse }
             payload["type"] = "comparison_result"; payload["result"] = Self.result()
         default: throw InsightsError.invalidResponse
         }

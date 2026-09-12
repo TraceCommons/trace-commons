@@ -18,6 +18,7 @@ final class ComparisonSpecificationsModel {
     private var active = false
     private var generation = UUID()
     private var presentation = UUID()
+    private var evidenceGeneration: UInt64 = 0
     private var readTask: Task<Void, Never>?
     private var saveTask: Task<Void, Never>?
     private var pendingRefresh = false
@@ -103,15 +104,17 @@ final class ComparisonSpecificationsModel {
     struct ResultConfirmation: Equatable, Sendable {
         fileprivate let specificationID, specificationDigest, savedRecordDigest, auditDigest: String
         fileprivate let presentation: UUID
+        fileprivate let evidenceGeneration: UInt64
     }
     func resultConfirmation() -> ResultConfirmation? {
         guard let selected, let result, result.specification_id == selected.id else { return nil }
         return .init(specificationID: selected.id, specificationDigest: selected.specification_digest,
                      savedRecordDigest: selected.saved_record_digest, auditDigest: result.audit_digest,
-                     presentation: presentation)
+                     presentation: presentation, evidenceGeneration: evidenceGeneration)
     }
     func explain(_ confirmation: ResultConfirmation) {
         guard confirmation.presentation == presentation, confirmation.specificationID == selected?.id,
+              confirmation.evidenceGeneration == evidenceGeneration,
               confirmation.specificationDigest == selected?.specification_digest,
               confirmation.savedRecordDigest == selected?.saved_record_digest,
               confirmation.auditDigest == result?.audit_digest else { return }
@@ -120,6 +123,8 @@ final class ComparisonSpecificationsModel {
     }
     func upstreamEvidenceChanged() {
         guard active else { return }
+        evidenceGeneration &+= 1
+        result = nil; previewSpecification = nil; previewResult = nil; previewInput = nil
         if busy { pendingRefresh = true }
         else if selected != nil { evaluate() } else { refresh() }
     }
@@ -130,19 +135,25 @@ final class ComparisonSpecificationsModel {
     private func runPreview(_ input: ComparisonSpecificationDraftInput) {
         guard active, !busy else { return }
         busy = true; error = nil; notice = nil; presentation = UUID(); let token = presentation
-        let screen = generation; let service = service
+        let screen = generation; let evidence = evidenceGeneration; let service = service
         readTask = Task { [weak self] in
             do {
                 let response = try await service(.init(operation: .init("comparison_preview_spec", input: input)))
                 guard let self, self.active, self.generation == screen, self.presentation == token,
                       !Task.isCancelled else { return }
+                guard self.evidenceGeneration == evidence else { self.finish(); return }
                 guard response.type == "comparison_preview_spec",
                       let spec = response.specification, let result = response.comparisonResult
                 else { throw InsightsError.invalidResponse }
                 try spec.validateStructure(); try result.validateStructure(expectedSpecification: spec)
                 self.previewSpecification = spec; self.previewResult = result; self.previewInput = input
                 self.notice = "comparison_preview_notice"; self.finish()
-            } catch { self?.fail(error, screen: screen) }
+            } catch {
+                guard let self else { return }
+                if self.active, self.generation == screen, self.evidenceGeneration != evidence {
+                    self.finish()
+                } else { self.fail(error, screen: screen) }
+            }
         }
     }
     private func runSave(_ input: ComparisonSpecificationDraftInput) {
@@ -194,7 +205,7 @@ final class ComparisonSpecificationsModel {
     private func runRead(_ operation: InsightsRequest.Operation, intent: ReadIntent) {
         guard active, !busy else { pendingRefresh = true; return }
         busy = true; error = nil; presentation = UUID(); let token = presentation
-        let screen = generation; let service = service
+        let screen = generation; let evidence = evidenceGeneration; let service = service
         readTask = Task { [weak self] in
             do {
                 let response = try await service(.init(operation: operation))
@@ -209,12 +220,18 @@ final class ComparisonSpecificationsModel {
                           spec.id == id else { throw InsightsError.invalidResponse }
                     try spec.validateStructure(); self.selected = spec; self.result = nil
                 case .evaluation(let spec):
+                    guard self.evidenceGeneration == evidence else { self.finish(); return }
                     guard response.type == "comparison_result",
                           let result = response.comparisonResult else { throw InsightsError.invalidResponse }
                     try result.validateStructure(expectedSpecification: spec); self.result = result
                 }
                 self.finish()
-            } catch { self?.fail(error, screen: screen) }
+            } catch {
+                guard let self else { return }
+                if self.active, self.generation == screen, self.evidenceGeneration != evidence {
+                    self.finish()
+                } else { self.fail(error, screen: screen) }
+            }
         }
     }
     private func finish() { busy = false; drain() }
