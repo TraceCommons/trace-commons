@@ -68,6 +68,8 @@ The protocol must not depend on contributor episode types. `EpisodeAssessmentInp
 
 The card provider capability remains deterministic and local. Extend the provider interface through a distinct method or capability whose typed result is `InsightCardResult`; do not reinterpret the existing report evaluator result as presentation data. Dispatch must reject unsupported schema/rubric, provider mismatch, duplicate cards, missing requested cards, unknown evidence, forged digests, unrequested evidence, invalid coverage, and an incorrect input digest. Public errors are fixed labels and never forward raw provider failures.
 
+The implementation names this separate capability `LocalQuestionCardProvider`, with `manifest` and `evaluate_cards` methods. `dispatch_question_cards` validates the host-selected request before invocation, requires the installed manifest to match it, and validates the complete returned projection against the shared deterministic calculator. `FirstPartyQuestionCardProvider` is the only implementation selected by the product service. A different trusted local implementation can use this contract without changing card semantics or native presentation; this does not yet provide provider installation, user-facing selection, process isolation, or permission grants. A provider that uses a different analytic method will need its own versioned rubric rather than changing values under this one.
+
 ## Common card projection
 
 Every shell receives the same ordered, presentation-ready projection from `LocalInsightsResponse::QuestionCards`. Shells may format numbers and dates for locale and lay out native controls; they must not count outcomes, combine time ranges, calculate overlap, choose denominators, or invent unavailable reasons.
