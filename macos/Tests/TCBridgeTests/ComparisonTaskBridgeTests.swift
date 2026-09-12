@@ -36,6 +36,16 @@ final class ComparisonTaskBridgeTests: XCTestCase {
         })
     }
 
+    func testMutationEffectsExposeStaleComparisonTasks() throws {
+        let response = try JSONDecoder().decode(InsightsResponse.self, from: Data("""
+        {"type":"episode_delete","mutation_effects":{"invalidated_episode_ids":[],
+        "stale_comparison_task_ids":["20c18c96-6093-49f5-bb6f-6092ef0630b9"],
+        "stale_comparison_tasks":[]}}
+        """.utf8))
+        XCTAssertEqual(response.staleComparisonTaskIDs,
+                       ["20c18c96-6093-49f5-bb6f-6092ef0630b9"])
+    }
+
     func testMalformedTaskDataIsRejectedByValidation() throws {
         let response = try JSONDecoder().decode(InsightsResponse.self, from: Data(Self.response(
             type: "comparison_task", task: Self.task(id: "not-a-uuid")).utf8))

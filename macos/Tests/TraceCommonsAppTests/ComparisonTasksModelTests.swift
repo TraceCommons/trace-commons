@@ -50,6 +50,48 @@ final class ComparisonTasksModelTests: XCTestCase {
         XCTAssertEqual(deletes, 0)
     }
 
+    @MainActor
+    func testContextEditorsResetBeforeInstallingAnIncompleteTask() async throws {
+        let service = ComparisonFakeService(seed: true)
+        await service.installKnownContext()
+        let model = ComparisonTasksModel(service: { try await service.call($0) })
+        model.open(); try await settle(model); model.select(ComparisonFakeService.taskID); try await settle(model)
+        XCTAssertEqual(model.language, "swift")
+        let priorProject = model.projectID
+        await service.clearContext()
+        model.closeDetail(); model.select(ComparisonFakeService.taskID); try await settle(model)
+        XCTAssertTrue(model.language.isEmpty)
+        XCTAssertTrue(model.harnessID.isEmpty)
+        XCTAssertEqual(model.reasoningEffort, .unknown)
+        XCTAssertNotEqual(model.projectID, priorProject)
+    }
+
+    @MainActor
+    func testCloseReopenWaitsForCommittedMutationThenReconciles() async throws {
+        let service = ComparisonFakeService(seed: true)
+        let model = ComparisonTasksModel(service: { try await service.call($0) })
+        model.open(); try await settle(model); model.select(ComparisonFakeService.taskID); try await settle(model)
+        await service.holdNextMutation(); model.outcome = .accepted; model.setOutcome()
+        try await Task.sleep(for: .milliseconds(20))
+        model.close(); model.open()
+        XCTAssertTrue(model.busy)
+        await service.releaseMutation(); try await settle(model)
+        XCTAssertEqual(model.detail?.task.outcome?.value, .accepted)
+        XCTAssertEqual(model.notice, "comparison_task_set_outcome")
+        let writes = await service.count("comparison_task_set_outcome")
+        XCTAssertEqual(writes, 1)
+    }
+
+    @MainActor
+    func testUpstreamEvidenceSignalRefreshesStaleTaskStatus() async throws {
+        let service = ComparisonFakeService(seed: true)
+        let model = ComparisonTasksModel(service: { try await service.call($0) })
+        model.open(); try await settle(model)
+        await service.markEpisodeMissing()
+        model.upstreamEvidenceChanged(); try await settle(model)
+        XCTAssertTrue(model.tasks[0].stale_reasons.contains(.episodeMissing))
+    }
+
     @MainActor private func settle(_ model: ComparisonTasksModel) async throws {
         for _ in 0..<300 { if !model.busy { return }; try await Task.sleep(for: .milliseconds(10)) }
         XCTFail("Comparison model did not settle")
@@ -61,19 +103,40 @@ private actor ComparisonFakeService {
     static let episodeID = "d0c18c96-6093-49f5-bb6f-6092ef0630b9"
     private var value: [String: Any]?
     private var failList = false
+    private var staleReasons = ["context_incomplete", "attribution_pending_qualification"]
+    private var holdMutation = false
+    private var mutationContinuation: CheckedContinuation<Void, Never>?
     private(set) var mutations: [String] = []
     init(seed: Bool = false) { if seed { value = Self.makeTask() } }
     func failNextList() { failList = true }
+    func holdNextMutation() { holdMutation = true }
+    func releaseMutation() { mutationContinuation?.resume(); mutationContinuation = nil }
+    func markEpisodeMissing() { staleReasons.append("episode_missing") }
+    func clearContext() { value?["context"] = NSNull() }
+    func installKnownContext() {
+        value?["context"] = ["project_id": "90c18c96-6093-49f5-bb6f-6092ef0630b9",
+            "category": "refactor", "task_date": "2026-09-11",
+            "checkout_provenance": ["state": "unavailable"], "language": ["state": "known", "value": "swift"],
+            "configuration": ["harness_id": ["state": "known", "value": "codex"],
+                "harness_version": ["state": "unknown"], "reasoning_effort": "high",
+                "tool_policy_id": ["state": "unknown"], "tool_policy_version": ["state": "unknown"],
+                "prompt_template_digest": ["state": "unknown"]],
+            "configuration_fingerprint": String(repeating: "e", count: 64)]
+    }
     func count(_ type: String) -> Int { mutations.filter { $0 == type }.count }
-    func call(_ request: InsightsRequest) throws -> InsightsResponse {
+    func call(_ request: InsightsRequest) async throws -> InsightsResponse {
         let op = request.operation; var response: [String: Any] = ["type": op.type]
         switch op.type {
         case "comparison_task_list":
             if failList { failList = false; throw InsightsError.invalidResponse }
-            response["tasks"] = value.map { [Self.detail($0)] } ?? []
-        case "comparison_task_explain": response["detail"] = Self.detail(try present())
+            response["tasks"] = value.map { [detail($0)] } ?? []
+        case "comparison_task_explain": response["detail"] = detail(try present())
         case "comparison_task_create": mutations.append(op.type); value = Self.makeTask(); response["type"] = "comparison_task"; response["task"] = value
         case "comparison_task_set_outcome":
+            if holdMutation {
+                holdMutation = false
+                await withCheckedContinuation { mutationContinuation = $0 }
+            }
             mutations.append(op.type); try check(op); advance()
             let digest = value!["material_digest"]!
             value?["outcome"] = ["value": op.outcome!, "material_revision": 1,
@@ -114,8 +177,8 @@ private actor ComparisonFakeService {
                                     "source_digest": String(repeating: "d", count: 64)]]]],
          "context": NSNull(), "outcome": NSNull(), "independence_confirmation": NSNull()]
     }
-    private static func detail(_ task: [String: Any]) -> [String: Any] {
-        ["task": task, "stale_reasons": ["context_incomplete", "attribution_pending_qualification"],
+    private func detail(_ task: [String: Any]) -> [String: Any] {
+        ["task": task, "stale_reasons": staleReasons,
          "overlapping_task_ids": [], "resolved_at": "2026-09-12T00:00:00Z"]
     }
 }

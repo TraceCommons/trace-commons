@@ -10,6 +10,8 @@ final class ComparisonTasksModel {
     private var generation = UUID()
     private var presentation = UUID()
     private var task: Task<Void, Never>?
+    private var mutationTask: Task<Void, Never>?
+    private var refreshAfterMutation = false
 
     private(set) var tasks: [ComparisonTaskDetail] = []
     private(set) var detail: ComparisonTaskDetail?
@@ -34,10 +36,15 @@ final class ComparisonTasksModel {
         try await Task.detached { try TCInsights.call(request) }.value
     }) { self.service = service }
 
-    func open() { active = true; refresh() }
+    func open() { active = true; if mutationTask == nil { refresh() } }
     func close() {
         active = false; generation = UUID(); presentation = UUID(); task?.cancel(); task = nil
-        busy = false; detail = nil; editSelection = []; editingEpisodes = false
+        if mutationTask == nil { busy = false }
+        detail = nil; editSelection = []; editingEpisodes = false
+    }
+    func upstreamEvidenceChanged() {
+        guard active else { return }
+        if mutationTask != nil { refreshAfterMutation = true } else { refresh() }
     }
     func refresh() {
         presentation = UUID(); detail = nil; editSelection = []; editingEpisodes = false
@@ -129,15 +136,29 @@ final class ComparisonTasksModel {
     }
     private enum Intent: Sendable {
         case list, create, detail(String, UUID), mutation(PresentedTask, String), delete(PresentedTask)
+        var isMutation: Bool {
+            switch self { case .create, .mutation, .delete: true; case .list, .detail: false }
+        }
     }
     private func run(_ operation: InsightsRequest.Operation, intent: Intent) {
         guard active, !busy else { return }
         busy = true; error = nil; notice = nil
         let screen = generation; let service = service
-        task = Task { [weak self] in
+        let writes = intent.isMutation
+        let operationTask = Task { [weak self] in
             do {
                 let response = try await service(.init(operation: operation))
-                guard let self, self.active, self.generation == screen, !Task.isCancelled else { return }
+                guard let self else { return }
+                if writes {
+                    self.mutationTask = nil; self.busy = false
+                    if self.generation != screen || !self.active {
+                        let effect = try self.detachedEffect(response, intent: intent)
+                        guard self.active else { return }
+                        self.reconcile(id: effect.id, noticeKey: effect.notice)
+                        return
+                    }
+                }
+                guard self.active, self.generation == screen, !Task.isCancelled else { return }
                 switch intent {
                 case .list:
                     guard response.type == "comparison_task_list", let tasks = response.tasks else {
@@ -169,12 +190,37 @@ final class ComparisonTasksModel {
                     self.busy = false; self.reconcile(id: nil, noticeKey: "comparison_task_deleted")
                 }
             } catch {
-                guard let self, self.active, self.generation == screen, !Task.isCancelled else { return }
+                guard let self else { return }
+                if writes { self.mutationTask = nil; self.busy = false }
+                guard self.active, !Task.isCancelled else { return }
+                if self.generation != screen {
+                    let retainedError = self.copyKey(for: error)
+                    self.discardEditableDetail(); self.refresh(); self.error = retainedError
+                    return
+                }
                 self.busy = false
                 self.error = self.copyKey(for: error)
                 if case .mutation = intent { self.discardEditableDetail() }
                 if case .delete = intent { self.discardEditableDetail() }
             }
+        }
+        if writes { mutationTask = operationTask } else { task = operationTask }
+    }
+    private func detachedEffect(_ response: InsightsResponse, intent: Intent) throws -> (id: String?, notice: String) {
+        switch intent {
+        case .create:
+            guard response.type == "comparison_task", let task = response.task else { throw InsightsError.invalidResponse }
+            try task.validateSupportedSchema(); return (task.id, "comparison_task_create")
+        case .mutation(let bound, let notice):
+            guard response.type == "comparison_task", let task = response.task, task.id == bound.id,
+                  task.revision >= bound.revision else { throw InsightsError.invalidResponse }
+            try task.validateSupportedSchema(); return (task.id, notice)
+        case .delete(let bound):
+            guard response.type == "comparison_task_delete", response.task?.id == bound.id else {
+                throw InsightsError.invalidResponse
+            }
+            return (nil, "comparison_task_deleted")
+        case .list, .detail: throw InsightsError.invalidResponse
         }
     }
     private func acceptsWhileBusy(_ value: PresentedTask) -> Bool {
@@ -201,6 +247,12 @@ final class ComparisonTasksModel {
                     try detail.validateSupportedSchema(expectedID: id); self.install(detail)
                 }
                 self.notice = retainedNotice; self.busy = false
+                if self.refreshAfterMutation {
+                    self.refreshAfterMutation = false
+                    let success = self.notice
+                    self.refresh()
+                    self.notice = success
+                }
             } catch {
                 guard let self, self.active, self.generation == screen, !Task.isCancelled else { return }
                 self.discardEditableDetail(); self.notice = retainedNotice
@@ -211,6 +263,10 @@ final class ComparisonTasksModel {
     private func install(_ value: ComparisonTaskDetail) {
         detail = value; presentation = UUID(); editingEpisodes = false; editSelection = []
         outcome = value.task.outcome?.value ?? .pending
+        projectID = UUID().uuidString.lowercased()
+        taskDate = String(Date().ISO8601Format().prefix(10))
+        language = ""; harnessID = ""; harnessVersion = ""; reasoningEffort = .unknown
+        toolPolicyID = ""; toolPolicyVersion = ""; promptTemplateDigest = ""
         if let context = value.task.context {
             projectID = context.project_id; taskDate = context.task_date
             language = string(context.language); harnessID = string(context.configuration.harness_id)

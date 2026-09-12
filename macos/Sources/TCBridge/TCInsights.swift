@@ -85,6 +85,7 @@ public struct InsightsRequest: Encodable, Sendable {
 }
 public struct InsightMutationEffects: Decodable, Sendable {
     public let invalidated_episode_ids: [String]
+    public let stale_comparison_task_ids: [String]?
 }
 public struct InsightsResponse: Decodable, Sendable {
     public let type: String
@@ -103,6 +104,7 @@ public struct InsightsResponse: Decodable, Sendable {
     public let tasks: [ComparisonTaskDetail]?
     public let comparisonTaskDetail: ComparisonTaskDetail?
     public var invalidatedEpisodeIDs: [String] { mutation_effects?.invalidated_episode_ids ?? [] }
+    public var staleComparisonTaskIDs: [String] { mutation_effects?.stale_comparison_task_ids ?? [] }
 
     private enum CodingKeys: String, CodingKey {
         case type, insight, insights, deleted, copy, summary, mutation_effects, episode, episodes

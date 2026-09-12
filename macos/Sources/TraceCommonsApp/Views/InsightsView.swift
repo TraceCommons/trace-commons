@@ -95,6 +95,9 @@ struct InsightsView: View {
         }
         .onAppear { model.open() }
         .onAppear { comparisonModel.open() }
+        .onChange(of: model.comparisonInvalidationGeneration) { _, _ in
+            comparisonModel.upstreamEvidenceChanged()
+        }
         .onDisappear { model.close(); comparisonModel.close() }
     }
     private var assessment: some View {

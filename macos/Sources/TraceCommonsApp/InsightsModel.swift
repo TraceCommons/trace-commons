@@ -17,6 +17,7 @@ final class InsightsModel {
     func text(_ key: String) -> String { copy[key] ?? "" }
     private(set) var error: String?
     private(set) var invalidatedEpisodeIDs: [String] = []
+    private(set) var comparisonInvalidationGeneration = UUID()
     private(set) var summary: SavedInsightsSummary?
     private(set) var summaryError: String?
     private(set) var loadingSummary = false
@@ -309,6 +310,7 @@ final class InsightsModel {
                 if operation.type == "analyze" || operation.type == "delete" {
                     if operation.type == "delete" || operation.save == true { self.invalidateCards() }
                     self.invalidatedEpisodeIDs = response.invalidatedEpisodeIDs
+                    self.recordComparisonEffects(response)
                     if let episodeID = self.episodeDetail?.episode.id,
                        response.invalidatedEpisodeIDs.contains(episodeID) {
                         self.closeEpisode()
@@ -388,6 +390,7 @@ final class InsightsModel {
                 case .create:
                     guard let episode = response.episode else { throw InsightsError.invalidResponse }
                     try episode.validateSupportedSchema()
+                    self.recordComparisonEffects(response)
                     self.invalidateCards()
                     self.episodeCreateSelection = []
                     self.episodeNotice = self.text("episode_create_success")
@@ -405,6 +408,7 @@ final class InsightsModel {
                         self.episodeBusy = false; return
                     }
                     try response.episode?.validateSupportedSchema()
+                    self.recordComparisonEffects(response)
                     self.invalidateCards()
                     var appliedNotice = notice
                     if operation.type == "episode_replace_members",
@@ -421,6 +425,7 @@ final class InsightsModel {
                         self.episodeBusy = false; return
                     }
                     try response.episode?.validateSupportedSchema()
+                    self.recordComparisonEffects(response)
                     self.invalidateCards()
                     self.closeEpisode()
                     self.episodeNotice = self.text("episode_deleted")
@@ -452,6 +457,9 @@ final class InsightsModel {
         episodeEditSelection = []; episodeEditingMembers = false
         episodeCategory = detail.episode.manual_assessment?.category ?? "unknown"
         episodeOutcome = detail.episode.manual_assessment?.outcome ?? "unknown"
+    }
+    private func recordComparisonEffects(_ response: InsightsResponse) {
+        if !response.staleComparisonTaskIDs.isEmpty { comparisonInvalidationGeneration = UUID() }
     }
     private func episodeMessage(for error: Error, list: Bool) -> String {
         if case let InsightsError.service(code) = error {
