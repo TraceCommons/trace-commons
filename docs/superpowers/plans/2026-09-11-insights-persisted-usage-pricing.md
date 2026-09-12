@@ -44,7 +44,7 @@ provider billing or an invoice.
 
 The current extractor retains bounded model labels but deliberately does not allocate counters to models. For Codex, a final or most recent label cannot own a cumulative total that spans a model switch. Claude records carry a model on each assistant message and can eventually support per-model grouping after duplicate resolution.
 
-Saved store schema 5 binds optional model and timestamp observations to the exact report evidence digest and source format. Versions 1–4 read those fields as unknown and upgrade on the next mutation. `LocalInsight.estimated_cost_usd` is required to remain `None`, and `cost_unavailable_reason` is required to remain `adapter_usage_unavailable`. Those legacy placeholders must be removed rather than populated with `f64`.
+Saved store schema 5 binds optional model and timestamp observations to the exact report evidence digest and source format. Versions 1–4 read those fields as unknown and upgrade on the next mutation. `LocalInsight.estimated_cost_usd` is required to remain `None`, and `cost_unavailable_reason` is required to remain `adapter_usage_unavailable`. These deprecated placeholders remain unchanged for decoder compatibility; new cost results use the typed integer contract below.
 
 Saved analysis supports Codex and trajectory. Native usage inspection supports Codex and Claude Code. Therefore:
 
@@ -131,6 +131,22 @@ Content-identical aliases continue sharing one report and one usage record. A ch
 
 Keep the existing ephemeral `usage` command for inspection. Add no attach-by-ID mutation in this sequence: accepting a separately supplied file would require proving it is the same bytes and source type, and for Claude there is no saved snapshot target. A future explicit reimport operation can use the normal snapshot lifecycle.
 
+## Provider and rate-context qualification
+
+Model attribution is not provider attribution. `has_attributed_interval()` only
+establishes model-attributed observed counters; the current persisted evidence
+does not retain provider identity. Codex can use custom endpoints, and its
+configured `model_provider` label alone does not prove which service supplied
+the usage. Do not infer OpenAI prices from the Codex adapter or a model slug.
+
+Before automatic numeric cost projection, require source-bound qualification of
+the provider and rate context, exact provider-plus-model matching, and applicable
+interval/category coverage. Missing, conflicting, custom, or unqualified context
+must produce typed unavailability. A future explicit user-selected rate table
+could support a hypothetical estimate, but that is a distinct product operation
+whose result must name the selected rate assumption; it must not silently fill
+the automatic estimated-cost card. Neither operation establishes invoiced cost.
+
 ## Immutable pricing evidence
 
 Add a versioned, presentation-neutral pricing contract in `trace-commons-protocol`, because the deterministic card request and all shells consume its result. Keep catalog loading, validation, and local persistence in `trace-commons-contributor`.
@@ -185,10 +201,10 @@ Do not use `f32`/`f64`, decimal strings, or locale-formatted values in contracts
 
 1. Decompose Codex input into `uncached_input = input.checked_sub(cached_input)`. Bill cached input at its own rate. Bill output once; reasoning output is coverage information and is not an additional category in schema 1.
 2. For Claude, bill ordinary input, cache-read input, cache-creation input, and output separately. Never subtract one category from another.
-3. For each category retain the exact rational numerator `tokens * usd_nanos_per_million_tokens` over denominator `1_000_000`. The breakdown carries these exact numerator/denominator values and does not independently round categories.
+3. For each category retain the exact rational numerator `tokens * usd_nanos_per_million_tokens` over denominator `1_000_000`. The wire breakdown carries the integer tokens and rate from which shared Rust code reconstructs this exact fraction; it does not serialize `u128` or independently round categories.
 4. Sum numerators with checked `u128`. Round once at the final card boundary to USD micros using a specified half-away-from-zero rule. Values are nonnegative, so ties round upward. Return unavailable on multiplication, addition, or narrowing overflow. Because only the total is rounded, displayed category detail must use shared text derived from the exact fractions rather than claim rounded category amounts sum to the total.
 
-The protocol result should carry `estimated_cost_usd_micros: u64`, the pricing table ID/version, and a category breakdown containing tokens, rate, exact numerator, and denominator for evidence display. Shared presentation formats micros and category detail; shells do not multiply, sum, round, or convert currency. Complete zero usage under any applicable rates is a known zero. A nonzero exact estimate smaller than half a microdollar can also round to zero, so the presentation must distinguish “less than $0.000001” from a zero-token estimate rather than displaying both as an unexplained `$0.00`.
+The protocol result should carry `estimated_cost_usd_micros: u64`, the pricing table ID/version, and a category breakdown containing tokens and rate for exact reconstruction and evidence display. The denominator is fixed by the schema, and intermediate `u128` values stay inside the calculator so native JSON decoders do not need a new integer representation. Shared presentation formats micros and category detail; shells do not multiply, sum, round, or convert currency. Complete zero usage under any applicable rates is a known zero. A nonzero exact estimate smaller than half a microdollar can also round to zero, so the presentation must distinguish “less than $0.000001” from a zero-token estimate rather than displaying both as an unexplained `$0.00`.
 
 Call the result `deterministic estimate using table …`. Keep `actual_billed_cost` absent. Do not compare it with provider invoices without a separately designed reconciliation contract for service tiers, cache-duration modifiers, batch discounts, taxes, credits, and provider-specific rounding.
 
