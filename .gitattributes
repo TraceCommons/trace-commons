@@ -22,5 +22,9 @@ tests/fixtures/update-conformance/**/*.exe  -text
 # on Windows would rewrite its line endings and break a digest that is correct.
 crates/trace-commons-contributor/tests/fixtures/orchard_worker_ipc_v0.json -text
 
+# This writer fixture package pins the source, manifest, and generator hashes.
+# Preserve their exact bytes on Windows as well as Unix checkouts.
+crates/trace-commons-contributor/fixtures/insights/codex-task-attribution/* -text
+
 # Preserve the pinned upstream SDK bytes, including its trailing whitespace.
 crates/trace-commons-contributor/src/daemon/nearai_credential/near_connect/near-connect-0.11.4.js -text whitespace=-blank-at-eol
