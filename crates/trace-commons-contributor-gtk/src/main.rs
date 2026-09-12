@@ -215,6 +215,7 @@ struct Drivers {
 enum StartupState {
     Idle,
     Starting,
+    Running,
     Stopped,
 }
 
@@ -236,6 +237,18 @@ fn start_or_ask(
     drivers: std::rc::Rc<Drivers>,
     startup: std::rc::Rc<std::cell::Cell<StartupState>>,
 ) {
+    if startup.get() == StartupState::Running {
+        if let Some(window) = application
+            .windows()
+            .into_iter()
+            .find(|window| window.widget_name() == "contributions-window")
+        {
+            window.present();
+            return;
+        }
+        // The contribution window was closed while local Insights stayed open.
+        startup.set(StartupState::Idle);
+    }
     if startup.get() != StartupState::Idle {
         return;
     }
@@ -247,7 +260,11 @@ fn start_or_ask(
     gtk::glib::spawn_future_local(async move {
         let result = Worker::start(dir.clone()).await;
         if startup.get() != StartupState::Stopped {
-            startup.set(StartupState::Idle);
+            startup.set(if result.is_ok() {
+                StartupState::Running
+            } else {
+                StartupState::Idle
+            });
             finish_start(&application, dir, drivers, startup, result);
         }
         // An unadopted worker drops its job sender; its owning thread then
@@ -414,6 +431,22 @@ mod insights_startup_tests {
         application.connect_activate(move |app| {
             assert!(!check_dir.exists());
             assert_eq!(app.windows().len(), 1);
+            let contribution = adw::ApplicationWindow::builder().application(app).build();
+            contribution.set_widget_name("contributions-window");
+            let startup = std::rc::Rc::new(std::cell::Cell::new(StartupState::Running));
+            for _ in 0..3 {
+                start_or_ask(app, check_dir.clone(), drivers(), startup.clone());
+                assert!(startup.get() == StartupState::Running);
+                assert_eq!(
+                    app.windows().len(),
+                    2,
+                    "repeat entry must present the adopted window"
+                );
+                assert!(
+                    !check_dir.exists(),
+                    "repeat entry must not start a new Worker"
+                );
+            }
             flag.set(true);
             let app = app.clone();
             gtk::glib::idle_add_local_once(move || app.quit());

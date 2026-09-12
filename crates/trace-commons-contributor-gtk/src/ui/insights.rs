@@ -308,6 +308,10 @@ impl InsightsView {
         self.assessment.set_sensitive(false);
         self.saved.set_sensitive(false);
         self.status.set_text(copy("working"));
+        let refresh_saved = matches!(
+            &operation,
+            Op::Analyze { save: true, .. } | Op::Annotate { .. } | Op::ClearAnnotation { .. }
+        );
         let (tx, rx) = async_channel::bounded(1);
         let store_dir = self.store_dir.clone();
         std::thread::spawn(move || {
@@ -363,6 +367,9 @@ impl InsightsView {
                     } else {
                         copy("unsaved")
                     });
+                    if refresh_saved {
+                        view.request(Op::List {}, false);
+                    }
                 }
                 Some(Response::List { insights }) => {
                     view.render_saved(insights);
@@ -737,6 +744,27 @@ mod tests {
         view.analyze(true);
         settle();
         let id = view.current_id.borrow().clone().expect("saved id");
+        assert!(
+            view.saved.first_child().is_some(),
+            "save refreshes saved rows immediately"
+        );
+        let prior_id = id.clone();
+        std::fs::write(&file, concat!(
+            "{\"role\":\"meta\",\"source\":\"claude-code\",\"model\":\"fixture\"}\n",
+            "{\"role\":\"user\",\"timestamp\":\"2026-09-11T12:00:00Z\",\"content\":\"CHANGED_BODY\"}\n"
+        )).unwrap();
+        view.analyze(true);
+        settle();
+        let id = view.current_id.borrow().clone().expect("reimported id");
+        assert_ne!(prior_id, id);
+        let row = view.saved.first_child().expect("saved row");
+        let title = row.first_child().unwrap().downcast::<gtk::Label>().unwrap();
+        assert!(title.text().contains(&id));
+        assert!(!title.text().contains(&prior_id));
+        assert!(
+            row.next_sibling().is_none(),
+            "reimport removes obsolete digest row"
+        );
         view.request(Op::Explain { id: id.clone() }, true);
         settle();
         assert!(view.assessment.is_visible());

@@ -269,6 +269,7 @@ impl App {
             .default_height(720)
             .build();
 
+        window.set_widget_name("contributions-window");
         let stack = adw::ViewStack::new();
         let queue = queue::QueueView::new();
         let history = history::HistoryView::new();
