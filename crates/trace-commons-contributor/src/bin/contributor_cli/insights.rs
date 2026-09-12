@@ -35,6 +35,8 @@ enum InsightsCommand {
     },
     /// List previously saved local insights
     List,
+    /// Summarize current saved session snapshots and separate user-reported assessments
+    Summary,
     /// Show the measurements and evidence references for a saved insight
     Explain { id: String },
     /// Delete a saved insight and its source references; leave the original file intact
@@ -106,6 +108,26 @@ pub(super) fn run(args: &InsightsArgs, json: bool) -> Result<()> {
                     render(&insight, false)?;
                 }
             }
+        }
+        InsightsCommand::Summary => {
+            let summary = trace_commons_contributor::insights::summary::read_saved(
+                args.store_dir.as_deref(),
+            )?;
+            if !json {
+                println!(
+                    "All currently saved, explicitly selected session snapshots; not verified completed tasks."
+                );
+                println!(
+                    "Assessments are user-reported. Unassessed and explicitly unknown are separate."
+                );
+                println!(
+                    "Metric sums cover observed values only. Read snapshot availability and record coverage together."
+                );
+                println!(
+                    "Analysis dates describe saved observations, not activity time. No model ranking, time savings, or cost is inferred."
+                );
+            }
+            println!("{}", serde_json::to_string_pretty(&summary)?);
         }
         InsightsCommand::Explain { id } => render(&store(args)?.explain(id)?, json)?,
         InsightsCommand::Delete { id } => {

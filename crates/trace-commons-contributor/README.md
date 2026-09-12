@@ -105,13 +105,15 @@ and explicitly reported tool failures with coverage. These adapters do not yet
 preserve enough usage for token or cost estimates; task outcomes and model
 comparisons remain unknown. A session is a provisional boundary, not a verified
 completed task. Evidence references identify the exact source snapshot by digest;
-event-level explanations and desktop views are follow-on work.
+event-level explanations remain follow-on work. Native snapshot views and their
+qualification are tracked in the [desktop story record](../../docs/superpowers/plans/2026-09-11-insights-desktop-stories.md).
 
 Save and manage derived observations in a dedicated local directory:
 
 ```bash
 trace-commons-contributor insights --store-dir ./private-insights analyze --source codex --file session.jsonl --save
 trace-commons-contributor insights --store-dir ./private-insights list
+trace-commons-contributor --json insights --store-dir ./private-insights summary
 trace-commons-contributor insights --store-dir ./private-insights explain INSIGHT_ID
 trace-commons-contributor insights --store-dir ./private-insights delete INSIGHT_ID
 ```
@@ -123,6 +125,14 @@ bodies or original paths. Reimporting the same file replaces its prior snapshot;
 identical copies share a result. Saved snapshots are not monitored for changes to
 the original files: reimport to refresh, or use `delete` to remove the saved result
 and its references. Deletion leaves the original transcript intact.
+
+`summary` reads the current derived history without reopening source files. It
+counts saved sessions, user-reported categories/outcomes, and observed metrics.
+Explicit `unknown` assessments stay separate from unassessed snapshots. Each
+metric retains available/missing snapshot counts and its original evidence
+coverage; a partial sum is not a complete activity total. No cost, time saved,
+model ranking, or verified task success is inferred. Empty history does not
+initialize the store.
 
 Record your own assessment of a saved snapshot:
 

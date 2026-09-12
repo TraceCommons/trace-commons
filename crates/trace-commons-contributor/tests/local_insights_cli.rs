@@ -312,3 +312,68 @@ fn a_selected_fifo_is_refused_without_waiting_for_a_writer() {
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
 }
+
+#[test]
+fn summary_counts_only_saved_snapshots_and_separates_manual_assessments() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("enrollment");
+    let store = dir.path().join("insights");
+    let empty = value(invoke(&config, &store, &["summary"]));
+    assert_eq!(empty["saved_snapshots"], 0);
+    assert!(!store.exists() && !config.exists());
+    let file = dir.path().join("source.jsonl");
+    fixture(&file, false);
+    let result = value(invoke(
+        &config,
+        &store,
+        &[
+            "analyze",
+            "--source",
+            "trajectory",
+            "--file",
+            file.to_str().unwrap(),
+            "--save",
+        ],
+    ));
+    let id = result["id"].as_str().unwrap();
+    value(invoke(
+        &config,
+        &store,
+        &[
+            "annotate",
+            id,
+            "--category",
+            "tests",
+            "--outcome",
+            "partial",
+        ],
+    ));
+    let summary = value(invoke(&config, &store, &["summary"]));
+    let service_json = trace_commons_contributor::insights::service::dispatch_json(
+        &serde_json::to_vec(&serde_json::json!({"store_dir":store,"operation":{"type":"summary"}}))
+            .unwrap(),
+    )
+    .unwrap();
+    let service: serde_json::Value = serde_json::from_str(&service_json).unwrap();
+    assert_eq!(
+        service["summary"], summary,
+        "CLI and native service share the exact reducer"
+    );
+    assert_eq!(summary["scope"], "all_saved_selected_session_snapshots");
+    assert_eq!(summary["saved_snapshots"], 1);
+    assert_eq!(summary["user_reported"]["assessed_snapshots"], 1);
+    assert_eq!(summary["user_reported"]["unassessed_snapshots"], 0);
+    assert_eq!(summary["snapshots"][0]["id"], id);
+    let outcomes = summary["user_reported"]["outcomes"].as_array().unwrap();
+    assert_eq!(
+        outcomes.iter().find(|o| o["outcome"] == "partial").unwrap()["snapshots"],
+        1
+    );
+    assert!(!summary.to_string().contains("SECRET_FIXTURE_BODY"));
+    assert!(!config.exists());
+    value(invoke(&config, &store, &["delete", id]));
+    assert_eq!(
+        value(invoke(&config, &store, &["summary"]))["saved_snapshots"],
+        0
+    );
+}

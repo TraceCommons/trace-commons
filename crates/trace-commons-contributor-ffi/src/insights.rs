@@ -13,7 +13,8 @@ use trace_commons_contributor::insights::service::{MAX_REQUEST_BYTES, dispatch_j
 /// User assessment: `{"type":"annotate","id":"...","category":"docs","outcome":"partial"}`.
 /// Clear assessment: `{"type":"clear_annotation","id":"..."}`.
 /// Native usage: `{"type":"usage","source":"claude_code","file":"/chosen/file"}`.
-/// Shared UI vocabulary: `{"type":"copy"}`. Listing an absent store creates no state.
+/// Saved-history summary: `{"type":"summary"}`. Reads derived observations only.
+/// Shared UI vocabulary: `{"type":"copy"}`. List/summary create no absent store.
 /// Omit store_dir to use the shared platform local-data Insights directory.
 /// Runs synchronous bounded-source local IO: call off the UI thread; closing a
 /// window does not cancel a started operation. Keep buffers alive until return.
