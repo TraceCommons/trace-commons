@@ -69,6 +69,40 @@ pub(super) fn invalidate_missing_members(index: &mut Index) -> MutationEffects {
         }
         retain
     });
+    effects.stale_comparison_task_ids = index
+        .comparison_tasks
+        .values()
+        .filter(|task| {
+            task.episodes.iter().any(|binding| {
+                index
+                    .episodes
+                    .get(&binding.episode_id)
+                    .is_none_or(|episode| {
+                        episode.revision != binding.revision || episode.members != binding.members
+                    })
+                    || binding.members.iter().any(|member| {
+                        index
+                            .reports
+                            .get(&member.snapshot_id)
+                            .is_none_or(|snapshot| {
+                                snapshot.report.evidence[0].source_digest != member.source_digest
+                            })
+                    })
+            })
+        })
+        .map(|task| task.id.clone())
+        .collect();
+    effects.stale_comparison_tasks = effects
+        .stale_comparison_task_ids
+        .iter()
+        .map(|task_id| super::StaleComparisonTaskEffect {
+            task_id: task_id.clone(),
+            reasons: vec![
+                super::comparison_tasks::ComparisonTaskStaleReason::EpisodeMissing,
+                super::comparison_tasks::ComparisonTaskStaleReason::SnapshotMissingOrReplaced,
+            ],
+        })
+        .collect();
     effects
 }
 
@@ -150,6 +184,35 @@ fn overlap(reverse: &BTreeMap<&str, Vec<&str>>, episode: &LocalEpisode) -> Vec<E
         .collect()
 }
 
+fn task_effects_for_episode(
+    index: &Index,
+    episode_id: &str,
+    reasons: Vec<super::comparison_tasks::ComparisonTaskStaleReason>,
+) -> MutationEffects {
+    let stale_comparison_task_ids = index
+        .comparison_tasks
+        .values()
+        .filter(|task| {
+            task.episodes
+                .iter()
+                .any(|binding| binding.episode_id == episode_id)
+        })
+        .map(|task| task.id.clone())
+        .collect::<Vec<_>>();
+    let stale_comparison_tasks = stale_comparison_task_ids
+        .iter()
+        .map(|task_id| super::StaleComparisonTaskEffect {
+            task_id: task_id.clone(),
+            reasons: reasons.clone(),
+        })
+        .collect();
+    MutationEffects {
+        invalidated_episode_ids: Vec::new(),
+        stale_comparison_task_ids,
+        stale_comparison_tasks,
+    }
+}
+
 impl LocalInsightStore {
     pub fn episode_create(&self, snapshot_ids: &[String]) -> Result<LocalEpisode> {
         validate_snapshot_ids(snapshot_ids)?;
@@ -220,6 +283,17 @@ impl LocalInsightStore {
         expected_revision: u64,
         snapshot_ids: &[String],
     ) -> Result<LocalEpisode> {
+        Ok(self
+            .episode_replace_members_with_effects(id, expected_revision, snapshot_ids)?
+            .value)
+    }
+
+    pub fn episode_replace_members_with_effects(
+        &self,
+        id: &str,
+        expected_revision: u64,
+        snapshot_ids: &[String],
+    ) -> Result<super::SnapshotMutation<LocalEpisode>> {
         validate_snapshot_ids(snapshot_ids)?;
         let (_lock, mut index) = self.locked()?;
         checked_episode(&mut index, id, expected_revision)?;
@@ -229,15 +303,29 @@ impl LocalInsightStore {
             .get_mut(id)
             .expect("checked episode remains in locked index");
         if episode.members == members {
-            return Ok(episode.clone());
+            return Ok(super::SnapshotMutation {
+                value: episode.clone(),
+                mutation_effects: MutationEffects::default(),
+            });
         }
         advance(episode, true)?;
         episode.members = members;
         episode.manual_assessment = None;
         episode.validate()?;
         let result = episode.clone();
+        let mutation_effects = task_effects_for_episode(
+            &index,
+            id,
+            vec![
+                super::comparison_tasks::ComparisonTaskStaleReason::EpisodeRevisionChanged,
+                super::comparison_tasks::ComparisonTaskStaleReason::EpisodeMembershipChanged,
+            ],
+        );
         self.save(&index)?;
-        Ok(result)
+        Ok(super::SnapshotMutation {
+            value: result,
+            mutation_effects,
+        })
     }
 
     pub fn episode_annotate(
@@ -247,6 +335,18 @@ impl LocalInsightStore {
         category: TaskCategory,
         outcome: TaskOutcome,
     ) -> Result<LocalEpisode> {
+        Ok(self
+            .episode_annotate_with_effects(id, expected_revision, category, outcome)?
+            .value)
+    }
+
+    pub fn episode_annotate_with_effects(
+        &self,
+        id: &str,
+        expected_revision: u64,
+        category: TaskCategory,
+        outcome: TaskOutcome,
+    ) -> Result<super::SnapshotMutation<LocalEpisode>> {
         let (_lock, mut index) = self.locked()?;
         let episode = checked_episode(&mut index, id, expected_revision)?;
         if episode
@@ -256,7 +356,10 @@ impl LocalInsightStore {
                 assessment.category == category && assessment.outcome == outcome
             })
         {
-            return Ok(episode.clone());
+            return Ok(super::SnapshotMutation {
+                value: episode.clone(),
+                mutation_effects: MutationEffects::default(),
+            });
         }
         advance(episode, false)?;
         episode.manual_assessment = Some(EpisodeAssessment {
@@ -269,8 +372,16 @@ impl LocalInsightStore {
         });
         episode.validate()?;
         let result = episode.clone();
+        let mutation_effects = task_effects_for_episode(
+            &index,
+            id,
+            vec![super::comparison_tasks::ComparisonTaskStaleReason::EpisodeRevisionChanged],
+        );
         self.save(&index)?;
-        Ok(result)
+        Ok(super::SnapshotMutation {
+            value: result,
+            mutation_effects,
+        })
     }
 
     pub fn episode_clear_assessment(
@@ -278,24 +389,63 @@ impl LocalInsightStore {
         id: &str,
         expected_revision: u64,
     ) -> Result<LocalEpisode> {
+        Ok(self
+            .episode_clear_assessment_with_effects(id, expected_revision)?
+            .value)
+    }
+
+    pub fn episode_clear_assessment_with_effects(
+        &self,
+        id: &str,
+        expected_revision: u64,
+    ) -> Result<super::SnapshotMutation<LocalEpisode>> {
         let (_lock, mut index) = self.locked()?;
         let episode = checked_episode(&mut index, id, expected_revision)?;
         if episode.manual_assessment.is_none() {
-            return Ok(episode.clone());
+            return Ok(super::SnapshotMutation {
+                value: episode.clone(),
+                mutation_effects: MutationEffects::default(),
+            });
         }
         advance(episode, false)?;
         episode.manual_assessment = None;
         let result = episode.clone();
+        let mutation_effects = task_effects_for_episode(
+            &index,
+            id,
+            vec![super::comparison_tasks::ComparisonTaskStaleReason::EpisodeRevisionChanged],
+        );
         self.save(&index)?;
-        Ok(result)
+        Ok(super::SnapshotMutation {
+            value: result,
+            mutation_effects,
+        })
     }
 
     pub fn episode_delete(&self, id: &str, expected_revision: u64) -> Result<LocalEpisode> {
+        Ok(self
+            .episode_delete_with_effects(id, expected_revision)?
+            .value)
+    }
+
+    pub fn episode_delete_with_effects(
+        &self,
+        id: &str,
+        expected_revision: u64,
+    ) -> Result<super::SnapshotMutation<LocalEpisode>> {
         let (_lock, mut index) = self.locked()?;
         let result = checked_episode(&mut index, id, expected_revision)?.clone();
         index.episodes.remove(id);
+        let mutation_effects = task_effects_for_episode(
+            &index,
+            id,
+            vec![super::comparison_tasks::ComparisonTaskStaleReason::EpisodeMissing],
+        );
         self.save(&index)?;
-        Ok(result)
+        Ok(super::SnapshotMutation {
+            value: result,
+            mutation_effects,
+        })
     }
 }
 

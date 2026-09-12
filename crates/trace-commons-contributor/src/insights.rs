@@ -5,6 +5,8 @@
 pub mod card_presentation;
 pub mod card_store;
 pub mod cards;
+pub mod comparison_task_store;
+pub mod comparison_tasks;
 pub mod episode_store;
 pub mod episodes;
 pub mod models;
@@ -31,7 +33,7 @@ use trace_commons_protocol::insights::{
 };
 
 const MAX_SOURCE_BYTES: u64 = 16 * 1024 * 1024;
-const STORE_VERSION: u32 = 6;
+const STORE_VERSION: u32 = 7;
 const MAX_OUTCOME_LINKS: usize = 128;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -270,6 +272,17 @@ pub fn analyze_file(format: SourceFormat, path: &Path) -> Result<LocalInsight> {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MutationEffects {
     pub invalidated_episode_ids: Vec<String>,
+    /// Retained tasks whose frozen episode/snapshot evidence is now stale.
+    pub stale_comparison_task_ids: Vec<String>,
+    /// Stable, content-free reasons for each affected retained task.
+    pub stale_comparison_tasks: Vec<StaleComparisonTaskEffect>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct StaleComparisonTaskEffect {
+    pub task_id: String,
+    pub reasons: Vec<comparison_tasks::ComparisonTaskStaleReason>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -286,6 +299,8 @@ struct Index {
     reports: BTreeMap<String, LocalInsight>,
     #[serde(default)]
     episodes: BTreeMap<String, episodes::LocalEpisode>,
+    #[serde(default)]
+    comparison_tasks: BTreeMap<String, comparison_tasks::LocalComparisonTaskV1>,
 }
 
 /// Dedicated local directory, independent of the enrollment/config store.
@@ -376,6 +391,7 @@ impl LocalInsightStore {
                 aliases: BTreeMap::new(),
                 reports: BTreeMap::new(),
                 episodes: BTreeMap::new(),
+                comparison_tasks: BTreeMap::new(),
             },
             Err(_) => bail!("insights_store_unreadable"),
         };
@@ -459,7 +475,8 @@ impl LocalInsightStore {
             bail!("insights_store_invalid");
         }
         episode_store::validate_index_episodes(&index)?;
-        // Legacy snapshots remain readable; the next mutation persists v5.
+        comparison_task_store::validate_index_comparison_tasks(&index)?;
+        // Legacy stores remain readable; the next mutation persists the current version.
         index.version = STORE_VERSION;
         Ok((lock, index))
     }

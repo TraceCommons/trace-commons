@@ -2,6 +2,10 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::{Args, Subcommand, ValueEnum};
+use trace_commons_contributor::insights::comparison_tasks::{
+    CheckoutProvenance, ComparisonConfigurationV1, ComparisonTaskContextInput, ContextDigest,
+    ContextString,
+};
 use trace_commons_contributor::insights::service::{
     LocalInsightsOperation, LocalInsightsRequest, LocalInsightsResponse, execute,
 };
@@ -70,6 +74,11 @@ enum InsightsCommand {
         #[arg(long)]
         expected_revision: u64,
     },
+    /// Manage user-reviewed comparison tasks built from frozen episodes
+    ComparisonTask {
+        #[command(subcommand)]
+        command: ComparisonTaskCommand,
+    },
     /// Analyze one selected file locally; persist only when --save is supplied
     Analyze {
         #[arg(long, value_enum)]
@@ -120,6 +129,72 @@ enum InsightsCommand {
         source: NativeUsageSource,
         #[arg(long)]
         file: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+enum ComparisonTaskCommand {
+    Create {
+        #[arg(long = "episode", required = true)]
+        episode_ids: Vec<String>,
+    },
+    List,
+    Explain {
+        id: String,
+    },
+    ReplaceEpisodes {
+        id: String,
+        #[arg(long)]
+        expected_revision: u64,
+        #[arg(long = "episode", required = true)]
+        episode_ids: Vec<String>,
+    },
+    SetContext {
+        id: String,
+        #[arg(long)]
+        expected_revision: u64,
+        #[arg(long)]
+        project_id: String,
+        #[arg(long)]
+        task_date: String,
+        #[arg(long)]
+        language: Option<String>,
+        #[arg(long)]
+        harness_id: Option<String>,
+        #[arg(long)]
+        harness_version: Option<String>,
+        #[arg(long, default_value = "unknown", value_parser = ["unknown", "none", "minimal", "low", "medium", "high", "xhigh"])]
+        reasoning_effort: String,
+        #[arg(long)]
+        tool_policy_id: Option<String>,
+        #[arg(long)]
+        tool_policy_version: Option<String>,
+        #[arg(long)]
+        prompt_template_digest: Option<String>,
+    },
+    SetOutcome {
+        id: String,
+        #[arg(long)]
+        expected_revision: u64,
+        #[arg(long, value_parser = ["pending", "accepted", "partial", "rejected", "unknown"])]
+        outcome: String,
+    },
+    ClearOutcome {
+        id: String,
+        #[arg(long)]
+        expected_revision: u64,
+    },
+    Reconfirm {
+        id: String,
+        #[arg(long)]
+        expected_revision: u64,
+        #[arg(long)]
+        material_digest: String,
+    },
+    Delete {
+        id: String,
+        #[arg(long)]
+        expected_revision: u64,
     },
 }
 
@@ -234,6 +309,101 @@ pub(super) fn run(args: &InsightsArgs, json: bool) -> Result<()> {
             },
             json,
         )?,
+        InsightsCommand::ComparisonTask { command } => {
+            let operation = match command {
+                ComparisonTaskCommand::Create { episode_ids } => {
+                    LocalInsightsOperation::ComparisonTaskCreate {
+                        episode_ids: episode_ids.clone(),
+                    }
+                }
+                ComparisonTaskCommand::List => LocalInsightsOperation::ComparisonTaskList {},
+                ComparisonTaskCommand::Explain { id } => {
+                    LocalInsightsOperation::ComparisonTaskExplain { id: id.clone() }
+                }
+                ComparisonTaskCommand::ReplaceEpisodes {
+                    id,
+                    expected_revision,
+                    episode_ids,
+                } => LocalInsightsOperation::ComparisonTaskReplaceEpisodes {
+                    id: id.clone(),
+                    expected_revision: *expected_revision,
+                    episode_ids: episode_ids.clone(),
+                },
+                ComparisonTaskCommand::SetContext {
+                    id,
+                    expected_revision,
+                    project_id,
+                    task_date,
+                    language,
+                    harness_id,
+                    harness_version,
+                    reasoning_effort,
+                    tool_policy_id,
+                    tool_policy_version,
+                    prompt_template_digest,
+                } => {
+                    let configuration = ComparisonConfigurationV1 {
+                        harness_id: context_string(harness_id),
+                        harness_version: context_string(harness_version),
+                        reasoning_effort: serde_json::from_value(reasoning_effort.clone().into())?,
+                        tool_policy_id: context_string(tool_policy_id),
+                        tool_policy_version: context_string(tool_policy_version),
+                        prompt_template_digest: prompt_template_digest.as_ref().map_or(
+                            ContextDigest::Unknown,
+                            |digest| ContextDigest::Known {
+                                digest: digest.clone(),
+                            },
+                        ),
+                    };
+                    let context = ComparisonTaskContextInput {
+                        project_id: project_id.clone(),
+                        category: TaskCategory::Refactor,
+                        task_date: task_date.parse()?,
+                        checkout_provenance: CheckoutProvenance::Unavailable,
+                        language: context_string(language),
+                        configuration,
+                    };
+                    LocalInsightsOperation::ComparisonTaskSetContext {
+                        id: id.clone(),
+                        expected_revision: *expected_revision,
+                        context,
+                    }
+                }
+                ComparisonTaskCommand::SetOutcome {
+                    id,
+                    expected_revision,
+                    outcome,
+                } => LocalInsightsOperation::ComparisonTaskSetOutcome {
+                    id: id.clone(),
+                    expected_revision: *expected_revision,
+                    outcome: serde_json::from_value(outcome.clone().into())?,
+                },
+                ComparisonTaskCommand::ClearOutcome {
+                    id,
+                    expected_revision,
+                } => LocalInsightsOperation::ComparisonTaskClearOutcome {
+                    id: id.clone(),
+                    expected_revision: *expected_revision,
+                },
+                ComparisonTaskCommand::Reconfirm {
+                    id,
+                    expected_revision,
+                    material_digest,
+                } => LocalInsightsOperation::ComparisonTaskReconfirm {
+                    id: id.clone(),
+                    expected_revision: *expected_revision,
+                    displayed_material_digest: material_digest.clone(),
+                },
+                ComparisonTaskCommand::Delete {
+                    id,
+                    expected_revision,
+                } => LocalInsightsOperation::ComparisonTaskDelete {
+                    id: id.clone(),
+                    expected_revision: *expected_revision,
+                },
+            };
+            render_comparison_task_operation(args, operation, json)?;
+        }
         InsightsCommand::Analyze { source, file, save } => {
             let LocalInsightsResponse::Analyze {
                 insight,
@@ -403,6 +573,124 @@ pub(super) fn run(args: &InsightsArgs, json: bool) -> Result<()> {
     Ok(())
 }
 
+fn context_string(value: &Option<String>) -> ContextString {
+    value
+        .as_ref()
+        .map_or(ContextString::Unknown, |value| ContextString::Known {
+            value: value.clone(),
+        })
+}
+
+fn render_comparison_task_operation(
+    args: &InsightsArgs,
+    operation: LocalInsightsOperation,
+    json: bool,
+) -> Result<()> {
+    let response = execute(LocalInsightsRequest {
+        store_dir: args.store_dir.clone(),
+        operation,
+    })?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&response)?);
+        return Ok(());
+    }
+    let copy = trace_commons_contributor::insights::service::ui_copy();
+    match response {
+        LocalInsightsResponse::ComparisonTaskList { tasks } => {
+            if tasks.is_empty() {
+                println!("{}", copy["comparison_task_empty"]);
+            }
+            for detail in tasks {
+                render_comparison_task(&detail.task, Some(&detail.stale_reasons), &copy)?;
+            }
+        }
+        LocalInsightsResponse::ComparisonTaskExplain { detail } => {
+            render_comparison_task(&detail.task, Some(&detail.stale_reasons), &copy)?
+        }
+        LocalInsightsResponse::ComparisonTask {
+            task,
+            mutation_effects,
+        }
+        | LocalInsightsResponse::ComparisonTaskDelete {
+            task,
+            mutation_effects,
+        } => {
+            render_comparison_task(&task, None, &copy)?;
+            render_mutation_effects(&mutation_effects);
+        }
+        _ => anyhow::bail!("insights-comparison-task-response-invalid"),
+    }
+    Ok(())
+}
+
+fn render_comparison_task(
+    task: &trace_commons_contributor::insights::comparison_tasks::LocalComparisonTaskV1,
+    reasons: Option<
+        &[trace_commons_contributor::insights::comparison_tasks::ComparisonTaskStaleReason],
+    >,
+    copy: &std::collections::BTreeMap<String, String>,
+) -> Result<()> {
+    println!("{} — {}", copy["comparison_task_title"], task.id);
+    println!(
+        "Revision: {} · Material revision: {}",
+        task.revision, task.material_revision
+    );
+    println!(
+        "{}: {}",
+        copy["comparison_task_material_digest"], task.material_digest
+    );
+    println!(
+        "{}",
+        if task
+            .context
+            .as_ref()
+            .is_some_and(|context| context.is_complete())
+        {
+            &copy["comparison_task_context_complete"]
+        } else {
+            &copy["comparison_task_context_incomplete"]
+        }
+    );
+    if let Some(outcome) = &task.outcome {
+        println!(
+            "User-reported outcome: {}",
+            serde_json::to_value(outcome.value)?
+                .as_str()
+                .unwrap_or("unknown")
+        );
+    } else {
+        println!("{}", copy["comparison_task_outcome_unassessed"]);
+    }
+    let confirmation_current = task
+        .independence_confirmation
+        .as_ref()
+        .is_some_and(|value| {
+            value.material_revision == task.material_revision
+                && value.material_digest == task.material_digest
+        });
+    println!(
+        "{}",
+        if confirmation_current {
+            &copy["comparison_task_confirmation_current"]
+        } else {
+            &copy["comparison_task_confirmation_missing"]
+        }
+    );
+    println!("{}", copy["comparison_task_attribution_pending"]);
+    if let Some(reasons) = reasons {
+        println!(
+            "Review reasons: {}",
+            reasons
+                .iter()
+                .filter_map(|reason| serde_json::to_value(reason).ok())
+                .filter_map(|value| value.as_str().map(str::to_owned))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    Ok(())
+}
+
 fn render_mutation_effects(effects: &MutationEffects) {
     if !effects.invalidated_episode_ids.is_empty() {
         let copy = trace_commons_contributor::insights::service::ui_copy();
@@ -410,6 +698,16 @@ fn render_mutation_effects(effects: &MutationEffects) {
         for id in &effects.invalidated_episode_ids {
             println!("  {id}");
         }
+    }
+    for effect in &effects.stale_comparison_tasks {
+        let reasons = effect
+            .reasons
+            .iter()
+            .filter_map(|reason| serde_json::to_value(reason).ok())
+            .filter_map(|value| value.as_str().map(str::to_owned))
+            .collect::<Vec<_>>()
+            .join(",");
+        println!("Comparison task {} is stale: {reasons}", effect.task_id);
     }
 }
 
@@ -455,15 +753,29 @@ fn render_episode_operation(
                 render(member, false)?;
             }
         }
-        LocalInsightsResponse::EpisodeDelete { episode } => {
+        LocalInsightsResponse::EpisodeDelete {
+            episode,
+            mutation_effects,
+        } => {
             println!("{}", copy["episode_deleted"]);
             render_episode(&episode, &copy)?;
+            render_mutation_effects(&mutation_effects);
         }
-        LocalInsightsResponse::EpisodeCreate { episode }
-        | LocalInsightsResponse::EpisodeReplaceMembers { episode }
-        | LocalInsightsResponse::EpisodeAnnotate { episode }
-        | LocalInsightsResponse::EpisodeClearAssessment { episode } => {
-            render_episode(&episode, &copy)?
+        LocalInsightsResponse::EpisodeCreate { episode } => render_episode(&episode, &copy)?,
+        LocalInsightsResponse::EpisodeReplaceMembers {
+            episode,
+            mutation_effects,
+        }
+        | LocalInsightsResponse::EpisodeAnnotate {
+            episode,
+            mutation_effects,
+        }
+        | LocalInsightsResponse::EpisodeClearAssessment {
+            episode,
+            mutation_effects,
+        } => {
+            render_episode(&episode, &copy)?;
+            render_mutation_effects(&mutation_effects);
         }
         _ => anyhow::bail!("insights-episode-response-invalid"),
     }
