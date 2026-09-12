@@ -396,8 +396,19 @@ async fn public_run_publish_and_withdraw_race_cannot_reopen_a_revoked_trace() {
     cleanup_tenant(&publisher, &tenant_id).await;
 }
 
+/// These tests deliberately contend on the production-wide provenance lock.
+/// Keep them out of each other's measurement window: the sourced-publication
+/// test probes whether that lock is available, and PostgreSQL cannot tell that
+/// probe whether a competing holder belongs to the operation under test or to
+/// this module's root-publication test running on another harness thread.
+fn provenance_graph_lock_test_guard() -> &'static tokio::sync::Mutex<()> {
+    static GUARD: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    GUARD.get_or_init(Default::default)
+}
+
 #[tokio::test]
 async fn root_publications_do_not_wait_for_the_provenance_graph_lock() {
+    let _guard = provenance_graph_lock_test_guard().lock().await;
     let Some(backend) = postgres_backend().await else {
         return;
     };
@@ -479,6 +490,7 @@ async fn root_publications_do_not_wait_for_the_provenance_graph_lock() {
 
 #[tokio::test]
 async fn sourced_publications_wait_for_the_provenance_graph_lock() {
+    let _guard = provenance_graph_lock_test_guard().lock().await;
     let Some(backend) = postgres_backend().await else {
         return;
     };
