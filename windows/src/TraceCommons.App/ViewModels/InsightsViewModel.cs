@@ -20,6 +20,11 @@ public sealed record SummaryRow(string Label, string Details, IReadOnlyList<Summ
 public sealed record EpisodeRow(string Id, string Label);
 public sealed record EpisodeMemberRow(string Id, string Label, string Details);
 public sealed record EpisodeTarget(string Id, ulong Revision, ulong MembershipRevision, long PresentationVersion);
+public sealed record CardEvidenceLink(string Id, string Label);
+public sealed record QuestionCardRow(string Label, string Value);
+public sealed record QuestionCardView(string Question, string State, string MetricVersion,
+    IReadOnlyList<QuestionCardRow> Rows, string Coverage, string Limitations,
+    IReadOnlyList<CardEvidenceLink> Evidence, IReadOnlyList<CardEvidenceLink> Episodes, string Omission);
 
 /// <summary>Owns the frozen revision used by the control's complete member-selection draft.</summary>
 public sealed class EpisodeMemberDraftBinding
@@ -45,6 +50,7 @@ public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
     private long _generation;
     private long _selectionVersion;
     private long _episodePresentationVersion;
+    private long _cardPresentationVersion;
     private bool _episodeReviewRequired;
     private bool _closed;
     private Task _active = Task.CompletedTask;
@@ -66,6 +72,9 @@ public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
     public ObservableCollection<SummaryRow> SummaryRows { get; } = new();
     public ObservableCollection<EpisodeRow> Episodes { get; } = new();
     public ObservableCollection<EpisodeMemberRow> EpisodeMembers { get; } = new();
+    public ObservableCollection<QuestionCardView> QuestionCards { get; } = new();
+    public string CardStatus { get; private set; } = "";
+    public bool HasQuestionCards => QuestionCards.Count != 0;
     public string EpisodeStatus { get; private set; } = "";
     public string EpisodeDetails { get; private set; } = "";
     public string? CurrentEpisodeId { get; private set; }
@@ -115,6 +124,7 @@ public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
     public Task RefreshAsync() => Run(RefreshCoreAsync);
     private async Task RefreshCoreAsync(CancellationToken token)
     {
+        ClearQuestionCards();
         ClearSummary();
         var response = await _service.CallAsync(new { type = "list" }, token);
         token.ThrowIfCancellationRequested();
@@ -140,6 +150,102 @@ public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
         Status = Saved.Count == 0 ? this["empty"] : "";
         await RefreshSummaryAsync(token);
         await RefreshEpisodesCoreAsync(token, CurrentEpisodeId);
+    }
+
+    public Task LoadQuestionCardsAsync(IEnumerable<string> snapshotIds, IEnumerable<string> episodeIds)
+    {
+        if (_closed || Busy) return Task.CompletedTask;
+        string[] snapshots = snapshotIds.Distinct(StringComparer.Ordinal).OrderBy(id => id, StringComparer.Ordinal).ToArray();
+        string[] episodes = episodeIds.Distinct(StringComparer.Ordinal).OrderBy(id => id, StringComparer.Ordinal).ToArray();
+        long presentation = ++_cardPresentationVersion;
+        ClearQuestionCards(false);
+        CardStatus = this["working"];
+        Changed();
+        return Run(async token =>
+        {
+            try
+            {
+                var response = await _service.CallAsync(new {
+                    type = "question_cards",
+                    questions = new[] { "recorded_activity", "episode_outcomes", "observed_models", "estimated_cost" },
+                    snapshot_ids = snapshots, episode_ids = episodes
+                }, token);
+                token.ThrowIfCancellationRequested();
+                var result = InsightCardResponses.Decode(response);
+                if (presentation != _cardPresentationVersion) return;
+                var rendered = RenderQuestionCards(result);
+                QuestionCards.Clear();
+                foreach (var card in rendered) QuestionCards.Add(card);
+                CardStatus = "";
+                Changed();
+            }
+            catch (InsightsServiceException error)
+            {
+                if (presentation != _cardPresentationVersion) return;
+                ClearQuestionCards(false);
+                CardStatus = this[CardErrorCopyKey(error.Code)];
+                Changed();
+            }
+            catch (Exception)
+            {
+                if (presentation != _cardPresentationVersion) return;
+                ClearQuestionCards(false);
+                CardStatus = this["error"];
+                Changed();
+            }
+        });
+    }
+
+    public Task OpenCardEvidenceAsync(string id)
+    {
+        if (!QuestionCards.SelectMany(card => card.Evidence).Any(link => link.Id == id)) return Task.CompletedTask;
+        return ExplainAsync(id);
+    }
+
+    public Task OpenCardEpisodeAsync(string id)
+    {
+        if (!QuestionCards.SelectMany(card => card.Episodes).Any(link => link.Id == id)) return Task.CompletedTask;
+        return OpenEpisodeAsync(id);
+    }
+
+    private IReadOnlyList<QuestionCardView> RenderQuestionCards(InsightCardResult result)
+    {
+        string Value(InsightCardRow row)
+        {
+            if (row.Value == null) return this["card_missing_" + row.MissingReason];
+            return row.Value.Type switch {
+                "count" => Number(row.Value.UnsignedValue!.Value),
+                "milliseconds" => Number(row.Value.UnsignedValue!.Value) + " ms",
+                "unix_milliseconds" => Date(DateTimeOffset.FromUnixTimeMilliseconds(row.Value.SignedValue!.Value)),
+                _ => throw new InvalidOperationException("insights-response-invalid")
+            };
+        }
+        return result.Cards.Select(card => new QuestionCardView(
+            this["card_question_" + card.Question], this["card_state_" + card.State], card.MetricVersion,
+            card.Rows.Select(row => new QuestionCardRow(this["card_row_" + row.Id] +
+                (row.Label == null ? "" : " (" + row.Label + ")"), Value(row))).ToArray(),
+            string.Join("\n", card.Coverage.Select(item => this["card_coverage_" + item.Unit] + ": " +
+                Number(item.Observed) + " / " + Number(item.Eligible))),
+            string.Join("\n", card.Limitations.Select(item => this["card_limitation_" + item])),
+            card.EvidenceIds.Select(id => new CardEvidenceLink(id, this["card_evidence"] + " · " + id)).ToArray(),
+            card.EpisodeIds.Select(id => new CardEvidenceLink(id, this["card_episodes"] + " · " + id)).ToArray(),
+            card.RowsOmitted ? this["card_more_models"] : "")).ToArray();
+    }
+
+    private static string CardErrorCopyKey(string code) => code switch {
+        "insights_card_snapshot_not_found" => "episode_missing_members",
+        "insights_card_episode_not_found" => "episode_missing",
+        "insights_card_snapshot_limit" => "episode_member_limit",
+        "insights_card_episode_limit" => "episode_limit",
+        _ => "error"
+    };
+
+    private void ClearQuestionCards(bool advance = true)
+    {
+        if (advance) ++_cardPresentationVersion;
+        QuestionCards.Clear();
+        CardStatus = "";
+        Changed();
     }
     public Task AnalyzeAsync(string source, string file, bool save) => Run(async token =>
     {
@@ -168,6 +274,7 @@ public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
             var response = await _service.CallAsync(new { type = "episode_create", snapshot_ids = ids }, token);
             token.ThrowIfCancellationRequested();
             var episode = InsightEpisodeResponses.DecodeMutation(response, "episode_create");
+            ClearQuestionCards();
             bool reconciled = await RefreshEpisodesCoreAsync(token, episode.Id);
             EpisodeStatus = reconciled ? this["episode_create_success"] : this["episode_create_success"] + "\n" + EpisodeStatus;
         }
@@ -220,6 +327,7 @@ public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
                 token.ThrowIfCancellationRequested();
                 var deleted = InsightEpisodeResponses.DecodeMutation(response, "episode_delete");
                 if (deleted.Id != target.Id) throw new InvalidOperationException("insights-response-invalid");
+                ClearQuestionCards();
                 ClearEpisodeDetail();
                 bool reconciled = await RefreshEpisodesCoreAsync(token, null);
                 EpisodeStatus = reconciled ? this["episode_deleted"] : this["episode_deleted"] + "\n" + EpisodeStatus;
@@ -240,6 +348,7 @@ public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
                 token.ThrowIfCancellationRequested();
                 var episode = InsightEpisodeResponses.DecodeMutation(response, responseType);
                 if (episode.Id != target.Id) throw new InvalidOperationException("insights-response-invalid");
+                ClearQuestionCards();
                 bool reconciled = await RefreshEpisodesCoreAsync(token, target.Id);
                 string committed = successKey == "episode_members_saved" && episode.MembershipRevision != target.MembershipRevision
                     ? this[successKey] + "\n" + this["episode_membership_changed"] : this[successKey];
@@ -261,6 +370,7 @@ public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
         ++_episodePresentationVersion;
         if (error.Code == "insights_episode_revision_conflict")
         {
+            ClearQuestionCards();
             EpisodeStatus = this["episode_revision_conflict"];
             bool reconciled = await RefreshEpisodesCoreAsync(token, id);
             _episodeReviewRequired = true;
@@ -386,6 +496,7 @@ public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
         ClearSummary();
         var result = await _service.CallAsync(new { type = "annotate", id = CurrentId, category, outcome }, token);
         token.ThrowIfCancellationRequested();
+        ClearQuestionCards();
         Render(result.GetProperty("insight"), true);
         await RefreshSummaryAsync(token);
     });
@@ -395,6 +506,7 @@ public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
         ClearSummary();
         var result = await _service.CallAsync(new { type = "clear_annotation", id = CurrentId }, token);
         token.ThrowIfCancellationRequested();
+        ClearQuestionCards();
         Render(result.GetProperty("insight"), true);
         await RefreshSummaryAsync(token);
     });
@@ -426,6 +538,7 @@ public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
             var insight = result.GetProperty("insight");
             if (insight.GetProperty("id").GetString() != target.SnapshotId)
                 throw new InvalidOperationException("insights-response-invalid");
+            ClearQuestionCards();
             Render(insight, true);
             await RefreshCoreAsync(token);
             Status = this[success];
@@ -514,6 +627,7 @@ public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
     }
     private void RenderMutationEffects(JsonElement response)
     {
+        ClearQuestionCards();
         var effects = InsightMutationEffects.Decode(response);
         if (CurrentEpisodeId != null && effects.InvalidatedEpisodeIds.Contains(CurrentEpisodeId, StringComparer.Ordinal))
             ClearEpisodeDetail();
@@ -665,6 +779,7 @@ public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
         MutationNotice = "";
         ++_selectionVersion;
         ++_episodePresentationVersion;
+        ClearQuestionCards();
         _pending?.Cancel();
         // Keep mutations serialized until the outstanding operation settles.
         Status = CancellationNotice;
@@ -677,6 +792,7 @@ public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
         MutationNotice = "";
         ++_selectionVersion;
         ++_episodePresentationVersion;
+        ++_cardPresentationVersion;
         ++_generation;
         _pending?.Cancel();
     }

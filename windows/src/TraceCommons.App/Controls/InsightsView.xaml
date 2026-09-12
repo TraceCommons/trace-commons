@@ -54,6 +54,55 @@
                 <Button Content="{Binding [explain]}" Click="OnExplain" IsEnabled="{Binding Idle}" />
                 <Button Content="{Binding [delete]}" Click="OnDelete" IsEnabled="{Binding HasSavedSelection}" />
             </StackPanel>
+            <Expander Header="{Binding [card_title]}" HorizontalAlignment="Stretch">
+                <StackPanel Spacing="10">
+                    <TextBlock Text="{Binding [card_selection_notice]}" TextWrapping="Wrap" />
+                    <TextBlock Text="{Binding [card_choose_evidence]}" FontSize="18" TextWrapping="Wrap" />
+                    <TextBlock Text="{Binding [card_evidence]}" TextWrapping="Wrap" />
+                    <ListView x:Name="CardSavedList" ItemsSource="{Binding Saved}" DisplayMemberPath="Label"
+                              MaxHeight="160" SelectionMode="Multiple" IsEnabled="{Binding Idle}"
+                              AutomationProperties.Name="{Binding [card_evidence]}" />
+                    <TextBlock Text="{Binding [card_episodes]}" TextWrapping="Wrap" />
+                    <ListView x:Name="CardEpisodeList" ItemsSource="{Binding Episodes}" DisplayMemberPath="Label"
+                              MaxHeight="160" SelectionMode="Multiple" IsEnabled="{Binding Idle}"
+                              AutomationProperties.Name="{Binding [card_episodes]}" />
+                    <Button Content="{Binding [card_update]}" Click="OnLoadQuestionCards" IsEnabled="{Binding Idle}" />
+                    <TextBlock Text="{Binding CardStatus}" TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite" />
+                    <ItemsControl ItemsSource="{Binding QuestionCards}">
+                        <ItemsControl.ItemTemplate><DataTemplate>
+                            <Expander Header="{Binding Question}" HorizontalAlignment="Stretch">
+                                <StackPanel Spacing="6" Padding="0,6">
+                                    <TextBlock Text="{Binding State}" FontSize="18" />
+                                    <TextBlock Text="{Binding MetricVersion}" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
+                                    <ItemsControl ItemsSource="{Binding Rows}">
+                                        <ItemsControl.ItemTemplate><DataTemplate>
+                                            <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
+                                                <TextBlock Text="{Binding Label}" TextWrapping="Wrap" />
+                                                <TextBlock Grid.Column="1" Text="{Binding Value}" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
+                                            </Grid>
+                                        </DataTemplate></ItemsControl.ItemTemplate>
+                                    </ItemsControl>
+                                    <TextBlock Text="{Binding Coverage}" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
+                                    <TextBlock Text="{Binding Limitations}" TextWrapping="Wrap" />
+                                    <TextBlock Text="{Binding Omission}" TextWrapping="Wrap" />
+                                    <ItemsControl ItemsSource="{Binding Evidence}">
+                                        <ItemsControl.ItemTemplate><DataTemplate>
+                                            <Button Content="{Binding Label}" Tag="{Binding Id}" Click="OnCardEvidence"
+                                                    HorizontalAlignment="Stretch" HorizontalContentAlignment="Left" />
+                                        </DataTemplate></ItemsControl.ItemTemplate>
+                                    </ItemsControl>
+                                    <ItemsControl ItemsSource="{Binding Episodes}">
+                                        <ItemsControl.ItemTemplate><DataTemplate>
+                                            <Button Content="{Binding Label}" Tag="{Binding Id}" Click="OnCardEpisode"
+                                                    HorizontalAlignment="Stretch" HorizontalContentAlignment="Left" />
+                                        </DataTemplate></ItemsControl.ItemTemplate>
+                                    </ItemsControl>
+                                </StackPanel>
+                            </Expander>
+                        </DataTemplate></ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </StackPanel>
+            </Expander>
             <Expander Header="{Binding [episode_title]}" HorizontalAlignment="Stretch">
                 <StackPanel Spacing="10">
                     <TextBlock Text="{Binding [episode_scope]}" TextWrapping="Wrap" />
