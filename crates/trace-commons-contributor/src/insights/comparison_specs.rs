@@ -132,6 +132,7 @@ pub enum QualifiedSourceAttribution {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum QualifiedSourceRule {
+    CodexRustV0_154_0TaskRecordsV1,
     #[cfg(test)]
     SyntheticReleasedRuleV1,
 }

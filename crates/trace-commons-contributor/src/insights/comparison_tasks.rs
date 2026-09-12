@@ -35,6 +35,10 @@ pub struct FrozenEpisodeBinding {
     pub membership_revision: u64,
     pub members_digest: String,
     pub members: Vec<EpisodeMember>,
+    /// Hashed producer session identities frozen with the task material so
+    /// overlapping exports remain connected after source deletion.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_session_identity_sha256: Vec<String>,
 }
 
 impl FrozenEpisodeBinding {
@@ -45,6 +49,7 @@ impl FrozenEpisodeBinding {
             membership_revision: episode.membership_revision,
             members_digest: members_digest(&episode.members)?,
             members: episode.members.clone(),
+            source_session_identity_sha256: Vec::new(),
         })
     }
 }
@@ -176,8 +181,19 @@ pub enum ComparisonTaskStaleReason {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+pub struct ComparisonTaskSourceQualification {
+    pub rule: super::comparison_specs::QualifiedSourceRule,
+    pub declared_model_cohort: String,
+    pub recorded_configuration_sha256: String,
+    pub material_revision: u64,
+    pub material_digest: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct ComparisonTaskDetail {
     pub task: LocalComparisonTaskV1,
+    pub source_qualification: Option<ComparisonTaskSourceQualification>,
     pub stale_reasons: Vec<ComparisonTaskStaleReason>,
     pub overlapping_task_ids: Vec<String>,
     pub resolved_at: DateTime<Utc>,
@@ -362,6 +378,14 @@ pub fn validate_episode_bindings(bindings: &[FrozenEpisodeBinding]) -> Result<()
             || !ids.insert(&binding.episode_id)
             || previous.is_some_and(|value: &str| value >= binding.episode_id.as_str())
             || binding.members_digest != members_digest(&binding.members)?
+            || !binding
+                .source_session_identity_sha256
+                .iter()
+                .all(|identity| validate_digest(identity).is_ok())
+            || !binding
+                .source_session_identity_sha256
+                .windows(2)
+                .all(|pair| pair[0] < pair[1])
         {
             return Err(ComparisonTaskValidationError::Invalid.into());
         }

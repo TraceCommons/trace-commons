@@ -79,11 +79,20 @@ impl LocalInsightStore {
         self.comparison_task_list()?
             .iter()
             .map(|detail| {
-                comparison_task_fact_from_detail(
-                    detail,
-                    QualifiedSourceAttribution::Unavailable {
+                let source_attribution = detail.source_qualification.as_ref().map_or_else(
+                    || QualifiedSourceAttribution::Unavailable {
                         reason: "source-attribution-pending-qualification".into(),
                     },
+                    |qualification| QualifiedSourceAttribution::Qualified {
+                        rule: qualification.rule.clone(),
+                        declared_cohort: qualification.declared_model_cohort.clone(),
+                        bound_material_revision: qualification.material_revision,
+                        bound_material_digest: qualification.material_digest.clone(),
+                    },
+                );
+                comparison_task_fact_from_detail(
+                    detail,
+                    source_attribution,
                     ObservedAttributedTokens::Unavailable {
                         reason: "observed-tokens-unavailable".into(),
                     },

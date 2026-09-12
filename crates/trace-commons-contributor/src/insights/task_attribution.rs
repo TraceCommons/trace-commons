@@ -5,9 +5,11 @@
 //! coordinates. It does not retain prompts, responses, paths, or raw session
 //! and turn identifiers. A source turn is not an independent user work item;
 //! multiple source turns can later belong to one `LocalComparisonTask`. The
-//! only profile implemented here was generated from a source checkout whose
-//! workspace version is `0.0.0`; that is fixture build
-//! provenance, not a released Codex version and never production eligibility.
+//! legacy profile remains fixture-only. The released profile is bound to the
+//! exact Codex 0.154.0 writer revision and a finite direct/reasoning/sequential
+//! exec record contract. It qualifies writer structure and declared cohorts;
+//! it does not prove live provider identity, exclusive model serving, outcome,
+//! or independence between user-reviewed tasks.
 
 use anyhow::{Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
@@ -17,20 +19,18 @@ use sha2::{Digest, Sha256};
 const MAX_SOURCE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_RECORDS: usize = 262_144;
 const MAX_TURNS: usize = 1_024;
-const PROFILE_ID: &str = "codex-writer-c4017a87-direct-fixture-v1";
-const UPSTREAM_REVISION: &str = "c4017a87aacc7558002b7cb510025e967c1d765e";
-const OBSERVED_WORKSPACE_VERSION: &str = "0.0.0";
-
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CodexTaskSourceProfile {
     PinnedDirectWriterFixtureC4017a87,
+    CodexRustV0_154_0TaskRecords,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum QualificationScope {
     WriterFixtureOnly,
+    ReleasedWriterTaskRecords,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -89,6 +89,11 @@ pub struct TurnRecordRefs {
     pub turn_context: u64,
     pub user_text: u64,
     pub user_event: u64,
+    /// Qualified reasoning/tool/usage records between the user and final answer.
+    #[serde(default)]
+    pub intermediate_records: Vec<u64>,
+    #[serde(default)]
+    pub intermediate_usage_records: Vec<u64>,
     pub assistant_event: u64,
     pub assistant_message: u64,
     pub token_usage_record: Option<u64>,
@@ -139,12 +144,27 @@ fn hash_domain(domain: &str, value: &str) -> String {
 }
 
 fn source_profile(profile: CodexTaskSourceProfile) -> SourceProfileEvidence {
+    let (profile_id, upstream_revision, observed_workspace_version, qualification_scope) =
+        match profile {
+            CodexTaskSourceProfile::PinnedDirectWriterFixtureC4017a87 => (
+                "codex-writer-c4017a87-direct-fixture-v1",
+                "c4017a87aacc7558002b7cb510025e967c1d765e",
+                "0.0.0",
+                QualificationScope::WriterFixtureOnly,
+            ),
+            CodexTaskSourceProfile::CodexRustV0_154_0TaskRecords => (
+                "codex-rust-v0.154.0-task-records-v1",
+                "6b9826e3aa83b1a5947db50f4332cb9c65f1b340",
+                "0.154.0",
+                QualificationScope::ReleasedWriterTaskRecords,
+            ),
+        };
     SourceProfileEvidence {
         profile,
-        profile_id: PROFILE_ID.into(),
-        upstream_revision: UPSTREAM_REVISION.into(),
-        observed_workspace_version: OBSERVED_WORKSPACE_VERSION.into(),
-        qualification_scope: QualificationScope::WriterFixtureOnly,
+        profile_id: profile_id.into(),
+        upstream_revision: upstream_revision.into(),
+        observed_workspace_version: observed_workspace_version.into(),
+        qualification_scope,
     }
 }
 
@@ -240,11 +260,17 @@ fn valid_turn(turn: &AttributedTurn, record_count: u64) -> bool {
         UsageRecordStatus::Valid => refs.token_usage_record.is_some(),
         UsageRecordStatus::Missing => refs.token_usage_record.is_none(),
         UsageRecordStatus::Invalid => {
-            refs.token_usage_record.is_some() || refs.token_count_event.is_some()
+            refs.token_usage_record.is_some()
+                || refs.token_count_event.is_some()
+                || !refs.intermediate_usage_records.is_empty()
         }
     };
     context_shape
         && usage_shape
+        && refs
+            .intermediate_usage_records
+            .iter()
+            .all(|index| refs.intermediate_records.binary_search(index).is_ok())
         && valid_hash(&turn.turn_identity_sha256)
         && valid_hash(&turn.recorded_configuration_sha256)
         && !turn.declared_model.is_empty()
@@ -276,13 +302,9 @@ fn turn_record_indexes(refs: &TurnRecordRefs) -> Vec<u64> {
         .into_iter()
         .flatten(),
     );
-    ordered.extend([
-        refs.turn_context,
-        refs.user_text,
-        refs.user_event,
-        refs.assistant_event,
-        refs.assistant_message,
-    ]);
+    ordered.extend([refs.turn_context, refs.user_text, refs.user_event]);
+    ordered.extend(refs.intermediate_records.iter().copied());
+    ordered.extend([refs.assistant_event, refs.assistant_message]);
     ordered.extend(refs.token_usage_record);
     ordered.extend(refs.token_count_event);
     ordered.push(refs.task_complete);
@@ -325,7 +347,7 @@ struct ConfigurationProjection<'a> {
     prompt_sha256: String,
     approval_policy: &'a Value,
     approvals_reviewer: &'a Value,
-    active_permission_profile_id: &'a Value,
+    active_permission_profile_id: Option<&'a Value>,
     permission_profile: &'a Value,
     sandbox_policy: &'a Value,
     collaboration_mode: &'a Value,
@@ -337,9 +359,10 @@ struct SessionFacts {
     identity: String,
     identity_sha256: String,
     cwd: String,
-    runtime_workspace_roots: Value,
+    runtime_workspace_roots: Option<Value>,
     prompt_sha256: String,
     originator: String,
+    observed_workspace_version: String,
 }
 
 struct TurnBuilder {
@@ -348,6 +371,7 @@ struct TurnBuilder {
     model: Option<String>,
     configuration_sha256: Option<String>,
     usage_status: UsageRecordStatus,
+    pending_call_id: Option<String>,
     refs: TurnRecordRefs,
 }
 
@@ -361,6 +385,7 @@ enum Stage {
     AfterContext,
     AfterUserText,
     AfterUserEvent,
+    Tooling,
     AfterAssistantEvent,
     AfterAssistantMessage,
     AfterUsage,
@@ -407,11 +432,12 @@ fn text_blocks_match(payload: &Value, block_type: &str) -> bool {
         })
 }
 
-fn parse_session(payload: &Value) -> Result<SessionFacts> {
+fn parse_session(profile: CodexTaskSourceProfile, payload: &Value) -> Result<SessionFacts> {
+    let profile_evidence = source_profile(profile);
     let identity = string_field(payload, "session_id")?;
     if !canonical_uuid(identity)
         || string_field(payload, "id")? != identity
-        || string_field(payload, "cli_version")? != OBSERVED_WORKSPACE_VERSION
+        || string_field(payload, "cli_version")? != profile_evidence.observed_workspace_version
         || string_field(payload, "originator")? != "codex_cli_rs"
         || string_field(payload, "source")? != "exec"
         || string_field(payload, "history_mode")? != "legacy"
@@ -419,9 +445,17 @@ fn parse_session(payload: &Value) -> Result<SessionFacts> {
         return Err(invalid());
     }
     let cwd = string_field(payload, "cwd")?;
-    let roots = field(payload, "runtime_workspace_roots")?;
-    if !roots.is_array() {
-        return Err(invalid());
+    let roots = payload.get("runtime_workspace_roots").cloned();
+    match profile {
+        CodexTaskSourceProfile::PinnedDirectWriterFixtureC4017a87
+            if roots.as_ref().is_none_or(|roots| !roots.is_array()) =>
+        {
+            return Err(invalid());
+        }
+        CodexTaskSourceProfile::CodexRustV0_154_0TaskRecords if roots.is_some() => {
+            return Err(invalid());
+        }
+        _ => {}
     }
     let prompt = field(payload, "base_instructions")?;
     if prompt
@@ -437,9 +471,10 @@ fn parse_session(payload: &Value) -> Result<SessionFacts> {
         identity: identity.into(),
         identity_sha256: hash_domain("codex-session-identity-v1", identity),
         cwd: cwd.into(),
-        runtime_workspace_roots: roots.clone(),
+        runtime_workspace_roots: roots,
         prompt_sha256: hash_domain("codex-base-instructions-v1", prompt),
         originator: "codex_cli_rs".into(),
+        observed_workspace_version: profile_evidence.observed_workspace_version,
     })
 }
 
@@ -460,16 +495,35 @@ fn event_kind(payload: &Value) -> Option<&str> {
     payload.get("type").and_then(Value::as_str)
 }
 
-fn supported_record_semantics(kind: &str, payload: &Value) -> bool {
+fn supported_record_semantics(
+    profile: CodexTaskSourceProfile,
+    kind: &str,
+    payload: &Value,
+) -> bool {
     match kind {
         "session_meta" | "world_state" | "turn_context" | "token_usage_record" => true,
-        "event_msg" => matches!(
-            event_kind(payload),
-            Some(
-                "task_started" | "user_message" | "agent_message" | "token_count" | "task_complete"
-            )
-        ),
+        "event_msg" => {
+            matches!(
+                event_kind(payload),
+                Some(
+                    "task_started"
+                        | "user_message"
+                        | "agent_message"
+                        | "token_count"
+                        | "task_complete"
+                )
+            ) || (profile == CodexTaskSourceProfile::CodexRustV0_154_0TaskRecords
+                && event_kind(payload) == Some("agent_reasoning"))
+        }
         "response_item" => {
+            if profile == CodexTaskSourceProfile::CodexRustV0_154_0TaskRecords
+                && matches!(
+                    payload.get("type").and_then(Value::as_str),
+                    Some("reasoning" | "function_call" | "function_call_output")
+                )
+            {
+                return true;
+            }
             if payload.get("type").and_then(Value::as_str) != Some("message") {
                 return false;
             }
@@ -496,11 +550,13 @@ fn config_digest(session: &SessionFacts, context: &Value) -> Result<String> {
     let settings = field(collaboration, "settings")?;
     let projection = ConfigurationProjection {
         originator: &session.originator,
-        observed_workspace_version: OBSERVED_WORKSPACE_VERSION,
+        observed_workspace_version: &session.observed_workspace_version,
         prompt_sha256: session.prompt_sha256.clone(),
         approval_policy: field(context, "approval_policy")?,
         approvals_reviewer: field(context, "approvals_reviewer")?,
-        active_permission_profile_id: field(field(context, "active_permission_profile")?, "id")?,
+        active_permission_profile_id: context
+            .get("active_permission_profile")
+            .and_then(|profile| profile.get("id")),
         permission_profile: field(context, "permission_profile")?,
         sandbox_policy: field(context, "sandbox_policy")?,
         collaboration_mode: field(collaboration, "mode")?,
@@ -544,7 +600,10 @@ fn world_context_agrees(session: &SessionFacts, world: &Value, context: &Value) 
                 .and_then(|value| value.get("mode"))
                 .and_then(Value::as_str)
         && context.get("cwd").and_then(Value::as_str) == Some(session.cwd.as_str())
-        && context.get("workspace_roots") == Some(&session.runtime_workspace_roots)
+        && session
+            .runtime_workspace_roots
+            .as_ref()
+            .is_none_or(|roots| context.get("workspace_roots") == Some(roots))
         && state
             .get("environments")
             .and_then(|v| v.get("current_date"))
@@ -672,7 +731,7 @@ pub fn classify_codex_task_attribution(
             Some(*first_index),
         );
     }
-    let session = match parse_session(first_payload) {
+    let session = match parse_session(profile, first_payload) {
         Ok(session) => session,
         Err(_) => {
             return unavailable(
@@ -725,7 +784,15 @@ pub fn classify_codex_task_attribution(
                 {
                     unavailable_here!(TaskAttributionUnavailableReason::IdentityConflict, *index);
                 }
-                if string_field(payload, "root_turn_id")? != identity
+                let root_identity_valid = match profile {
+                    CodexTaskSourceProfile::PinnedDirectWriterFixtureC4017a87 => {
+                        string_field(payload, "root_turn_id")? == identity
+                    }
+                    CodexTaskSourceProfile::CodexRustV0_154_0TaskRecords => {
+                        payload.get("root_turn_id").is_none()
+                    }
+                };
+                if !root_identity_valid
                     || string_field(payload, "collaboration_mode_kind")? != "default"
                 {
                     unavailable_here!(TaskAttributionUnavailableReason::ForkOrDelegation, *index);
@@ -736,6 +803,7 @@ pub fn classify_codex_task_attribution(
                     model: None,
                     configuration_sha256: None,
                     usage_status: UsageRecordStatus::Missing,
+                    pending_call_id: None,
                     refs: TurnRecordRefs {
                         task_started: record_index(*index)?,
                         permissions_context: None,
@@ -744,6 +812,8 @@ pub fn classify_codex_task_attribution(
                         turn_context: 0,
                         user_text: 0,
                         user_event: 0,
+                        intermediate_records: Vec::new(),
+                        intermediate_usage_records: Vec::new(),
                         assistant_event: 0,
                         assistant_message: 0,
                         token_usage_record: None,
@@ -829,7 +899,10 @@ pub fn classify_codex_task_attribution(
                     }
                 }
                 if payload.get("cwd").and_then(Value::as_str) != Some(session.cwd.as_str())
-                    || payload.get("workspace_roots") != Some(&session.runtime_workspace_roots)
+                    || session
+                        .runtime_workspace_roots
+                        .as_ref()
+                        .is_some_and(|roots| payload.get("workspace_roots") != Some(roots))
                 {
                     unavailable_here!(TaskAttributionUnavailableReason::ContextConflict, *index);
                 }
@@ -876,11 +949,99 @@ pub fn classify_codex_task_attribution(
                 stage = Stage::AfterUserEvent;
             }
             Stage::AfterUserEvent
+                if profile == CodexTaskSourceProfile::CodexRustV0_154_0TaskRecords
+                    && kind == "event_msg"
+                    && event == Some("agent_reasoning")
+                    && payload.get("text").is_some_and(Value::is_string) =>
+            {
+                turn.as_mut()
+                    .ok_or_else(invalid)?
+                    .refs
+                    .intermediate_records
+                    .push(record_index(*index)?);
+                stage = Stage::Tooling;
+            }
+            Stage::Tooling
+                if kind == "response_item"
+                    && response_type == Some("reasoning")
+                    && payload.get("summary").is_some_and(Value::is_array)
+                    && payload
+                        .get("encrypted_content")
+                        .is_some_and(Value::is_string) =>
+            {
+                let active = turn.as_mut().ok_or_else(invalid)?;
+                if active.pending_call_id.is_some()
+                    || message_turn_id(payload) != Some(active.identity.as_str())
+                {
+                    unavailable_here!(TaskAttributionUnavailableReason::InvalidRecordOrder, *index);
+                }
+                active.refs.intermediate_records.push(record_index(*index)?);
+            }
+            Stage::Tooling
+                if kind == "response_item"
+                    && response_type == Some("function_call")
+                    && payload.get("name").and_then(Value::as_str) == Some("exec_command") =>
+            {
+                let active = turn.as_mut().ok_or_else(invalid)?;
+                let call_id = string_field(payload, "call_id")?;
+                let arguments = string_field(payload, "arguments")?;
+                let arguments: Value = serde_json::from_str(arguments).map_err(|_| invalid())?;
+                if active.pending_call_id.is_some()
+                    || message_turn_id(payload) != Some(active.identity.as_str())
+                    || !arguments
+                        .get("cmd")
+                        .is_some_and(|command| command.is_string())
+                {
+                    unavailable_here!(TaskAttributionUnavailableReason::InvalidRecordOrder, *index);
+                }
+                active.pending_call_id = Some(call_id.into());
+                active.refs.intermediate_records.push(record_index(*index)?);
+            }
+            Stage::Tooling if kind == "token_usage_record" => {
+                let active = turn.as_mut().ok_or_else(invalid)?;
+                if !usage_agrees(payload, &session, active) {
+                    active.usage_status = UsageRecordStatus::Invalid;
+                }
+                active.refs.intermediate_records.push(record_index(*index)?);
+                active
+                    .refs
+                    .intermediate_usage_records
+                    .push(record_index(*index)?);
+            }
+            Stage::Tooling
+                if kind == "response_item" && response_type == Some("function_call_output") =>
+            {
+                let active = turn.as_mut().ok_or_else(invalid)?;
+                if active.pending_call_id.as_deref() != Some(string_field(payload, "call_id")?)
+                    || message_turn_id(payload) != Some(active.identity.as_str())
+                    || !payload.get("output").is_some_and(Value::is_string)
+                {
+                    unavailable_here!(TaskAttributionUnavailableReason::InvalidRecordOrder, *index);
+                }
+                active.pending_call_id = None;
+                active.refs.intermediate_records.push(record_index(*index)?);
+            }
+            Stage::Tooling if kind == "event_msg" && event == Some("token_count") => {
+                let active = turn.as_mut().ok_or_else(invalid)?;
+                if !token_count_valid(payload) {
+                    active.usage_status = UsageRecordStatus::Invalid;
+                }
+                active.refs.intermediate_records.push(record_index(*index)?);
+                active
+                    .refs
+                    .intermediate_usage_records
+                    .push(record_index(*index)?);
+            }
+            Stage::AfterUserEvent | Stage::Tooling
                 if kind == "event_msg"
                     && event == Some("agent_message")
                     && payload.get("message").is_some_and(Value::is_string) =>
             {
-                turn.as_mut().ok_or_else(invalid)?.refs.assistant_event = record_index(*index)?;
+                let active = turn.as_mut().ok_or_else(invalid)?;
+                if active.pending_call_id.is_some() {
+                    unavailable_here!(TaskAttributionUnavailableReason::InvalidRecordOrder, *index);
+                }
+                active.refs.assistant_event = record_index(*index)?;
                 stage = Stage::AfterAssistantEvent;
             }
             Stage::AfterAssistantEvent
@@ -899,11 +1060,11 @@ pub fn classify_codex_task_attribution(
             }
             Stage::AfterAssistantMessage if kind == "token_usage_record" => {
                 let active = turn.as_mut().ok_or_else(invalid)?;
-                active.usage_status = if usage_agrees(payload, &session, active) {
-                    UsageRecordStatus::Valid
-                } else {
-                    UsageRecordStatus::Invalid
-                };
+                if !usage_agrees(payload, &session, active) {
+                    active.usage_status = UsageRecordStatus::Invalid;
+                } else if active.usage_status != UsageRecordStatus::Invalid {
+                    active.usage_status = UsageRecordStatus::Valid;
+                }
                 active.refs.token_usage_record = Some(record_index(*index)?);
                 stage = Stage::AfterUsage;
             }
@@ -941,7 +1102,7 @@ pub fn classify_codex_task_attribution(
             }
             _ => {
                 unavailable_here!(
-                    if supported_record_semantics(kind, payload) {
+                    if supported_record_semantics(profile, kind, payload) {
                         TaskAttributionUnavailableReason::InvalidRecordOrder
                     } else {
                         TaskAttributionUnavailableReason::UnsupportedRecord
@@ -977,6 +1138,31 @@ pub fn classify_codex_task_attribution(
     Ok(evidence)
 }
 
+/// Preserve generic Codex import compatibility when a valid transcript falls
+/// outside the qualified source profile. The unavailable evidence remains
+/// bound to the exact bytes and cannot be promoted by caller assertion.
+pub fn classify_codex_task_attribution_for_import(
+    profile: CodexTaskSourceProfile,
+    bytes: &[u8],
+) -> Result<CodexTaskAttributionEvidence> {
+    match classify_codex_task_attribution(profile, bytes) {
+        Ok(evidence) => Ok(evidence),
+        Err(_) if !bytes.is_empty() && bytes.len() <= MAX_SOURCE_BYTES => unavailable(
+            profile,
+            format!("{:x}", Sha256::digest(bytes)),
+            std::str::from_utf8(bytes)
+                .map_err(|_| invalid())?
+                .lines()
+                .count(),
+            0,
+            None,
+            TaskAttributionUnavailableReason::SourceProfileMismatch,
+            None,
+        ),
+        Err(error) => Err(error),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -986,6 +1172,15 @@ mod tests {
         include_bytes!("../../fixtures/insights/codex-task-attribution/codex-alpha-direct.jsonl");
     const BETA: &[u8] =
         include_bytes!("../../fixtures/insights/codex-task-attribution/codex-beta-direct.jsonl");
+    const RELEASE_ALPHA: &[u8] = include_bytes!(
+        "../../fixtures/insights/codex-task-attribution/codex-release-0.154.0-alpha-direct.jsonl"
+    );
+    const RELEASE_BETA: &[u8] = include_bytes!(
+        "../../fixtures/insights/codex-task-attribution/codex-release-0.154.0-beta-direct.jsonl"
+    );
+    const RELEASE_TOOL: &[u8] = include_bytes!(
+        "../../fixtures/insights/codex-task-attribution/codex-release-0.154.0-tool-reasoning.jsonl"
+    );
     const PROFILE: CodexTaskSourceProfile =
         CodexTaskSourceProfile::PinnedDirectWriterFixtureC4017a87;
 
@@ -1094,6 +1289,125 @@ mod tests {
             turn.usage_record_status == UsageRecordStatus::Valid
                 && turn.records.task_started < turn.records.task_complete
         }));
+    }
+
+    #[test]
+    fn released_writer_profile_attributes_only_its_exact_direct_message_shape() {
+        let profile = CodexTaskSourceProfile::CodexRustV0_154_0TaskRecords;
+        let alpha = classify_codex_task_attribution(profile, RELEASE_ALPHA).unwrap();
+        let beta = classify_codex_task_attribution(profile, RELEASE_BETA).unwrap();
+        assert_eq!(
+            alpha.source_digest,
+            "a254d4965ec6250f87386ff390ab9a273dd60ad0e9b140091027affa126e0d9a"
+        );
+        assert_eq!(
+            beta.source_digest,
+            "3fdbb19252144df71527ccdf9f142a9ae9e0c91ce9a5485dea139761a3b78fef"
+        );
+        assert_eq!(
+            alpha.source_profile.qualification_scope,
+            QualificationScope::ReleasedWriterTaskRecords
+        );
+        assert_eq!(alpha.source_profile.observed_workspace_version, "0.154.0");
+        let TaskAttributionState::Attributed { turns: alpha_turns } = alpha.state else {
+            panic!("released alpha fixture was not attributed")
+        };
+        let TaskAttributionState::Attributed { turns: beta_turns } = beta.state else {
+            panic!("released beta fixture was not attributed")
+        };
+        assert_eq!(alpha_turns.len(), 1);
+        assert_eq!(beta_turns.len(), 2);
+        assert!(
+            alpha_turns
+                .iter()
+                .all(|turn| turn.declared_model == "model-alpha")
+        );
+        assert!(
+            beta_turns
+                .iter()
+                .all(|turn| turn.declared_model == "model-beta")
+        );
+
+        let mut unsupported = decode(RELEASE_ALPHA);
+        unsupported.insert(
+            8,
+            json!({"type":"response_item","payload":{"type":"reasoning","summary":[]}}),
+        );
+        let evidence = classify_codex_task_attribution(profile, &encode(&unsupported)).unwrap();
+        assert!(matches!(
+            evidence.state,
+            TaskAttributionState::Unavailable {
+                reason: TaskAttributionUnavailableReason::InvalidRecordOrder,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn generic_import_keeps_profile_mismatches_as_typed_unavailable_evidence() {
+        let mut bytes = RELEASE_ALPHA.to_vec();
+        bytes.push(b'\n');
+        let profile = CodexTaskSourceProfile::CodexRustV0_154_0TaskRecords;
+        assert!(classify_codex_task_attribution(profile, &bytes).is_err());
+        let evidence = classify_codex_task_attribution_for_import(profile, &bytes).unwrap();
+        assert!(matches!(
+            evidence.state,
+            TaskAttributionState::Unavailable {
+                reason: TaskAttributionUnavailableReason::SourceProfileMismatch,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn released_writer_profile_qualifies_paired_reasoning_and_exec_records() {
+        let profile = CodexTaskSourceProfile::CodexRustV0_154_0TaskRecords;
+        let evidence = classify_codex_task_attribution(profile, RELEASE_TOOL).unwrap();
+        assert_eq!(
+            evidence.source_digest,
+            "b0bbcd2ce3b35a9b96f89b3c9ead28888d61c0b98fe77dd9a1b386518374a9a5"
+        );
+        let TaskAttributionState::Attributed { turns } = evidence.state else {
+            panic!("released tool fixture was not attributed")
+        };
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].declared_model, "model-tool");
+        assert_eq!(
+            turns[0].records.intermediate_records,
+            vec![9, 10, 11, 12, 13, 14]
+        );
+
+        let mut mismatched = decode(RELEASE_TOOL);
+        mismatched[12]["payload"]["call_id"] = serde_json::json!("mismatched-call");
+        let evidence = classify_codex_task_attribution(profile, &encode(&mismatched)).unwrap();
+        assert!(matches!(
+            evidence.state,
+            TaskAttributionState::Unavailable {
+                reason: TaskAttributionUnavailableReason::InvalidRecordOrder,
+                ..
+            }
+        ));
+
+        let mut invalid_usage = decode(RELEASE_TOOL);
+        invalid_usage[11]["payload"]["turn_token_usage"]["input_tokens"] =
+            serde_json::json!(u64::MAX);
+        invalid_usage[11]["payload"]["turn_token_usage"]["output_tokens"] = serde_json::json!(1u64);
+        let evidence = classify_codex_task_attribution(profile, &encode(&invalid_usage)).unwrap();
+        let TaskAttributionState::Attributed { turns } = evidence.state else {
+            panic!("invalid optional usage suppressed structural attribution")
+        };
+        assert_eq!(turns[0].usage_record_status, UsageRecordStatus::Invalid);
+
+        let mut no_final_usage = invalid_usage;
+        no_final_usage.remove(17);
+        no_final_usage.remove(16);
+        let evidence = classify_codex_task_attribution(profile, &encode(&no_final_usage)).unwrap();
+        let TaskAttributionState::Attributed { turns } = evidence.state else {
+            panic!("intermediate invalid usage required an optional final usage pair")
+        };
+        assert_eq!(turns[0].usage_record_status, UsageRecordStatus::Invalid);
+        assert!(turns[0].records.token_usage_record.is_none());
+        assert!(turns[0].records.token_count_event.is_none());
     }
 
     #[test]

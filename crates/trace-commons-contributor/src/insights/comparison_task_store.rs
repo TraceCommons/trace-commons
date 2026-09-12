@@ -66,7 +66,21 @@ fn resolve_bindings(index: &Index, episode_ids: &[String]) -> Result<Vec<FrozenE
             .episodes
             .get(id)
             .ok_or(ComparisonTaskStoreError::MissingEpisode)?;
-        bindings.push(FrozenEpisodeBinding::from_episode(episode)?);
+        let mut binding = FrozenEpisodeBinding::from_episode(episode)?;
+        binding.source_session_identity_sha256 = episode
+            .members
+            .iter()
+            .filter_map(|member| {
+                index
+                    .reports
+                    .get(&member.snapshot_id)
+                    .and_then(|report| report.task_attribution.as_ref())
+                    .and_then(|attribution| attribution.session_identity_sha256.clone())
+            })
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        bindings.push(binding);
     }
     bindings.sort_by(|a, b| a.episode_id.cmp(&b.episode_id));
     Ok(bindings)
@@ -106,12 +120,22 @@ fn advance(task: &mut LocalComparisonTaskV1, material: bool) -> Result<()> {
     Ok(())
 }
 
-fn canonical_evidence(task: &LocalComparisonTaskV1) -> BTreeSet<(String, String)> {
-    task.episodes
+fn canonical_evidence(task: &LocalComparisonTaskV1) -> BTreeSet<String> {
+    let mut evidence = BTreeSet::new();
+    for member in task.episodes.iter().flat_map(|episode| &episode.members) {
+        evidence.insert(format!(
+            "snapshot:{}:{}",
+            member.snapshot_id, member.source_digest
+        ));
+    }
+    for identity in task
+        .episodes
         .iter()
-        .flat_map(|episode| episode.members.iter())
-        .map(|member| (member.snapshot_id.clone(), member.source_digest.clone()))
-        .collect()
+        .flat_map(|binding| &binding.source_session_identity_sha256)
+    {
+        evidence.insert(format!("codex_session:{identity}"));
+    }
+    evidence
 }
 
 fn overlap_components(index: &Index) -> BTreeMap<String, Vec<String>> {
@@ -120,7 +144,7 @@ fn overlap_components(index: &Index) -> BTreeMap<String, Vec<String>> {
         .iter()
         .map(|(id, task)| (id.clone(), canonical_evidence(task)))
         .collect::<BTreeMap<_, _>>();
-    let mut reverse: BTreeMap<(String, String), Vec<String>> = BTreeMap::new();
+    let mut reverse: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for (id, values) in &evidence {
         for value in values {
             reverse.entry(value.clone()).or_default().push(id.clone());
@@ -214,12 +238,74 @@ fn current_binding_reasons(
     reasons
 }
 
+fn source_qualification(
+    index: &Index,
+    task: &LocalComparisonTaskV1,
+) -> Option<ComparisonTaskSourceQualification> {
+    use super::task_attribution::{
+        CodexTaskSourceProfile, QualificationScope, TaskAttributionState,
+    };
+
+    let mut declared_model = None;
+    let mut recorded_configuration = None;
+    for binding in &task.episodes {
+        for member in &binding.members {
+            let report = index.reports.get(&member.snapshot_id)?;
+            if report.report.evidence[0].source_digest != member.source_digest {
+                return None;
+            }
+            let attribution = report.task_attribution.as_ref()?;
+            if attribution.source_digest != member.source_digest
+                || attribution.source_profile.profile
+                    != CodexTaskSourceProfile::CodexRustV0_154_0TaskRecords
+                || attribution.source_profile.qualification_scope
+                    != QualificationScope::ReleasedWriterTaskRecords
+            {
+                return None;
+            }
+            let session_identity = attribution.session_identity_sha256.as_ref()?;
+            if binding
+                .source_session_identity_sha256
+                .binary_search(session_identity)
+                .is_err()
+            {
+                return None;
+            }
+            let TaskAttributionState::Attributed { turns } = &attribution.state else {
+                return None;
+            };
+            for turn in turns {
+                if declared_model
+                    .as_deref()
+                    .is_some_and(|known| known != turn.declared_model)
+                    || recorded_configuration
+                        .as_deref()
+                        .is_some_and(|known| known != turn.recorded_configuration_sha256)
+                {
+                    return None;
+                }
+                declared_model.get_or_insert_with(|| turn.declared_model.clone());
+                recorded_configuration
+                    .get_or_insert_with(|| turn.recorded_configuration_sha256.clone());
+            }
+        }
+    }
+    Some(ComparisonTaskSourceQualification {
+        rule: super::comparison_specs::QualifiedSourceRule::CodexRustV0_154_0TaskRecordsV1,
+        declared_model_cohort: declared_model?,
+        recorded_configuration_sha256: recorded_configuration?,
+        material_revision: task.material_revision,
+        material_digest: task.material_digest.clone(),
+    })
+}
+
 fn detail(
     index: &Index,
     task: &LocalComparisonTaskV1,
     overlaps: &[String],
 ) -> ComparisonTaskDetail {
     let mut reasons = current_binding_reasons(index, task);
+    let source_qualification = source_qualification(index, task);
     if task
         .context
         .as_ref()
@@ -227,7 +313,9 @@ fn detail(
     {
         reasons.insert(ComparisonTaskStaleReason::ContextIncomplete);
     }
-    reasons.insert(ComparisonTaskStaleReason::AttributionPendingQualification);
+    if source_qualification.is_none() {
+        reasons.insert(ComparisonTaskStaleReason::AttributionPendingQualification);
+    }
     if task.outcome.as_ref().is_some_and(|value| {
         value.material_revision != task.material_revision
             || value.material_digest != task.material_digest
@@ -249,6 +337,7 @@ fn detail(
     }
     ComparisonTaskDetail {
         task: task.clone(),
+        source_qualification,
         stale_reasons: reasons.into_iter().collect(),
         overlapping_task_ids: overlaps.to_vec(),
         resolved_at: Utc::now(),
@@ -515,6 +604,13 @@ mod tests {
     use super::*;
     use crate::insights::{SourceFormat, TaskOutcome};
 
+    const RELEASE_ALPHA: &[u8] = include_bytes!(
+        "../../fixtures/insights/codex-task-attribution/codex-release-0.154.0-alpha-direct.jsonl"
+    );
+    const RELEASE_BETA: &[u8] = include_bytes!(
+        "../../fixtures/insights/codex-task-attribution/codex-release-0.154.0-beta-direct.jsonl"
+    );
+
     fn source(path: &Path, content: &str) {
         fs::write(
             path,
@@ -539,6 +635,134 @@ mod tests {
             })
             .collect();
         (root, store, ids)
+    }
+
+    fn import_codex(store: &LocalInsightStore, path: &Path, bytes: &[u8]) -> String {
+        fs::write(path, bytes).unwrap();
+        store.import(SourceFormat::Codex, path).unwrap().id
+    }
+
+    #[test]
+    fn released_sources_produce_bound_qualification_and_session_overlap() {
+        let root = tempfile::tempdir().unwrap();
+        let store = LocalInsightStore::open(&root.path().join("store")).unwrap();
+        let alpha_id = import_codex(&store, &root.path().join("alpha"), RELEASE_ALPHA);
+        let beta_id = import_codex(&store, &root.path().join("beta"), RELEASE_BETA);
+        let alpha_episode = store
+            .episode_create(std::slice::from_ref(&alpha_id))
+            .unwrap();
+        let beta_episode = store.episode_create(&[beta_id]).unwrap();
+        let alpha = store.comparison_task_create(&[alpha_episode.id]).unwrap();
+        let beta = store.comparison_task_create(&[beta_episode.id]).unwrap();
+        let alpha_detail = store.comparison_task_explain(&alpha.id).unwrap();
+        let beta_detail = store.comparison_task_explain(&beta.id).unwrap();
+        assert_eq!(
+            alpha_detail
+                .source_qualification
+                .as_ref()
+                .unwrap()
+                .declared_model_cohort,
+            "model-alpha"
+        );
+        assert_eq!(
+            beta_detail
+                .source_qualification
+                .as_ref()
+                .unwrap()
+                .declared_model_cohort,
+            "model-beta"
+        );
+        assert!(
+            !alpha_detail
+                .stale_reasons
+                .contains(&ComparisonTaskStaleReason::AttributionPendingQualification)
+        );
+
+        let mut second_export = String::from_utf8(RELEASE_ALPHA.to_vec()).unwrap();
+        second_export = second_export.replace("synthetic-alpha-text", "synthetic-alpha-reexport");
+        let second_id = import_codex(
+            &store,
+            &root.path().join("alpha-reexport"),
+            second_export.as_bytes(),
+        );
+        let second_episode = store.episode_create(&[second_id]).unwrap();
+        let second_task = store.comparison_task_create(&[second_episode.id]).unwrap();
+        assert!(
+            store
+                .comparison_task_explain(&alpha.id)
+                .unwrap()
+                .overlapping_task_ids
+                .contains(&second_task.id),
+            "different bytes from one hashed Codex session must overlap"
+        );
+        store.delete_with_effects(&alpha_id).unwrap();
+        assert!(
+            store
+                .comparison_task_explain(&second_task.id)
+                .unwrap()
+                .overlapping_task_ids
+                .contains(&alpha.id),
+            "a deleted source must not erase the frozen session overlap edge"
+        );
+    }
+
+    #[test]
+    fn legacy_tasks_require_binding_refresh_before_reimported_sessions_qualify() {
+        let root = tempfile::tempdir().unwrap();
+        let store = LocalInsightStore::open(&root.path().join("store")).unwrap();
+        let first_path = root.path().join("first");
+        let second_path = root.path().join("second");
+        let first_id = import_codex(&store, &first_path, RELEASE_ALPHA);
+        let second_bytes = String::from_utf8(RELEASE_ALPHA.to_vec())
+            .unwrap()
+            .replace("synthetic-alpha-text", "synthetic-alpha-legacy-export");
+        let second_id = import_codex(&store, &second_path, second_bytes.as_bytes());
+        let index_path = store.dir.join("index.json");
+        let mut index: serde_json::Value =
+            serde_json::from_slice(&fs::read(&index_path).unwrap()).unwrap();
+        for report in index["reports"].as_object_mut().unwrap().values_mut() {
+            report.as_object_mut().unwrap().remove("task_attribution");
+        }
+        fs::write(&index_path, serde_json::to_vec(&index).unwrap()).unwrap();
+
+        let first_episode = store.episode_create(&[first_id]).unwrap();
+        let second_episode = store.episode_create(&[second_id]).unwrap();
+        let first = store
+            .comparison_task_create(std::slice::from_ref(&first_episode.id))
+            .unwrap();
+        let second = store
+            .comparison_task_create(std::slice::from_ref(&second_episode.id))
+            .unwrap();
+        store.import(SourceFormat::Codex, &first_path).unwrap();
+        store.import(SourceFormat::Codex, &second_path).unwrap();
+        assert!(
+            store
+                .comparison_task_explain(&first.id)
+                .unwrap()
+                .source_qualification
+                .is_none()
+        );
+        assert!(
+            store
+                .comparison_task_explain(&second.id)
+                .unwrap()
+                .source_qualification
+                .is_none()
+        );
+
+        let first = store
+            .comparison_task_replace_episodes(&first.id, 1, &[first_episode.id])
+            .unwrap();
+        let second = store
+            .comparison_task_replace_episodes(&second.id, 1, &[second_episode.id])
+            .unwrap();
+        assert!(
+            store
+                .comparison_task_explain(&first.id)
+                .unwrap()
+                .overlapping_task_ids
+                .contains(&second.id)
+        );
     }
 
     fn known(value: &str) -> ContextString {
