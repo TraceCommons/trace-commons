@@ -206,6 +206,7 @@ pub enum CardState {
 pub enum CardUnit {
     SavedSnapshots,
     NormalizedEvents,
+    ToolCalls,
     ToolResults,
     EpisodeGroups,
     DistinctSavedSnapshots,
@@ -276,8 +277,10 @@ pub struct CardRow {
 pub enum CoverageUnit {
     SavedSnapshots,
     NormalizedEvents,
+    ToolCallEvents,
     ToolResults,
     EpisodeGroups,
+    TimestampEvidenceSnapshots,
     TimestampRecords,
     ModelRecords,
 }
@@ -502,10 +505,11 @@ pub const fn row_dictionary(id: CardRowId) -> (InsightQuestionId, CardUnit) {
             InsightQuestionId::RecordedActivity,
             CardUnit::SavedSnapshots,
         ),
-        NormalizedEvents | ToolCalls => (
+        NormalizedEvents => (
             InsightQuestionId::RecordedActivity,
             CardUnit::NormalizedEvents,
         ),
+        ToolCalls => (InsightQuestionId::RecordedActivity, CardUnit::ToolCalls),
         ToolFailures => (InsightQuestionId::RecordedActivity, CardUnit::ToolResults),
         TimestampEligible | TimestampValid | TimestampMissing | TimestampInvalid => (
             InsightQuestionId::RecordedActivity,
@@ -1119,7 +1123,9 @@ pub const fn coverage_dictionary(question: InsightQuestionId) -> &'static [Cover
         InsightQuestionId::RecordedActivity => &[
             SavedSnapshots,
             NormalizedEvents,
+            ToolCallEvents,
             ToolResults,
+            TimestampEvidenceSnapshots,
             TimestampRecords,
         ],
         InsightQuestionId::EpisodeOutcomes => &[EpisodeGroups],
