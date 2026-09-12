@@ -121,7 +121,7 @@ pub struct SnapshotCardInput {
     pub tool_calls: CountFact,
     pub tool_failures: CountFact,
     pub models: Vec<ModelFact>,
-    pub omitted_models: u64,
+    pub model_labels_omitted: bool,
     pub omitted_model_records: u64,
     pub model_eligible_records: u64,
     pub model_observed_records: u64,
@@ -327,7 +327,7 @@ pub struct InsightCard {
     pub evidence_ids: Vec<String>,
     pub episode_ids: Vec<String>,
     pub limitations: Vec<CardLimitation>,
-    pub omitted_rows: u64,
+    pub rows_omitted: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -498,6 +498,413 @@ impl InsightCardResult {
     }
 }
 
+/// Compute the complete schema-v1 card projection from host-selected facts.
+///
+/// This proves consistency with the request, not that the selected facts are true. The host is
+/// responsible for resolving them from current saved evidence before constructing the request.
+pub fn expected_cards(
+    request: &InsightCardRequest,
+) -> Result<Vec<InsightCard>, CardValidationError> {
+    request.validate()?;
+    request
+        .questions
+        .iter()
+        .map(|question| match question {
+            InsightQuestionId::RecordedActivity => expected_activity_card(request),
+            InsightQuestionId::EpisodeOutcomes => expected_episode_card(request),
+            InsightQuestionId::ObservedModels => expected_models_card(request),
+            InsightQuestionId::EstimatedCost => Ok(expected_cost_card(request)),
+        })
+        .collect()
+}
+
+fn expected_activity_card(
+    request: &InsightCardRequest,
+) -> Result<InsightCard, CardValidationError> {
+    let snapshots = request.snapshots.len() as u64;
+    let normalized = aggregate_count(request.snapshots.iter().map(|s| &s.normalized_events))?;
+    let calls = aggregate_count(request.snapshots.iter().map(|s| &s.tool_calls))?;
+    let failures = aggregate_count(request.snapshots.iter().map(|s| &s.tool_failures))?;
+    let timed_snapshots = request
+        .snapshots
+        .iter()
+        .filter(|s| s.time.is_some())
+        .count() as u64;
+    let mut time_eligible = 0_u64;
+    let mut time_valid = 0_u64;
+    let mut time_missing = 0_u64;
+    let mut time_invalid = 0_u64;
+    let mut earliest: Option<DateTime<Utc>> = None;
+    let mut latest: Option<DateTime<Utc>> = None;
+    for time in request
+        .snapshots
+        .iter()
+        .filter_map(|snapshot| snapshot.time.as_ref())
+    {
+        time_eligible = checked_add(time_eligible, time.total_eligible_records)?;
+        time_valid = checked_add(time_valid, time.valid_timestamps)?;
+        time_missing = checked_add(time_missing, time.missing_timestamps)?;
+        time_invalid = checked_add(time_invalid, time.invalid_timestamps)?;
+        if let Some(value) = &time.earliest {
+            earliest = Some(earliest.map_or(value.recorded_at, |old| old.min(value.recorded_at)));
+        }
+        if let Some(value) = &time.latest {
+            latest = Some(latest.map_or(value.recorded_at, |old| old.max(value.recorded_at)));
+        }
+    }
+    let earliest_ms = timestamp_millis(earliest)?;
+    let latest_ms = timestamp_millis(latest)?;
+    let span = match (earliest_ms, latest_ms) {
+        (Some(first), Some(last)) if time_valid >= 2 => Some(
+            u64::try_from(
+                last.checked_sub(first)
+                    .ok_or(CardValidationError::InvalidInput)?,
+            )
+            .map_err(|_| CardValidationError::InvalidInput)?,
+        ),
+        _ => None,
+    };
+    let time_missing_reason = if timed_snapshots == 0 || time_eligible == 0 {
+        MissingReason::NoEligibleEvidence
+    } else {
+        MissingReason::NoObservedValue
+    };
+    let rows = vec![
+        count_row(CardRowId::SavedSnapshots, snapshots),
+        aggregate_row(CardRowId::NormalizedEvents, normalized),
+        aggregate_row(CardRowId::ToolCalls, calls),
+        aggregate_row(CardRowId::ToolFailures, failures),
+        count_row(CardRowId::TimestampEligible, time_eligible),
+        count_row(CardRowId::TimestampValid, time_valid),
+        count_row(CardRowId::TimestampMissing, time_missing),
+        count_row(CardRowId::TimestampInvalid, time_invalid),
+        optional_row(
+            CardRowId::EarliestRecordedAt,
+            earliest_ms.map(CardValue::UnixMilliseconds),
+            time_missing_reason,
+        ),
+        optional_row(
+            CardRowId::LatestRecordedAt,
+            latest_ms.map(CardValue::UnixMilliseconds),
+            time_missing_reason,
+        ),
+        optional_row(
+            CardRowId::RecordSpan,
+            span.map(CardValue::Milliseconds),
+            MissingReason::InsufficientTimestamps,
+        ),
+    ];
+    let coverage = vec![
+        coverage(CoverageUnit::SavedSnapshots, snapshots, snapshots),
+        coverage(
+            CoverageUnit::NormalizedEvents,
+            normalized.observed,
+            normalized.eligible,
+        ),
+        coverage(CoverageUnit::ToolCallEvents, calls.observed, calls.eligible),
+        coverage(
+            CoverageUnit::ToolResults,
+            failures.observed,
+            failures.eligible,
+        ),
+        coverage(
+            CoverageUnit::TimestampEvidenceSnapshots,
+            timed_snapshots,
+            snapshots,
+        ),
+        coverage(CoverageUnit::TimestampRecords, time_valid, time_eligible),
+    ];
+    let state = if snapshots == 0 {
+        CardState::Unavailable
+    } else if coverage.iter().all(|item| item.observed == item.eligible)
+        && rows.iter().all(|row| row.missing_reason.is_none())
+    {
+        CardState::Observed
+    } else {
+        CardState::Partial
+    };
+    Ok(card(
+        request,
+        InsightQuestionId::RecordedActivity,
+        state,
+        rows,
+        coverage,
+        None,
+        vec![
+            CardLimitation::TimestampsAreRecordSpan,
+            CardLimitation::RecordSpanIsNotActiveTime,
+            CardLimitation::ToolFailuresAreNotRejections,
+        ],
+        false,
+    ))
+}
+
+#[derive(Clone, Copy)]
+struct AggregateCount {
+    value: Option<u64>,
+    observed: u64,
+    eligible: u64,
+}
+
+fn aggregate_count<'a>(
+    facts: impl Iterator<Item = &'a CountFact>,
+) -> Result<AggregateCount, CardValidationError> {
+    let mut value = 0_u64;
+    let mut observed = 0_u64;
+    let mut eligible = 0_u64;
+    for fact in facts {
+        observed = checked_add(observed, fact.observed)?;
+        eligible = checked_add(eligible, fact.eligible)?;
+        if let Some(part) = fact.value {
+            value = checked_add(value, part)?;
+        }
+    }
+    Ok(AggregateCount {
+        value: (observed > 0 || eligible == 0).then_some(value),
+        observed,
+        eligible,
+    })
+}
+
+fn expected_episode_card(request: &InsightCardRequest) -> Result<InsightCard, CardValidationError> {
+    let eligible = request.episodes.len() as u64;
+    let mut accepted = 0_u64;
+    let mut partial = 0_u64;
+    let mut rejected = 0_u64;
+    let mut unknown = 0_u64;
+    for assessment in request
+        .episodes
+        .iter()
+        .filter_map(|e| e.assessment.as_ref())
+    {
+        match assessment.outcome {
+            EpisodeOutcome::Accepted => accepted += 1,
+            EpisodeOutcome::Partial => partial += 1,
+            EpisodeOutcome::Rejected => rejected += 1,
+            EpisodeOutcome::Unknown => unknown += 1,
+        }
+    }
+    let assessed = accepted + partial + rejected + unknown;
+    let unassessed = eligible - assessed;
+    let overlap = request.episode_overlap()?;
+    let overlapping = overlap.values().filter(|ids| !ids.is_empty()).count() as u64;
+    let distinct = request
+        .episodes
+        .iter()
+        .flat_map(|episode| {
+            episode
+                .members
+                .iter()
+                .map(|member| member.snapshot_id.as_str())
+        })
+        .collect::<BTreeSet<_>>()
+        .len() as u64;
+    let rows = [
+        (CardRowId::EligibleEpisodes, eligible),
+        (CardRowId::AssessedEpisodes, assessed),
+        (CardRowId::AcceptedEpisodes, accepted),
+        (CardRowId::PartialEpisodes, partial),
+        (CardRowId::RejectedEpisodes, rejected),
+        (CardRowId::ExplicitUnknownEpisodes, unknown),
+        (CardRowId::UnassessedEpisodes, unassessed),
+        (CardRowId::OverlappingEpisodes, overlapping),
+        (CardRowId::DistinctSnapshots, distinct),
+    ]
+    .into_iter()
+    .map(|(id, value)| count_row(id, value))
+    .collect();
+    let denominator = EpisodeDenominator {
+        eligible,
+        assessed,
+        unassessed,
+        explicit_unknown: unknown,
+    };
+    let state = if eligible == 0 || assessed == 0 {
+        CardState::Unavailable
+    } else if assessed < eligible || unknown > 0 {
+        CardState::Partial
+    } else {
+        CardState::Observed
+    };
+    let mut limitations = vec![
+        CardLimitation::UserSelectedEpisodeGroups,
+        CardLimitation::EpisodesNotIndependentTasks,
+    ];
+    if overlapping > 0 {
+        limitations.push(CardLimitation::EpisodeGroupsOverlap);
+    }
+    Ok(card(
+        request,
+        InsightQuestionId::EpisodeOutcomes,
+        state,
+        rows,
+        vec![coverage(CoverageUnit::EpisodeGroups, assessed, eligible)],
+        Some(denominator),
+        limitations,
+        false,
+    ))
+}
+
+fn expected_models_card(request: &InsightCardRequest) -> Result<InsightCard, CardValidationError> {
+    let mut labels = BTreeMap::<String, u64>::new();
+    let mut eligible = 0_u64;
+    let mut observed = 0_u64;
+    let mut observed_snapshots = 0_u64;
+    let mut source_omission = false;
+    for snapshot in &request.snapshots {
+        eligible = checked_add(eligible, snapshot.model_eligible_records)?;
+        observed = checked_add(observed, snapshot.model_observed_records)?;
+        if snapshot.model_observed_records > 0 {
+            observed_snapshots += 1;
+        }
+        source_omission |= snapshot.model_labels_omitted;
+        for model in &snapshot.models {
+            let entry = labels.entry(model.label.clone()).or_default();
+            *entry = checked_add(*entry, model.observed_records)?;
+        }
+    }
+    let rows_omitted = source_omission || labels.len() > MAX_CARD_ROWS;
+    let rows = labels
+        .into_iter()
+        .take(MAX_CARD_ROWS)
+        .map(|(label, value)| CardRow {
+            id: CardRowId::ObservedModel,
+            unit: CardUnit::ModelRecords,
+            label: Some(label),
+            value: Some(CardValue::Count(value)),
+            missing_reason: None,
+        })
+        .collect();
+    let state = if observed == 0 {
+        CardState::Unavailable
+    } else if observed < eligible || rows_omitted {
+        CardState::Partial
+    } else {
+        CardState::Observed
+    };
+    Ok(card(
+        request,
+        InsightQuestionId::ObservedModels,
+        state,
+        rows,
+        vec![
+            coverage(
+                CoverageUnit::SavedSnapshots,
+                observed_snapshots,
+                request.snapshots.len() as u64,
+            ),
+            coverage(CoverageUnit::ModelRecords, observed, eligible),
+        ],
+        None,
+        vec![CardLimitation::ModelDeclarationsAreObservedMetadata],
+        rows_omitted,
+    ))
+}
+
+fn expected_cost_card(request: &InsightCardRequest) -> InsightCard {
+    card(
+        request,
+        InsightQuestionId::EstimatedCost,
+        CardState::Unavailable,
+        vec![optional_row(
+            CardRowId::EstimatedCost,
+            None,
+            MissingReason::UsageNotPersisted,
+        )],
+        vec![coverage(
+            CoverageUnit::SavedSnapshots,
+            0,
+            request.snapshots.len() as u64,
+        )],
+        None,
+        vec![CardLimitation::CostUnavailableWithoutPersistedUsageAndPricing],
+        false,
+    )
+}
+
+fn card(
+    request: &InsightCardRequest,
+    question: InsightQuestionId,
+    state: CardState,
+    rows: Vec<CardRow>,
+    coverage: Vec<CardCoverage>,
+    episode_denominator: Option<EpisodeDenominator>,
+    limitations: Vec<CardLimitation>,
+    rows_omitted: bool,
+) -> InsightCard {
+    let episode_question = question == InsightQuestionId::EpisodeOutcomes;
+    InsightCard {
+        question,
+        metric_version: question.metric_version().into(),
+        state,
+        rows,
+        coverage,
+        episode_denominator,
+        evidence_ids: if episode_question {
+            request
+                .episodes
+                .iter()
+                .flat_map(|e| e.members.iter().map(|m| m.snapshot_id.clone()))
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect()
+        } else {
+            request.evidence.iter().map(|e| e.id.clone()).collect()
+        },
+        episode_ids: if episode_question {
+            request.episodes.iter().map(|e| e.id.clone()).collect()
+        } else {
+            Vec::new()
+        },
+        limitations,
+        rows_omitted,
+    }
+}
+
+fn count_row(id: CardRowId, value: u64) -> CardRow {
+    CardRow {
+        id,
+        unit: row_dictionary(id).1,
+        label: None,
+        value: Some(CardValue::Count(value)),
+        missing_reason: None,
+    }
+}
+fn aggregate_row(id: CardRowId, fact: AggregateCount) -> CardRow {
+    optional_row(
+        id,
+        fact.value.map(CardValue::Count),
+        if fact.eligible == 0 {
+            MissingReason::NoEligibleEvidence
+        } else {
+            MissingReason::NoObservedValue
+        },
+    )
+}
+fn optional_row(id: CardRowId, value: Option<CardValue>, missing: MissingReason) -> CardRow {
+    CardRow {
+        id,
+        unit: row_dictionary(id).1,
+        label: None,
+        missing_reason: value.is_none().then_some(missing),
+        value,
+    }
+}
+fn coverage(unit: CoverageUnit, observed: u64, eligible: u64) -> CardCoverage {
+    CardCoverage {
+        unit,
+        observed,
+        eligible,
+    }
+}
+fn checked_add(left: u64, right: u64) -> Result<u64, CardValidationError> {
+    left.checked_add(right)
+        .ok_or(CardValidationError::InvalidInput)
+}
+fn timestamp_millis(value: Option<DateTime<Utc>>) -> Result<Option<i64>, CardValidationError> {
+    Ok(value.map(|at| at.timestamp_millis()))
+}
+
 pub const fn row_dictionary(id: CardRowId) -> (InsightQuestionId, CardUnit) {
     use CardRowId::*;
     match id {
@@ -579,9 +986,9 @@ fn validate_snapshot(s: &SnapshotCardInput) -> Result<(), CardValidationError> {
     }
     if s.models.len() > MAX_CARD_MODEL_LABELS
         || s.model_observed_records > s.model_eligible_records
-        || ((s.omitted_models > 0 || s.omitted_model_records > 0)
+        || ((s.model_labels_omitted || s.omitted_model_records > 0)
             && (s.models.len() != MAX_CARD_MODEL_LABELS
-                || s.omitted_models == 0
+                || !s.model_labels_omitted
                 || s.omitted_model_records == 0))
     {
         return Err(CardValidationError::InvalidInput);
@@ -792,9 +1199,7 @@ fn validate_card(
     if card.metric_version != card.question.metric_version() || card.rows.len() > MAX_CARD_ROWS {
         return Err(CardValidationError::InvalidRow);
     }
-    if card.omitted_rows > 0
-        && (card.question != InsightQuestionId::ObservedModels || card.rows.len() != MAX_CARD_ROWS)
-    {
+    if card.rows_omitted && card.question != InsightQuestionId::ObservedModels {
         return Err(CardValidationError::InvalidRow);
     }
     let mut row_ids = BTreeSet::new();
@@ -872,7 +1277,7 @@ fn validate_state(card: &InsightCard) -> Result<(), CardValidationError> {
                 CardState::Unavailable
             } else if card.coverage.iter().all(|c| c.observed == c.eligible)
                 && card.rows.iter().all(|row| row.missing_reason.is_none())
-                && card.omitted_rows == 0
+                && !card.rows_omitted
             {
                 CardState::Observed
             } else {
@@ -900,7 +1305,7 @@ fn validate_state(card: &InsightCard) -> Result<(), CardValidationError> {
                 .expect("required coverage");
             if models.observed == 0 {
                 CardState::Unavailable
-            } else if models.observed < models.eligible || card.omitted_rows > 0 {
+            } else if models.observed < models.eligible || card.rows_omitted {
                 CardState::Partial
             } else {
                 CardState::Observed
@@ -1231,7 +1636,7 @@ mod tests {
                     eligible: 3,
                 },
                 models: vec![],
-                omitted_models: 0,
+                model_labels_omitted: false,
                 omitted_model_records: 0,
                 model_eligible_records: 0,
                 model_observed_records: 0,
@@ -1287,7 +1692,7 @@ mod tests {
                     CardLimitation::UserSelectedEpisodeGroups,
                     CardLimitation::EpisodesNotIndependentTasks,
                 ],
-                omitted_rows: 0,
+                rows_omitted: false,
             }],
         }
     }
@@ -1324,7 +1729,7 @@ mod tests {
         out.validate_for(&r).unwrap();
         assert_eq!(
             r.input_digest().unwrap(),
-            "222dcf8bee413fd45ca11ee5ce89a406a7723009b260a55e7b476027f2b49421"
+            "0073b73df4448c8d7cc81e1cc27260527fb4b50dc9fce86775bf0982bbc4485c"
         );
     }
     #[test]
@@ -1496,7 +1901,7 @@ mod tests {
                 evidence_ids: vec![r.evidence[0].id.clone()],
                 episode_ids: vec![],
                 limitations: vec![CardLimitation::CostUnavailableWithoutPersistedUsageAndPricing],
-                omitted_rows: 0,
+                rows_omitted: false,
             }],
         };
         out.validate_for(&r).unwrap();
@@ -1540,5 +1945,119 @@ mod tests {
             .unwrap()
             .omitted_event_refs = 1;
         assert_eq!(r.validate(), Err(CardValidationError::InvalidInput));
+    }
+
+    #[test]
+    fn expected_projection_orders_all_questions_and_keeps_unknowns_explicit() {
+        let mut r = request();
+        r.questions = InsightQuestionId::ALL.to_vec();
+        let cards = expected_cards(&r).unwrap();
+        assert_eq!(
+            cards.iter().map(|card| card.question).collect::<Vec<_>>(),
+            InsightQuestionId::ALL
+        );
+        assert_eq!(cards[0].state, CardState::Partial);
+        assert_eq!(
+            cards[0].rows[8].missing_reason,
+            Some(MissingReason::NoEligibleEvidence)
+        );
+        assert_eq!(cards[1].state, CardState::Unavailable);
+        assert_eq!(cards[2].state, CardState::Unavailable);
+        assert_eq!(cards[3].state, CardState::Unavailable);
+        let result = InsightCardResult {
+            schema_version: 1,
+            provider: provider(),
+            input_digest: r.input_digest().unwrap(),
+            cards,
+        };
+        result.validate_for(&r).unwrap();
+    }
+
+    #[test]
+    fn expected_model_projection_bounds_union_and_marks_omission() {
+        let mut r = request();
+        r.questions = vec![InsightQuestionId::ObservedModels];
+        r.evidence.clear();
+        r.snapshots.clear();
+        for snapshot_index in 0..3_u64 {
+            let evidence = EvidenceRef {
+                id: format!("{snapshot_index:064x}"),
+                source_digest: format!("{:064x}", snapshot_index + 10),
+            };
+            let models = (0..32_u64)
+                .map(|model_index| ModelFact {
+                    label: format!("model-{:03}", snapshot_index * 32 + model_index),
+                    observed_records: 1,
+                })
+                .collect();
+            r.evidence.push(evidence.clone());
+            r.snapshots.push(SnapshotCardInput {
+                evidence,
+                source_format: CardSourceFormat::Codex,
+                normalized_events: CountFact {
+                    value: Some(0),
+                    observed: 0,
+                    eligible: 0,
+                },
+                tool_calls: CountFact {
+                    value: Some(0),
+                    observed: 0,
+                    eligible: 0,
+                },
+                tool_failures: CountFact {
+                    value: Some(0),
+                    observed: 0,
+                    eligible: 0,
+                },
+                models,
+                model_labels_omitted: false,
+                omitted_model_records: 0,
+                model_eligible_records: 32,
+                model_observed_records: 32,
+                time: None,
+            });
+        }
+        let cards = expected_cards(&r).unwrap();
+        assert_eq!(cards[0].rows.len(), MAX_CARD_ROWS);
+        assert!(cards[0].rows_omitted);
+        assert_eq!(cards[0].state, CardState::Partial);
+        assert_eq!(cards[0].rows[0].label.as_deref(), Some("model-000"));
+        assert_eq!(cards[0].rows[63].label.as_deref(), Some("model-063"));
+    }
+
+    #[test]
+    fn expected_episode_projection_derives_overlap_and_unknown_denominators() {
+        let mut r = request();
+        let evidence = r.evidence[0].clone();
+        r.episodes = vec![
+            episode(
+                "00000000-0000-4000-8000-000000000001",
+                &evidence,
+                Some(EpisodeOutcome::Rejected),
+            ),
+            episode(
+                "00000000-0000-4000-8000-000000000002",
+                &evidence,
+                Some(EpisodeOutcome::Unknown),
+            ),
+            episode("00000000-0000-4000-8000-000000000003", &evidence, None),
+        ];
+        let card = expected_cards(&r).unwrap().remove(0);
+        assert_eq!(card.state, CardState::Partial);
+        assert_eq!(
+            card.episode_denominator,
+            Some(EpisodeDenominator {
+                eligible: 3,
+                assessed: 2,
+                unassessed: 1,
+                explicit_unknown: 1
+            })
+        );
+        assert!(
+            card.limitations
+                .contains(&CardLimitation::EpisodeGroupsOverlap)
+        );
+        assert_eq!(card.rows[7].value, Some(CardValue::Count(3)));
+        assert_eq!(card.rows[8].value, Some(CardValue::Count(1)));
     }
 }
