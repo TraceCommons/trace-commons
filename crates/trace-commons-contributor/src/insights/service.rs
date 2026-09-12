@@ -5,6 +5,10 @@ use anyhow::{Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use trace_commons_protocol::insights_cards::{InsightCardResult, InsightQuestionId};
 
+use super::comparison_specs::{
+    ComparisonSpecificationDraftInput, ComparisonSpecificationError, ComparisonSpecificationV1,
+    DescriptiveComparisonResultV1,
+};
 use super::comparison_task_store::ComparisonTaskStoreError;
 use super::comparison_tasks::{
     ComparisonTaskContextInput, ComparisonTaskDetail, ComparisonTaskOutcome,
@@ -85,6 +89,26 @@ pub fn ui_copy() -> std::collections::BTreeMap<String, String> {
         ("episode_resolved", "Evidence resolved at"),
         ("episode_missing", "This episode is no longer available. Refresh saved episodes."),
         ("comparison_task_title", "Comparison task"),
+        ("comparison_specification_title", "Comparison specification"),
+        ("comparison_specifications_empty", "No comparison specifications have been saved."),
+        ("comparison_preview_notice", "Preview only. This specification has not been saved."),
+        ("comparison_retrospective_notice", "Retrospective user specification based on existing evidence."),
+        ("comparison_descriptive_notice", "Descriptive outcomes only. Uncertainty is not yet calibrated; no model advantage is established."),
+        ("comparison_no_eligible_evidence", "No eligible evidence matches this comparison. Review the exclusions below."),
+        ("comparison_denominator_notice", "Assessed outcomes include accepted, partial, and rejected tasks. Pending, unknown, and unassessed outcomes are excluded from that denominator. Observed tokens may cover only part of a task."),
+        ("comparison_exclusion_evidence_after_cutoff", "Evidence changed or was recorded after the cutoff"),
+        ("comparison_exclusion_cutoff_time_unavailable", "Evidence recording time is unavailable"),
+        ("comparison_exclusion_category_mismatch", "Task category does not match"),
+        ("comparison_exclusion_date_outside_window", "Task date is outside the selected window"),
+        ("comparison_exclusion_stratum_mismatch", "Project, language, or configuration does not match"),
+        ("comparison_exclusion_context_unavailable", "Task context is incomplete"),
+        ("comparison_exclusion_cohort_unavailable", "Declared model cohort is unavailable"),
+        ("comparison_exclusion_cohort_not_selected", "Declared model cohort is not selected"),
+        ("comparison_exclusion_evidence_stale", "Bound evidence is stale"),
+        ("comparison_exclusion_independence_unconfirmed", "Task independence needs review"),
+        ("comparison_exclusion_overlapping_task_evidence", "Evidence overlaps another task"),
+        ("comparison_exclusion_source_attribution_unavailable", "Source attribution is not qualified"),
+        ("comparison_exclusion_source_attribution_stale", "Source attribution no longer matches the evidence"),
         ("comparison_task_empty", "No comparison tasks have been saved."),
         ("comparison_task_material_digest", "Material evidence digest"),
         ("comparison_task_context_complete", "Comparable context is complete."),
@@ -364,6 +388,23 @@ pub enum LocalInsightsOperation {
         id: String,
         expected_revision: u64,
     },
+    ComparisonPreviewSpec {
+        input: ComparisonSpecificationDraftInput,
+    },
+    ComparisonSaveSpec {
+        input: ComparisonSpecificationDraftInput,
+    },
+    ComparisonListSpecs {},
+    ComparisonGetSpec {
+        id: String,
+    },
+    ComparisonEvaluate {
+        id: String,
+    },
+    ComparisonExplainResult {
+        specification_id: String,
+        audit_digest: String,
+    },
     Analyze {
         source: SourceFormat,
         file: PathBuf,
@@ -458,6 +499,19 @@ pub enum LocalInsightsResponse {
         #[serde(default)]
         mutation_effects: MutationEffects,
     },
+    ComparisonPreviewSpec {
+        specification: Box<ComparisonSpecificationV1>,
+        result: Box<DescriptiveComparisonResultV1>,
+    },
+    ComparisonSpecification {
+        specification: Box<ComparisonSpecificationV1>,
+    },
+    ComparisonSpecificationList {
+        specifications: Vec<ComparisonSpecificationV1>,
+    },
+    ComparisonResult {
+        result: Box<DescriptiveComparisonResultV1>,
+    },
     Analyze {
         insight: Box<LocalInsight>,
         #[serde(default)]
@@ -549,6 +603,10 @@ fn execute_inner(request: LocalInsightsRequest) -> Result<LocalInsightsResponse>
     let comparison_store = || {
         existing_store(request.store_dir.as_deref())?
             .ok_or_else(|| anyhow!(ComparisonTaskStoreError::NotFound))
+    };
+    let specification_store = || {
+        existing_store(request.store_dir.as_deref())?
+            .ok_or_else(|| anyhow!(ComparisonSpecificationError::NotFound))
     };
     Ok(match request.operation {
         LocalInsightsOperation::QuestionCards {
@@ -749,6 +807,59 @@ fn execute_inner(request: LocalInsightsRequest) -> Result<LocalInsightsResponse>
                 mutation_effects: result.mutation_effects,
             }
         }
+        LocalInsightsOperation::ComparisonPreviewSpec { input } => {
+            let store = existing_store(request.store_dir.as_deref())?
+                .ok_or(ComparisonSpecificationError::NoSavedTasks)?;
+            let (specification, result) = store.comparison_specification_preview(
+                input.evidence_cutoff,
+                input.cohort_labels,
+                input.date_start,
+                input.date_end,
+                input.stratum,
+            )?;
+            LocalInsightsResponse::ComparisonPreviewSpec {
+                specification: Box::new(specification),
+                result: Box::new(result),
+            }
+        }
+        LocalInsightsOperation::ComparisonSaveSpec { input } => {
+            LocalInsightsResponse::ComparisonSpecification {
+                specification: Box::new(store()?.comparison_specification_save(
+                    input.evidence_cutoff,
+                    input.cohort_labels,
+                    input.date_start,
+                    input.date_end,
+                    input.stratum,
+                )?),
+            }
+        }
+        LocalInsightsOperation::ComparisonListSpecs {} => {
+            LocalInsightsResponse::ComparisonSpecificationList {
+                specifications: match existing_store(request.store_dir.as_deref())? {
+                    Some(store) => store.comparison_specification_list()?,
+                    None => Vec::new(),
+                },
+            }
+        }
+        LocalInsightsOperation::ComparisonGetSpec { id } => {
+            LocalInsightsResponse::ComparisonSpecification {
+                specification: Box::new(specification_store()?.comparison_specification_get(&id)?),
+            }
+        }
+        LocalInsightsOperation::ComparisonEvaluate { id } => {
+            LocalInsightsResponse::ComparisonResult {
+                result: Box::new(specification_store()?.comparison_specification_evaluate(&id)?),
+            }
+        }
+        LocalInsightsOperation::ComparisonExplainResult {
+            specification_id,
+            audit_digest,
+        } => LocalInsightsResponse::ComparisonResult {
+            result: Box::new(
+                specification_store()?
+                    .comparison_result_explain(&specification_id, &audit_digest)?,
+            ),
+        },
         LocalInsightsOperation::Analyze { source, file, save } => {
             let (insight, mutation_effects) = if save {
                 let result = store()?.import_with_effects(source, &file)?;
@@ -866,6 +977,9 @@ fn public_error(error: anyhow::Error) -> anyhow::Error {
         return anyhow!(error.to_string());
     }
     if let Some(error) = error.downcast_ref::<ComparisonTaskStoreError>() {
+        return anyhow!(error.to_string());
+    }
+    if let Some(error) = error.downcast_ref::<ComparisonSpecificationError>() {
         return anyhow!(error.to_string());
     }
     if error.downcast_ref::<ResponseTooLarge>().is_some() {
@@ -1312,5 +1426,67 @@ mod tests {
             serde_json::json!({"type":"list","insights":[]})
         );
         assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn retrospective_specification_service_lifecycle_is_typed_and_digest_bound() {
+        let temp = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let store = temp.path().join("insights");
+        let input = serde_json::json!({
+            "evidence_cutoff":"2026-09-11T00:00:00Z",
+            "cohort_labels":["model-a","model-b"],
+            "date_start":"2026-09-01",
+            "date_end":"2026-09-10",
+            "stratum":{
+                "project_id":"00000000-0000-4000-8000-000000000001",
+                "language":"rust",
+                "configuration_fingerprint":"11".repeat(32)
+            }
+        });
+        let call = |operation: serde_json::Value| {
+            let request = serde_json::json!({"store_dir":store,"operation":operation});
+            let response = dispatch_json(&serde_json::to_vec(&request).unwrap()).unwrap();
+            serde_json::from_str::<serde_json::Value>(&response).unwrap()
+        };
+        let saved = call(serde_json::json!({"type":"comparison_save_spec","input":input}));
+        let id = saved["specification"]["id"].as_str().unwrap();
+        assert_eq!(
+            saved["specification"]["provenance"],
+            "retrospective_user_specification"
+        );
+        let listed = call(serde_json::json!({"type":"comparison_list_specs"}));
+        assert_eq!(listed["specifications"].as_array().unwrap().len(), 1);
+        let result = call(serde_json::json!({"type":"comparison_evaluate","id":id}));
+        assert_eq!(result["result"]["cohorts"].as_array().unwrap().len(), 2);
+        assert!(
+            result["result"]["included_task_ids"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        let audit = result["result"]["audit_digest"].as_str().unwrap();
+        let explained = call(serde_json::json!({
+            "type":"comparison_explain_result",
+            "specification_id":id,
+            "audit_digest":audit
+        }));
+        assert_eq!(explained, result);
+
+        let bad = serde_json::json!({"store_dir":store,"operation":{
+            "type":"comparison_explain_result",
+            "specification_id":id,
+            "audit_digest":"ff".repeat(32)
+        }});
+        assert_eq!(
+            dispatch_json(&serde_json::to_vec(&bad).unwrap())
+                .unwrap_err()
+                .to_string(),
+            "insights-comparison-result-stale"
+        );
     }
 }

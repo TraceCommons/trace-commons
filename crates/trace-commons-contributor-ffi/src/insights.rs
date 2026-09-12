@@ -213,6 +213,87 @@ mod tests {
         );
     }
 
+    #[test]
+    fn comparison_specification_abi_preserves_preview_and_detects_stale_results() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = dir.path().join("insights");
+        assert_eq!(
+            json_call(&store, serde_json::json!({"type":"comparison_list_specs"})).unwrap()["specifications"],
+            serde_json::json!([])
+        );
+        assert!(!store.exists());
+        let episode = comparison_episode(&store, &dir.path().join("fixture.jsonl"));
+        let task = json_call(
+            &store,
+            serde_json::json!({"type":"comparison_task_create","episode_ids":[episode]}),
+        )
+        .unwrap()["task"]
+            .clone();
+        let input = serde_json::json!({
+            "evidence_cutoff":task["updated_at"],
+            "cohort_labels":["fixture","second-fixture"],
+            "date_start":"2026-09-01", "date_end":"2026-09-30",
+            "stratum":{
+                "project_id":"20c18c96-6093-49f5-bb6f-6092ef0630b9",
+                "language":"rust", "configuration_fingerprint":"a".repeat(64)
+            }
+        });
+        let before = std::fs::read(store.join("index.json")).unwrap();
+        let preview = json_call(
+            &store,
+            serde_json::json!({"type":"comparison_preview_spec","input":input}),
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(store.join("index.json")).unwrap(), before);
+        assert_eq!(
+            preview["result"]["included_task_ids"],
+            serde_json::json!([])
+        );
+        let specification = json_call(
+            &store,
+            serde_json::json!({"type":"comparison_save_spec","input":input}),
+        )
+        .unwrap()["specification"]
+            .clone();
+        assert_eq!(
+            specification["provenance"],
+            "retrospective_user_specification"
+        );
+        let id = &specification["id"];
+        let result = json_call(
+            &store,
+            serde_json::json!({"type":"comparison_evaluate","id":id}),
+        )
+        .unwrap()["result"]
+            .clone();
+        assert_eq!(result["excluded_tasks"][0]["task_id"], task["id"]);
+        assert!(
+            result["excluded_tasks"][0]["reasons"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("source_attribution_unavailable"))
+        );
+        assert!(!result.to_string().contains("PRIVATE_COMPARISON_BODY"));
+        let explanation = serde_json::json!({"type":"comparison_explain_result","specification_id":id,"audit_digest":result["audit_digest"]});
+        assert_eq!(
+            json_call(&store, explanation.clone()).unwrap()["result"],
+            result
+        );
+        json_call(&store, serde_json::json!({"type":"comparison_task_delete","id":task["id"],"expected_revision":1})).unwrap();
+        assert_eq!(
+            json_call(&store, explanation).unwrap_err(),
+            "insights-comparison-result-stale"
+        );
+        assert_eq!(
+            json_call(
+                &store,
+                serde_json::json!({"type":"comparison_get_spec","id":id})
+            )
+            .unwrap()["specification"],
+            specification
+        );
+    }
+
     fn comparison_episode(store: &std::path::Path, source: &std::path::Path) -> String {
         std::fs::write(source, b"{\"role\":\"meta\",\"source\":\"claude-code\",\"model\":\"fixture\"}\n{\"role\":\"user\",\"timestamp\":\"2026-09-11T12:00:00Z\",\"content\":\"PRIVATE_COMPARISON_BODY\"}\n").unwrap();
         let saved = json_call(

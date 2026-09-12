@@ -5,6 +5,8 @@
 pub mod card_presentation;
 pub mod card_store;
 pub mod cards;
+pub mod comparison_spec_store;
+pub mod comparison_specs;
 pub mod comparison_task_store;
 pub mod comparison_tasks;
 pub mod episode_store;
@@ -33,7 +35,7 @@ use trace_commons_protocol::insights::{
 };
 
 const MAX_SOURCE_BYTES: u64 = 16 * 1024 * 1024;
-const STORE_VERSION: u32 = 7;
+const STORE_VERSION: u32 = 8;
 const MAX_OUTCOME_LINKS: usize = 128;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -311,6 +313,8 @@ struct Index {
     episodes: BTreeMap<String, episodes::LocalEpisode>,
     #[serde(default)]
     comparison_tasks: BTreeMap<String, comparison_tasks::LocalComparisonTaskV1>,
+    #[serde(default)]
+    comparison_specifications: BTreeMap<String, comparison_specs::ComparisonSpecificationV1>,
 }
 
 /// Dedicated local directory, independent of the enrollment/config store.
@@ -402,6 +406,7 @@ impl LocalInsightStore {
                 reports: BTreeMap::new(),
                 episodes: BTreeMap::new(),
                 comparison_tasks: BTreeMap::new(),
+                comparison_specifications: BTreeMap::new(),
             },
             Err(_) => bail!("insights_store_unreadable"),
         };
@@ -486,6 +491,7 @@ impl LocalInsightStore {
         }
         episode_store::validate_index_episodes(&index)?;
         comparison_task_store::validate_index_comparison_tasks(&index)?;
+        comparison_spec_store::validate_index_comparison_specifications(&index)?;
         // Legacy stores remain readable; the next mutation persists the current version.
         index.version = STORE_VERSION;
         Ok((lock, index))

@@ -255,6 +255,15 @@ fn detail(
     }
 }
 
+pub(super) fn comparison_task_details(index: &Index) -> Vec<ComparisonTaskDetail> {
+    let overlaps = overlap_components(index);
+    index
+        .comparison_tasks
+        .values()
+        .map(|task| detail(index, task, &overlaps[&task.id]))
+        .collect()
+}
+
 impl LocalInsightStore {
     pub fn comparison_task_create(&self, episode_ids: &[String]) -> Result<LocalComparisonTaskV1> {
         Ok(self.comparison_task_create_with_effects(episode_ids)?.value)
@@ -296,12 +305,7 @@ impl LocalInsightStore {
 
     pub fn comparison_task_list(&self) -> Result<Vec<ComparisonTaskDetail>> {
         let (_lock, index) = self.locked()?;
-        let overlaps = overlap_components(&index);
-        Ok(index
-            .comparison_tasks
-            .values()
-            .map(|task| detail(&index, task, &overlaps[&task.id]))
-            .collect())
+        Ok(comparison_task_details(&index))
     }
 
     pub fn comparison_task_explain(&self, id: &str) -> Result<ComparisonTaskDetail> {
@@ -828,7 +832,7 @@ mod tests {
         store.episode_create(&ids[..1]).unwrap();
         let upgraded: serde_json::Value =
             serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-        assert_eq!(upgraded["version"], 7);
+        assert_eq!(upgraded["version"], super::super::STORE_VERSION);
 
         let episode = store.episode_create(&ids[1..]).unwrap();
         let task = store.comparison_task_create(&[episode.id]).unwrap();
@@ -851,7 +855,7 @@ mod tests {
         fs::write(&path, serde_json::to_vec(&corrupt).unwrap()).unwrap();
         assert!(store.comparison_task_list().is_err());
         let mut future: serde_json::Value = serde_json::from_slice(&valid).unwrap();
-        future["version"] = 8.into();
+        future["version"] = (super::super::STORE_VERSION + 1).into();
         fs::write(&path, serde_json::to_vec(&future).unwrap()).unwrap();
         assert_eq!(
             store.comparison_task_list().unwrap_err().to_string(),
