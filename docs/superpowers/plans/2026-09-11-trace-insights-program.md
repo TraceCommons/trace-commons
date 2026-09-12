@@ -22,6 +22,8 @@ Current implementation checkpoints are draft PRs, not releases:
 | Estimator experiments | [#938](https://github.com/TraceCommons/trace-commons/pull/938). Test-only candidates; percentile undercoverage found. A reviewed, useful interval method remains required before admission. |
 | Native Claude local import | [#939](https://github.com/TraceCommons/trace-commons/pull/939). Three authorized real-file drafts imported and user outcomes recorded as accepted. Task boundaries, complete attempt linkage, model attribution, and cohort eligibility remain unqualified; one recorded model label does not supply two cohorts. |
 
+Recorded Claude declaration inspection is now in [#940](https://github.com/TraceCommons/trace-commons/pull/940): source-bound physical-line references, missing/invalid coverage, and native schema compatibility. The three selected files produced 438 declaration candidates (437 valid and one invalid synthetic label); accepted outcomes survived explicit reimport. These are declaration observations, not task or serving-model attribution. Original/final local Git object links are available for the two patch-matched cases; complete attempt linkage remains unresolved.
+
 The pilot exposed a missing native Claude importer and incremental records sharing message IDs; those findings changed implementation and regression coverage. Further pilot work measures whether users can complete the flow and make a decision, including excluded and abandoned cases. Runtime/platform CI is tracked on each PR at its actual head; these checkpoint links are not a broad readiness claim. Rewards for missions and insights are excluded and owned by Abhishek, as specified below.
 
 ## Outcome
