@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::OnceCell;
 use trace_commons_server::{
     config::{DatabaseConfig, SslMode},
-    db::postgres::PgBackend,
+    db::{Database, postgres::PgBackend},
     mission_rewards::{RewardActivityKind, RewardError, RewardProgramTerms},
 };
 use uuid::Uuid;
@@ -86,9 +86,8 @@ async fn backend(url: &str, role: &str) -> PgBackend {
 async fn migrated_database_url() -> String {
     MIGRATED_DATABASE_URL
         .get_or_init(|| async {
-            let url = std::env::var("TRACE_COMMONS_REWARDS_PG_TEST_URL").expect(
-                "TRACE_COMMONS_REWARDS_PG_TEST_URL is required; no fallback is permitted",
-            );
+            let url = std::env::var("TRACE_COMMONS_REWARDS_PG_TEST_URL")
+                .expect("TRACE_COMMONS_REWARDS_PG_TEST_URL is required; no fallback is permitted");
             let target = url
                 .parse::<tokio_postgres::Config>()
                 .expect("parse test URL");
@@ -116,19 +115,13 @@ async fn migrated_database_url() -> String {
                 "database name must start reward_test_"
             );
 
-            let (admin, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
+            let backend = PgBackend::new(&config(url.clone()))
                 .await
-                .expect("connect migration fixture");
-            tokio::spawn(async move { connection.await.expect("migration connection") });
-            admin.batch_execute("CREATE TABLE IF NOT EXISTS trace_tenants (tenant_id TEXT PRIMARY KEY); CREATE OR REPLACE FUNCTION trace_current_tenant_id() RETURNS TEXT LANGUAGE SQL STABLE AS $$ SELECT NULLIF(current_setting('trace_commons.trace_tenant_id', true), '') $$;")
+                .expect("connect administrative migration backend");
+            backend
+                .run_migrations()
                 .await
-                .expect("minimal tenant prelude");
-            admin
-                .batch_execute(include_str!(
-                    "../../../../migrations/V69__mission_insight_rewards.sql"
-                ))
-                .await
-                .expect("apply actual V69 migration");
+                .expect("apply the complete production migration chain");
             url
         })
         .await

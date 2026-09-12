@@ -5,10 +5,14 @@
 mod boundaries;
 #[path = "mission_rewards_pg/deadlines.rs"]
 mod deadlines;
+#[path = "mission_rewards_pg/deployment.rs"]
+mod deployment;
 #[path = "mission_rewards_pg/fixture.rs"]
 mod fixture;
 #[path = "mission_rewards_pg/operator_cli.rs"]
 mod operator_cli;
+#[path = "mission_rewards_pg/pagination.rs"]
+mod pagination;
 
 use serde_json::{Value, json};
 use trace_commons_server::mission_rewards::{RewardActivityKind, RewardError};

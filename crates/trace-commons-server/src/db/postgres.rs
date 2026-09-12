@@ -9,6 +9,8 @@ use std::collections::HashSet;
 mod account_onboarding;
 #[path = "postgres_public_run.rs"]
 mod public_run;
+#[cfg(test)]
+mod reward_upgrade_tests;
 
 use async_trait::async_trait;
 use deadpool_postgres::Pool;
@@ -1302,6 +1304,11 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         69,
         "mission_insight_rewards",
         include_str!("../../../../migrations/V69__mission_insight_rewards.sql"),
+    ),
+    (
+        70,
+        "reward_history_pagination",
+        include_str!("../../../../migrations/V70__reward_history_pagination.sql"),
     ),
 ];
 

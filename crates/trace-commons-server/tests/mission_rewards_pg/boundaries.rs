@@ -2,15 +2,12 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // INTEGRATION: boundary regressions for V69 tenant isolation and ledger serialization.
 
-use std::time::Duration;
-
 use serde_json::json;
 use trace_commons_server::mission_rewards::{RewardActivityKind, RewardError};
 use uuid::Uuid;
 
 use crate::fixture::{
-    RewardPgFixture, assert_refusal, award_submission, create_program, digest, history_entry,
-    reserve_and_submit,
+    RewardPgFixture, assert_refusal, award_submission, create_program, digest, reserve_and_submit,
 };
 
 #[tokio::test]
@@ -164,70 +161,4 @@ async fn claim_and_cancel_replays_preserve_terminal_ledger_rules() {
             .expect("exact cancellation replay"),
         cancelled
     );
-}
-
-#[tokio::test]
-#[ignore = "requires PostgreSQL 16+ at isolated TRACE_COMMONS_REWARDS_PG_TEST_URL"]
-async fn history_waits_for_pending_review_before_reporting_award() {
-    let fixture = RewardPgFixture::new().await;
-    let participant = digest("history-lock-participant");
-    let program = create_program(
-        &fixture.issuer_db,
-        &fixture.tenant,
-        RewardActivityKind::MissionCompletion,
-        7,
-        7,
-        7,
-    )
-    .await;
-    let (reservation, _) = reserve_and_submit(
-        &fixture.issuer_db,
-        &fixture.tenant,
-        program,
-        &participant,
-        "history-lock",
-    )
-    .await;
-    let mut client = fixture
-        .reviewer_db
-        .raw_pool_for_tests_and_diagnostics()
-        .get()
-        .await
-        .expect("reviewer pool connection");
-    let transaction = client.transaction().await.expect("review transaction");
-    transaction
-        .execute(
-            "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
-            &[&fixture.tenant],
-        )
-        .await
-        .expect("bind review transaction tenant");
-    transaction
-        .query_one(
-            "SELECT public.trace_reward_review($1, $2, $3, true, 'completion_verified')",
-            &[&fixture.tenant, &reservation, &Uuid::new_v4()],
-        )
-        .await
-        .expect("execute uncommitted review");
-
-    let history = fixture
-        .issuer_db
-        .reward_history(&fixture.tenant, &participant, 10);
-    tokio::pin!(history);
-    assert!(
-        tokio::time::timeout(Duration::from_millis(100), &mut history)
-            .await
-            .is_err(),
-        "history must wait on the same tenant lock as review"
-    );
-    transaction
-        .commit()
-        .await
-        .expect("commit review transaction");
-    let history = history.await.expect("history after review commit");
-    let entry = history_entry(&history, reservation);
-    assert_eq!(entry["state"], "awarded");
-    assert_eq!(entry["awarded_units"], json!(7));
-    assert_eq!(history["programs"][0]["program_id"], program.to_string());
-    assert_eq!(history["programs"][0]["awarded_units"], json!(7));
 }

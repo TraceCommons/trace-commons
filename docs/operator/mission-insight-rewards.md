@@ -8,12 +8,17 @@ An issuer reserves and submits evidence. An independent reviewer accepts or reje
 
 - Publish the task definition, rubric, evaluator policy, required evidence, rights, challenge policy, sponsor identity, unit schedule, and closing time. Store the published artifacts in the approved external evidence location.
 - Assign one issuer and one reviewer with different stable SHA-256 actor hashes. Check affiliations and likely Sybils manually; hash inequality does not prove independence.
+- Designate an independent fallback reviewer and escalation contact before enrollment; provision additional reviewer logins through the same DBA process. Submitted allocations remain held when review stalls, so pause invitations if review capacity is exhausted.
 - Use the PostgreSQL login assigned to the operator. The CLI has no `--actor` or `--reviewer` override, and session authentication determines authority.
 - Build `trace-commons-reward-operator` from the release being operated. Successful output is JSON, including with `--json`; failures return a safe label and next action on stderr.
 
 ## DBA provisioning
 
-Run migration `V69__mission_insight_rewards.sql` through normal server migration registration. It creates `trace_reward_guard` and `trace_reward_runtime` as `NOLOGIN NOBYPASSRLS`, forces RLS on every `trace_reward_` table, and revokes runtime table access. The runtime group receives `EXECUTE` only on the eight public reward functions. Do not grant table DML, access to `trace_reward_operators`, `BYPASSRLS`, superuser, role administration, database creation, or schema creation to an operator login.
+Run the normal server migrator through `V70__reward_history_pagination.sql` before provisioning operators; the CLI does not apply migrations. V69 creates `trace_reward_guard` and `trace_reward_runtime` as `NOLOGIN NOBYPASSRLS`, forces RLS on every `trace_reward_` table, and revokes runtime table access.
+
+V70 preserves existing awards while adding stored identity provenance and history continuation. Databases that installed V69 upgrade through V70; the earlier migration remains unchanged.
+
+The runtime group receives `EXECUTE` only on the eight public reward functions. Do not grant table DML, access to `trace_reward_operators`, `BYPASSRLS`, superuser, role administration, database creation, or schema creation to an operator login.
 
 Create separate direct-login roles. Run this as a DBA with table-write privileges and BYPASSRLS or superuser authority; never use either operator login for these statements.
 
@@ -124,17 +129,27 @@ trace-commons-reward-operator --tenant pilot-tenant cancel \
 
 Reservations expire at the earlier of the terms TTL and program close. A timely submission remains held during review. Rejection and cancellation release the hold. Invalidation blocks a later submission and releases a pending submitted hold; an existing award stays recorded and counted, with invalidation visible in history. No command changes terms, reopens a terminal decision, refunds an accepted award, or redeems units.
 
+Participants request consent withdrawal through the published operator contact; an authorized operator invalidates the affected evidence before acceptance. There is no participant-facing withdrawal command or automatic consent-revocation feed.
+
+Appeals use the published human contact, and the ledger preserves the original decision. The pilot cannot record an appeal, overturn a rejection or issue a compensating award; do not invite participation under terms that promise those unavailable actions.
+
 ## Retries and incidents
 
 Repeat only the exact request with the same identifier after an interruption. Changed payloads for an existing program, reservation, or decision return `reward_payload_conflict`. Work and evidence hashes are unique across programs within the tenant, including after rejection or invalidation. Preserve the CLI's safe `reward_*` label and the retained evidence record in the incident ticket; do not attach connection strings or raw evidence.
 
-History returns the newest `--limit` entries and full awarded totals, including zero, for the programs represented in those entries. Reads share the tenant lock with mutations so each response describes one consistent ledger state.
+Inspect semantic duplicates and cross-tenant reuse manually. The ledger compares exact digests within a tenant and provides no global duplicate registry.
 
-`truncated` marks omitted older entries; `programs_scope` is `visible_entries`. Invalidating rejected evidence preserves the rejection and adds the invalidation flag.
+History returns the newest `--limit` entries and full awarded totals, including zero, for the programs represented in those entries. Each program's stored `identity_mode` identifies its operator-asserted provenance.
+
+Pass the returned `next_cursor` to `history --before <cursor>` to read older entries; the final page returns `next_cursor: null` and `truncated: false`. Cursors belong to the specified tenant and participant, and newer inserts cannot displace older entries across pages.
+
+Reads share the tenant lock with mutations so each response describes one consistent ledger state; separate pages can reflect subsequent decisions. `programs_scope` is `visible_entries`, and invalidating rejected evidence preserves the rejection and adds the invalidation flag.
 
 ## Isolated verification
 
-Use Rust 1.96.1 and a fresh local PostgreSQL database named `reward_test_...`; CI uses PostgreSQL 16 and local validation uses 17. Set `TRACE_COMMONS_REWARDS_PG_TEST_URL` through the environment to that disposable database using an administrative test login. The ignored integration tests install V69 with a minimal tenant schema and create distinct operator logins; do not pre-apply migrations. Never use production or rely on `DATABASE_URL`.
+Use Rust 1.96.1 and a fresh local PostgreSQL database named `reward_test_...`; CI uses PostgreSQL 16 and local validation uses 17. Set `TRACE_COMMONS_REWARDS_PG_TEST_URL` through the environment to that disposable database using an administrative test login.
+
+The ignored integration tests run the complete production migration chain and create distinct operator logins; do not pre-apply migrations or reuse a database from an older candidate. Never use production or rely on `DATABASE_URL`.
 
 The disposable test cluster needs loopback-only trust authentication for its synthetic logins because the fixture generates no passwords.
 
@@ -147,6 +162,8 @@ The test matrix also covers:
 
 - issuer/reviewer swaps, no grant, wrong tenant, superuser, and direct runtime writes;
 - malformed terms, replay conflicts, cross-program work and evidence duplicates, expiry, cancellation, participant caps, and invalidation before and after award;
-- concurrent last-slot reserve and review-versus-invalidate cases.
+- concurrent last-slot reserve and review-versus-invalidate cases;
+- database-clock expiry and closure, repeat migrations, catalog permissions, and an observed advisory-lock waiter;
+- tied-timestamp pagination, foreign cursors, full balances across pages, and CLI continuation.
 
 A migration shape check or mock does not establish these controls.

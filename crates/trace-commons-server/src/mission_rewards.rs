@@ -266,10 +266,22 @@ impl PgBackend {
         participant_hash: &str,
         limit: i32,
     ) -> Result<Value, RewardError> {
+        self.reward_history_page(tenant, participant_hash, limit, None)
+            .await
+    }
+
+    /// Continue bounded history with the reservation cursor from the prior page.
+    pub async fn reward_history_page(
+        &self,
+        tenant: &str,
+        participant_hash: &str,
+        limit: i32,
+        before: Option<Uuid>,
+    ) -> Result<Value, RewardError> {
         self.reward_query(
             tenant,
-            "SELECT public.trace_reward_history($1,$2,$3)",
-            &[&tenant, &participant_hash, &limit],
+            "SELECT public.trace_reward_history($1,$2,$3,$4)",
+            &[&tenant, &participant_hash, &limit, &before],
         )
         .await
     }

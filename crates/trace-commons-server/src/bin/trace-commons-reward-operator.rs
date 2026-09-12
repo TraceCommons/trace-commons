@@ -137,6 +137,9 @@ struct HistoryArgs {
     participant_hash: String,
     #[arg(long, default_value_t = 50, value_parser = clap::value_parser!(i32).range(1..=100))]
     limit: i32,
+    /// Continue from the next_cursor returned by the previous history page.
+    #[arg(long)]
+    before: Option<Uuid>,
 }
 
 #[tokio::main]
@@ -207,7 +210,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         }
         Command::History(args) => {
             backend
-                .reward_history(&cli.tenant, &args.participant_hash, args.limit)
+                .reward_history_page(&cli.tenant, &args.participant_hash, args.limit, args.before)
                 .await
         }
     }
