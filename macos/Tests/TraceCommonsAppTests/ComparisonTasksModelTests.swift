@@ -92,6 +92,35 @@ final class ComparisonTasksModelTests: XCTestCase {
         XCTAssertTrue(model.tasks[0].stale_reasons.contains(.episodeMissing))
     }
 
+    @MainActor
+    func testUpstreamInvalidationDuringHeldListQueuesFreshRead() async throws {
+        let service = ComparisonFakeService(seed: true)
+        let model = ComparisonTasksModel(service: { try await service.call($0) })
+        model.open(); try await settle(model)
+        await service.holdNextList(); model.refresh()
+        try await Task.sleep(for: .milliseconds(20))
+        await service.markEpisodeMissing(); model.upstreamEvidenceChanged()
+        await service.releaseList(); try await settle(model)
+        XCTAssertTrue(model.tasks[0].stale_reasons.contains(.episodeMissing))
+        let listCalls = await service.listCallCount()
+        XCTAssertGreaterThanOrEqual(listCalls, 3)
+    }
+
+    @MainActor
+    func testInvalidationDuringFailingMutationDrainsOnFailure() async throws {
+        let service = ComparisonFakeService(seed: true)
+        let model = ComparisonTasksModel(service: { try await service.call($0) })
+        model.open(); try await settle(model); model.select(ComparisonFakeService.taskID); try await settle(model)
+        await service.holdAndFailNextMutation(); model.setOutcome()
+        try await Task.sleep(for: .milliseconds(20))
+        await service.markEpisodeMissing(); model.upstreamEvidenceChanged()
+        await service.releaseMutation(); try await settle(model)
+        XCTAssertEqual(model.error, "error")
+        XCTAssertTrue(model.tasks[0].stale_reasons.contains(.episodeMissing))
+        let writes = await service.count("comparison_task_set_outcome")
+        XCTAssertEqual(writes, 1)
+    }
+
     @MainActor private func settle(_ model: ComparisonTasksModel) async throws {
         for _ in 0..<300 { if !model.busy { return }; try await Task.sleep(for: .milliseconds(10)) }
         XCTFail("Comparison model did not settle")
@@ -106,11 +135,19 @@ private actor ComparisonFakeService {
     private var staleReasons = ["context_incomplete", "attribution_pending_qualification"]
     private var holdMutation = false
     private var mutationContinuation: CheckedContinuation<Void, Never>?
+    private var holdList = false
+    private var listContinuation: CheckedContinuation<Void, Never>?
+    private var listCalls = 0
+    private var failMutation = false
     private(set) var mutations: [String] = []
     init(seed: Bool = false) { if seed { value = Self.makeTask() } }
     func failNextList() { failList = true }
     func holdNextMutation() { holdMutation = true }
+    func holdAndFailNextMutation() { holdMutation = true; failMutation = true }
     func releaseMutation() { mutationContinuation?.resume(); mutationContinuation = nil }
+    func holdNextList() { holdList = true }
+    func releaseList() { listContinuation?.resume(); listContinuation = nil }
+    func listCallCount() -> Int { listCalls }
     func markEpisodeMissing() { staleReasons.append("episode_missing") }
     func clearContext() { value?["context"] = NSNull() }
     func installKnownContext() {
@@ -129,15 +166,23 @@ private actor ComparisonFakeService {
         switch op.type {
         case "comparison_task_list":
             if failList { failList = false; throw InsightsError.invalidResponse }
-            response["tasks"] = value.map { [detail($0)] } ?? []
+            listCalls += 1
+            let captured = value.map { [detail($0)] } ?? []
+            if holdList {
+                holdList = false
+                await withCheckedContinuation { listContinuation = $0 }
+            }
+            response["tasks"] = captured
         case "comparison_task_explain": response["detail"] = detail(try present())
         case "comparison_task_create": mutations.append(op.type); value = Self.makeTask(); response["type"] = "comparison_task"; response["task"] = value
         case "comparison_task_set_outcome":
+            mutations.append(op.type)
             if holdMutation {
                 holdMutation = false
                 await withCheckedContinuation { mutationContinuation = $0 }
             }
-            mutations.append(op.type); try check(op); advance()
+            if failMutation { failMutation = false; throw InsightsError.invalidResponse }
+            try check(op); advance()
             let digest = value!["material_digest"]!
             value?["outcome"] = ["value": op.outcome!, "material_revision": 1,
                                   "material_digest": digest, "recorded_at": "2026-09-12T00:00:00Z"]

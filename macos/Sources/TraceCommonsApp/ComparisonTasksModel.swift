@@ -44,7 +44,7 @@ final class ComparisonTasksModel {
     }
     func upstreamEvidenceChanged() {
         guard active else { return }
-        if mutationTask != nil { refreshAfterMutation = true } else { refresh() }
+        if busy { refreshAfterMutation = true } else { refresh() }
     }
     func refresh() {
         presentation = UUID(); detail = nil; editSelection = []; editingEpisodes = false
@@ -165,12 +165,12 @@ final class ComparisonTasksModel {
                         throw InsightsError.invalidResponse
                     }
                     try tasks.forEach { try $0.validateSupportedSchema() }
-                    self.tasks = tasks; self.busy = false
+                    self.tasks = tasks; self.finishAndDrainRefresh()
                 case .detail(let id, let token):
                     guard self.presentation == token, response.type == "comparison_task_explain",
                           let detail = response.comparisonTaskDetail else { throw InsightsError.invalidResponse }
                     try detail.validateSupportedSchema(expectedID: id)
-                    self.install(detail); self.busy = false
+                    self.install(detail); self.finishAndDrainRefresh()
                 case .create:
                     guard response.type == "comparison_task", let value = response.task else {
                         throw InsightsError.invalidResponse
@@ -202,6 +202,7 @@ final class ComparisonTasksModel {
                 self.error = self.copyKey(for: error)
                 if case .mutation = intent { self.discardEditableDetail() }
                 if case .delete = intent { self.discardEditableDetail() }
+                self.drainRefreshPreservingMessages()
             }
         }
         if writes { mutationTask = operationTask } else { task = operationTask }
@@ -246,17 +247,12 @@ final class ComparisonTasksModel {
                           let detail = explained.comparisonTaskDetail else { throw InsightsError.invalidResponse }
                     try detail.validateSupportedSchema(expectedID: id); self.install(detail)
                 }
-                self.notice = retainedNotice; self.busy = false
-                if self.refreshAfterMutation {
-                    self.refreshAfterMutation = false
-                    let success = self.notice
-                    self.refresh()
-                    self.notice = success
-                }
+                self.notice = retainedNotice; self.finishAndDrainRefresh()
             } catch {
                 guard let self, self.active, self.generation == screen, !Task.isCancelled else { return }
                 self.discardEditableDetail(); self.notice = retainedNotice
-                self.error = "comparison_task_committed_reload_failed"; self.busy = false
+                self.error = "comparison_task_committed_reload_failed"
+                self.finishAndDrainRefresh()
             }
         }
     }
@@ -285,6 +281,17 @@ final class ComparisonTasksModel {
     }
     private func discardEditableDetail() {
         presentation = UUID(); detail = nil; editSelection = []; editingEpisodes = false
+    }
+    private func finishAndDrainRefresh() {
+        busy = false
+        drainRefreshPreservingMessages()
+    }
+    private func drainRefreshPreservingMessages() {
+        guard active, !busy, refreshAfterMutation else { return }
+        refreshAfterMutation = false
+        let retainedNotice = notice; let retainedError = error
+        refresh()
+        notice = retainedNotice; error = retainedError
     }
     private func copyKey(for error: Error) -> String {
         guard case .service(let code) = error as? InsightsError else { return "error" }
