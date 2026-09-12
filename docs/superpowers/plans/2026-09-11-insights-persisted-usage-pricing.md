@@ -131,6 +131,22 @@ Content-identical aliases continue sharing one report and one usage record. A ch
 
 Keep the existing ephemeral `usage` command for inspection. Add no attach-by-ID mutation in this sequence: accepting a separately supplied file would require proving it is the same bytes and source type, and for Claude there is no saved snapshot target. A future explicit reimport operation can use the normal snapshot lifecycle.
 
+## Provider and rate-context qualification
+
+Model attribution is not provider attribution. `has_attributed_interval()` only
+establishes model-attributed observed counters; the current persisted evidence
+does not retain provider identity. Codex can use custom endpoints, and its
+configured `model_provider` label alone does not prove which service supplied
+the usage. Do not infer OpenAI prices from the Codex adapter or a model slug.
+
+Before automatic numeric cost projection, require source-bound qualification of
+the provider and rate context, exact provider-plus-model matching, and applicable
+interval/category coverage. Missing, conflicting, custom, or unqualified context
+must produce typed unavailability. A future explicit user-selected rate table
+could support a hypothetical estimate, but that is a distinct product operation
+whose result must name the selected rate assumption; it must not silently fill
+the automatic estimated-cost card. Neither operation establishes invoiced cost.
+
 ## Immutable pricing evidence
 
 Add a versioned, presentation-neutral pricing contract in `trace-commons-protocol`, because the deterministic card request and all shells consume its result. Keep catalog loading, validation, and local persistence in `trace-commons-contributor`.
