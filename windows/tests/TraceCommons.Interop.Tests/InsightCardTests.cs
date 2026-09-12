@@ -92,6 +92,18 @@ public sealed class InsightCardTests
     }
 
     [Fact]
+    public async Task EmptySelectionIsSentAsNoEvidence()
+    {
+        var service = new Service();
+        using var model = new InsightsViewModel(service);
+        await model.LoadAsync();
+        await model.LoadQuestionCardsAsync(Array.Empty<string>(), Array.Empty<string>());
+        var call = service.Calls.Single(item => item.GetProperty("type").GetString() == "question_cards");
+        Assert.Empty(call.GetProperty("snapshot_ids").EnumerateArray());
+        Assert.Empty(call.GetProperty("episode_ids").EnumerateArray());
+    }
+
+    [Fact]
     public async Task CancellationPreventsLateCardPresentationAndNavigationRequiresReturnedEvidence()
     {
         var service = new Service();
@@ -149,6 +161,10 @@ public sealed class InsightCardTests
         Assert.Contains("x:Name=\"CardSavedList\"", xaml);
         Assert.Contains("x:Name=\"CardEpisodeList\"", xaml);
         Assert.Contains("SelectionMode=\"Multiple\"", xaml);
+        Assert.Contains("Header=\"{Binding [card_title]}\"", xaml);
+        Assert.Contains("Text=\"{Binding [card_selection_notice]}\"", xaml);
+        Assert.Contains("Text=\"{Binding [card_choose_evidence]}\"", xaml);
+        Assert.Contains("Content=\"{Binding [card_update]}\"", xaml);
         Assert.Contains("ItemsSource=\"{Binding QuestionCards}\"", xaml);
         Assert.Contains("Click=\"OnCardEvidence\"", xaml);
         Assert.Contains("Click=\"OnCardEpisode\"", xaml);
