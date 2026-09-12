@@ -19,6 +19,7 @@ cargo test --locked -p codex-core --test all insights_direct_profile_writer_fixt
 | `/private/tmp/trace-insights-codex-release-writer-fixtures/codex-alpha-direct.jsonl` | `codex-release-0.154.0-alpha-direct.jsonl` |
 | `/private/tmp/trace-insights-codex-release-writer-fixtures/codex-beta-direct.jsonl` | `codex-release-0.154.0-beta-direct.jsonl` |
 | `/private/tmp/trace-insights-codex-release-tool-fixtures/codex-tool-reasoning.jsonl` | `codex-release-0.154.0-tool-reasoning.jsonl` |
+| `/private/tmp/trace-insights-codex-default-instruction-fixture/codex-default-instructions.jsonl` | `codex-release-0.154.0-default-instructions.jsonl` |
 
 Compare SHA-256 values with `manifest-release-0.154.0.json`, including its generator digest. Run the harness a second time and verify identical fixture bytes. The manifest in this repository is the combined admission manifest; the generator's direct-fixture `manifest.json` is a separate harness artifact.
 
