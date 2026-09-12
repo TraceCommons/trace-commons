@@ -213,6 +213,333 @@ mod tests {
         );
     }
 
+    fn comparison_episode(store: &std::path::Path, source: &std::path::Path) -> String {
+        std::fs::write(source, b"{\"role\":\"meta\",\"source\":\"claude-code\",\"model\":\"fixture\"}\n{\"role\":\"user\",\"timestamp\":\"2026-09-11T12:00:00Z\",\"content\":\"PRIVATE_COMPARISON_BODY\"}\n").unwrap();
+        let saved = json_call(
+            store,
+            serde_json::json!({
+                "type":"analyze", "source":"trajectory", "file":source, "save":true
+            }),
+        )
+        .unwrap();
+        let episode = json_call(
+            store,
+            serde_json::json!({
+                "type":"episode_create", "snapshot_ids":[saved["insight"]["id"]]
+            }),
+        )
+        .unwrap();
+        episode["episode"]["id"].as_str().unwrap().to_owned()
+    }
+
+    fn comparison_context() -> serde_json::Value {
+        serde_json::json!({
+            "project_id":"20c18c96-6093-49f5-bb6f-6092ef0630b9",
+            "category":"refactor", "task_date":"2026-09-11",
+            "checkout_provenance":{"state":"unavailable"},
+            "language":{"state":"known","value":"rust"},
+            "configuration":{
+                "harness_id":{"state":"known","value":"fixture"},
+                "harness_version":{"state":"known","value":"1"},
+                "reasoning_effort":"none",
+                "tool_policy_id":{"state":"known","value":"read-only"},
+                "tool_policy_version":{"state":"known","value":"1"},
+                "prompt_template_digest":{"state":"known","digest":"a".repeat(64)}
+            }
+        })
+    }
+
+    #[test]
+    fn comparison_task_abi_preserves_review_across_outcomes_and_invalidates_changed_context() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = temp.path().join("insights");
+        let list = json_call(&store, serde_json::json!({"type":"comparison_task_list"})).unwrap();
+        assert_eq!(list["tasks"], serde_json::json!([]));
+        assert!(!store.exists());
+        assert_eq!(
+            json_call(
+                &store,
+                serde_json::json!({
+                    "type":"comparison_task_explain", "id":"20c18c96-6093-49f5-bb6f-6092ef0630b9"
+                })
+            )
+            .unwrap_err(),
+            "insights_comparison_task_not_found"
+        );
+        assert!(
+            !store.exists(),
+            "explaining a missing task must not create storage"
+        );
+        let episode = comparison_episode(&store, &temp.path().join("source.jsonl"));
+        let created = json_call(
+            &store,
+            serde_json::json!({
+                "type":"comparison_task_create", "episode_ids":[episode]
+            }),
+        )
+        .unwrap();
+        let id = created["task"]["id"].as_str().unwrap();
+        let context = comparison_context();
+        let contextualized = json_call(
+            &store,
+            serde_json::json!({
+                "type":"comparison_task_set_context", "id":id, "expected_revision":1,
+                "context":context
+            }),
+        )
+        .unwrap();
+        let material = &contextualized["task"]["material_digest"];
+        let confirmed = json_call(
+            &store,
+            serde_json::json!({
+                "type":"comparison_task_reconfirm", "id":id, "expected_revision":2,
+                "displayed_material_digest":material
+            }),
+        )
+        .unwrap();
+        let pending = json_call(
+            &store,
+            serde_json::json!({
+                "type":"comparison_task_set_outcome", "id":id, "expected_revision":3,
+                "outcome":"pending"
+            }),
+        )
+        .unwrap();
+        assert_eq!(pending["task"]["outcome"]["value"], "pending");
+        let accepted = json_call(
+            &store,
+            serde_json::json!({
+                "type":"comparison_task_set_outcome", "id":id, "expected_revision":4,
+                "outcome":"accepted"
+            }),
+        )
+        .unwrap();
+        assert_eq!(accepted["task"]["material_digest"], *material);
+        assert_eq!(
+            accepted["task"]["independence_confirmation"],
+            confirmed["task"]["independence_confirmation"]
+        );
+        assert_eq!(
+            json_call(
+                &store,
+                serde_json::json!({
+                    "type":"comparison_task_delete", "id":id, "expected_revision":4
+                })
+            )
+            .unwrap_err(),
+            "insights_comparison_task_revision_conflict"
+        );
+        let mut changed_context = context;
+        changed_context["task_date"] = serde_json::json!("2026-09-12");
+        let changed = json_call(
+            &store,
+            serde_json::json!({
+                "type":"comparison_task_set_context", "id":id, "expected_revision":5,
+                "context":changed_context
+            }),
+        )
+        .unwrap();
+        assert_ne!(changed["task"]["material_digest"], *material);
+        assert_eq!(
+            json_call(
+                &store,
+                serde_json::json!({
+                    "type":"comparison_task_reconfirm", "id":id, "expected_revision":6,
+                    "displayed_material_digest":material
+                })
+            )
+            .unwrap_err(),
+            "insights_comparison_task_material_digest_conflict"
+        );
+        let detail = json_call(
+            &store,
+            serde_json::json!({"type":"comparison_task_explain","id":id}),
+        )
+        .unwrap();
+        let reasons = detail["detail"]["stale_reasons"].as_array().unwrap();
+        assert!(reasons.contains(&serde_json::json!("outcome_material_changed")));
+        assert!(reasons.contains(&serde_json::json!("independence_material_changed")));
+        assert!(reasons.contains(&serde_json::json!("attribution_pending_qualification")));
+        assert!(!detail.to_string().contains("PRIVATE_COMPARISON_BODY"));
+        json_call(
+            &store,
+            serde_json::json!({
+                "type":"comparison_task_delete", "id":id, "expected_revision":6
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            json_call(&store, serde_json::json!({"type":"comparison_task_list"})).unwrap()["tasks"],
+            serde_json::json!([])
+        );
+        assert!(
+            json_call(
+                &store,
+                serde_json::json!({"type":"episode_explain","id":episode})
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn comparison_task_abi_retains_missing_evidence_and_rejects_stale_reconfirmation() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = temp.path().join("insights");
+        let episode = comparison_episode(&store, &temp.path().join("source.jsonl"));
+        let created = json_call(
+            &store,
+            serde_json::json!({
+                "type":"comparison_task_create", "episode_ids":[episode]
+            }),
+        )
+        .unwrap();
+        let id = created["task"]["id"].as_str().unwrap();
+        json_call(
+            &store,
+            serde_json::json!({"type":"episode_delete","id":episode,"expected_revision":1}),
+        )
+        .unwrap();
+        let detail = json_call(
+            &store,
+            serde_json::json!({"type":"comparison_task_explain","id":id}),
+        )
+        .unwrap();
+        assert_eq!(
+            detail["detail"]["task"]["episodes"][0]["episode_id"],
+            episode
+        );
+        assert!(
+            detail["detail"]["stale_reasons"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("episode_missing"))
+        );
+        assert!(
+            json_call(
+                &store,
+                serde_json::json!({
+                    "type":"comparison_task_reconfirm", "id":id, "expected_revision":1,
+                    "displayed_material_digest":created["task"]["material_digest"]
+                })
+            )
+            .is_err()
+        );
+        let list = json_call(&store, serde_json::json!({"type":"comparison_task_list"})).unwrap();
+        assert_eq!(list["tasks"].as_array().unwrap().len(), 1);
+        json_call(
+            &store,
+            serde_json::json!({"type":"comparison_task_delete","id":id,"expected_revision":1}),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn comparison_task_abi_reports_upstream_and_overlap_changes_for_reconciliation() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = temp.path().join("insights");
+        let episode = comparison_episode(&store, &temp.path().join("source.jsonl"));
+        let first = json_call(
+            &store,
+            serde_json::json!({
+                "type":"comparison_task_create", "episode_ids":[episode]
+            }),
+        )
+        .unwrap();
+        let first_id = first["task"]["id"].as_str().unwrap();
+        let second = json_call(
+            &store,
+            serde_json::json!({
+                "type":"comparison_task_create", "episode_ids":[episode]
+            }),
+        )
+        .unwrap();
+        assert!(
+            second["mutation_effects"]["stale_comparison_task_ids"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!(first_id))
+        );
+        let detail = json_call(
+            &store,
+            serde_json::json!({"type":"comparison_task_explain","id":first_id}),
+        )
+        .unwrap();
+        assert_eq!(
+            detail["detail"]["overlapping_task_ids"],
+            serde_json::json!([second["task"]["id"]])
+        );
+        let deleted = json_call(
+            &store,
+            serde_json::json!({
+                "type":"comparison_task_delete", "id":second["task"]["id"], "expected_revision":1
+            }),
+        )
+        .unwrap();
+        assert!(
+            deleted["mutation_effects"]["stale_comparison_task_ids"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!(first_id))
+        );
+        let detail = json_call(
+            &store,
+            serde_json::json!({"type":"comparison_task_explain","id":first_id}),
+        )
+        .unwrap();
+        assert_eq!(
+            detail["detail"]["overlapping_task_ids"],
+            serde_json::json!([])
+        );
+        let annotated = json_call(
+            &store,
+            serde_json::json!({
+                "type":"episode_annotate", "id":episode, "expected_revision":1,
+                "category":"refactor", "outcome":"accepted"
+            }),
+        )
+        .unwrap();
+        assert!(
+            annotated["mutation_effects"]["stale_comparison_task_ids"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!(first_id))
+        );
+        let effects = annotated["mutation_effects"]["stale_comparison_tasks"]
+            .as_array()
+            .unwrap();
+        let affected = effects
+            .iter()
+            .find(|effect| effect["task_id"] == first_id)
+            .unwrap();
+        assert!(
+            affected["reasons"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("episode_revision_changed"))
+        );
+        let snapshot = &first["task"]["episodes"][0]["members"][0]["snapshot_id"];
+        let removed =
+            json_call(&store, serde_json::json!({"type":"delete","id":snapshot})).unwrap();
+        assert!(
+            removed["mutation_effects"]["stale_comparison_task_ids"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!(first_id))
+        );
+        let detail = json_call(
+            &store,
+            serde_json::json!({"type":"comparison_task_explain","id":first_id}),
+        )
+        .unwrap();
+        assert!(
+            detail["detail"]["stale_reasons"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("snapshot_missing_or_replaced"))
+        );
+        assert_eq!(detail["detail"]["task"]["id"], first_id);
+    }
+
     fn all_questions() -> serde_json::Value {
         serde_json::json!([
             "recorded_activity",

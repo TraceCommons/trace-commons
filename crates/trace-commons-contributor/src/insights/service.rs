@@ -5,6 +5,11 @@ use anyhow::{Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use trace_commons_protocol::insights_cards::{InsightCardResult, InsightQuestionId};
 
+use super::comparison_task_store::ComparisonTaskStoreError;
+use super::comparison_tasks::{
+    ComparisonTaskContextInput, ComparisonTaskDetail, ComparisonTaskOutcome,
+    ComparisonTaskValidationError, LocalComparisonTaskV1,
+};
 use super::episode_store::EpisodeStoreError;
 use super::episodes::{EpisodeDetail, EpisodeListEntry, EpisodeValidationError, LocalEpisode};
 use super::usage::{UsageSource, UsageSummary, extract_usage};
@@ -79,6 +84,46 @@ pub fn ui_copy() -> std::collections::BTreeMap<String, String> {
         ("episode_member_evidence", "Current saved member evidence"),
         ("episode_resolved", "Evidence resolved at"),
         ("episode_missing", "This episode is no longer available. Refresh saved episodes."),
+        ("comparison_task_title", "Comparison task"),
+        ("comparison_task_empty", "No comparison tasks have been saved."),
+        ("comparison_task_material_digest", "Material evidence digest"),
+        ("comparison_task_context_complete", "Comparable context is complete."),
+        ("comparison_task_context_incomplete", "Comparable context is incomplete."),
+        ("comparison_task_outcome_unassessed", "Outcome is unassessed."),
+        ("comparison_task_confirmation_current", "Independence review is current."),
+        ("comparison_task_confirmation_missing", "Independence review is missing or stale."),
+        ("comparison_task_attribution_pending", "Source attribution is pending qualification; this task is not comparison-eligible."),
+        ("comparison_task_create", "Create comparison task"),
+        ("comparison_task_list", "Saved comparison tasks"),
+        ("comparison_task_open", "Review comparison task"),
+        ("comparison_task_back", "Back to comparison tasks"),
+        ("comparison_task_delete", "Delete comparison task"),
+        ("comparison_task_delete_confirm", "Delete this comparison task? Its episodes and snapshots will remain."),
+        ("comparison_task_deleted", "Comparison task deleted."),
+        ("comparison_task_replace_episodes", "Replace episode evidence"),
+        ("comparison_task_set_context", "Save task context"),
+        ("comparison_task_set_outcome", "Save user-reported outcome"),
+        ("comparison_task_clear_outcome", "Clear outcome"),
+        ("comparison_task_reconfirm", "Confirm one work item and all known attempts"),
+        ("comparison_task_reconfirm_notice", "Confirm only after reviewing the displayed material evidence digest and all frozen attempts."),
+        ("comparison_task_revision_conflict", "This task changed in another window. Refresh and review it before editing."),
+        ("comparison_task_digest_conflict", "The task evidence changed after it was displayed. Refresh and review the new digest."),
+        ("comparison_task_stale_evidence", "The bound episode or snapshot evidence changed. Replace or review it before confirming."),
+        ("comparison_task_committed_reload_failed", "The change was saved, but refreshed task details could not be loaded. Refresh before editing again."),
+        ("comparison_task_project_id", "Project ID"),
+        ("comparison_task_category", "Category"),
+        ("comparison_task_task_date", "Task date"),
+        ("comparison_task_language", "Language"),
+        ("comparison_task_harness_id", "Harness ID"),
+        ("comparison_task_harness_version", "Harness version"),
+        ("comparison_task_reasoning_effort", "Reasoning effort"),
+        ("comparison_task_tool_policy_id", "Tool-policy profile ID"),
+        ("comparison_task_tool_policy_version", "Tool-policy profile version"),
+        ("comparison_task_prompt_template_digest", "Prompt-template digest"),
+        ("comparison_task_configuration_fingerprint", "Configuration fingerprint"),
+        ("comparison_task_unknown", "Unknown"),
+        ("comparison_task_stale_reasons", "Review reasons"),
+        ("comparison_task_overlap", "Overlapping comparison tasks"),
         ("episode_list_unavailable", "Saved episodes could not be refreshed. Try again."),
         ("episode_detail_unavailable", "This episode could not be refreshed. Return to saved episodes and try again."),
         ("intro", "Analyze a file on this device without an account or upload."),
@@ -256,6 +301,41 @@ pub enum LocalInsightsOperation {
         id: String,
         expected_revision: u64,
     },
+    ComparisonTaskCreate {
+        episode_ids: Vec<String>,
+    },
+    ComparisonTaskList {},
+    ComparisonTaskExplain {
+        id: String,
+    },
+    ComparisonTaskReplaceEpisodes {
+        id: String,
+        expected_revision: u64,
+        episode_ids: Vec<String>,
+    },
+    ComparisonTaskSetContext {
+        id: String,
+        expected_revision: u64,
+        context: ComparisonTaskContextInput,
+    },
+    ComparisonTaskSetOutcome {
+        id: String,
+        expected_revision: u64,
+        outcome: ComparisonTaskOutcome,
+    },
+    ComparisonTaskClearOutcome {
+        id: String,
+        expected_revision: u64,
+    },
+    ComparisonTaskReconfirm {
+        id: String,
+        expected_revision: u64,
+        displayed_material_digest: String,
+    },
+    ComparisonTaskDelete {
+        id: String,
+        expected_revision: u64,
+    },
     Analyze {
         source: SourceFormat,
         file: PathBuf,
@@ -316,15 +396,39 @@ pub enum LocalInsightsResponse {
     },
     EpisodeReplaceMembers {
         episode: Box<LocalEpisode>,
+        #[serde(default)]
+        mutation_effects: MutationEffects,
     },
     EpisodeAnnotate {
         episode: Box<LocalEpisode>,
+        #[serde(default)]
+        mutation_effects: MutationEffects,
     },
     EpisodeClearAssessment {
         episode: Box<LocalEpisode>,
+        #[serde(default)]
+        mutation_effects: MutationEffects,
     },
     EpisodeDelete {
         episode: Box<LocalEpisode>,
+        #[serde(default)]
+        mutation_effects: MutationEffects,
+    },
+    ComparisonTask {
+        task: Box<LocalComparisonTaskV1>,
+        #[serde(default)]
+        mutation_effects: MutationEffects,
+    },
+    ComparisonTaskList {
+        tasks: Vec<ComparisonTaskDetail>,
+    },
+    ComparisonTaskExplain {
+        detail: Box<ComparisonTaskDetail>,
+    },
+    ComparisonTaskDelete {
+        task: Box<LocalComparisonTaskV1>,
+        #[serde(default)]
+        mutation_effects: MutationEffects,
     },
     Analyze {
         insight: Box<LocalInsight>,
@@ -414,6 +518,10 @@ fn execute_inner(request: LocalInsightsRequest) -> Result<LocalInsightsResponse>
         existing_store(request.store_dir.as_deref())?
             .ok_or_else(|| anyhow!(EpisodeStoreError::NotFound))
     };
+    let comparison_store = || {
+        existing_store(request.store_dir.as_deref())?
+            .ok_or_else(|| anyhow!(ComparisonTaskStoreError::NotFound))
+    };
     Ok(match request.operation {
         LocalInsightsOperation::QuestionCards {
             questions,
@@ -468,12 +576,14 @@ fn execute_inner(request: LocalInsightsRequest) -> Result<LocalInsightsResponse>
         } => {
             super::episodes::validate_episode_id(&id)?;
             super::episodes::validate_snapshot_ids(&snapshot_ids)?;
+            let result = episode_store()?.episode_replace_members_with_effects(
+                &id,
+                expected_revision,
+                &snapshot_ids,
+            )?;
             LocalInsightsResponse::EpisodeReplaceMembers {
-                episode: Box::new(episode_store()?.episode_replace_members(
-                    &id,
-                    expected_revision,
-                    &snapshot_ids,
-                )?),
+                episode: Box::new(result.value),
+                mutation_effects: result.mutation_effects,
             }
         }
         LocalInsightsOperation::EpisodeAnnotate {
@@ -483,13 +593,15 @@ fn execute_inner(request: LocalInsightsRequest) -> Result<LocalInsightsResponse>
             outcome,
         } => {
             super::episodes::validate_episode_id(&id)?;
+            let result = episode_store()?.episode_annotate_with_effects(
+                &id,
+                expected_revision,
+                category,
+                outcome,
+            )?;
             LocalInsightsResponse::EpisodeAnnotate {
-                episode: Box::new(episode_store()?.episode_annotate(
-                    &id,
-                    expected_revision,
-                    category,
-                    outcome,
-                )?),
+                episode: Box::new(result.value),
+                mutation_effects: result.mutation_effects,
             }
         }
         LocalInsightsOperation::EpisodeClearAssessment {
@@ -497,10 +609,11 @@ fn execute_inner(request: LocalInsightsRequest) -> Result<LocalInsightsResponse>
             expected_revision,
         } => {
             super::episodes::validate_episode_id(&id)?;
+            let result =
+                episode_store()?.episode_clear_assessment_with_effects(&id, expected_revision)?;
             LocalInsightsResponse::EpisodeClearAssessment {
-                episode: Box::new(
-                    episode_store()?.episode_clear_assessment(&id, expected_revision)?,
-                ),
+                episode: Box::new(result.value),
+                mutation_effects: result.mutation_effects,
             }
         }
         LocalInsightsOperation::EpisodeDelete {
@@ -508,8 +621,104 @@ fn execute_inner(request: LocalInsightsRequest) -> Result<LocalInsightsResponse>
             expected_revision,
         } => {
             super::episodes::validate_episode_id(&id)?;
+            let result = episode_store()?.episode_delete_with_effects(&id, expected_revision)?;
             LocalInsightsResponse::EpisodeDelete {
-                episode: Box::new(episode_store()?.episode_delete(&id, expected_revision)?),
+                episode: Box::new(result.value),
+                mutation_effects: result.mutation_effects,
+            }
+        }
+        LocalInsightsOperation::ComparisonTaskCreate { episode_ids } => {
+            let result = existing_store(request.store_dir.as_deref())?
+                .ok_or(ComparisonTaskStoreError::MissingEpisode)?
+                .comparison_task_create_with_effects(&episode_ids)?;
+            LocalInsightsResponse::ComparisonTask {
+                task: Box::new(result.value),
+                mutation_effects: result.mutation_effects,
+            }
+        }
+        LocalInsightsOperation::ComparisonTaskList {} => {
+            LocalInsightsResponse::ComparisonTaskList {
+                tasks: match existing_store(request.store_dir.as_deref())? {
+                    Some(store) => store.comparison_task_list()?,
+                    None => Vec::new(),
+                },
+            }
+        }
+        LocalInsightsOperation::ComparisonTaskExplain { id } => {
+            super::comparison_tasks::validate_uuid(&id)?;
+            LocalInsightsResponse::ComparisonTaskExplain {
+                detail: Box::new(comparison_store()?.comparison_task_explain(&id)?),
+            }
+        }
+        LocalInsightsOperation::ComparisonTaskReplaceEpisodes {
+            id,
+            expected_revision,
+            episode_ids,
+        } => {
+            let result = comparison_store()?.comparison_task_replace_episodes_with_effects(
+                &id,
+                expected_revision,
+                &episode_ids,
+            )?;
+            LocalInsightsResponse::ComparisonTask {
+                task: Box::new(result.value),
+                mutation_effects: result.mutation_effects,
+            }
+        }
+        LocalInsightsOperation::ComparisonTaskSetContext {
+            id,
+            expected_revision,
+            context,
+        } => LocalInsightsResponse::ComparisonTask {
+            task: Box::new(comparison_store()?.comparison_task_set_context(
+                &id,
+                expected_revision,
+                context,
+            )?),
+            mutation_effects: MutationEffects::default(),
+        },
+        LocalInsightsOperation::ComparisonTaskSetOutcome {
+            id,
+            expected_revision,
+            outcome,
+        } => LocalInsightsResponse::ComparisonTask {
+            task: Box::new(comparison_store()?.comparison_task_set_outcome(
+                &id,
+                expected_revision,
+                outcome,
+            )?),
+            mutation_effects: MutationEffects::default(),
+        },
+        LocalInsightsOperation::ComparisonTaskClearOutcome {
+            id,
+            expected_revision,
+        } => LocalInsightsResponse::ComparisonTask {
+            task: Box::new(
+                comparison_store()?.comparison_task_clear_outcome(&id, expected_revision)?,
+            ),
+            mutation_effects: MutationEffects::default(),
+        },
+        LocalInsightsOperation::ComparisonTaskReconfirm {
+            id,
+            expected_revision,
+            displayed_material_digest,
+        } => LocalInsightsResponse::ComparisonTask {
+            task: Box::new(comparison_store()?.comparison_task_reconfirm(
+                &id,
+                expected_revision,
+                &displayed_material_digest,
+            )?),
+            mutation_effects: MutationEffects::default(),
+        },
+        LocalInsightsOperation::ComparisonTaskDelete {
+            id,
+            expected_revision,
+        } => {
+            let result =
+                comparison_store()?.comparison_task_delete_with_effects(&id, expected_revision)?;
+            LocalInsightsResponse::ComparisonTaskDelete {
+                task: Box::new(result.value),
+                mutation_effects: result.mutation_effects,
             }
         }
         LocalInsightsOperation::Analyze { source, file, save } => {
@@ -624,6 +833,12 @@ fn public_error(error: anyhow::Error) -> anyhow::Error {
             EpisodeStoreError::Full => "insights_episode_limit_exceeded",
             EpisodeStoreError::RevisionOverflow => "insights_episode_revision_overflow",
         });
+    }
+    if let Some(error) = error.downcast_ref::<ComparisonTaskValidationError>() {
+        return anyhow!(error.to_string());
+    }
+    if let Some(error) = error.downcast_ref::<ComparisonTaskStoreError>() {
+        return anyhow!(error.to_string());
     }
     if error.downcast_ref::<ResponseTooLarge>().is_some() {
         return anyhow!(ResponseTooLarge);

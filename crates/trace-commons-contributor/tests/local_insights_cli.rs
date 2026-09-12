@@ -178,7 +178,11 @@ fn saved_insights_deduplicate_replace_explain_and_delete_without_enrollment() {
             .as_object_mut()
             .unwrap()
             .remove("mutation_effects"),
-        Some(serde_json::json!({"invalidated_episode_ids":[]}))
+        Some(serde_json::json!({
+            "invalidated_episode_ids": [],
+            "stale_comparison_task_ids": [],
+            "stale_comparison_tasks": []
+        }))
     );
     assert_eq!(explained, saved_fields);
 

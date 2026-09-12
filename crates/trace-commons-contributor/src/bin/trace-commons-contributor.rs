@@ -359,11 +359,19 @@ enum DaemonAction {
     Uninstall,
 }
 
-#[tokio::main]
-async fn main() -> std::process::ExitCode {
+fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
     let json = cli.json;
-    match run(cli).await {
+    async_main(cli, json)
+}
+
+#[tokio::main]
+async fn async_main(cli: Cli, json: bool) -> std::process::ExitCode {
+    // `run` dispatches every command, including the larger async submission
+    // paths. Keep that combined future off the smaller Windows main-thread
+    // stack even when the selected command itself is synchronous.
+    let run_future = Box::pin(run(cli));
+    match run_future.await {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) => {
             if json

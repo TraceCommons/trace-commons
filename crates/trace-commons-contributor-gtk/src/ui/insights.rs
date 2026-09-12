@@ -1226,7 +1226,7 @@ impl InsightsView {
                     view.set_episode_success(copy("episode_create_success"));
                     view.refresh_episodes();
                 }
-                EpisodeResult::Response(Response::EpisodeReplaceMembers { episode }) => {
+                EpisodeResult::Response(Response::EpisodeReplaceMembers { episode, .. }) => {
                     let membership_changed =
                         view.current_membership_revision.get() != Some(episode.membership_revision);
                     view.present_episode(&episode);
@@ -1241,12 +1241,12 @@ impl InsightsView {
                     }
                     view.refresh_episodes();
                 }
-                EpisodeResult::Response(Response::EpisodeAnnotate { episode }) => {
+                EpisodeResult::Response(Response::EpisodeAnnotate { episode, .. }) => {
                     view.present_episode(&episode);
                     view.set_episode_success(copy("episode_assessment_saved"));
                     view.refresh_episodes();
                 }
-                EpisodeResult::Response(Response::EpisodeClearAssessment { episode }) => {
+                EpisodeResult::Response(Response::EpisodeClearAssessment { episode, .. }) => {
                     view.present_episode(&episode);
                     view.set_episode_success(copy("episode_assessment_cleared"));
                     view.refresh_episodes();
@@ -2262,6 +2262,7 @@ mod tests {
         assert!(render_mutation_notice(&MutationEffects::default()).is_empty());
         let notice = render_mutation_notice(&MutationEffects {
             invalidated_episode_ids: vec!["group-a".into(), "group-b".into()],
+            ..MutationEffects::default()
         });
         assert!(notice.starts_with(copy("episode_invalidated_notice")));
         assert!(notice.ends_with("group-a\ngroup-b"));

@@ -5,6 +5,8 @@
 pub mod card_presentation;
 pub mod card_store;
 pub mod cards;
+pub mod comparison_task_store;
+pub mod comparison_tasks;
 pub mod episode_store;
 pub mod episodes;
 pub mod models;
@@ -31,7 +33,7 @@ use trace_commons_protocol::insights::{
 };
 
 const MAX_SOURCE_BYTES: u64 = 16 * 1024 * 1024;
-const STORE_VERSION: u32 = 6;
+const STORE_VERSION: u32 = 7;
 const MAX_OUTCOME_LINKS: usize = 128;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -270,6 +272,27 @@ pub fn analyze_file(format: SourceFormat, path: &Path) -> Result<LocalInsight> {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MutationEffects {
     pub invalidated_episode_ids: Vec<String>,
+    /// Retained tasks whose frozen episode/snapshot evidence is now stale.
+    pub stale_comparison_task_ids: Vec<String>,
+    /// Stable, content-free reasons for each affected retained task.
+    pub stale_comparison_tasks: Vec<StaleComparisonTaskEffect>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct StaleComparisonTaskEffect {
+    pub task_id: String,
+    pub reasons: Vec<ComparisonTaskMutationReason>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum ComparisonTaskMutationReason {
+    EpisodeMissing,
+    EpisodeRevisionChanged,
+    EpisodeMembershipChanged,
+    SnapshotMissingOrReplaced,
+    OverlapChanged,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -286,6 +309,8 @@ struct Index {
     reports: BTreeMap<String, LocalInsight>,
     #[serde(default)]
     episodes: BTreeMap<String, episodes::LocalEpisode>,
+    #[serde(default)]
+    comparison_tasks: BTreeMap<String, comparison_tasks::LocalComparisonTaskV1>,
 }
 
 /// Dedicated local directory, independent of the enrollment/config store.
@@ -376,6 +401,7 @@ impl LocalInsightStore {
                 aliases: BTreeMap::new(),
                 reports: BTreeMap::new(),
                 episodes: BTreeMap::new(),
+                comparison_tasks: BTreeMap::new(),
             },
             Err(_) => bail!("insights_store_unreadable"),
         };
@@ -459,7 +485,8 @@ impl LocalInsightStore {
             bail!("insights_store_invalid");
         }
         episode_store::validate_index_episodes(&index)?;
-        // Legacy snapshots remain readable; the next mutation persists v5.
+        comparison_task_store::validate_index_comparison_tasks(&index)?;
+        // Legacy stores remain readable; the next mutation persists the current version.
         index.version = STORE_VERSION;
         Ok((lock, index))
     }
@@ -496,6 +523,7 @@ impl LocalInsightStore {
             .map_err(|_| anyhow!("insights_source_unreadable"))?;
         let alias = digest(canonical.as_os_str().as_encoded_bytes());
         let (_lock, mut index) = self.locked()?;
+        let previous_report_ids = index.reports.keys().cloned().collect::<BTreeSet<_>>();
         // Content-identical copies share both evidence and annotation. A new
         // digest never inherits the old snapshot's user assessment.
         if let Some(previous) = index.reports.get(&insight.id) {
@@ -506,7 +534,13 @@ impl LocalInsightStore {
         index.reports.insert(insight.id.clone(), insight.clone());
         let referenced = index.aliases.values().cloned().collect::<BTreeSet<_>>();
         index.reports.retain(|id, _| referenced.contains(id));
-        let mutation_effects = episode_store::invalidate_missing_members(&mut index);
+        let current_report_ids = index.reports.keys().cloned().collect::<BTreeSet<_>>();
+        let affected_snapshot_ids = previous_report_ids
+            .symmetric_difference(&current_report_ids)
+            .cloned()
+            .collect();
+        let mutation_effects =
+            episode_store::invalidate_missing_members(&mut index, &affected_snapshot_ids);
         self.save(&index)?;
         Ok(SnapshotMutation {
             value: insight,
@@ -624,7 +658,13 @@ impl LocalInsightStore {
     pub fn delete_with_effects(&self, id: &str) -> Result<SnapshotMutation<bool>> {
         let (_lock, mut index) = self.locked()?;
         let removed = index.reports.remove(id).is_some();
-        let mutation_effects = episode_store::invalidate_missing_members(&mut index);
+        let affected_snapshot_ids = if removed {
+            BTreeSet::from([id.to_owned()])
+        } else {
+            BTreeSet::new()
+        };
+        let mutation_effects =
+            episode_store::invalidate_missing_members(&mut index, &affected_snapshot_ids);
         if removed {
             index.aliases.retain(|_, value| value != id);
             self.save(&index)?;
