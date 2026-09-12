@@ -12,7 +12,7 @@ fn source(path: &Path, final_input: u64) {
         })
     };
     let rows = [
-        json!({"type":"session_meta","timestamp":"2026-09-11T00:00:00Z","payload":{"id":"PRIVATE_SESSION_ID"}}),
+        json!({"type":"session_meta","timestamp":"2026-09-11T00:00:00Z","payload":{"id":"PRIVATE_SESSION_ID","model":"fixture-model"}}),
         json!({"type":"turn_context","timestamp":"2026-09-11T00:00:00Z","payload":{"model":"fixture-model"}}),
         token("2026-09-11T00:00:01Z", 100, 20, 20, 5),
         json!({"type":"response_item","timestamp":"2026-09-11T00:00:02Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"PRIVATE_BODY"}]}}),
@@ -82,6 +82,22 @@ fn versions_one_through_five_remain_read_only_and_do_not_invent_usage() {
         source(&path, 150);
         let store = LocalInsightStore::open(&root.path().join("store")).unwrap();
         let saved = store.import(SourceFormat::Codex, &path).unwrap();
+        if version >= 2 {
+            store
+                .annotate(&saved.id, TaskCategory::Docs, TaskOutcome::Partial)
+                .unwrap();
+        }
+        if version >= 3 {
+            let evidence = outcomes::OutcomeEvidence::TestReport(outcomes::parse_test_report(
+                br#"{"schema_version":1,"runner":"fixture","passed":2,"failed":0,"skipped":0,"observed_at":"2026-09-11T00:00:04Z","commit_id":null}"#
+            ).unwrap());
+            store.link_outcome(&saved.id, evidence).unwrap();
+        }
+        if version >= 4 {
+            store
+                .episode_create(std::slice::from_ref(&saved.id))
+                .unwrap();
+        }
         let index_path = store.dir.join("index.json");
         let mut legacy: Value = serde_json::from_slice(&fs::read(&index_path).unwrap()).unwrap();
         legacy["version"] = version.into();
@@ -109,10 +125,14 @@ fn versions_one_through_five_remain_read_only_and_do_not_invent_usage() {
         assert!(annotated.usage_evidence.is_none());
         assert_eq!(annotated.time_evidence, read.time_evidence);
         assert_eq!(annotated.model_observations, read.model_observations);
-        assert_eq!(annotated.outcome_links, read.outcome_links);
+        assert_eq!(
+            serde_json::to_value(&annotated.outcome_links).unwrap(),
+            serde_json::to_value(&read.outcome_links).unwrap()
+        );
         assert_eq!(annotated.report, read.report);
         let upgraded: Value = serde_json::from_slice(&fs::read(&index_path).unwrap()).unwrap();
         assert_eq!(upgraded["version"], 6);
+        assert_eq!(upgraded["episodes"], legacy["episodes"]);
         source(&path, 150);
         let reimported = store.import(SourceFormat::Codex, &path).unwrap();
         assert_eq!(reimported.id, saved.id);
