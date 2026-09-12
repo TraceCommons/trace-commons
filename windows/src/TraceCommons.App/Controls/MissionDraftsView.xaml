@@ -9,9 +9,9 @@
             <TextBlock Text="{x:Bind ViewModel[review_notice], Mode=OneWay}" TextWrapping="Wrap" />
             <TextBlock Text="{x:Bind ViewModel[authority_notice], Mode=OneWay}" TextWrapping="Wrap" />
             <StackPanel Orientation="Horizontal" Spacing="8">
-                <Button Content="{x:Bind ViewModel[choose_file], Mode=OneWay}" Click="OnChoose" />
+                <Button Content="{x:Bind ViewModel[choose_file], Mode=OneWay}" Click="OnChoose" IsEnabled="{x:Bind ViewModel.CanAct, Mode=OneWay}" />
                 <Button Content="{x:Bind ViewModel[import], Mode=OneWay}" Click="OnImport" IsEnabled="{x:Bind CanImport, Mode=OneWay}" />
-                <Button Content="{x:Bind ViewModel[refresh], Mode=OneWay}" Click="OnRefresh" />
+                <Button Content="{x:Bind ViewModel[refresh], Mode=OneWay}" Click="OnRefresh" IsEnabled="{x:Bind ViewModel.CanAct, Mode=OneWay}" />
             </StackPanel>
             <TextBlock Text="{x:Bind SelectedFileName, Mode=OneWay}" />
             <ProgressRing IsActive="{x:Bind ViewModel.IsBusy, Mode=OneWay}" Width="20" Height="20" HorizontalAlignment="Left" />
@@ -31,8 +31,8 @@
                 </ListView.ItemTemplate>
             </ListView>
             <StackPanel Orientation="Horizontal" Spacing="8">
-                <Button Content="{x:Bind ViewModel[show], Mode=OneWay}" Click="OnShow" />
-                <Button Content="{x:Bind ViewModel[delete], Mode=OneWay}" Click="OnDelete" />
+                <Button Content="{x:Bind ViewModel[show], Mode=OneWay}" Click="OnShow" IsEnabled="{x:Bind ViewModel.CanAct, Mode=OneWay}" />
+                <Button Content="{x:Bind ViewModel[delete], Mode=OneWay}" Click="OnDelete" IsEnabled="{x:Bind ViewModel.CanAct, Mode=OneWay}" />
             </StackPanel>
 
             <StackPanel Visibility="{x:Bind ViewModel.HasCurrent, Mode=OneWay}" Spacing="8">

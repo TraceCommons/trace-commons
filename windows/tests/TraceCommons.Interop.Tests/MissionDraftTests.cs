@@ -14,6 +14,7 @@ namespace TraceCommons.Interop.Tests;
 public sealed class MissionDraftTests
 {
     private const string Id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    private const string SecondId = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
     private static JsonElement Json(string value) => JsonDocument.Parse(value).RootElement.Clone();
     private static string Review => $$"""{"schema_version":1,"proposal_sha256":"{{Id}}","status":"needs_curator_review","publication_authorized":false,"external_sources_verified":false,"required_reviews":["sources"]}""";
     private static string Summary => $$"""{"id":"{{Id}}","source_count":1,"status":"needs_curator_review"}""";
@@ -48,6 +49,56 @@ public sealed class MissionDraftTests
         }
     }
 
+    private sealed class MutationRaceService : ILocalMissionDrafts
+    {
+        private int _draftCount = 1;
+        private bool _blockNextList;
+        public List<string> Calls { get; } = new();
+        public TaskCompletionSource<bool> ReconcileEntered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource<bool> ReleaseReconcile { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public async Task<JsonElement> CallAsync(object operation, CancellationToken cancellationToken)
+        {
+            JsonElement request = JsonSerializer.SerializeToElement(operation);
+            string type = request.GetProperty("type").GetString()!;
+            Calls.Add(type);
+            if (type == "import")
+            {
+                _draftCount = 2;
+                _blockNextList = true;
+                return Json("{\"type\":\"import\",\"draft\":{\"id\":\"" + SecondId + "\",\"review\":" + Review.Replace(Id, SecondId, StringComparison.Ordinal) + ",\"inserted\":true}}");
+            }
+            if (type == "delete")
+            {
+                _draftCount = 0;
+                _blockNextList = true;
+                return Json("{\"type\":\"delete\",\"draft\":{\"id\":\"" + Id + "\",\"deleted\":true}}");
+            }
+            if (type == "list")
+            {
+                if (_blockNextList)
+                {
+                    _blockNextList = false;
+                    ReconcileEntered.SetResult(true);
+                    await ReleaseReconcile.Task; // Deliberately ignores cancellation like a native call already in progress.
+                }
+                string drafts = _draftCount switch
+                {
+                    0 => string.Empty,
+                    1 => Summary,
+                    _ => Summary + "," + Summary.Replace(Id, SecondId, StringComparison.Ordinal)
+                };
+                return Json("{\"type\":\"list\",\"drafts\":[" + drafts + "]}");
+            }
+            return type switch
+            {
+                "copy" => Json(Copy()),
+                "show" => Json("{\"type\":\"show\",\"draft\":{\"id\":\"" + Id + "\",\"proposal\":" + Proposal + ",\"review\":" + Review + "}}"),
+                _ => throw new InvalidOperationException(type)
+            };
+        }
+    }
+
     [Fact]
     public void StrictDecoderRejectsUnknownFieldsAuthorityAndMismatchedIds()
     {
@@ -70,16 +121,47 @@ public sealed class MissionDraftTests
     }
 
     [Fact]
-    public async Task DeleteInvalidatesPendingInspectAndClearsOnlyAfterSuccess()
+    public async Task ConflictingDeleteWaitsForPendingInspect()
     {
         var service = new Service(); using var model = new MissionDraftsViewModel(service);
         await model.LoadAsync();
         var completion = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
         service.PendingShow = completion;
         Task pending = model.ShowAsync(Id); service.PendingShow = null;
-        await model.DeleteAsync(Id);
+        Task delete = model.DeleteAsync(Id);
+        Assert.False(delete.IsCompleted);
         completion.SetResult(Json("{\"type\":\"show\",\"draft\":{\"id\":\"" + Id + "\",\"proposal\":" + Proposal + ",\"review\":" + Review + "}}"));
-        await pending; Assert.Null(model.Current);
+        await pending; await delete; Assert.Null(model.Current);
+    }
+
+    [Fact]
+    public async Task ImportReconciliationCannotBeSupersededByInspect()
+    {
+        var service = new MutationRaceService(); using var model = new MissionDraftsViewModel(service);
+        await model.LoadAsync();
+        Task import = model.ImportAsync("/explicit/draft.json");
+        await service.ReconcileEntered.Task;
+        Task show = model.ShowAsync(Id);
+        Assert.True(model.IsBusy); Assert.False(model.CanAct); Assert.False(show.IsCompleted);
+        Assert.Equal(0, service.Calls.Count(call => call == "show"));
+        service.ReleaseReconcile.SetResult(true);
+        await Task.WhenAll(import, show);
+        Assert.Equal(2, model.Drafts.Count); Assert.Equal(Id, model.Current?.Id); Assert.False(model.IsBusy);
+    }
+
+    [Fact]
+    public async Task DeleteReconciliationCannotBeSupersededByInspect()
+    {
+        var service = new MutationRaceService(); using var model = new MissionDraftsViewModel(service);
+        await model.LoadAsync(); await model.ShowAsync(Id); Assert.NotNull(model.Current);
+        Task delete = model.DeleteAsync(Id);
+        await service.ReconcileEntered.Task;
+        Task show = model.ShowAsync(Id);
+        Assert.True(model.IsBusy); Assert.False(model.CanAct); Assert.False(show.IsCompleted);
+        Assert.Equal(1, service.Calls.Count(call => call == "show"));
+        service.ReleaseReconcile.SetResult(true);
+        await Task.WhenAll(delete, show);
+        Assert.Empty(model.Drafts); Assert.Null(model.Current); Assert.False(model.IsBusy);
     }
 
     [Fact]
@@ -103,6 +185,8 @@ public sealed class MissionDraftTests
         string view = File.ReadAllText(Path.Combine(root, "Controls", "MissionDraftsView.xaml.txt"));
         Assert.DoesNotContain("Hyperlink", view); Assert.DoesNotContain("NavigateUri", view);
         Assert.Contains("StartingArtifact.Url", view); Assert.Contains("SourceUrls", view);
+        Assert.Equal(4, view.Split("IsEnabled=\"{x:Bind ViewModel.CanAct, Mode=OneWay}\"", StringSplitOptions.None).Length - 1);
+        Assert.Contains("IsEnabled=\"{x:Bind CanImport, Mode=OneWay}\"", view);
     }
 
     [Fact]

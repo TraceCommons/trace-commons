@@ -12,6 +12,7 @@ namespace TraceCommons.App.ViewModels;
 public sealed class MissionDraftsViewModel : INotifyPropertyChanged, IDisposable
 {
     private readonly ILocalMissionDrafts _service;
+    private readonly SemaphoreSlim _actions = new(1, 1);
     private CancellationTokenSource _lifetime = new();
     private long _generation;
     private IReadOnlyDictionary<string,string> _copy = new Dictionary<string,string>();
@@ -26,12 +27,14 @@ public sealed class MissionDraftsViewModel : INotifyPropertyChanged, IDisposable
     public StoredMissionDraft? Current { get => _current; private set { _current = value; Raise(); Raise(nameof(HasCurrent)); } }
     public bool HasCurrent => Current != null;
     public string Status { get => _status; private set { _status = value; Raise(); } }
-    public bool IsBusy { get => _busy; private set { _busy = value; Raise(); } }
+    public bool IsBusy { get => _busy; private set { _busy = value; Raise(); Raise(nameof(CanAct)); } }
+    public bool CanAct => !IsBusy;
     public bool IsEmpty => Drafts.Count == 0;
     public string this[string key] => _copy.TryGetValue(key, out string? value) ? value : string.Empty;
 
     public async Task LoadAsync()
     {
+        if (!await EnterAsync()) return;
         long ticket = Begin();
         CancellationToken token = _lifetime.Token;
         try
@@ -47,11 +50,12 @@ public sealed class MissionDraftsViewModel : INotifyPropertyChanged, IDisposable
         }
         catch (OperationCanceledException) { }
         catch (Exception) { if (CurrentTicket(ticket)) Status = this["error"]; }
-        finally { End(ticket); }
+        finally { End(ticket); _actions.Release(); }
     }
 
     public async Task RefreshAsync()
     {
+        if (!await EnterAsync()) return;
         long ticket = Begin();
         CancellationToken token = _lifetime.Token;
         try
@@ -64,11 +68,12 @@ public sealed class MissionDraftsViewModel : INotifyPropertyChanged, IDisposable
         }
         catch (OperationCanceledException) { }
         catch (Exception) { if (CurrentTicket(ticket)) Status = this["error"]; }
-        finally { End(ticket); }
+        finally { End(ticket); _actions.Release(); }
     }
 
     public async Task ImportAsync(string file)
     {
+        if (!await EnterAsync()) return;
         long ticket = Begin();
         CancellationToken token = _lifetime.Token;
         try
@@ -85,11 +90,12 @@ public sealed class MissionDraftsViewModel : INotifyPropertyChanged, IDisposable
         }
         catch (OperationCanceledException) { }
         catch (Exception) { if (CurrentTicket(ticket)) Status = this["error"]; }
-        finally { End(ticket); }
+        finally { End(ticket); _actions.Release(); }
     }
 
     public async Task ShowAsync(string id)
     {
+        if (!await EnterAsync()) return;
         long ticket = Begin();
         CancellationToken token = _lifetime.Token;
         try
@@ -101,11 +107,12 @@ public sealed class MissionDraftsViewModel : INotifyPropertyChanged, IDisposable
         }
         catch (OperationCanceledException) { }
         catch (Exception) { if (CurrentTicket(ticket)) Status = this["error"]; }
-        finally { End(ticket); }
+        finally { End(ticket); _actions.Release(); }
     }
 
     public async Task DeleteAsync(string id)
     {
+        if (!await EnterAsync()) return;
         long ticket = Begin();
         CancellationToken token = _lifetime.Token;
         try
@@ -125,7 +132,7 @@ public sealed class MissionDraftsViewModel : INotifyPropertyChanged, IDisposable
         }
         catch (OperationCanceledException) { }
         catch (Exception) { if (CurrentTicket(ticket)) Status = this["error"]; }
-        finally { End(ticket); }
+        finally { End(ticket); _actions.Release(); }
     }
 
     public void ReportFileSelected() => Status = this["file_selected"];
@@ -134,6 +141,17 @@ public sealed class MissionDraftsViewModel : INotifyPropertyChanged, IDisposable
     public void Dispose() { if (_disposed) return; _disposed = true; Interlocked.Increment(ref _generation); _lifetime.Cancel(); _lifetime.Dispose(); }
 
     private long Begin() { long ticket = Interlocked.Increment(ref _generation); IsBusy = true; Status = this["working"]; return ticket; }
+    private async Task<bool> EnterAsync()
+    {
+        try
+        {
+            await _actions.WaitAsync(_lifetime.Token);
+            if (!_disposed) return true;
+            _actions.Release();
+            return false;
+        }
+        catch (OperationCanceledException) { return false; }
+    }
     private bool CurrentTicket(long ticket) => !_disposed && ticket == Interlocked.Read(ref _generation);
     private void End(long ticket) { if (CurrentTicket(ticket)) IsBusy = false; }
     private bool Contains(string id) { foreach (var draft in Drafts) if (draft.Id == id) return true; return false; }

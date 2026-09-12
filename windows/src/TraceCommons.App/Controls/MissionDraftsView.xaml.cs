@@ -19,11 +19,12 @@ public sealed partial class MissionDraftsView : UserControl, IDisposable, INotif
     public MissionDraftsViewModel ViewModel { get; } = new();
     public event PropertyChangedEventHandler? PropertyChanged;
     public string SelectedFileName { get => _selectedFileName; private set { _selectedFileName = value; PropertyChanged?.Invoke(this, new(nameof(SelectedFileName))); } }
-    public bool CanImport => _file != null;
+    public bool CanImport => _file != null && ViewModel.CanAct;
 
     public MissionDraftsView(IntPtr window)
     {
         InitializeComponent(); _window = window; DataContext = ViewModel;
+        ViewModel.PropertyChanged += (_, change) => { if (change.PropertyName == nameof(ViewModel.CanAct)) PropertyChanged?.Invoke(this, new(nameof(CanImport))); };
         Unloaded += (_, _) => ViewModel.Deactivate();
     }
     public Task ActivateAsync() { _generation++; return ViewModel.LoadAsync(); }
