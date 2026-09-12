@@ -5,7 +5,17 @@ struct MainWindowView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(ComputeModel.self) private var compute
     let navigation: MainWindowNavigation
+    let missionDrafts: MissionDraftsModel
     private var section: Section { navigation.section }
+
+    @MainActor init(navigation: MainWindowNavigation, missionDrafts: MissionDraftsModel) {
+        self.navigation = navigation
+        self.missionDrafts = missionDrafts
+    }
+
+    @MainActor init(navigation: MainWindowNavigation) {
+        self.init(navigation: navigation, missionDrafts: MissionDraftsModel())
+    }
 
     enum Section: String, CaseIterable, Identifiable {
         case queue = "Waiting"
@@ -16,6 +26,7 @@ struct MainWindowView: View {
         case privateInference = "privateInference"
         // Keep Settings last; declaration order also defines Cmd-N shortcuts.
         case insights = "Insights"
+        case missionDrafts = "missionDrafts"
         case settings = "Settings"
         var id: String { rawValue }
 
@@ -24,7 +35,7 @@ struct MainWindowView: View {
         /// and a system symbol brings its own weight and optical size.
         ///
         /// `queue` and `compute` already share `.monitor`. A third reuse
-        /// would leave three of five rows with one glyph and make the
+        /// would leave most rows with one glyph and make the
         /// sidebar unreadable at a glance, so this destination gets its own.
         var glyph: MacGlyphs {
             switch self {
@@ -34,6 +45,7 @@ struct MainWindowView: View {
             case .compute: return .monitor
             case .privateInference: return .exchange
             case .insights: return .clock
+            case .missionDrafts: return .eye
             }
         }
 
@@ -54,7 +66,7 @@ struct MainWindowView: View {
         /// before they need to know what to do.
         var subtitle: String {
             switch self {
-            case .insights: return ""
+            case .insights, .missionDrafts: return ""
             case .queue: return "Nothing is sent unless you say so."
             case .history: return "What you have contributed, and what is still being reviewed."
             case .settings: return "What this machine watches, and what your traces are allowed to do."
@@ -146,6 +158,9 @@ struct MainWindowView: View {
                 } else if section == .insights {
                     contentHeader
                     InsightsView()
+                } else if section == .missionDrafts {
+                    contentHeader
+                    MissionDraftsView(model: missionDrafts)
                 } else if section == .privateInference {
                     contentHeader
                     PrivateInferenceActivationView()
@@ -170,42 +185,49 @@ struct MainWindowView: View {
         case .compute: EmptyView()
         case .privateInference: EmptyView()
         case .insights: EmptyView()
+        case .missionDrafts: EmptyView()
         }
     }
 
     private func title(_ item: Section) -> String {
-        Self.title(item, compute: compute.copy, privateInference: model.privateInferenceCopy)
+        Self.title(item, compute: compute.copy, privateInference: model.privateInferenceCopy,
+                   missionCopy: missionDrafts.copy)
     }
 
     private func subtitle(_ item: Section) -> String {
-        Self.subtitle(item, compute: compute.copy, privateInference: model.privateInferenceCopy)
+        Self.subtitle(item, compute: compute.copy, privateInference: model.privateInferenceCopy,
+                      missionCopy: missionDrafts.copy)
     }
 
-    /// The nav label, from the Rust for the two destinations whose words the
+    /// The nav label, from Rust for destinations whose words the
     /// Rust owns and from the raw value for the three whose words this shell
-    /// still authors.
+    /// still authored in this shell.
     ///
     /// Static and copy-taking so a test can ask it what it would render
     /// without standing up a window, and so the answer for a payload that
     /// never arrived is no words at all -- never the raw value, which on
     /// this destination is an identifier and not a label.
     static func title(
-        _ item: Section, compute: ComputeCopy?, privateInference: PrivateInferenceCopy?
+        _ item: Section, compute: ComputeCopy?, privateInference: PrivateInferenceCopy?,
+        missionCopy: [String: String] = [:]
     ) -> String {
         switch item {
         case .compute: return compute?.destination ?? ""
         case .privateInference: return privateInference?.destination ?? ""
+        case .missionDrafts: return missionCopy["title"] ?? ""
         case .queue, .history, .settings, .insights: return item.rawValue
         }
     }
 
     /// The line under the title, on the same terms as `title`.
     static func subtitle(
-        _ item: Section, compute: ComputeCopy?, privateInference: PrivateInferenceCopy?
+        _ item: Section, compute: ComputeCopy?, privateInference: PrivateInferenceCopy?,
+        missionCopy: [String: String] = [:]
     ) -> String {
         switch item {
         case .compute: return compute?.subtitle ?? ""
         case .privateInference: return privateInference.map(\.subtitle) ?? ""
+        case .missionDrafts: return missionCopy["intro"] ?? ""
         case .queue, .history, .settings, .insights: return item.subtitle
         }
     }
@@ -324,7 +346,8 @@ struct MainWindowView: View {
                     .foregroundStyle(TC.inkSecondary)
             }
             Spacer(minLength: TC.Space.m)
-            if section != .compute && section != .privateInference && section != .insights {
+            if section != .compute && section != .privateInference && section != .insights
+                && section != .missionDrafts {
                 watchChip
                 watchControl
             }
@@ -433,6 +456,7 @@ struct MainWindowCommands: Commands {
     @ObservedObject var model: AppModel
     var compute: ComputeModel
     var navigation: MainWindowNavigation
+    var missionDrafts: MissionDraftsModel
 
     /// Cmd-N for the Nth destination.
     static let destinationModifiers: EventModifiers = [.command]
@@ -455,7 +479,8 @@ struct MainWindowCommands: Commands {
     @ViewBuilder
     private func destination(_ item: MainWindowView.Section) -> some View {
         let label = MainWindowView.title(
-            item, compute: compute.copy, privateInference: model.privateInferenceCopy)
+            item, compute: compute.copy, privateInference: model.privateInferenceCopy,
+            missionCopy: missionDrafts.copy)
         // A destination whose words never arrived gets no menu item rather
         // than a blank one.
         if !label.isEmpty {

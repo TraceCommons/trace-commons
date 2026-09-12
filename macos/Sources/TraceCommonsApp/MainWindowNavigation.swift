@@ -6,9 +6,9 @@ import Observation
 final class MainWindowNavigation {
     var section: MainWindowView.Section = .insights
     private(set) var servicesActivated = false
-    /// Local Insights never activates discovery, enrollment, or network work.
+    /// Local Insights and Mission drafts never activate discovery, enrollment, or network work.
     func activateServicesIfNeeded(_ start: () -> Void) {
-        guard section != .insights, !servicesActivated else { return }
+        guard section != .insights, section != .missionDrafts, !servicesActivated else { return }
         servicesActivated = true
         start()
     }
