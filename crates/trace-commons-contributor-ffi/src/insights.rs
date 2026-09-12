@@ -10,6 +10,8 @@ use trace_commons_contributor::insights::service::{MAX_REQUEST_BYTES, dispatch_j
 /// `{"store_dir":"/chosen/store","operation":{"type":"list"}}`.
 /// Analyze: `{"type":"analyze","source":"codex","file":"/chosen/file","save":false}`.
 /// Explain/delete: `{"type":"explain","id":"..."}` / `{"type":"delete","id":"..."}`.
+/// User assessment: `{"type":"annotate","id":"...","category":"docs","outcome":"partial"}`.
+/// Clear assessment: `{"type":"clear_annotation","id":"..."}`.
 /// Omit store_dir to use the shared platform local-data Insights directory.
 /// Runs synchronous bounded-source local IO: call off the UI thread; closing a
 /// window does not cancel a started operation. Keep buffers alive until return.

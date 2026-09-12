@@ -4,7 +4,9 @@ use std::path::PathBuf;
 use anyhow::{Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 
-use super::{LocalInsight, LocalInsightStore, SourceFormat, analyze_file};
+use super::{
+    LocalInsight, LocalInsightStore, SourceFormat, TaskCategory, TaskOutcome, analyze_file,
+};
 
 /// Bound request bytes before parsing or reading caller-owned FFI memory.
 pub const MAX_REQUEST_BYTES: usize = 64 * 1024;
@@ -33,6 +35,14 @@ pub enum LocalInsightsOperation {
     Delete {
         id: String,
     },
+    Annotate {
+        id: String,
+        category: TaskCategory,
+        outcome: TaskOutcome,
+    },
+    ClearAnnotation {
+        id: String,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -42,6 +52,8 @@ pub enum LocalInsightsResponse {
     List { insights: Vec<LocalInsight> },
     Explain { insight: Box<LocalInsight> },
     Delete { deleted: bool },
+    Annotate { insight: Box<LocalInsight> },
+    ClearAnnotation { insight: Box<LocalInsight> },
 }
 
 /// Resolve only local Insights storage; never resolve enrollment configuration.
@@ -79,6 +91,16 @@ pub fn execute(request: LocalInsightsRequest) -> Result<LocalInsightsResponse> {
         },
         LocalInsightsOperation::Delete { id } => LocalInsightsResponse::Delete {
             deleted: store()?.delete(&id)?,
+        },
+        LocalInsightsOperation::Annotate {
+            id,
+            category,
+            outcome,
+        } => LocalInsightsResponse::Annotate {
+            insight: Box::new(store()?.annotate(&id, category, outcome)?),
+        },
+        LocalInsightsOperation::ClearAnnotation { id } => LocalInsightsResponse::ClearAnnotation {
+            insight: Box::new(store()?.clear_annotation(&id)?),
         },
     })
 }
@@ -131,7 +153,7 @@ mod tests {
             &file,
             concat!(
                 "{\"role\":\"meta\",\"source\":\"claude-code\",\"model\":\"fixture\"}\n",
-                "{\"role\":\"user\",\"content\":\"PRIVATE_BODY\",\"timestamp\":\"2026-09-11T12:00:00Z\"}\n"
+                "{\"role\":\"user\",\"timestamp\":\"2026-09-11T12:00:00Z\",\"content\":\"PRIVATE_BODY\"}\n"
             ),
         )
         .unwrap();
@@ -168,6 +190,27 @@ mod tests {
             panic!("expected explanation")
         };
         assert_eq!(saved.id, insight.id);
+        let LocalInsightsResponse::Annotate { insight: annotated } =
+            call(LocalInsightsOperation::Annotate {
+                id: saved.id.clone(),
+                category: TaskCategory::Docs,
+                outcome: TaskOutcome::Partial,
+            })
+        else {
+            panic!("expected annotated snapshot")
+        };
+        assert_eq!(
+            annotated.manual_annotation.unwrap().outcome,
+            TaskOutcome::Partial
+        );
+        let LocalInsightsResponse::ClearAnnotation { insight: cleared } =
+            call(LocalInsightsOperation::ClearAnnotation {
+                id: saved.id.clone(),
+            })
+        else {
+            panic!("expected cleared snapshot")
+        };
+        assert!(cleared.manual_annotation.is_none());
         assert!(matches!(
             call(LocalInsightsOperation::Delete { id: insight.id }),
             LocalInsightsResponse::Delete { deleted: true }

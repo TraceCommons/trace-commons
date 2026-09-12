@@ -20,7 +20,7 @@ use trace_commons_protocol::insights::{
 use crate::source::SessionEventKind;
 
 const MAX_SOURCE_BYTES: u64 = 16 * 1024 * 1024;
-const STORE_VERSION: u32 = 1;
+const STORE_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -35,6 +35,46 @@ pub enum EpisodeBoundary {
     SessionProxy,
 }
 
+/// A user label on a saved session proxy, not an inferred task boundary.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskCategory {
+    Refactor,
+    Tests,
+    Docs,
+    Debugging,
+    Other,
+    Unknown,
+}
+
+/// User-reported assessment; does not establish independent task success.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskOutcome {
+    Accepted,
+    Partial,
+    Rejected,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AnnotationProvenance {
+    UserReported,
+}
+
+/// No free text or user identity is retained. The digest binds this assessment
+/// to exactly the saved source bytes, independently of the last import time.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ManualAnnotation {
+    pub category: TaskCategory,
+    pub outcome: TaskOutcome,
+    pub provenance: AnnotationProvenance,
+    pub recorded_at: chrono::DateTime<chrono::Utc>,
+    pub source_digest: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LocalInsight {
     pub id: String,
@@ -46,6 +86,9 @@ pub struct LocalInsight {
     pub cost_unavailable_reason: String,
     /// No semantic task classification is performed in this release.
     pub task_category: Option<String>,
+    /// Separate user-reported evidence; never folded into observed metrics.
+    #[serde(default)]
+    pub manual_annotation: Option<ManualAnnotation>,
     /// Import snapshot time; source freshness requires explicit reimport.
     pub analyzed_at: chrono::DateTime<chrono::Utc>,
 }
@@ -209,6 +252,7 @@ pub fn analyze_file(format: SourceFormat, path: &Path) -> Result<LocalInsight> {
         estimated_cost_usd: None,
         cost_unavailable_reason: "adapter_usage_unavailable".into(),
         task_category: None,
+        manual_annotation: None,
         analyzed_at: chrono::Utc::now(),
     })
 }
@@ -279,7 +323,7 @@ impl LocalInsightStore {
             .map_err(|_| anyhow!("insights_store_busy"))?;
         let path = self.dir.join("index.json");
         reject_symlinks(&path)?;
-        let index = match fs::symlink_metadata(&path) {
+        let mut index = match fs::symlink_metadata(&path) {
             Ok(_) => {
                 let bytes = bounded_read(&path)?;
                 serde_json::from_slice::<Index>(&bytes)
@@ -292,7 +336,7 @@ impl LocalInsightStore {
             },
             Err(_) => bail!("insights_store_unreadable"),
         };
-        if index.version != STORE_VERSION {
+        if index.version != 1 && index.version != STORE_VERSION {
             bail!("insights_store_version_unsupported");
         }
         for (id, insight) in &index.reports {
@@ -311,6 +355,11 @@ impl LocalInsightStore {
             {
                 bail!("insights_store_invalid");
             }
+            if let Some(annotation) = &insight.manual_annotation
+                && (index.version == 1 || annotation.source_digest != evidence[0].source_digest)
+            {
+                bail!("insights_store_invalid");
+            }
             insight
                 .report
                 .validate_for(&ProviderManifest::first_party(), evidence)?;
@@ -323,6 +372,8 @@ impl LocalInsightStore {
         {
             bail!("insights_store_invalid");
         }
+        // Legacy snapshots remain readable; the next mutation persists v2.
+        index.version = STORE_VERSION;
         Ok((lock, index))
     }
 
@@ -340,18 +391,61 @@ impl LocalInsightStore {
     pub fn import(&self, format: SourceFormat, path: &Path) -> Result<LocalInsight> {
         // Analyze the selected leaf through the same no-follow reader used by
         // unsaved analysis. Canonicalization is only for deduplication identity.
-        let insight = analyze_file(format, path)?;
+        let mut insight = analyze_file(format, path)?;
         let canonical = path
             .canonicalize()
             .map_err(|_| anyhow!("insights_source_unreadable"))?;
         let alias = digest(canonical.as_os_str().as_encoded_bytes());
         let (_lock, mut index) = self.locked()?;
+        // Content-identical copies share both evidence and annotation. A new
+        // digest never inherits the old snapshot's user assessment.
+        if let Some(previous) = index.reports.get(&insight.id) {
+            insight.manual_annotation = previous.manual_annotation.clone();
+        }
         index.aliases.insert(alias, insight.id.clone());
         index.reports.insert(insight.id.clone(), insight.clone());
         let referenced = index.aliases.values().cloned().collect::<BTreeSet<_>>();
         index.reports.retain(|id, _| referenced.contains(id));
         self.save(&index)?;
         Ok(insight)
+    }
+
+    /// Replace the user assessment on an existing saved snapshot. Both labels
+    /// are explicit, including Unknown; absence is represented by clear_annotation.
+    pub fn annotate(
+        &self,
+        id: &str,
+        category: TaskCategory,
+        outcome: TaskOutcome,
+    ) -> Result<LocalInsight> {
+        let (_lock, mut index) = self.locked()?;
+        let insight = index
+            .reports
+            .get_mut(id)
+            .ok_or_else(|| anyhow!("insights_not_found"))?;
+        insight.manual_annotation = Some(ManualAnnotation {
+            category,
+            outcome,
+            provenance: AnnotationProvenance::UserReported,
+            recorded_at: chrono::Utc::now(),
+            source_digest: insight.report.evidence[0].source_digest.clone(),
+        });
+        let result = insight.clone();
+        self.save(&index)?;
+        Ok(result)
+    }
+
+    /// Clear only the assessment, preserving the snapshot and source file.
+    pub fn clear_annotation(&self, id: &str) -> Result<LocalInsight> {
+        let (_lock, mut index) = self.locked()?;
+        let insight = index
+            .reports
+            .get_mut(id)
+            .ok_or_else(|| anyhow!("insights_not_found"))?;
+        insight.manual_annotation = None;
+        let result = insight.clone();
+        self.save(&index)?;
+        Ok(result)
     }
 
     pub fn list(&self) -> Result<Vec<LocalInsight>> {
@@ -508,6 +602,163 @@ mod tests {
         assert!(store.delete(&second.id).unwrap());
         assert!(store.list().unwrap().is_empty());
         assert!(!store.delete(&second.id).unwrap());
+    }
+
+    #[test]
+    fn manual_annotations_follow_saved_evidence_lifecycle() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source.jsonl");
+        let copy = dir.path().join("copy.jsonl");
+        trajectory(&source, "first");
+        let store = LocalInsightStore::open(&dir.path().join("store")).unwrap();
+        let unsaved = analyze_file(SourceFormat::Trajectory, &source).unwrap();
+        assert!(
+            store
+                .annotate(&unsaved.id, TaskCategory::Docs, TaskOutcome::Accepted)
+                .is_err()
+        );
+        assert!(store.clear_annotation(&unsaved.id).is_err());
+        let initial = store.import(SourceFormat::Trajectory, &source).unwrap();
+        let annotated = store
+            .annotate(&initial.id, TaskCategory::Refactor, TaskOutcome::Partial)
+            .unwrap();
+        let annotation = annotated.manual_annotation.clone().unwrap();
+        assert_eq!(annotation.provenance, AnnotationProvenance::UserReported);
+        assert_eq!(
+            annotation.source_digest,
+            initial.report.evidence[0].source_digest
+        );
+        assert!(annotation.recorded_at >= initial.analyzed_at);
+        assert_eq!(
+            serde_json::to_value(&annotated.report).unwrap(),
+            serde_json::to_value(&initial.report).unwrap()
+        );
+        let reopened = LocalInsightStore::open(&dir.path().join("store")).unwrap();
+        assert_eq!(
+            reopened.explain(&initial.id).unwrap().manual_annotation,
+            Some(annotation.clone())
+        );
+        assert_eq!(
+            store
+                .import(SourceFormat::Trajectory, &source)
+                .unwrap()
+                .manual_annotation,
+            Some(annotation.clone())
+        );
+        fs::copy(&source, &copy).unwrap();
+        assert_eq!(
+            store
+                .import(SourceFormat::Trajectory, &copy)
+                .unwrap()
+                .manual_annotation,
+            Some(annotation.clone())
+        );
+        trajectory(&source, "changed");
+        let changed = store.import(SourceFormat::Trajectory, &source).unwrap();
+        assert_ne!(changed.id, initial.id);
+        assert!(changed.manual_annotation.is_none());
+        assert_eq!(
+            store.explain(&initial.id).unwrap().manual_annotation,
+            Some(annotation)
+        );
+        let updated = store
+            .annotate(&initial.id, TaskCategory::Unknown, TaskOutcome::Unknown)
+            .unwrap();
+        assert_eq!(
+            updated.manual_annotation.unwrap().outcome,
+            TaskOutcome::Unknown
+        );
+        assert!(
+            store
+                .clear_annotation(&initial.id)
+                .unwrap()
+                .manual_annotation
+                .is_none()
+        );
+        store
+            .annotate(&initial.id, TaskCategory::Tests, TaskOutcome::Rejected)
+            .unwrap();
+        assert!(store.delete(&initial.id).unwrap());
+        assert!(store.explain(&initial.id).is_err());
+        assert!(
+            store
+                .import(SourceFormat::Trajectory, &copy)
+                .unwrap()
+                .manual_annotation
+                .is_none()
+        );
+        assert!(source.exists() && copy.exists());
+    }
+
+    #[test]
+    fn legacy_store_migrates_on_mutation_without_inventing_annotations() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source.jsonl");
+        trajectory(&source, "fixture");
+        let store = LocalInsightStore::open(&dir.path().join("store")).unwrap();
+        let insight = store.import(SourceFormat::Trajectory, &source).unwrap();
+        let path = store.dir.join("index.json");
+        let mut legacy: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        legacy["version"] = 1.into();
+        legacy["reports"][&insight.id]
+            .as_object_mut()
+            .unwrap()
+            .remove("manual_annotation");
+        fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        assert!(
+            store
+                .explain(&insight.id)
+                .unwrap()
+                .manual_annotation
+                .is_none()
+        );
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&fs::read(&path).unwrap()).unwrap()["version"],
+            1
+        );
+        store
+            .annotate(&insight.id, TaskCategory::Debugging, TaskOutcome::Accepted)
+            .unwrap();
+        let migrated: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(migrated["version"], STORE_VERSION);
+        assert_eq!(
+            migrated["reports"][&insight.id]["manual_annotation"]["provenance"],
+            "user_reported"
+        );
+    }
+
+    #[test]
+    fn invalid_annotation_cache_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source.jsonl");
+        trajectory(&source, "fixture");
+        let store = LocalInsightStore::open(&dir.path().join("store")).unwrap();
+        let insight = store.import(SourceFormat::Trajectory, &source).unwrap();
+        store
+            .annotate(&insight.id, TaskCategory::Other, TaskOutcome::Accepted)
+            .unwrap();
+        let path = store.dir.join("index.json");
+        let original: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        for (field, invalid) in [
+            ("source_digest", "0".repeat(64)),
+            ("provenance", "verified".into()),
+            ("category", "arbitrary free text".into()),
+            ("outcome", "success".into()),
+            ("recorded_at", "invalid".into()),
+            ("comment", "raw free text".into()),
+        ] {
+            let mut corrupted = original.clone();
+            corrupted["reports"][&insight.id]["manual_annotation"][field] = invalid.into();
+            fs::write(&path, serde_json::to_vec(&corrupted).unwrap()).unwrap();
+            assert!(store.list().is_err(), "accepted invalid {field}");
+        }
+        let mut corrupted = original;
+        corrupted["version"] = 1.into();
+        fs::write(&path, serde_json::to_vec(&corrupted).unwrap()).unwrap();
+        assert!(store.list().is_err());
     }
 
     #[test]

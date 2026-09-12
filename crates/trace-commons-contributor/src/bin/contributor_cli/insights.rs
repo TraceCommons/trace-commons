@@ -3,7 +3,8 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::{Args, Subcommand, ValueEnum};
 use trace_commons_contributor::insights::{
-    LocalInsight, LocalInsightStore, SourceFormat, analyze_file, service::open_store,
+    LocalInsight, LocalInsightStore, SourceFormat, TaskCategory, TaskOutcome, analyze_file,
+    service::open_store,
 };
 use trace_commons_protocol::insights::MetricId;
 
@@ -34,6 +35,16 @@ enum InsightsCommand {
     Explain { id: String },
     /// Delete a saved insight and its source references; leave the original file intact
     Delete { id: String },
+    /// Record your assessment of a saved snapshot, separate from verified outcomes
+    Annotate {
+        id: String,
+        #[arg(long, value_parser = ["refactor", "tests", "docs", "debugging", "other", "unknown"])]
+        category: String,
+        #[arg(long, value_parser = ["accepted", "partial", "rejected", "unknown"])]
+        outcome: String,
+    },
+    /// Remove your assessment without deleting the saved snapshot
+    ClearAnnotation { id: String },
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -88,6 +99,18 @@ pub(super) fn run(args: &InsightsArgs, json: bool) -> Result<()> {
                 println!("No saved insight matched that identifier.");
             }
         }
+        InsightsCommand::Annotate {
+            id,
+            category,
+            outcome,
+        } => {
+            let category: TaskCategory = serde_json::from_value(category.clone().into())?;
+            let outcome: TaskOutcome = serde_json::from_value(outcome.clone().into())?;
+            render(&store(args)?.annotate(id, category, outcome)?, json)?;
+        }
+        InsightsCommand::ClearAnnotation { id } => {
+            render(&store(args)?.clear_annotation(id)?, json)?
+        }
     }
     Ok(())
 }
@@ -102,7 +125,21 @@ fn render(insight: &LocalInsight, json: bool) -> Result<()> {
             "Snapshot analyzed at {}. Reimport to refresh.",
             insight.analyzed_at
         );
-        println!("Cost, task outcome, and model comparisons lack sufficient evidence.");
+        println!(
+            "Cost, independently verified task outcomes, and model comparisons lack sufficient evidence."
+        );
+        if let Some(annotation) = &insight.manual_annotation {
+            println!(
+                "Your assessment: {} / {} (user-reported, {}).",
+                serde_json::to_value(annotation.category)?
+                    .as_str()
+                    .unwrap_or("unknown"),
+                serde_json::to_value(annotation.outcome)?
+                    .as_str()
+                    .unwrap_or("unknown"),
+                annotation.recorded_at
+            );
+        }
         println!(
             "Analysis by {} (version {}, rubric {}).",
             insight.report.provider.id,
