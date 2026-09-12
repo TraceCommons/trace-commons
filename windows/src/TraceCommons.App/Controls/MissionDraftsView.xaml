@@ -1,0 +1,78 @@
+<UserControl
+    x:Class="TraceCommons.App.Controls.MissionDraftsView"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <ScrollViewer Padding="28,24">
+        <StackPanel Spacing="12" MaxWidth="900" HorizontalAlignment="Left">
+            <TextBlock Text="{x:Bind ViewModel[title], Mode=OneWay}" Style="{StaticResource TitleTextBlockStyle}" />
+            <TextBlock Text="{x:Bind ViewModel[intro], Mode=OneWay}" TextWrapping="Wrap" />
+            <TextBlock Text="{x:Bind ViewModel[review_notice], Mode=OneWay}" TextWrapping="Wrap" />
+            <TextBlock Text="{x:Bind ViewModel[authority_notice], Mode=OneWay}" TextWrapping="Wrap" />
+            <StackPanel Orientation="Horizontal" Spacing="8">
+                <Button Content="{x:Bind ViewModel[choose_file], Mode=OneWay}" Click="OnChoose" IsEnabled="{x:Bind ViewModel.CanAct, Mode=OneWay}" />
+                <Button Content="{x:Bind ViewModel[import], Mode=OneWay}" Click="OnImport" IsEnabled="{x:Bind CanImport, Mode=OneWay}" />
+                <Button Content="{x:Bind ViewModel[refresh], Mode=OneWay}" Click="OnRefresh" IsEnabled="{x:Bind ViewModel.CanAct, Mode=OneWay}" />
+            </StackPanel>
+            <TextBlock Text="{x:Bind SelectedFileName, Mode=OneWay}" />
+            <ProgressRing IsActive="{x:Bind ViewModel.IsBusy, Mode=OneWay}" Width="20" Height="20" HorizontalAlignment="Left" />
+            <TextBlock Text="{x:Bind ViewModel.Status, Mode=OneWay}" TextWrapping="Wrap" />
+
+            <ListView x:Name="DraftList" ItemsSource="{x:Bind ViewModel.Drafts}" SelectionMode="Single">
+                <ListView.ItemTemplate>
+                    <DataTemplate>
+                        <StackPanel Spacing="4" Padding="0,6">
+                            <TextBlock Text="{Binding Id}" FontFamily="Consolas" TextWrapping="Wrap" />
+                            <StackPanel Orientation="Horizontal" Spacing="6">
+                                <TextBlock Text="{Binding SourceCount}" />
+                                <TextBlock Text="{Binding Status}" />
+                            </StackPanel>
+                        </StackPanel>
+                    </DataTemplate>
+                </ListView.ItemTemplate>
+            </ListView>
+            <StackPanel Orientation="Horizontal" Spacing="8">
+                <Button Content="{x:Bind ViewModel[show], Mode=OneWay}" Click="OnShow" IsEnabled="{x:Bind ViewModel.CanAct, Mode=OneWay}" />
+                <Button Content="{x:Bind ViewModel[delete], Mode=OneWay}" Click="OnDelete" IsEnabled="{x:Bind ViewModel.CanAct, Mode=OneWay}" />
+            </StackPanel>
+
+            <StackPanel Visibility="{x:Bind ViewModel.HasCurrent, Mode=OneWay}" Spacing="8">
+                <TextBlock Text="{x:Bind ViewModel[display_notice], Mode=OneWay}" TextWrapping="Wrap" />
+                <TextBlock Text="{x:Bind ViewModel[proposal_sha256], Mode=OneWay}" FontWeight="SemiBold" />
+                <TextBlock Text="{x:Bind ViewModel.Current.Id, Mode=OneWay}" FontFamily="Consolas" TextWrapping="Wrap" />
+                <TextBlock Text="{x:Bind ViewModel[proposal_title], Mode=OneWay}" FontWeight="SemiBold" />
+                <TextBlock Text="{x:Bind ViewModel.Current.Proposal.Title, Mode=OneWay}" TextWrapping="Wrap" />
+                <TextBlock Text="{x:Bind ViewModel[author_unverified], Mode=OneWay}" FontWeight="SemiBold" />
+                <TextBlock Text="{x:Bind ViewModel.Current.Proposal.AuthorId, Mode=OneWay}" TextWrapping="Wrap" />
+                <TextBlock Text="{x:Bind ViewModel[evaluator_unverified], Mode=OneWay}" FontWeight="SemiBold" />
+                <TextBlock Text="{x:Bind ViewModel.Current.Proposal.EvaluatorId, Mode=OneWay}" TextWrapping="Wrap" />
+                <TextBlock Text="{x:Bind ViewModel[rubric_version], Mode=OneWay}" FontWeight="SemiBold" />
+                <TextBlock Text="{x:Bind ViewModel.Current.Proposal.RubricVersion, Mode=OneWay}" TextWrapping="Wrap" />
+                <TextBlock Text="{x:Bind ViewModel[source_claim], Mode=OneWay}" FontWeight="SemiBold" />
+                <TextBlock Text="{x:Bind ViewModel.Current.Proposal.ClaimToTest, Mode=OneWay}" TextWrapping="Wrap" />
+                <TextBlock Text="{x:Bind ViewModel[task], Mode=OneWay}" FontWeight="SemiBold" />
+                <TextBlock Text="{x:Bind ViewModel.Current.Proposal.Task, Mode=OneWay}" TextWrapping="Wrap" />
+                <TextBlock Text="{x:Bind ViewModel[starting_artifact], Mode=OneWay}" FontWeight="SemiBold" />
+                <TextBlock Text="{x:Bind ViewModel.Current.Proposal.StartingArtifact.Url, Mode=OneWay}" TextWrapping="Wrap" />
+                <TextBlock Text="{x:Bind ViewModel[starting_artifact_digest], Mode=OneWay}" FontWeight="SemiBold" />
+                <TextBlock Text="{x:Bind ViewModel.Current.Proposal.StartingArtifact.Sha256, Mode=OneWay}" FontFamily="Consolas" TextWrapping="Wrap" />
+                <TextBlock Text="{x:Bind ViewModel[source_urls], Mode=OneWay}" FontWeight="SemiBold" />
+                <ItemsControl ItemsSource="{x:Bind ViewModel.Current.Proposal.SourceUrls, Mode=OneWay}" />
+                <TextBlock Text="{x:Bind ViewModel[success_criteria], Mode=OneWay}" FontWeight="SemiBold" />
+                <ItemsControl ItemsSource="{x:Bind ViewModel.Current.Proposal.SuccessCriteria, Mode=OneWay}" />
+                <TextBlock Text="{x:Bind ViewModel[required_evidence], Mode=OneWay}" FontWeight="SemiBold" />
+                <ItemsControl ItemsSource="{x:Bind ViewModel.Current.Proposal.RequiredEvidence, Mode=OneWay}" />
+                <TextBlock Text="{x:Bind ViewModel[allowed_models], Mode=OneWay}" FontWeight="SemiBold" />
+                <ItemsControl ItemsSource="{x:Bind ViewModel.Current.Proposal.AllowedModels, Mode=OneWay}" />
+                <TextBlock Text="{x:Bind ViewModel[allowed_tools], Mode=OneWay}" FontWeight="SemiBold" />
+                <ItemsControl ItemsSource="{x:Bind ViewModel.Current.Proposal.AllowedTools, Mode=OneWay}" />
+                <TextBlock Text="{x:Bind ViewModel[proposed_budget], Mode=OneWay}" FontWeight="SemiBold" />
+                <TextBlock Text="{x:Bind ViewModel[duration_seconds], Mode=OneWay}" />
+                <TextBlock Text="{x:Bind ViewModel.Current.Proposal.Budget.MaxDurationSeconds, Mode=OneWay}" />
+                <TextBlock Text="{x:Bind ViewModel[input_tokens], Mode=OneWay}" />
+                <TextBlock Text="{x:Bind ViewModel.Current.Proposal.Budget.MaxInputTokens, Mode=OneWay}" />
+                <TextBlock Text="{x:Bind ViewModel[output_tokens], Mode=OneWay}" />
+                <TextBlock Text="{x:Bind ViewModel.Current.Proposal.Budget.MaxOutputTokens, Mode=OneWay}" />
+            </StackPanel>
+        </StackPanel>
+    </ScrollViewer>
+</UserControl>

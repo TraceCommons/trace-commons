@@ -138,6 +138,8 @@ public sealed partial class MainWindow : Window
         {
             if (change.PropertyName == nameof(MainViewModel.ShowingInsights) && !ViewModel.ShowingInsights)
                 (InsightsPane.Content as InsightsView)?.Deactivate();
+            if (change.PropertyName == nameof(MainViewModel.ShowingMissionDrafts) && !ViewModel.ShowingMissionDrafts)
+                (MissionDraftsPane.Content as MissionDraftsView)?.Deactivate();
         };
 
         // Found once the template is realized, not here: the ScrollViewer
@@ -929,6 +931,14 @@ public sealed partial class MainWindow : Window
     /// </remarks>
     private void OnShowInsights(object sender, RoutedEventArgs e) => ShowInsightsPane();
 
+    private async void OnShowMissionDrafts(object sender, RoutedEventArgs e)
+    {
+        if (MissionDraftsPane.Content is not MissionDraftsView)
+            MissionDraftsPane.Content = new MissionDraftsView(WinRT.Interop.WindowNative.GetWindowHandle(this));
+        ViewModel.ShowMissionDrafts();
+        await ((MissionDraftsView)MissionDraftsPane.Content).ActivateAsync();
+    }
+
     private async void ShowInsightsPane()
     {
         if (InsightsPane.Content is not InsightsView)
@@ -1592,6 +1602,7 @@ public sealed partial class MainWindow : Window
     {
         _closed = true;
         (InsightsPane.Content as InsightsView)?.Dispose();
+        (MissionDraftsPane.Content as MissionDraftsView)?.Dispose();
         _activationReady = false;
         _redirectedInvite.Clear();
         // Before the daemon teardown, and synchronously: an icon left in the
