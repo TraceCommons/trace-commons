@@ -177,11 +177,16 @@ fn split_top_level_commas(s: &str) -> Vec<String> {
 }
 
 fn rust_surface() -> BTreeMap<String, Signature> {
-    let src = ["src/lib.rs", "src/compute.rs", "src/insights.rs"]
-        .map(|path| {
-            std::fs::read_to_string(ffi_crate_dir().join(path)).expect("failed to read FFI source")
-        })
-        .join("\n");
+    let src = [
+        "src/lib.rs",
+        "src/compute.rs",
+        "src/insights.rs",
+        "src/mission_drafts.rs",
+    ]
+    .map(|path| {
+        std::fs::read_to_string(ffi_crate_dir().join(path)).expect("failed to read FFI source")
+    })
+    .join("\n");
 
     let mut out: BTreeMap<String, Signature> = BTreeMap::new();
     let bytes: Vec<&str> = src.lines().collect();
