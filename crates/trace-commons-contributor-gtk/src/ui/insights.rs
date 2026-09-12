@@ -251,6 +251,17 @@ impl InsightsView {
                 }
             });
         }
+        // GtkWindow::close can destroy its native surface without emitting
+        // hide/destroy before a queued local completion. Invalidate now, but
+        // do not mark the view terminal: another close handler may ask the
+        // user to confirm quitting and decline it.
+        window.connect_close_request(move |_| {
+            if let Some(view) = weak.upgrade() {
+                view.flight.borrow_mut().cancelled = true;
+            }
+            gtk::glib::Propagation::Proceed
+        });
+        let weak = Rc::downgrade(&view);
         window.connect_hide(move |_| {
             if let Some(view) = weak.upgrade() {
                 view.flight.borrow_mut().cancelled = true;
@@ -258,6 +269,16 @@ impl InsightsView {
         });
         let weak = Rc::downgrade(&view);
         window.connect_show(move |_| {
+            if let Some(view) = weak.upgrade() {
+                if !view.flight.borrow().busy && !view.flight.borrow().closed {
+                    view.controls.set_sensitive(true);
+                    view.assessment.set_sensitive(true);
+                    view.saved.set_sensitive(true);
+                }
+            }
+        });
+        let weak = Rc::downgrade(&view);
+        view.root.connect_map(move |_| {
             if let Some(view) = weak.upgrade() {
                 if !view.flight.borrow().busy && !view.flight.borrow().closed {
                     view.controls.set_sensitive(true);
@@ -812,6 +833,17 @@ mod tests {
             },
             false,
         );
+        let declined_close = window.connect_close_request(|_| gtk::glib::Propagation::Stop);
+        window.close();
+        assert!(view.flight.borrow().cancelled);
+        settle();
+        assert!(
+            view.controls.is_sensitive(),
+            "declined close restores controls without show signal"
+        );
+        assert_eq!(view.detail.text(), before);
+        window.disconnect(declined_close);
+        view.request(Op::List {}, false);
         window.hide();
         settle();
         assert_eq!(view.detail.text(), before);
@@ -819,6 +851,10 @@ mod tests {
         assert!(view.controls.is_sensitive());
         view.request(Op::List {}, false);
         window.close();
+        assert!(
+            view.flight.borrow().cancelled,
+            "close synchronously invalidates queued presentation"
+        );
         settle();
         assert!(view.flight.borrow().closed || view.flight.borrow().cancelled);
         assert_eq!(view.detail.text(), before);

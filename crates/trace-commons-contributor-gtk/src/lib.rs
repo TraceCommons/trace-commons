@@ -23,6 +23,7 @@ pub mod backend;
 pub mod balance;
 pub mod certificate;
 pub mod copy;
+mod dbus;
 pub mod eligibility;
 pub mod model;
 pub mod notify;
