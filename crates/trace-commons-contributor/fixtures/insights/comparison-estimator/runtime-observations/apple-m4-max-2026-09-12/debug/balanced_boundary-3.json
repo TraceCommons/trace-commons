@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "case": "balanced_boundary",
+  "first_total": 128,
+  "first_outcomes": [
+    128,
+    0,
+    0
+  ],
+  "second_total": 128,
+  "second_outcomes": [
+    128,
+    0,
+    0
+  ],
+  "candidate_elapsed_nanos": 40533291,
+  "evaluation": {
+    "status": "supported",
+    "contrasts": [
+      {
+        "lower_millionths": -41914,
+        "upper_millionths": 41914,
+        "width_millionths": 83828,
+        "decision": "includes_zero"
+      },
+      {
+        "lower_millionths": -41914,
+        "upper_millionths": 41914,
+        "width_millionths": 83828,
+        "decision": "includes_zero"
+      },
+      {
+        "lower_millionths": -41914,
+        "upper_millionths": 41914,
+        "width_millionths": 83828,
+        "decision": "includes_zero"
+      }
+    ]
+  }
+}
