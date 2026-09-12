@@ -13,6 +13,13 @@ The macOS date and saved-record reconciliation fixes are in [#944](https://githu
 
 Once integrated, launch the app with `--insights-store` and the absolute path to the existing working-copy directory. Verify the visible custom-store location before interacting; malformed, missing, relative, duplicate, or non-directory selections must not fall back to the normal store. Keep task context, outcome, and independence review separate. The real two-cohort app pilot remains outstanding.
 
+
+## Additional cohort discovery
+
+A local metadata audit found that branches using the currently admitted Claude writer profile all share one root session, including the original three selected tasks. Additional roots have other writer versions. A parent session's model declaration also does not identify its subagents' declared models. This is discovery evidence only, not task attribution or outcome review; the detailed manifests remain local.
+
+The next pilot evidence step therefore requires either qualifying an additional source writer profile or obtaining independent captures under a supported profile. Do not broaden version admission based on model metadata alone, infer independence from distinct branch files, or reuse the three accepted outcomes for other work. The human task/context/outcome/independence review remains required.
+
 ## First repository and tasks
 
 Use Trace Commons for the first local retrospective pilot. Start with these completed refactors, then add other accepted, revised, or abandoned work to reach roughly 6–10 tasks if suitable traces exist. That is a usability sample, not a statistical sample-size claim.

@@ -48,7 +48,7 @@ Abhishek owns the system for rewarding users for missions and insights. Reward d
 
 ## Current delivery priority
 
-Current position: between milestones B and C. The next engineering step is reviewed production integration of the exact candidate while preserving historical specification bytes and digests, followed by the isolated-store macOS workflow. The selected three accepted tasks share a root session and one model cohort, so they cannot qualify an independent two-model comparison. Obtain authorized evidence for two cohorts and complete human task/context/outcome/independence review; do not manufacture independence or treat passing synthetic checks as the pilot.
+Current position: between milestones B and C. The next engineering step is reviewed production integration of the exact candidate while preserving historical specification bytes and digests, followed by the isolated-store macOS workflow. The selected three accepted tasks share a root session and one model cohort, so they cannot qualify an independent two-model comparison. A local metadata audit also found only one root represented by the currently admitted Claude writer profile; additional cohort discovery requires qualified source-version coverage or new independent captures. Obtain authorized evidence for two cohorts and complete human task/context/outcome/independence review; do not manufacture independence or treat passing synthetic checks as the pilot.
 
 The architecture and full user-story scope remain intact. The sequence below supersedes the numerical order of the phase and packet inventory. Progress is measured by user questions answered with inspectable evidence, not by contracts, test counts, or platform implementations completed.
 
