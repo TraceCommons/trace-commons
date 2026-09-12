@@ -360,7 +360,18 @@ fn load_session(path: &Path) -> anyhow::Result<SessionTranscript> {
     // accumulated over the same bytes in the same order, so the session id
     // is unchanged -- see `SessionHasher`.
     let file = std::fs::File::open(path)?;
-    let mut reader = BufReader::new(file);
+    parse_session_reader(BufReader::new(file), path)
+}
+
+/// Parse an explicitly supplied immutable snapshot without reopening its source.
+pub(crate) fn parse_session_bytes(bytes: &[u8]) -> anyhow::Result<SessionTranscript> {
+    parse_session_reader(std::io::Cursor::new(bytes), Path::new(""))
+}
+
+fn parse_session_reader(
+    mut reader: impl BufRead,
+    path: &Path,
+) -> anyhow::Result<SessionTranscript> {
     let mut hasher = SessionHasher::new();
     let mut raw = Vec::new();
 
