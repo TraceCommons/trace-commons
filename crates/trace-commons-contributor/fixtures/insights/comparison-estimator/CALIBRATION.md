@@ -1,0 +1,24 @@
+# Exact component calibration evidence
+
+This packet contains synthetic numerical evidence for the test-only candidate. The [canonical comparison plan in PR #870](https://github.com/TraceCommons/trace-commons/blob/plan-unified-trace-insights/docs/superpowers/plans/2026-09-12-personal-refactor-comparison.md) defines the delivery and qualification gates.
+
+## Provenance
+
+- Frozen protocol: [exact-component-candidate-v1.json](exact-component-candidate-v1.json), SHA-256 `d257605993aaa94220ce31144203c0c05a28ff6c33cc129d678f90a8986e26c8`.
+- Executed runner source: `9d41d5b4a7f4e0ca74a0264f63124e5c2b030bcc`.
+- Immutable output: [exact-component-calibration-raw-v1.json](exact-component-calibration-raw-v1.json), SHA-256 `68926edabd94d317c381640d712787077e7001d8357cf8f9128d577af8a01d70`.
+- Coverage: 252 frozen settings, each with 10,000 experiments. All 252 passed the frozen numerical noncoverage criterion. Thirty-six settings evaluated no intervals because support was insufficient.
+
+The raw output is preserved byte-for-byte. It contains synthetic counts and numerical summaries, with no private traces or pilot store data. Its elapsed time describes the whole calibration run, not one comparison or application latency.
+
+## Interpretation
+
+The historical `admission.admitted: true` field means only that the frozen numerical criterion passed. `qualified_for_saved_specifications` remains false. Below-support trials count as no error in the frozen all-trial criterion; they must not be described as successfully covered intervals. The derived report separately describes uncertainty among eligible intervals and suppression. Neither denominator establishes useful precision for a small pilot, real task independence, or model superiority.
+
+Astra independently verified the raw setting grid, counters, and all 252 confidence bounds. Derived-report execution and artifact review, runtime measurements, and product qualification remain pending. Saved comparisons remain unqualified.
+
+## Reproduction
+
+The ignored Rust test `write_exact_component_full_grid_artifact` runs the full frozen grid when `TRACE_COMMONS_COMPARISON_CALIBRATION_OUTPUT` names a new output path. Use the executed source commit above to reproduce the historical runner; elapsed time will differ.
+
+The ignored Rust test `derive_complete_report_from_raw_artifact` accepts this raw file through `TRACE_COMMONS_COMPARISON_CALIBRATION_RAW` and requires a different, nonexistent output path in `TRACE_COMMONS_COMPARISON_CALIBRATION_OUTPUT`. It validates the full setting set and writes without overwriting an existing file. Run these deliberately with `cargo test --locked -p trace-commons-contributor --lib <test-name> -- --ignored --nocapture` and `RUSTFLAGS='-D warnings'`, using an isolated target directory. The exact arithmetic can take substantial time; the currently running derivation should finish rather than be restarted to obtain another copy.
