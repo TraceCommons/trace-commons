@@ -263,7 +263,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             store.comparison_specification_list().unwrap(),
-            [saved.clone()]
+            std::slice::from_ref(&saved)
         );
         assert_eq!(
             store.comparison_specification_get(&saved.id).unwrap(),
@@ -331,7 +331,9 @@ mod tests {
         let store = LocalInsightStore::open(&dir.path().join("store")).unwrap();
         let snapshot = store.import(SourceFormat::Trajectory, &source).unwrap();
         let episode = store.episode_create(&[snapshot.id]).unwrap();
-        let task = store.comparison_task_create(&[episode.id.clone()]).unwrap();
+        let task = store
+            .comparison_task_create(std::slice::from_ref(&episode.id))
+            .unwrap();
         let task = store
             .comparison_task_set_context(&task.id, task.revision, complete_context())
             .unwrap();
