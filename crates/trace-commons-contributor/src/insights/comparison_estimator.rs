@@ -1082,10 +1082,10 @@ mod tests {
 
     #[test]
     fn exhaustive_small_n_component_coverage_meets_exact_allocation() {
-        // The independent u128 oracle is intentionally bounded at n=3:
-        // 1_000_000^4 does not fit u128. Production arithmetic is exercised
-        // at n=255 by exact_component_endpoints_round_outward.
-        for total in 1..=3usize {
+        // The independent u128 oracle is bounded at n=6 because multiplying
+        // 1_000_000^7 by the coverage denominator does not fit u128.
+        // Production arithmetic is exercised at n=255 and n=256 separately.
+        for total in 1..=6usize {
             let intervals = (0..=total)
                 .map(|count| exact_component_interval(count, total).unwrap())
                 .collect::<Vec<_>>();
