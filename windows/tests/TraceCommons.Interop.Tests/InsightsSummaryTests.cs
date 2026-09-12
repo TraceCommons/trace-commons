@@ -58,6 +58,7 @@ public sealed class InsightsSummaryTests
                 "summary_analysis_range":"Analysis dates","category":"Category","outcome":"Outcome","category_unknown":"Unknown category",
                 "outcome_unknown":"Unknown outcome","codex":"Codex rollout","error":"safe-error","summary_unavailable":"Unavailable"}}
                 """));
+            if (type == "episode_list") return Task.FromResult(Json("{\"type\":\"episode_list\",\"episodes\":[]}"));
             if (type == "list") return Task.FromResult(Json("{\"type\":\"list\",\"insights\":[" + InsightsTests.Insight + "]}"));
             if (type == "delete") return Task.FromResult(Json("{\"type\":\"delete\",\"deleted\":true}"));
             return Task.FromResult(Json("{\"type\":\"" + type + "\",\"insight\":" + InsightsTests.Insight + "}"));
@@ -86,7 +87,7 @@ public sealed class InsightsSummaryTests
         var service = new Service();
         using var model = new InsightsViewModel(service);
         await model.LoadAsync();
-        Assert.Equal(new[] { "copy", "list", "summary" }, service.Operations);
+        Assert.Equal(new[] { "copy", "list", "summary", "episode_list" }, service.Operations);
         Assert.Contains("Unassessed: 1", model.SummaryDetails);
         Assert.Contains("Analysis dates:", model.SummaryDetails);
         Assert.Contains(model.SummaryRows, row => row.Label == "Outcome · Unknown outcome" && row.Details == "1");
@@ -105,11 +106,11 @@ public sealed class InsightsSummaryTests
         await model.ClearAnnotationAsync();
         Assert.Equal(new[] { "clear_annotation", "summary" }, service.Operations.TakeLast(2));
         await model.DeleteAsync();
-        Assert.Equal(new[] { "delete", "list", "summary" }, service.Operations.TakeLast(3));
+        Assert.Equal(new[] { "delete", "list", "summary", "episode_list" }, service.Operations.TakeLast(4));
         await model.AnalyzeAsync("codex", "/explicit/file", true);
-        Assert.Equal(new[] { "analyze", "list", "summary" }, service.Operations.TakeLast(3));
+        Assert.Equal(new[] { "analyze", "list", "summary", "episode_list" }, service.Operations.TakeLast(4));
         await model.RefreshAsync();
-        Assert.Equal(new[] { "list", "summary" }, service.Operations.TakeLast(2));
+        Assert.Equal(new[] { "list", "summary", "episode_list" }, service.Operations.TakeLast(3));
     }
     [Fact]
     public async Task FailedOrCancelledRefreshClearsStaleSummaryAndReentryRecovers()

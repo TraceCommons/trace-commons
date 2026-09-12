@@ -73,6 +73,7 @@ public sealed class InsightEvidenceTests
                   """),
                 "list" => Json("{\"type\":\"list\",\"insights\":[" + Snapshot + "]}"),
                 "summary" => Json(InsightsSummaryTests.Response),
+                "episode_list" => Json("{\"type\":\"episode_list\",\"episodes\":[]}"),
                 _ => Json("{\"type\":\"" + type + "\",\"insight\":" + Snapshot + "}")
             });
         }
@@ -164,10 +165,10 @@ public sealed class InsightEvidenceTests
         await model.LoadAsync();
         await model.ExplainAsync("snapshot-a");
         await model.LinkGitAsync(model.CaptureEvidenceTarget()!, "/explicit/repo", new string('a', 40));
-        Assert.Equal(new[] { "link_git", "list", "summary" }, service.Calls.TakeLast(3).Select(call => call.GetProperty("type").GetString()));
-        Assert.Equal("snapshot-a", service.Calls[^3].GetProperty("id").GetString());
+        Assert.Equal(new[] { "link_git", "list", "summary", "episode_list" }, service.Calls.TakeLast(4).Select(call => call.GetProperty("type").GetString()));
+        Assert.Equal("snapshot-a", service.Calls[^4].GetProperty("id").GetString());
         await model.UnlinkEvidenceAsync(model.CaptureEvidenceTarget()!, "git-link");
-        Assert.Equal("unlink_evidence", service.Calls[^3].GetProperty("type").GetString());
+        Assert.Equal("unlink_evidence", service.Calls[^4].GetProperty("type").GetString());
         service.FailMutation = true;
         await model.LinkTestReportAsync(model.CaptureEvidenceTarget()!, "/explicit/report.json");
         Assert.Null(model.CurrentId);
@@ -283,7 +284,7 @@ public sealed class InsightEvidenceTests
         Assert.Equal(before, service.Calls.Count);
         model.CancelEvidenceTarget(older);
         await model.LinkTestReportAsync(newer, "/explicit/report.json");
-        Assert.Equal("link_test_report", service.Calls[^3].GetProperty("type").GetString());
+        Assert.Equal("link_test_report", service.Calls[^4].GetProperty("type").GetString());
         var cancelled = model.CaptureEvidenceTarget()!;
         model.CancelEvidenceTarget(cancelled);
         before = service.Calls.Count;

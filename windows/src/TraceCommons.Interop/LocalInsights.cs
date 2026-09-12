@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -13,6 +14,11 @@ public interface ILocalInsights
 /// <summary>Handle-free bounded calls. Cancellation stops waiting, not an already-started mutation.</summary>
 public sealed class LocalInsights : ILocalInsights
 {
+    private static readonly HashSet<string> PublicEpisodeErrors = new(StringComparer.Ordinal) {
+        "insights_episode_invalid", "insights_episode_member_limit", "insights_episode_duplicate_member",
+        "insights_episode_not_found", "insights_episode_missing_members", "insights_episode_revision_conflict",
+        "insights_episode_limit_exceeded", "insights_episode_revision_overflow", "insights_response_too_large"
+    };
     private static readonly SemaphoreSlim Calls = new(1, 1);
     private readonly string? _storeDirectory;
     public LocalInsights(string? storeDirectory = null) => _storeDirectory = storeDirectory;
@@ -35,7 +41,11 @@ public sealed class LocalInsights : ILocalInsights
         try
         {
             if (error != IntPtr.Zero || response == IntPtr.Zero)
+            {
+                string? code = error == IntPtr.Zero ? null : NativeMethods.BorrowedString(error);
+                if (code != null && PublicEpisodeErrors.Contains(code)) throw new InsightsServiceException(code);
                 throw new InvalidOperationException("insights-operation-failed");
+            }
             string json = NativeMethods.BorrowedString(response)
                 ?? throw new InvalidOperationException("insights-response-invalid");
             using var document = JsonDocument.Parse(json);
