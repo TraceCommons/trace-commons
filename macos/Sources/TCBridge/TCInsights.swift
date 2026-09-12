@@ -23,6 +23,9 @@ public enum TCInsights {
             let response = try JSONDecoder().decode(InsightsResponse.self, from: Data(text.utf8))
             try response.insight?.validateSupportedEvidence()
             for snapshot in response.insights ?? [] { try snapshot.validateSupportedEvidence() }
+            try response.task?.validateSupportedSchema()
+            try response.comparisonTaskDetail?.validateSupportedSchema(expectedID: request.operation.id)
+            for task in response.tasks ?? [] { try task.validateSupportedSchema() }
             if request.operation.type == "question_cards" {
                 guard response.type == "question_cards", let result = response.result,
                       response.text != nil, let questions = request.operation.questions else {
@@ -61,22 +64,28 @@ public struct InsightsRequest: Encodable, Sendable {
         public var episode_ids: [String]?
         public var questions: [InsightQuestion]?
         public var expected_revision: UInt64?
+        public var context: ComparisonTaskContextInput?
+        public var displayed_material_digest: String?
         public init(_ type: String, source: String? = nil, file: String? = nil,
                     save: Bool? = nil, id: String? = nil, category: String? = nil, outcome: String? = nil,
                     repository: String? = nil, commit: String? = nil, evidenceID: String? = nil,
                     snapshotIDs: [String]? = nil, episodeIDs: [String]? = nil,
-                    questions: [InsightQuestion]? = nil, expectedRevision: UInt64? = nil) {
+                    questions: [InsightQuestion]? = nil, expectedRevision: UInt64? = nil,
+                    context: ComparisonTaskContextInput? = nil,
+                    displayedMaterialDigest: String? = nil) {
             self.type = type; self.source = source; self.file = file; self.save = save
             self.id = id; self.category = category; self.outcome = outcome
             self.repository = repository; self.commit = commit; self.evidence_id = evidenceID
             self.snapshot_ids = snapshotIDs
             self.episode_ids = episodeIDs; self.questions = questions
             self.expected_revision = expectedRevision
+            self.context = context; self.displayed_material_digest = displayedMaterialDigest
         }
     }
 }
 public struct InsightMutationEffects: Decodable, Sendable {
     public let invalidated_episode_ids: [String]
+    public let stale_comparison_task_ids: [String]?
 }
 public struct InsightsResponse: Decodable, Sendable {
     public let type: String
@@ -91,7 +100,39 @@ public struct InsightsResponse: Decodable, Sendable {
     public let detail: EpisodeDetail?
     public let result: InsightCardResult?
     public let text: String?
+    public let task: LocalComparisonTask?
+    public let tasks: [ComparisonTaskDetail]?
+    public let comparisonTaskDetail: ComparisonTaskDetail?
     public var invalidatedEpisodeIDs: [String] { mutation_effects?.invalidated_episode_ids ?? [] }
+    public var staleComparisonTaskIDs: [String] { mutation_effects?.stale_comparison_task_ids ?? [] }
+
+    private enum CodingKeys: String, CodingKey {
+        case type, insight, insights, deleted, copy, summary, mutation_effects, episode, episodes
+        case detail, result, text, task, tasks
+    }
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        type = try values.decode(String.self, forKey: .type)
+        insight = try values.decodeIfPresent(LocalInsight.self, forKey: .insight)
+        insights = try values.decodeIfPresent([LocalInsight].self, forKey: .insights)
+        deleted = try values.decodeIfPresent(Bool.self, forKey: .deleted)
+        copy = try values.decodeIfPresent([String: String].self, forKey: .copy)
+        summary = try values.decodeIfPresent(SavedInsightsSummary.self, forKey: .summary)
+        mutation_effects = try values.decodeIfPresent(InsightMutationEffects.self, forKey: .mutation_effects)
+        episode = try values.decodeIfPresent(LocalEpisode.self, forKey: .episode)
+        episodes = try values.decodeIfPresent([EpisodeListEntry].self, forKey: .episodes)
+        if type == "comparison_task_explain" {
+            detail = nil
+            comparisonTaskDetail = try values.decodeIfPresent(ComparisonTaskDetail.self, forKey: .detail)
+        } else {
+            detail = try values.decodeIfPresent(EpisodeDetail.self, forKey: .detail)
+            comparisonTaskDetail = nil
+        }
+        result = try values.decodeIfPresent(InsightCardResult.self, forKey: .result)
+        text = try values.decodeIfPresent(String.self, forKey: .text)
+        task = try values.decodeIfPresent(LocalComparisonTask.self, forKey: .task)
+        tasks = try values.decodeIfPresent([ComparisonTaskDetail].self, forKey: .tasks)
+    }
 }
 
 public enum InsightQuestion: String, Codable, Sendable, CaseIterable {
