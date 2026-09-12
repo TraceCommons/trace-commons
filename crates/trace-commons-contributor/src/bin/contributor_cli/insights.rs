@@ -94,7 +94,9 @@ pub(super) fn run(args: &InsightsArgs, json: bool) -> Result<()> {
             render(&insight, json)?;
         }
         InsightsCommand::List => {
-            let insights = store(args)?.list()?;
+            let insights = trace_commons_contributor::insights::service::list_saved(
+                args.store_dir.as_deref(),
+            )?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&insights)?);
             } else if insights.is_empty() {
