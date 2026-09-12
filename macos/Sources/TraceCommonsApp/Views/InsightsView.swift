@@ -4,6 +4,7 @@ import UniformTypeIdentifiers
 
 struct InsightsView: View {
     @State private var model = InsightsModel()
+    @State private var comparisonModel = ComparisonTasksModel()
     @State private var choosingFile = false
     @State private var source = "codex"
 
@@ -65,6 +66,8 @@ struct InsightsView: View {
                     Divider()
                     InsightsEpisodesView(model: model)
                     Divider()
+                    ComparisonTasksView(model: comparisonModel, episodes: model.episodes, copy: model.copy)
+                    Divider()
                     InsightCardsView(model: model)
                     Divider()
                     Text(model.text("saved")).font(.headline)
@@ -90,7 +93,8 @@ struct InsightsView: View {
             if case .success(let file) = result { model.analyze(file: file, source: source) }
         }
         .onAppear { model.open() }
-        .onDisappear { model.close() }
+        .onAppear { comparisonModel.open() }
+        .onDisappear { model.close(); comparisonModel.close() }
     }
     private var assessment: some View {
         VStack(alignment: .leading) {
