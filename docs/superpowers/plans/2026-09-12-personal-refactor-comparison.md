@@ -4,6 +4,14 @@ Date: 2026-09-12
 Parent: [Trace insights program](2026-09-11-trace-insights-program.md).
 Status: Revised delivery plan; implementation and pilot qualification remain outstanding.
 
+## Implementation checkpoint
+
+The task lifecycle is implemented in [PR #932](https://github.com/TraceCommons/trace-commons/pull/932), with the macOS task workflow stacked in [PR #933](https://github.com/TraceCommons/trace-commons/pull/933). Both remain open. Windows CI exposed a daemon-preview stack overflow in the parent stack; resolving and verifying it is part of consolidation.
+
+The next layer implements immutable saved specifications, descriptive evaluation, readable CLI results, and C-interface operations. Production source attribution is still pending, so this layer currently explains exclusions rather than supplying qualified model comparisons. The released Codex writer fixtures establish a bounded structural test profile; they do not establish real task independence, provider identity, or pilot readiness.
+
+Remaining exits retain the original scope: qualified nonempty two-cohort evidence, the estimator and calibration, complete macOS evaluation and a private pilot, Windows/GTK parity, then controlled mission participation and the wider program. Passing a lifecycle test or opening another stacked PR does not satisfy those exits.
+
 ## First result and delivery order
 
 Ship one complete private, local refactor comparison through the shared protocol/contributor backend, CLI, service/FFI, and macOS. A result may say that user-confirmed refactor tasks in an exact repository/language/harness/configuration context have specified user-reported outcome distributions for declared-model cohorts. It may report an observed difference, insufficient precision, an indeterminate boundary, or no eligible evidence. It must not turn snapshots or attempts into trials, assign mixed work to a final model, call uncertainty a tie, call a task rejection “rejected code,” infer full-task tokens from observed intervals, or estimate time saved.
@@ -63,6 +71,12 @@ Usage is optional secondary evidence. Persisted Codex usage describes observed a
 `ComparisonSpecificationV1` fixes selected declaration labels, refactor category, date window, exact context fields, task/attempt/outcome rules, estimands, interval method, precision target, multiplicity policy, and rubric version. Results bind its digest, an audit digest of every included/excluded task and reason, and a separate estimation-input digest containing only included eligible task facts consumed by the estimator. Excluded-task/provenance-only changes may change the audit digest but never the estimation input or seed.
 
 A specification created after tasks/outcomes exist is `retrospective_user_specification`, with creation time and evidence cutoff. Do not call it predeclared or preregistered. A future prospective label requires a verified immutable specification that predates the bound evidence.
+
+Cutoff chronology uses a task's local `material_recorded_at` and the bound outcome's `recorded_at`, not the optimistic-concurrency `updated_at`. Creation and substantive context/evidence changes advance material chronology; outcome edits use their own timestamp, and reconfirmation does not advance either. Legacy tasks without material chronology receive `cutoff_time_unavailable`. Neither task dates nor upstream execution timestamps substitute for the missing local chronology.
+
+Saving captures material/outcome bindings recorded by the cutoff under the store lock. A separate substantive material digest excludes assessment-only episode revisions while retaining episode identity, membership, member evidence, and context. Current full evidence bindings and independence review are still required during evaluation. This lets an explicitly reviewed assessment-only refresh preserve cutoff membership without admitting changed substantive evidence or reviving stale outcomes. A delayed outcome after the cutoff produces a per-task exclusion rather than failing the entire specification.
+
+The analytical `specification_digest` binds cohort/context/date selection and analytical rules. The `saved_record_digest` additionally binds record identity, creation/cutoff chronology, and frozen cutoff evidence. Audit-only record changes must not perturb analytical inputs or the future estimator seed. Results bind both specification identities and the current audit digest; explaining a result after relevant evidence changes returns an explicit stale-result error.
 
 Use a deterministic task-level stratified bootstrap. Define and serialize the actual estimator inputs before deriving its seed:
 
