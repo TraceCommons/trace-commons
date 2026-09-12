@@ -1,4 +1,5 @@
 using System;
+using System.IO;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -96,5 +97,34 @@ public sealed class InsightMutationEffectsTests
         service.Pending.SetResult(Service.Mutation("analyze"));
         await pending;
         Assert.Empty(model.MutationNotice);
+    }
+
+    [Fact]
+    public async Task NativeSnapshotDeletionDisclosesInvalidatedEpisodeAndRefreshesSummary()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "insights-effects-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            string file = Path.Combine(root, "selected.jsonl");
+            await File.WriteAllTextAsync(file, "{\"type\":\"session_meta\",\"payload\":{}}\n{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"fixture\"}]}}\n");
+            var service = new LocalInsights(Path.Combine(root, "store"));
+            using var model = new InsightsViewModel(service);
+            await model.LoadAsync();
+            await model.AnalyzeAsync("codex", file, true);
+            Assert.NotNull(model.CurrentId);
+            var created = await service.CallAsync(new { type = "episode_create", snapshot_ids = new[] { model.CurrentId } }, CancellationToken.None);
+            string episodeId = created.GetProperty("episode").GetProperty("id").GetString()!;
+            await model.DeleteAsync();
+            Assert.Contains(episodeId, model.MutationNotice);
+            Assert.StartsWith(model["episode_invalidated_notice"], model.MutationNotice);
+            Assert.DoesNotContain("episode_invalidated_notice", model.MutationNotice);
+            Assert.Null(model.CurrentId);
+            Assert.Empty(model.Saved);
+            Assert.NotNull(model.Summary);
+            Assert.Equal(0UL, model.Summary.SavedSnapshots);
+            Assert.True(File.Exists(file));
+        }
+        finally { Directory.Delete(root, true); }
     }
 }
