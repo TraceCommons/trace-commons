@@ -945,11 +945,15 @@ impl InsightsView {
                     let membership_changed =
                         view.current_membership_revision.get() != Some(episode.membership_revision);
                     view.present_episode(&episode);
-                    view.set_episode_success(if membership_changed {
-                        copy("episode_membership_changed")
+                    if membership_changed {
+                        view.set_episode_success(&format!(
+                            "{}\n{}",
+                            copy("episode_members_saved"),
+                            copy("episode_membership_changed")
+                        ));
                     } else {
-                        copy("episode_members_saved")
-                    });
+                        view.set_episode_success(copy("episode_members_saved"));
+                    }
                     view.refresh_episodes();
                 }
                 EpisodeResult::Response(Response::EpisodeAnnotate { episode }) => {
@@ -970,13 +974,21 @@ impl InsightsView {
                 }
                 EpisodeResult::Failed(key) => {
                     view.invalidate_episode_draft();
-                    view.episode_success_notice.borrow_mut().take();
-                    view.status.set_text(copy(key));
+                    let error = copy(key);
+                    let status = episode_failure_status(
+                        view.episode_success_notice.borrow().as_deref(),
+                        error,
+                    );
+                    view.status.set_text(&status);
                 }
                 _ => {
                     view.invalidate_episode_draft();
-                    view.episode_success_notice.borrow_mut().take();
-                    view.status.set_text(copy("episode_detail_unavailable"));
+                    let error = copy("episode_detail_unavailable");
+                    let status = episode_failure_status(
+                        view.episode_success_notice.borrow().as_deref(),
+                        error,
+                    );
+                    view.status.set_text(&status);
                 }
             }
         });
@@ -1327,6 +1339,22 @@ impl InsightsView {
                 }) => Some(render_mutation_notice(mutation_effects)),
                 _ => None,
             };
+            let invalidates_current_episode = match &result {
+                Some(Response::Analyze {
+                    mutation_effects, ..
+                })
+                | Some(Response::Delete {
+                    mutation_effects, ..
+                }) => view
+                    .current_episode
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|(id, _)| mutation_effects.invalidated_episode_ids.contains(id)),
+                _ => false,
+            };
+            if invalidates_current_episode {
+                view.invalidate_episode_draft();
+            }
             match result {
                 Some(Response::Analyze { insight, .. })
                 | Some(Response::Explain { insight })
@@ -1568,6 +1596,11 @@ fn episode_error_copy_key(error: &anyhow::Error) -> &'static str {
         return "episode_response_too_large";
     }
     "episode_detail_unavailable"
+}
+fn episode_failure_status(committed: Option<&str>, error: &str) -> String {
+    committed
+        .map(|notice| format!("{notice}\n{error}"))
+        .unwrap_or_else(|| error.to_owned())
 }
 fn render_episode(episode: &LocalEpisode, overlap: &[EpisodeOverlap]) -> String {
     let mut lines = vec![
@@ -1929,6 +1962,14 @@ mod tests {
         assert!(read.accepts(9, Some("episode-a")));
         assert!(!read.accepts(10, Some("episode-a")));
         assert!(!read.accepts(9, Some("episode-b")));
+        assert_eq!(
+            episode_failure_status(Some("Committed"), "Refresh failed"),
+            "Committed\nRefresh failed"
+        );
+        assert_eq!(
+            episode_failure_status(None, "Refresh failed"),
+            "Refresh failed"
+        );
     }
     #[test]
     fn cancelled_read_cannot_publish_and_next_request_waits_for_completion() {
@@ -2190,7 +2231,12 @@ mod tests {
         settle();
         assert_eq!(view.current_membership_revision.get(), Some(2));
         assert_eq!(view.current_episode.borrow().as_ref().unwrap().1, 2);
-        assert_eq!(view.status.text(), copy("episode_membership_changed"));
+        assert!(view.status.text().contains(copy("episode_members_saved")));
+        assert!(
+            view.status
+                .text()
+                .contains(copy("episode_membership_changed"))
+        );
         view.replace_episode_members();
         settle();
         assert_eq!(view.current_episode.borrow().as_ref().unwrap().1, 2);
@@ -2479,8 +2525,18 @@ mod tests {
             .unwrap()
             .episode_create(std::slice::from_ref(&id))
             .unwrap();
+        view.open_episode(group.id.clone());
+        settle();
+        assert_eq!(
+            view.current_episode.borrow().as_ref().map(|(id, _)| id),
+            Some(&group.id)
+        );
         view.request(Op::Delete { id }, false);
         settle();
+        assert!(
+            view.current_episode.borrow().is_none(),
+            "committed snapshot cleanup immediately invalidates the open episode"
+        );
         assert!(
             view.mutation_notice.text().contains(&group.id),
             "cleanup notice survives automatic empty-history refresh"
