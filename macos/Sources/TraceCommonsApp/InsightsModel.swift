@@ -8,6 +8,7 @@ final class InsightsModel {
     private let service: Service
     private var task: Task<Void, Never>?
     private var episodeTask: Task<Void, Never>?
+    private var cardTask: Task<Void, Never>?
     private var generation = UUID()
     private var active = false
     private var selectionRevision = UUID()
@@ -25,6 +26,13 @@ final class InsightsModel {
     private(set) var episodeBusy = false
     private(set) var episodeError: String?
     private(set) var episodeNotice: String?
+    private(set) var cardResult: InsightCardResult?
+    private(set) var cardText: String?
+    private(set) var cardError: String?
+    private(set) var cardBusy = false
+    private(set) var cardSnapshotSelection = Set<String>()
+    private(set) var cardEpisodeSelection = Set<String>()
+    private var cardPresentation = UUID()
     var episodeCreateSelection = Set<String>()
     var episodeEditSelection = Set<String>()
     private(set) var episodeEditingMembers = false
@@ -62,13 +70,68 @@ final class InsightsModel {
     func close() {
         active = false; generation = UUID(); task?.cancel(); task = nil; busy = false
         episodePresentation = UUID(); episodeTask?.cancel(); episodeTask = nil; episodeBusy = false
+        cardPresentation = UUID(); cardTask?.cancel(); cardTask = nil; cardBusy = false
+        cardResult = nil; cardText = nil; cardError = nil
+        cardSnapshotSelection = []; cardEpisodeSelection = []
         refreshEpisodesAfterSnapshotChain = false
         episodeDetail = nil; episodeEditSelection = []; episodeEditingMembers = false; episodeCreateSelection = []
         loadingSummary = false
         invalidatedEpisodeIDs = []
     }
-    func refresh() { perform(.init("list")) }
+    func refresh() { invalidateCards(); perform(.init("list")) }
+    func setCardSnapshot(_ id: String, selected: Bool) {
+        if selected { cardSnapshotSelection.insert(id) } else { cardSnapshotSelection.remove(id) }
+        invalidateCards()
+    }
+    func setCardEpisode(_ id: String, selected: Bool) {
+        if selected { cardEpisodeSelection.insert(id) } else { cardEpisodeSelection.remove(id) }
+        invalidateCards()
+    }
+    func generateCards() {
+        guard active, !cardBusy else { return }
+        let questions = InsightQuestion.allCases
+        let snapshotIDs = cardSnapshotSelection.sorted()
+        let episodeIDs = cardEpisodeSelection.sorted()
+        cardPresentation = UUID(); let presentation = cardPresentation
+        let screenGeneration = generation
+        cardBusy = true; cardError = nil; cardResult = nil; cardText = nil
+        let service = service
+        cardTask = Task { [weak self] in
+            do {
+                let response = try await service(.init(operation: .init(
+                    "question_cards", snapshotIDs: snapshotIDs, episodeIDs: episodeIDs,
+                    questions: questions)))
+                guard let self, self.active, self.generation == screenGeneration,
+                      self.cardPresentation == presentation, !Task.isCancelled,
+                      self.cardSnapshotSelection.sorted() == snapshotIDs,
+                      self.cardEpisodeSelection.sorted() == episodeIDs,
+                      response.type == "question_cards", let result = response.result,
+                      let rendered = response.text else { throw InsightsError.invalidResponse }
+                try result.validateSupportedSchema(expectedQuestions: questions)
+                self.cardResult = result; self.cardText = rendered; self.cardBusy = false
+            } catch {
+                guard let self, self.active, self.generation == screenGeneration,
+                      self.cardPresentation == presentation, !Task.isCancelled else { return }
+                self.cardResult = nil; self.cardText = nil; self.cardBusy = false
+                self.cardError = self.text("error")
+            }
+        }
+    }
+    private func invalidateCards() {
+        cardPresentation = UUID(); cardTask?.cancel(); cardTask = nil; cardBusy = false
+        cardResult = nil; cardText = nil; cardError = nil
+    }
+    private func reconcileCardSelections() {
+        let snapshotsNow = Set(snapshots.map(\.id)); let episodesNow = Set(episodes.map(\.id))
+        let newSnapshots = cardSnapshotSelection.intersection(snapshotsNow)
+        let newEpisodes = cardEpisodeSelection.intersection(episodesNow)
+        if newSnapshots != cardSnapshotSelection || newEpisodes != cardEpisodeSelection {
+            cardSnapshotSelection = newSnapshots; cardEpisodeSelection = newEpisodes
+            invalidateCards()
+        }
+    }
     func refreshEpisodes() {
+        invalidateCards()
         episodeTask?.cancel(); episodeBusy = false
         episodePresentation = UUID(); episodeEditSelection = []; episodeEditingMembers = false
         episodeDetail = nil
@@ -215,6 +278,7 @@ final class InsightsModel {
                 case "list":
                     guard let values = response.insights else { throw InsightsError.invalidResponse }
                     self.snapshots = values
+                    self.reconcileCardSelections()
                     if self.selectedIsSaved, let id = self.selected?.id {
                         self.selected = values.first { $0.id == id }
                         if self.selected == nil {
@@ -243,6 +307,7 @@ final class InsightsModel {
                     }
                 }
                 if operation.type == "analyze" || operation.type == "delete" {
+                    if operation.type == "delete" || operation.save == true { self.invalidateCards() }
                     self.invalidatedEpisodeIDs = response.invalidatedEpisodeIDs
                     if let episodeID = self.episodeDetail?.episode.id,
                        response.invalidatedEpisodeIDs.contains(episodeID) {
@@ -255,6 +320,7 @@ final class InsightsModel {
                 self.busy = false
                 if operation.type == "copy" || operation.save == true || operation.type == "delete"
                     || operation.type == "annotate" || operation.type == "clear_annotation" || self.isEvidenceMutation(operation) {
+                    if operation.type != "copy" { self.invalidateCards() }
                     self.perform(.init("list"), preservingMutationEffects: true)
                 } else if operation.type == "list" {
                     self.perform(.init("summary"), preservingMutationEffects: true)
@@ -313,6 +379,7 @@ final class InsightsModel {
                     guard let episodes = response.episodes else { throw InsightsError.invalidResponse }
                     try episodes.forEach { try $0.episode.validateSupportedSchema() }
                     self.episodes = episodes
+                    self.reconcileCardSelections()
                     if let id = self.episodeDetail?.episode.id,
                        !episodes.contains(where: { $0.id == id }) {
                         self.episodePresentation = UUID()
@@ -321,6 +388,7 @@ final class InsightsModel {
                 case .create:
                     guard let episode = response.episode else { throw InsightsError.invalidResponse }
                     try episode.validateSupportedSchema()
+                    self.invalidateCards()
                     self.episodeCreateSelection = []
                     self.episodeNotice = self.text("episode_create_success")
                     self.episodeBusy = false
@@ -337,6 +405,7 @@ final class InsightsModel {
                         self.episodeBusy = false; return
                     }
                     try response.episode?.validateSupportedSchema()
+                    self.invalidateCards()
                     var appliedNotice = notice
                     if operation.type == "episode_replace_members",
                        response.episode?.membership_revision != presented.membershipRevision {
@@ -352,6 +421,7 @@ final class InsightsModel {
                         self.episodeBusy = false; return
                     }
                     try response.episode?.validateSupportedSchema()
+                    self.invalidateCards()
                     self.closeEpisode()
                     self.episodeNotice = self.text("episode_deleted")
                     self.episodeBusy = false

@@ -23,6 +23,13 @@ public enum TCInsights {
             let response = try JSONDecoder().decode(InsightsResponse.self, from: Data(text.utf8))
             try response.insight?.validateSupportedEvidence()
             for snapshot in response.insights ?? [] { try snapshot.validateSupportedEvidence() }
+            if request.operation.type == "question_cards" {
+                guard response.type == "question_cards", let result = response.result,
+                      response.text != nil, let questions = request.operation.questions else {
+                    throw InsightsError.invalidResponse
+                }
+                try result.validateSupportedSchema(expectedQuestions: questions)
+            }
             return response
         }
         catch { throw InsightsError.invalidResponse }
@@ -51,15 +58,19 @@ public struct InsightsRequest: Encodable, Sendable {
         public var commit: String?
         public var evidence_id: String?
         public var snapshot_ids: [String]?
+        public var episode_ids: [String]?
+        public var questions: [InsightQuestion]?
         public var expected_revision: UInt64?
         public init(_ type: String, source: String? = nil, file: String? = nil,
                     save: Bool? = nil, id: String? = nil, category: String? = nil, outcome: String? = nil,
                     repository: String? = nil, commit: String? = nil, evidenceID: String? = nil,
-                    snapshotIDs: [String]? = nil, expectedRevision: UInt64? = nil) {
+                    snapshotIDs: [String]? = nil, episodeIDs: [String]? = nil,
+                    questions: [InsightQuestion]? = nil, expectedRevision: UInt64? = nil) {
             self.type = type; self.source = source; self.file = file; self.save = save
             self.id = id; self.category = category; self.outcome = outcome
             self.repository = repository; self.commit = commit; self.evidence_id = evidenceID
             self.snapshot_ids = snapshotIDs
+            self.episode_ids = episodeIDs; self.questions = questions
             self.expected_revision = expectedRevision
         }
     }
@@ -78,7 +89,101 @@ public struct InsightsResponse: Decodable, Sendable {
     public let episode: LocalEpisode?
     public let episodes: [EpisodeListEntry]?
     public let detail: EpisodeDetail?
+    public let result: InsightCardResult?
+    public let text: String?
     public var invalidatedEpisodeIDs: [String] { mutation_effects?.invalidated_episode_ids ?? [] }
+}
+
+public enum InsightQuestion: String, Codable, Sendable, CaseIterable {
+    case recordedActivity = "recorded_activity"
+    case episodeOutcomes = "episode_outcomes"
+    case observedModels = "observed_models"
+    case estimatedCost = "estimated_cost"
+    public var copyKey: String { "card_question_\(rawValue)" }
+}
+public enum InsightCardState: String, Decodable, Sendable { case observed, partial, unavailable }
+public enum InsightCardValue: Decodable, Sendable {
+    case count(UInt64), unixMilliseconds(Int64), milliseconds(UInt64)
+    private enum Keys: String, CodingKey { case type, value }
+    private enum Kind: String, Decodable { case count, unixMilliseconds = "unix_milliseconds", milliseconds }
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: Keys.self)
+        switch try values.decode(Kind.self, forKey: .type) {
+        case .count: self = .count(try values.decode(UInt64.self, forKey: .value))
+        case .unixMilliseconds: self = .unixMilliseconds(try values.decode(Int64.self, forKey: .value))
+        case .milliseconds: self = .milliseconds(try values.decode(UInt64.self, forKey: .value))
+        }
+    }
+}
+public struct InsightCardRow: Decodable, Sendable, Identifiable {
+    public let id, unit: String
+    public let label: String?
+    public let value: InsightCardValue?
+    public let missing_reason: String?
+}
+public struct InsightCardCoverage: Decodable, Sendable, Identifiable {
+    public let unit: String
+    public let observed, eligible: UInt64
+    public var id: String { unit }
+}
+public struct InsightEpisodeDenominator: Decodable, Sendable {
+    public let eligible, assessed, unassessed, explicit_unknown: UInt64
+}
+public struct InsightQuestionCard: Decodable, Sendable, Identifiable {
+    public let question: InsightQuestion
+    public let metric_version: String
+    public let state: InsightCardState
+    public let rows: [InsightCardRow]
+    public let coverage: [InsightCardCoverage]
+    public let episode_denominator: InsightEpisodeDenominator?
+    public let evidence_ids, episode_ids, limitations: [String]
+    public let rows_omitted: Bool
+    public var id: InsightQuestion { question }
+}
+public struct InsightCardResult: Decodable, Sendable {
+    public struct Provider: Decodable, Sendable {
+        public let id, version, rubric_version, execution_mode: String
+        public let schema_version: UInt32
+    }
+    public let schema_version: UInt32
+    public let provider: Provider
+    public let input_digest: String
+    public let cards: [InsightQuestionCard]
+    public func validateSupportedSchema(expectedQuestions: [InsightQuestion]) throws {
+        let digest = input_digest.utf8
+        guard schema_version == 1, provider.schema_version == 1,
+              provider.id == "trace-commons-local", provider.version == "1",
+              provider.rubric_version == "deterministic-question-cards-v1", provider.execution_mode == "local",
+              digest.count == 64, digest.allSatisfy({ byte in
+                  (UInt8(ascii: "0")...UInt8(ascii: "9")).contains(byte)
+                    || (UInt8(ascii: "a")...UInt8(ascii: "f")).contains(byte)
+              }), cards.map(\.question) == expectedQuestions,
+              Set(cards.map(\.question)).count == cards.count,
+              cards.allSatisfy({ card in
+                  card.metric_version == Self.metricVersion(card.question)
+                    && card.evidence_ids.allSatisfy(Self.isDigest)
+                    && card.episode_ids.allSatisfy { UUID(uuidString: $0)?.uuidString.lowercased() == $0 }
+                    &&
+                  Set(card.coverage.map(\.unit)).count == card.coverage.count
+                    && card.rows.allSatisfy { ($0.value == nil) != ($0.missing_reason == nil) }
+                    && Set(card.evidence_ids).count == card.evidence_ids.count
+                    && Set(card.episode_ids).count == card.episode_ids.count
+              }) else { throw InsightsError.invalidResponse }
+    }
+    private static func metricVersion(_ question: InsightQuestion) -> String {
+        switch question {
+        case .recordedActivity: "recorded-activity-v1"
+        case .episodeOutcomes: "episode-outcomes-v1"
+        case .observedModels: "observed-models-v1"
+        case .estimatedCost: "estimated-cost-v1"
+        }
+    }
+    private static func isDigest(_ value: String) -> Bool {
+        value.utf8.count == 64 && value.utf8.allSatisfy {
+            (UInt8(ascii: "0")...UInt8(ascii: "9")).contains($0)
+                || (UInt8(ascii: "a")...UInt8(ascii: "f")).contains($0)
+        }
+    }
 }
 public struct LocalEpisode: Decodable, Sendable, Identifiable, Equatable {
     public let schema_version: UInt32
