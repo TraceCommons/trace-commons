@@ -8,6 +8,11 @@ import TCShellCore
 @testable import TraceCommonsApp
 
 final class InsightsStoreRoutingIntegrationTests: XCTestCase {
+    func testOCRNormalizationChangesOnlyCaseAndWhitespace() {
+        XCTAssertEqual(Self.normalizedOCR("  Outcome\tIs\n unassessed.  "), "outcome is unassessed.")
+        XCTAssertNotEqual(Self.normalizedOCR("Outcome is assessed."), "outcome is unassessed.")
+    }
+
     @MainActor
     func testActualSupportedSchemaTwoResultFlowsThroughRoutedModel() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -86,8 +91,9 @@ final class InsightsStoreRoutingIntegrationTests: XCTestCase {
         XCTAssertTrue(topText.contains("Insights store"), topText)
         XCTAssertTrue(topText.contains("selected-store"), topText)
         let text = try recognizedText(bitmap)
-        XCTAssertTrue(text.contains("Whole saved snapshot members"), text)
-        XCTAssertTrue(text.contains("Outcome is unassessed"), text)
+        let normalizedText = Self.normalizedOCR(text)
+        XCTAssertTrue(normalizedText.contains(Self.normalizedOCR("Whole saved snapshot members")), text)
+        XCTAssertTrue(normalizedText.contains(Self.normalizedOCR("Outcome is unassessed")), text)
         XCTAssertTrue(text.contains("model-a") && text.contains("model-b"), text)
     }
 
@@ -209,6 +215,10 @@ final class InsightsStoreRoutingIntegrationTests: XCTestCase {
         let handler = VNImageRequestHandler(cgImage: try XCTUnwrap(bitmap.cgImage), options: [:])
         try handler.perform([request])
         return (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }.joined(separator: "\n")
+    }
+
+    private static func normalizedOCR(_ text: String) -> String {
+        text.split(whereSeparator: \.isWhitespace).joined(separator: " ").lowercased()
     }
 }
 
