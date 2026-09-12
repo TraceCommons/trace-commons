@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Text.Json;
 using System.Threading;
@@ -14,7 +15,7 @@ public sealed class InsightsSummaryTests
     internal const string Response = """
     {"type":"summary","summary":{
       "schema_version":1,"scope":"all_saved_selected_session_snapshots",
-      "limitations":["assessments_are_user_reported","observed_sums_require_both_coverages","analysis_dates_are_not_activity_time"],
+      "limitations":["selected_saved_sessions_are_not_verified_tasks","assessments_are_user_reported","observed_sums_require_both_coverages","analysis_dates_are_not_activity_time","source_formats_are_not_model_identity","no_model_rankings_time_savings_or_cost"],
       "provider":{"id":"trace-commons-local","version":"1","rubric_version":"descriptive-counts-v1","execution_mode":"local","schema_version":1},
       "saved_snapshots":2,
       "snapshot_analysis_range":{"oldest":"2026-09-10T10:00:00Z","newest":"2026-09-11T10:00:00Z"},
@@ -37,12 +38,14 @@ public sealed class InsightsSummaryTests
         public readonly List<string> Operations = new();
         public string Summary = Response;
         public bool FailSummary;
+        public bool FailExplain;
         public TaskCompletionSource<JsonElement>? PendingSummary;
         public Task<JsonElement> CallAsync(object operation, CancellationToken cancellationToken)
         {
             var op = JsonSerializer.SerializeToElement(operation);
             string type = op.GetProperty("type").GetString()!;
             Operations.Add(type);
+            if (type == "explain" && FailExplain) throw new InvalidOperationException("deleted-snapshot");
             if (type == "summary")
             {
                 if (FailSummary) throw new InvalidOperationException("private-path-must-not-render");
@@ -148,6 +151,51 @@ public sealed class InsightsSummaryTests
         Assert.Null(model.Summary);
         Assert.Empty(model.SummaryRows);
         Assert.Equal(0, changes);
+    }
+
+    [Fact]
+    public async Task DeletedEvidenceCannotLeavePreviousSuccessfulDetailVisible()
+    {
+        var service = new Service();
+        using var model = new InsightsViewModel(service);
+        await model.LoadAsync();
+        await model.ExplainSummaryEvidenceAsync("snapshot-a");
+        Assert.NotEmpty(model.Details);
+        Assert.Equal("snapshot-a", model.CurrentId);
+        service.FailExplain = true;
+        await model.ExplainSummaryEvidenceAsync("snapshot-b");
+        Assert.Empty(model.Details);
+        Assert.Null(model.CurrentId);
+        Assert.False(model.HasSavedSelection);
+        Assert.Equal("safe-error", model.Status);
+    }
+
+    [Theory]
+    [InlineData("normalized_events", "unknown_unit")]
+    [InlineData("no_model_rankings_time_savings_or_cost", "unknown_limitation")]
+    public void UnknownSemanticsAreRefused(string before, string after)
+    {
+        Assert.Throws<InvalidOperationException>(() => InsightsSummaryResponse.Decode(Json(Response.Replace(before, after, StringComparison.Ordinal))));
+    }
+
+    [Fact]
+    public void MissingRequiredLimitationIsRefused()
+    {
+        Assert.Throws<InvalidOperationException>(() => InsightsSummaryResponse.Decode(Json(Response.Replace("\"no_model_rankings_time_savings_or_cost\"", "\"assessments_are_user_reported\"", StringComparison.Ordinal))));
+    }
+
+    [Fact]
+    public void NavigationKeepsFileChoiceAheadOfCollapsedSummaryAndScrollsToEvidence()
+    {
+        string sourceRoot = Path.Combine(AppContext.BaseDirectory, "shell-source", "TraceCommons.App", "Controls");
+        string markup = File.ReadAllText(Path.Combine(sourceRoot, "InsightsView.xaml.txt"));
+        Assert.True(markup.IndexOf("[choose_file]", StringComparison.Ordinal) < markup.IndexOf("SummaryRows", StringComparison.Ordinal));
+        Assert.Contains("IsExpanded=\"False\"", markup);
+        Assert.Contains("x:Name=\"SnapshotDetail\"", markup);
+        string code = File.ReadAllText(Path.Combine(sourceRoot, "InsightsView.xaml.cs.txt"));
+        Assert.Contains("await ViewModel.ExplainSummaryEvidenceAsync(id);", code);
+        Assert.Contains("ViewModel.CurrentId == id", code);
+        Assert.Contains("SnapshotDetail.StartBringIntoView();", code);
     }
 
 }

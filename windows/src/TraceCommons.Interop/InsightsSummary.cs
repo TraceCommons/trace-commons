@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Text.Json;
 
 namespace TraceCommons.Interop;
@@ -6,6 +8,14 @@ namespace TraceCommons.Interop;
 /// <summary>Shared derived-store summary. No shell-side aggregation or model inference.</summary>
 public sealed class InsightsSummaryResponse
 {
+    private static readonly HashSet<string> RequiredLimitations = new(StringComparer.Ordinal) {
+        "selected_saved_sessions_are_not_verified_tasks", "assessments_are_user_reported",
+        "observed_sums_require_both_coverages", "analysis_dates_are_not_activity_time",
+        "source_formats_are_not_model_identity", "no_model_rankings_time_savings_or_cost"
+    };
+    private static readonly HashSet<string> CoverageUnits = new(StringComparer.Ordinal) {
+        "session_snapshots", "normalized_events", "tool_results"
+    };
     public required string Type { get; init; }
     public required SavedInsightsSummary Summary { get; init; }
 
@@ -16,6 +26,9 @@ public sealed class InsightsSummaryResponse
         });
         if (value?.Type != "summary" || value.Summary == null || value.Summary.SchemaVersion != 1 ||
             value.Summary.Scope != "all_saved_selected_session_snapshots")
+            throw new InvalidOperationException("insights-response-invalid");
+        if (value.Summary.Limitations == null || !RequiredLimitations.SetEquals(value.Summary.Limitations) ||
+            value.Summary.Metrics == null || value.Summary.Metrics.Any(metric => metric == null || !CoverageUnits.Contains(metric.CoverageUnit)))
             throw new InvalidOperationException("insights-response-invalid");
         return value.Summary;
     }

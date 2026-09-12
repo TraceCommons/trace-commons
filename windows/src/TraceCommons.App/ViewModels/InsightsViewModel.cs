@@ -109,6 +109,10 @@ public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
     });
     public Task ExplainAsync(string id) => Run(async token =>
     {
+        CurrentId = null;
+        Details = "";
+        ResetAssessment();
+        Changed();
         var result = await _service.CallAsync(new { type = "explain", id }, token);
         token.ThrowIfCancellationRequested();
         Render(result.GetProperty("insight"), true);

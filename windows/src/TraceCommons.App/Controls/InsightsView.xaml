@@ -7,10 +7,26 @@
             <TextBlock Text="{Binding Title}" FontSize="28" />
             <TextBlock Text="{Binding Intro}" TextWrapping="Wrap" />
             <TextBlock Text="{Binding SnapshotNotice}" TextWrapping="Wrap" />
+            <StackPanel Orientation="Horizontal" Spacing="12">
+                <ComboBox x:Name="Source" Header="{Binding [source]}" SelectedIndex="0" IsEnabled="{Binding Idle}">
+                    <ComboBoxItem Content="{Binding [codex]}" Tag="codex" />
+                    <ComboBoxItem Content="{Binding [trajectory]}" Tag="trajectory" />
+                </ComboBox>
+                <Button Content="{Binding [choose_file]}" Click="OnChoose" IsEnabled="{Binding Idle}" VerticalAlignment="Bottom" />
+            </StackPanel>
+            <TextBlock x:Name="SelectedFile" Text="{Binding [no_file]}" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
+            <StackPanel Orientation="Horizontal" Spacing="12">
+                <Button Content="{Binding [analyze]}" Click="OnAnalyze" IsEnabled="{Binding Idle}" />
+                <Button Content="{Binding [save]}" Click="OnSave" IsEnabled="{Binding Idle}" />
+                <Button Content="{Binding [cancel]}" Click="OnCancel" IsEnabled="{Binding Busy}" />
+            </StackPanel>
+            <TextBlock Text="{Binding [save_notice]}" TextWrapping="Wrap" />
+            <TextBlock Text="{Binding CancellationNotice}" TextWrapping="Wrap" />
+            <TextBlock Text="{Binding Status}" TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite" />
             <TextBlock Text="{Binding [summary_title]}" FontSize="22" />
             <TextBlock Text="{Binding SummaryStatus}" TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite" />
             <TextBlock Text="{Binding SummaryDetails}" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
-            <Expander Header="{Binding [summary_title]}" IsExpanded="True" HorizontalAlignment="Stretch">
+            <Expander Header="{Binding [summary_title]}" IsExpanded="False" HorizontalAlignment="Stretch">
                 <ItemsControl ItemsSource="{Binding SummaryRows}" IsEnabled="{Binding Idle}">
                     <ItemsControl.ItemTemplate>
                         <DataTemplate>
@@ -31,22 +47,6 @@
                     </ItemsControl.ItemTemplate>
                 </ItemsControl>
             </Expander>
-            <StackPanel Orientation="Horizontal" Spacing="12">
-                <ComboBox x:Name="Source" Header="{Binding [source]}" SelectedIndex="0" IsEnabled="{Binding Idle}">
-                    <ComboBoxItem Content="{Binding [codex]}" Tag="codex" />
-                    <ComboBoxItem Content="{Binding [trajectory]}" Tag="trajectory" />
-                </ComboBox>
-                <Button Content="{Binding [choose_file]}" Click="OnChoose" IsEnabled="{Binding Idle}" VerticalAlignment="Bottom" />
-            </StackPanel>
-            <TextBlock x:Name="SelectedFile" Text="{Binding [no_file]}" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
-            <StackPanel Orientation="Horizontal" Spacing="12">
-                <Button Content="{Binding [analyze]}" Click="OnAnalyze" IsEnabled="{Binding Idle}" />
-                <Button Content="{Binding [save]}" Click="OnSave" IsEnabled="{Binding Idle}" />
-                <Button Content="{Binding [cancel]}" Click="OnCancel" IsEnabled="{Binding Busy}" />
-            </StackPanel>
-            <TextBlock Text="{Binding [save_notice]}" TextWrapping="Wrap" />
-            <TextBlock Text="{Binding CancellationNotice}" TextWrapping="Wrap" />
-            <TextBlock Text="{Binding Status}" TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite" />
             <Button Content="{Binding [refresh]}" Click="OnRefresh" IsEnabled="{Binding Idle}" />
             <ListView x:Name="SavedList" ItemsSource="{Binding Saved}" DisplayMemberPath="Label" MaxHeight="200" SelectionMode="Single" IsEnabled="{Binding Idle}" AutomationProperties.Name="{Binding [saved]}" />
             <StackPanel Orientation="Horizontal" Spacing="12">
@@ -56,7 +56,7 @@
             <TextBlock Text="{Binding CoverageNotice}" TextWrapping="Wrap" />
             <TextBlock Text="{Binding EvidenceNotice}" TextWrapping="Wrap" />
             <TextBlock Text="{Binding [boundary_notice]}" TextWrapping="Wrap" />
-            <TextBlock Text="{Binding Details}" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
+            <TextBlock x:Name="SnapshotDetail" Text="{Binding Details}" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
             <TextBlock Text="{Binding AssessmentNotice}" TextWrapping="Wrap" />
             <StackPanel Orientation="Horizontal" Spacing="12">
                 <ComboBox x:Name="Category" IsEnabled="{Binding HasSavedSelection}" Header="{Binding [category]}" SelectedIndex="{Binding CategoryIndex, Mode=TwoWay}">

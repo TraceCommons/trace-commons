@@ -56,3 +56,9 @@ an available snapshot, known zero, explicit unknown assessments, missingness, ev
 navigation, saved mutations, failure, cancellation, and close. The updated summary
 WinUI markup still requires Windows CI compilation and interactive qualification;
 the earlier snapshot UI's Windows CI result does not qualify these new controls.
+
+File selection stays above the summary. Detailed summary rows and contributing
+snapshot lists start collapsed. Opening evidence clears any previous selected
+snapshot before lookup and scrolls the successful result into view; a failed
+lookup cannot retain an unrelated successful result. Schema-v1 summaries refuse
+unknown coverage units and unknown or missing required limitation labels.
