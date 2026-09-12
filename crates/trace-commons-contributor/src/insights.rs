@@ -1205,7 +1205,7 @@ mod tests {
         assert!(matches!(
             analyzed.claude_task_attribution.unwrap().state,
             claude_task_attribution::ClaudeTaskAttributionState::Unavailable {
-                reason: claude_task_attribution::ClaudeTaskUnavailableReason::IdentityConflict,
+                reason: claude_task_attribution::ClaudeTaskUnavailableReason::UnsupportedRecord,
                 ..
             }
         ));
