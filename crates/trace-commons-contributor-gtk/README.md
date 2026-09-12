@@ -38,3 +38,24 @@ On macOS, GTK requires initialization on the OS main thread, so its display
 scenarios cannot run inside the Rust test harness; the actual application smoke
 command above runs on the main thread. Dates use GLib local time and locale
 formatting; metric counts retain exact ungrouped decimal values.
+
+### Saved-history summary
+
+Entering Insights reads the saved-history summary without initializing an
+absent store. Saving, reimporting, deleting, and changing an assessment refresh
+that summary. Unsaved previews stay outside its population. The shared service
+supplies every total, coverage denominator, unit, limitation, and contributor ID;
+GTK performs no independent metric calculation.
+
+The summary distinguishes unassessed snapshots from explicit Unknown assessments
+and shows observed totals beside available/missing snapshots and record coverage.
+Its dates describe analysis time. Category, outcome, and metric evidence buttons
+show only their contributing saved snapshots; open a row to inspect its evidence.
+Refresh returns to the complete saved population. A failed operation clears the
+summary and its evidence rows instead of retaining stale totals as current.
+
+The summary defines the population used for the rows. Opening a detail performs
+a later independent read, which can observe a newer assessment or deletion.
+Closing, hiding, cancellation, and re-entry retain the same bounded worker rules
+as individual snapshots. The Linux display lifecycle test above also covers
+summary refresh, evidence navigation, failure clearing, and empty-store entry.

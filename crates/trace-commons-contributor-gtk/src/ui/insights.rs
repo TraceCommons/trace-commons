@@ -2,9 +2,16 @@
 //! A single bounded IO request runs on an OS thread. Cancellation suppresses
 //! presentation; already-started writes finish. Weak callbacks never own a view.
 use adw::prelude::*;
-use std::{cell::RefCell, path::PathBuf, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    path::PathBuf,
+    rc::Rc,
+};
 use trace_commons_contributor::insights::service::{
     self, LocalInsightsOperation as Op, LocalInsightsRequest, LocalInsightsResponse as Response,
+};
+use trace_commons_contributor::insights::summary::{
+    CoverageUnit, SavedInsightsSummary, SnapshotEvidence, SummaryLimitation,
 };
 use trace_commons_contributor::insights::{LocalInsight, SourceFormat, TaskCategory, TaskOutcome};
 
@@ -46,7 +53,11 @@ pub struct InsightsView {
     selected_label: gtk::Label,
     status: gtk::Label,
     detail: gtk::Label,
+    summary: gtk::Label,
+    summary_evidence: gtk::Box,
+    pending_refresh: Cell<bool>,
     saved: gtk::Box,
+    saved_heading: gtk::Label,
     save: gtk::Button,
     assessment: gtk::Box,
     category: gtk::DropDown,
@@ -109,6 +120,11 @@ impl InsightsView {
         let status = label(copy("empty"));
         root.append(&status);
         let content = gtk::Box::new(gtk::Orientation::Vertical, 12);
+        content.append(&label(copy("summary_title")));
+        let summary = label("");
+        content.append(&summary);
+        let summary_evidence = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        content.append(&summary_evidence);
         let detail = label("");
         content.append(&detail);
         let assessment = gtk::Box::new(gtk::Orientation::Vertical, 8);
@@ -139,7 +155,8 @@ impl InsightsView {
         assessment.append(&clear);
         assessment.set_visible(false);
         content.append(&assessment);
-        content.append(&label(copy("saved")));
+        let saved_heading = label(copy("saved"));
+        content.append(&saved_heading);
         let saved = gtk::Box::new(gtk::Orientation::Vertical, 8);
         content.append(&saved);
         let scroller = gtk::ScrolledWindow::builder()
@@ -156,7 +173,11 @@ impl InsightsView {
             selected_label,
             status,
             detail,
+            summary,
+            summary_evidence,
+            pending_refresh: Cell::new(false),
             saved,
+            saved_heading,
             save: save.clone(),
             assessment,
             category,
@@ -207,7 +228,7 @@ impl InsightsView {
         let weak = Rc::downgrade(&view);
         refresh.connect_clicked(move |_| {
             if let Some(v) = weak.upgrade() {
-                v.request(Op::List {}, false);
+                v.refresh_history();
             }
         });
         let weak = Rc::downgrade(&view);
@@ -285,6 +306,7 @@ impl InsightsView {
                     view.assessment.set_sensitive(true);
                     view.saved.set_sensitive(true);
                 }
+                view.refresh_history();
             }
         });
         // The window retains the controller without a view/root reference cycle.
@@ -321,6 +343,25 @@ impl InsightsView {
         }
     }
 
+    fn refresh_history(self: &Rc<Self>) {
+        if self.flight.borrow().closed {
+            return;
+        }
+        if self.flight.borrow().busy {
+            self.pending_refresh.set(true);
+        } else {
+            self.pending_refresh.set(false);
+            self.request(Op::Summary {}, false);
+        }
+    }
+
+    fn clear_summary(&self) {
+        self.summary.set_text("");
+        while let Some(child) = self.summary_evidence.first_child() {
+            self.summary_evidence.remove(&child);
+        }
+    }
+
     fn request(self: &Rc<Self>, operation: Op, persisted: bool) {
         if !self.flight.borrow_mut().begin() {
             return;
@@ -328,11 +369,17 @@ impl InsightsView {
         self.controls.set_sensitive(false);
         self.assessment.set_sensitive(false);
         self.saved.set_sensitive(false);
+        self.summary_evidence.set_sensitive(false);
         self.status.set_text(copy("working"));
         let refresh_saved = matches!(
             &operation,
             Op::Analyze { save: true, .. } | Op::Annotate { .. } | Op::ClearAnnotation { .. }
         );
+        let history_read = matches!(&operation, Op::Summary {} | Op::List {});
+        let mutates_history = refresh_saved || matches!(&operation, Op::Delete { .. });
+        if history_read || mutates_history {
+            self.clear_summary();
+        }
         let (tx, rx) = async_channel::bounded(1);
         let store_dir = self.store_dir.clone();
         std::thread::spawn(move || {
@@ -357,12 +404,17 @@ impl InsightsView {
                     view.controls.set_sensitive(true);
                     view.assessment.set_sensitive(true);
                     view.saved.set_sensitive(true);
+                    view.summary_evidence.set_sensitive(true);
+                    if view.pending_refresh.get() {
+                        view.refresh_history();
+                    }
                 }
                 return;
             }
             view.controls.set_sensitive(true);
             view.assessment.set_sensitive(true);
             view.saved.set_sensitive(true);
+            view.summary_evidence.set_sensitive(true);
             match result {
                 Some(Response::Analyze { insight })
                 | Some(Response::Explain { insight })
@@ -389,13 +441,18 @@ impl InsightsView {
                         copy("unsaved")
                     });
                     if refresh_saved {
-                        view.request(Op::List {}, false);
+                        view.refresh_history();
                     }
                 }
-                Some(Response::List { insights }) => {
-                    view.render_saved(insights);
+                Some(Response::Summary { summary }) => {
+                    view.render_summary(summary);
                     view.status.set_text(copy("refreshed"));
+                    let selected = view.current_id.borrow().clone();
+                    if let Some(id) = selected {
+                        view.request(Op::Explain { id }, true);
+                    }
                 }
+                Some(Response::List { .. }) => view.refresh_history(),
                 Some(Response::Delete { deleted }) => {
                     view.detail.set_text("");
                     view.assessment.set_visible(false);
@@ -405,33 +462,97 @@ impl InsightsView {
                     } else {
                         copy("already_absent")
                     });
-                    view.request(Op::List {}, false);
+                    view.refresh_history();
                 }
-                _ => view.status.set_text(copy("error")),
+                _ => {
+                    view.clear_summary();
+                    view.summary.set_text(copy("summary_unavailable"));
+                    while let Some(child) = view.saved.first_child() {
+                        view.saved.remove(&child);
+                    }
+                    if view.current_id.borrow().is_some() {
+                        view.detail.set_text("");
+                        view.assessment.set_visible(false);
+                        *view.current_id.borrow_mut() = None;
+                    }
+                    view.status.set_text(copy("error"));
+                }
+            }
+            if view.pending_refresh.get() && !view.flight.borrow().busy && view.root.is_mapped() {
+                view.refresh_history();
             }
         });
     }
 
-    fn render_saved(self: &Rc<Self>, insights: Vec<LocalInsight>) {
+    fn render_summary(self: &Rc<Self>, summary: Box<SavedInsightsSummary>) {
+        self.summary.set_text(&render_summary_text(&summary));
+        self.saved_heading.set_text(copy("saved"));
+        let summary = Rc::new(*summary);
+        self.render_saved(summary.snapshots.iter());
+        for category in &summary.user_reported.categories {
+            self.evidence_button(
+                &format!(
+                    "{} · {}",
+                    copy("category"),
+                    category_label(category.category)
+                ),
+                category.evidence_snapshot_ids.clone(),
+                summary.clone(),
+            );
+        }
+        for outcome in &summary.user_reported.outcomes {
+            self.evidence_button(
+                &format!("{} · {}", copy("outcome"), outcome_label(outcome.outcome)),
+                outcome.evidence_snapshot_ids.clone(),
+                summary.clone(),
+            );
+        }
+        for metric in &summary.metrics {
+            self.evidence_button(
+                metric_label(metric.id),
+                metric.evidence_snapshot_ids.clone(),
+                summary.clone(),
+            );
+        }
+        if self.summary_evidence.first_child().is_none() {
+            self.summary_evidence
+                .append(&label(copy("summary_no_evidence")));
+        }
+    }
+
+    fn evidence_button(
+        self: &Rc<Self>,
+        title: &str,
+        ids: Vec<String>,
+        summary: Rc<SavedInsightsSummary>,
+    ) {
+        if ids.is_empty() {
+            return;
+        }
+        let button = gtk::Button::with_label(&format!("{} · {}", title, copy("evidence")));
+        let weak = Rc::downgrade(self);
+        let title = title.to_owned();
+        button.connect_clicked(move |_| {
+            if let Some(view) = weak.upgrade() {
+                view.saved_heading
+                    .set_text(&format!("{} · {}", copy("summary_evidence"), title));
+                let ids: std::collections::BTreeSet<_> = ids.iter().collect();
+                view.render_saved(
+                    summary
+                        .snapshots
+                        .iter()
+                        .filter(|snapshot| ids.contains(&snapshot.id)),
+                );
+            }
+        });
+        self.summary_evidence.append(&button);
+    }
+
+    fn render_saved<'a>(self: &Rc<Self>, insights: impl Iterator<Item = &'a SnapshotEvidence>) {
+        let insights: Vec<_> = insights.collect();
         let current = self.current_id.borrow().clone();
         if let Some(id) = current {
-            if let Some(insight) = insights.iter().find(|insight| insight.id == id) {
-                self.detail.set_text(&render(insight));
-                self.category.set_selected(
-                    insight
-                        .manual_annotation
-                        .as_ref()
-                        .map(|a| category_index(a.category))
-                        .unwrap_or(0),
-                );
-                self.outcome.set_selected(
-                    insight
-                        .manual_annotation
-                        .as_ref()
-                        .map(|a| outcome_index(a.outcome))
-                        .unwrap_or(0),
-                );
-            } else {
+            if !insights.iter().any(|insight| insight.id == id) {
                 self.detail.set_text("");
                 self.assessment.set_visible(false);
                 *self.current_id.borrow_mut() = None;
@@ -465,11 +586,12 @@ impl InsightsView {
                 }
             });
             let weak = Rc::downgrade(self);
+            let delete_id = insight.id.clone();
             delete.connect_clicked(move |_| {
                 if let Some(v) = weak.upgrade() {
                     v.request(
                         Op::Delete {
-                            id: insight.id.clone(),
+                            id: delete_id.clone(),
                         },
                         false,
                     );
@@ -515,6 +637,123 @@ fn local_date(date: &chrono::DateTime<chrono::Utc>) -> String {
         .unwrap_or_else(|_| date.to_rfc3339())
 }
 
+fn metric_label(id: trace_commons_protocol::insights::MetricId) -> &'static str {
+    use trace_commons_protocol::insights::MetricId;
+    copy(match id {
+        MetricId::Sessions => "metric_sessions",
+        MetricId::Events => "metric_events",
+        MetricId::InputTokens => "metric_input_tokens",
+        MetricId::OutputTokens => "metric_output_tokens",
+        MetricId::ToolCalls => "metric_tool_calls",
+        MetricId::ToolFailures => "metric_tool_failures",
+        MetricId::KnownOutcomes => "metric_known_outcomes",
+    })
+}
+
+fn render_summary_text(summary: &SavedInsightsSummary) -> String {
+    let mut text = format!(
+        "{}\n{}: {}\n{}: {}\n{}: {}\n{}: {} v{} · {}: {}\n",
+        copy("summary_scope"),
+        copy("summary_snapshots"),
+        summary.saved_snapshots,
+        copy("summary_assessed"),
+        summary.user_reported.assessed_snapshots,
+        copy("summary_unassessed"),
+        summary.user_reported.unassessed_snapshots,
+        copy("provider"),
+        summary.provider.id,
+        summary.provider.version,
+        copy("rubric"),
+        summary.provider.rubric_version
+    );
+    text.push_str(&format!(
+        "{}: {}\n",
+        copy("summary_analysis_range"),
+        summary
+            .snapshot_analysis_range
+            .as_ref()
+            .map(|range| format!(
+                "{} – {}",
+                local_date(&range.oldest),
+                local_date(&range.newest)
+            ))
+            .unwrap_or_else(|| copy("unknown").to_owned())
+    ));
+    if summary.saved_snapshots == 0 {
+        text.push_str(copy("summary_empty"));
+        text.push('\n');
+    }
+    text.push_str(copy("summary_limitations"));
+    text.push('\n');
+    for limitation in &summary.limitations {
+        text.push_str(copy(match limitation {
+            SummaryLimitation::SelectedSavedSessionsAreNotVerifiedTasks => {
+                "summary_limitation_selected_saved_sessions_are_not_verified_tasks"
+            }
+            SummaryLimitation::AssessmentsAreUserReported => {
+                "summary_limitation_assessments_are_user_reported"
+            }
+            SummaryLimitation::ObservedSumsRequireBothCoverages => {
+                "summary_limitation_observed_sums_require_both_coverages"
+            }
+            SummaryLimitation::AnalysisDatesAreNotActivityTime => {
+                "summary_limitation_analysis_dates_are_not_activity_time"
+            }
+            SummaryLimitation::SourceFormatsAreNotModelIdentity => {
+                "summary_limitation_source_formats_are_not_model_identity"
+            }
+            SummaryLimitation::NoModelRankingsTimeSavingsOrCost => {
+                "summary_limitation_no_model_rankings_time_savings_or_cost"
+            }
+        }));
+        text.push('\n');
+    }
+    text.push_str(copy("summary_categories"));
+    text.push('\n');
+    for category in &summary.user_reported.categories {
+        text.push_str(&format!(
+            "{}: {}\n",
+            category_label(category.category),
+            category.snapshots
+        ));
+    }
+    text.push_str(copy("summary_outcomes"));
+    text.push('\n');
+    for outcome in &summary.user_reported.outcomes {
+        text.push_str(&format!(
+            "{}: {}\n",
+            outcome_label(outcome.outcome),
+            outcome.snapshots
+        ));
+    }
+    text.push_str(copy("summary_metrics"));
+    text.push('\n');
+    for metric in &summary.metrics {
+        text.push_str(&format!(
+            "{} · {}: {}\n{}: {} · {}: {}\n{}: {} / {} {}\n",
+            metric_label(metric.id),
+            copy("summary_observed_sum"),
+            metric
+                .observed_value_sum
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| copy("unknown").to_owned()),
+            copy("summary_available"),
+            metric.available_snapshots,
+            copy("summary_missing"),
+            metric.missing_snapshots,
+            copy("summary_record_coverage"),
+            metric.record_coverage.observed,
+            metric.record_coverage.total,
+            copy(match metric.coverage_unit {
+                CoverageUnit::SessionSnapshots => "summary_unit_session_snapshots",
+                CoverageUnit::NormalizedEvents => "summary_unit_normalized_events",
+                CoverageUnit::ToolResults => "summary_unit_tool_results",
+            })
+        ));
+    }
+    text
+}
+
 fn render(insight: &LocalInsight) -> String {
     use trace_commons_protocol::insights::MetricId;
     let mut text = format!(
@@ -535,18 +774,9 @@ fn render(insight: &LocalInsight) -> String {
         copy("coverage_notice")
     );
     for metric in &insight.report.metrics {
-        let key = match metric.id {
-            MetricId::Sessions => "metric_sessions",
-            MetricId::Events => "metric_events",
-            MetricId::InputTokens => "metric_input_tokens",
-            MetricId::OutputTokens => "metric_output_tokens",
-            MetricId::ToolCalls => "metric_tool_calls",
-            MetricId::ToolFailures => "metric_tool_failures",
-            MetricId::KnownOutcomes => "metric_known_outcomes",
-        };
         text.push_str(&format!(
             "{}: {} · {} {} / {}\n",
-            copy(key),
+            metric_label(metric.id),
             metric
                 .value
                 .map(|n| n.to_string())
@@ -724,6 +954,76 @@ mod tests {
         assert!(text.contains(copy("boundary_notice")));
     }
 
+    #[test]
+    fn summary_renderer_preserves_empty_unknown_zero_coverage_units_and_limitations() {
+        use trace_commons_protocol::insights::MetricId;
+        let absent =
+            std::env::temp_dir().join(format!("tc-summary-render-{}", uuid::Uuid::new_v4()));
+        let mut summary =
+            trace_commons_contributor::insights::summary::read_saved(Some(&absent)).unwrap();
+        let empty = render_summary_text(&summary);
+        assert!(empty.contains(copy("summary_empty")));
+        assert!(empty.contains(&format!(
+            "{}: {}",
+            copy("summary_analysis_range"),
+            copy("unknown")
+        )));
+        assert!(!absent.exists());
+        summary.saved_snapshots = 2;
+        summary.user_reported.assessed_snapshots = 1;
+        summary.user_reported.unassessed_snapshots = 1;
+        summary
+            .user_reported
+            .outcomes
+            .iter_mut()
+            .find(|o| o.outcome == TaskOutcome::Unknown)
+            .unwrap()
+            .snapshots = 1;
+        let metric = summary
+            .metrics
+            .iter_mut()
+            .find(|m| m.id == MetricId::ToolCalls)
+            .unwrap();
+        metric.observed_value_sum = Some(0);
+        metric.available_snapshots = 1;
+        metric.missing_snapshots = 1;
+        metric.record_coverage.observed = 1;
+        metric.record_coverage.total = 3;
+        let text = render_summary_text(&summary);
+        assert!(text.contains(&format!("{}: 1", copy("summary_unassessed"))));
+        assert!(text.contains(&format!("{}: 1", copy("outcome_unknown"))));
+        assert!(text.contains(&format!(
+            "{} · {}: 0",
+            metric_label(MetricId::ToolCalls),
+            copy("summary_observed_sum")
+        )));
+        assert!(text.contains(&format!(
+            "{} · {}: {}",
+            metric_label(MetricId::InputTokens),
+            copy("summary_observed_sum"),
+            copy("unknown")
+        )));
+        assert!(text.contains(&format!(
+            "{}: 1 / 3 {}",
+            copy("summary_record_coverage"),
+            copy("summary_unit_normalized_events")
+        )));
+        for key in [
+            "summary_available",
+            "summary_missing",
+            "summary_unit_tool_results",
+            "summary_unit_session_snapshots",
+            "summary_limitation_selected_saved_sessions_are_not_verified_tasks",
+            "summary_limitation_assessments_are_user_reported",
+            "summary_limitation_observed_sums_require_both_coverages",
+            "summary_limitation_analysis_dates_are_not_activity_time",
+            "summary_limitation_source_formats_are_not_model_identity",
+            "summary_limitation_no_model_rankings_time_savings_or_cost",
+        ] {
+            assert!(text.contains(copy(key)), "missing shared label {key}");
+        }
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     #[ignore = "requires a Linux GTK display; run alone with --ignored --test-threads=1"]
@@ -754,6 +1054,12 @@ mod tests {
                 std::thread::sleep(std::time::Duration::from_millis(1));
             }
         };
+        settle();
+        assert!(
+            !store.exists(),
+            "initial summary must not initialize storage"
+        );
+        assert!(view.summary.text().contains(copy("summary_empty")));
         view.source.set_selected(1);
         *view.selected.borrow_mut() = Some(file.clone());
         view.analyze(false);
@@ -766,8 +1072,40 @@ mod tests {
         settle();
         let id = view.current_id.borrow().clone().expect("saved id");
         assert!(
+            view.summary
+                .text()
+                .contains(&format!("{}: 1", copy("summary_snapshots")))
+        );
+        assert!(
+            view.summary
+                .text()
+                .contains(&format!("{}: 1", copy("summary_unassessed")))
+        );
+        assert!(
             view.saved.first_child().is_some(),
             "save refreshes saved rows immediately"
+        );
+        let evidence = view
+            .summary_evidence
+            .first_child()
+            .unwrap()
+            .downcast::<gtk::Button>()
+            .unwrap();
+        evidence.emit_clicked();
+        let row = view.saved.first_child().unwrap();
+        let open = row
+            .first_child()
+            .unwrap()
+            .next_sibling()
+            .unwrap()
+            .downcast::<gtk::Button>()
+            .unwrap();
+        open.emit_clicked();
+        settle();
+        assert_eq!(
+            view.current_id.borrow().as_deref(),
+            Some(id.as_str()),
+            "summary evidence opens its saved snapshot"
         );
         let prior_id = id.clone();
         std::fs::write(&file, concat!(
@@ -799,10 +1137,28 @@ mod tests {
         );
         settle();
         assert!(view.detail.text().contains(copy("assessment_notice")));
+        assert!(
+            view.summary
+                .text()
+                .contains(&format!("{}: 1", copy("summary_assessed")))
+        );
+        view.request(Op::ClearAnnotation { id: id.clone() }, true);
+        settle();
+        assert!(
+            view.summary
+                .text()
+                .contains(&format!("{}: 0", copy("summary_assessed")))
+        );
+        assert!(
+            view.summary
+                .text()
+                .contains(&format!("{}: 1", copy("summary_unassessed")))
+        );
         view.request(Op::Delete { id }, false);
         settle();
         assert!(file.exists());
         assert!(service::list_saved(Some(&store)).unwrap().is_empty());
+        assert!(view.summary.text().contains(copy("summary_empty")));
         view.analyze(true);
         settle();
         let id = view.current_id.borrow().clone().unwrap();
@@ -810,20 +1166,32 @@ mod tests {
             .unwrap()
             .delete(&id)
             .unwrap();
-        view.request(Op::List {}, false);
+        view.refresh_history();
         settle();
         assert!(view.current_id.borrow().is_none());
         assert!(view.detail.text().is_empty());
         view.analyze(false);
         settle();
         let preview = view.detail.text();
-        view.request(Op::List {}, false);
+        view.refresh_history();
         settle();
         assert_eq!(
             view.detail.text(),
             preview,
             "history refresh preserves unsaved preview"
         );
+        let index = store.join("index.json");
+        let valid_index = std::fs::read(&index).unwrap();
+        std::fs::write(&index, b"invalid saved store").unwrap();
+        view.refresh_history();
+        settle();
+        assert_eq!(view.summary.text(), copy("summary_unavailable"));
+        assert!(view.summary_evidence.first_child().is_none());
+        assert!(view.saved.first_child().is_none());
+        std::fs::write(&index, valid_index).unwrap();
+        view.refresh_history();
+        settle();
+        assert!(view.summary.text().contains(copy("summary_empty")));
         let before = view.detail.text();
         view.request(
             Op::Analyze {
@@ -843,13 +1211,14 @@ mod tests {
         );
         assert_eq!(view.detail.text(), before);
         window.disconnect(declined_close);
-        view.request(Op::List {}, false);
+        view.refresh_history();
         window.hide();
         settle();
         assert_eq!(view.detail.text(), before);
         window.present();
+        settle();
         assert!(view.controls.is_sensitive());
-        view.request(Op::List {}, false);
+        view.refresh_history();
         window.close();
         assert!(
             view.flight.borrow().cancelled,
