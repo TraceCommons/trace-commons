@@ -48,6 +48,10 @@ public sealed partial class InsightsView : UserControl, IDisposable
     {
         if (_file != null) await ViewModel.AnalyzeAsync(SourceTag, _file, true);
     }
+    private async void OnSummaryEvidence(object sender, RoutedEventArgs args)
+    {
+        if (sender is Button { Tag: string id }) await ViewModel.ExplainSummaryEvidenceAsync(id);
+    }
     private async void OnRefresh(object sender, RoutedEventArgs args) => await ViewModel.RefreshAsync();
     private async void OnExplain(object sender, RoutedEventArgs args)
     {

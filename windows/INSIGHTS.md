@@ -36,3 +36,23 @@ Before Windows release, build the WinUI application on Windows and run these tes
 against the newly built Windows DLL, then manually qualify fresh-install navigation,
 file picker and keyboard focus, long text and scaling, cancellation/window close,
 source replacement and CLI store interoperability, and owner-only persistence ACLs.
+
+## Saved history summary
+
+The summary reads the shared derived store on entry and refresh, and after save,
+delete, annotation, and annotation removal. It never reopens source files. Native
+observed totals retain unknown versus known zero, snapshot availability/missingness,
+and recognized-record coverage with its unit. Categories and outcomes distinguish
+explicit Unknown assessments from sessions that have no assessment.
+
+Summary rows link their contributing snapshot IDs to the existing evidence view.
+Analysis dates describe snapshot imports, not activity duration. The UI renders
+shared limitations and does not calculate rates, rankings, savings, or cost. A
+failed or canceled summary refresh clears the previous summary; re-entry retries
+through the existing serialized service boundary.
+
+Summary-specific validation includes typed decoding, partial record coverage despite
+an available snapshot, known zero, explicit unknown assessments, missingness, evidence
+navigation, saved mutations, failure, cancellation, and close. The updated summary
+WinUI markup still requires Windows CI compilation and interactive qualification;
+the earlier snapshot UI's Windows CI result does not qualify these new controls.

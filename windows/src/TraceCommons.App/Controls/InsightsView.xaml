@@ -7,6 +7,30 @@
             <TextBlock Text="{Binding Title}" FontSize="28" />
             <TextBlock Text="{Binding Intro}" TextWrapping="Wrap" />
             <TextBlock Text="{Binding SnapshotNotice}" TextWrapping="Wrap" />
+            <TextBlock Text="{Binding [summary_title]}" FontSize="22" />
+            <TextBlock Text="{Binding SummaryStatus}" TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite" />
+            <TextBlock Text="{Binding SummaryDetails}" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
+            <Expander Header="{Binding [summary_title]}" IsExpanded="True" HorizontalAlignment="Stretch">
+                <ItemsControl ItemsSource="{Binding SummaryRows}" IsEnabled="{Binding Idle}">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <StackPanel Spacing="8" Padding="0,8">
+                                <TextBlock Text="{Binding Label}" FontSize="18" TextWrapping="Wrap" />
+                                <TextBlock Text="{Binding Details}" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
+                                <ItemsControl ItemsSource="{Binding Evidence}">
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate>
+                                            <Button Tag="{Binding Id}" Click="OnSummaryEvidence" HorizontalAlignment="Stretch" HorizontalContentAlignment="Left">
+                                                <TextBlock Text="{Binding Label}" TextWrapping="Wrap" />
+                                            </Button>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+                            </StackPanel>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+            </Expander>
             <StackPanel Orientation="Horizontal" Spacing="12">
                 <ComboBox x:Name="Source" Header="{Binding [source]}" SelectedIndex="0" IsEnabled="{Binding Idle}">
                     <ComboBoxItem Content="{Binding [codex]}" Tag="codex" />
