@@ -3,6 +3,109 @@ use std::path::Path;
 use std::process::{Command, Output};
 
 #[test]
+fn comparison_cli_separates_script_responses_from_readable_exclusions() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("enrollment");
+    let store = dir.path().join("insights");
+    let file = dir.path().join("PRIVATE_SOURCE.jsonl");
+    fixture(&file, false);
+    let saved = value(invoke(
+        &config,
+        &store,
+        &[
+            "analyze",
+            "--source",
+            "trajectory",
+            "--file",
+            file.to_str().unwrap(),
+            "--save",
+        ],
+    ));
+    let episode = value(invoke(
+        &config,
+        &store,
+        &[
+            "episode-create",
+            "--snapshot",
+            saved["id"].as_str().unwrap(),
+        ],
+    ));
+    let task = value(invoke(
+        &config,
+        &store,
+        &[
+            "comparison-task",
+            "create",
+            "--episode",
+            episode["episode"]["id"].as_str().unwrap(),
+        ],
+    ));
+    let cutoff = task["task"]["updated_at"].as_str().unwrap();
+    let fingerprint = "a".repeat(64);
+    let input = [
+        "--evidence-cutoff",
+        cutoff,
+        "--cohort",
+        "fixture-a",
+        "fixture-b",
+        "--date-start",
+        "2026-09-01",
+        "--date-end",
+        "2026-09-30",
+        "--project-id",
+        "20c18c96-6093-49f5-bb6f-6092ef0630b9",
+        "--language",
+        "rust",
+        "--configuration-fingerprint",
+        fingerprint.as_str(),
+    ];
+    let before = std::fs::read(store.join("index.json")).unwrap();
+    let mut preview_args = vec!["comparison", "preview-spec"];
+    preview_args.extend(input);
+    let preview = value(invoke(&config, &store, &preview_args));
+    assert_eq!(preview["type"], "comparison_preview_spec");
+    assert!(preview["specification"].is_object());
+    assert!(preview["result"].is_object());
+    assert_eq!(std::fs::read(store.join("index.json")).unwrap(), before);
+    let mut save_args = vec!["comparison", "save-spec"];
+    save_args.extend(input);
+    let saved = value(invoke(&config, &store, &save_args));
+    assert_eq!(saved["type"], "comparison_specification");
+    let id = saved["specification"]["id"].as_str().unwrap();
+    let result = value(invoke(&config, &store, &["comparison", "evaluate", id]));
+    assert_eq!(result["type"], "comparison_result");
+    assert_eq!(result["result"]["included_task_ids"], serde_json::json!([]));
+    let plain = Command::new(env!("CARGO_BIN_EXE_trace-commons-contributor"))
+        .arg("--config-dir")
+        .arg(&config)
+        .args(["insights", "--store-dir"])
+        .arg(&store)
+        .args(["comparison", "evaluate", id])
+        .output()
+        .unwrap();
+    assert!(
+        plain.status.success(),
+        "{}",
+        String::from_utf8_lossy(&plain.stderr)
+    );
+    let text = String::from_utf8(plain.stdout).unwrap();
+    assert!(text.contains("No eligible evidence"));
+    assert!(text.contains("Source attribution is not qualified"));
+    assert!(text.contains("Uncertainty is not yet calibrated"));
+    assert!(text.contains("Pending, unknown, and unassessed outcomes are excluded"));
+    assert!(serde_json::from_str::<serde_json::Value>(&text).is_err());
+    for private in [
+        "SECRET_FIXTURE_BODY",
+        "PRIVATE_SOURCE",
+        "/private/fixture-project",
+    ] {
+        assert!(!text.contains(private));
+        assert!(!result.to_string().contains(private));
+    }
+    assert!(!config.exists());
+}
+
+#[test]
 fn question_cards_use_saved_evidence_and_invalidate_deleted_selections() {
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("enrollment");

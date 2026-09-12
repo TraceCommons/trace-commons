@@ -751,7 +751,11 @@ pub fn project_descriptive_comparison(
             });
         if fact.material_recorded_at.is_none() {
             reasons.insert(ComparisonExclusionReason::CutoffTimeUnavailable);
-        } else if !cutoff_match {
+        } else if fact
+            .material_recorded_at
+            .is_some_and(|recorded| recorded > specification.evidence_cutoff)
+            || !cutoff_match
+        {
             reasons.insert(ComparisonExclusionReason::EvidenceAfterCutoff);
         }
         if fact.category != specification.category {
@@ -980,6 +984,28 @@ mod tests {
                 reason: "usage-unavailable".into(),
             },
         }
+    }
+
+    #[test]
+    fn restored_material_cannot_reenter_a_saved_cutoff() {
+        let specification = spec();
+        let mut restored = fact(4, "model-a", DescriptiveOutcome::Unassessed);
+        restored.material_recorded_at = Some(specification.evidence_cutoff);
+        assert_eq!(
+            project_descriptive_comparison(&specification, std::slice::from_ref(&restored))
+                .unwrap()
+                .included_task_ids,
+            std::slice::from_ref(&restored.task_id)
+        );
+        // Restoring context A after A -> B -> A can restore the substantive
+        // digest, but its newly recorded material still postdates the cutoff.
+        restored.material_recorded_at = Some(at(12));
+        let result = project_descriptive_comparison(&specification, &[restored]).unwrap();
+        assert!(result.included_task_ids.is_empty());
+        assert_eq!(
+            result.excluded_tasks[0].reasons,
+            [ComparisonExclusionReason::EvidenceAfterCutoff]
+        );
     }
 
     #[test]
