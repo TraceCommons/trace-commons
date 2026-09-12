@@ -2,6 +2,19 @@
 use std::path::Path;
 use std::process::{Command, Output};
 
+#[test]
+fn empty_history_does_not_initialize_insights_or_enrollment() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("enrollment");
+    let store = dir.path().join("insights");
+    assert_eq!(
+        value(invoke(&config, &store, &["list"])),
+        serde_json::json!([])
+    );
+    assert!(!store.exists());
+    assert!(!config.exists());
+}
+
 fn invoke(config: &Path, store: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_trace-commons-contributor"))
         .arg("--config-dir")
