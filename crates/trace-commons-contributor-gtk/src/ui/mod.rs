@@ -13,6 +13,7 @@ pub mod funding;
 pub mod history;
 pub mod insights;
 pub mod mark;
+pub mod mission_drafts;
 pub mod onboarding;
 mod onboarding_nearai;
 mod onboarding_wallet;
@@ -52,7 +53,7 @@ const HEADER_HEIGHT: i32 = 46;
 const COLUMN_MAX: i32 = 840;
 const COLUMN_TIGHTEN: i32 = 680;
 
-/// The five screens, in the order the switcher shows them, with the icon
+/// The six screens, in the order the switcher shows them, with the icon
 /// each one carries. One list, so the stack pages and the switcher items
 /// cannot drift apart.
 ///
@@ -68,7 +69,7 @@ const COLUMN_TIGHTEN: i32 = 680;
 /// never retyped: the word this surface may not say is "private", and the
 /// only way three shells keep saying the same true thing is by reading one
 /// definition. The stack name below it is internal and is read by nobody.
-pub(crate) const SCREENS: [(&str, &str, &str); 5] = [
+pub(crate) const SCREENS: [(&str, &str, &str); 6] = [
     ("insights", "Insights", "view-statistics-symbolic"),
     ("queue", "Queue", "view-list-symbolic"),
     ("history", "History", "document-open-recent-symbolic"),
@@ -78,6 +79,7 @@ pub(crate) const SCREENS: [(&str, &str, &str); 5] = [
         "network-transmit-receive-symbolic",
     ),
     ("settings", "Settings", "emblem-system-symbolic"),
+    ("mission-drafts", "Mission drafts", "document-edit-symbolic"),
 ];
 
 /// The stack's name for the model-calls screen. Named once because the
@@ -281,12 +283,14 @@ impl App {
         // order, so a screen cannot be renamed in one place and not the
         // other.
         let insights = insights::InsightsView::new(&window);
-        let pages: [&gtk::Box; 5] = [
+        let mission_drafts = mission_drafts::MissionDraftsView::new(&window);
+        let pages: [&gtk::Box; 6] = [
             &insights.root,
             &queue.root,
             &history.root,
             &private_inference.root,
             &settings.root,
+            &mission_drafts.root,
         ];
         for ((name, label, icon_name), page) in SCREENS.into_iter().zip(pages) {
             stack
@@ -1710,7 +1714,7 @@ mod screen_tests {
     /// length itself, so the next screen has to grow both.
     #[test]
     fn every_screen_has_a_page() {
-        assert_eq!(SCREENS.len(), 5);
+        assert_eq!(SCREENS.len(), 6);
         for (name, label, icon) in SCREENS {
             assert!(!name.is_empty(), "a screen needs a stack name");
             assert!(!label.is_empty(), "a screen needs a switcher label");
@@ -1730,6 +1734,18 @@ mod screen_tests {
             .expect("the Private AI screen is one of the switcher's items");
         assert_eq!(name, "private-inference");
         assert_eq!(label, copy::PRIVATE_INFERENCE_DESTINATION);
+    }
+
+    #[test]
+    fn the_mission_drafts_screen_takes_its_label_from_shared_copy() {
+        let (_, label, _) = SCREENS
+            .into_iter()
+            .find(|(name, _, _)| *name == "mission-drafts")
+            .expect("the local mission inbox is one of the switcher's items");
+        assert_eq!(
+            label,
+            trace_commons_contributor::mission_draft_service::ui_copy()["title"]
+        );
     }
 
     /// No switcher label may PROMISE privacy.
