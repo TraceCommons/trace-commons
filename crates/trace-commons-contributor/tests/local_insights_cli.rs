@@ -141,6 +141,56 @@ fn malformed_input_returns_a_safe_error_and_no_report() {
 }
 
 #[test]
+fn user_assessment_is_separate_from_measured_outcomes_and_clears() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("enrollment");
+    let store = dir.path().join("insights");
+    let file = dir.path().join("session.jsonl");
+    fixture(&file, false);
+    let first = value(invoke(
+        &config,
+        &store,
+        &[
+            "analyze",
+            "--source",
+            "trajectory",
+            "--file",
+            file.to_str().unwrap(),
+            "--save",
+        ],
+    ));
+    let id = first["id"].as_str().unwrap();
+    let annotated = value(invoke(
+        &config,
+        &store,
+        &[
+            "annotate",
+            id,
+            "--category",
+            "refactor",
+            "--outcome",
+            "accepted",
+        ],
+    ));
+    assert_eq!(annotated["manual_annotation"]["category"], "refactor");
+    assert_eq!(annotated["manual_annotation"]["outcome"], "accepted");
+    assert_eq!(
+        annotated["manual_annotation"]["provenance"],
+        "user_reported"
+    );
+    let outcome = annotated["report"]["metrics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["id"] == "known_outcomes")
+        .unwrap();
+    assert!(outcome["value"].is_null());
+    let cleared = value(invoke(&config, &store, &["clear-annotation", id]));
+    assert!(cleared["manual_annotation"].is_null());
+    assert!(!config.exists());
+}
+
+#[test]
 fn codex_counts_and_missingness_match_the_human_view() {
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("enrollment");
