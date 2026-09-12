@@ -342,11 +342,11 @@ fn create_private_dir(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn require_private_dir(path: &Path) -> Result<()> {
+fn require_private_dir(_path: &Path) -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        if fs::metadata(path)
+        if fs::metadata(_path)
             .map_err(|_| anyhow!("mission-draft-store-unavailable"))?
             .permissions()
             .mode()
