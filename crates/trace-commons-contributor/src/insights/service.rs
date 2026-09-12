@@ -12,6 +12,49 @@ use super::{
 /// Bound request bytes before parsing or reading caller-owned FFI memory.
 pub const MAX_REQUEST_BYTES: usize = 64 * 1024;
 
+/// Shared desktop vocabulary; shells render observations without inventing claims.
+pub fn ui_copy() -> std::collections::BTreeMap<String, String> {
+    [
+        ("title", "Insights"),
+        ("intro", "Analyze a file on this device without an account or upload."),
+        ("snapshot_notice", "This is a dated snapshot. Reimport the file to refresh it."),
+        ("unknown_notice", "Cost, independently verified outcomes, and model comparisons need more evidence."),
+        ("coverage_notice", "Coverage describes recognized evidence. Missing values are unknown, not zero."),
+        ("cancellation_notice", "Closing this view stops updates to the screen. A save or deletion already started may finish."),
+        ("assessment_notice", "Your assessment is user-reported and separate from verified outcomes."),
+        ("evidence_notice", "Evidence identifies the source snapshot by digest. Event-level explanations are not available yet."),
+        ("empty", "No saved insights. Choose a file to analyze; saving is optional."),
+        ("error", "The local operation could not be completed. Check the selected file or saved snapshot and try again."),
+        ("save_notice", "Saving reads the selected file again and stores derived observations. The original transcript stays on this device."),
+        ("delete_notice", "Delete the saved insight and its references? The original file will remain intact."),
+        ("boundary_notice", "One selected session; task boundaries have not been verified."),
+        ("choose_file", "Choose file"), ("analyze", "Analyze"),
+        ("save", "Re-read and save"), ("refresh", "Refresh saved insights"),
+        ("delete", "Delete saved insight"), ("cancel", "Cancel"),
+        ("explain", "Show evidence"), ("save_assessment", "Save assessment"),
+        ("clear_assessment", "Clear assessment"), ("contributions", "Contributions"),
+        ("source", "Source format"), ("file", "Selected file"),
+        ("saved", "Saved insights"), ("result", "Analysis"),
+        ("provider", "Analyzer"), ("rubric", "Rubric version"),
+        ("analyzed_at", "Analyzed at"), ("coverage", "Coverage"),
+        ("evidence", "Evidence"), ("source_digest", "Source digest"),
+        ("assessment", "Your assessment"), ("category", "Task category"),
+        ("outcome", "Outcome"), ("recorded_at", "Recorded at"),
+        ("unknown", "Unknown"), ("working", "Working…"),
+        ("no_file", "No file selected"), ("cost", "Estimated cost"),
+        ("codex", "Codex rollout"), ("trajectory", "Trajectory"),
+        ("metric_sessions", "Sessions"), ("metric_events", "Events"),
+        ("metric_input_tokens", "Input tokens"), ("metric_output_tokens", "Output tokens"),
+        ("metric_tool_calls", "Tool calls"), ("metric_tool_failures", "Reported tool failures"),
+        ("metric_known_outcomes", "Verified outcomes"),
+        ("category_refactor", "Refactor"), ("category_tests", "Tests"),
+        ("category_docs", "Documentation"), ("category_debugging", "Debugging"),
+        ("category_other", "Other"), ("category_unknown", "Unknown"),
+        ("outcome_accepted", "Accepted"), ("outcome_partial", "Partial"),
+        ("outcome_rejected", "Rejected"), ("outcome_unknown", "Unknown"),
+    ].into_iter().map(|(key, value)| (key.to_owned(), value.to_owned())).collect()
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct LocalInsightsRequest {
@@ -30,6 +73,7 @@ pub enum LocalInsightsOperation {
         save: bool,
     },
     List {},
+    Copy {},
     Explain {
         id: String,
     },
@@ -53,25 +97,55 @@ pub enum LocalInsightsOperation {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum LocalInsightsResponse {
-    Analyze { insight: Box<LocalInsight> },
-    List { insights: Vec<LocalInsight> },
-    Explain { insight: Box<LocalInsight> },
-    Delete { deleted: bool },
-    Annotate { insight: Box<LocalInsight> },
-    ClearAnnotation { insight: Box<LocalInsight> },
-    Usage { usage: UsageSummary },
+    Analyze {
+        insight: Box<LocalInsight>,
+    },
+    List {
+        insights: Vec<LocalInsight>,
+    },
+    Copy {
+        copy: std::collections::BTreeMap<String, String>,
+    },
+    Explain {
+        insight: Box<LocalInsight>,
+    },
+    Delete {
+        deleted: bool,
+    },
+    Annotate {
+        insight: Box<LocalInsight>,
+    },
+    ClearAnnotation {
+        insight: Box<LocalInsight>,
+    },
+    Usage {
+        usage: UsageSummary,
+    },
 }
 
 /// Resolve only local Insights storage; never resolve enrollment configuration.
 pub fn open_store(store_dir: Option<&std::path::Path>) -> Result<LocalInsightStore> {
-    let path = match store_dir {
+    LocalInsightStore::open(&store_path(store_dir)?)
+}
+
+fn store_path(store_dir: Option<&std::path::Path>) -> Result<PathBuf> {
+    Ok(match store_dir {
         Some(path) => path.to_path_buf(),
         None => dirs::data_local_dir()
             .ok_or_else(|| anyhow!("insights-local-directory-unavailable"))?
             .join("trace-commons")
             .join("insights"),
-    };
-    LocalInsightStore::open(&path)
+    })
+}
+
+/// Reading an empty history must not create state before an explicit save.
+pub fn list_saved(store_dir: Option<&std::path::Path>) -> Result<Vec<LocalInsight>> {
+    let path = store_path(store_dir)?;
+    match std::fs::symlink_metadata(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(_) => bail!("insights-local-directory-unavailable"),
+        Ok(_) => LocalInsightStore::open(&path)?.list(),
+    }
 }
 
 /// Synchronous local IO. Native callers must schedule this off the UI thread.
@@ -90,8 +164,9 @@ pub fn execute(request: LocalInsightsRequest) -> Result<LocalInsightsResponse> {
             }
         }
         LocalInsightsOperation::List {} => LocalInsightsResponse::List {
-            insights: store()?.list()?,
+            insights: list_saved(request.store_dir.as_deref())?,
         },
+        LocalInsightsOperation::Copy {} => LocalInsightsResponse::Copy { copy: ui_copy() },
         LocalInsightsOperation::Explain { id } => LocalInsightsResponse::Explain {
             insight: Box::new(store()?.explain(&id)?),
         },
@@ -133,6 +208,7 @@ mod tests {
     fn rejects_untrusted_request_without_echoing_content() {
         for request in [
             br#"{"operation":{"type":"list","secret":"private"}}"#.as_slice(),
+            br#"{"operation":{"type":"copy","secret":"private"}}"#,
             br#"{"operation":{"type":"upload"}}"#,
             br#"{"operation":{"type":"list"},"secret":"private"}"#,
         ] {
@@ -261,6 +337,35 @@ mod tests {
     }
 
     #[test]
+    fn desktop_copy_is_available_without_resolving_storage() {
+        let temp = tempfile::tempdir().unwrap();
+        let request = serde_json::json!({"store_dir": temp.path().join("not-created"),
+            "operation":{"type":"copy"}});
+        let response = dispatch_json(&serde_json::to_vec(&request).unwrap()).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(value["type"], "copy");
+        assert_eq!(value["copy"]["title"], "Insights");
+        assert_eq!(value["copy"]["save"], "Re-read and save");
+        assert!(
+            value["copy"]["assessment_notice"]
+                .as_str()
+                .unwrap()
+                .contains("user-reported")
+        );
+        assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_only_history_still_refuses_a_symlink_store() {
+        let temp = tempfile::tempdir().unwrap();
+        let link = temp.path().join("store");
+        std::os::unix::fs::symlink(temp.path().join("absent-target"), &link).unwrap();
+        assert!(list_saved(Some(&link)).is_err());
+        assert!(!temp.path().join("absent-target").exists());
+    }
+
+    #[test]
     fn list_needs_only_an_explicit_local_directory() {
         let temp = tempfile::tempdir().unwrap();
         let request = LocalInsightsRequest {
@@ -272,6 +377,6 @@ mod tests {
             serde_json::from_str::<serde_json::Value>(&response).unwrap(),
             serde_json::json!({"type":"list","insights":[]})
         );
-        assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 1);
+        assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 0);
     }
 }
