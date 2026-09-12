@@ -66,13 +66,18 @@ public struct InsightsRequest: Encodable, Sendable {
         public var expected_revision: UInt64?
         public var context: ComparisonTaskContextInput?
         public var displayed_material_digest: String?
+        public var input: ComparisonSpecificationDraftInput?
+        public var specification_id: String?
+        public var audit_digest: String?
         public init(_ type: String, source: String? = nil, file: String? = nil,
                     save: Bool? = nil, id: String? = nil, category: String? = nil, outcome: String? = nil,
                     repository: String? = nil, commit: String? = nil, evidenceID: String? = nil,
                     snapshotIDs: [String]? = nil, episodeIDs: [String]? = nil,
                     questions: [InsightQuestion]? = nil, expectedRevision: UInt64? = nil,
                     context: ComparisonTaskContextInput? = nil,
-                    displayedMaterialDigest: String? = nil) {
+                    displayedMaterialDigest: String? = nil,
+                    input: ComparisonSpecificationDraftInput? = nil,
+                    specificationID: String? = nil, auditDigest: String? = nil) {
             self.type = type; self.source = source; self.file = file; self.save = save
             self.id = id; self.category = category; self.outcome = outcome
             self.repository = repository; self.commit = commit; self.evidence_id = evidenceID
@@ -80,6 +85,8 @@ public struct InsightsRequest: Encodable, Sendable {
             self.episode_ids = episodeIDs; self.questions = questions
             self.expected_revision = expectedRevision
             self.context = context; self.displayed_material_digest = displayedMaterialDigest
+            self.input = input
+            self.specification_id = specificationID; self.audit_digest = auditDigest
         }
     }
 }
@@ -103,12 +110,15 @@ public struct InsightsResponse: Decodable, Sendable {
     public let task: LocalComparisonTask?
     public let tasks: [ComparisonTaskDetail]?
     public let comparisonTaskDetail: ComparisonTaskDetail?
+    public let specification: ComparisonSpecification?
+    public let specifications: [ComparisonSpecification]?
+    public let comparisonResult: DescriptiveComparisonResult?
     public var invalidatedEpisodeIDs: [String] { mutation_effects?.invalidated_episode_ids ?? [] }
     public var staleComparisonTaskIDs: [String] { mutation_effects?.stale_comparison_task_ids ?? [] }
 
     private enum CodingKeys: String, CodingKey {
         case type, insight, insights, deleted, copy, summary, mutation_effects, episode, episodes
-        case detail, result, text, task, tasks
+        case detail, result, text, task, tasks, specification, specifications
     }
     public init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
@@ -128,10 +138,18 @@ public struct InsightsResponse: Decodable, Sendable {
             detail = try values.decodeIfPresent(EpisodeDetail.self, forKey: .detail)
             comparisonTaskDetail = nil
         }
-        result = try values.decodeIfPresent(InsightCardResult.self, forKey: .result)
+        if type == "comparison_preview_spec" || type == "comparison_result" {
+            result = nil
+            comparisonResult = try values.decodeIfPresent(DescriptiveComparisonResult.self, forKey: .result)
+        } else {
+            result = try values.decodeIfPresent(InsightCardResult.self, forKey: .result)
+            comparisonResult = nil
+        }
         text = try values.decodeIfPresent(String.self, forKey: .text)
         task = try values.decodeIfPresent(LocalComparisonTask.self, forKey: .task)
         tasks = try values.decodeIfPresent([ComparisonTaskDetail].self, forKey: .tasks)
+        specification = try values.decodeIfPresent(ComparisonSpecification.self, forKey: .specification)
+        specifications = try values.decodeIfPresent([ComparisonSpecification].self, forKey: .specifications)
     }
 }
 

@@ -5,6 +5,7 @@ import UniformTypeIdentifiers
 struct InsightsView: View {
     @State private var model = InsightsModel()
     @State private var comparisonModel = ComparisonTasksModel()
+    @State private var specificationModel = ComparisonSpecificationsModel()
     @State private var choosingFile = false
     @State private var source = "codex"
 
@@ -69,6 +70,9 @@ struct InsightsView: View {
                     ComparisonTasksView(model: comparisonModel, episodes: model.episodes, copy: model.copy,
                                         openEpisode: model.openEpisode, openSnapshot: model.explain)
                     Divider()
+                    ComparisonSpecificationsView(model: specificationModel, copy: model.copy,
+                                                 openTask: comparisonModel.select)
+                    Divider()
                     InsightCardsView(model: model)
                     Divider()
                     Text(model.text("saved")).font(.headline)
@@ -95,10 +99,28 @@ struct InsightsView: View {
         }
         .onAppear { model.open() }
         .onAppear { comparisonModel.open() }
+        .onAppear { specificationModel.open() }
+        .onChange(of: comparisonTaskVersions) { _, _ in
+            specificationModel.sourceEvidenceChanged(tasks: comparisonModel.tasks, snapshots: model.snapshots)
+        }
+        .onChange(of: model.snapshots.map(\.id)) { _, _ in updateSpecificationSources() }
         .onChange(of: model.comparisonInvalidationGeneration) { _, _ in
             comparisonModel.upstreamEvidenceChanged()
+            specificationModel.upstreamEvidenceChanged()
         }
-        .onDisappear { model.close(); comparisonModel.close() }
+        .onDisappear { model.close(); comparisonModel.close(); specificationModel.close() }
+    }
+    private func updateSpecificationSources() {
+        specificationModel.updateSources(tasks: comparisonModel.tasks, snapshots: model.snapshots)
+    }
+    private var comparisonTaskVersions: [String] {
+        comparisonModel.tasks.map { detail in
+            let context = detail.task.context
+            return [detail.id, String(detail.task.revision), detail.task.material_digest,
+                    context?.configuration_fingerprint ?? "", context?.task_date ?? "",
+                    detail.task.outcome?.recorded_at ?? "", detail.task.independence_confirmation?.confirmed_at ?? "",
+                    detail.stale_reasons.map(\.rawValue).joined(separator: ",")].joined(separator: ":")
+        }
     }
     private var assessment: some View {
         VStack(alignment: .leading) {
