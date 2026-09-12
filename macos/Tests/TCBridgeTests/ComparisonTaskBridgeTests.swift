@@ -50,6 +50,31 @@ final class ComparisonTaskBridgeTests: XCTestCase {
         result["exact_estimation"] = exact; payload["result"] = result
         XCTAssertThrowsError(try Self.decode(payload))
 
+        for level in ["exact", "counts", "component", "contrast"] {
+            payload = try Self.qualifiedObject()
+            result = try XCTUnwrap(payload["result"] as? [String: Any])
+            exact = try XCTUnwrap(result["exact_estimation"] as? [String: Any])
+            switch level {
+            case "exact": exact["unknown_payload"] = true
+            case "counts":
+                var counts = try XCTUnwrap(exact["assessed_counts"] as? [[String: Any]])
+                counts[0]["unknown_payload"] = true; exact["assessed_counts"] = counts
+            case "component":
+                evaluation = try XCTUnwrap(exact["evaluation"] as? [String: Any])
+                var components = try XCTUnwrap(evaluation["first_components"] as? [[String: Any]])
+                components[0]["unknown_payload"] = true; evaluation["first_components"] = components
+                exact["evaluation"] = evaluation
+            case "contrast":
+                evaluation = try XCTUnwrap(exact["evaluation"] as? [String: Any])
+                var contrasts = try XCTUnwrap(evaluation["contrasts"] as? [[String: Any]])
+                contrasts[0]["unknown_payload"] = true; evaluation["contrasts"] = contrasts
+                exact["evaluation"] = evaluation
+            default: break
+            }
+            result["exact_estimation"] = exact; payload["result"] = result
+            XCTAssertThrowsError(try Self.decode(payload), level)
+        }
+
         payload = try Self.qualifiedObject()
         result = try XCTUnwrap(payload["result"] as? [String: Any])
         exact = try XCTUnwrap(result["exact_estimation"] as? [String: Any])
@@ -60,7 +85,7 @@ final class ComparisonTaskBridgeTests: XCTestCase {
     }
 
     func testQualifiedSchemaTwoRejectsBindingAndCoverageMismatches() throws {
-        for mutation in ["legacy_schema", "included_count", "included_ids", "assessed_cap", "cohort_order"] {
+        for mutation in ["legacy_schema", "included_count", "included_ids", "cohort_order"] {
             var payload = try Self.qualifiedObject()
             var result = try XCTUnwrap(payload["result"] as? [String: Any])
             var specification = try XCTUnwrap(payload["specification"] as? [String: Any])
@@ -70,12 +95,6 @@ final class ComparisonTaskBridgeTests: XCTestCase {
                 var cohorts = try XCTUnwrap(result["cohorts"] as? [[String: Any]])
                 cohorts[0]["included_tasks"] = 4; result["cohorts"] = cohorts
             case "included_ids": result["included_task_ids"] = Array(repeating: UUID().uuidString, count: 6)
-            case "assessed_cap":
-                var cohorts = try XCTUnwrap(result["cohorts"] as? [[String: Any]])
-                var outcomes = try XCTUnwrap(cohorts[0]["outcomes"] as? [String: Any])
-                outcomes["accepted"] = 257; outcomes["assessed"] = 258
-                cohorts[0]["included_tasks"] = 259; cohorts[0]["outcomes"] = outcomes
-                result["cohorts"] = cohorts
             case "cohort_order": specification["cohort_labels"] = ["model-b", "model-a"]
             default: break
             }
@@ -84,6 +103,30 @@ final class ComparisonTaskBridgeTests: XCTestCase {
             let spec = try XCTUnwrap(decoded.specification)
             XCTAssertThrowsError(try decoded.comparisonResult?.validateStructure(expectedSpecification: spec), mutation)
         }
+    }
+
+    func testQualifiedSchemaTwoRejectsOtherwiseConsistentResultAboveTaskCap() throws {
+        var payload = try Self.qualifiedObject()
+        var result = try XCTUnwrap(payload["result"] as? [String: Any])
+        result["included_task_ids"] = (1...257).map {
+            String(format: "00000000-0000-4000-8000-%012d", $0)
+        }
+        var cohorts = try XCTUnwrap(result["cohorts"] as? [[String: Any]])
+        cohorts[0]["included_tasks"] = 255
+        cohorts[0]["outcomes"] = ["accepted": 255, "partial": 0, "rejected": 0, "pending": 0,
+                                    "unknown": 0, "unassessed": 0, "assessed": 255]
+        cohorts[0]["usage"] = ["tasks_with_observed_attributed_tokens": 0,
+                                 "tasks_without_observed_attributed_tokens": 255,
+                                 "observed_attributed_tokens": 0]
+        result["cohorts"] = cohorts
+        var exact = try XCTUnwrap(result["exact_estimation"] as? [String: Any])
+        var counts = try XCTUnwrap(exact["assessed_counts"] as? [[String: Any]])
+        counts[0] = ["accepted": 255, "partial": 0, "rejected": 0, "total": 255]
+        exact["assessed_counts"] = counts; result["exact_estimation"] = exact; payload["result"] = result
+
+        let decoded = try Self.decode(payload)
+        XCTAssertThrowsError(try XCTUnwrap(decoded.comparisonResult).validateStructure(
+            expectedSpecification: try XCTUnwrap(decoded.specification)))
     }
 
     func testTypedContextEncodesUnknownAndKnownValues() throws {

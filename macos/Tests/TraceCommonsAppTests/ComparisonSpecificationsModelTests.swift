@@ -24,7 +24,7 @@ final class ComparisonSpecificationsModelTests: XCTestCase {
     }
 
     @MainActor
-    func testSuppressedSchemaTwoResultFlowsWithoutContrasts() async throws {
+    func testStructurallyValidSuppressedSchemaTwoResultFlowsWithoutContrasts() async throws {
         let service = try QualifiedSpecificationService(suppressed: true)
         let model = ComparisonSpecificationsModel(service: { try await service.call($0) })
         model.open(); try await settle(model)
