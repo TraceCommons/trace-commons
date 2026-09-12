@@ -133,6 +133,7 @@ pub enum QualifiedSourceAttribution {
 #[serde(rename_all = "snake_case")]
 pub enum QualifiedSourceRule {
     CodexRustV0_154_0TaskRecordsV1,
+    ClaudeCodeV2_1_260AgentBranchV1,
     #[cfg(test)]
     SyntheticReleasedRuleV1,
 }

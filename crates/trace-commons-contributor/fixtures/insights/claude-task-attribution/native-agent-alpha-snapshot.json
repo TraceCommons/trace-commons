@@ -1,0 +1,170 @@
+{
+  "id": "0e2738c330a7da7bf80804d57073a535f6dfe2762b6c955210090dab275c42d1",
+  "source_format": "claude_code",
+  "boundary": "session_proxy",
+  "report": {
+    "schema_version": 1,
+    "provider": {
+      "id": "trace-commons-local",
+      "version": "1",
+      "rubric_version": "descriptive-counts-v1",
+      "execution_mode": "local",
+      "schema_version": 1
+    },
+    "evidence": [
+      {
+        "id": "0e2738c330a7da7bf80804d57073a535f6dfe2762b6c955210090dab275c42d1",
+        "source_digest": "91fc2067312515104cfe02b7f022128bd6bc02506b145918724a405f25a7010f"
+      }
+    ],
+    "metrics": [
+      {
+        "id": "sessions",
+        "value": 1,
+        "coverage": {
+          "observed": 1,
+          "total": 1
+        },
+        "evidence_ids": [
+          "0e2738c330a7da7bf80804d57073a535f6dfe2762b6c955210090dab275c42d1"
+        ]
+      },
+      {
+        "id": "events",
+        "value": 3,
+        "coverage": {
+          "observed": 3,
+          "total": 3
+        },
+        "evidence_ids": [
+          "0e2738c330a7da7bf80804d57073a535f6dfe2762b6c955210090dab275c42d1"
+        ]
+      },
+      {
+        "id": "tool_calls",
+        "value": 0,
+        "coverage": {
+          "observed": 2,
+          "total": 3
+        },
+        "evidence_ids": [
+          "0e2738c330a7da7bf80804d57073a535f6dfe2762b6c955210090dab275c42d1"
+        ]
+      },
+      {
+        "id": "tool_failures",
+        "value": null,
+        "coverage": {
+          "observed": 0,
+          "total": 0
+        },
+        "evidence_ids": [
+          "0e2738c330a7da7bf80804d57073a535f6dfe2762b6c955210090dab275c42d1"
+        ]
+      },
+      {
+        "id": "input_tokens",
+        "value": null,
+        "coverage": {
+          "observed": 0,
+          "total": 1
+        },
+        "evidence_ids": [
+          "0e2738c330a7da7bf80804d57073a535f6dfe2762b6c955210090dab275c42d1"
+        ]
+      },
+      {
+        "id": "output_tokens",
+        "value": null,
+        "coverage": {
+          "observed": 0,
+          "total": 1
+        },
+        "evidence_ids": [
+          "0e2738c330a7da7bf80804d57073a535f6dfe2762b6c955210090dab275c42d1"
+        ]
+      },
+      {
+        "id": "known_outcomes",
+        "value": null,
+        "coverage": {
+          "observed": 0,
+          "total": 1
+        },
+        "evidence_ids": [
+          "0e2738c330a7da7bf80804d57073a535f6dfe2762b6c955210090dab275c42d1"
+        ]
+      }
+    ]
+  },
+  "estimated_cost_usd": null,
+  "cost_unavailable_reason": "adapter_usage_unavailable",
+  "task_category": null,
+  "manual_annotation": null,
+  "model_observations": {
+    "schema_version": 3,
+    "scope": "declared_metadata_only",
+    "source_format": "claude_code",
+    "source_digest": "91fc2067312515104cfe02b7f022128bd6bc02506b145918724a405f25a7010f",
+    "coordinates": "jsonl_physical_lines_one_based",
+    "record_count": 3,
+    "candidate_records": 1,
+    "valid_declarations": 1,
+    "missing_declarations": 0,
+    "invalid_declarations": 0,
+    "omitted_declarations": 0,
+    "model_labels_omitted": false,
+    "mixed_declared_models": false,
+    "declared_models": [
+      "claude-opus-5"
+    ],
+    "declarations": [
+      {
+        "model": "claude-opus-5",
+        "record_index": 3,
+        "kind": "claude_assistant_message"
+      }
+    ]
+  },
+  "outcome_links": [],
+  "time_evidence": null,
+  "usage_evidence": null,
+  "task_attribution": null,
+  "claude_task_attribution": {
+    "schema_version": 1,
+    "extractor_version": 1,
+    "profile_id": "claude-code-v2.1.260-observed-agent-branch-v1",
+    "observed_writer_version": "2.1.260",
+    "qualification_scope": "observed_writer_agent_branch_records",
+    "source_digest": "91fc2067312515104cfe02b7f022128bd6bc02506b145918724a405f25a7010f",
+    "record_count": 3,
+    "recognized_records": 3,
+    "root_session_identity_sha256": "5e00983a13abf9d7374cfa67b3add7d932988c6825b3b0b68b002192cce3b3a0",
+    "agent_branch_identity_sha256": "f3bdb34defc65aea459ea10b542b2a0c55b021e8eb841f427e3457b510f55934",
+    "declared_model": "claude-opus-5",
+    "model_selector": "claude-opus-5[1m]",
+    "context_window_selector": "1m",
+    "state": {
+      "status": "attributed",
+      "branch": {
+        "terminal_physical_line": 3,
+        "termination": "observed_branch_segment_ended",
+        "tool_calls": 0,
+        "tool_protocol_responses": 0,
+        "repeated_assistant_records": 0,
+        "tool_pairs": [],
+        "repeated_assistant_refs": [],
+        "material_attachment_provenance_sha256": "239b43cd595bc6543f2b6f471e10a79e416f1e99b0e1edcaf903a561072b6a11",
+        "attachments": [
+          {
+            "kind": "model",
+            "physical_line": 2,
+            "canonical_payload_sha256": "0b5ba36cf38ea9a739e043f10127d817366f56c3c1cc95762f5b039dda14a457"
+          }
+        ],
+        "background_work": []
+      }
+    }
+  },
+  "analyzed_at": "2026-09-12T00:00:03Z"
+}

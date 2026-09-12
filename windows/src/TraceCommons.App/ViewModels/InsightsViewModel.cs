@@ -562,10 +562,13 @@ public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
         ResetAssessment();
         Changed();
     }
-    private void RenderEvidence(InsightEvidence projection, string? snapshotId)
+    private void RenderEvidence(InsightEvidence projection, string? snapshotId, string sourceFormat)
     {
         ModelReferences.Clear();
         OutcomeEvidence.Clear();
+        if (projection.ClaudeTaskAttribution is { } claudeAttribution &&
+            !claudeAttribution.IsSupported(sourceFormat))
+            throw new InvalidOperationException("insights-response-invalid");
         if (projection.ModelObservations is { } models)
         {
             if (!models.IsSupported() || models.Scope != "declared_metadata_only" ||
@@ -698,7 +701,11 @@ public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
         ++_selectionVersion;
         CommitId = "";
         CurrentId = saved ? insight.GetProperty("id").GetString() : null;
-        RenderEvidence(projection, CurrentId);
+        RenderEvidence(
+            projection,
+            CurrentId,
+            insight.GetProperty("source_format").GetString()
+                ?? throw new InvalidOperationException("insights-response-invalid"));
         var report = insight.GetProperty("report");
         var provider = report.GetProperty("provider");
         var lines = new List<string> {

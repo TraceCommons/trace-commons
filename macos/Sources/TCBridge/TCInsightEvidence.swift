@@ -1,5 +1,17 @@
 import Foundation
 
+public struct ClaudeTaskAttributionEvidence: Decodable, Sendable {
+    public let schema_version, extractor_version: UInt32
+    public let profile_id, observed_writer_version, qualification_scope, source_digest: String
+    public let record_count, recognized_records: UInt64
+    public let root_session_identity_sha256, agent_branch_identity_sha256: String?
+    public let declared_model, model_selector, context_window_selector: String?
+    public let state: State
+    public struct State: Decodable, Sendable {
+        public let status: String
+    }
+}
+
 public struct InsightModelObservations: Decodable, Sendable {
     public let schema_version: UInt32
     public let scope: Scope
@@ -68,6 +80,18 @@ public struct InsightOutcomeLink: Decodable, Sendable, Identifiable {
 
 extension LocalInsight {
     func validateSupportedEvidence() throws {
+        if let attribution = claude_task_attribution {
+            guard source_format == "claude_code", attribution.schema_version == 1,
+                  attribution.extractor_version == 1,
+                  attribution.profile_id == "claude-code-v2.1.260-observed-agent-branch-v1",
+                  attribution.observed_writer_version == "2.1.260",
+                  attribution.qualification_scope == "observed_writer_agent_branch_records",
+                  attribution.record_count > 0,
+                  attribution.recognized_records <= attribution.record_count,
+                  ["attributed", "unavailable"].contains(attribution.state.status) else {
+                throw InsightsError.invalidResponse
+            }
+        }
         if let models = model_observations {
             switch models.schema_version {
             case 1:

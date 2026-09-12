@@ -83,6 +83,7 @@ public sealed class InsightEvidenceTests
     {
         var legacy = InsightEvidence.Decode(Json(InsightsTests.Insight));
         Assert.Null(legacy.ModelObservations);
+        Assert.Null(legacy.ClaudeTaskAttribution);
         Assert.Empty(legacy.OutcomeLinks);
         var current = InsightEvidence.Decode(Json(Fixture()));
         Assert.True(current.ModelObservations!.MixedDeclaredModels);
@@ -96,6 +97,21 @@ public sealed class InsightEvidenceTests
         var leaked = InsightEvidence.Decode(Json(Fixture().Replace(
             "codex_session_metadata", "claude_assistant_message", StringComparison.Ordinal)));
         Assert.False(leaked.ModelObservations!.IsSupported());
+    }
+    [Fact]
+    public void ClaudeAttributionIsAdditiveAndSourceSpecific()
+    {
+        var snapshot = JsonNode.Parse(InsightsTests.Insight)!;
+        snapshot["source_format"] = "claude_code";
+        snapshot["claude_task_attribution"] = JsonNode.Parse("""
+          {"schema_version":1,"extractor_version":1,"profile_id":"claude-code-v2.1.260-observed-agent-branch-v1",
+           "observed_writer_version":"2.1.260","qualification_scope":"observed_writer_agent_branch_records",
+           "source_digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+           "record_count":3,"recognized_records":3,"state":{"status":"attributed","branch":{}}}
+          """);
+        var current = InsightEvidence.Decode(Json(snapshot.ToJsonString()));
+        Assert.True(current.ClaudeTaskAttribution!.IsSupported("claude_code"));
+        Assert.False(current.ClaudeTaskAttribution.IsSupported("codex"));
     }
     [Fact]
     public void CodexTurnContextSchemaAcceptsKnownAbsenceAndRejectsForgedCoverage()

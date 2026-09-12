@@ -316,6 +316,7 @@ public struct LocalInsight: Decodable, Sendable, Identifiable {
     public let cost_unavailable_reason: String
     public let manual_annotation: Annotation?
     public let model_observations: InsightModelObservations?
+    public let claude_task_attribution: ClaudeTaskAttributionEvidence?
     public let outcome_links: [InsightOutcomeLink]?
     public struct Annotation: Decodable, Sendable {
         public let category, outcome, provenance, recorded_at, source_digest: String

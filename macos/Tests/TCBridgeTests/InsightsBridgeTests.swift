@@ -80,4 +80,35 @@ final class InsightsBridgeTests: XCTestCase {
         XCTAssertEqual(Set(listed.map(\.id)), Set([saved.id, absentSaved.id]))
         XCTAssertTrue(listed.allSatisfy { $0.model_observations?.schema_version == 2 })
     }
+
+    func testClaudeAttributionSurvivesNativeAnalyzeSaveAndList() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = root.appendingPathComponent("insights")
+        let repository = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+        let file = repository.appendingPathComponent(
+            "crates/trace-commons-contributor/fixtures/insights/claude-task-attribution/agent-alpha.jsonl")
+        let original = try Data(contentsOf: file)
+        func call(_ operation: InsightsRequest.Operation) throws -> InsightsResponse {
+            try TCInsights.call(.init(storeDirectory: store.path, operation: operation))
+        }
+        let preview = try XCTUnwrap(call(.init("analyze", source: "claude_code", file: file.path, save: false)).insight)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: store.path))
+        XCTAssertEqual(preview.claude_task_attribution?.state.status, "attributed")
+        XCTAssertEqual(preview.claude_task_attribution?.declared_model, "claude-opus-5")
+        XCTAssertEqual(preview.claude_task_attribution?.context_window_selector, "1m")
+        let saved = try XCTUnwrap(call(.init("analyze", source: "claude_code", file: file.path, save: true)).insight)
+        XCTAssertEqual(saved.id, preview.id)
+        let listed = try XCTUnwrap(call(.init("list")).insights)
+        XCTAssertEqual(listed.count, 1)
+        XCTAssertEqual(listed.first?.claude_task_attribution?.source_digest,
+                       preview.claude_task_attribution?.source_digest)
+        XCTAssertEqual(listed.first?.claude_task_attribution?.state.status, "attributed")
+        XCTAssertEqual(try call(.init("delete", id: saved.id)).deleted, true)
+        XCTAssertEqual(try Data(contentsOf: file), original)
+    }
+
 }

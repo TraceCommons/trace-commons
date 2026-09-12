@@ -5,6 +5,7 @@
 pub mod card_presentation;
 pub mod card_store;
 pub mod cards;
+pub mod claude_task_attribution;
 #[cfg(test)]
 pub(crate) mod comparison_estimator;
 pub mod comparison_spec_store;
@@ -37,7 +38,7 @@ use trace_commons_protocol::insights::{
 };
 
 const MAX_SOURCE_BYTES: u64 = 16 * 1024 * 1024;
-const STORE_VERSION: u32 = 9;
+const STORE_VERSION: u32 = 10;
 const MAX_OUTCOME_LINKS: usize = 128;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -144,6 +145,10 @@ pub struct LocalInsight {
     /// remain unavailable until a qualified adapter produces this evidence.
     #[serde(default)]
     pub task_attribution: Option<task_attribution::CodexTaskAttributionEvidence>,
+    /// Observed Claude agent-branch structure. It does not establish a whole
+    /// task, human prompt, outcome, independence, or asynchronous completion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claude_task_attribution: Option<claude_task_attribution::ClaudeTaskAttributionEvidence>,
     /// Import snapshot time; source freshness requires explicit reimport.
     pub analyzed_at: chrono::DateTime<chrono::Utc>,
 }
@@ -273,6 +278,12 @@ pub fn analyze_file(format: SourceFormat, path: &Path) -> Result<LocalInsight> {
         ),
         SourceFormat::ClaudeCode | SourceFormat::Trajectory => None,
     };
+    let claude_task_attribution = match format {
+        SourceFormat::ClaudeCode => Some(
+            claude_task_attribution::classify_claude_task_attribution(&bytes)?,
+        ),
+        SourceFormat::Codex | SourceFormat::Trajectory => None,
+    };
     let input = provider::ProviderInput::first_party(evidence, &events);
     let report = provider::dispatch(&provider::FirstPartyProvider, &input)?;
     Ok(LocalInsight {
@@ -293,6 +304,7 @@ pub fn analyze_file(format: SourceFormat, path: &Path) -> Result<LocalInsight> {
         time_evidence,
         usage_evidence,
         task_attribution,
+        claude_task_attribution,
         analyzed_at: chrono::Utc::now(),
     })
 }
@@ -479,12 +491,23 @@ impl LocalInsightStore {
             if index.version < 9 && insight.task_attribution.is_some() {
                 bail!("insights_store_invalid");
             }
+            if index.version < 10 && insight.claude_task_attribution.is_some() {
+                bail!("insights_store_invalid");
+            }
             if let Some(usage) = &insight.usage_evidence {
                 usage.validate_binding(insight.source_format, &evidence[0].source_digest)?;
             }
             if let Some(attribution) = &insight.task_attribution {
                 attribution.validate()?;
                 if insight.source_format != SourceFormat::Codex
+                    || attribution.source_digest != evidence[0].source_digest
+                {
+                    bail!("insights_store_invalid");
+                }
+            }
+            if let Some(attribution) = &insight.claude_task_attribution {
+                attribution.validate()?;
+                if insight.source_format != SourceFormat::ClaudeCode
                     || attribution.source_digest != evidence[0].source_digest
                 {
                     bail!("insights_store_invalid");
@@ -1044,6 +1067,63 @@ mod tests {
     }
 
     #[test]
+    fn claude_attribution_store_is_source_exclusive_and_requires_v10() {
+        let dir = tempfile::tempdir().unwrap();
+        let claude_path = dir.path().join("claude.jsonl");
+        fs::write(
+            &claude_path,
+            include_bytes!("../fixtures/insights/claude-task-attribution/agent-alpha.jsonl"),
+        )
+        .unwrap();
+        let codex_path = dir.path().join("codex.jsonl");
+        fs::write(
+            &codex_path,
+            include_bytes!("../fixtures/insights/codex-task-attribution/codex-release-0.154.0-alpha-direct.jsonl"),
+        )
+        .unwrap();
+        let store = LocalInsightStore::open(&dir.path().join("store")).unwrap();
+        let claude = store
+            .import(SourceFormat::ClaudeCode, &claude_path)
+            .unwrap();
+        let codex = store.import(SourceFormat::Codex, &codex_path).unwrap();
+        let path = store.dir.join("index.json");
+        let original: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+
+        let mut both = original.clone();
+        both["reports"][&claude.id]["task_attribution"] =
+            original["reports"][&codex.id]["task_attribution"].clone();
+        fs::write(&path, serde_json::to_vec(&both).unwrap()).unwrap();
+        assert!(store.list().is_err());
+
+        let mut legacy = original.clone();
+        legacy["version"] = 9.into();
+        fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        assert!(store.list().is_err());
+
+        let mut wrong_source = original;
+        wrong_source["reports"][&claude.id]["source_format"] = "codex".into();
+        fs::write(&path, serde_json::to_vec(&wrong_source).unwrap()).unwrap();
+        assert!(store.list().is_err());
+    }
+
+    #[test]
+    fn shared_native_claude_snapshot_matches_the_rust_evidence_contract() {
+        let insight: LocalInsight = serde_json::from_slice(include_bytes!(
+            "../fixtures/insights/claude-task-attribution/native-agent-alpha-snapshot.json"
+        ))
+        .unwrap();
+        assert_eq!(insight.source_format, SourceFormat::ClaudeCode);
+        assert!(insight.task_attribution.is_none());
+        let attribution = insight.claude_task_attribution.as_ref().unwrap();
+        attribution.validate().unwrap();
+        assert_eq!(
+            attribution.source_digest,
+            insight.report.evidence[0].source_digest
+        );
+    }
+
+    #[test]
     fn unknown_usage_and_outcomes_are_not_zero_or_tool_success() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("fixture.jsonl");
@@ -1086,7 +1166,7 @@ mod tests {
     }
 
     #[test]
-    fn claude_code_import_preserves_distinct_same_id_blocks_without_claiming_attribution() {
+    fn claude_code_import_preserves_distinct_same_id_blocks_with_typed_unavailability() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("fixture.jsonl");
         fs::write(
@@ -1122,6 +1202,13 @@ mod tests {
         assert!(analyzed.usage_evidence.is_none());
         assert!(analyzed.time_evidence.is_none());
         assert!(analyzed.task_attribution.is_none());
+        assert!(matches!(
+            analyzed.claude_task_attribution.unwrap().state,
+            claude_task_attribution::ClaudeTaskAttributionState::Unavailable {
+                reason: claude_task_attribution::ClaudeTaskUnavailableReason::IdentityConflict,
+                ..
+            }
+        ));
         assert_eq!(
             analyzed.report.evidence[0].source_digest,
             digest(&fs::read(path).unwrap())

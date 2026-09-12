@@ -1460,6 +1460,11 @@ impl InsightsView {
         self.evidence_body.append(&label(&evidence::render_models(
             insight.model_observations.as_ref(),
         )));
+        if let Some(attribution) =
+            evidence::render_claude_attribution(insight.claude_task_attribution.as_ref())
+        {
+            self.evidence_body.append(&label(&attribution));
+        }
         self.evidence_body
             .append(&label(copy("linked_evidence_title")));
         self.evidence_body.append(&label(copy("link_notice")));
@@ -2390,6 +2395,7 @@ mod tests {
         };
         let insight = LocalInsight {
             task_attribution: None,
+            claude_task_attribution: None,
             id: "fixture".into(),
             source_format: SourceFormat::Codex,
             boundary: trace_commons_contributor::insights::EpisodeBoundary::SessionProxy,
