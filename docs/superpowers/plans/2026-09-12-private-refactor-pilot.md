@@ -1,6 +1,6 @@
 # Private refactor pilot
 
-Status: preparation; the user authorized locating candidate traces in local Claude history. Source-to-task matching and qualification remain pending. The user assessed all three final PR outcomes as accepted; those assessments do not establish complete trace boundaries or independent task attribution.
+Status: local retrospective evidence audit in progress. Three authorized Claude files have been imported into a private pilot store, and the user assessed all three final PR outcomes as accepted. Original patches for #616 and #606 match the corresponding final PR patches; #632 has unresolved later integration changes. Complete task boundaries, historical context, independence, and comparison qualification remain unverified.
 Parent: [personal refactor comparison delivery plan](2026-09-12-personal-refactor-comparison.md).
 
 Reward systems for both missions and insights are outside scope and owned by Abhishek. This pilot collects evidence and user assessments without reward eligibility, compensation, or payout features.
@@ -15,9 +15,9 @@ Use Trace Commons for the first local retrospective pilot. Start with these comp
 | [#606: operator CLI plumbing](https://github.com/TraceCommons/trace-commons/pull/606) | Several callers; request/output compatibility. |
 | [#632: daemon IPC handlers](https://github.com/TraceCommons/trace-commons/pull/632) | Larger extraction; handler behavior and lock lifetime. |
 
-These PRs are merged, but neither merge status nor passing tests supplies the user's outcome assessment. Original traces have not been inspected or qualified. A PR is a candidate work item, not automatically one independent task: check whether several PRs arose from one session or one task spanned multiple PRs.
+These PRs are merged, but neither merge status nor passing tests supplies the user's outcome assessment. Inspection found that all three selected files are child-agent branches of one parent session and retain one valid declared model cohort. They cannot supply a two-model comparison or three independent observations. A PR remains a candidate work item: complete attempt membership and final integration must be reviewed separately from patch matching.
 
-The user selects the original trace paths or an explicit directory to inspect. Do not synthesize a replacement historical trace, alter model labels to create cohorts, infer an outcome from merge status, or replay completed work and call it historical evidence. Keep source files and pilot observations local.
+The user authorized locating these traces under local Claude history; the three selected originals remain unchanged. Further source inspection stays within that authorization. Do not synthesize a replacement historical trace, alter model labels to create cohorts, infer an outcome from merge status, or replay completed work and call it historical evidence. Keep source files and pilot observations local.
 
 ## Prepare the local workflow
 
@@ -31,7 +31,15 @@ TC_PILOT_STORE='/absolute/path/to/private-refactor-pilot/insights'
 "$TC_BIN" --json insights --store-dir "$TC_PILOT_STORE" list
 ```
 
-An empty-store read should leave the store absent. Record the application commit and source format/version in the local pilot notes. A version label alone does not qualify a source. Native Claude Code files can now be imported descriptively with `--source claude-code`; this does not provide model, usage, time, or comparison attribution. The [source profile](../specs/2026-09-12-codex-comparison-source-profile.md) currently admits only bounded Codex 0.154.0 exec traces for comparisons. Older, interactive, delegated, or unsupported traces may still import generically when their selected source parser accepts them, but remain unavailable for comparison; record that as coverage feedback.
+An empty-store read should leave the store absent. Record the application commit and source format/version in the local pilot notes. A version label alone does not qualify a source. Native Claude Code files can be imported descriptively with `--source claude-code` (#939). The model-observation layer (#940) adds source-declared model labels and physical record references; it does not establish serving identity, task authorship, usage, time, or comparison attribution. The [Codex source profile](../specs/2026-09-12-codex-comparison-source-profile.md) admits bounded Codex 0.154.0 exec traces for comparisons. The [Claude agent-branch source profile](../specs/2026-09-12-claude-comparison-source-profile.md) is specified, but its implementation remains under independent review and is not yet admitted. Older, interactive, delegated, or unsupported traces may still import generically when their selected source parser accepts them, but remain unavailable for comparison; record that as coverage feedback.
+
+## Current local evidence checkpoint
+
+The original pilot store retains three accepted assessments, no independence confirmations, and zero fully qualified comparison tasks. Historical context and complete task boundaries still need review. No workflow timing, abandonment, or comprehension result has been collected.
+
+A disposable copy exercised the pending Claude attribution implementation: legacy reads preserved the store bytes, explicit reimport did not silently update frozen task bindings, and an explicit same-evidence binding refresh preserved the accepted value and assessment timestamp. Source attribution became available for #616 and #606; #632 remained unavailable at an unsupported terminal record. All three shared the frozen parent-session overlap, which remained after deleting a source from the copy. These are implementation checks on an uncommitted build, not source-profile admission or a completed human pilot. Independent review found validation gaps; fixes and a repeat of these checks are required before recording a qualified implementation checkpoint.
+
+Keep raw files, local paths, identifiers, and detailed pilot artifacts local. Publish only the bounded status and implementation changes here.
 
 ## Import and review one task
 
