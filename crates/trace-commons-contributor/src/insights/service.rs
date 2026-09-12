@@ -124,6 +124,19 @@ pub enum LocalInsightsOperation {
     ClearAnnotation {
         id: String,
     },
+    LinkGit {
+        id: String,
+        repository: PathBuf,
+        commit: String,
+    },
+    LinkTestReport {
+        id: String,
+        file: PathBuf,
+    },
+    UnlinkEvidence {
+        id: String,
+        evidence_id: String,
+    },
     Usage {
         source: UsageSource,
         file: PathBuf,
@@ -155,6 +168,15 @@ pub enum LocalInsightsResponse {
         insight: Box<LocalInsight>,
     },
     ClearAnnotation {
+        insight: Box<LocalInsight>,
+    },
+    LinkGit {
+        insight: Box<LocalInsight>,
+    },
+    LinkTestReport {
+        insight: Box<LocalInsight>,
+    },
+    UnlinkEvidence {
         insight: Box<LocalInsight>,
     },
     Usage {
@@ -225,6 +247,39 @@ pub fn execute(request: LocalInsightsRequest) -> Result<LocalInsightsResponse> {
         LocalInsightsOperation::ClearAnnotation { id } => LocalInsightsResponse::ClearAnnotation {
             insight: Box::new(store()?.clear_annotation(&id)?),
         },
+        LocalInsightsOperation::LinkGit {
+            id,
+            repository,
+            commit,
+        } => {
+            let store = store()?;
+            store.explain(&id)?;
+            let evidence = super::outcomes::inspect_git_commit(&repository, &commit)?;
+            LocalInsightsResponse::LinkGit {
+                insight: Box::new(
+                    store
+                        .link_outcome(&id, super::outcomes::OutcomeEvidence::GitCommit(evidence))?,
+                ),
+            }
+        }
+        LocalInsightsOperation::LinkTestReport { id, file } => {
+            let store = store()?;
+            store.explain(&id)?;
+            let evidence = super::outcomes::import_test_report(&file)?;
+            LocalInsightsResponse::LinkTestReport {
+                insight: Box::new(
+                    store.link_outcome(
+                        &id,
+                        super::outcomes::OutcomeEvidence::TestReport(evidence),
+                    )?,
+                ),
+            }
+        }
+        LocalInsightsOperation::UnlinkEvidence { id, evidence_id } => {
+            LocalInsightsResponse::UnlinkEvidence {
+                insight: Box::new(store()?.unlink_outcome(&id, &evidence_id)?),
+            }
+        }
         LocalInsightsOperation::Usage { source, file } => LocalInsightsResponse::Usage {
             usage: extract_usage(source, &super::bounded_read(&file)?)?,
         },

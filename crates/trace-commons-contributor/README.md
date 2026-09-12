@@ -147,6 +147,25 @@ outcomes are `accepted`, `partial`, `rejected`, or `unknown`. Assessments carry
 user-reported provenance, a timestamp, and the source digest. They remain
 separate from verified outcome metrics and reset when the source content changes.
 
+New analyses retain bounded declared-model metadata with source-digest record
+references. Mixed declarations remain distinct from verified model attribution;
+missing declarations do not prove exclusive model use. Legacy snapshots require
+explicit reimport to populate these observations.
+
+Link evidence explicitly to a saved snapshot:
+
+```bash
+trace-commons-contributor insights link-git INSIGHT_ID --repository /chosen/repo --commit FULL_OBJECT_ID
+trace-commons-contributor insights link-test-report INSIGHT_ID --file /chosen/report.json
+trace-commons-contributor insights unlink-evidence INSIGHT_ID EVIDENCE_ID
+```
+
+Git inspection reads an exact local commit object. Test reports remain imported
+assertions; neither operation runs tests or proves accepted work. Repeated links
+deduplicate, and changed source bytes do not inherit old links. The
+[model and outcome evidence plan](../../docs/superpowers/plans/2026-09-11-insights-model-outcome-evidence.md)
+describes report schema, authority, limits, and store v3 migration.
+
 Inspect native usage separately from the saved descriptive report:
 
 ```bash

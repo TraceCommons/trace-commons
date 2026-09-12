@@ -976,6 +976,8 @@ mod tests {
             cost_unavailable_reason: "unavailable".into(),
             task_category: None,
             manual_annotation: None,
+            model_observations: None,
+            outcome_links: Vec::new(),
             analyzed_at: chrono::Utc::now(),
         };
         let text = render(&insight);

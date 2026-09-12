@@ -377,3 +377,53 @@ fn summary_counts_only_saved_snapshots_and_separates_manual_assessments() {
         0
     );
 }
+
+#[test]
+fn explicit_test_evidence_links_are_local_removable_and_not_verified_outcomes() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("enrollment");
+    let store = dir.path().join("insights");
+    let file = dir.path().join("source.jsonl");
+    fixture(&file, false);
+    let saved = value(invoke(
+        &config,
+        &store,
+        &[
+            "analyze",
+            "--source",
+            "trajectory",
+            "--file",
+            file.to_str().unwrap(),
+            "--save",
+        ],
+    ));
+    let id = saved["id"].as_str().unwrap();
+    assert!(saved["model_observations"].is_object());
+    let report = dir.path().join("report.json");
+    std::fs::write(&report, br#"{"schema_version":1,"runner":"cargo-test","passed":3,"failed":1,"skipped":0,"observed_at":"2026-09-11T00:00:00Z","commit_id":null}"#).unwrap();
+    let linked = value(invoke(
+        &config,
+        &store,
+        &["link-test-report", id, "--file", report.to_str().unwrap()],
+    ));
+    let evidence_id = linked["outcome_links"][0]["id"].as_str().unwrap();
+    assert_eq!(linked["outcome_links"][0]["provenance"], "user_linked");
+    assert!(linked["manual_annotation"].is_null());
+    let summary = value(invoke(&config, &store, &["summary"]));
+    assert_eq!(summary["user_reported"]["assessed_snapshots"], 0);
+    let metrics = summary["metrics"].as_array().unwrap();
+    assert!(
+        metrics
+            .iter()
+            .find(|m| m["id"] == "known_outcomes")
+            .unwrap()["observed_value_sum"]
+            .is_null()
+    );
+    let cleared = value(invoke(
+        &config,
+        &store,
+        &["unlink-evidence", id, evidence_id],
+    ));
+    assert_eq!(cleared["outcome_links"].as_array().unwrap().len(), 0);
+    assert!(report.exists() && file.exists() && !config.exists());
+}

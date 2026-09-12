@@ -24,7 +24,8 @@ use trace_commons_protocol::insights::{
 use crate::source::SessionEventKind;
 
 const MAX_SOURCE_BYTES: u64 = 16 * 1024 * 1024;
-const STORE_VERSION: u32 = 2;
+const STORE_VERSION: u32 = 3;
+const MAX_OUTCOME_LINKS: usize = 128;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -79,6 +80,23 @@ pub struct ManualAnnotation {
     pub source_digest: String,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OutcomeLinkProvenance {
+    UserLinked,
+}
+
+/// An explicit user association, not proof that this session caused an outcome.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OutcomeLink {
+    pub id: String,
+    pub source_digest: String,
+    pub linked_at: chrono::DateTime<chrono::Utc>,
+    pub provenance: OutcomeLinkProvenance,
+    pub evidence: outcomes::OutcomeEvidence,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LocalInsight {
     pub id: String,
@@ -93,6 +111,12 @@ pub struct LocalInsight {
     /// Separate user-reported evidence; never folded into observed metrics.
     #[serde(default)]
     pub manual_annotation: Option<ManualAnnotation>,
+    /// Legacy snapshots remain unknown until explicit reimport.
+    #[serde(default)]
+    pub model_observations: Option<models::ModelObservations>,
+    /// Explicit many-to-many evidence associations; no inferred success metric.
+    #[serde(default)]
+    pub outcome_links: Vec<OutcomeLink>,
     /// Import snapshot time; source freshness requires explicit reimport.
     pub analyzed_at: chrono::DateTime<chrono::Utc>,
 }
@@ -257,6 +281,8 @@ pub fn analyze_file(format: SourceFormat, path: &Path) -> Result<LocalInsight> {
         cost_unavailable_reason: "adapter_usage_unavailable".into(),
         task_category: None,
         manual_annotation: None,
+        model_observations: Some(models::extract_model_observations(format, &bytes)?),
+        outcome_links: Vec::new(),
         analyzed_at: chrono::Utc::now(),
     })
 }
@@ -340,7 +366,7 @@ impl LocalInsightStore {
             },
             Err(_) => bail!("insights_store_unreadable"),
         };
-        if index.version != 1 && index.version != STORE_VERSION {
+        if !(1..=STORE_VERSION).contains(&index.version) {
             bail!("insights_store_version_unsupported");
         }
         for (id, insight) in &index.reports {
@@ -368,6 +394,32 @@ impl LocalInsightStore {
                 .report
                 .validate_for(&ProviderManifest::first_party(), evidence)?;
             validate_local_metrics(insight)?;
+            if index.version < 3
+                && (insight.model_observations.is_some() || !insight.outcome_links.is_empty())
+            {
+                bail!("insights_store_invalid");
+            }
+            if let Some(models) = &insight.model_observations {
+                models.validate()?;
+                if models.source_digest != evidence[0].source_digest
+                    || models.source_format != insight.source_format
+                {
+                    bail!("insights_store_invalid");
+                }
+            }
+            if insight.outcome_links.len() > MAX_OUTCOME_LINKS {
+                bail!("insights_store_invalid");
+            }
+            let mut link_ids = BTreeSet::new();
+            for link in &insight.outcome_links {
+                link.evidence.validate()?;
+                if link.source_digest != evidence[0].source_digest
+                    || link.id != link.evidence.identity_digest()?
+                    || !link_ids.insert(&link.id)
+                {
+                    bail!("insights_store_invalid");
+                }
+            }
         }
         if index
             .aliases
@@ -376,7 +428,7 @@ impl LocalInsightStore {
         {
             bail!("insights_store_invalid");
         }
-        // Legacy snapshots remain readable; the next mutation persists v2.
+        // Legacy snapshots remain readable; the next mutation persists v3.
         index.version = STORE_VERSION;
         Ok((lock, index))
     }
@@ -405,6 +457,7 @@ impl LocalInsightStore {
         // digest never inherits the old snapshot's user assessment.
         if let Some(previous) = index.reports.get(&insight.id) {
             insight.manual_annotation = previous.manual_annotation.clone();
+            insight.outcome_links = previous.outcome_links.clone();
         }
         index.aliases.insert(alias, insight.id.clone());
         index.reports.insert(insight.id.clone(), insight.clone());
@@ -447,6 +500,56 @@ impl LocalInsightStore {
             .get_mut(id)
             .ok_or_else(|| anyhow!("insights_not_found"))?;
         insight.manual_annotation = None;
+        let result = insight.clone();
+        self.save(&index)?;
+        Ok(result)
+    }
+
+    /// Associate inspected/imported evidence only after explicit user selection.
+    /// Repeated associations preserve the original link time and do not duplicate.
+    pub fn link_outcome(
+        &self,
+        id: &str,
+        evidence: outcomes::OutcomeEvidence,
+    ) -> Result<LocalInsight> {
+        evidence.validate()?;
+        let evidence_id = evidence.identity_digest()?;
+        let (_lock, mut index) = self.locked()?;
+        let insight = index
+            .reports
+            .get_mut(id)
+            .ok_or_else(|| anyhow!("insights_not_found"))?;
+        if !insight
+            .outcome_links
+            .iter()
+            .any(|link| link.id == evidence_id)
+        {
+            if insight.outcome_links.len() >= MAX_OUTCOME_LINKS {
+                bail!("insights_outcome_links_full");
+            }
+            insight.outcome_links.push(OutcomeLink {
+                id: evidence_id,
+                source_digest: insight.report.evidence[0].source_digest.clone(),
+                linked_at: chrono::Utc::now(),
+                provenance: OutcomeLinkProvenance::UserLinked,
+                evidence,
+            });
+            insight.outcome_links.sort_by(|a, b| a.id.cmp(&b.id));
+            let result = insight.clone();
+            self.save(&index)?;
+            return Ok(result);
+        }
+        Ok(insight.clone())
+    }
+
+    /// Remove only the selected evidence association; original artifacts remain.
+    pub fn unlink_outcome(&self, id: &str, evidence_id: &str) -> Result<LocalInsight> {
+        let (_lock, mut index) = self.locked()?;
+        let insight = index
+            .reports
+            .get_mut(id)
+            .ok_or_else(|| anyhow!("insights_not_found"))?;
+        insight.outcome_links.retain(|link| link.id != evidence_id);
         let result = insight.clone();
         self.save(&index)?;
         Ok(result)
@@ -709,6 +812,14 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .remove("manual_annotation");
+        legacy["reports"][&insight.id]
+            .as_object_mut()
+            .unwrap()
+            .remove("model_observations");
+        legacy["reports"][&insight.id]
+            .as_object_mut()
+            .unwrap()
+            .remove("outcome_links");
         fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
         assert!(
             store
@@ -895,3 +1006,7 @@ mod tests {
         assert!(store.list().is_err());
     }
 }
+
+#[cfg(test)]
+#[path = "insights/evidence_tests.rs"]
+mod evidence_tests;
