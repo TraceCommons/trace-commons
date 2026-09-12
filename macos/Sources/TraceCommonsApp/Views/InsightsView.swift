@@ -63,6 +63,8 @@ struct InsightsView: View {
                         }
                     }
                     Divider()
+                    InsightsEpisodesView(model: model)
+                    Divider()
                     Text(model.text("saved")).font(.headline)
                     if model.snapshots.isEmpty { Text(model.text("empty")) }
                     ForEach(model.snapshots) { insight in

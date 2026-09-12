@@ -26,7 +26,7 @@ final class InsightMutationEffectsTests: XCTestCase {
         })
         func settle() async throws {
             for _ in 0..<500 {
-                if !model.busy { return }
+                if !model.busy && !model.episodeBusy { return }
                 try await Task.sleep(for: .milliseconds(10))
             }
             XCTFail("Local operation did not finish")
@@ -55,7 +55,7 @@ final class InsightMutationEffectsTests: XCTestCase {
         let model = InsightsModel(service: { request in try await service.call(request) })
         func settle() async throws {
             for _ in 0..<500 {
-                if !model.busy { return }
+                if !model.busy && !model.episodeBusy { return }
                 try await Task.sleep(for: .milliseconds(10))
             }
             XCTFail("Operation did not finish")
@@ -67,7 +67,7 @@ final class InsightMutationEffectsTests: XCTestCase {
         XCTAssertEqual(model.invalidatedEpisodeIDs, ["removed-group"])
         XCTAssertNotNil(model.summary)
         let operations = await service.operations
-        XCTAssertEqual(Array(operations.suffix(3)), ["analyze", "list", "summary"])
+        XCTAssertEqual(Array(operations.suffix(4)), ["analyze", "list", "summary", "episode_list"])
         model.refresh()
         XCTAssertTrue(model.invalidatedEpisodeIDs.isEmpty)
         try await settle()
@@ -114,6 +114,7 @@ private actor MutationEffectsService {
         switch operation.type {
         case "copy": response["copy"] = ["error": "operation-failed", "episode_invalidated_notice": "groups removed"]
         case "list": response["insights"] = [snapshot]
+        case "episode_list": response["episodes"] = []
         case "delete": response["deleted"] = true
         default: response["insight"] = snapshot
         }
