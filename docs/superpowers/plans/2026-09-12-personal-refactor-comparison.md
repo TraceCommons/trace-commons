@@ -138,6 +138,8 @@ Implement the estimator/seed above with existing dependencies and checked arithm
 
 ### 4. Complete macOS workflow
 
+The current UI has explicit task/context/outcome/reconfirmation controls. Independent review found two remaining lifecycle corrections: default task dates must use the local calendar, and post-save reconciliation must verify the requested saved specification identity and digests. The isolated pilot also needs an explicit immutable store selection shared by snapshots, tasks, specifications, and evidence drilldown. Supply one launch-selected local directory, show the selected location, and reject malformed selection visibly without falling back to the default store. Reads must not create the store. These changes must preserve source-file security-scoped access and require focused lifecycle/routing verification before the pilot.
+
 Use shared copy and typed service/FFI responses. Support task create, structured context, outcome, frozen/current evidence and overlap review, explicit digest-bound reconfirmation, stale resolution, deletion, specification selection/save, eligibility review, evaluation, and drilldown to task/episode/snapshot/declaration/outcome/usage/Git/test evidence.
 
 Bind callbacks/drafts to presentation generation, task ID/revision/input digest, and specification digest. Reject stale callbacks. Invalidate results after mutations and retain committed success/stale notices if reconciliation fails. Never retry conflicts or reconfirm automatically.
