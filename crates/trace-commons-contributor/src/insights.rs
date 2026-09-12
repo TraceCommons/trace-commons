@@ -285,8 +285,7 @@ pub fn analyze_file(format: SourceFormat, path: &Path) -> Result<LocalInsight> {
         task_category: None,
         manual_annotation: None,
         model_observations: match format {
-            SourceFormat::ClaudeCode => None,
-            SourceFormat::Codex | SourceFormat::Trajectory => {
+            SourceFormat::ClaudeCode | SourceFormat::Codex | SourceFormat::Trajectory => {
                 Some(models::extract_model_observations(format, &bytes)?)
             }
         },
@@ -1115,7 +1114,11 @@ mod tests {
         assert_eq!(metric(MetricId::ToolFailures).value, Some(0));
         assert_eq!(metric(MetricId::InputTokens).value, None);
         assert_eq!(analyzed.source_format, SourceFormat::ClaudeCode);
-        assert!(analyzed.model_observations.is_none());
+        let models = analyzed.model_observations.unwrap();
+        assert_eq!(models.schema_version, 3);
+        assert_eq!(models.candidate_records, 2);
+        assert_eq!(models.valid_declarations, 2);
+        assert_eq!(models.declared_models, ["fixture-model"]);
         assert!(analyzed.usage_evidence.is_none());
         assert!(analyzed.time_evidence.is_none());
         assert!(analyzed.task_attribution.is_none());

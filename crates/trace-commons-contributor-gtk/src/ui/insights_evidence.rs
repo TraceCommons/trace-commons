@@ -74,10 +74,14 @@ pub(super) fn render_models(observation: Option<&ModelObservations>) -> String {
                 DeclarationKind::CodexSessionMetadata => "model_kind_codex_session_metadata",
                 DeclarationKind::CodexTurnContext => "model_kind_codex_turn_context",
                 DeclarationKind::CodexAssistantMessage => "model_kind_codex_assistant_message",
+                DeclarationKind::ClaudeAssistantMessage => {
+                    "model_kind_claude_assistant_message"
+                }
                 DeclarationKind::TrajectoryMetadata => "model_kind_trajectory_metadata",
             })
         ));
     }
+
     text
 }
 
@@ -149,6 +153,48 @@ mod tests {
             GitCommitEvidence, GitEvidenceProvenance, TestEvidenceProvenance, TestReportEvidence,
         },
     };
+
+    #[test]
+    fn claude_declarations_render_physical_line_evidence() {
+        let observation = ModelObservations {
+            schema_version: 3,
+            scope: ModelObservationScope::DeclaredMetadataOnly,
+            source_format: SourceFormat::ClaudeCode,
+            source_digest: "c".repeat(64),
+            coordinates: RecordCoordinates::JsonlPhysicalLinesOneBased,
+            record_count: 7,
+            candidate_records: 4,
+            valid_declarations: 2,
+            missing_declarations: 1,
+            invalid_declarations: 1,
+            omitted_declarations: 0,
+            model_labels_omitted: false,
+            mixed_declared_models: false,
+            declared_models: vec!["claude-declared".into()],
+            declarations: vec![
+                ModelDeclaration {
+                    model: "claude-declared".into(),
+                    record_index: 4,
+                    kind: DeclarationKind::ClaudeAssistantMessage,
+                },
+                ModelDeclaration {
+                    model: "claude-declared".into(),
+                    record_index: 6,
+                    kind: DeclarationKind::ClaudeAssistantMessage,
+                },
+            ],
+        };
+
+        observation.validate().unwrap();
+        let text = render_models(Some(&observation));
+        assert!(text.contains(copy("model_kind_claude_assistant_message")));
+        assert!(text.contains(copy("model_coordinates_jsonl_physical_lines_one_based")));
+        assert!(text.contains(&format!("{}: 4", copy("model_candidates"))));
+        assert!(text.contains(&format!("{}: 2", copy("model_valid"))));
+        assert!(text.contains(&format!("{}: 1", copy("model_missing"))));
+        assert!(text.contains(&format!("{}: 1", copy("model_invalid"))));
+        assert!(text.contains(&format!("{}: 6", copy("model_record_index"))));
+    }
 
     #[test]
     fn declarations_preserve_missingness_bounds_and_coordinate_origin() {

@@ -26,10 +26,20 @@ final class InsightEvidenceBridgeTests: XCTestCase {
             from: Data(json.replacingOccurrences(of: "declared_metadata_only", with: "verified_identity").utf8)))
         var snapshot = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(legacy.utf8)) as? [String: Any])
         var observations = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
-        observations["schema_version"] = 3
+        observations["schema_version"] = 4
         snapshot["model_observations"] = observations
         let unsupported = try JSONDecoder().decode(LocalInsight.self, from: JSONSerialization.data(withJSONObject: snapshot))
         XCTAssertThrowsError(try unsupported.validateSupportedEvidence())
+        observations["schema_version"] = 1
+        observations["declarations"] = [["model": "fixture-a", "record_index": 1, "kind": "claude_assistant_message"]]
+        observations["declared_models"] = ["fixture-a"]
+        observations["valid_declarations"] = 1
+        observations["missing_declarations"] = 4
+        observations["invalid_declarations"] = 0
+        observations["mixed_declared_models"] = false
+        snapshot["model_observations"] = observations
+        let crossSchemaKind = try JSONDecoder().decode(LocalInsight.self, from: JSONSerialization.data(withJSONObject: snapshot))
+        XCTAssertThrowsError(try crossSchemaKind.validateSupportedEvidence())
     }
     func testCodexTurnContextSchemaAcceptsKnownAbsenceAndRejectsForgedCoverage() throws {
         let valid = """
@@ -39,11 +49,31 @@ final class InsightEvidenceBridgeTests: XCTestCase {
         snapshot["model_observations"] = try JSONSerialization.jsonObject(with: Data(valid.utf8))
         let supported = try JSONDecoder().decode(LocalInsight.self, from: JSONSerialization.data(withJSONObject: snapshot))
         try supported.validateSupportedEvidence()
-
         for replacement in [
             valid.replacingOccurrences(of: "\"candidate_records\":0", with: "\"candidate_records\":1"),
             valid.replacingOccurrences(of: "\"source_format\":\"codex\"", with: "\"source_format\":\"trajectory\""),
             valid.replacingOccurrences(of: "\"declarations\":[]", with: "\"declarations\":[{\"model\":\"x\",\"record_index\":1,\"kind\":\"codex_session_metadata\"}]")
+        ] {
+            snapshot["model_observations"] = try JSONSerialization.jsonObject(with: Data(replacement.utf8))
+            let malformed = try JSONDecoder().decode(LocalInsight.self, from: JSONSerialization.data(withJSONObject: snapshot))
+            XCTAssertThrowsError(try malformed.validateSupportedEvidence())
+        }
+    }
+    func testClaudeAssistantSchemaAcceptsRepeatedDeclarationsAndRejectsWrongKinds() throws {
+        let valid = """
+        {"schema_version":3,"scope":"declared_metadata_only","source_format":"claude_code","source_digest":"abc","coordinates":"jsonl_physical_lines_one_based","record_count":3,"candidate_records":3,"valid_declarations":2,"missing_declarations":1,"invalid_declarations":0,"omitted_declarations":0,"model_labels_omitted":false,"mixed_declared_models":false,"declared_models":["claude-a"],"declarations":[{"model":"claude-a","record_index":1,"kind":"claude_assistant_message"},{"model":"claude-a","record_index":2,"kind":"claude_assistant_message"}]}
+        """
+        var snapshot = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(legacy.utf8)) as? [String: Any])
+        snapshot["model_observations"] = try JSONSerialization.jsonObject(with: Data(valid.utf8))
+        let supported = try JSONDecoder().decode(LocalInsight.self, from: JSONSerialization.data(withJSONObject: snapshot))
+        try supported.validateSupportedEvidence()
+        snapshot["model_observations"] = try JSONSerialization.jsonObject(with: Data(valid.replacingOccurrences(of: "\"schema_version\":3", with: "\"schema_version\":1").utf8))
+        let crossSchemaSource = try JSONDecoder().decode(LocalInsight.self, from: JSONSerialization.data(withJSONObject: snapshot))
+        XCTAssertThrowsError(try crossSchemaSource.validateSupportedEvidence())
+        for replacement in [
+            valid.replacingOccurrences(of: "\"source_format\":\"claude_code\"", with: "\"source_format\":\"codex\""),
+            valid.replacingOccurrences(of: "claude_assistant_message", with: "codex_turn_context"),
+            valid.replacingOccurrences(of: "\"candidate_records\":3", with: "\"candidate_records\":2")
         ] {
             snapshot["model_observations"] = try JSONSerialization.jsonObject(with: Data(replacement.utf8))
             let malformed = try JSONDecoder().decode(LocalInsight.self, from: JSONSerialization.data(withJSONObject: snapshot))

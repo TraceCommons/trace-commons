@@ -587,7 +587,7 @@ public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
             ModelDetails = string.Join("\n", lines);
             foreach (var declaration in models.Declarations)
             {
-                if (declaration.Kind is not ("codex_session_metadata" or "codex_turn_context" or "codex_assistant_message" or "trajectory_metadata"))
+                if (declaration.Kind is not ("claude_assistant_message" or "codex_session_metadata" or "codex_turn_context" or "codex_assistant_message" or "trajectory_metadata"))
                     throw new InvalidOperationException("insights-response-invalid");
                 ModelReferences.Add(new ModelReferenceRow(declaration.Model + " · " + this["model_kind_" + declaration.Kind] + " · " +
                     this["model_record_index"] + ": " + Number(declaration.RecordIndex)));

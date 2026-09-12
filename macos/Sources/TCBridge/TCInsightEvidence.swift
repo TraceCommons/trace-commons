@@ -24,6 +24,7 @@ public struct InsightModelObservations: Decodable, Sendable {
         public var id: UInt64 { record_index }
     }
     public enum Kind: String, Decodable, Sendable {
+        case claudeAssistantMessage = "claude_assistant_message"
         case codexSessionMetadata = "codex_session_metadata"
         case codexTurnContext = "codex_turn_context"
         case codexAssistantMessage = "codex_assistant_message"
@@ -70,9 +71,11 @@ extension LocalInsight {
         if let models = model_observations {
             switch models.schema_version {
             case 1:
-                break
+                try models.validateLegacySchema()
             case 2:
                 try models.validateCodexTurnContextSchema()
+            case 3:
+                try models.validateClaudeAssistantSchema()
             default:
                 throw InsightsError.invalidResponse
             }
@@ -86,6 +89,22 @@ extension LocalInsight {
 }
 
 private extension InsightModelObservations {
+    func validateLegacySchema() throws {
+        let validKinds: Set<Kind>
+        switch source_format {
+        case "codex":
+            guard coordinates == .jsonlPhysicalLinesOneBased else { throw InsightsError.invalidResponse }
+            validKinds = [.codexSessionMetadata, .codexTurnContext, .codexAssistantMessage]
+        case "trajectory":
+            validKinds = [.trajectoryMetadata]
+        default:
+            throw InsightsError.invalidResponse
+        }
+        guard declarations.allSatisfy({ validKinds.contains($0.kind) }) else {
+            throw InsightsError.invalidResponse
+        }
+    }
+
     func validateCodexTurnContextSchema() throws {
         let (known, knownOverflow) = valid_declarations.addingReportingOverflow(missing_declarations)
         let (total, totalOverflow) = known.addingReportingOverflow(invalid_declarations)
@@ -107,6 +126,32 @@ private extension InsightModelObservations {
               }),
               declarations.allSatisfy({
                   $0.kind == .codexTurnContext && $0.record_index > 0 && $0.record_index <= record_count
+              }) else {
+            throw InsightsError.invalidResponse
+        }
+    }
+
+    func validateClaudeAssistantSchema() throws {
+        let (known, knownOverflow) = valid_declarations.addingReportingOverflow(missing_declarations)
+        let (total, totalOverflow) = known.addingReportingOverflow(invalid_declarations)
+        let (retained, retainedOverflow) = UInt64(declarations.count).addingReportingOverflow(omitted_declarations)
+        let labels = Set(declared_models)
+        let referenced = Set(declarations.map(\.model))
+        guard source_format == "claude_code",
+              coordinates == .jsonlPhysicalLinesOneBased,
+              !knownOverflow, !totalOverflow, total == candidate_records,
+              candidate_records <= record_count,
+              !retainedOverflow, retained == valid_declarations,
+              labels.count == declared_models.count,
+              labels == referenced,
+              mixed_declared_models == (declared_models.count > 1),
+              valid_declarations == 0 || !declarations.isEmpty,
+              !model_labels_omitted || (declared_models.count == 32 && omitted_declarations > 0),
+              zip(declarations, declarations.dropFirst()).allSatisfy({ pair in
+                  pair.0.record_index < pair.1.record_index
+              }),
+              declarations.allSatisfy({
+                  $0.kind == .claudeAssistantMessage && $0.record_index > 0 && $0.record_index <= record_count
               }) else {
             throw InsightsError.invalidResponse
         }
