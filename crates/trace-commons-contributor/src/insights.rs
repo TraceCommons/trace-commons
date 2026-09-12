@@ -5,6 +5,7 @@
 pub mod card_presentation;
 pub mod card_store;
 pub mod cards;
+#[cfg(test)]
 pub(crate) mod comparison_estimator;
 pub mod comparison_spec_store;
 pub mod comparison_specs;
