@@ -3,6 +3,7 @@ pub mod canonical_json;
 pub mod community_handle;
 pub mod insights;
 pub mod insights_cards;
+pub mod insights_pricing;
 pub mod llm;
 pub mod mission_draft;
 pub mod onboarding;
