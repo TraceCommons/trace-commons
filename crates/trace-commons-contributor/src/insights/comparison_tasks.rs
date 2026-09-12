@@ -153,6 +153,7 @@ pub struct LocalComparisonTaskV1 {
     pub material_digest: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    pub material_recorded_at: Option<DateTime<Utc>>,
     pub episodes: Vec<FrozenEpisodeBinding>,
     pub context: Option<ComparisonTaskContext>,
     pub outcome: Option<MaterialBoundOutcome>,
@@ -394,6 +395,9 @@ impl LocalComparisonTaskV1 {
             || self.material_revision == 0
             || self.material_revision > self.revision
             || self.updated_at < self.created_at
+            || self.material_recorded_at.is_some_and(|recorded_at| {
+                recorded_at < self.created_at || recorded_at > self.updated_at
+            })
             || self.material_digest != material_digest(&self.episodes, self.context.as_ref())?
         {
             return Err(ComparisonTaskValidationError::Invalid.into());

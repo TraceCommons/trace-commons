@@ -93,14 +93,16 @@ fn advance(task: &mut LocalComparisonTaskV1, material: bool) -> Result<()> {
         .revision
         .checked_add(1)
         .ok_or(ComparisonTaskStoreError::RevisionOverflow)?;
+    let now = Utc::now().max(task.updated_at);
     if material {
         task.material_revision = task
             .material_revision
             .checked_add(1)
             .ok_or(ComparisonTaskStoreError::RevisionOverflow)?;
         task.material_digest = material_digest(&task.episodes, task.context.as_ref())?;
+        task.material_recorded_at = Some(now);
     }
-    task.updated_at = Utc::now().max(task.updated_at);
+    task.updated_at = now;
     Ok(())
 }
 
@@ -276,6 +278,7 @@ impl LocalInsightStore {
             material_digest: material_digest(&episodes, None)?,
             created_at: now,
             updated_at: now,
+            material_recorded_at: Some(now),
             episodes,
             context: None,
             outcome: None,
@@ -354,12 +357,16 @@ impl LocalInsightStore {
                     && old.members == new.members
             });
         task.episodes = episodes;
+        let prior_material_recorded_at = task.material_recorded_at;
         advance(task, true)?;
         if assessment_only && outcome_was_current {
             if let Some(outcome) = &mut task.outcome {
                 outcome.material_revision = task.material_revision;
                 outcome.material_digest = task.material_digest.clone();
             }
+        }
+        if assessment_only {
+            task.material_recorded_at = prior_material_recorded_at;
         }
         task.validate()?;
         let result = task.clone();
@@ -563,6 +570,15 @@ mod tests {
             .comparison_task_create(std::slice::from_ref(&episode.id))
             .unwrap();
         assert_eq!((draft.revision, draft.material_revision), (1, 1));
+        assert_eq!(draft.material_recorded_at, Some(draft.created_at));
+        let mut legacy = serde_json::to_value(&draft).unwrap();
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("material_recorded_at");
+        let legacy: LocalComparisonTaskV1 = serde_json::from_value(legacy).unwrap();
+        assert_eq!(legacy.material_recorded_at, None);
+        legacy.validate().unwrap();
         assert!(
             store
                 .comparison_task_explain(&draft.id)
@@ -573,25 +589,30 @@ mod tests {
         let context = store
             .comparison_task_set_context(&draft.id, 1, complete_context("2026-01-02"))
             .unwrap();
+        assert_eq!(context.material_recorded_at, Some(context.updated_at));
         let outcome = store
             .comparison_task_set_outcome(&draft.id, 2, ComparisonTaskOutcome::Accepted)
             .unwrap();
         assert_eq!(outcome.material_revision, context.material_revision);
+        assert_eq!(outcome.material_recorded_at, context.material_recorded_at);
         let confirmed = store
             .comparison_task_reconfirm(&draft.id, 3, &outcome.material_digest)
             .unwrap();
+        assert_eq!(confirmed.material_recorded_at, context.material_recorded_at);
         let cleared = store.comparison_task_clear_outcome(&draft.id, 4).unwrap();
         assert_eq!(cleared.material_revision, confirmed.material_revision);
         assert_eq!(
             cleared.independence_confirmation,
             confirmed.independence_confirmation
         );
+        assert_eq!(cleared.material_recorded_at, context.material_recorded_at);
         let pending = store
             .comparison_task_set_outcome(&draft.id, 5, ComparisonTaskOutcome::Pending)
             .unwrap();
         let changed = store
             .comparison_task_set_context(&draft.id, 6, complete_context("2026-01-03"))
             .unwrap();
+        assert_eq!(changed.material_recorded_at, Some(changed.updated_at));
         assert_eq!(
             changed.outcome.unwrap().value,
             ComparisonTaskOutcome::Pending
@@ -730,6 +751,7 @@ mod tests {
         let task = store
             .comparison_task_create(std::slice::from_ref(&episode.id))
             .unwrap();
+        let material_recorded_at = task.material_recorded_at;
         let task = store
             .comparison_task_set_outcome(&task.id, 1, ComparisonTaskOutcome::Unknown)
             .unwrap();
@@ -756,6 +778,7 @@ mod tests {
             refreshed.outcome.as_ref().unwrap().recorded_at,
             outcome_recorded_at
         );
+        assert_eq!(refreshed.material_recorded_at, material_recorded_at);
         assert_ne!(
             refreshed
                 .independence_confirmation
