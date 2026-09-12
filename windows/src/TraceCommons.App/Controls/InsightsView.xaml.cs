@@ -23,6 +23,7 @@ public sealed partial class InsightsView : UserControl, IDisposable
         Unloaded += (_, _) => ViewModel.Cancel();
     }
     public Task ActivateAsync() => ViewModel.LoadAsync();
+    public void Deactivate() => ViewModel.Cancel();
     private async void OnChoose(object sender, RoutedEventArgs args)
     {
         try
@@ -79,6 +80,44 @@ public sealed partial class InsightsView : UserControl, IDisposable
         };
         if (await dialog.ShowAsync() == ContentDialogResult.Primary && !_closed)
             await ViewModel.DeleteAsync();
+    }
+    private async void OnLinkGit(object sender, RoutedEventArgs args)
+    {
+        var target = ViewModel.CaptureEvidenceTarget();
+        if (target == null) return;
+        string commit = ViewModel.CommitId;
+        try
+        {
+            var picker = new FolderPicker();
+            WinRT.Interop.InitializeWithWindow.Initialize(picker, _window);
+            picker.FileTypeFilter.Add("*");
+            var folder = await picker.PickSingleFolderAsync();
+            if (folder != null) await ViewModel.LinkGitAsync(target, folder.Path, commit);
+            else ViewModel.CancelEvidenceTarget(target);
+        }
+        catch (Exception) { ViewModel.CancelEvidenceTarget(target); ViewModel.ReportError(); }
+    }
+    private async void OnLinkTestReport(object sender, RoutedEventArgs args)
+    {
+        var target = ViewModel.CaptureEvidenceTarget();
+        if (target == null) return;
+        try
+        {
+            var picker = new FileOpenPicker();
+            WinRT.Interop.InitializeWithWindow.Initialize(picker, _window);
+            picker.FileTypeFilter.Add(".json");
+            var file = await picker.PickSingleFileAsync();
+            if (file != null) await ViewModel.LinkTestReportAsync(target, file.Path);
+            else ViewModel.CancelEvidenceTarget(target);
+        }
+        catch (Exception) { ViewModel.CancelEvidenceTarget(target); ViewModel.ReportError(); }
+    }
+    private async void OnUnlinkEvidence(object sender, RoutedEventArgs args)
+    {
+        if (sender is not Button { Tag: OutcomeEvidenceRow row }) return;
+        var target = ViewModel.CaptureEvidenceTarget();
+        if (target != null && target.SnapshotId == row.SnapshotId)
+            await ViewModel.UnlinkEvidenceAsync(target, row.Id);
     }
     private async void OnAnnotate(object sender, RoutedEventArgs args) => await ViewModel.SaveAssessmentAsync();
     private async void OnClear(object sender, RoutedEventArgs args) => await ViewModel.ClearAnnotationAsync();
