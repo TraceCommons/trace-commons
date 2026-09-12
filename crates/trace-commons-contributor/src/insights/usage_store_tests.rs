@@ -12,7 +12,7 @@ fn source(path: &Path, final_input: u64) {
         })
     };
     let rows = [
-        json!({"type":"session_meta","timestamp":"2026-09-11T00:00:00Z","payload":{"id":"PRIVATE_SESSION_ID","model":"fixture-model"}}),
+        json!({"type":"session_meta","timestamp":"2026-09-11T00:00:00Z","payload":{"id":"PRIVATE_SESSION_ID","model_provider":"openai"}}),
         json!({"type":"turn_context","timestamp":"2026-09-11T00:00:00Z","payload":{"model":"fixture-model"}}),
         token("2026-09-11T00:00:01Z", 100, 20, 20, 5),
         json!({"type":"response_item","timestamp":"2026-09-11T00:00:02Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"PRIVATE_BODY"}]}}),
