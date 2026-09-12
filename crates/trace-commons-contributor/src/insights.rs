@@ -9,6 +9,7 @@ pub mod episode_store;
 pub mod episodes;
 pub mod models;
 pub mod outcomes;
+pub mod pricing_catalog;
 pub mod provider;
 pub mod service;
 pub mod summary;
