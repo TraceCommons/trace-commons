@@ -68,10 +68,90 @@ struct AdmissionResult {
     reason: &'static str,
 }
 
-#[derive(Default)]
+#[derive(Clone, Copy, Default)]
 struct Counts {
     total: usize,
     outcomes: [usize; 3],
+}
+
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum CandidateDecision {
+    InsufficientPrecision,
+    IndeterminateBoundary,
+    ExcludesZero,
+    IncludesZero,
+}
+
+#[derive(Serialize)]
+struct CandidateContrast {
+    lower_millionths: i64,
+    upper_millionths: i64,
+    width_millionths: i64,
+    decision: CandidateDecision,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+enum CandidateEvaluation {
+    Supported { contrasts: [CandidateContrast; 3] },
+    SuppressedBelowMinimumCohortSupport,
+}
+
+fn combine_candidate_intervals(first: (u32, u32), second: (u32, u32)) -> CandidateContrast {
+    let lower = i64::from(second.0) - i64::from(first.1);
+    let upper = i64::from(second.1) - i64::from(first.0);
+    let width = upper - lower;
+    let decision = if width > MAXIMUM_WIDTH {
+        CandidateDecision::InsufficientPrecision
+    } else if width == MAXIMUM_WIDTH || lower == 0 || upper == 0 {
+        CandidateDecision::IndeterminateBoundary
+    } else if upper < 0 || lower > 0 {
+        CandidateDecision::ExcludesZero
+    } else {
+        CandidateDecision::IncludesZero
+    };
+    CandidateContrast {
+        lower_millionths: lower,
+        upper_millionths: upper,
+        width_millionths: width,
+        decision,
+    }
+}
+
+fn evaluate_candidate_counts(
+    first: &Counts,
+    second: &Counts,
+) -> anyhow::Result<CandidateEvaluation> {
+    let checked_sum = |outcomes: &[usize; 3]| {
+        outcomes
+            .iter()
+            .try_fold(0_usize, |sum, value| sum.checked_add(*value))
+    };
+    if checked_sum(&first.outcomes) != Some(first.total)
+        || checked_sum(&second.outcomes) != Some(second.total)
+        || first
+            .total
+            .checked_add(second.total)
+            .is_none_or(|total| total > MAX_TASKS)
+    {
+        return Err(anyhow::anyhow!("insights-comparison-estimator-invalid"));
+    }
+    if first.total < 2 || second.total < 2 {
+        return Ok(CandidateEvaluation::SuppressedBelowMinimumCohortSupport);
+    }
+    let mut contrasts = Vec::with_capacity(3);
+    for outcome in 0..3 {
+        contrasts.push(combine_candidate_intervals(
+            exact_component_interval(first.outcomes[outcome], first.total)?,
+            exact_component_interval(second.outcomes[outcome], second.total)?,
+        ));
+    }
+    Ok(CandidateEvaluation::Supported {
+        contrasts: contrasts
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("insights-comparison-estimator-invalid"))?,
+    })
 }
 
 #[test]
@@ -505,19 +585,19 @@ fn run_setting(
                 .or_insert_with(|| {
                     exact_component_interval(second.outcomes[outcome], second.total).unwrap()
                 });
-            let lower = i64::from(second_interval.0) - i64::from(first_interval.1);
-            let upper = i64::from(second_interval.1) - i64::from(first_interval.0);
+            let contrast = combine_candidate_intervals(first_interval, second_interval);
+            let lower = contrast.lower_millionths;
+            let upper = contrast.upper_millionths;
             let truth = i64::from(second_probability_bps[outcome]) * 100
                 - i64::from(first_probability_bps[outcome]) * 100;
             covered &= lower <= truth && truth <= upper;
-            let width = upper - lower;
+            let width = contrast.width_millionths;
             widths[outcome].push(width);
-            if width > MAXIMUM_WIDTH {
-                imprecise += 1;
-            } else if width == MAXIMUM_WIDTH || lower == 0 || upper == 0 {
-                boundary += 1;
-            } else if upper < 0 || lower > 0 {
-                any_exclusion = true;
+            match contrast.decision {
+                CandidateDecision::InsufficientPrecision => imprecise += 1,
+                CandidateDecision::IndeterminateBoundary => boundary += 1,
+                CandidateDecision::ExcludesZero => any_exclusion = true,
+                CandidateDecision::IncludesZero => {}
             }
         }
         failures += u32::from(!covered);
@@ -787,4 +867,95 @@ fn atomic_report_publication_does_not_replace_existing_artifact() {
     atomic_write(&path, b"first");
     assert!(std::panic::catch_unwind(|| atomic_write(&path, b"second")).is_err());
     assert_eq!(std::fs::read(path).unwrap(), b"first");
+}
+
+#[derive(Serialize)]
+struct RuntimeObservation<'a> {
+    schema_version: u32,
+    case: &'a str,
+    first_total: usize,
+    first_outcomes: [usize; 3],
+    second_total: usize,
+    second_outcomes: [usize; 3],
+    candidate_elapsed_nanos: u128,
+    evaluation: CandidateEvaluation,
+}
+
+#[test]
+#[ignore = "measures one fresh-process exact candidate evaluation"]
+fn measure_exact_candidate_evaluation() {
+    let case = std::env::var("TRACE_COMMONS_EXACT_EVALUATION_CASE")
+        .expect("TRACE_COMMONS_EXACT_EVALUATION_CASE is required");
+    let output = std::env::var_os("TRACE_COMMONS_EXACT_EVALUATION_OUTPUT")
+        .expect("TRACE_COMMONS_EXACT_EVALUATION_OUTPUT is required");
+    let (first, second, expected_supported) = match case.as_str() {
+        "balanced_boundary" => (
+            Counts {
+                total: 128,
+                outcomes: [128, 0, 0],
+            },
+            Counts {
+                total: 128,
+                outcomes: [128, 0, 0],
+            },
+            true,
+        ),
+        "balanced_interior" => (
+            Counts {
+                total: 128,
+                outcomes: [43, 43, 42],
+            },
+            Counts {
+                total: 128,
+                outcomes: [43, 43, 42],
+            },
+            true,
+        ),
+        "imbalanced_supported" => (
+            Counts {
+                total: 254,
+                outcomes: [127, 64, 63],
+            },
+            Counts {
+                total: 2,
+                outcomes: [1, 1, 0],
+            },
+            true,
+        ),
+        "imbalanced_suppressed" => (
+            Counts {
+                total: 255,
+                outcomes: [128, 64, 63],
+            },
+            Counts {
+                total: 1,
+                outcomes: [1, 0, 0],
+            },
+            false,
+        ),
+        _ => panic!("unsupported exact evaluation case"),
+    };
+    let first = std::hint::black_box(first);
+    let second = std::hint::black_box(second);
+    let started = Instant::now();
+    let evaluation = evaluate_candidate_counts(&first, &second).unwrap();
+    let candidate_elapsed_nanos = started.elapsed().as_nanos();
+    assert_eq!(
+        matches!(evaluation, CandidateEvaluation::Supported { .. }),
+        expected_supported
+    );
+    let observation = RuntimeObservation {
+        schema_version: 1,
+        case: &case,
+        first_total: first.total,
+        first_outcomes: first.outcomes,
+        second_total: second.total,
+        second_outcomes: second.outcomes,
+        candidate_elapsed_nanos,
+        evaluation,
+    };
+    atomic_write(
+        std::path::Path::new(&output),
+        &serde_json::to_vec_pretty(&observation).unwrap(),
+    );
 }
