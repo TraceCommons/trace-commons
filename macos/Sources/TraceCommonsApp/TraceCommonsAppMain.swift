@@ -56,7 +56,7 @@ struct TraceCommonsShell: App {
                 .tint(TC.green)
         }
         .defaultSize(width: 940, height: 660)
-        // Cmd-1..5 for the five destinations, and Cmd-Shift-M for the one
+        // Cmd-1..6 for the six destinations, and Cmd-Shift-M for the one
         // switch worth reaching without the window. Menu items, so they are
         // in-app only; see `MainWindowCommands`.
         .commands {
@@ -78,6 +78,23 @@ private struct Launcher: View {
     var body: some View {
         MenuBarLabel(model: model)
             .task { launch() }
+            .onChange(of: navigation.section) { activateServices() }
+    }
+
+    @MainActor
+    private func activateServices() {
+        navigation.activateServicesIfNeeded {
+            model.start()
+            Task {
+                await compute.start()
+                compute.startMonitoring()
+            }
+            // Update checks begin here and nowhere else. UpdateController itself
+            // decides whether Sparkle runs at all: under a Homebrew install this
+            // call constructs no updater and schedules nothing.
+            UpdateController.shared.start()
+            Notifier.shared.configure()
+        }
     }
 
     @MainActor
@@ -89,16 +106,7 @@ private struct Launcher: View {
         appDelegate.compute = compute
         appDelegate.navigation = navigation
         appDelegate.model = model
-        model.start()
-        Task {
-            await compute.start()
-            compute.startMonitoring()
-        }
-        // Update checks begin here and nowhere else. UpdateController itself
-        // decides whether Sparkle runs at all: under a Homebrew install this
-        // call constructs no updater and schedules nothing.
-        UpdateController.shared.start()
-        Notifier.shared.configure()
+        activateServices()
         // The only thing a notification action may do is open this window.
         Notifier.shared.onReview = { OpenMainWindow.request() }
 
