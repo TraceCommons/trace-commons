@@ -219,7 +219,6 @@ fn configure_git(mut command: Command, repo: &Path) -> Command {
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_NO_LAZY_FETCH", "1")
         .env("GIT_OPTIONAL_LOCKS", "0")
-        .env("GIT_CEILING_DIRECTORIES", repo)
         .args([
             "--no-pager",
             "--no-replace-objects",
@@ -230,9 +229,10 @@ fn configure_git(mut command: Command, repo: &Path) -> Command {
             "core.hooksPath=",
             "-c",
             "protocol.allow=never",
-            "-C",
         ])
-        .arg(repo)
+        // Let the OS resolve canonical Windows verbatim paths. Git parses only
+        // relative repository arguments below, never the \\?\ command-line form.
+        .current_dir(repo)
         .stdin(Stdio::null())
         .stderr(Stdio::null());
     command
@@ -240,9 +240,9 @@ fn configure_git(mut command: Command, repo: &Path) -> Command {
 fn read_git(repo: &Path, arguments: &[&str], max_bytes: usize) -> Result<Vec<u8>> {
     let dot_git = repo.join(".git");
     let git_dir = if dot_git.is_file() || dot_git.is_dir() {
-        dot_git
+        Path::new(".git")
     } else if repo.join("HEAD").is_file() && repo.join("objects").is_dir() {
-        repo.to_path_buf()
+        Path::new(".")
     } else {
         bail!("insights-git-repository-invalid");
     };
@@ -426,7 +426,8 @@ mod tests {
         for format in ["sha1", "sha256"] {
             let (root, tree, first) = repo(format);
             let second = commit(root.path(), &tree, &[&first], "ANOTHER_PRIVATE_MESSAGE");
-            let evidence = inspect_git_commit(root.path(), &second).unwrap();
+            let canonical = root.path().canonicalize().unwrap();
+            let evidence = inspect_git_commit(&canonical, &second).unwrap();
             assert_eq!(evidence.tree_id, tree);
             assert_eq!(evidence.parent_ids, [first]);
             assert_eq!(
