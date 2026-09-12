@@ -323,6 +323,7 @@
                     </Button>
 
                     <Button Content="Insights" Click="OnShowInsights" HorizontalAlignment="Stretch" />
+                    <Button Content="Mission drafts" Click="OnShowMissionDrafts" HorizontalAlignment="Stretch" />
 
                     <Button HorizontalAlignment="Stretch"
                             HorizontalContentAlignment="Stretch"
@@ -672,6 +673,9 @@
 
             <ContentPresenter x:Name="InsightsPane" Grid.Row="2" Grid.Column="1"
                               Visibility="{x:Bind ViewModel.ShowingInsights, Mode=OneWay}" />
+
+            <ContentPresenter x:Name="MissionDraftsPane" Grid.Row="2" Grid.Column="1"
+                              Visibility="{x:Bind ViewModel.ShowingMissionDrafts, Mode=OneWay}" />
 
             <ContentPresenter x:Name="SettingsPane"
                               Grid.Row="2"

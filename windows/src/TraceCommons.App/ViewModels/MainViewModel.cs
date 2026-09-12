@@ -388,6 +388,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         History,
         PrivateInference,
         Insights,
+        MissionDrafts,
         Settings,
     }
 
@@ -399,7 +400,11 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     public bool ShowingInsights => _pane == MainPane.Insights;
 
+    public bool ShowingMissionDrafts => _pane == MainPane.MissionDrafts;
+
     public void ShowInsights() => SetPane(MainPane.Insights);
+
+    public void ShowMissionDrafts() => SetPane(MainPane.MissionDrafts);
 
     public bool ShowingSettings => _pane == MainPane.Settings;
 
@@ -429,6 +434,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         Raise(nameof(ShowingPrivateInference));
         Raise(nameof(ShowingSettings));
         Raise(nameof(ShowingInsights));
+        Raise(nameof(ShowingMissionDrafts));
     }
 
     // --- The health banner -------------------------------------------------

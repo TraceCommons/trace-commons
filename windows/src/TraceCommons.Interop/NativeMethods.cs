@@ -125,6 +125,11 @@ internal static class NativeMethods
     internal static extern IntPtr tc_insights_call(
         [In] byte[] request, UIntPtr requestLen, out IntPtr error);
 
+    /// <summary>Account-free bounded local mission draft inbox.</summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_mission_drafts_call(
+        [In] byte[] request, UIntPtr requestLen, out IntPtr error);
+
     /// <summary>
     /// Calls a daemon method in-process. Returns an owned NUL-terminated JSON
     /// response -- never NULL, even for a bad handle or malformed params; a
