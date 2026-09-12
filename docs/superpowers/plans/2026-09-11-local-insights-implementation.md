@@ -123,13 +123,16 @@ Run explicit CLI integration test targets in addition to the module filter. Run 
 
 ## Desktop scope remaining after the CLI slice
 
-All desktop surfaces remain follow-on work: macOS SwiftUI, GTK, and Windows. Add a common daemon API and FFI projection for summary/explain/delete and later annotations; desktop code must not implement separate metric arithmetic. Preserve one Insights vocabulary, attribution, missingness, and evidence drilldown across shells.
+The original CLI slice deferred all desktop surfaces. Their implementation and
+remaining release gates are now tracked in the [desktop story record](2026-09-11-insights-desktop-stories.md): macOS SwiftUI, GTK, and Windows. Add a common daemon API and FFI projection for summary/explain/delete and later annotations; desktop code must not implement separate metric arithmetic. Preserve one Insights vocabulary, attribution, missingness, and evidence drilldown across shells.
 
 For each platform, qualify empty state, incomplete evidence, mixed models when supported, source replacement, deletion, keyboard navigation, long text, localized number/date rendering, and owner-only local persistence. Rebuild contributor FFI before macOS/Windows native tests; run the Rust workspace suite for lifecycle/FFI changes and GTK checks in its separate workspace. A CLI pass does not imply a desktop release. Document platform availability explicitly before shipping.
 
 ### Desktop implementation handoff: startup isolation
 
-Status: follow-on design and implementation; none of the desktop work below is implemented by the CLI slice.
+Status: this handoff describes the boundary after the original CLI slice. The
+subsequent desktop stack implements these screens; platform qualification remains
+explicit in the linked desktop story record.
 
 The existing startup paths prevent simply placing Insights behind ordinary daemon calls. `crates/trace-commons-contributor-ffi/src/lib.rs` checks `roots_refusal` in `tc_daemon_start*`; GTK `src/backend.rs` also refuses undeclared source roots. macOS `Views/MainWindowView.swift` gates `traceContent` on daemon startup and contribution onboarding. A private analyzer must remain usable before both enrollment and source-root declaration. Do not silently declare sources off to make daemon startup succeed or weaken the existing watcher startup gate.
 

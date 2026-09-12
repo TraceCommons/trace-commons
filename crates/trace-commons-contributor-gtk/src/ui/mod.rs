@@ -11,6 +11,7 @@ pub mod credential;
 mod css_contract;
 pub mod funding;
 pub mod history;
+pub mod insights;
 pub mod mark;
 pub mod onboarding;
 mod onboarding_nearai;
@@ -51,7 +52,7 @@ const HEADER_HEIGHT: i32 = 46;
 const COLUMN_MAX: i32 = 840;
 const COLUMN_TIGHTEN: i32 = 680;
 
-/// The four screens, in the order the switcher shows them, with the icon
+/// The five screens, in the order the switcher shows them, with the icon
 /// each one carries. One list, so the stack pages and the switcher items
 /// cannot drift apart.
 ///
@@ -67,7 +68,8 @@ const COLUMN_TIGHTEN: i32 = 680;
 /// never retyped: the word this surface may not say is "private", and the
 /// only way three shells keep saying the same true thing is by reading one
 /// definition. The stack name below it is internal and is read by nobody.
-pub(crate) const SCREENS: [(&str, &str, &str); 4] = [
+pub(crate) const SCREENS: [(&str, &str, &str); 5] = [
+    ("insights", "Insights", "view-statistics-symbolic"),
     ("queue", "Queue", "view-list-symbolic"),
     ("history", "History", "document-open-recent-symbolic"),
     (
@@ -267,6 +269,7 @@ impl App {
             .default_height(720)
             .build();
 
+        window.set_widget_name("contributions-window");
         let stack = adw::ViewStack::new();
         let queue = queue::QueueView::new();
         let history = history::HistoryView::new();
@@ -277,7 +280,9 @@ impl App {
         // Pages and switcher items are built from the same list, in the same
         // order, so a screen cannot be renamed in one place and not the
         // other.
-        let pages: [&gtk::Box; 4] = [
+        let insights = insights::InsightsView::new(&window);
+        let pages: [&gtk::Box; 5] = [
+            &insights.root,
             &queue.root,
             &history.root,
             &private_inference.root,
@@ -289,6 +294,8 @@ impl App {
                 .set_icon_name(Some(icon_name));
         }
 
+        // This window is entered by the explicit Contributions action.
+        stack.set_visible_child_name("queue");
         let queue_badge = gtk::Label::builder().visible(false).build();
         queue_badge.add_css_class("tc-count-badge");
         queue_badge.set_valign(gtk::Align::Center);
@@ -1703,7 +1710,7 @@ mod screen_tests {
     /// length itself, so the next screen has to grow both.
     #[test]
     fn every_screen_has_a_page() {
-        assert_eq!(SCREENS.len(), 4);
+        assert_eq!(SCREENS.len(), 5);
         for (name, label, icon) in SCREENS {
             assert!(!name.is_empty(), "a screen needs a stack name");
             assert!(!label.is_empty(), "a screen needs a switcher label");
