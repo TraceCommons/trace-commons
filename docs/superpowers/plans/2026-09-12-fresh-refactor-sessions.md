@@ -10,6 +10,14 @@ The user chose four new independent refactor sessions instead of continuing hist
 
 [Task briefs and verification commands](2026-09-12-fresh-refactor-task-briefs.md) define four scopes. Allocation is fixed before execution: task 1 Cline to cohort A, task 2 Gemini to cohort B, task 3 OpenCode to cohort B, task 4 trajectory to cohort A. Cohort A/B are preparation slots, not model declarations; bind exact model selectors before launch and retain observed labels independently. All worktrees were verified clean at the same base. Local manifests contain unique allocated session UUIDs and explicitly mark each session as not started. Four complete prompts and a common instruction template are prepared with SHA-256 digests; exact selectors, effective tool policy and execution limits remain unfilled launch fields. Astra reviewed the pinned source and cleared the corrected briefs for preparation freeze.
 
+## Baseline validation
+
+At the pinned commit, the existing contributor library suites passed with `--locked` and `RUSTFLAGS=-D warnings`: Cline 11/11, Gemini CLI 11/11, OpenCode 11/11, trajectory 26/26 (59 total; all commands exited 0). The checkout stayed clean. The four raw logs and their SHA-256 manifest remain local. This establishes the pre-refactor test baseline; it is not implementation, model-performance or outcome evidence.
+
+## Proposed launch defaults
+
+No model or spending decision had been made when preparation was selected. Proposed defaults are cohort A `claude-opus-5` and cohort B `claude-sonnet-5`, high effort for both, identical tools, a 30-minute wall-time limit and a $10 API budget per session ($40 across four sessions). [Anthropic documents both exact selectors](https://support.claude.com/en/articles/11940350-claude-code-model-configuration). These are proposals, not approved spending or verified account access. Confirm the execution limits and effective tool policy, and verify how the harness enforces the budget and timeout before launch. The local manifest keeps proposed values separate from actual execution fields.
+
 ## Design and capture rules
 
 Use four distinct useful work items from Trace Commons commit `60bfe5329aa166a5ec2cb5519d616f581d43fef3`, each in its own clean worktree and fresh root session. Keep scopes disjoint; do not replay one problem four times, reuse prior solutions, resume another task's session, or pass one implementation to another participant. Use two matched task pairs, assigning one task in each pair to each of two declared-model cohorts before execution. Freeze task briefs and assignment before outcomes. This balances selected task types but cannot establish causal model superiority or equal difficulty.
