@@ -209,7 +209,8 @@ pub fn ui_copy() -> std::collections::BTreeMap<String, String> {
         ("summary_limitation_analysis_dates_are_not_activity_time", "Dates show when snapshots were analyzed, not when the work happened."),
         ("summary_limitation_source_formats_are_not_model_identity", "Source formats identify the imported file format, not which model performed the work."),
         ("summary_limitation_no_model_rankings_time_savings_or_cost", "These observations do not establish model rankings, time saved, or cost."),
-    ].into_iter().map(|(key, value)| (key.to_owned(), value.to_owned())).collect()
+    ].into_iter().map(|(key, value)| (key.to_owned(), value.to_owned()))
+    .chain(super::card_presentation::ui_copy()).collect()
 }
 
 #[derive(Debug, Deserialize, Serialize)]
