@@ -1778,6 +1778,20 @@ char*       tc_call(tc_handle*, const char* method, const char* params_json);
  * Explicit links: link_git {id,repository,commit}, link_test_report {id,file},
  * unlink_evidence {id,evidence_id}. Links do not establish verified task success.
  * copy returns shared UI vocabulary. list/summary create no state for an absent store.
+ * Episodes: episode_create {snapshot_ids}, episode_list, episode_explain {id}.
+ * Episode edits require {id,expected_revision}: episode_replace_members also
+ * takes snapshot_ids; episode_annotate takes category,outcome;
+ * episode_clear_assessment and episode_delete take no additional fields.
+ * Groups contain whole saved snapshots, not inferred independent tasks.
+ * Episode reads create no absent store and do not reread source files.
+ * Analyze/delete add mutation_effects.invalidated_episode_ids for lost groups.
+ * Responses are capped at 16 MiB; oversized results are never truncated.
+ * Fixed typed episode errors include insights_episode_revision_conflict
+ * (refresh and review), insights_episode_not_found, insights_episode_missing_members,
+ * insights_episode_invalid, insights_episode_member_limit,
+ * insights_episode_duplicate_member, insights_episode_limit_exceeded,
+ * insights_episode_revision_overflow, and insights_response_too_large.
+ * Unexpected execution errors remain insights-operation-failed.
  * Returns owned JSON tagged by type, or NULL plus owned fixed-label *err.
  * Free result/error with tc_string_free. err may be NULL; otherwise writable
  * and cleared on success. Request buffers must remain valid until return. */

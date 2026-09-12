@@ -96,7 +96,16 @@ fn saved_insights_deduplicate_replace_explain_and_delete_without_enrollment() {
     let listed = value(invoke(&config, &store, &["list"]));
     assert_eq!(listed.as_array().unwrap().len(), 1);
     let id = first["id"].as_str().unwrap();
-    assert_eq!(value(invoke(&config, &store, &["explain", id])), again);
+    let explained = value(invoke(&config, &store, &["explain", id]));
+    let mut saved_fields = again.clone();
+    assert_eq!(
+        saved_fields
+            .as_object_mut()
+            .unwrap()
+            .remove("mutation_effects"),
+        Some(serde_json::json!({"invalidated_episode_ids":[]}))
+    );
+    assert_eq!(explained, saved_fields);
 
     fixture(&file, true);
     let changed = value(invoke(&config, &store, &args));
@@ -426,4 +435,250 @@ fn explicit_test_evidence_links_are_local_removable_and_not_verified_outcomes() 
     ));
     assert_eq!(cleared["outcome_links"].as_array().unwrap().len(), 0);
     assert!(report.exists() && file.exists() && !config.exists());
+}
+
+#[test]
+fn episode_commands_keep_revisions_assessments_overlap_and_replacement_effects_explicit() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = temp.path().join("enrollment");
+    let store = temp.path().join("insights");
+    assert_eq!(
+        value(invoke(&config, &store, &["episode-list"]))["episodes"],
+        serde_json::json!([])
+    );
+    assert!(!store.exists() && !config.exists());
+    let file_a = temp.path().join("a.jsonl");
+    let file_b = temp.path().join("b.jsonl");
+    fixture(&file_a, false);
+    fixture(&file_b, true);
+    let save = |file: &Path| {
+        value(invoke(
+            &config,
+            &store,
+            &[
+                "analyze",
+                "--source",
+                "trajectory",
+                "--file",
+                file.to_str().unwrap(),
+                "--save",
+            ],
+        ))
+    };
+    let a = save(&file_a);
+    let b = save(&file_b);
+    let a_id = a["id"].as_str().unwrap();
+    let b_id = b["id"].as_str().unwrap();
+    let first = value(invoke(
+        &config,
+        &store,
+        &["episode-create", "--snapshot", a_id, "--snapshot", b_id],
+    ));
+    let other = value(invoke(
+        &config,
+        &store,
+        &["episode-create", "--snapshot", a_id],
+    ));
+    let id = first["episode"]["id"].as_str().unwrap();
+    let other_id = other["episode"]["id"].as_str().unwrap();
+    assert_eq!(
+        first["episode"]["provenance"],
+        "user_selected_whole_snapshots"
+    );
+    let detail = value(invoke(&config, &store, &["episode-explain", id]));
+    assert_eq!(detail["detail"]["members"].as_array().unwrap().len(), 2);
+    assert!(
+        detail["detail"]["overlap"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["snapshot_id"] == a_id
+                && entry["episode_ids"] == serde_json::json!([other_id]))
+    );
+    let annotated = value(invoke(
+        &config,
+        &store,
+        &[
+            "episode-annotate",
+            id,
+            "--expected-revision",
+            "1",
+            "--category",
+            "tests",
+            "--outcome",
+            "accepted",
+        ],
+    ));
+    assert_eq!(annotated["episode"]["revision"], 2);
+    assert_eq!(annotated["episode"]["membership_revision"], 1);
+    assert_eq!(
+        annotated["episode"]["manual_assessment"]["provenance"],
+        "user_reported"
+    );
+    let stale = invoke(
+        &config,
+        &store,
+        &["episode-delete", id, "--expected-revision", "1"],
+    );
+    assert!(!stale.status.success());
+    let error: serde_json::Value = serde_json::from_slice(&stale.stdout).unwrap();
+    assert_eq!(error["error"], "insights_episode_revision_conflict");
+    let replaced = value(invoke(
+        &config,
+        &store,
+        &[
+            "episode-replace-members",
+            id,
+            "--expected-revision",
+            "2",
+            "--snapshot",
+            b_id,
+        ],
+    ));
+    assert_eq!(replaced["episode"]["revision"], 3);
+    assert_eq!(replaced["episode"]["membership_revision"], 2);
+    assert!(replaced["episode"]["manual_assessment"].is_null());
+    value(invoke(
+        &config,
+        &store,
+        &[
+            "episode-annotate",
+            id,
+            "--expected-revision",
+            "3",
+            "--category",
+            "unknown",
+            "--outcome",
+            "unknown",
+        ],
+    ));
+    let cleared = value(invoke(
+        &config,
+        &store,
+        &["episode-clear-assessment", id, "--expected-revision", "4"],
+    ));
+    assert_eq!(cleared["episode"]["revision"], 5);
+    assert!(cleared["episode"]["manual_assessment"].is_null());
+    value(invoke(
+        &config,
+        &store,
+        &["episode-delete", id, "--expected-revision", "5"],
+    ));
+    assert_eq!(
+        value(invoke(&config, &store, &["list"]))
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    let summary = value(invoke(&config, &store, &["summary"]));
+    assert_eq!(summary["saved_snapshots"], 2);
+    assert_eq!(summary["user_reported"]["assessed_snapshots"], 0);
+    fixture(&file_a, true);
+    let changed = save(&file_a);
+    assert_eq!(
+        changed["id"], b_id,
+        "saved insight JSON keeps its existing top-level fields"
+    );
+    assert_eq!(
+        changed["mutation_effects"]["invalidated_episode_ids"],
+        serde_json::json!([other_id])
+    );
+    assert_eq!(
+        value(invoke(&config, &store, &["episode-list"]))["episodes"],
+        serde_json::json!([])
+    );
+    let last = value(invoke(
+        &config,
+        &store,
+        &["episode-create", "--snapshot", b_id],
+    ));
+    let deleted = value(invoke(&config, &store, &["delete", b_id]));
+    assert_eq!(deleted["deleted"], true);
+    assert_eq!(
+        deleted["mutation_effects"]["invalidated_episode_ids"],
+        serde_json::json!([last["episode"]["id"]])
+    );
+    assert!(file_a.exists() && file_b.exists() && !config.exists());
+}
+
+#[test]
+fn human_snapshot_delete_reports_lost_episode_groups() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = temp.path().join("enrollment");
+    let store = temp.path().join("insights");
+    let file = temp.path().join("source.jsonl");
+    fixture(&file, false);
+    let snapshot = value(invoke(
+        &config,
+        &store,
+        &[
+            "analyze",
+            "--source",
+            "trajectory",
+            "--file",
+            file.to_str().unwrap(),
+            "--save",
+        ],
+    ));
+    let id = snapshot["id"].as_str().unwrap();
+    let episode = value(invoke(
+        &config,
+        &store,
+        &["episode-create", "--snapshot", id],
+    ));
+    let human_list = || {
+        let output = Command::new(env!("CARGO_BIN_EXE_trace-commons-contributor"))
+            .arg("--config-dir")
+            .arg(&config)
+            .args(["insights", "--store-dir"])
+            .arg(&store)
+            .arg("episode-list")
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        String::from_utf8(output.stdout).unwrap()
+    };
+    let copy = trace_commons_contributor::insights::service::ui_copy();
+    let text = human_list();
+    assert!(text.contains(&copy["episode_unassessed"]));
+    assert!(text.contains(&copy["episode_no_overlap"]));
+    assert!(text.contains(id));
+    assert!(
+        !text.contains("\"schema_version\""),
+        "human list must not dump raw JSON"
+    );
+    value(invoke(
+        &config,
+        &store,
+        &[
+            "episode-annotate",
+            episode["episode"]["id"].as_str().unwrap(),
+            "--expected-revision",
+            "1",
+            "--category",
+            "tests",
+            "--outcome",
+            "accepted",
+        ],
+    ));
+    let text = human_list();
+    assert!(text.contains(&format!(
+        "{}: {} / {}",
+        copy["episode_assessment"], copy["category_tests"], copy["outcome_accepted"]
+    )));
+    let output = Command::new(env!("CARGO_BIN_EXE_trace-commons-contributor"))
+        .arg("--config-dir")
+        .arg(&config)
+        .args(["insights", "--store-dir"])
+        .arg(&store)
+        .args(["delete", id])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let text = String::from_utf8(output.stdout).unwrap();
+    let copy = trace_commons_contributor::insights::service::ui_copy();
+    assert!(text.contains(&copy["episode_invalidated_notice"]));
+    assert!(text.contains(episode["episode"]["id"].as_str().unwrap()));
+    assert!(file.exists() && !config.exists());
 }

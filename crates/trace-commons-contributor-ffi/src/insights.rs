@@ -15,6 +15,20 @@ use trace_commons_contributor::insights::service::{MAX_REQUEST_BYTES, dispatch_j
 /// Native usage: `{"type":"usage","source":"claude_code","file":"/chosen/file"}`.
 /// Saved-history summary: `{"type":"summary"}`. Reads derived observations only.
 /// Shared UI vocabulary: `{"type":"copy"}`. List/summary create no absent store.
+/// Whole-snapshot episodes: `{"type":"episode_create","snapshot_ids":["..."]}`;
+/// `episode_list`, and `episode_explain` with an episode UUID `id`.
+/// Edits require `id` and `expected_revision`: `episode_replace_members` also
+/// takes `snapshot_ids`; `episode_annotate` takes `category` and `outcome`;
+/// `episode_clear_assessment` and `episode_delete` take no other fields.
+/// Episode reads resolve saved observations without rereading source files.
+/// Absent episode history creates no store. Revisions protect concurrent edits;
+/// `insights_episode_revision_conflict` requires refresh and user review.
+/// Analyze/delete return additive `mutation_effects.invalidated_episode_ids`;
+/// those groups and assessments were atomically removed with a member snapshot.
+/// Successful response JSON is capped at 16 MiB. Oversized responses return
+/// `insights_response_too_large`; no truncated evidence is returned.
+/// Only fixed typed episode errors cross this ABI. Unexpected execution errors
+/// remain `insights-operation-failed`, without paths or parser/source details.
 /// Omit store_dir to use the shared platform local-data Insights directory.
 /// Runs synchronous bounded-source local IO: call off the UI thread; closing a
 /// window does not cancel a started operation. Keep buffers alive until return.
@@ -104,5 +118,94 @@ mod tests {
         assert_eq!(value, serde_json::json!({"type":"list","insights":[]}));
         unsafe { tc_string_free(result) };
         assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 0);
+    }
+
+    fn json_call(
+        store: &std::path::Path,
+        operation: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let request =
+            serde_json::to_vec(&serde_json::json!({"store_dir":store,"operation":operation}))
+                .unwrap();
+        let mut error = std::ptr::null_mut();
+        let result = unsafe { tc_insights_call(request.as_ptr(), request.len(), &mut error) };
+        if result.is_null() {
+            assert!(!error.is_null());
+            let message = unsafe { CStr::from_ptr(error) }
+                .to_str()
+                .unwrap()
+                .to_owned();
+            unsafe { tc_string_free(error) };
+            return Err(message);
+        }
+        assert!(error.is_null());
+        let value =
+            serde_json::from_str(unsafe { CStr::from_ptr(result) }.to_str().unwrap()).unwrap();
+        unsafe { tc_string_free(result) };
+        Ok(value)
+    }
+
+    #[test]
+    fn episode_abi_preserves_fixed_errors_no_state_and_revision_conflicts() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = temp.path().join("insights");
+        assert_eq!(
+            json_call(&store, serde_json::json!({"type":"episode_list"})).unwrap()["episodes"],
+            serde_json::json!([])
+        );
+        assert_eq!(
+            json_call(
+                &store,
+                serde_json::json!({"type":"episode_explain","id":"PRIVATE_UUID"})
+            )
+            .unwrap_err(),
+            "insights_episode_invalid"
+        );
+        assert_eq!(json_call(&store, serde_json::json!({"type":"episode_explain","id":"d0c18c96-6093-49f5-bb6f-6092ef0630b9"})).unwrap_err(), "insights_episode_not_found");
+        assert_eq!(
+            json_call(
+                &store,
+                serde_json::json!({"type":"episode_create","snapshot_ids":["a".repeat(64)]})
+            )
+            .unwrap_err(),
+            "insights_episode_missing_members"
+        );
+        assert!(!store.exists());
+        let source = temp.path().join("source.jsonl");
+        std::fs::write(&source, b"{\"role\":\"meta\",\"source\":\"claude-code\",\"model\":\"fixture\"}\n{\"role\":\"user\",\"timestamp\":\"2026-09-11T12:00:00Z\",\"content\":\"PRIVATE_BODY\"}\n").unwrap();
+        let saved = json_call(
+            &store,
+            serde_json::json!({"type":"analyze","source":"trajectory","file":source,"save":true}),
+        )
+        .unwrap();
+        let snapshot = saved["insight"]["id"].as_str().unwrap();
+        let created = json_call(
+            &store,
+            serde_json::json!({"type":"episode_create","snapshot_ids":[snapshot]}),
+        )
+        .unwrap();
+        let id = created["episode"]["id"].as_str().unwrap();
+        let updated = json_call(&store, serde_json::json!({"type":"episode_annotate","id":id,"expected_revision":1,"category":"docs","outcome":"unknown"})).unwrap();
+        assert_eq!(updated["episode"]["revision"], 2);
+        assert_eq!(
+            json_call(
+                &store,
+                serde_json::json!({"type":"episode_delete","id":id,"expected_revision":1})
+            )
+            .unwrap_err(),
+            "insights_episode_revision_conflict"
+        );
+        let deleted = json_call(
+            &store,
+            serde_json::json!({"type":"episode_delete","id":id,"expected_revision":2}),
+        )
+        .unwrap();
+        assert_eq!(deleted["episode"]["id"], id);
+        assert!(json_call(&store, serde_json::json!({"type":"explain","id":snapshot})).is_ok());
+        std::fs::write(store.join("index.json"), b"PRIVATE_PARSER_CONTENT").unwrap();
+        assert_eq!(
+            json_call(&store, serde_json::json!({"type":"episode_list"})).unwrap_err(),
+            "insights-operation-failed"
+        );
     }
 }
