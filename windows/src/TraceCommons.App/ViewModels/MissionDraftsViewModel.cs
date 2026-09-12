@@ -143,10 +143,12 @@ public sealed class MissionDraftsViewModel : INotifyPropertyChanged, IDisposable
     private long Begin() { long ticket = Interlocked.Increment(ref _generation); IsBusy = true; Status = this["working"]; return ticket; }
     private async Task<bool> EnterAsync()
     {
+        CancellationToken token = _lifetime.Token;
+        long generation = Interlocked.Read(ref _generation);
         try
         {
-            await _actions.WaitAsync(_lifetime.Token);
-            if (!_disposed) return true;
+            await _actions.WaitAsync(token);
+            if (!_disposed && !token.IsCancellationRequested && generation == Interlocked.Read(ref _generation)) return true;
             _actions.Release();
             return false;
         }

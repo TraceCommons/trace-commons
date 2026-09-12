@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Collections.Concurrent;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
@@ -99,6 +100,22 @@ public sealed class MissionDraftTests
         }
     }
 
+    private sealed class ManualSynchronizationContext : SynchronizationContext
+    {
+        private readonly ConcurrentQueue<(SendOrPostCallback Callback, object? State)> _work = new();
+        public override void Post(SendOrPostCallback callback, object? state) => _work.Enqueue((callback, state));
+        public bool RunOne()
+        {
+            if (!_work.TryDequeue(out var work)) return false;
+            SynchronizationContext? prior = Current;
+            SetSynchronizationContext(this);
+            try { work.Callback(work.State); }
+            finally { SetSynchronizationContext(prior); }
+            return true;
+        }
+        public void RunAll() { while (RunOne()) { } }
+    }
+
     [Fact]
     public void StrictDecoderRejectsUnknownFieldsAuthorityAndMismatchedIds()
     {
@@ -162,6 +179,36 @@ public sealed class MissionDraftTests
         service.ReleaseReconcile.SetResult(true);
         await Task.WhenAll(delete, show);
         Assert.Empty(model.Drafts); Assert.Null(model.Current); Assert.False(model.IsBusy);
+    }
+
+    [Fact]
+    public async Task NavigationRejectsActionWhosePermitWasGrantedBeforeItsContinuation()
+    {
+        var service = new Service(); using var model = new MissionDraftsViewModel(service);
+        await model.LoadAsync();
+        var showCompletion = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
+        service.PendingShow = showCompletion;
+        var context = new ManualSynchronizationContext();
+        SynchronizationContext? prior = SynchronizationContext.Current;
+        SynchronizationContext.SetSynchronizationContext(context);
+        Task show;
+        Task import;
+        try
+        {
+            show = model.ShowAsync(Id);
+            import = model.ImportAsync("/stale/draft.json");
+        }
+        finally { SynchronizationContext.SetSynchronizationContext(prior); }
+
+        showCompletion.SetResult(Json("{\"type\":\"show\",\"draft\":{\"id\":\"" + Id + "\",\"proposal\":" + Proposal + ",\"review\":" + Review + "}}"));
+        Assert.True(context.RunOne()); // The show completes and grants the queued import its permit.
+        model.Deactivate();
+        context.RunAll();              // The import continuation observes its cancelled lifetime.
+        await Task.WhenAll(show, import);
+
+        Assert.DoesNotContain(service.Calls, call => call.GetProperty("type").GetString() == "import");
+        await model.RefreshAsync();    // A rejected stale action returned the permit.
+        Assert.False(model.IsBusy);
     }
 
     [Fact]
