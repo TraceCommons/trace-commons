@@ -76,6 +76,10 @@ final class ComparisonSpecificationsModel {
         }
         reconcileCohorts()
     }
+    func sourceEvidenceChanged(tasks: [ComparisonTaskDetail], snapshots: [LocalInsight]) {
+        updateSources(tasks: tasks, snapshots: snapshots)
+        upstreamEvidenceChanged()
+    }
     func selectStratum(_ id: String) { selectedStratumID = id; selectedCohorts = []; invalidatePreview() }
     func setCohort(_ label: String, selected: Bool) {
         if selected { if selectedCohorts.count < 2 { selectedCohorts.insert(label) } }
@@ -180,7 +184,9 @@ final class ComparisonSpecificationsModel {
                       let spec = response.specification else { throw InsightsError.invalidResponse }
                 try spec.validateStructure(); self.selected = spec; self.notice = retained; self.finish()
             } catch {
-                guard let self, self.active else { return }; self.notice = retained
+                guard let self, self.active, self.generation == screen, self.presentation == token,
+                      !Task.isCancelled else { return }
+                self.notice = retained
                 self.error = "comparison_specification_committed_reload_failed"; self.finish()
             }
         }

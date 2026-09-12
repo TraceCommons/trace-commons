@@ -72,6 +72,17 @@ final class ComparisonTaskBridgeTests: XCTestCase {
         let resultResponse = try JSONDecoder().decode(InsightsResponse.self, from: try JSONSerialization.data(
             withJSONObject: ["type": "comparison_result", "result": malformedResult]))
         XCTAssertThrowsError(try XCTUnwrap(resultResponse.comparisonResult).validateStructure())
+
+        malformedResult = Self.comparisonResult()
+        malformedResult["cohorts"] = [["cohort_label": "a", "included_tasks": UInt64.max,
+            "outcomes": ["accepted": UInt64.max, "partial": 1, "rejected": 0, "pending": 0,
+                         "unknown": 0, "unassessed": 0, "assessed": UInt64.max],
+            "usage": ["tasks_with_observed_attributed_tokens": 0,
+                      "tasks_without_observed_attributed_tokens": UInt64.max,
+                      "observed_attributed_tokens": 0]]]
+        let overflowing = try JSONDecoder().decode(InsightsResponse.self, from: try JSONSerialization.data(
+            withJSONObject: ["type": "comparison_result", "result": malformedResult]))
+        XCTAssertThrowsError(try XCTUnwrap(overflowing.comparisonResult).validateStructure())
     }
 
     func testActualServiceComparisonTaskRoundTrip() throws {

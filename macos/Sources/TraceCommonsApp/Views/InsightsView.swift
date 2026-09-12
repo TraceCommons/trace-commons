@@ -100,7 +100,9 @@ struct InsightsView: View {
         .onAppear { model.open() }
         .onAppear { comparisonModel.open() }
         .onAppear { specificationModel.open() }
-        .onChange(of: comparisonModel.tasks.map(\.id)) { _, _ in updateSpecificationSources() }
+        .onChange(of: comparisonTaskVersions) { _, _ in
+            specificationModel.sourceEvidenceChanged(tasks: comparisonModel.tasks, snapshots: model.snapshots)
+        }
         .onChange(of: model.snapshots.map(\.id)) { _, _ in updateSpecificationSources() }
         .onChange(of: model.comparisonInvalidationGeneration) { _, _ in
             comparisonModel.upstreamEvidenceChanged()
@@ -110,6 +112,15 @@ struct InsightsView: View {
     }
     private func updateSpecificationSources() {
         specificationModel.updateSources(tasks: comparisonModel.tasks, snapshots: model.snapshots)
+    }
+    private var comparisonTaskVersions: [String] {
+        comparisonModel.tasks.map { detail in
+            let context = detail.task.context
+            return [detail.id, String(detail.task.revision), detail.task.material_digest,
+                    context?.configuration_fingerprint ?? "", context?.task_date ?? "",
+                    detail.task.outcome?.recorded_at ?? "", detail.task.independence_confirmation?.confirmed_at ?? "",
+                    detail.stale_reasons.map(\.rawValue).joined(separator: ",")].joined(separator: ":")
+        }
     }
     private var assessment: some View {
         VStack(alignment: .leading) {

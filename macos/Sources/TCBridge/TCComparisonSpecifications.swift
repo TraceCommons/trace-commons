@@ -94,11 +94,19 @@ public struct DescriptiveComparisonResult: Decodable, Sendable, Equatable {
                 && expectedSpecification?.saved_record_digest == specification_record_digest)
         else { throw InsightsError.invalidResponse }
         guard cohorts.allSatisfy({ cohort in
-            cohort.included_tasks == cohort.outcomes.accepted + cohort.outcomes.partial
-                + cohort.outcomes.rejected + cohort.outcomes.pending + cohort.outcomes.unknown
-                + cohort.outcomes.unassessed
-                && cohort.outcomes.assessed == cohort.outcomes.accepted + cohort.outcomes.partial
-                    + cohort.outcomes.rejected
+            guard let total = Self.checkedSum([cohort.outcomes.accepted, cohort.outcomes.partial,
+                cohort.outcomes.rejected, cohort.outcomes.pending, cohort.outcomes.unknown,
+                cohort.outcomes.unassessed]),
+                let assessed = Self.checkedSum([cohort.outcomes.accepted, cohort.outcomes.partial,
+                                                cohort.outcomes.rejected]) else { return false }
+            return cohort.included_tasks == total && cohort.outcomes.assessed == assessed
         }) else { throw InsightsError.invalidResponse }
+    }
+    private static func checkedSum(_ values: [UInt64]) -> UInt64? {
+        values.reduce(Optional(UInt64.zero)) { partial, value in
+            guard let partial else { return nil }
+            let (sum, overflow) = partial.addingReportingOverflow(value)
+            return overflow ? nil : sum
+        }
     }
 }

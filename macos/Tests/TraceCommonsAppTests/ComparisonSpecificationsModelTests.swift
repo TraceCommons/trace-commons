@@ -80,13 +80,48 @@ final class ComparisonSpecificationsModelTests: XCTestCase {
         XCTAssertEqual(ComparisonSpecificationsModel.day(instant, calendar: calendar), "2026-09-11")
     }
 
+    @MainActor
+    func testStableTaskIDContextAndOutcomeChangesRefreshSourcesAndResult() async throws {
+        let service = SpecificationFakeService(seed: true)
+        let model = ComparisonSpecificationsModel(service: { try await service.call($0) })
+        model.open(); try await settle(model)
+        model.updateSources(tasks: [try Self.task(complete: false)], snapshots: try Self.snapshots())
+        XCTAssertTrue(model.options.isEmpty)
+        model.sourceEvidenceChanged(tasks: [try Self.task()], snapshots: try Self.snapshots())
+        try await settle(model); XCTAssertEqual(model.options.count, 1)
+        model.select(SpecificationFakeService.specID); try await settle(model); model.evaluate(); try await settle(model)
+        let prior = await service.count("comparison_evaluate")
+        model.sourceEvidenceChanged(tasks: [try Self.task(revision: 2, outcomeRecordedAt: "2026-09-12T01:00:00Z")],
+                                    snapshots: try Self.snapshots())
+        try await settle(model)
+        let current = await service.count("comparison_evaluate")
+        XCTAssertEqual(current, prior + 1)
+    }
+
+    @MainActor
+    func testOldReconciliationFailureCannotOverwriteReopenedRead() async throws {
+        let service = SpecificationFakeService()
+        let model = ComparisonSpecificationsModel(service: { try await service.call($0) })
+        model.open(); try await settle(model); model.updateSources(tasks: [try Self.task()], snapshots: try Self.snapshots())
+        model.setCohort("model-a", selected: true); model.setCohort("model-b", selected: true)
+        model.preview(); try await settle(model)
+        await service.holdAndFailList(); model.save(); try await Task.sleep(for: .milliseconds(20))
+        model.close(); await service.holdList(); model.open(); try await Task.sleep(for: .milliseconds(20))
+        await service.releaseFailingList(); try await Task.sleep(for: .milliseconds(20))
+        XCTAssertTrue(model.busy); XCTAssertNil(model.error)
+        await service.releaseList(); try await settle(model)
+        XCTAssertNil(model.error)
+    }
+
     @MainActor private func settle(_ model: ComparisonSpecificationsModel) async throws {
         for _ in 0..<300 { if !model.busy { return }; try await Task.sleep(for: .milliseconds(10)) }
         XCTFail("Specification model did not settle")
     }
 
-    private static func task() throws -> ComparisonTaskDetail {
+    private static func task(complete: Bool = true, revision: UInt64 = 1,
+                             outcomeRecordedAt: String? = nil) throws -> ComparisonTaskDetail {
         var task = SpecificationFixtures.task()
+        task["revision"] = revision
         task["context"] = ["project_id": SpecificationFakeService.projectID, "category": "refactor",
             "task_date": "2026-09-12", "checkout_provenance": ["state": "unavailable"],
             "language": ["state": "known", "value": "swift"],
@@ -96,6 +131,11 @@ final class ComparisonSpecificationsModelTests: XCTestCase {
                 "tool_policy_version": ["state": "known", "value": "1"],
                 "prompt_template_digest": ["state": "known", "digest": String(repeating: "f", count: 64)]],
             "configuration_fingerprint": String(repeating: "a", count: 64)]
+        if !complete { task["context"] = NSNull() }
+        if let outcomeRecordedAt {
+            task["outcome"] = ["value": "accepted", "material_revision": 1,
+                "material_digest": String(repeating: "a", count: 64), "recorded_at": outcomeRecordedAt]
+        }
         return try JSONDecoder().decode(ComparisonTaskDetail.self,
             from: JSONSerialization.data(withJSONObject: SpecificationFixtures.detail(task: task)))
     }
@@ -126,19 +166,28 @@ private actor SpecificationFakeService {
     private var malformedPreviewFlag = false
     private var saveContinuation: CheckedContinuation<Void, Never>?
     private var listContinuation: CheckedContinuation<Void, Never>?
+    private var failListContinuation: CheckedContinuation<Void, Never>?
+    private var holdFailListFlag = false
     init(seed: Bool = false) { if seed { saved = Self.specification() } }
     func operations() -> [String] { calls }
     func count(_ operation: String) -> Int { calls.filter { $0 == operation }.count }
     func holdSave() { holdSaveFlag = true }
     func releaseSave() { saveContinuation?.resume(); saveContinuation = nil }
     func holdList() { holdListFlag = true }
+    func holdAndFailList() { holdFailListFlag = true }
     func malformedPreview() { malformedPreviewFlag = true }
     func releaseList() { listContinuation?.resume(); listContinuation = nil }
+    func releaseFailingList() { failListContinuation?.resume(); failListContinuation = nil }
     func call(_ request: InsightsRequest) async throws -> InsightsResponse {
         let type = request.operation.type; calls.append(type); var payload: [String: Any] = ["type": type]
         switch type {
         case "comparison_list_specs":
             let captured = saved.map { [$0] } ?? []
+            if holdFailListFlag {
+                holdFailListFlag = false
+                await withCheckedContinuation { failListContinuation = $0 }
+                throw InsightsError.invalidResponse
+            }
             if holdListFlag { holdListFlag = false; await withCheckedContinuation { listContinuation = $0 } }
             payload["type"] = "comparison_specification_list"; payload["specifications"] = captured
         case "comparison_preview_spec":
