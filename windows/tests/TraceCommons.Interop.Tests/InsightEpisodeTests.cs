@@ -49,7 +49,7 @@ public sealed class InsightEpisodeTests
             if (type == "episode_replace_members" && ConflictReplace)
             {
                 ConflictReplace = false;
-                Revision = 2;
+                Revision++;
                 throw new InsightsServiceException("insights_episode_revision_conflict");
             }
             if (type == "episode_explain" && PendingExplain != null) return PendingExplain.Task;
@@ -134,6 +134,33 @@ public sealed class InsightEpisodeTests
         Assert.Equal(before, service.Calls.Count);
         Assert.Equal("Review conflict", model.EpisodeStatus);
         Assert.Null(model.CaptureEpisodeTarget());
+    }
+
+    [Fact]
+    public async Task ControlDraftBindingRebindsAfterReconciliationAndRequiresReopenAfterConflict()
+    {
+        var service = new Service { Exists = false };
+        using var model = new InsightsViewModel(service);
+        var binding = new EpisodeMemberDraftBinding();
+        await model.LoadAsync();
+        await model.CreateEpisodeAsync(new[] { SnapshotId });
+        Assert.True(binding.Reconcile(model, EpisodeId));
+        var createDraft = binding.Consume()!;
+        await model.ReplaceEpisodeMembersAsync(createDraft, new[] { SnapshotId });
+        Assert.True(binding.Reconcile(model, EpisodeId));
+        var editDraft = binding.Consume()!;
+        Assert.True(editDraft.Revision > createDraft.Revision);
+        await model.SaveEpisodeAssessmentAsync(editDraft);
+        Assert.True(binding.Reconcile(model, EpisodeId));
+        var assessmentDraft = binding.Consume()!;
+        Assert.True(assessmentDraft.Revision > editDraft.Revision);
+        service.ConflictReplace = true;
+        await model.ReplaceEpisodeMembersAsync(assessmentDraft, new[] { SnapshotId });
+        Assert.False(binding.Reconcile(model, EpisodeId));
+        Assert.False(binding.HasDraft);
+        await model.OpenEpisodeAsync(EpisodeId);
+        Assert.True(binding.Reconcile(model, EpisodeId));
+        Assert.True(binding.HasDraft);
     }
 
     [Fact]

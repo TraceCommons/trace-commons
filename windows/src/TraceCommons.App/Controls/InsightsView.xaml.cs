@@ -12,7 +12,7 @@ public sealed partial class InsightsView : UserControl, IDisposable
 {
     private readonly IntPtr _window;
     private string? _file;
-    private EpisodeTarget? _episodeMemberDraft;
+    private readonly EpisodeMemberDraftBinding _episodeMemberDraft = new();
     private bool _closed;
     public InsightsViewModel ViewModel { get; } = new();
     public event EventHandler? ContributionSetupRequested;
@@ -22,10 +22,10 @@ public sealed partial class InsightsView : UserControl, IDisposable
         InitializeComponent();
         _window = window;
         DataContext = ViewModel;
-        Unloaded += (_, _) => { _episodeMemberDraft = null; ViewModel.Cancel(); };
+        Unloaded += (_, _) => { _episodeMemberDraft.Clear(); ViewModel.Cancel(); };
     }
     public Task ActivateAsync() => ViewModel.LoadAsync();
-    public void Deactivate() { _episodeMemberDraft = null; ViewModel.Cancel(); }
+    public void Deactivate() { _episodeMemberDraft.Clear(); ViewModel.Cancel(); }
     private async void OnChoose(object sender, RoutedEventArgs args)
     {
         try
@@ -65,28 +65,32 @@ public sealed partial class InsightsView : UserControl, IDisposable
         BringSnapshotIntoView(selected.Id);
     }
     private string[] SelectedSnapshotIds() => SavedList.SelectedItems.Cast<SavedInsight>().Select(item => item.Id).ToArray();
-    private async void OnCreateEpisode(object sender, RoutedEventArgs args) => await ViewModel.CreateEpisodeAsync(SelectedSnapshotIds());
+    private async void OnCreateEpisode(object sender, RoutedEventArgs args)
+    {
+        await ViewModel.CreateEpisodeAsync(SelectedSnapshotIds());
+        if (ViewModel.CurrentEpisodeId is { } id) ReconcileEpisodeMemberDraft(id);
+    }
     private async void OnOpenEpisode(object sender, RoutedEventArgs args)
     {
         if (EpisodeList.SelectedItem is not EpisodeRow selected) return;
         await ViewModel.OpenEpisodeAsync(selected.Id);
         if (_closed || ViewModel.CurrentEpisodeId != selected.Id) return;
-        var members = ViewModel.EpisodeMembers.Select(member => member.Id).ToHashSet(StringComparer.Ordinal);
-        SavedList.SelectedItems.Clear();
-        foreach (var saved in ViewModel.Saved.Where(saved => members.Contains(saved.Id))) SavedList.SelectedItems.Add(saved);
-        _episodeMemberDraft = ViewModel.CaptureEpisodeTarget();
+        ReconcileEpisodeMemberDraft(selected.Id);
         DispatcherQueue.TryEnqueue(() => { if (!_closed && IsLoaded && ViewModel.CurrentEpisodeId == selected.Id) EpisodeDetail.StartBringIntoView(); });
     }
     private async void OnSaveEpisodeMembers(object sender, RoutedEventArgs args)
     {
-        var target = _episodeMemberDraft;
-        _episodeMemberDraft = null;
-        if (target != null) await ViewModel.ReplaceEpisodeMembersAsync(target, SelectedSnapshotIds());
+        var target = _episodeMemberDraft.Consume();
+        if (target == null) return;
+        await ViewModel.ReplaceEpisodeMembersAsync(target, SelectedSnapshotIds());
+        ReconcileEpisodeMemberDraft(target.Id);
     }
     private async void OnSaveEpisodeAssessment(object sender, RoutedEventArgs args)
     {
         var target = ViewModel.CaptureEpisodeTarget();
-        if (target != null) await ViewModel.SaveEpisodeAssessmentAsync(target);
+        if (target == null) return;
+        await ViewModel.SaveEpisodeAssessmentAsync(target);
+        ReconcileEpisodeMemberDraft(target.Id);
     }
     private async void OnClearEpisodeAssessment(object sender, RoutedEventArgs args)
     {
@@ -96,7 +100,18 @@ public sealed partial class InsightsView : UserControl, IDisposable
             Content = ViewModel["episode_clear_assessment_confirm"], PrimaryButtonText = ViewModel["episode_clear_assessment"],
             CloseButtonText = ViewModel["cancel"], DefaultButton = ContentDialogButton.Close };
         if (await dialog.ShowAsync() == ContentDialogResult.Primary && !_closed)
+        {
             await ViewModel.ClearEpisodeAssessmentAsync(target);
+            ReconcileEpisodeMemberDraft(target.Id);
+        }
+    }
+    private bool ReconcileEpisodeMemberDraft(string expectedId)
+    {
+        if (!_episodeMemberDraft.Reconcile(ViewModel, expectedId)) return false;
+        var members = ViewModel.EpisodeMembers.Select(member => member.Id).ToHashSet(StringComparer.Ordinal);
+        SavedList.SelectedItems.Clear();
+        foreach (var saved in ViewModel.Saved.Where(saved => members.Contains(saved.Id))) SavedList.SelectedItems.Add(saved);
+        return true;
     }
     private async void OnDeleteEpisode(object sender, RoutedEventArgs args)
     {
@@ -167,7 +182,7 @@ public sealed partial class InsightsView : UserControl, IDisposable
     }
     private async void OnAnnotate(object sender, RoutedEventArgs args) => await ViewModel.SaveAssessmentAsync();
     private async void OnClear(object sender, RoutedEventArgs args) => await ViewModel.ClearAnnotationAsync();
-    private void OnCancel(object sender, RoutedEventArgs args) => ViewModel.Cancel();
+    private void OnCancel(object sender, RoutedEventArgs args) { _episodeMemberDraft.Clear(); ViewModel.Cancel(); }
     private void OnContributions(object sender, RoutedEventArgs args) => ContributionSetupRequested?.Invoke(this, EventArgs.Empty);
-    public void Dispose() { _closed = true; _episodeMemberDraft = null; ViewModel.Dispose(); }
+    public void Dispose() { _closed = true; _episodeMemberDraft.Clear(); ViewModel.Dispose(); }
 }

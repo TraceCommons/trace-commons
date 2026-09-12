@@ -21,6 +21,22 @@ public sealed record EpisodeRow(string Id, string Label);
 public sealed record EpisodeMemberRow(string Id, string Label, string Details);
 public sealed record EpisodeTarget(string Id, ulong Revision, ulong MembershipRevision, long PresentationVersion);
 
+/// <summary>Owns the frozen revision used by the control's complete member-selection draft.</summary>
+public sealed class EpisodeMemberDraftBinding
+{
+    private EpisodeTarget? _target;
+    public bool HasDraft => _target != null;
+    public EpisodeTarget? Consume() { var target = _target; _target = null; return target; }
+    public void Clear() => _target = null;
+    public bool Reconcile(InsightsViewModel model, string expectedId)
+    {
+        var target = model.CaptureEpisodeTarget();
+        if (target == null || target.Id != expectedId) { Clear(); return false; }
+        _target = target;
+        return true;
+    }
+}
+
 /// <summary>UI-thread state; all IO belongs to the handle-free service. No metrics are calculated here.</summary>
 public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
 {
