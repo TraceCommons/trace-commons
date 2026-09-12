@@ -1,6 +1,6 @@
 //! First-party local projection of validated, host-selected Insights card facts.
 
-use trace_commons_protocol::insights::ExecutionMode;
+use trace_commons_protocol::insights::{ExecutionMode, ProviderManifest};
 use trace_commons_protocol::insights_cards::{
     CardValidationError, INSIGHT_CARD_RUBRIC_VERSION, INSIGHT_CARD_SCHEMA_VERSION,
     InsightCardRequest, InsightCardResult, expected_cards,
@@ -18,37 +18,80 @@ pub enum QuestionCardProjectionError {
     IncompatibleProvider,
     #[error("insights_card_projection_invalid")]
     InvalidProjection,
+    #[error("insights_card_provider_unavailable")]
+    Unavailable,
+}
+
+/// A separate capability from descriptive report evaluation. Implementations
+/// must perform no external IO and return only payload-free errors. The host
+/// selects trusted implementations; this in-process seam is not a sandbox or
+/// a product installation, selection, or remote-execution mechanism.
+pub trait LocalQuestionCardProvider {
+    fn manifest(&self) -> ProviderManifest;
+    fn evaluate_cards(
+        &self,
+        request: &InsightCardRequest,
+    ) -> Result<InsightCardResult, QuestionCardProjectionError>;
+}
+
+/// Validate the host-selected request before invoking a provider, then bind its
+/// complete result to that request and the shared deterministic rubric.
+pub fn dispatch_question_cards(
+    provider: &dyn LocalQuestionCardProvider,
+    request: &InsightCardRequest,
+) -> Result<InsightCardResult, QuestionCardProjectionError> {
+    request
+        .validate()
+        .map_err(|_| QuestionCardProjectionError::InvalidRequest)?;
+    if provider.manifest() != request.expected_provider {
+        return Err(QuestionCardProjectionError::IncompatibleProvider);
+    }
+    let result = provider.evaluate_cards(request)?;
+    result
+        .validate_for(request)
+        .map_err(|_| QuestionCardProjectionError::InvalidProjection)?;
+    Ok(result)
+}
+
+pub struct FirstPartyQuestionCardProvider;
+
+impl LocalQuestionCardProvider for FirstPartyQuestionCardProvider {
+    fn manifest(&self) -> ProviderManifest {
+        ProviderManifest {
+            id: FIRST_PARTY_PROVIDER_ID.into(),
+            version: FIRST_PARTY_PROVIDER_VERSION.into(),
+            rubric_version: INSIGHT_CARD_RUBRIC_VERSION.into(),
+            execution_mode: ExecutionMode::Local,
+            schema_version: 1,
+        }
+    }
+
+    fn evaluate_cards(
+        &self,
+        request: &InsightCardRequest,
+    ) -> Result<InsightCardResult, QuestionCardProjectionError> {
+        request
+            .validate()
+            .map_err(|_| QuestionCardProjectionError::InvalidRequest)?;
+        if request.expected_provider != self.manifest() {
+            return Err(QuestionCardProjectionError::IncompatibleProvider);
+        }
+        Ok(InsightCardResult {
+            schema_version: INSIGHT_CARD_SCHEMA_VERSION,
+            provider: self.manifest(),
+            input_digest: request
+                .input_digest()
+                .map_err(|_| QuestionCardProjectionError::InvalidRequest)?,
+            cards: expected_cards(request).map_err(map_projection_error)?,
+        })
+    }
 }
 
 /// Project all requested cards through the curated first-party local capability.
 pub fn project_first_party_question_cards(
     request: &InsightCardRequest,
 ) -> Result<InsightCardResult, QuestionCardProjectionError> {
-    request
-        .validate()
-        .map_err(|_| QuestionCardProjectionError::InvalidRequest)?;
-    let provider = &request.expected_provider;
-    if provider.id != FIRST_PARTY_PROVIDER_ID
-        || provider.version != FIRST_PARTY_PROVIDER_VERSION
-        || provider.rubric_version != INSIGHT_CARD_RUBRIC_VERSION
-        || provider.execution_mode != ExecutionMode::Local
-        || provider.schema_version != 1
-    {
-        return Err(QuestionCardProjectionError::IncompatibleProvider);
-    }
-    let cards = expected_cards(request).map_err(map_projection_error)?;
-    let result = InsightCardResult {
-        schema_version: INSIGHT_CARD_SCHEMA_VERSION,
-        provider: provider.clone(),
-        input_digest: request
-            .input_digest()
-            .map_err(|_| QuestionCardProjectionError::InvalidRequest)?,
-        cards,
-    };
-    result
-        .validate_for(request)
-        .map_err(|_| QuestionCardProjectionError::InvalidProjection)?;
-    Ok(result)
+    dispatch_question_cards(&FirstPartyQuestionCardProvider, request)
 }
 
 fn map_projection_error(_: CardValidationError) -> QuestionCardProjectionError {
@@ -59,6 +102,7 @@ fn map_projection_error(_: CardValidationError) -> QuestionCardProjectionError {
 mod tests {
     use chrono::{DateTime, Utc};
     use sha2::{Digest, Sha256};
+    use std::cell::Cell;
     use trace_commons_protocol::insights::{EvidenceRef, ProviderManifest};
     use trace_commons_protocol::insights_cards::{
         CardSourceFormat, CardState, CardTimeEvidence, CountFact, EpisodeAssessmentInput,
@@ -68,6 +112,112 @@ mod tests {
     };
 
     use super::*;
+
+    struct TestProvider {
+        manifest: ProviderManifest,
+        calls: Cell<u32>,
+        alter: fn(&mut InsightCardResult),
+        fail: bool,
+    }
+
+    impl LocalQuestionCardProvider for TestProvider {
+        fn manifest(&self) -> ProviderManifest {
+            self.manifest.clone()
+        }
+        fn evaluate_cards(
+            &self,
+            request: &InsightCardRequest,
+        ) -> Result<InsightCardResult, QuestionCardProjectionError> {
+            self.calls.set(self.calls.get() + 1);
+            if self.fail {
+                return Err(QuestionCardProjectionError::Unavailable);
+            }
+            let mut result = InsightCardResult {
+                schema_version: INSIGHT_CARD_SCHEMA_VERSION,
+                provider: self.manifest(),
+                input_digest: request.input_digest().unwrap(),
+                cards: expected_cards(request).unwrap(),
+            };
+            (self.alter)(&mut result);
+            Ok(result)
+        }
+    }
+
+    #[test]
+    fn alternate_local_provider_preserves_the_common_card_contract() {
+        let mut request = request();
+        request.expected_provider.id = "another-local-analyzer".into();
+        let provider = TestProvider {
+            manifest: request.expected_provider.clone(),
+            calls: Cell::new(0),
+            alter: |_| {},
+            fail: false,
+        };
+        let result = dispatch_question_cards(&provider, &request).unwrap();
+        assert_eq!(provider.calls.get(), 1);
+        assert_eq!(result.provider.id, "another-local-analyzer");
+        assert_eq!(result.cards, expected_cards(&request).unwrap());
+        result.validate_for(&request).unwrap();
+    }
+
+    #[test]
+    fn bad_requests_and_manifest_mismatch_do_not_invoke_the_provider() {
+        let mut request = request();
+        let provider = TestProvider {
+            manifest: request.expected_provider.clone(),
+            calls: Cell::new(0),
+            alter: |_| {},
+            fail: false,
+        };
+        request.questions.push(request.questions[0]);
+        assert_eq!(
+            dispatch_question_cards(&provider, &request),
+            Err(QuestionCardProjectionError::InvalidRequest)
+        );
+        request.questions.pop();
+        request.expected_provider.id = "another-local-analyzer".into();
+        assert_eq!(
+            dispatch_question_cards(&provider, &request),
+            Err(QuestionCardProjectionError::IncompatibleProvider)
+        );
+        assert_eq!(provider.calls.get(), 0);
+    }
+
+    #[test]
+    fn provider_failures_and_forged_results_cannot_escape_dispatch() {
+        let request = request();
+        let mut provider = TestProvider {
+            manifest: request.expected_provider.clone(),
+            calls: Cell::new(0),
+            alter: |_| {},
+            fail: true,
+        };
+        assert_eq!(
+            dispatch_question_cards(&provider, &request),
+            Err(QuestionCardProjectionError::Unavailable)
+        );
+        provider.fail = false;
+        let mutations: [fn(&mut InsightCardResult); 5] = [
+            |r| r.input_digest = "f".repeat(64),
+            |r| r.provider.id = "impostor".into(),
+            |r| {
+                r.cards.pop();
+            },
+            |r| r.cards[0].evidence_ids.push("f".repeat(64)),
+            |r| {
+                r.cards[0].rows[0].value = Some(
+                    trace_commons_protocol::insights_cards::CardValue::Count(999),
+                )
+            },
+        ];
+        for mutate in mutations {
+            provider.alter = mutate;
+            assert_eq!(
+                dispatch_question_cards(&provider, &request),
+                Err(QuestionCardProjectionError::InvalidProjection)
+            );
+        }
+    }
 
     fn provider() -> ProviderManifest {
         ProviderManifest {

@@ -388,6 +388,80 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_episode_replacement_never_mixes_members_and_snapshot_facts() {
+        use std::sync::{Arc, Barrier};
+
+        let (root, store, ids) = fixture();
+        let episode = store.episode_create(&[ids[0].clone()]).unwrap();
+        let reader = LocalInsightStore::open(&root.path().join("store")).unwrap();
+        // Reading cards must continue to use saved evidence during the race.
+        for label in ["model-a", "model-b"] {
+            fs::remove_file(root.path().join(label)).unwrap();
+        }
+        let phase = Arc::new(Barrier::new(2));
+        std::thread::scope(|scope| {
+            let phase_writer = Arc::clone(&phase);
+            let id = &episode.id;
+            let ids = &ids;
+            let writer = scope.spawn(move || {
+                let mut revision = 1;
+                phase_writer.wait();
+                for _ in 0..32 {
+                    let next = &ids[(revision % 2) as usize];
+                    match store.episode_replace_members(id, revision, std::slice::from_ref(next)) {
+                        Ok(updated) => revision = updated.revision,
+                        Err(error) => assert_eq!(error.to_string(), "insights_store_busy"),
+                    }
+                }
+                revision
+            });
+            phase.wait();
+            for _ in 0..32 {
+                let request = match reader.resolve_card_request(
+                    &InsightQuestionId::ALL,
+                    &[],
+                    std::slice::from_ref(id),
+                ) {
+                    Ok(request) => request,
+                    Err(error) => {
+                        assert_eq!(error.to_string(), "insights_store_busy");
+                        continue;
+                    }
+                };
+                // Every field must belong to one complete store revision,
+                // regardless of how the reader and writer are scheduled.
+                request.validate().unwrap();
+                assert_eq!(request.episodes.len(), 1);
+                assert_eq!(request.snapshots.len(), 1);
+                let selected = &request.episodes[0];
+                assert!((1..=33).contains(&selected.revision));
+                assert_eq!(selected.membership_revision, selected.revision);
+                let expected_id = &ids[((selected.revision - 1) % 2) as usize];
+                assert_eq!(&selected.members[0].snapshot_id, expected_id);
+                assert_eq!(&request.snapshots[0].evidence.id, expected_id);
+                assert_eq!(request.evidence[0], request.snapshots[0].evidence);
+                assert_eq!(
+                    selected.members[0].source_digest,
+                    request.evidence[0].source_digest
+                );
+                super::super::cards::project_first_party_question_cards(&request)
+                    .unwrap()
+                    .validate_for(&request)
+                    .unwrap();
+            }
+            let final_revision = writer.join().unwrap();
+            let final_request = reader
+                .resolve_card_request(&InsightQuestionId::ALL, &[], std::slice::from_ref(id))
+                .unwrap();
+            assert_eq!(final_request.episodes[0].revision, final_revision);
+            assert_eq!(
+                final_request.snapshots[0].evidence.id,
+                ids[((final_revision - 1) % 2) as usize]
+            );
+        });
+    }
+
+    #[test]
     fn empty_and_selected_requests_are_valid_canonical_and_metadata_only() {
         let (root, store, ids) = fixture();
         let empty = empty_card_request(&[InsightQuestionId::RecordedActivity]).unwrap();
