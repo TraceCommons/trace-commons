@@ -208,11 +208,8 @@ impl InsightsView {
         root.append(&label(copy("intro")));
         root.append(&label(copy("snapshot_notice")));
         let controls = gtk::Box::new(gtk::Orientation::Vertical, 8);
-        let source = gtk::DropDown::from_strings(&[
-            copy("codex"),
-            copy("claude_code"),
-            copy("trajectory"),
-        ]);
+        let source =
+            gtk::DropDown::from_strings(&[copy("codex"), copy("claude_code"), copy("trajectory")]);
         source.set_tooltip_text(Some(copy("source")));
         let choose = gtk::Button::with_label(copy("choose_file"));
         let save = gtk::Button::with_label(copy("save"));
