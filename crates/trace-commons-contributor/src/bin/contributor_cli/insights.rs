@@ -11,6 +11,7 @@ use trace_commons_contributor::insights::{
     service::open_store,
 };
 use trace_commons_protocol::insights::MetricId;
+use trace_commons_protocol::insights_cards::InsightQuestionId;
 
 #[derive(Args)]
 pub(super) struct InsightsArgs {
@@ -23,6 +24,13 @@ pub(super) struct InsightsArgs {
 
 #[derive(Subcommand)]
 enum InsightsCommand {
+    /// Show shared cards for explicitly selected snapshots and episode groups
+    Cards {
+        #[arg(long = "snapshot")]
+        snapshot_ids: Vec<String>,
+        #[arg(long = "episode")]
+        episode_ids: Vec<String>,
+    },
     /// Group explicitly selected whole saved snapshots; not inferred task boundaries
     EpisodeCreate {
         #[arg(long = "snapshot", required = true)]
@@ -142,6 +150,25 @@ fn store(args: &InsightsArgs) -> Result<LocalInsightStore> {
 
 pub(super) fn run(args: &InsightsArgs, json: bool) -> Result<()> {
     match &args.command {
+        InsightsCommand::Cards {
+            snapshot_ids,
+            episode_ids,
+        } => {
+            let response = execute(LocalInsightsRequest {
+                store_dir: args.store_dir.clone(),
+                operation: LocalInsightsOperation::QuestionCards {
+                    questions: InsightQuestionId::ALL.to_vec(),
+                    snapshot_ids: snapshot_ids.clone(),
+                    episode_ids: episode_ids.clone(),
+                },
+            })?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&response)?);
+            } else if let LocalInsightsResponse::QuestionCards { text, .. } = response {
+                println!("{text}");
+            }
+        }
+
         InsightsCommand::EpisodeCreate { snapshot_ids } => render_episode_operation(
             args,
             LocalInsightsOperation::EpisodeCreate {

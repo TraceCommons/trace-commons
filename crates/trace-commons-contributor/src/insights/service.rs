@@ -3,6 +3,7 @@ use std::{io::Write, path::PathBuf};
 
 use anyhow::{Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
+use trace_commons_protocol::insights_cards::{InsightCardResult, InsightQuestionId};
 
 use super::episode_store::EpisodeStoreError;
 use super::episodes::{EpisodeDetail, EpisodeListEntry, EpisodeValidationError, LocalEpisode};
@@ -224,6 +225,11 @@ pub struct LocalInsightsRequest {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum LocalInsightsOperation {
+    QuestionCards {
+        questions: Vec<InsightQuestionId>,
+        snapshot_ids: Vec<String>,
+        episode_ids: Vec<String>,
+    },
     EpisodeCreate {
         snapshot_ids: Vec<String>,
     },
@@ -295,6 +301,10 @@ pub enum LocalInsightsOperation {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum LocalInsightsResponse {
+    QuestionCards {
+        result: Box<InsightCardResult>,
+        text: String,
+    },
     EpisodeCreate {
         episode: Box<LocalEpisode>,
     },
@@ -405,6 +415,32 @@ fn execute_inner(request: LocalInsightsRequest) -> Result<LocalInsightsResponse>
             .ok_or_else(|| anyhow!(EpisodeStoreError::NotFound))
     };
     Ok(match request.operation {
+        LocalInsightsOperation::QuestionCards {
+            questions,
+            snapshot_ids,
+            episode_ids,
+        } => {
+            use super::card_store::{CardStoreError, empty_card_request, validate_card_selection};
+            validate_card_selection(&questions, &snapshot_ids, &episode_ids)?;
+            let input = match existing_store(request.store_dir.as_deref())? {
+                Some(store) => {
+                    store.resolve_card_request(&questions, &snapshot_ids, &episode_ids)?
+                }
+                None if !snapshot_ids.is_empty() => {
+                    return Err(CardStoreError::MissingSnapshot.into());
+                }
+                None if !episode_ids.is_empty() => {
+                    return Err(CardStoreError::MissingEpisode.into());
+                }
+                None => empty_card_request(&questions)?,
+            };
+            let result = super::cards::project_first_party_question_cards(&input)?;
+            let text = super::card_presentation::render_text(&result, &input)?;
+            LocalInsightsResponse::QuestionCards {
+                result: Box::new(result),
+                text,
+            }
+        }
         LocalInsightsOperation::EpisodeCreate { snapshot_ids } => {
             super::episodes::validate_snapshot_ids(&snapshot_ids)?;
             let store = existing_store(request.store_dir.as_deref())?
@@ -567,6 +603,12 @@ pub fn dispatch_json(bytes: &[u8]) -> Result<String> {
 
 /// Only concrete, payload-free types may cross the JSON/FFI error boundary.
 fn public_error(error: anyhow::Error) -> anyhow::Error {
+    if let Some(error) = error.downcast_ref::<super::card_store::CardStoreError>() {
+        return anyhow!(error.to_string());
+    }
+    if let Some(error) = error.downcast_ref::<super::cards::QuestionCardProjectionError>() {
+        return anyhow!(error.to_string());
+    }
     if let Some(error) = error.downcast_ref::<EpisodeValidationError>() {
         return anyhow!(match error {
             EpisodeValidationError::Invalid => "insights_episode_invalid",
@@ -622,6 +664,53 @@ fn response_json(response: &LocalInsightsResponse) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn card_reads_on_an_absent_store_are_read_only_and_missing_selections_are_explicit() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("never-created");
+        let request = |snapshot_ids| LocalInsightsRequest {
+            store_dir: Some(directory.clone()),
+            operation: LocalInsightsOperation::QuestionCards {
+                questions: InsightQuestionId::ALL.to_vec(),
+                snapshot_ids,
+                episode_ids: vec![],
+            },
+        };
+        let LocalInsightsResponse::QuestionCards { result, text } =
+            execute(request(vec![])).unwrap()
+        else {
+            panic!("card response expected");
+        };
+        assert_eq!(result.cards.len(), 4);
+        assert!(text.contains("Saved usage evidence is not available."));
+        assert!(!directory.exists());
+        let error = execute(request(vec!["a".repeat(64)])).unwrap_err();
+        assert_eq!(
+            public_error(error).to_string(),
+            "insights_card_snapshot_not_found"
+        );
+        assert!(!directory.exists());
+        let error = execute(request(vec!["PRIVATE_INVALID_PATH".into()])).unwrap_err();
+        assert_eq!(
+            public_error(error).to_string(),
+            "insights_card_invalid_selection"
+        );
+        assert!(!directory.exists());
+    }
+
+    #[test]
+    fn card_errors_are_typed_and_do_not_forward_source_context() {
+        let error: anyhow::Error = super::super::card_store::CardStoreError::MissingEpisode.into();
+        assert_eq!(
+            public_error(error.context("PRIVATE_SOURCE")).to_string(),
+            "insights_card_episode_not_found"
+        );
+        assert_eq!(
+            public_error(anyhow!("insights_card_episode_not_found")).to_string(),
+            "insights-operation-failed"
+        );
+    }
 
     #[test]
     fn episode_error_whitelist_is_typed_and_never_forwards_context_or_impostors() {
