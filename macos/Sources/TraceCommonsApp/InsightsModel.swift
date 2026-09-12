@@ -7,6 +7,7 @@ final class InsightsModel {
     typealias Service = @Sendable (InsightsRequest) async throws -> InsightsResponse
     private let service: Service
     private var task: Task<Void, Never>?
+    private var episodeTask: Task<Void, Never>?
     private var generation = UUID()
     private var active = false
     private var selectionRevision = UUID()
@@ -19,6 +20,18 @@ final class InsightsModel {
     private(set) var summaryError: String?
     private(set) var loadingSummary = false
     private(set) var snapshots: [LocalInsight] = []
+    private(set) var episodes: [EpisodeListEntry] = []
+    private(set) var episodeDetail: EpisodeDetail?
+    private(set) var episodeBusy = false
+    private(set) var episodeError: String?
+    private(set) var episodeNotice: String?
+    var episodeCreateSelection = Set<String>()
+    var episodeEditSelection = Set<String>()
+    private(set) var episodeEditingMembers = false
+    var episodeCategory = "unknown"
+    var episodeOutcome = "unknown"
+    private var episodePresentation = UUID()
+    private var refreshEpisodesAfterSnapshotChain = false
     var assessmentCategory = "unknown"
     var assessmentOutcome = "unknown"
     private(set) var selected: LocalInsight? {
@@ -41,13 +54,76 @@ final class InsightsModel {
         }.value
     }) { self.service = service }
 
-    func open() { active = true; perform(.init("copy")) }
+    func open() {
+        active = true
+        perform(.init("copy"))
+        refreshEpisodes()
+    }
     func close() {
         active = false; generation = UUID(); task?.cancel(); task = nil; busy = false
+        episodePresentation = UUID(); episodeTask?.cancel(); episodeTask = nil; episodeBusy = false
+        refreshEpisodesAfterSnapshotChain = false
+        episodeDetail = nil; episodeEditSelection = []; episodeEditingMembers = false; episodeCreateSelection = []
         loadingSummary = false
         invalidatedEpisodeIDs = []
     }
     func refresh() { perform(.init("list")) }
+    func refreshEpisodes() {
+        episodeTask?.cancel(); episodeBusy = false
+        episodePresentation = UUID(); episodeEditSelection = []; episodeEditingMembers = false
+        episodeDetail = nil
+        runEpisode(.init("episode_list"), intent: .list)
+    }
+    func openEpisode(_ id: String) {
+        episodeTask?.cancel(); episodeBusy = false
+        episodePresentation = UUID(); episodeDetail = nil; episodeEditSelection = []; episodeEditingMembers = false
+        runEpisode(.init("episode_explain", id: id), intent: .detail(id, episodePresentation))
+    }
+    func closeEpisode() {
+        episodeTask?.cancel(); episodeTask = nil; episodeBusy = false
+        episodePresentation = UUID(); episodeDetail = nil; episodeEditSelection = []; episodeEditingMembers = false
+        episodeError = nil; episodeNotice = nil
+    }
+    func createEpisode() {
+        let ids = episodeCreateSelection.sorted()
+        guard !ids.isEmpty else { episodeError = text("episode_selection_empty"); return }
+        runEpisode(.init("episode_create", snapshotIDs: ids), intent: .create)
+    }
+    func beginEpisodeMemberEdit() {
+        guard let detail = episodeDetail else { return }
+        episodeEditSelection = Set(detail.episode.members.map(\.snapshot_id))
+        episodeEditingMembers = true
+        episodePresentation = UUID()
+    }
+    func saveEpisodeMembers() {
+        guard let presented = frozenEpisode(), !episodeEditSelection.isEmpty else {
+            episodeError = text("episode_selection_empty"); return
+        }
+        runEpisode(.init("episode_replace_members", id: presented.id,
+                         snapshotIDs: episodeEditSelection.sorted(), expectedRevision: presented.revision),
+                   intent: .mutate(presented, text("episode_members_saved")))
+    }
+    func saveEpisodeAssessment() {
+        guard let presented = frozenEpisode() else { return }
+        runEpisode(.init("episode_annotate", id: presented.id, category: episodeCategory,
+                         outcome: episodeOutcome, expectedRevision: presented.revision),
+                   intent: .mutate(presented, text("episode_assessment_saved")))
+    }
+    struct EpisodeConfirmation: Equatable, Sendable { fileprivate let presented: PresentedEpisode }
+    func episodeConfirmation() -> EpisodeConfirmation? { frozenEpisode().map(EpisodeConfirmation.init) }
+    func clearEpisodeAssessment(_ confirmation: EpisodeConfirmation) {
+        let presented = confirmation.presented
+        guard accepts(presented), !episodeBusy else { return }
+        runEpisode(.init("episode_clear_assessment", id: presented.id,
+                         expectedRevision: presented.revision),
+                   intent: .mutate(presented, text("episode_assessment_cleared")))
+    }
+    func deleteEpisode(_ confirmation: EpisodeConfirmation) {
+        let presented = confirmation.presented
+        guard accepts(presented), !episodeBusy else { return }
+        runEpisode(.init("episode_delete", id: presented.id, expectedRevision: presented.revision),
+                   intent: .delete(presented))
+    }
     func analyze(file: URL, source: String) {
         guard active, !busy else { return }
         selected = nil; selectedIsSaved = false
@@ -168,6 +244,13 @@ final class InsightsModel {
                 }
                 if operation.type == "analyze" || operation.type == "delete" {
                     self.invalidatedEpisodeIDs = response.invalidatedEpisodeIDs
+                    if let episodeID = self.episodeDetail?.episode.id,
+                       response.invalidatedEpisodeIDs.contains(episodeID) {
+                        self.closeEpisode()
+                    }
+                    if operation.type == "delete" || operation.save == true {
+                        self.refreshEpisodesAfterSnapshotChain = true
+                    }
                 }
                 self.busy = false
                 if operation.type == "copy" || operation.save == true || operation.type == "delete"
@@ -175,6 +258,9 @@ final class InsightsModel {
                     self.perform(.init("list"), preservingMutationEffects: true)
                 } else if operation.type == "list" {
                     self.perform(.init("summary"), preservingMutationEffects: true)
+                } else if operation.type == "summary", self.refreshEpisodesAfterSnapshotChain {
+                    self.refreshEpisodesAfterSnapshotChain = false
+                    self.refreshEpisodes()
                 }
             } catch {
                 guard let self, self.active, self.generation == token, !Task.isCancelled else { return }
@@ -186,6 +272,182 @@ final class InsightsModel {
                     self.loadingSummary = false
                 }
                 self.busy = false
+                if operation.type == "summary", self.refreshEpisodesAfterSnapshotChain {
+                    self.refreshEpisodesAfterSnapshotChain = false
+                    self.refreshEpisodes()
+                }
+            }
+        }
+    }
+
+    fileprivate struct PresentedEpisode: Equatable, Sendable {
+        let id: String
+        let revision: UInt64
+        let membershipRevision: UInt64
+        let token: UUID
+    }
+    private enum EpisodeIntent: Sendable {
+        case list, create, detail(String, UUID), mutate(PresentedEpisode, String), delete(PresentedEpisode)
+    }
+    private func frozenEpisode() -> PresentedEpisode? {
+        guard active, !episodeBusy, let episode = episodeDetail?.episode else { return nil }
+        return .init(id: episode.id, revision: episode.revision,
+                     membershipRevision: episode.membership_revision, token: episodePresentation)
+    }
+    private func accepts(_ value: PresentedEpisode) -> Bool {
+        episodeDetail?.episode.id == value.id && episodeDetail?.episode.revision == value.revision
+            && episodePresentation == value.token
+    }
+    private func runEpisode(_ operation: InsightsRequest.Operation, intent: EpisodeIntent) {
+        guard active, !episodeBusy else { return }
+        episodeBusy = true; episodeError = nil; episodeNotice = nil
+        let screenGeneration = generation
+        let service = service
+        episodeTask = Task { [weak self] in
+            do {
+                let response = try await service(.init(operation: operation))
+                guard let self, self.active, self.generation == screenGeneration, !Task.isCancelled else { return }
+                guard response.type == operation.type else { throw InsightsError.invalidResponse }
+                switch intent {
+                case .list:
+                    guard let episodes = response.episodes else { throw InsightsError.invalidResponse }
+                    try episodes.forEach { try $0.episode.validateSupportedSchema() }
+                    self.episodes = episodes
+                    if let id = self.episodeDetail?.episode.id,
+                       !episodes.contains(where: { $0.id == id }) {
+                        self.episodePresentation = UUID()
+                        self.episodeDetail = nil; self.episodeEditSelection = []; self.episodeEditingMembers = false
+                    }
+                case .create:
+                    guard let episode = response.episode else { throw InsightsError.invalidResponse }
+                    try episode.validateSupportedSchema()
+                    self.episodeCreateSelection = []
+                    self.episodeNotice = self.text("episode_create_success")
+                    self.episodeBusy = false
+                    self.refreshEpisodeState(opening: episode.id, preservingNotice: true)
+                    return
+                case let .detail(id, token):
+                    guard token == self.episodePresentation, let detail = response.detail else {
+                        throw InsightsError.invalidResponse
+                    }
+                    try detail.validateSupportedSchema(expectedID: id)
+                    self.installEpisodeDetail(detail)
+                case let .mutate(presented, notice):
+                    guard self.accepts(presented), response.episode?.id == presented.id else {
+                        self.episodeBusy = false; return
+                    }
+                    try response.episode?.validateSupportedSchema()
+                    var appliedNotice = notice
+                    if operation.type == "episode_replace_members",
+                       response.episode?.membership_revision != presented.membershipRevision {
+                        appliedNotice += " " + self.text("episode_membership_changed")
+                    }
+                    self.episodeNotice = appliedNotice
+                    self.episodeEditSelection = []; self.episodeEditingMembers = false
+                    self.episodeBusy = false
+                    self.refreshEpisodeState(opening: presented.id, preservingNotice: true)
+                    return
+                case let .delete(presented):
+                    guard self.accepts(presented), response.episode?.id == presented.id else {
+                        self.episodeBusy = false; return
+                    }
+                    try response.episode?.validateSupportedSchema()
+                    self.closeEpisode()
+                    self.episodeNotice = self.text("episode_deleted")
+                    self.episodeBusy = false
+                    self.refreshEpisodeState(opening: nil, preservingNotice: true)
+                    return
+                }
+                self.episodeBusy = false
+            } catch {
+                guard let self, self.active, self.generation == screenGeneration, !Task.isCancelled else { return }
+                self.episodeBusy = false
+                if case InsightsError.service("insights_episode_revision_conflict") = error,
+                   case let .mutate(presented, _) = intent {
+                    self.handleEpisodeConflict(presented)
+                } else if case InsightsError.service("insights_episode_revision_conflict") = error,
+                          case let .delete(presented) = intent {
+                    self.handleEpisodeConflict(presented)
+                } else if case InsightsError.service("insights_episode_not_found") = error {
+                    self.closeEpisode(); self.episodeError = self.text("episode_missing")
+                    self.refreshEpisodeState(opening: nil, preservingError: true)
+                } else {
+                    self.episodeError = self.episodeMessage(for: error, list: operation.type == "episode_list")
+                }
+            }
+        }
+    }
+    private func installEpisodeDetail(_ detail: EpisodeDetail) {
+        episodeDetail = detail
+        episodeEditSelection = []; episodeEditingMembers = false
+        episodeCategory = detail.episode.manual_assessment?.category ?? "unknown"
+        episodeOutcome = detail.episode.manual_assessment?.outcome ?? "unknown"
+    }
+    private func episodeMessage(for error: Error, list: Bool) -> String {
+        if case let InsightsError.service(code) = error {
+            let key: String? = switch code {
+            case "insights_episode_member_limit": "episode_member_limit"
+            case "insights_episode_limit_exceeded": "episode_limit"
+            case "insights_episode_missing_members": "episode_missing_members"
+            case "insights_episode_invalid": "episode_invalid"
+            case "insights_response_too_large": "episode_response_too_large"
+            default: nil
+            }
+            if let key { return text(key) }
+        }
+        return text(list ? "episode_list_unavailable" : "episode_detail_unavailable")
+    }
+    private func handleEpisodeConflict(_ presented: PresentedEpisode) {
+        guard accepts(presented) else { return }
+        episodeEditSelection = []; episodeEditingMembers = false
+        episodeError = text("episode_revision_conflict")
+        refreshEpisodeState(opening: presented.id, preservingError: true)
+    }
+    private func refreshEpisodeState(opening id: String?, preservingNotice: Bool = false,
+                                     preservingError: Bool = false) {
+        guard active else { return }
+        let notice = preservingNotice ? episodeNotice : nil
+        let retainedError = preservingError ? episodeError : nil
+        episodePresentation = UUID()
+        episodeDetail = nil; episodeEditSelection = []; episodeEditingMembers = false
+        episodeBusy = true
+        let screenGeneration = generation
+        let token = episodePresentation
+        let service = service
+        episodeTask = Task { [weak self] in
+            var resolvingDetail = false
+            do {
+                let list = try await service(.init(operation: .init("episode_list")))
+                guard let self, self.active, self.generation == screenGeneration, !Task.isCancelled,
+                      list.type == "episode_list", let episodes = list.episodes else {
+                    throw InsightsError.invalidResponse
+                }
+                try episodes.forEach { try $0.episode.validateSupportedSchema() }
+                self.episodes = episodes
+                if let id {
+                    guard episodes.contains(where: { $0.id == id }) else {
+                        self.episodeError = self.text("episode_missing")
+                        self.episodeNotice = notice; self.episodeBusy = false
+                        return
+                    }
+                    resolvingDetail = true
+                    let result = try await service(.init(operation: .init("episode_explain", id: id)))
+                    guard self.active, self.generation == screenGeneration, self.episodePresentation == token,
+                          !Task.isCancelled, result.type == "episode_explain", let detail = result.detail else {
+                        throw InsightsError.invalidResponse
+                    }
+                    try detail.validateSupportedSchema(expectedID: id)
+                    self.installEpisodeDetail(detail)
+                }
+                self.episodeNotice = notice; self.episodeError = retainedError; self.episodeBusy = false
+            } catch {
+                guard let self, self.active, self.generation == screenGeneration, !Task.isCancelled else { return }
+                self.episodePresentation = UUID()
+                self.episodeDetail = nil; self.episodeEditSelection = []; self.episodeEditingMembers = false
+                self.episodeNotice = notice
+                self.episodeError = retainedError ?? self.text(resolvingDetail
+                    ? "episode_detail_unavailable" : "episode_list_unavailable")
+                self.episodeBusy = false
             }
         }
     }

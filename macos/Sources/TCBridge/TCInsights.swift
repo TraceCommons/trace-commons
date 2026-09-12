@@ -15,8 +15,10 @@ public enum TCInsights {
             if let result { tc_string_free(result) }
             if let error { tc_string_free(error) }
         }
-        guard let result, error == nil,
-              let text = String(validatingCString: result) else { throw InsightsError.operationFailed }
+        if let error, let code = String(validatingCString: error) {
+            throw InsightsError.service(code)
+        }
+        guard let result, let text = String(validatingCString: result) else { throw InsightsError.operationFailed }
         do {
             let response = try JSONDecoder().decode(InsightsResponse.self, from: Data(text.utf8))
             try response.insight?.validateSupportedEvidence()
@@ -27,7 +29,10 @@ public enum TCInsights {
     }
 }
 
-public enum InsightsError: Error { case requestTooLarge, operationFailed, invalidResponse }
+public enum InsightsError: Error, Equatable {
+    case requestTooLarge, operationFailed, invalidResponse
+    case service(String)
+}
 public struct InsightsRequest: Encodable, Sendable {
     public let store_dir: String?
     public let operation: Operation
@@ -46,13 +51,16 @@ public struct InsightsRequest: Encodable, Sendable {
         public var commit: String?
         public var evidence_id: String?
         public var snapshot_ids: [String]?
+        public var expected_revision: UInt64?
         public init(_ type: String, source: String? = nil, file: String? = nil,
                     save: Bool? = nil, id: String? = nil, category: String? = nil, outcome: String? = nil,
-                    repository: String? = nil, commit: String? = nil, evidenceID: String? = nil, snapshotIDs: [String]? = nil) {
+                    repository: String? = nil, commit: String? = nil, evidenceID: String? = nil,
+                    snapshotIDs: [String]? = nil, expectedRevision: UInt64? = nil) {
             self.type = type; self.source = source; self.file = file; self.save = save
             self.id = id; self.category = category; self.outcome = outcome
             self.repository = repository; self.commit = commit; self.evidence_id = evidenceID
             self.snapshot_ids = snapshotIDs
+            self.expected_revision = expectedRevision
         }
     }
 }
@@ -67,7 +75,75 @@ public struct InsightsResponse: Decodable, Sendable {
     public let copy: [String: String]?
     public let summary: SavedInsightsSummary?
     public let mutation_effects: InsightMutationEffects?
+    public let episode: LocalEpisode?
+    public let episodes: [EpisodeListEntry]?
+    public let detail: EpisodeDetail?
     public var invalidatedEpisodeIDs: [String] { mutation_effects?.invalidated_episode_ids ?? [] }
+}
+public struct LocalEpisode: Decodable, Sendable, Identifiable, Equatable {
+    public let schema_version: UInt32
+    public let id: String
+    public let revision, membership_revision: UInt64
+    public let created_at, updated_at, provenance: String
+    public let members: [EpisodeMember]
+    public let manual_assessment: EpisodeAssessment?
+    public func validateSupportedSchema() throws {
+        guard schema_version == 1, provenance == "user_selected_whole_snapshots",
+              revision > 0, membership_revision > 0, membership_revision <= revision,
+              !members.isEmpty, UUID(uuidString: id)?.uuidString.lowercased() == id,
+              Set(members.map(\.snapshot_id)).count == members.count,
+              members.allSatisfy({ Self.isDigest($0.snapshot_id) && Self.isDigest($0.source_digest) })
+        else { throw InsightsError.invalidResponse }
+        if let assessment = manual_assessment {
+            guard assessment.provenance == "user_reported",
+                  assessment.membership_revision == membership_revision,
+                  ["unknown", "refactor", "tests", "docs", "debugging", "other"].contains(assessment.category),
+                  ["unknown", "accepted", "partial", "rejected"].contains(assessment.outcome),
+                  Self.isDigest(assessment.members_digest) else {
+                throw InsightsError.invalidResponse
+            }
+        }
+    }
+    private static func isDigest(_ value: String) -> Bool {
+        value.utf8.count == 64 && value.utf8.allSatisfy {
+            (UInt8(ascii: "0")...UInt8(ascii: "9")).contains($0)
+                || (UInt8(ascii: "a")...UInt8(ascii: "f")).contains($0)
+        }
+    }
+}
+public struct EpisodeMember: Decodable, Sendable, Equatable {
+    public let snapshot_id, source_digest: String
+}
+public struct EpisodeAssessment: Decodable, Sendable, Equatable {
+    public let category, outcome, provenance, recorded_at: String
+    public let membership_revision: UInt64
+    public let members_digest: String
+}
+public struct EpisodeListEntry: Decodable, Sendable, Identifiable, Equatable {
+    public let episode: LocalEpisode
+    public let overlapping_episode_ids: [String]
+    public var id: String { episode.id }
+}
+public struct EpisodeOverlap: Decodable, Sendable, Equatable {
+    public let snapshot_id: String
+    public let episode_ids: [String]
+}
+public struct EpisodeDetail: Decodable, Sendable {
+    public let episode: LocalEpisode
+    public let members: [LocalInsight]
+    public let overlap: [EpisodeOverlap]
+    public let resolved_at: String
+    public func validateSupportedSchema(expectedID: String? = nil) throws {
+        try episode.validateSupportedSchema()
+        if let expectedID, episode.id != expectedID { throw InsightsError.invalidResponse }
+        let memberIDs = Set(episode.members.map(\.snapshot_id))
+        let overlapIDs = overlap.map(\.snapshot_id)
+        guard Set(members.map(\.id)) == memberIDs,
+              Set(overlapIDs).isSubset(of: memberIDs), Set(overlapIDs).count == overlapIDs.count else {
+            throw InsightsError.invalidResponse
+        }
+        for member in members { try member.validateSupportedEvidence() }
+    }
 }
 public struct LocalInsight: Decodable, Sendable, Identifiable {
     public let id, source_format, boundary, analyzed_at: String

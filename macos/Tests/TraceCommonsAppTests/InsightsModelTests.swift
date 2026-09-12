@@ -47,10 +47,10 @@ final class InsightsModelTests: XCTestCase {
         let recorder = Recorder()
         let model = InsightsModel(service: { request in try await recorder.call(request) })
         model.open()
-        for _ in 0..<500 where model.busy { try await Task.sleep(for: .milliseconds(10)) }
+        for _ in 0..<500 where model.busy || model.episodeBusy { try await Task.sleep(for: .milliseconds(10)) }
         XCTAssertEqual(model.text("title"), "Insights")
         let operations = await recorder.operations
-        XCTAssertEqual(operations, ["copy", "list", "summary"])
+        XCTAssertEqual(Set(operations), ["copy", "episode_list", "list", "summary"])
         XCTAssertEqual(model.summary?.saved_snapshots, 0)
         XCTAssertTrue(model.snapshots.isEmpty)
         model.close()
@@ -79,9 +79,11 @@ private actor Recorder {
                 storeDirectory: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path,
                 operation: .init("summary")))
         }
-        let json = request.operation.type == "copy"
-            ? "{\"type\":\"copy\",\"copy\":{\"title\":\"Insights\"}}"
-            : "{\"type\":\"list\",\"insights\":[]}"
+        let json = switch request.operation.type {
+        case "copy": "{\"type\":\"copy\",\"copy\":{\"title\":\"Insights\"}}"
+        case "episode_list": "{\"type\":\"episode_list\",\"episodes\":[]}"
+        default: "{\"type\":\"list\",\"insights\":[]}"
+        }
         return try JSONDecoder().decode(InsightsResponse.self, from: Data(json.utf8))
     }
 }
@@ -102,7 +104,7 @@ extension InsightsModelTests {
         })
         func settle() async throws {
             for _ in 0..<500 {
-                if !model.busy { return }
+                if !model.busy && !model.episodeBusy { return }
                 try await Task.sleep(for: .milliseconds(10))
             }
             XCTFail("Local operation did not finish")

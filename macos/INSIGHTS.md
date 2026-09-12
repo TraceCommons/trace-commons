@@ -57,8 +57,23 @@ Each picker freezes its snapshot selection (and Git commit); refresh, selection
 changes, and closing invalidate pending selections. Successful link changes
 refresh saved detail, history, and summary; failures clear prior detail.
 
-Snapshot replacement or deletion can remove episode groups created through the
-local CLI. The screen shows the committed group IDs and explains the loss of
-grouping and assessments. This notice survives automatic refresh, including a
-refresh failure, and clears on the next user action or closing Insights. Full
-episode creation and editing controls are a later native slice.
+Episodes group one or more whole saved snapshots selected by the user. The
+native screen creates and lists groups, resolves current member evidence, shows
+snapshot overlap with other groups, and supports complete membership replacement,
+an independent category/outcome assessment, clearing that assessment, and group
+deletion. These groups do not establish task boundaries, independent tasks,
+model attribution, rankings, time saved, or cost.
+
+An open group freezes its ID and revision. Member edits submit the complete
+selection against that revision; assessment and deletion use the same conflict
+check. A conflict discards the draft, refreshes the group, and requires review
+instead of retrying the write. Leaving the group or Insights invalidates pending
+callbacks. Episode IO has separate busy state, so the compact screen keeps its
+snapshot analysis, save, detail, evidence, and assessment controls available.
+
+Snapshot replacement or deletion can remove episode groups. The screen shows
+the committed group IDs and explains the loss of grouping and assessments. This
+notice survives automatic episode/history refresh, including a refresh failure,
+and clears on the next user action or closing Insights. A failed or missing
+episode refresh clears editable detail; a successful mutation is reconciled by
+reading the episode list and current detail from the local service.
