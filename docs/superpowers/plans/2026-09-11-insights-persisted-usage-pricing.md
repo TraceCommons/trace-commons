@@ -147,6 +147,8 @@ could support a hypothetical estimate, but that is a distinct product operation
 whose result must name the selected rate assumption; it must not silently fill
 the automatic estimated-cost card. Neither operation establishes invoiced cost.
 
+The [real pricing source audit](2026-09-11-insights-real-pricing-qualification.md) adds per-request cache-write, context-band, processing-mode, and regional qualification requirements before real rates can be admitted. The schema-1 calculator currently establishes synthetic fixed-rate arithmetic only.
+
 ## Immutable pricing evidence
 
 Add a versioned, presentation-neutral pricing contract in `trace-commons-protocol`, because the deterministic card request and all shells consume its result. Keep catalog loading, validation, and local persistence in `trace-commons-contributor`.
