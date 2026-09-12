@@ -6,6 +6,7 @@ pub mod episode_store;
 pub mod episodes;
 pub mod models;
 pub mod outcomes;
+pub mod provider;
 pub mod service;
 pub mod summary;
 pub mod usage;
@@ -19,11 +20,8 @@ use anyhow::{Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use trace_commons_protocol::insights::{
-    Coverage, EvidenceRef, INSIGHT_SCHEMA_VERSION, InsightMetric, InsightReport, MetricId,
-    ProviderManifest,
+    Coverage, EvidenceRef, InsightReport, MetricId, ProviderManifest,
 };
-
-use crate::source::SessionEventKind;
 
 const MAX_SOURCE_BYTES: u64 = 16 * 1024 * 1024;
 const STORE_VERSION: u32 = 4;
@@ -228,52 +226,8 @@ pub fn analyze_file(format: SourceFormat, path: &Path) -> Result<LocalInsight> {
         id: id.clone(),
         source_digest,
     };
-    let count = events.len() as u64;
-    let classified = events
-        .iter()
-        .filter(|e| e.kind != SessionEventKind::Opaque)
-        .count() as u64;
-    let calls = events
-        .iter()
-        .filter(|e| e.kind == SessionEventKind::ToolCall)
-        .count() as u64;
-    let results = events
-        .iter()
-        .filter(|e| e.kind == SessionEventKind::ToolResult)
-        .collect::<Vec<_>>();
-    let observed_results = results.iter().filter(|e| e.success.is_some()).count() as u64;
-    let failures = results.iter().filter(|e| e.success == Some(false)).count() as u64;
-    let metric = |id, value, observed, total| InsightMetric {
-        id,
-        value,
-        coverage: Coverage { observed, total },
-        evidence_ids: vec![evidence.id.clone()],
-    };
-    let report = InsightReport {
-        schema_version: INSIGHT_SCHEMA_VERSION,
-        provider: ProviderManifest::first_party(),
-        evidence: vec![evidence.clone()],
-        metrics: vec![
-            metric(MetricId::Sessions, Some(1), 1, 1),
-            metric(MetricId::Events, Some(count), count, count),
-            metric(
-                MetricId::ToolCalls,
-                (classified > 0).then_some(calls),
-                classified,
-                count,
-            ),
-            metric(
-                MetricId::ToolFailures,
-                (observed_results > 0).then_some(failures),
-                observed_results,
-                results.len() as u64,
-            ),
-            metric(MetricId::InputTokens, None, 0, 1),
-            metric(MetricId::OutputTokens, None, 0, 1),
-            metric(MetricId::KnownOutcomes, None, 0, 1),
-        ],
-    };
-    report.validate_for(&ProviderManifest::first_party(), &[evidence])?;
+    let input = provider::ProviderInput::first_party(evidence, &events);
+    let report = provider::dispatch(&provider::FirstPartyProvider, &input)?;
     Ok(LocalInsight {
         id,
         source_format: format,
