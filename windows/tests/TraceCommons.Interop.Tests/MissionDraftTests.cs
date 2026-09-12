@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
@@ -103,7 +104,39 @@ public sealed class MissionDraftTests
     private sealed class ManualSynchronizationContext : SynchronizationContext
     {
         private readonly ConcurrentQueue<(SendOrPostCallback Callback, object? State)> _work = new();
-        public override void Post(SendOrPostCallback callback, object? state) => _work.Enqueue((callback, state));
+        private readonly int? _delayedPostNumber;
+        private readonly object _delayedGate = new();
+        private (SendOrPostCallback Callback, object? State)? _delayed;
+        private int _postCount;
+        public TaskCompletionSource<bool> FirstPostObserved { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource<bool> DelayedPostObserved { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public ManualSynchronizationContext(int? delayedPostNumber = null) =>
+            _delayedPostNumber = delayedPostNumber;
+
+        public override void Post(SendOrPostCallback callback, object? state)
+        {
+            int postNumber = Interlocked.Increment(ref _postCount);
+            if (postNumber == _delayedPostNumber)
+            {
+                lock (_delayedGate) { _delayed = (callback, state); }
+                if (postNumber == 1) FirstPostObserved.TrySetResult(true);
+                DelayedPostObserved.TrySetResult(true);
+                return;
+            }
+            _work.Enqueue((callback, state));
+            if (postNumber == 1) FirstPostObserved.TrySetResult(true);
+        }
+
+        public void ReleaseDelayedPost()
+        {
+            (SendOrPostCallback Callback, object? State)? delayed;
+            lock (_delayedGate) { delayed = _delayed; _delayed = null; }
+            if (delayed is { } work) _work.Enqueue(work);
+        }
+
         public bool RunOne()
         {
             if (!_work.TryDequeue(out var work)) return false;
@@ -114,6 +147,24 @@ public sealed class MissionDraftTests
             return true;
         }
         public void RunAll() { while (RunOne()) { } }
+    }
+
+    private static async Task PumpUntilCompletedAsync(
+        ManualSynchronizationContext context,
+        Task task)
+    {
+        var elapsed = Stopwatch.StartNew();
+        TimeSpan timeout = TimeSpan.FromSeconds(5);
+        while (!task.IsCompleted)
+        {
+            context.RunAll();
+            if (task.IsCompleted) break;
+            if (elapsed.Elapsed >= timeout)
+                throw new TimeoutException("manual synchronization context did not become idle");
+            await Task.Delay(1).ConfigureAwait(false);
+        }
+        context.RunAll();
+        await task.ConfigureAwait(false);
     }
 
     [Fact]
@@ -205,7 +256,10 @@ public sealed class MissionDraftTests
         await model.LoadAsync();
         var showCompletion = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
         service.PendingShow = showCompletion;
-        var context = new ManualSynchronizationContext();
+        // Hold the import's post until the first drain has observed an empty
+        // queue. SemaphoreSlim completes its waiter asynchronously, so this is
+        // the scheduling gap that a one-shot RunAll could miss.
+        var context = new ManualSynchronizationContext(delayedPostNumber: 2);
         SynchronizationContext? prior = SynchronizationContext.Current;
         SynchronizationContext.SetSynchronizationContext(context);
         Task show;
@@ -218,13 +272,18 @@ public sealed class MissionDraftTests
         finally { SynchronizationContext.SetSynchronizationContext(prior); }
 
         showCompletion.SetResult(Json("{\"type\":\"show\",\"draft\":{\"id\":\"" + Id + "\",\"proposal\":" + Proposal + ",\"review\":" + Review + "}}"));
+        await context.FirstPostObserved.Task.WaitAsync(TimeSpan.FromSeconds(5));
         Assert.True(context.RunOne()); // The show completes and grants the queued import its permit.
+        await context.DelayedPostObserved.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.False(context.RunOne()); // A one-shot drain would now leave the import stranded.
+        Assert.False(import.IsCompleted);
         model.Deactivate();
-        context.RunAll();              // The import continuation observes its cancelled lifetime.
-        await Task.WhenAll(show, import);
+        context.ReleaseDelayedPost();
+        await PumpUntilCompletedAsync(context, Task.WhenAll(show, import));
 
         Assert.DoesNotContain(service.Calls, call => call.GetProperty("type").GetString() == "import");
-        await model.RefreshAsync();    // A rejected stale action returned the permit.
+        // A rejected stale action returned the permit.
+        await model.RefreshAsync().WaitAsync(TimeSpan.FromSeconds(5));
         Assert.False(model.IsBusy);
     }
 
