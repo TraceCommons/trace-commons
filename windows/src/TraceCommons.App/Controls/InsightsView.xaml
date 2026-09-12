@@ -23,6 +23,30 @@
             <TextBlock Text="{Binding [save_notice]}" TextWrapping="Wrap" />
             <TextBlock Text="{Binding CancellationNotice}" TextWrapping="Wrap" />
             <TextBlock Text="{Binding Status}" TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite" />
+            <TextBlock Text="{Binding [summary_title]}" FontSize="22" />
+            <TextBlock Text="{Binding SummaryStatus}" TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite" />
+            <TextBlock Text="{Binding SummaryDetails}" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
+            <Expander Header="{Binding [summary_title]}" IsExpanded="False" HorizontalAlignment="Stretch">
+                <ItemsControl ItemsSource="{Binding SummaryRows}" IsEnabled="{Binding Idle}">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <StackPanel Spacing="8" Padding="0,8">
+                                <TextBlock Text="{Binding Label}" FontSize="18" TextWrapping="Wrap" />
+                                <TextBlock Text="{Binding Details}" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
+                                <ItemsControl ItemsSource="{Binding Evidence}">
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate>
+                                            <Button Tag="{Binding Id}" Click="OnSummaryEvidence" HorizontalAlignment="Stretch" HorizontalContentAlignment="Left">
+                                                <TextBlock Text="{Binding Label}" TextWrapping="Wrap" />
+                                            </Button>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+                            </StackPanel>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+            </Expander>
             <Button Content="{Binding [refresh]}" Click="OnRefresh" IsEnabled="{Binding Idle}" />
             <ListView x:Name="SavedList" ItemsSource="{Binding Saved}" DisplayMemberPath="Label" MaxHeight="200" SelectionMode="Single" IsEnabled="{Binding Idle}" AutomationProperties.Name="{Binding [saved]}" />
             <StackPanel Orientation="Horizontal" Spacing="12">
@@ -32,7 +56,7 @@
             <TextBlock Text="{Binding CoverageNotice}" TextWrapping="Wrap" />
             <TextBlock Text="{Binding EvidenceNotice}" TextWrapping="Wrap" />
             <TextBlock Text="{Binding [boundary_notice]}" TextWrapping="Wrap" />
-            <TextBlock Text="{Binding Details}" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
+            <TextBlock x:Name="SnapshotDetail" Text="{Binding Details}" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
             <TextBlock Text="{Binding AssessmentNotice}" TextWrapping="Wrap" />
             <StackPanel Orientation="Horizontal" Spacing="12">
                 <ComboBox x:Name="Category" IsEnabled="{Binding HasSavedSelection}" Header="{Binding [category]}" SelectedIndex="{Binding CategoryIndex, Mode=TwoWay}">

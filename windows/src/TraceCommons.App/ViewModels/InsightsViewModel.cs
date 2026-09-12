@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Globalization;
+using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -11,6 +12,8 @@ using TraceCommons.Interop;
 namespace TraceCommons.App.ViewModels;
 
 public sealed record SavedInsight(string Id, string Label);
+public sealed record SummaryEvidenceLink(string Id, string Label);
+public sealed record SummaryRow(string Label, string Details, IReadOnlyList<SummaryEvidenceLink> Evidence);
 
 /// <summary>UI-thread state; all IO belongs to the handle-free service. No metrics are calculated here.</summary>
 public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
@@ -25,6 +28,11 @@ public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
     public event PropertyChangedEventHandler? PropertyChanged;
     public ObservableCollection<SavedInsight> Saved { get; } = new();
     public string Details { get; private set; } = "";
+    public SavedInsightsSummary? Summary { get; private set; }
+    public string SummaryDetails { get; private set; } = "";
+    public string SummaryStatus => Summary == null ? this[Busy ? "working" : "summary_unavailable"]
+        : Summary.SavedSnapshots == 0 ? this["summary_empty"] : "";
+    public ObservableCollection<SummaryRow> SummaryRows { get; } = new();
     public string Status { get; private set; } = "";
     public bool Busy { get; private set; }
     public bool Idle => !Busy;
@@ -64,6 +72,7 @@ public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
     public Task RefreshAsync() => Run(RefreshCoreAsync);
     private async Task RefreshCoreAsync(CancellationToken token)
     {
+        ClearSummary();
         var response = await _service.CallAsync(new { type = "list" }, token);
         token.ThrowIfCancellationRequested();
         Saved.Clear();
@@ -88,9 +97,11 @@ public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
             ResetAssessment();
         }
         Status = Saved.Count == 0 ? this["empty"] : "";
+        await RefreshSummaryAsync(token);
     }
     public Task AnalyzeAsync(string source, string file, bool save) => Run(async token =>
     {
+        if (save) ClearSummary();
         var result = await _service.CallAsync(new { type = "analyze", source, file, save }, token);
         token.ThrowIfCancellationRequested();
         Render(result.GetProperty("insight"), save);
@@ -98,6 +109,10 @@ public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
     });
     public Task ExplainAsync(string id) => Run(async token =>
     {
+        CurrentId = null;
+        Details = "";
+        ResetAssessment();
+        Changed();
         var result = await _service.CallAsync(new { type = "explain", id }, token);
         token.ThrowIfCancellationRequested();
         Render(result.GetProperty("insight"), true);
@@ -105,6 +120,7 @@ public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
     public Task DeleteAsync() => Run(async token =>
     {
         if (CurrentId == null) return;
+        ClearSummary();
         await _service.CallAsync(new { type = "delete", id = CurrentId }, token);
         token.ThrowIfCancellationRequested();
         CurrentId = null;
@@ -115,17 +131,78 @@ public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
     public Task AnnotateAsync(string category, string outcome) => Run(async token =>
     {
         if (CurrentId == null) return;
+        ClearSummary();
         var result = await _service.CallAsync(new { type = "annotate", id = CurrentId, category, outcome }, token);
         token.ThrowIfCancellationRequested();
         Render(result.GetProperty("insight"), true);
+        await RefreshSummaryAsync(token);
     });
     public Task ClearAnnotationAsync() => Run(async token =>
     {
         if (CurrentId == null) return;
+        ClearSummary();
         var result = await _service.CallAsync(new { type = "clear_annotation", id = CurrentId }, token);
         token.ThrowIfCancellationRequested();
         Render(result.GetProperty("insight"), true);
+        await RefreshSummaryAsync(token);
     });
+    private void ClearSummary()
+    {
+        Summary = null;
+        SummaryDetails = "";
+        SummaryRows.Clear();
+        Changed();
+    }
+    private static string Number(ulong value) => value.ToString("N0", CultureInfo.CurrentCulture);
+    private static string Date(DateTimeOffset value) => value.ToLocalTime().ToString("g", CultureInfo.CurrentCulture);
+    private async Task RefreshSummaryAsync(CancellationToken token)
+    {
+        ClearSummary();
+        var response = await _service.CallAsync(new { type = "summary" }, token);
+        token.ThrowIfCancellationRequested();
+        var summary = InsightsSummaryResponse.Decode(response);
+        // Render before publishing, so a malformed response cannot leave a partial summary.
+        var rows = new List<SummaryRow>();
+        var snapshots = summary.Snapshots.ToDictionary(snapshot => snapshot.Id, StringComparer.Ordinal);
+        IReadOnlyList<SummaryEvidenceLink> Links(string[] ids) => ids.Select(id => {
+            if (!snapshots.TryGetValue(id, out var snapshot))
+                throw new InvalidOperationException("insights-response-invalid");
+            var label = this[snapshot.SourceFormat] + " · " + Date(snapshot.AnalyzedAt) + "\n" +
+                snapshot.Id + "\n" + string.Join("\n", snapshot.Evidence.Select(evidence => evidence.SourceDigest));
+            return new SummaryEvidenceLink(id, label);
+        }).ToArray();
+        foreach (var metric in summary.Metrics)
+            rows.Add(new SummaryRow(this["metric_" + metric.Id],
+                this["summary_observed_sum"] + ": " + (metric.ObservedValueSum is ulong value ? Number(value) : this["unknown"]) + "\n" +
+                this["summary_available"] + ": " + Number(metric.AvailableSnapshots) + " · " +
+                this["summary_missing"] + ": " + Number(metric.MissingSnapshots) + "\n" +
+                this["summary_record_coverage"] + ": " + Number(metric.RecordCoverage.Observed) + "/" + Number(metric.RecordCoverage.Total) +
+                " · " + this["summary_unit_" + metric.CoverageUnit], Links(metric.EvidenceSnapshotIds)));
+        foreach (var category in summary.UserReported.Categories)
+            rows.Add(new SummaryRow(this["category"] + " · " + this["category_" + category.Category], Number(category.Snapshots), Links(category.EvidenceSnapshotIds)));
+        foreach (var outcome in summary.UserReported.Outcomes)
+            rows.Add(new SummaryRow(this["outcome"] + " · " + this["outcome_" + outcome.Outcome], Number(outcome.Snapshots), Links(outcome.EvidenceSnapshotIds)));
+        var lines = new List<string> {
+            this["summary_scope"],
+            this["summary_snapshots"] + ": " + Number(summary.SavedSnapshots),
+            this["summary_assessed"] + ": " + Number(summary.UserReported.AssessedSnapshots),
+            this["summary_unassessed"] + ": " + Number(summary.UserReported.UnassessedSnapshots),
+            this["provider"] + ": " + summary.Provider.Id + " / " + summary.Provider.Version,
+            this["rubric"] + ": " + summary.Provider.RubricVersion,
+            this["summary_analysis_range"] + ": " + (summary.SnapshotAnalysisRange is { } range
+                ? Date(range.Oldest) + " – " + Date(range.Newest) : this["unknown"])
+        };
+        lines.AddRange(summary.Limitations.Select(limitation => this["summary_limitation_" + limitation]));
+        Summary = summary;
+        SummaryDetails = string.Join("\n\n", lines);
+        foreach (var row in rows) SummaryRows.Add(row);
+    }
+    public Task ExplainSummaryEvidenceAsync(string id)
+    {
+        if (Summary == null || !Summary.Snapshots.Any(snapshot => snapshot.Id == id))
+            return Task.CompletedTask;
+        return ExplainAsync(id);
+    }
     private static string Date(JsonElement value) => value.GetDateTimeOffset().ToLocalTime().ToString("g", CultureInfo.CurrentCulture);
     private void Render(JsonElement insight, bool saved)
     {
@@ -177,7 +254,14 @@ public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
         Changed();
         try { await action(cancellation.Token); }
         catch (OperationCanceledException) { }
-        catch (Exception) { if (!_closed && generation == _generation) Status = this["error"]; }
+        catch (Exception)
+        {
+            if (!_closed && generation == _generation)
+            {
+                ClearSummary();
+                Status = this["error"];
+            }
+        }
         finally
         {
             if (!_closed && generation == _generation)

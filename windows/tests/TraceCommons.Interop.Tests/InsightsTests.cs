@@ -12,7 +12,7 @@ namespace TraceCommons.Interop.Tests;
 public sealed class InsightsTests
 {
     private static JsonElement Json(string value) => JsonDocument.Parse(value).RootElement.Clone();
-    private const string Insight = """
+    internal const string Insight = """
         {"id":"snapshot-a","source_format":"codex","analyzed_at":"2026-09-11T10:00:00Z",
          "report":{"provider":{"id":"trace-commons-local","version":"1","rubric_version":"descriptive-counts-v1"},
          "metrics":[{"id":"input_tokens","value":null,"coverage":{"observed":0,"total":2}}],
@@ -32,6 +32,7 @@ public sealed class InsightsTests
             if (Pending != null) return Pending.Task;
             return Task.FromResult(type switch {
                 "copy" => Json("""{"type":"copy","copy":{"unknown":"Unknown","coverage":"Coverage","metric_input_tokens":"Input tokens","error":"safe-error","codex":"Codex rollout"}}"""),
+                "summary" => Json(InsightsSummaryTests.Response),
                 "list" => Json("{\"type\":\"list\",\"insights\":[" + ListedInsights + "]}"),
                 "delete" => Json("{\"type\":\"delete\",\"deleted\":true}"),
                 _ => Json("{\"type\":\"" + type + "\",\"insight\":" + ReturnedInsight + "}")
@@ -50,13 +51,13 @@ public sealed class InsightsTests
         Assert.Contains("Input tokens: Unknown", model.Details);
         Assert.Contains("Coverage 0/2", model.Details);
         Assert.Contains("abcdef", model.Details);
-        Assert.False(service.Calls[2].GetProperty("save").GetBoolean());
+        Assert.False(service.Calls.FindLast(call => call.GetProperty("type").GetString() == "analyze").GetProperty("save").GetBoolean());
         await model.AnalyzeAsync("codex", "/selected/file", true);
         Assert.Equal("snapshot-a", model.CurrentId);
         await model.AnnotateAsync("tests", "accepted");
-        Assert.Equal("annotate", service.Calls[^1].GetProperty("type").GetString());
+        Assert.Equal("annotate", service.Calls[^2].GetProperty("type").GetString());
         await model.ClearAnnotationAsync();
-        Assert.Equal("clear_annotation", service.Calls[^1].GetProperty("type").GetString());
+        Assert.Equal("clear_annotation", service.Calls[^2].GetProperty("type").GetString());
         await model.DeleteAsync();
         Assert.Null(model.CurrentId);
         Assert.Equal("", model.Details);
@@ -108,8 +109,8 @@ public sealed class InsightsTests
         Assert.Equal(2, model.CategoryIndex);
         Assert.Equal(0, model.OutcomeIndex);
         await model.SaveAssessmentAsync();
-        Assert.Equal("docs", service.Calls[^1].GetProperty("category").GetString());
-        Assert.Equal("accepted", service.Calls[^1].GetProperty("outcome").GetString());
+        Assert.Equal("docs", service.Calls[^2].GetProperty("category").GetString());
+        Assert.Equal("accepted", service.Calls[^2].GetProperty("outcome").GetString());
         service.ListedInsights = annotated.Replace("accepted", "partial", StringComparison.Ordinal);
         await model.RefreshAsync();
         Assert.Equal(1, model.OutcomeIndex);
@@ -137,7 +138,7 @@ public sealed class InsightsTests
         service.Pending = null;
         completion.SetResult(Json("{\"type\":\"copy\",\"copy\":{}}"));
         await Task.WhenAll(first, reentry);
-        Assert.Equal(3, service.Calls.Count);
+        Assert.Equal(4, service.Calls.Count);
         Assert.Single(model.Saved);
         Assert.False(model.Busy);
     }
@@ -189,14 +190,25 @@ public sealed class InsightsTests
             var empty = await service.CallAsync(new { type = "list" }, CancellationToken.None);
             Assert.Empty(empty.GetProperty("insights").EnumerateArray());
             Assert.False(Directory.Exists(store));
+            var emptySummary = InsightsSummaryResponse.Decode(await service.CallAsync(new { type = "summary" }, CancellationToken.None));
+            Assert.Equal(0UL, emptySummary.SavedSnapshots);
+            Assert.Null(emptySummary.SnapshotAnalysisRange);
+            Assert.All(emptySummary.Metrics, metric => Assert.Null(metric.ObservedValueSum));
+            Assert.False(Directory.Exists(store));
             await service.CallAsync(new { type = "analyze", source = "codex", file, save = false }, CancellationToken.None);
             Assert.False(Directory.Exists(store));
             var saved = await service.CallAsync(new { type = "analyze", source = "codex", file, save = true }, CancellationToken.None);
             string id = saved.GetProperty("insight").GetProperty("id").GetString()!;
             var annotated = await service.CallAsync(new { type = "annotate", id, category = "tests", outcome = "accepted" }, CancellationToken.None);
             Assert.Equal("user_reported", annotated.GetProperty("insight").GetProperty("manual_annotation").GetProperty("provenance").GetString());
+            var summary = InsightsSummaryResponse.Decode(await service.CallAsync(new { type = "summary" }, CancellationToken.None));
+            Assert.Equal(1UL, summary.SavedSnapshots);
+            Assert.Equal(1UL, summary.UserReported.AssessedSnapshots);
+            Assert.Equal(0UL, summary.UserReported.UnassessedSnapshots);
+            Assert.Equal(id, Assert.Single(summary.Snapshots).Id);
             var deleted = await service.CallAsync(new { type = "delete", id }, CancellationToken.None);
             Assert.True(deleted.GetProperty("deleted").GetBoolean());
+            Assert.Equal(0UL, InsightsSummaryResponse.Decode(await service.CallAsync(new { type = "summary" }, CancellationToken.None)).SavedSnapshots);
             Assert.True(File.Exists(file));
             var error = await Assert.ThrowsAsync<InvalidOperationException>(() => service.CallAsync(new { type = "secret-invalid-request" }, CancellationToken.None));
             Assert.DoesNotContain("secret", error.Message);

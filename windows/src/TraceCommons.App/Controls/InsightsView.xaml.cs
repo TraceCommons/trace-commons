@@ -48,10 +48,27 @@ public sealed partial class InsightsView : UserControl, IDisposable
     {
         if (_file != null) await ViewModel.AnalyzeAsync(SourceTag, _file, true);
     }
+    private async void OnSummaryEvidence(object sender, RoutedEventArgs args)
+    {
+        if (sender is not Button { Tag: string id }) return;
+        await ViewModel.ExplainSummaryEvidenceAsync(id);
+        BringSnapshotIntoView(id);
+    }
     private async void OnRefresh(object sender, RoutedEventArgs args) => await ViewModel.RefreshAsync();
     private async void OnExplain(object sender, RoutedEventArgs args)
     {
-        if (SavedList.SelectedItem is SavedInsight selected) await ViewModel.ExplainAsync(selected.Id);
+        if (SavedList.SelectedItem is not SavedInsight selected) return;
+        await ViewModel.ExplainAsync(selected.Id);
+        BringSnapshotIntoView(selected.Id);
+    }
+    private void BringSnapshotIntoView(string id)
+    {
+        if (_closed || ViewModel.CurrentId != id) return;
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            if (!_closed && IsLoaded && ViewModel.CurrentId == id)
+                SnapshotDetail.StartBringIntoView();
+        });
     }
     private async void OnDelete(object sender, RoutedEventArgs args)
     {
