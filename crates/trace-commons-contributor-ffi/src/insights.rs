@@ -182,6 +182,58 @@ mod tests {
         );
     }
 
+    #[test]
+    fn qualified_supported_store_crosses_tc_insights_call_with_exact_components() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = temp.path().join("insights");
+        std::fs::create_dir(&store).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        std::fs::write(
+            store.join("index.json"),
+            include_bytes!(
+                "../../trace-commons-contributor/fixtures/insights/comparison-estimator/schema2-supported-store/index.json"
+            ),
+        )
+        .unwrap();
+        let response = json_call(
+            &store,
+            serde_json::json!({
+                "type":"comparison_evaluate",
+                "id":"0e86d56a-8117-4daa-b18f-8f4f8210c457"
+            }),
+        )
+        .unwrap();
+        let result = &response["result"];
+        assert_eq!(result["schema_version"], 2);
+        assert_eq!(result["included_task_ids"].as_array().unwrap().len(), 4);
+        assert_eq!(
+            result["exact_estimation"]["evaluation"]["status"],
+            "supported"
+        );
+        assert_eq!(
+            result["exact_estimation"]["evaluation"]["first_components"]
+                .as_array()
+                .unwrap()
+                .len()
+                + result["exact_estimation"]["evaluation"]["second_components"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+            6
+        );
+        assert_eq!(
+            result["exact_estimation"]["evaluation"]["contrasts"]
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
+    }
+
     fn failure(bytes: *const u8, len: usize, expected: &str) {
         let mut error = std::ptr::null_mut();
         let response = unsafe { tc_insights_call(bytes, len, &mut error) };

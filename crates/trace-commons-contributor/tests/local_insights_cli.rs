@@ -181,6 +181,55 @@ fn qualified_schema_two_saved_spec_evaluates_through_json_and_readable_cli() {
 }
 
 #[test]
+fn qualified_schema_two_supported_store_evaluates_exact_components_through_cli() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("enrollment");
+    let store = dir.path().join("insights");
+    std::fs::create_dir(&store).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    std::fs::copy(
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/fixtures/insights/comparison-estimator/schema2-supported-store/index.json"
+        ),
+        store.join("index.json"),
+    )
+    .unwrap();
+    let id = "0e86d56a-8117-4daa-b18f-8f4f8210c457";
+    let response = value(invoke(&config, &store, &["comparison", "evaluate", id]));
+    let result = &response["result"];
+    assert_eq!(result["schema_version"], 2);
+    assert_eq!(result["included_task_ids"].as_array().unwrap().len(), 4);
+    assert_eq!(
+        result["exact_estimation"]["evaluation"]["status"],
+        "supported"
+    );
+    assert_eq!(
+        result["exact_estimation"]["evaluation"]["first_components"]
+            .as_array()
+            .unwrap()
+            .len()
+            + result["exact_estimation"]["evaluation"]["second_components"]
+                .as_array()
+                .unwrap()
+                .len(),
+        6
+    );
+    assert_eq!(
+        result["exact_estimation"]["evaluation"]["contrasts"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3
+    );
+    assert!(!config.exists());
+}
+
+#[test]
 fn question_cards_use_saved_evidence_and_invalidate_deleted_selections() {
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("enrollment");
