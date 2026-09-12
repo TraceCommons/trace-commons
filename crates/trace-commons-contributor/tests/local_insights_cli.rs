@@ -106,6 +106,130 @@ fn comparison_cli_separates_script_responses_from_readable_exclusions() {
 }
 
 #[test]
+fn qualified_schema_two_saved_spec_evaluates_through_json_and_readable_cli() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("enrollment");
+    let store = dir.path().join("insights");
+    let fingerprint = "1".repeat(64);
+    let saved = value(invoke(
+        &config,
+        &store,
+        &[
+            "comparison",
+            "save-spec",
+            "--evidence-cutoff",
+            "2026-09-11T12:00:00Z",
+            "--cohort",
+            "model-a",
+            "model-b",
+            "--date-start",
+            "2026-09-01",
+            "--date-end",
+            "2026-09-10",
+            "--project-id",
+            "00000000-0000-4000-8000-000000000001",
+            "--language",
+            "rust",
+            "--configuration-fingerprint",
+            &fingerprint,
+        ],
+    ));
+    let old_id = saved["specification"]["id"].as_str().unwrap();
+    let fixture: serde_json::Value = serde_json::from_slice(include_bytes!(
+        "../fixtures/insights/comparison-estimator/schema2-qualified/preview-response.json"
+    ))
+    .unwrap();
+    let qualified = fixture["specification"].clone();
+    let qualified_id = qualified["id"].as_str().unwrap().to_owned();
+    let index_path = store.join("index.json");
+    let mut index: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&index_path).unwrap()).unwrap();
+    index["comparison_specifications"]
+        .as_object_mut()
+        .unwrap()
+        .remove(old_id);
+    index["comparison_specifications"][&qualified_id] = qualified;
+    std::fs::write(&index_path, serde_json::to_vec(&index).unwrap()).unwrap();
+
+    let response = value(invoke(
+        &config,
+        &store,
+        &["comparison", "evaluate", &qualified_id],
+    ));
+    assert_eq!(response["result"]["schema_version"], 2);
+    assert_eq!(
+        response["result"]["exact_estimation"]["evaluation"]["status"],
+        "suppressed_below_minimum_cohort_support"
+    );
+    let plain = Command::new(env!("CARGO_BIN_EXE_trace-commons-contributor"))
+        .arg("--config-dir")
+        .arg(&config)
+        .args(["insights", "--store-dir"])
+        .arg(&store)
+        .args(["comparison", "evaluate", &qualified_id])
+        .output()
+        .unwrap();
+    assert!(
+        plain.status.success(),
+        "{}",
+        String::from_utf8_lossy(&plain.stderr)
+    );
+    let text = String::from_utf8(plain.stdout).unwrap();
+    assert!(text.contains("model-b minus model-a"));
+    assert!(text.contains("each cohort needs at least 2 assessed tasks"));
+    assert!(!text.contains("Uncertainty is not yet calibrated"));
+}
+
+#[test]
+fn qualified_schema_two_supported_store_evaluates_exact_components_through_cli() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("enrollment");
+    let store = dir.path().join("insights");
+    std::fs::create_dir(&store).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    std::fs::copy(
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/fixtures/insights/comparison-estimator/schema2-supported-store/index.json"
+        ),
+        store.join("index.json"),
+    )
+    .unwrap();
+    let id = "0e86d56a-8117-4daa-b18f-8f4f8210c457";
+    let response = value(invoke(&config, &store, &["comparison", "evaluate", id]));
+    let result = &response["result"];
+    assert_eq!(result["schema_version"], 2);
+    assert_eq!(result["included_task_ids"].as_array().unwrap().len(), 4);
+    assert_eq!(
+        result["exact_estimation"]["evaluation"]["status"],
+        "supported"
+    );
+    assert_eq!(
+        result["exact_estimation"]["evaluation"]["first_components"]
+            .as_array()
+            .unwrap()
+            .len()
+            + result["exact_estimation"]["evaluation"]["second_components"]
+                .as_array()
+                .unwrap()
+                .len(),
+        6
+    );
+    assert_eq!(
+        result["exact_estimation"]["evaluation"]["contrasts"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3
+    );
+    assert!(!config.exists());
+}
+
+#[test]
 fn question_cards_use_saved_evidence_and_invalidate_deleted_selections() {
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("enrollment");

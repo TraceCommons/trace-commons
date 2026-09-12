@@ -8,6 +8,7 @@ pub mod cards;
 pub mod claude_task_attribution;
 #[cfg(test)]
 pub(crate) mod comparison_estimator;
+pub(crate) mod comparison_exact;
 pub mod comparison_spec_store;
 pub mod comparison_specs;
 pub mod comparison_task_store;

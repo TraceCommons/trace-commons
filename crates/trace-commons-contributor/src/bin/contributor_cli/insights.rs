@@ -1,10 +1,11 @@
+use std::fmt::Write as _;
 use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::{Args, Subcommand, ValueEnum};
 use trace_commons_contributor::insights::comparison_specs::{
     ComparisonSpecificationDraftInput, ComparisonSpecificationV1, DescriptiveComparisonResultV1,
-    ExactComparisonStratumV1,
+    ExactCandidateDecision, ExactCandidateEvaluation, ExactComparisonStratumV1,
 };
 use trace_commons_contributor::insights::comparison_tasks::{
     CheckoutProvenance, ComparisonConfigurationV1, ComparisonTaskContextInput, ContextDigest,
@@ -747,7 +748,11 @@ fn render_comparison_result(
         copy["comparison_specification_title"], result.specification_id
     );
     println!("{}", copy["comparison_retrospective_notice"]);
-    println!("{}", copy["comparison_descriptive_notice"]);
+    if result.schema_version == 1 {
+        println!("{}", copy["comparison_descriptive_notice"]);
+    } else {
+        println!("{}", copy["comparison_exact_notice"]);
+    }
     if result.included_task_ids.is_empty() {
         println!("{}", copy["comparison_no_eligible_evidence"]);
     }
@@ -773,6 +778,9 @@ fn render_comparison_result(
         );
     }
     println!("{}", copy["comparison_denominator_notice"]);
+    if let Some(estimation) = &result.exact_estimation {
+        print!("{}", exact_estimation_text(result, estimation, copy)?);
+    }
     for task_id in &result.included_task_ids {
         println!("Included task: {task_id}");
     }
@@ -795,6 +803,101 @@ fn render_comparison_result(
     }
     println!("Audit digest: {}", result.audit_digest);
     Ok(())
+}
+
+fn exact_estimation_text(
+    result: &DescriptiveComparisonResultV1,
+    estimation: &trace_commons_contributor::insights::comparison_specs::QualifiedExactEstimationV1,
+    copy: &std::collections::BTreeMap<String, String>,
+) -> Result<String> {
+    let mut rendered = String::new();
+    let [first_label, second_label] = &estimation.cohort_labels;
+    writeln!(
+        rendered,
+        "{second_label} {} {first_label}",
+        copy["comparison_exact_minus"]
+    )?;
+    writeln!(rendered, "{}", copy["comparison_exact_orientation"])?;
+    for ((label, counts), cohort) in estimation
+        .cohort_labels
+        .iter()
+        .zip(&estimation.assessed_counts)
+        .zip(&result.cohorts)
+    {
+        writeln!(
+            rendered,
+            "{label}: {}: {} / {}: {}",
+            copy["comparison_specification_assessed"],
+            counts.total,
+            copy["comparison_specification_included"],
+            cohort.included_tasks
+        )?;
+    }
+    match &estimation.evaluation {
+        ExactCandidateEvaluation::SuppressedBelowMinimumCohortSupport => {
+            writeln!(rendered, "{}", copy["comparison_exact_support_unavailable"])?;
+        }
+        ExactCandidateEvaluation::Supported { contrasts, .. } => {
+            let names = ["Accepted", "Partial", "Rejected"];
+            for (index, (name, contrast)) in names.iter().zip(contrasts).enumerate() {
+                let first = &estimation.assessed_counts[0];
+                let second = &estimation.assessed_counts[1];
+                let first_count = [first.accepted, first.partial, first.rejected][index];
+                let second_count = [second.accepted, second.partial, second.rejected][index];
+                writeln!(
+                    rendered,
+                    "{name}: {first_count}/{} ({:.2}%) {} {second_count}/{} ({:.2}%)",
+                    first.total,
+                    percent(first_count, first.total),
+                    copy["comparison_exact_versus"],
+                    second.total,
+                    percent(second_count, second.total)
+                )?;
+                let observed =
+                    percent(second_count, second.total) - percent(first_count, first.total);
+                writeln!(
+                    rendered,
+                    "  {}: {observed:+.4} {}",
+                    copy["comparison_exact_observed_difference"],
+                    copy["comparison_exact_percentage_points"]
+                )?;
+                writeln!(
+                    rendered,
+                    "  {}: [{:+.4}, {:+.4}] {}",
+                    copy["comparison_exact_interval"],
+                    contrast.lower_millionths as f64 / 10_000.0,
+                    contrast.upper_millionths as f64 / 10_000.0,
+                    copy["comparison_exact_percentage_points"]
+                )?;
+                let key = match contrast.decision {
+                    ExactCandidateDecision::InsufficientPrecision => {
+                        "comparison_exact_insufficient_precision"
+                    }
+                    ExactCandidateDecision::IndeterminateBoundary => {
+                        "comparison_exact_indeterminate_boundary"
+                    }
+                    ExactCandidateDecision::IncludesZero => "comparison_exact_includes_zero",
+                    ExactCandidateDecision::ExcludesZero => "comparison_exact_excludes_zero",
+                };
+                writeln!(rendered, "  {}", copy[key])?;
+            }
+            writeln!(rendered, "{}", copy["comparison_exact_positive_direction"])?;
+        }
+    }
+    writeln!(
+        rendered,
+        "Exact output digest: {}",
+        estimation.output_digest
+    )?;
+    Ok(rendered)
+}
+
+fn percent(count: u64, total: u64) -> f64 {
+    if total == 0 {
+        0.0
+    } else {
+        count as f64 * 100.0 / total as f64
+    }
 }
 
 fn render_comparison_task_operation(
@@ -1140,4 +1243,29 @@ fn render(insight: &LocalInsight, json: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn qualified_exact_result_renders_conditional_orientation_and_statuses() {
+        let response: LocalInsightsResponse = serde_json::from_slice(include_bytes!(
+            "../../../fixtures/insights/comparison-estimator/schema2-qualified/preview-response.json"
+        ))
+        .unwrap();
+        let LocalInsightsResponse::ComparisonPreviewSpec { result, .. } = response else {
+            panic!("fixture must be a comparison preview")
+        };
+        let copy = trace_commons_contributor::insights::service::ui_copy();
+        let text = exact_estimation_text(&result, result.exact_estimation.as_ref().unwrap(), &copy)
+            .unwrap();
+        assert!(text.contains("model-b minus model-a"));
+        assert!(text.contains("Observed difference: +0.0000 percentage points"));
+        assert!(text.contains("Simultaneous interval:"));
+        assert!(text.contains("Interval too wide for a directional conclusion."));
+        assert!(text.contains("Accepted: 1/2"));
+        assert!(!text.contains("better model"));
+    }
 }

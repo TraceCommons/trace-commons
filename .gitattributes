@@ -28,3 +28,9 @@ crates/trace-commons-contributor/fixtures/insights/codex-task-attribution/* -tex
 
 # Preserve the pinned upstream SDK bytes, including its trailing whitespace.
 crates/trace-commons-contributor/src/daemon/nearai_credential/near_connect/near-connect-0.11.4.js -text whitespace=-blank-at-eol
+
+# Comparison-estimator fixtures and reviewed calibration/runtime evidence are
+# pinned to their exact committed bytes. Rust golden tests and SHA-256 manifests
+# intentionally distinguish every byte, so Windows autocrlf translation must
+# not rewrite JSON, JSONL, Markdown, or manifest line endings in this tree.
+crates/trace-commons-contributor/fixtures/insights/comparison-estimator/** -text

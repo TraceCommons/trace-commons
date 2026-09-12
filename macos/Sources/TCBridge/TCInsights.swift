@@ -33,6 +33,9 @@ public enum TCInsights {
             try response.task?.validateSupportedSchema()
             try response.comparisonTaskDetail?.validateSupportedSchema(expectedID: request.operation.id)
             for task in response.tasks ?? [] { try task.validateSupportedSchema() }
+            try response.specification?.validateStructure()
+            for specification in response.specifications ?? [] { try specification.validateStructure() }
+            try response.comparisonResult?.validateStructure(expectedSpecification: response.specification)
             if request.operation.type == "question_cards" {
                 guard response.type == "question_cards", let result = response.result,
                       response.text != nil, let questions = request.operation.questions else {

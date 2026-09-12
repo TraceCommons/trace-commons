@@ -8,6 +8,51 @@ import TCShellCore
 @testable import TraceCommonsApp
 
 final class InsightsStoreRoutingIntegrationTests: XCTestCase {
+    func testOCRNormalizationChangesOnlyCaseAndWhitespace() {
+        XCTAssertEqual(Self.normalizedOCR("  Outcome\tIs\n unassessed.  "), "outcome is unassessed.")
+        XCTAssertNotEqual(Self.normalizedOCR("Outcome is assessed."), "outcome is unassessed.")
+    }
+
+    @MainActor
+    func testActualSupportedSchemaTwoResultFlowsThroughRoutedModel() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let store = root.appendingPathComponent("supported-store")
+        try FileManager.default.createDirectory(at: store, withIntermediateDirectories: true,
+                                                attributes: [.posixPermissions: 0o700])
+        defer { try? FileManager.default.removeItem(at: root) }
+        let fixture = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent(
+                "crates/trace-commons-contributor/fixtures/insights/comparison-estimator/schema2-supported-store/index.json")
+        try FileManager.default.copyItem(at: fixture, to: store.appendingPathComponent("index.json"))
+
+        let router = InsightsServiceRouter(selection: .custom(store.path))
+        let model = ComparisonSpecificationsModel(service: { try await router.call($0) })
+        model.open(); try await settle(model)
+        let specification = try XCTUnwrap(model.specifications.first)
+        XCTAssertEqual(specification.id, "0e86d56a-8117-4daa-b18f-8f4f8210c457")
+        guard case .qualifiedExactCategoricalV1 = specification.estimator_state else {
+            return XCTFail("Expected the fixture's qualified exact estimator state")
+        }
+        model.select(specification.id); try await settle(model)
+        model.evaluate(); try await settle(model)
+
+        let result = try XCTUnwrap(model.result)
+        try result.validateStructure(expectedSpecification: try XCTUnwrap(model.selected))
+        XCTAssertEqual(result.schema_version, 2)
+        XCTAssertEqual(result.included_task_ids.count, 4)
+        XCTAssertEqual(result.cohorts.map(\.included_tasks), [2, 2])
+        let exact = try XCTUnwrap(result.exact_estimation)
+        XCTAssertEqual(exact.cohort_labels, result.cohorts.map(\.cohort_label))
+        XCTAssertEqual(exact.assessed_estimation_input_digest.count, 64)
+        XCTAssertEqual(exact.output_digest.count, 64)
+        guard case .supported(let first, let second, let contrasts) = exact.evaluation else {
+            return XCTFail("Expected supported exact intervals")
+        }
+        XCTAssertEqual(first.count + second.count, 6)
+        XCTAssertEqual(contrasts.count, 3)
+    }
+
     @MainActor
     func testActualSelectedStoreRendersLocationAndPopulatedComparisonSections() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -15,6 +60,9 @@ final class InsightsStoreRoutingIntegrationTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         let store = root.appendingPathComponent("selected-store")
         let seeded = try seedStore(store, marker: "visible", includeComparisonData: true)
+        let task = try XCTUnwrap(TCInsights.call(.init(
+            storeDirectory: store.path, operation: .init("comparison_task_list"))).tasks?.first)
+        XCTAssertTrue(task.stale_reasons.contains(.attributionPendingQualification))
         let copy = try XCTUnwrap(TCInsights.copy())
         _ = NSApplication.shared
         let size = CGSize(width: 1_180, height: 3_200)
@@ -43,7 +91,9 @@ final class InsightsStoreRoutingIntegrationTests: XCTestCase {
         XCTAssertTrue(topText.contains("Insights store"), topText)
         XCTAssertTrue(topText.contains("selected-store"), topText)
         let text = try recognizedText(bitmap)
-        XCTAssertTrue(text.contains("Source attribution is pending qualification"), text)
+        let normalizedText = Self.normalizedOCR(text)
+        XCTAssertTrue(normalizedText.contains(Self.normalizedOCR("Whole saved snapshot members")), text)
+        XCTAssertTrue(normalizedText.contains(Self.normalizedOCR("Outcome is unassessed")), text)
         XCTAssertTrue(text.contains("model-a") && text.contains("model-b"), text)
     }
 
@@ -121,6 +171,15 @@ final class InsightsStoreRoutingIntegrationTests: XCTestCase {
         XCTFail("routed Insights models did not settle")
     }
 
+    @MainActor
+    private func settle(_ model: ComparisonSpecificationsModel) async throws {
+        for _ in 0..<500 {
+            if !model.busy { return }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTFail("comparison specification model did not settle")
+    }
+
     private func seedStore(_ store: URL, marker: String, includeComparisonData: Bool) throws -> SeededStore {
         let source = store.deletingLastPathComponent().appendingPathComponent("\(marker).json")
         let fixture = "[{\"role\":\"meta\",\"source\":\"fixture\",\"model\":\"\(marker)\"}," +
@@ -156,6 +215,10 @@ final class InsightsStoreRoutingIntegrationTests: XCTestCase {
         let handler = VNImageRequestHandler(cgImage: try XCTUnwrap(bitmap.cgImage), options: [:])
         try handler.perform([request])
         return (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }.joined(separator: "\n")
+    }
+
+    private static func normalizedOCR(_ text: String) -> String {
+        text.split(whereSeparator: \.isWhitespace).joined(separator: " ").lowercased()
     }
 }
 

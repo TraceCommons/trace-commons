@@ -5,6 +5,39 @@ import TCBridge
 
 final class ComparisonSpecificationsModelTests: XCTestCase {
     @MainActor
+    func testQualifiedSchemaTwoResultFlowsThroughSelectedModel() async throws {
+        let service = try QualifiedSpecificationService()
+        let model = ComparisonSpecificationsModel(service: { try await service.call($0) })
+        model.open(); try await settle(model)
+        model.select(QualifiedSpecificationService.specificationID); try await settle(model)
+        model.evaluate(); try await settle(model)
+
+        let result = try XCTUnwrap(model.result)
+        XCTAssertEqual(result.schema_version, 2)
+        XCTAssertEqual(result.cohorts.map(\.included_tasks), [3, 2])
+        guard case .supported(_, _, let contrasts) = try XCTUnwrap(result.exact_estimation).evaluation else {
+            return XCTFail("Expected supported exact estimation")
+        }
+        XCTAssertEqual(contrasts.first?.lower_millionths, -997_915)
+        XCTAssertEqual(contrasts.last?.upper_millionths, 997_915)
+        XCTAssertNotNil(model.resultConfirmation())
+    }
+
+    @MainActor
+    func testStructurallyValidSuppressedSchemaTwoResultFlowsWithoutContrasts() async throws {
+        let service = try QualifiedSpecificationService(suppressed: true)
+        let model = ComparisonSpecificationsModel(service: { try await service.call($0) })
+        model.open(); try await settle(model)
+        model.select(QualifiedSpecificationService.specificationID); try await settle(model)
+        model.evaluate(); try await settle(model)
+
+        guard case .suppressedBelowMinimumCohortSupport = try XCTUnwrap(model.result?.exact_estimation).evaluation else {
+            return XCTFail("Expected typed support suppression")
+        }
+        XCTAssertNil(model.error)
+    }
+
+    @MainActor
     func testPreviewSaveSelectEvaluateAndDigestBoundExplain() async throws {
         let service = SpecificationFakeService()
         let model = ComparisonSpecificationsModel(service: { try await service.call($0) })
@@ -201,6 +234,53 @@ final class ComparisonSpecificationsModelTests: XCTestCase {
                                                                    "kind": "codex_session_metadata"]]]]
             return try JSONDecoder().decode(LocalInsight.self, from: JSONSerialization.data(withJSONObject: json))
         }
+    }
+}
+
+private actor QualifiedSpecificationService {
+    static let specificationID = "00000000-0000-4000-8000-000000000010"
+    private let specification: [String: Any]
+    private let result: [String: Any]
+
+    init(suppressed: Bool = false) throws {
+        let testFile = URL(fileURLWithPath: #filePath)
+        let root = testFile.deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+        let fixture = root.appendingPathComponent(
+            "crates/trace-commons-contributor/fixtures/insights/comparison-estimator/schema2-qualified/preview-response.json")
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: fixture)) as? [String: Any])
+        specification = try XCTUnwrap(object["specification"] as? [String: Any])
+        var result = try XCTUnwrap(object["result"] as? [String: Any])
+        if suppressed {
+            var exact = try XCTUnwrap(result["exact_estimation"] as? [String: Any])
+            var counts = try XCTUnwrap(exact["assessed_counts"] as? [[String: Any]])
+            counts[0] = ["accepted": 1, "partial": 0, "rejected": 0, "total": 1]
+            exact["assessed_counts"] = counts
+            exact["evaluation"] = ["status": "suppressed_below_minimum_cohort_support"]
+            result["exact_estimation"] = exact
+            var cohorts = try XCTUnwrap(result["cohorts"] as? [[String: Any]])
+            var outcomes = try XCTUnwrap(cohorts[0]["outcomes"] as? [String: Any])
+            outcomes["accepted"] = 1; outcomes["partial"] = 0; outcomes["assessed"] = 1
+            outcomes["unassessed"] = 2; cohorts[0]["outcomes"] = outcomes
+            result["cohorts"] = cohorts
+        }
+        self.result = result
+    }
+
+    func call(_ request: InsightsRequest) throws -> InsightsResponse {
+        let payload: [String: Any]
+        switch request.operation.type {
+        case "comparison_list_specs":
+            payload = ["type": "comparison_specification_list", "specifications": [specification]]
+        case "comparison_get_spec":
+            payload = ["type": "comparison_specification", "specification": specification]
+        case "comparison_evaluate":
+            payload = ["type": "comparison_result", "result": result]
+        default:
+            throw InsightsError.invalidResponse
+        }
+        return try JSONDecoder().decode(InsightsResponse.self,
+                                        from: JSONSerialization.data(withJSONObject: payload))
     }
 }
 
