@@ -165,6 +165,7 @@ impl ModelObservations {
                 }
             };
             let kind_matches = match self.source_format {
+                SourceFormat::ClaudeCode => false,
                 SourceFormat::Codex if codex_turn_context_schema => {
                     declaration.kind == DeclarationKind::CodexTurnContext
                 }
@@ -195,6 +196,7 @@ pub fn extract_model_observations(source: SourceFormat, bytes: &[u8]) -> Result<
     let is_array = source == SourceFormat::Trajectory && text.trim_start().starts_with('[');
     let mut observation = ModelObservations {
         schema_version: match source {
+            SourceFormat::ClaudeCode => return Err(invalid()),
             SourceFormat::Codex => CODEX_MODEL_OBSERVATIONS_SCHEMA_VERSION,
             SourceFormat::Trajectory => LEGACY_MODEL_OBSERVATIONS_SCHEMA_VERSION,
         },
@@ -271,6 +273,7 @@ fn observe_record(
         return Err(invalid());
     }
     let candidate = match result.source_format {
+        SourceFormat::ClaudeCode => return Err(invalid()),
         SourceFormat::Codex => {
             let kind = record
                 .get("type")

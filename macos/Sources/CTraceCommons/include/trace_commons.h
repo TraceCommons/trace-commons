@@ -1772,7 +1772,7 @@ char*       tc_call(tc_handle*, const char* method, const char* params_json);
  * request is borrowed readable UTF-8 bytes (no trailing NUL), at most 65536.
  * Example: {"operation":{"type":"list"}}. Optional top-level store_dir selects
  * a dedicated store; omitted uses the platform local-data Insights directory.
- * Operations: analyze {source:codex|trajectory,file,save:false}, list, summary,
+ * Operations: analyze {source:codex|claude_code|trajectory,file,save:false}, list, summary,
  * explain {id}, delete {id}, annotate {id,category,outcome}, clear_annotation {id},
  * usage {source:codex|claude_code,file}, copy; each has a "type" discriminator.
  * Explicit links: link_git {id,repository,commit}, link_test_report {id,file},

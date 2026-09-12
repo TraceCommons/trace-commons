@@ -256,6 +256,7 @@ fn model_input(
 fn source_format(value: SourceFormat) -> CardSourceFormat {
     match value {
         SourceFormat::Codex => CardSourceFormat::Codex,
+        SourceFormat::ClaudeCode => CardSourceFormat::ClaudeCode,
         SourceFormat::Trajectory => CardSourceFormat::Trajectory,
     }
 }

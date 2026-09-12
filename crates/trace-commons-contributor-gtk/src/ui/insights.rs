@@ -208,7 +208,8 @@ impl InsightsView {
         root.append(&label(copy("intro")));
         root.append(&label(copy("snapshot_notice")));
         let controls = gtk::Box::new(gtk::Orientation::Vertical, 8);
-        let source = gtk::DropDown::from_strings(&[copy("codex"), copy("trajectory")]);
+        let source =
+            gtk::DropDown::from_strings(&[copy("codex"), copy("claude_code"), copy("trajectory")]);
         source.set_tooltip_text(Some(copy("source")));
         let choose = gtk::Button::with_label(copy("choose_file"));
         let save = gtk::Button::with_label(copy("save"));
@@ -732,10 +733,10 @@ impl InsightsView {
             self.clear_detail();
             self.request(
                 Op::Analyze {
-                    source: if self.source.selected() == 0 {
-                        SourceFormat::Codex
-                    } else {
-                        SourceFormat::Trajectory
+                    source: match self.source.selected() {
+                        0 => SourceFormat::Codex,
+                        1 => SourceFormat::ClaudeCode,
+                        _ => SourceFormat::Trajectory,
                     },
                     file,
                     save,
@@ -2166,8 +2167,17 @@ fn render(insight: &LocalInsight) -> String {
 fn source_label(source: SourceFormat) -> &'static str {
     copy(match source {
         SourceFormat::Codex => "codex",
+        SourceFormat::ClaudeCode => "claude_code",
         SourceFormat::Trajectory => "trajectory",
     })
+}
+#[cfg(test)]
+fn source_index(source: SourceFormat) -> u32 {
+    match source {
+        SourceFormat::Codex => 0,
+        SourceFormat::ClaudeCode => 1,
+        SourceFormat::Trajectory => 2,
+    }
 }
 fn category_label(category: TaskCategory) -> &'static str {
     copy(match category {
@@ -2547,7 +2557,8 @@ mod tests {
             "initial summary must not initialize storage"
         );
         assert!(view.summary.text().contains(copy("summary_empty")));
-        view.source.set_selected(1);
+        view.source
+            .set_selected(source_index(SourceFormat::Trajectory));
         *view.selected.borrow_mut() = Some(file.clone());
         view.analyze(false);
         settle();

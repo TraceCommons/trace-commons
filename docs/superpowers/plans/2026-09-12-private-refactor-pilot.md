@@ -1,6 +1,6 @@
 # Private refactor pilot
 
-Status: preparation; the user authorized locating candidate traces in local Claude history. Source-to-task matching, qualification, and user outcome reviews remain pending.
+Status: preparation; the user authorized locating candidate traces in local Claude history. Source-to-task matching and qualification remain pending. The user assessed all three final PR outcomes as accepted; those assessments do not establish complete trace boundaries or independent task attribution.
 Parent: [personal refactor comparison delivery plan](2026-09-12-personal-refactor-comparison.md).
 
 Reward systems for both missions and insights are outside scope and owned by Abhishek. This pilot collects evidence and user assessments without reward eligibility, compensation, or payout features.
@@ -31,21 +31,23 @@ TC_PILOT_STORE='/absolute/path/to/private-refactor-pilot/insights'
 "$TC_BIN" --json insights --store-dir "$TC_PILOT_STORE" list
 ```
 
-An empty-store read should leave the store absent. Record the application commit and source format/version in the local pilot notes. A version label alone does not qualify a source. The [source profile](../specs/2026-09-12-codex-comparison-source-profile.md) currently admits only bounded Codex 0.154.0 exec traces. Older, interactive, delegated, or unsupported traces may still import generically but remain unavailable for comparison; record that as coverage feedback.
+An empty-store read should leave the store absent. Record the application commit and source format/version in the local pilot notes. A version label alone does not qualify a source. Native Claude Code files can now be imported descriptively with `--source claude-code`; this does not provide model, usage, time, or comparison attribution. The [source profile](../specs/2026-09-12-codex-comparison-source-profile.md) currently admits only bounded Codex 0.154.0 exec traces for comparisons. Older, interactive, delegated, or unsupported traces may still import generically when their selected source parser accepts them, but remain unavailable for comparison; record that as coverage feedback.
 
 ## Import and review one task
 
-1. Import only an authorized original trace, then create an episode and task using the returned identifiers:
+1. Import only an authorized original trace. Set `TC_SOURCE_FORMAT=claude-code` for the selected Claude pilot files (`codex` remains available for Codex sources), then create an episode and task using the returned identifiers:
 
 ```sh
 "$TC_BIN" --json insights --store-dir "$TC_PILOT_STORE" analyze \
-  --source codex --file "$TC_TRACE_FILE" --save
+  --source "$TC_SOURCE_FORMAT" --file "$TC_TRACE_FILE" --save
 "$TC_BIN" --json insights --store-dir "$TC_PILOT_STORE" episode-create \
   --snapshot "$TC_SNAPSHOT_ID"
 "$TC_BIN" --json insights --store-dir "$TC_PILOT_STORE" comparison-task create \
   --episode "$TC_EPISODE_ID"
 "$TC_BIN" --json insights --store-dir "$TC_PILOT_STORE" comparison-task explain "$TC_TASK_ID"
 ```
+
+Claude import reads exactly the selected file, without discovering its parent or sibling agents. Distinct content sequences sharing a message ID are preserved; exact repeated content sequences under that ID are collapsed. Metrics describe normalized record/block observations, not unique tool executions. An agent-written opening instruction is not proof of a human prompt. Preserve the original file while reviewing any missing task membership.
 
 2. Review the whole task boundary and every attempt. Multiple turns never count as multiple independent tasks. Reuse one user-selected project UUID across worktrees of this repository. Set only known context fields:
 

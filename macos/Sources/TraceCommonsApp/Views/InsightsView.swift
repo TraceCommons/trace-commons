@@ -17,6 +17,7 @@ struct InsightsView: View {
                     HStack {
                         Picker(model.text("source"), selection: $source) {
                             Text(model.text("codex")).tag("codex")
+                            Text(model.text("claude_code")).tag("claude_code")
                             Text(model.text("trajectory")).tag("trajectory")
                         }.frame(maxWidth: 260)
                         Button(model.text("choose_file")) { choosingFile = true }

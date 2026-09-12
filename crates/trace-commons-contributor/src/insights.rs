@@ -44,6 +44,7 @@ const MAX_OUTCOME_LINKS: usize = 128;
 #[serde(rename_all = "snake_case")]
 pub enum SourceFormat {
     Codex,
+    ClaudeCode,
     Trajectory,
 }
 
@@ -215,6 +216,7 @@ pub fn analyze_file(format: SourceFormat, path: &Path) -> Result<LocalInsight> {
     let bytes = bounded_read(path)?;
     let source_digest = digest(&bytes);
     let events = match format {
+        SourceFormat::ClaudeCode => crate::source::claude_code::parse_selected_file_bytes(&bytes)?,
         SourceFormat::Trajectory => {
             crate::source::trajectory::parse_trajectory(&bytes)
                 .map_err(|_| anyhow!("insights_invalid_trajectory"))?
@@ -252,10 +254,15 @@ pub fn analyze_file(format: SourceFormat, path: &Path) -> Result<LocalInsight> {
         id: id.clone(),
         source_digest,
     };
-    let time_evidence = time_evidence::extract_recorded_time_evidence(format, &bytes)?;
+    let time_evidence = match format {
+        SourceFormat::ClaudeCode => None,
+        SourceFormat::Codex | SourceFormat::Trajectory => Some(
+            time_evidence::extract_recorded_time_evidence(format, &bytes)?,
+        ),
+    };
     let usage_evidence = match format {
         SourceFormat::Codex => Some(usage_evidence::extract_codex_usage_evidence(&bytes)?),
-        SourceFormat::Trajectory => None,
+        SourceFormat::ClaudeCode | SourceFormat::Trajectory => None,
     };
     let task_attribution = match format {
         SourceFormat::Codex => Some(
@@ -264,7 +271,7 @@ pub fn analyze_file(format: SourceFormat, path: &Path) -> Result<LocalInsight> {
                 &bytes,
             )?,
         ),
-        SourceFormat::Trajectory => None,
+        SourceFormat::ClaudeCode | SourceFormat::Trajectory => None,
     };
     let input = provider::ProviderInput::first_party(evidence, &events);
     let report = provider::dispatch(&provider::FirstPartyProvider, &input)?;
@@ -277,9 +284,14 @@ pub fn analyze_file(format: SourceFormat, path: &Path) -> Result<LocalInsight> {
         cost_unavailable_reason: "adapter_usage_unavailable".into(),
         task_category: None,
         manual_annotation: None,
-        model_observations: Some(models::extract_model_observations(format, &bytes)?),
+        model_observations: match format {
+            SourceFormat::ClaudeCode => None,
+            SourceFormat::Codex | SourceFormat::Trajectory => {
+                Some(models::extract_model_observations(format, &bytes)?)
+            }
+        },
         outcome_links: Vec::new(),
-        time_evidence: Some(time_evidence),
+        time_evidence,
         usage_evidence,
         task_attribution,
         analyzed_at: chrono::Utc::now(),
@@ -1072,6 +1084,77 @@ mod tests {
         .unwrap();
         assert!(analyze_file(SourceFormat::Codex, &path).is_err());
         assert!(analyze_file(SourceFormat::Trajectory, &path).is_err());
+    }
+
+    #[test]
+    fn claude_code_import_preserves_distinct_same_id_blocks_without_claiming_attribution() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fixture.jsonl");
+        fs::write(
+            &path,
+            concat!(
+                "{\"type\":\"user\",\"timestamp\":\"2026-09-12T12:00:00Z\",\"message\":{\"content\":\"synthetic request\"}}\n",
+                "{\"type\":\"assistant\",\"timestamp\":\"2026-09-12T12:00:01Z\",\"message\":{\"id\":\"msg_synthetic\",\"model\":\"fixture-model\",\"content\":[{\"type\":\"tool_use\",\"id\":\"tool_synthetic\",\"name\":\"Read\",\"input\":{}}]}}\n",
+                "{\"type\":\"assistant\",\"timestamp\":\"2026-09-12T12:00:02Z\",\"message\":{\"id\":\"msg_synthetic\",\"model\":\"fixture-model\",\"content\":[{\"type\":\"tool_use\",\"id\":\"tool_synthetic\",\"name\":\"Read\",\"input\":{}},{\"type\":\"text\",\"text\":\"synthetic answer\"}]}}\n",
+                "{\"type\":\"user\",\"timestamp\":\"2026-09-12T12:00:03Z\",\"message\":{\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"tool_synthetic\",\"content\":\"synthetic result\",\"is_error\":false}]}}\n"
+            ),
+        )
+        .unwrap();
+
+        let analyzed = analyze_file(SourceFormat::ClaudeCode, &path).unwrap();
+        let metric = |id| {
+            analyzed
+                .report
+                .metrics
+                .iter()
+                .find(|metric| metric.id == id)
+                .unwrap()
+        };
+        assert_eq!(metric(MetricId::Events).value, Some(5));
+        assert_eq!(metric(MetricId::ToolCalls).value, Some(2));
+        assert_eq!(metric(MetricId::ToolFailures).value, Some(0));
+        assert_eq!(metric(MetricId::InputTokens).value, None);
+        assert_eq!(analyzed.source_format, SourceFormat::ClaudeCode);
+        assert!(analyzed.model_observations.is_none());
+        assert!(analyzed.usage_evidence.is_none());
+        assert!(analyzed.time_evidence.is_none());
+        assert!(analyzed.task_attribution.is_none());
+        assert_eq!(
+            analyzed.report.evidence[0].source_digest,
+            digest(&fs::read(path).unwrap())
+        );
+    }
+
+    #[test]
+    fn claude_code_import_deduplicates_only_exact_same_id_snapshots() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fixture.jsonl");
+        let record = "{\"type\":\"assistant\",\"message\":{\"id\":\"msg_synthetic\",\"content\":[{\"type\":\"text\",\"text\":\"synthetic answer\"}]}}\n";
+        fs::write(&path, format!("{record}{record}")).unwrap();
+        let analyzed = analyze_file(SourceFormat::ClaudeCode, &path).unwrap();
+        assert_eq!(
+            analyzed
+                .report
+                .metrics
+                .iter()
+                .find(|metric| metric.id == MetricId::Events)
+                .unwrap()
+                .value,
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn claude_code_import_rejects_malformed_selected_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fixture.jsonl");
+        fs::write(&path, "{\"type\":\"user\",\"message\":{}\n").unwrap();
+        assert_eq!(
+            analyze_file(SourceFormat::ClaudeCode, &path)
+                .unwrap_err()
+                .to_string(),
+            "insights_invalid_claude_code"
+        );
     }
 
     #[test]
