@@ -40,7 +40,9 @@ pub struct MissionBudget {
     pub max_output_tokens: u64,
 }
 
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// UI review status, not an authorization token or an attestation. Only local
+/// structural validation produces this result; no publication path consumes it.
+#[derive(Debug, PartialEq, Eq, Serialize)]
 pub struct MissionDraftReview {
     pub schema_version: u32,
     pub proposal_sha256: String,
