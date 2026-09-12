@@ -103,6 +103,7 @@ fn versions_one_through_five_remain_read_only_and_do_not_invent_usage() {
         legacy["version"] = version.into();
         let report = legacy["reports"][&saved.id].as_object_mut().unwrap();
         report.remove("usage_evidence");
+        report.remove("task_attribution");
         if version < 5 {
             report.remove("time_evidence");
         }

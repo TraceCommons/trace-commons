@@ -35,7 +35,7 @@ use trace_commons_protocol::insights::{
 };
 
 const MAX_SOURCE_BYTES: u64 = 16 * 1024 * 1024;
-const STORE_VERSION: u32 = 8;
+const STORE_VERSION: u32 = 9;
 const MAX_OUTCOME_LINKS: usize = 128;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -137,6 +137,10 @@ pub struct LocalInsight {
     /// unknown until reimport; trajectory has no supported native contract.
     #[serde(default)]
     pub usage_evidence: Option<usage_evidence::PersistedUsageEvidence>,
+    /// Source-bound structural task attribution. Legacy and non-Codex snapshots
+    /// remain unavailable until a qualified adapter produces this evidence.
+    #[serde(default)]
+    pub task_attribution: Option<task_attribution::CodexTaskAttributionEvidence>,
     /// Import snapshot time; source freshness requires explicit reimport.
     pub analyzed_at: chrono::DateTime<chrono::Utc>,
 }
@@ -251,6 +255,15 @@ pub fn analyze_file(format: SourceFormat, path: &Path) -> Result<LocalInsight> {
         SourceFormat::Codex => Some(usage_evidence::extract_codex_usage_evidence(&bytes)?),
         SourceFormat::Trajectory => None,
     };
+    let task_attribution = match format {
+        SourceFormat::Codex => Some(
+            task_attribution::classify_codex_task_attribution_for_import(
+                task_attribution::CodexTaskSourceProfile::CodexRustV0_154_0TaskRecords,
+                &bytes,
+            )?,
+        ),
+        SourceFormat::Trajectory => None,
+    };
     let input = provider::ProviderInput::first_party(evidence, &events);
     let report = provider::dispatch(&provider::FirstPartyProvider, &input)?;
     Ok(LocalInsight {
@@ -266,6 +279,7 @@ pub fn analyze_file(format: SourceFormat, path: &Path) -> Result<LocalInsight> {
         outcome_links: Vec::new(),
         time_evidence: Some(time_evidence),
         usage_evidence,
+        task_attribution,
         analyzed_at: chrono::Utc::now(),
     })
 }
@@ -449,8 +463,19 @@ impl LocalInsightStore {
             if index.version < 6 && insight.usage_evidence.is_some() {
                 bail!("insights_store_invalid");
             }
+            if index.version < 9 && insight.task_attribution.is_some() {
+                bail!("insights_store_invalid");
+            }
             if let Some(usage) = &insight.usage_evidence {
                 usage.validate_binding(insight.source_format, &evidence[0].source_digest)?;
+            }
+            if let Some(attribution) = &insight.task_attribution {
+                attribution.validate()?;
+                if insight.source_format != SourceFormat::Codex
+                    || attribution.source_digest != evidence[0].source_digest
+                {
+                    bail!("insights_store_invalid");
+                }
             }
             if let Some(time_evidence) = &insight.time_evidence {
                 time_evidence.validate()?;
@@ -1028,6 +1053,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("fixture.jsonl");
         fs::write(&path, "{\"type\":\"session_meta\",\"payload\":{}}\n{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"fixture\"}]}}\n").unwrap();
+        let analyzed = analyze_file(SourceFormat::Codex, &path).unwrap();
+        assert!(matches!(
+            analyzed.task_attribution.unwrap().state,
+            task_attribution::TaskAttributionState::Unavailable {
+                reason: task_attribution::TaskAttributionUnavailableReason::SourceProfileMismatch,
+                ..
+            }
+        ));
+        fs::write(&path, "{\"type\":\"session_meta\",\"payload\":{}}\n\n{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"fixture\"}]}}\n").unwrap();
         assert!(analyze_file(SourceFormat::Codex, &path).is_ok());
         fs::write(
             &path,

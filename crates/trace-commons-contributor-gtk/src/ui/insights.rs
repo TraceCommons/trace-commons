@@ -2379,6 +2379,7 @@ mod tests {
             Coverage, EvidenceRef, InsightMetric, InsightReport, MetricId, ProviderManifest,
         };
         let insight = LocalInsight {
+            task_attribution: None,
             id: "fixture".into(),
             source_format: SourceFormat::Codex,
             boundary: trace_commons_contributor::insights::EpisodeBoundary::SessionProxy,
