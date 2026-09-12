@@ -15,6 +15,21 @@ use trace_commons_contributor::insights::summary::{
 };
 use trace_commons_contributor::insights::{LocalInsight, SourceFormat, TaskCategory, TaskOutcome};
 
+#[path = "insights_evidence.rs"]
+mod evidence;
+
+/// A chooser belongs to the selection and view lifetime that opened it.
+#[derive(Clone)]
+struct ChooserTicket {
+    generation: u64,
+    snapshot: Option<String>,
+}
+impl ChooserTicket {
+    fn matches(&self, generation: u64, snapshot: Option<&str>) -> bool {
+        self.generation == generation && self.snapshot.as_deref() == snapshot
+    }
+}
+
 fn copy(key: &str) -> &'static str {
     static COPY: std::sync::OnceLock<std::collections::BTreeMap<String, String>> =
         std::sync::OnceLock::new();
@@ -62,6 +77,11 @@ pub struct InsightsView {
     saved_heading: gtk::Label,
     save: gtk::Button,
     assessment: gtk::Box,
+    evidence_expander: gtk::Expander,
+    evidence_body: gtk::Box,
+    evidence_controls: gtk::Box,
+    commit: gtk::Entry,
+    chooser_generation: Cell<u64>,
     category: gtk::DropDown,
     outcome: gtk::DropDown,
     current_id: RefCell<Option<String>>,
@@ -135,6 +155,26 @@ impl InsightsView {
         content.append(&summary_expander);
         let detail = label("");
         content.append(&detail);
+        let evidence_body = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        let evidence_controls = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        let commit = gtk::Entry::new();
+        commit.set_placeholder_text(Some(copy("link_commit")));
+        evidence_controls.append(&label(copy("link_commit")));
+        evidence_controls.append(&commit);
+        let link_git = gtk::Button::with_label(copy("link_git"));
+        let link_test = gtk::Button::with_label(copy("choose_test_report"));
+        evidence_controls.append(&link_git);
+        evidence_controls.append(&link_test);
+        evidence_controls.append(&label(copy("test_report_format")));
+        let evidence_content = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        evidence_content.append(&evidence_controls);
+        evidence_content.append(&evidence_body);
+        let evidence_expander = gtk::Expander::builder()
+            .label(copy("evidence"))
+            .child(&evidence_content)
+            .visible(false)
+            .build();
+        content.append(&evidence_expander);
         let assessment = gtk::Box::new(gtk::Orientation::Vertical, 8);
         assessment.append(&label(copy("assessment_notice")));
         let category = gtk::DropDown::from_strings(&[
@@ -190,6 +230,11 @@ impl InsightsView {
             saved_heading,
             save: save.clone(),
             assessment,
+            evidence_expander,
+            evidence_body,
+            evidence_controls,
+            commit,
+            chooser_generation: Cell::new(0),
             category,
             outcome,
             current_id: RefCell::new(None),
@@ -209,11 +254,12 @@ impl InsightsView {
                 Some(copy("analyze")),
                 Some(copy("cancel")),
             );
+            let ticket = view.chooser_ticket();
             let weak = Rc::downgrade(&view);
             chooser.connect_response(move |dialog, response| {
                 if response == gtk::ResponseType::Accept {
                     if let Some(view) = weak.upgrade() {
-                        if view.flight.borrow().closed {
+                        if !view.accepts_chooser(&ticket) {
                             dialog.destroy();
                             return;
                         }
@@ -229,6 +275,15 @@ impl InsightsView {
             });
             chooser.show();
         });
+        for (button, git) in [(link_git, true), (link_test, false)] {
+            let weak = Rc::downgrade(&view);
+            let parent = window.downgrade();
+            button.connect_clicked(move |_| {
+                if let (Some(view), Some(parent)) = (weak.upgrade(), parent.upgrade()) {
+                    view.choose_evidence(&parent, git);
+                }
+            });
+        }
         let weak = Rc::downgrade(&view);
         save.connect_clicked(move |_| {
             if let Some(v) = weak.upgrade() {
@@ -246,6 +301,7 @@ impl InsightsView {
         cancel.connect_clicked(move |_| {
             if let Some(v) = weak.upgrade() {
                 v.flight.borrow_mut().cancelled = true;
+                v.invalidate_choosers();
                 v.status.set_text(copy("cancelled"));
             }
         });
@@ -290,6 +346,7 @@ impl InsightsView {
         window.connect_close_request(move |_| {
             if let Some(view) = weak.upgrade() {
                 view.flight.borrow_mut().cancelled = true;
+                view.invalidate_choosers();
             }
             gtk::glib::Propagation::Proceed
         });
@@ -297,6 +354,7 @@ impl InsightsView {
         window.connect_hide(move |_| {
             if let Some(view) = weak.upgrade() {
                 view.flight.borrow_mut().cancelled = true;
+                view.invalidate_choosers();
             }
         });
         let weak = Rc::downgrade(&view);
@@ -306,7 +364,15 @@ impl InsightsView {
                     view.controls.set_sensitive(true);
                     view.assessment.set_sensitive(true);
                     view.saved.set_sensitive(true);
+                    view.evidence_expander.set_sensitive(true);
                 }
+            }
+        });
+        let weak = Rc::downgrade(&view);
+        view.root.connect_unmap(move |_| {
+            if let Some(view) = weak.upgrade() {
+                view.invalidate_choosers();
+                view.flight.borrow_mut().cancelled = true;
             }
         });
         let weak = Rc::downgrade(&view);
@@ -316,6 +382,7 @@ impl InsightsView {
                     view.controls.set_sensitive(true);
                     view.assessment.set_sensitive(true);
                     view.saved.set_sensitive(true);
+                    view.evidence_expander.set_sensitive(true);
                 }
                 view.summary_expander.set_expanded(true);
                 view.refresh_history();
@@ -337,9 +404,7 @@ impl InsightsView {
                 return;
             }
             self.save.set_sensitive(false);
-            self.detail.set_text("");
-            self.assessment.set_visible(false);
-            *self.current_id.borrow_mut() = None;
+            self.clear_detail();
             self.request(
                 Op::Analyze {
                     source: if self.source.selected() == 0 {
@@ -356,9 +421,149 @@ impl InsightsView {
     }
 
     fn clear_detail(&self) {
+        self.invalidate_choosers();
         self.detail.set_text("");
         self.assessment.set_visible(false);
+        self.evidence_expander.set_visible(false);
+        self.evidence_expander.set_expanded(false);
+        self.commit.set_text("");
+        while let Some(child) = self.evidence_body.first_child() {
+            self.evidence_body.remove(&child);
+        }
         *self.current_id.borrow_mut() = None;
+    }
+
+    fn invalidate_choosers(&self) {
+        self.chooser_generation
+            .set(self.chooser_generation.get().wrapping_add(1));
+    }
+
+    fn chooser_ticket(&self) -> ChooserTicket {
+        ChooserTicket {
+            generation: self.chooser_generation.get(),
+            snapshot: self.current_id.borrow().clone(),
+        }
+    }
+
+    fn accepts_chooser(&self, ticket: &ChooserTicket) -> bool {
+        let flight = self.flight.borrow();
+        !flight.busy
+            && !flight.closed
+            && self.root.is_mapped()
+            && ticket.matches(
+                self.chooser_generation.get(),
+                self.current_id.borrow().as_deref(),
+            )
+    }
+
+    fn choose_evidence(self: &Rc<Self>, parent: &adw::ApplicationWindow, git: bool) {
+        let ticket = self.chooser_ticket();
+        if ticket.snapshot.is_none() || !self.accepts_chooser(&ticket) {
+            return;
+        }
+        // Capture before opening the picker; later edits cannot change this request.
+        let commit = self.commit.text().to_string();
+        let chooser = gtk::FileChooserNative::new(
+            Some(copy(if git {
+                "choose_repository"
+            } else {
+                "choose_test_report"
+            })),
+            Some(parent),
+            if git {
+                gtk::FileChooserAction::SelectFolder
+            } else {
+                gtk::FileChooserAction::Open
+            },
+            Some(copy(if git { "link_git" } else { "link_test_report" })),
+            Some(copy("cancel")),
+        );
+        let weak = Rc::downgrade(self);
+        chooser.connect_response(move |dialog, response| {
+            if response == gtk::ResponseType::Accept {
+                if let (Some(view), Some(path)) =
+                    (weak.upgrade(), dialog.file().and_then(|f| f.path()))
+                {
+                    view.link_chosen_evidence(
+                        &ticket,
+                        path,
+                        if git { Some(commit.clone()) } else { None },
+                    );
+                }
+            }
+            dialog.destroy();
+        });
+        chooser.show();
+    }
+
+    fn link_chosen_evidence(
+        self: &Rc<Self>,
+        ticket: &ChooserTicket,
+        path: PathBuf,
+        commit: Option<String>,
+    ) {
+        if !self.accepts_chooser(ticket) {
+            return;
+        }
+        let Some(id) = ticket.snapshot.clone() else {
+            return;
+        };
+        let operation = match commit {
+            Some(commit) => Op::LinkGit {
+                id,
+                repository: path,
+                commit,
+            },
+            None => Op::LinkTestReport { id, file: path },
+        };
+        self.request(operation, true);
+    }
+
+    fn render_evidence(self: &Rc<Self>, insight: &LocalInsight, persisted: bool) {
+        while let Some(child) = self.evidence_body.first_child() {
+            self.evidence_body.remove(&child);
+        }
+        self.evidence_body.append(&label(&evidence::render_models(
+            insight.model_observations.as_ref(),
+        )));
+        self.evidence_body
+            .append(&label(copy("linked_evidence_title")));
+        self.evidence_body.append(&label(copy("link_notice")));
+        self.evidence_body.append(&label(copy("link_git_notice")));
+        self.evidence_body.append(&label(copy("link_test_notice")));
+        if !persisted {
+            self.evidence_body
+                .append(&label(copy("link_saved_required")));
+        }
+        if insight.outcome_links.is_empty() {
+            self.evidence_body.append(&label(copy("link_empty")));
+        }
+        for link in &insight.outcome_links {
+            self.evidence_body
+                .append(&label(&evidence::render_link(link)));
+            if persisted {
+                let unlink = gtk::Button::with_label(copy("unlink_evidence"));
+                let weak = Rc::downgrade(self);
+                let id = insight.id.clone();
+                let evidence_id = link.id.clone();
+                unlink.connect_clicked(move |_| {
+                    if let Some(view) = weak.upgrade() {
+                        if view.current_id.borrow().as_deref() == Some(id.as_str()) {
+                            view.request(
+                                Op::UnlinkEvidence {
+                                    id: id.clone(),
+                                    evidence_id: evidence_id.clone(),
+                                },
+                                true,
+                            );
+                        }
+                    }
+                });
+                self.evidence_body.append(&unlink);
+            }
+        }
+        self.evidence_controls.set_visible(persisted);
+        self.evidence_expander.set_visible(true);
     }
 
     fn reveal_evidence(&self) {
@@ -402,14 +607,28 @@ impl InsightsView {
         if !self.flight.borrow_mut().begin() {
             return;
         }
+        self.invalidate_choosers();
+        let evidence_mutation = matches!(
+            &operation,
+            Op::LinkGit { .. } | Op::LinkTestReport { .. } | Op::UnlinkEvidence { .. }
+        );
+        if evidence_mutation {
+            self.clear_detail();
+        }
         self.controls.set_sensitive(false);
         self.assessment.set_sensitive(false);
         self.saved.set_sensitive(false);
         self.summary_evidence.set_sensitive(false);
+        self.evidence_expander.set_sensitive(false);
         self.status.set_text(copy("working"));
         let refresh_saved = matches!(
             &operation,
-            Op::Analyze { save: true, .. } | Op::Annotate { .. } | Op::ClearAnnotation { .. }
+            Op::Analyze { save: true, .. }
+                | Op::Annotate { .. }
+                | Op::ClearAnnotation { .. }
+                | Op::LinkGit { .. }
+                | Op::LinkTestReport { .. }
+                | Op::UnlinkEvidence { .. }
         );
         let history_read = matches!(&operation, Op::Summary {} | Op::List {});
         let mutates_history = refresh_saved || matches!(&operation, Op::Delete { .. });
@@ -441,6 +660,7 @@ impl InsightsView {
                     view.assessment.set_sensitive(true);
                     view.saved.set_sensitive(true);
                     view.summary_evidence.set_sensitive(true);
+                    view.evidence_expander.set_sensitive(true);
                     if view.pending_refresh.get() {
                         view.refresh_history();
                     }
@@ -451,11 +671,15 @@ impl InsightsView {
             view.assessment.set_sensitive(true);
             view.saved.set_sensitive(true);
             view.summary_evidence.set_sensitive(true);
+            view.evidence_expander.set_sensitive(true);
             match result {
                 Some(Response::Analyze { insight })
                 | Some(Response::Explain { insight })
                 | Some(Response::Annotate { insight })
-                | Some(Response::ClearAnnotation { insight }) => {
+                | Some(Response::ClearAnnotation { insight })
+                | Some(Response::LinkGit { insight })
+                | Some(Response::LinkTestReport { insight })
+                | Some(Response::UnlinkEvidence { insight }) => {
                     view.detail.set_text(&render(&insight));
                     *view.current_id.borrow_mut() = if persisted {
                         Some(insight.id.clone())
@@ -463,6 +687,10 @@ impl InsightsView {
                         None
                     };
                     view.assessment.set_visible(persisted);
+                    view.render_evidence(&insight, persisted);
+                    if evidence_mutation {
+                        view.evidence_expander.set_expanded(true);
+                    }
                     if let Some(a) = &insight.manual_annotation {
                         view.category.set_selected(category_index(a.category));
                         view.outcome.set_selected(outcome_index(a.outcome));
@@ -490,9 +718,7 @@ impl InsightsView {
                 }
                 Some(Response::List { .. }) => view.refresh_history(),
                 Some(Response::Delete { deleted }) => {
-                    view.detail.set_text("");
-                    view.assessment.set_visible(false);
-                    *view.current_id.borrow_mut() = None;
+                    view.clear_detail();
                     view.status.set_text(if deleted {
                         copy("deleted")
                     } else {
@@ -507,9 +733,7 @@ impl InsightsView {
                         view.saved.remove(&child);
                     }
                     if view.current_id.borrow().is_some() {
-                        view.detail.set_text("");
-                        view.assessment.set_visible(false);
-                        *view.current_id.borrow_mut() = None;
+                        view.clear_detail();
                     }
                     view.status.set_text(copy("error"));
                 }
@@ -591,9 +815,7 @@ impl InsightsView {
         let current = self.current_id.borrow().clone();
         if let Some(id) = current {
             if !insights.iter().any(|insight| insight.id == id) {
-                self.detail.set_text("");
-                self.assessment.set_visible(false);
-                *self.current_id.borrow_mut() = None;
+                self.clear_detail();
             }
         }
 
@@ -908,6 +1130,23 @@ pub fn present_local<F: Fn() + 'static>(application: &adw::Application, contribu
 mod tests {
     use super::*;
     #[test]
+    fn chooser_tickets_reject_switch_and_return_to_same_snapshot() {
+        let ticket = ChooserTicket {
+            generation: 7,
+            snapshot: Some("original".into()),
+        };
+        assert!(ticket.matches(7, Some("original")));
+        assert!(!ticket.matches(7, Some("different")));
+        assert!(!ticket.matches(7, None));
+        assert!(!ticket.matches(8, Some("original")));
+        let preview = ChooserTicket {
+            generation: 7,
+            snapshot: None,
+        };
+        assert!(preview.matches(7, None));
+        assert!(!preview.matches(8, None));
+    }
+    #[test]
     fn cancelled_read_cannot_publish_and_next_request_waits_for_completion() {
         let mut f = Flight::default();
         assert!(f.begin());
@@ -1064,10 +1303,16 @@ mod tests {
         }
     }
 
-    #[cfg(target_os = "linux")]
     #[test]
     #[ignore = "requires a Linux GTK display; run alone with --ignored --test-threads=1"]
     fn account_free_view_analyzes_saves_explains_deletes_and_ignores_closed_results() {
+        // Compile the whole scenario on every platform, but never initialize
+        // macOS GTK on the Rust harness worker thread.
+        assert_eq!(
+            std::env::consts::OS,
+            "linux",
+            "requires a Linux GTK display"
+        );
         let context = gtk::glib::MainContext::default();
         let _owner = context.acquire().unwrap();
         adw::init().expect("GTK display unavailable");
@@ -1111,6 +1356,123 @@ mod tests {
         view.analyze(true);
         settle();
         let id = view.current_id.borrow().clone().expect("saved id");
+        assert!(view.evidence_expander.is_visible());
+        assert!(view.evidence_controls.is_visible());
+        let report = temp.join("test-report.json");
+        std::fs::write(&report, br#"{"schema_version":1,"runner":"synthetic-fixture","passed":0,"failed":1,"skipped":0,"observed_at":"2026-01-01T00:00:00Z","commit_id":null}"#).unwrap();
+        let ticket = view.chooser_ticket();
+        assert!(view.accepts_chooser(&ticket));
+        view.link_chosen_evidence(&ticket, report.clone(), None);
+        assert!(
+            view.detail.text().is_empty(),
+            "link clears previous successful detail while pending"
+        );
+        settle();
+        let stored = service::open_store(Some(&store))
+            .unwrap()
+            .explain(&id)
+            .unwrap();
+        assert_eq!(stored.outcome_links.len(), 1);
+        assert!(view.evidence_expander.is_expanded());
+        assert!(
+            !view.accepts_chooser(&ticket),
+            "completed operation invalidates previous picker"
+        );
+        assert!(
+            view.summary
+                .text()
+                .contains(&format!("{}: 1", copy("summary_snapshots")))
+        );
+        let unlink = view
+            .evidence_body
+            .last_child()
+            .unwrap()
+            .downcast::<gtk::Button>()
+            .unwrap();
+        unlink.emit_clicked();
+        settle();
+        assert!(
+            service::open_store(Some(&store))
+                .unwrap()
+                .explain(&id)
+                .unwrap()
+                .outcome_links
+                .is_empty()
+        );
+        assert!(report.exists());
+        // Exercise the directory/commit completion through the same shared
+        // service path as the native picker, using an isolated local object.
+        let repository = temp.join("repository.git");
+        let init = std::process::Command::new("git")
+            .args(["init", "--bare", "--template="])
+            .arg(&repository)
+            .output()
+            .unwrap();
+        assert!(init.status.success());
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repository)
+                .args([
+                    "-c",
+                    "user.name=Fixture",
+                    "-c",
+                    "user.email=fixture@example.invalid",
+                    "-c",
+                    "commit.gpgsign=false",
+                ])
+                .args(args)
+                .stdin(std::process::Stdio::null())
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            String::from_utf8(output.stdout).unwrap().trim().to_owned()
+        };
+        let tree = git(&["hash-object", "-w", "-t", "tree", "--stdin"]);
+        let commit = git(&["commit-tree", &tree]);
+        view.link_chosen_evidence(
+            &view.chooser_ticket(),
+            repository.clone(),
+            Some(commit.clone()),
+        );
+        settle();
+        let stored = service::open_store(Some(&store))
+            .unwrap()
+            .explain(&id)
+            .unwrap();
+        assert_eq!(stored.outcome_links.len(), 1);
+        let trace_commons_contributor::insights::outcomes::OutcomeEvidence::GitCommit(git) =
+            &stored.outcome_links[0].evidence
+        else {
+            panic!("Git evidence");
+        };
+        assert_eq!(git.object_id, commit);
+        view.evidence_body
+            .last_child()
+            .unwrap()
+            .downcast::<gtk::Button>()
+            .unwrap()
+            .emit_clicked();
+        settle();
+        assert!(
+            service::open_store(Some(&store))
+                .unwrap()
+                .explain(&id)
+                .unwrap()
+                .outcome_links
+                .is_empty()
+        );
+        assert!(repository.exists());
+        let hidden_ticket = view.chooser_ticket();
+        window.hide();
+        window.present();
+        settle();
+        assert!(!view.accepts_chooser(&hidden_ticket));
+        view.link_chosen_evidence(&hidden_ticket, report.clone(), None);
+        assert!(
+            !view.flight.borrow().busy,
+            "late picker cannot mutate reopened view"
+        );
         assert!(
             view.summary
                 .text()
@@ -1157,10 +1519,41 @@ mod tests {
             "summary evidence opens its saved snapshot"
         );
         let prior_id = id.clone();
+        let externally_replaced_ticket = view.chooser_ticket();
         std::fs::write(&file, concat!(
             "{\"role\":\"meta\",\"source\":\"claude-code\",\"model\":\"fixture\"}\n",
             "{\"role\":\"user\",\"timestamp\":\"2026-09-11T12:00:00Z\",\"content\":\"CHANGED_BODY\"}\n"
         )).unwrap();
+        // Another shell replaces this path while the picker remains open. The
+        // original ID must fail, never silently mutate its replacement.
+        let replacement = service::execute(LocalInsightsRequest {
+            store_dir: Some(store.clone()),
+            operation: Op::Analyze {
+                source: SourceFormat::Trajectory,
+                file: file.clone(),
+                save: true,
+            },
+        })
+        .unwrap();
+        let Response::Analyze {
+            insight: replacement,
+        } = replacement
+        else {
+            panic!("analyze response");
+        };
+        view.link_chosen_evidence(&externally_replaced_ticket, report.clone(), None);
+        settle();
+        assert_eq!(view.status.text(), copy("error"));
+        assert!(view.detail.text().is_empty());
+        assert!(!view.evidence_expander.is_visible());
+        assert!(
+            service::open_store(Some(&store))
+                .unwrap()
+                .explain(&replacement.id)
+                .unwrap()
+                .outcome_links
+                .is_empty()
+        );
         view.analyze(true);
         settle();
         let id = view.current_id.borrow().clone().expect("reimported id");
