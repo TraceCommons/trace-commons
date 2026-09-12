@@ -270,6 +270,7 @@ pub fn ui_copy() -> std::collections::BTreeMap<String, String> {
         ("model_kind_codex_session_metadata", "Session metadata"),
         ("model_kind_codex_turn_context", "Turn context"),
         ("model_kind_codex_assistant_message", "Assistant message metadata"),
+        ("model_kind_claude_assistant_message", "Claude assistant message metadata"),
         ("model_kind_trajectory_metadata", "Trajectory metadata"),
         ("linked_evidence_title", "Linked outcome evidence"),
         ("link_notice", "You choose these associations. Linking evidence does not verify task success or attribute work to a model."),

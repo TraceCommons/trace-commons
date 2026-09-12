@@ -14,6 +14,7 @@ pub const MAX_DECLARED_MODELS: usize = 32;
 pub const MAX_DECLARATION_REFERENCES: usize = 256;
 const LEGACY_MODEL_OBSERVATIONS_SCHEMA_VERSION: u32 = 1;
 const CODEX_MODEL_OBSERVATIONS_SCHEMA_VERSION: u32 = 2;
+const CLAUDE_MODEL_OBSERVATIONS_SCHEMA_VERSION: u32 = 3;
 const MAX_MODEL_LABEL_BYTES: usize = 96;
 const MAX_SOURCE_BYTES: usize = 16 * 1024 * 1024;
 
@@ -69,6 +70,7 @@ pub struct ModelDeclaration {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum DeclarationKind {
+    ClaudeAssistantMessage,
     CodexSessionMetadata,
     CodexTurnContext,
     CodexAssistantMessage,
@@ -97,11 +99,18 @@ impl ModelObservations {
             .valid_declarations
             .checked_add(self.missing_declarations)
             .and_then(|n| n.checked_add(self.invalid_declarations));
-        let legacy_schema = self.schema_version == LEGACY_MODEL_OBSERVATIONS_SCHEMA_VERSION;
+        let legacy_schema = self.schema_version == LEGACY_MODEL_OBSERVATIONS_SCHEMA_VERSION
+            && matches!(
+                self.source_format,
+                SourceFormat::Codex | SourceFormat::Trajectory
+            );
         let codex_turn_context_schema = self.schema_version
             == CODEX_MODEL_OBSERVATIONS_SCHEMA_VERSION
             && self.source_format == SourceFormat::Codex;
-        if (!legacy_schema && !codex_turn_context_schema)
+        let claude_assistant_schema = self.schema_version
+            == CLAUDE_MODEL_OBSERVATIONS_SCHEMA_VERSION
+            && self.source_format == SourceFormat::ClaudeCode;
+        if (!legacy_schema && !codex_turn_context_schema && !claude_assistant_schema)
             || self.source_digest.len() != 64
             || !self
                 .source_digest
@@ -109,7 +118,9 @@ impl ModelObservations {
                 .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
             || self.record_count == 0
             || self.record_count > MAX_SOURCE_BYTES as u64
-            || (self.candidate_records == 0 && !codex_turn_context_schema)
+            || (self.candidate_records == 0
+                && !codex_turn_context_schema
+                && !claude_assistant_schema)
             || self.candidate_records > self.record_count
             || valid_plus_missing != Some(self.candidate_records)
             || (self.declarations.len() as u64).checked_add(self.omitted_declarations)
@@ -147,8 +158,10 @@ impl ModelObservations {
         {
             return Err(invalid());
         }
-        if self.source_format == SourceFormat::Codex
-            && self.coordinates != RecordCoordinates::JsonlPhysicalLinesOneBased
+        if matches!(
+            self.source_format,
+            SourceFormat::Codex | SourceFormat::ClaudeCode
+        ) && self.coordinates != RecordCoordinates::JsonlPhysicalLinesOneBased
         {
             return Err(invalid());
         }
@@ -165,11 +178,19 @@ impl ModelObservations {
                 }
             };
             let kind_matches = match self.source_format {
-                SourceFormat::ClaudeCode => false,
+                SourceFormat::ClaudeCode => {
+                    claude_assistant_schema
+                        && declaration.kind == DeclarationKind::ClaudeAssistantMessage
+                }
                 SourceFormat::Codex if codex_turn_context_schema => {
                     declaration.kind == DeclarationKind::CodexTurnContext
                 }
-                SourceFormat::Codex => declaration.kind != DeclarationKind::TrajectoryMetadata,
+                SourceFormat::Codex => matches!(
+                    declaration.kind,
+                    DeclarationKind::CodexSessionMetadata
+                        | DeclarationKind::CodexTurnContext
+                        | DeclarationKind::CodexAssistantMessage
+                ),
                 SourceFormat::Trajectory => {
                     declaration.kind == DeclarationKind::TrajectoryMetadata
                         && (self.coordinates != RecordCoordinates::TrajectoryArrayIndexesZeroBased
@@ -196,7 +217,7 @@ pub fn extract_model_observations(source: SourceFormat, bytes: &[u8]) -> Result<
     let is_array = source == SourceFormat::Trajectory && text.trim_start().starts_with('[');
     let mut observation = ModelObservations {
         schema_version: match source {
-            SourceFormat::ClaudeCode => return Err(invalid()),
+            SourceFormat::ClaudeCode => CLAUDE_MODEL_OBSERVATIONS_SCHEMA_VERSION,
             SourceFormat::Codex => CODEX_MODEL_OBSERVATIONS_SCHEMA_VERSION,
             SourceFormat::Trajectory => LEGACY_MODEL_OBSERVATIONS_SCHEMA_VERSION,
         },
@@ -273,7 +294,18 @@ fn observe_record(
         return Err(invalid());
     }
     let candidate = match result.source_format {
-        SourceFormat::ClaudeCode => return Err(invalid()),
+        SourceFormat::ClaudeCode => {
+            let kind = record
+                .get("type")
+                .and_then(Value::as_str)
+                .ok_or_else(invalid)?;
+            (kind == "assistant").then(|| {
+                (
+                    DeclarationKind::ClaudeAssistantMessage,
+                    record.pointer("/message/model"),
+                )
+            })
+        }
         SourceFormat::Codex => {
             let kind = record
                 .get("type")
@@ -491,6 +523,60 @@ mod tests {
             );
             result.validate().unwrap();
         }
+    }
+
+    #[test]
+    fn claude_uses_assistant_message_models_with_physical_record_coordinates() {
+        let bytes = codex(vec![
+            json!({"type":"assistant","message":{"id":"same","model":"claude-a","content":[]}}),
+            json!({"type":"user","model":"DO_NOT_RETAIN","message":{"content":"synthetic"}}),
+            json!({"type":"assistant","message":{"id":"same","model":"claude-a","content":[]}}),
+            json!({"type":"assistant","message":{"id":"missing","content":[]}}),
+            json!({"type":"assistant","message":{"id":"null","model":null,"content":[]}}),
+            json!({"type":"assistant","message":{"id":"number","model":42,"content":[]}}),
+            json!({"type":"assistant","message":{"id":"synthetic","model":"<synthetic>","content":[]}}),
+            json!({"type":"assistant","message":{"id":"other","model":"claude-b","content":[]}}),
+        ]);
+        let bytes = [b"\n".as_slice(), bytes.as_slice()].concat();
+        let result = extract_model_observations(SourceFormat::ClaudeCode, &bytes).unwrap();
+        assert_eq!(result.schema_version, 3);
+        assert_eq!(result.record_count, 9);
+        assert_eq!(result.candidate_records, 7);
+        assert_eq!(result.valid_declarations, 3);
+        assert_eq!(result.missing_declarations, 2);
+        assert_eq!(result.invalid_declarations, 2);
+        assert_eq!(result.declared_models, ["claude-a", "claude-b"]);
+        assert!(result.mixed_declared_models);
+        assert_eq!(
+            result
+                .declarations
+                .iter()
+                .map(|declaration| (declaration.record_index, declaration.kind))
+                .collect::<Vec<_>>(),
+            [
+                (2, DeclarationKind::ClaudeAssistantMessage),
+                (4, DeclarationKind::ClaudeAssistantMessage),
+                (9, DeclarationKind::ClaudeAssistantMessage),
+            ]
+        );
+        assert_eq!(
+            result.source_digest,
+            format!("{:x}", Sha256::digest(&bytes))
+        );
+        let encoded = serde_json::to_string(&result).unwrap();
+        assert!(!encoded.contains("DO_NOT_RETAIN"));
+        assert!(!encoded.contains("<synthetic>"));
+        result.validate().unwrap();
+
+        let mut claude_as_legacy = result.clone();
+        claude_as_legacy.schema_version = 1;
+        assert!(claude_as_legacy.validate().is_err());
+        let mut claude_kind_as_legacy_codex = claude_as_legacy.clone();
+        claude_kind_as_legacy_codex.source_format = SourceFormat::Codex;
+        assert!(claude_kind_as_legacy_codex.validate().is_err());
+        let mut claude_kind_as_legacy_trajectory = claude_as_legacy;
+        claude_kind_as_legacy_trajectory.source_format = SourceFormat::Trajectory;
+        assert!(claude_kind_as_legacy_trajectory.validate().is_err());
     }
 
     #[test]

@@ -232,7 +232,14 @@ mod tests {
         )
         .unwrap();
         assert_eq!(analyzed["insight"]["source_format"], "claude_code");
-        assert!(analyzed["insight"]["model_observations"].is_null());
+        assert_eq!(
+            analyzed["insight"]["model_observations"]["schema_version"],
+            3
+        );
+        assert_eq!(
+            analyzed["insight"]["model_observations"]["source_format"],
+            "claude_code"
+        );
         assert!(analyzed["insight"]["usage_evidence"].is_null());
         assert!(analyzed["insight"]["task_attribution"].is_null());
         let listed = json_call(&store, serde_json::json!({"type":"list"})).unwrap();

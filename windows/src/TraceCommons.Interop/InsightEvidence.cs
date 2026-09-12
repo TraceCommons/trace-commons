@@ -34,15 +34,36 @@ public sealed class DeclaredModelObservations
 
     public bool IsSupported()
     {
-        if (SchemaVersion == 1) return true;
-        if (SchemaVersion != 2 || SourceFormat != "codex" || Coordinates != "jsonl_physical_lines_one_based" ||
+        if (SchemaVersion == 1)
+        {
+            if (SourceFormat == "codex")
+                return Coordinates == "jsonl_physical_lines_one_based" && Declarations.All(value =>
+                    value.Kind is "codex_session_metadata" or "codex_turn_context" or "codex_assistant_message");
+            if (SourceFormat == "trajectory")
+                return Declarations.All(value => value.Kind == "trajectory_metadata");
+            return false;
+        }
+        string expectedSource;
+        string expectedKind;
+        if (SchemaVersion == 2)
+        {
+            expectedSource = "codex";
+            expectedKind = "codex_turn_context";
+        }
+        else if (SchemaVersion == 3)
+        {
+            expectedSource = "claude_code";
+            expectedKind = "claude_assistant_message";
+        }
+        else return false;
+        if (SourceFormat != expectedSource || Coordinates != "jsonl_physical_lines_one_based" ||
             CandidateRecords > RecordCount || !TryAdd(ValidDeclarations, MissingDeclarations, out ulong known) ||
             !TryAdd(known, InvalidDeclarations, out ulong total) || total != CandidateRecords ||
             !TryAdd((ulong)Declarations.Length, OmittedDeclarations, out ulong retained) || retained != ValidDeclarations ||
             MixedDeclaredModels != (DeclaredModels.Length > 1) || DeclaredModels.Distinct(StringComparer.Ordinal).Count() != DeclaredModels.Length ||
             (ValidDeclarations > 0 && Declarations.Length == 0) || (ModelLabelsOmitted && (DeclaredModels.Length != 32 || OmittedDeclarations == 0)) ||
             Declarations.Zip(Declarations.Skip(1)).Any(pair => pair.First.RecordIndex >= pair.Second.RecordIndex) ||
-            Declarations.Any(value => value.Kind != "codex_turn_context" || value.RecordIndex == 0 || value.RecordIndex > RecordCount))
+            Declarations.Any(value => value.Kind != expectedKind || value.RecordIndex == 0 || value.RecordIndex > RecordCount))
             return false;
         var labels = DeclaredModels.ToHashSet(StringComparer.Ordinal);
         var referenced = Declarations.Select(value => value.Model).ToHashSet(StringComparer.Ordinal);
