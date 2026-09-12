@@ -375,6 +375,9 @@ fn wilson_component_interval(successes: usize, total: usize) -> Result<(i64, i64
 /// noncoverage to 5%, without assuming independence between outcome counts.
 /// This remains test-only until the frozen qualification artifact is run.
 fn exact_component_interval(successes: usize, total: usize) -> Result<(u32, u32)> {
+    if total > MAX_TASKS {
+        return Err(invalid());
+    }
     exact_binomial_interval(successes, total, BONFERRONI_ONE_SIDED_DENOMINATOR)
 }
 
