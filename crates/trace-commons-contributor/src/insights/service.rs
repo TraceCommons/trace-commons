@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use anyhow::{Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 
+use super::usage::{UsageSource, UsageSummary, extract_usage};
 use super::{
     LocalInsight, LocalInsightStore, SourceFormat, TaskCategory, TaskOutcome, analyze_file,
 };
@@ -43,6 +44,10 @@ pub enum LocalInsightsOperation {
     ClearAnnotation {
         id: String,
     },
+    Usage {
+        source: UsageSource,
+        file: PathBuf,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -54,6 +59,7 @@ pub enum LocalInsightsResponse {
     Delete { deleted: bool },
     Annotate { insight: Box<LocalInsight> },
     ClearAnnotation { insight: Box<LocalInsight> },
+    Usage { usage: UsageSummary },
 }
 
 /// Resolve only local Insights storage; never resolve enrollment configuration.
@@ -101,6 +107,9 @@ pub fn execute(request: LocalInsightsRequest) -> Result<LocalInsightsResponse> {
         },
         LocalInsightsOperation::ClearAnnotation { id } => LocalInsightsResponse::ClearAnnotation {
             insight: Box::new(store()?.clear_annotation(&id)?),
+        },
+        LocalInsightsOperation::Usage { source, file } => LocalInsightsResponse::Usage {
+            usage: extract_usage(source, &super::bounded_read(&file)?)?,
         },
     })
 }
@@ -219,6 +228,36 @@ mod tests {
             matches!(call(LocalInsightsOperation::List {}), LocalInsightsResponse::List { insights } if insights.is_empty())
         );
         assert!(file.exists());
+    }
+
+    #[test]
+    fn native_usage_json_is_ephemeral_and_redacts_source_content() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("native.jsonl");
+        let store = temp.path().join("unused-store");
+        std::fs::write(
+            &file,
+            serde_json::json!({
+                "type":"assistant", "message":{
+                    "id":"message-1", "model":"fixture", "content":"PRIVATE_BODY",
+                    "usage":{"input_tokens":12,"cache_read_input_tokens":3,
+                        "cache_creation_input_tokens":4,"output_tokens":5}
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let request = serde_json::json!({"store_dir":store,"operation":{
+            "type":"usage","source":"claude_code","file":file
+        }});
+        let response = dispatch_json(&serde_json::to_vec(&request).unwrap()).unwrap();
+        assert!(!response.contains("PRIVATE_BODY"));
+        assert!(!response.contains("native.jsonl"));
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(value["type"], "usage");
+        assert_eq!(value["usage"]["complete_records"], 1);
+        assert!(value["usage"]["counts"].is_object());
+        assert!(!store.exists());
     }
 
     #[test]

@@ -191,6 +191,36 @@ fn user_assessment_is_separate_from_measured_outcomes_and_clears() {
 }
 
 #[test]
+fn native_usage_preserves_cumulative_accounting_without_writing_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("enrollment");
+    let store = dir.path().join("insights");
+    let file = dir.path().join("usage.jsonl");
+    let mut rows = Vec::new();
+    for input in [100, 200] {
+        rows.push(serde_json::json!({"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":input,"cached_input_tokens":50,"output_tokens":10,"reasoning_output_tokens":5,"total_tokens":input+10}}}}).to_string());
+    }
+    std::fs::write(&file, rows.join("\n")).unwrap();
+    let result = value(invoke(
+        &config,
+        &store,
+        &[
+            "usage",
+            "--source",
+            "codex",
+            "--file",
+            file.to_str().unwrap(),
+        ],
+    ));
+    assert_eq!(result["counts"]["input"], 200);
+    assert_eq!(result["counts"]["total"], 210);
+    assert_eq!(result["complete_records"], 2);
+    assert!(result["unavailable_reason"].is_null());
+    assert!(!store.exists());
+    assert!(!config.exists());
+}
+
+#[test]
 fn codex_counts_and_missingness_match_the_human_view() {
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("enrollment");

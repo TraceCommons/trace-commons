@@ -3,6 +3,7 @@
 //! No discovery, enrollment, network, or contribution path is invoked. A file
 //! is a provisional session boundary, never an inferred completed task.
 pub mod service;
+pub mod usage;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};

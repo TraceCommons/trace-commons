@@ -1773,7 +1773,8 @@ char*       tc_call(tc_handle*, const char* method, const char* params_json);
  * Example: {"operation":{"type":"list"}}. Optional top-level store_dir selects
  * a dedicated store; omitted uses the platform local-data Insights directory.
  * Operations: analyze {source:codex|trajectory,file,save:false}, list,
- * explain {id}, delete {id}, annotate {id,category,outcome}, clear_annotation {id}; each has a "type" discriminator.
+ * explain {id}, delete {id}, annotate {id,category,outcome}, clear_annotation {id},
+ * usage {source:codex|claude_code,file}; each has a "type" discriminator.
  * Returns owned JSON tagged by type, or NULL plus owned fixed-label *err.
  * Free result/error with tc_string_free. err may be NULL; otherwise writable
  * and cleared on success. Request buffers must remain valid until return. */
