@@ -136,7 +136,7 @@ Bind callbacks/drafts to presentation generation, task ID/revision/input digest,
 
 ### 5. Private pilot, then platform parity
 
-Pilot real user-reviewed refactor tasks locally. Measure extractor coverage, context completion, stale/reconfirmation behavior, overlap resolution, delayed outcomes, declaration ambiguity, interval stability, and comprehension of declared cohorts and observed intervals. Descriptive or suppressed output is a valid pilot result.
+Use the [private pilot runbook](2026-09-12-private-refactor-pilot.md) for the selected Trace Commons candidates, local commands, user review, and observation record. Original trace inputs and outcomes remain to be qualified. Pilot real user-reviewed refactor tasks locally. Measure extractor coverage, context completion, stale/reconfirmation behavior, overlap resolution, delayed outcomes, declaration ambiguity, interval stability, and comprehension of declared cohorts and observed intervals. Descriptive or suppressed output is a valid pilot result.
 
 Apply pilot corrections, then port to Windows and GTK with actual WinUI runtime/build and GTK display CI. macOS-hosted managed tests do not qualify WinUI; headless GTK tests do not qualify display behavior.
 
