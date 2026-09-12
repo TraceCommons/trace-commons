@@ -586,7 +586,12 @@ mod tests {
     }
     #[test]
     fn maximum_overlap_is_bounded_and_store_cap_refuses_an_extra_group() {
-        let (_root, store, ids) = fixture();
+        let (root, store, mut ids) = fixture();
+        for n in ids.len()..super::super::episodes::MAX_EPISODE_MEMBERS {
+            let path = root.path().join(format!("member-{n}"));
+            source(&path, &format!("member-{n}"));
+            ids.push(store.import(SourceFormat::Trajectory, &path).unwrap().id);
+        }
         let base = store.episode_create(&ids).unwrap();
         let (_lock, mut index) = store.locked().unwrap();
         for _ in 1..MAX_EPISODES {
@@ -640,5 +645,54 @@ mod tests {
             EpisodeStoreError::RevisionConflict,
         );
         assert_eq!(bytes(&store), before);
+    }
+    #[test]
+    fn persistence_failure_returns_no_effects_and_preserves_groups_and_snapshots() {
+        let (root, store, ids) = fixture();
+        let episode = store.episode_create(&ids[..2]).unwrap();
+        let episode = store
+            .episode_annotate(&episode.id, 1, TaskCategory::Tests, TaskOutcome::Accepted)
+            .unwrap();
+        let before = bytes(&store);
+        store
+            .fail_writes
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let failures = [
+            store
+                .episode_replace_members(&episode.id, 2, &ids)
+                .unwrap_err(),
+            store
+                .episode_annotate(&episode.id, 2, TaskCategory::Docs, TaskOutcome::Rejected)
+                .unwrap_err(),
+            store.episode_delete(&episode.id, 2).unwrap_err(),
+            store.delete_with_effects(&ids[0]).unwrap_err(),
+        ];
+        assert!(
+            failures
+                .iter()
+                .all(|error| error.to_string() == "insights_store_write_failed")
+        );
+        source(&root.path().join("a"), "replacement not committed");
+        assert_eq!(
+            store
+                .import_with_effects(SourceFormat::Trajectory, &root.path().join("a"))
+                .unwrap_err()
+                .to_string(),
+            "insights_store_write_failed"
+        );
+        assert_eq!(bytes(&store), before);
+        assert_eq!(store.episode_explain(&episode.id).unwrap().episode, episode);
+        assert!(store.explain(&ids[0]).is_ok());
+        store
+            .fail_writes
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        let result = store
+            .import_with_effects(SourceFormat::Trajectory, &root.path().join("a"))
+            .unwrap();
+        assert_eq!(
+            result.mutation_effects.invalidated_episode_ids,
+            [episode.id]
+        );
+        assert!(store.episode_list().unwrap().is_empty());
     }
 }

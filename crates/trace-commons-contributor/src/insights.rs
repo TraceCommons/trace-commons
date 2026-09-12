@@ -315,6 +315,8 @@ struct Index {
 /// The lock remains on a stable file while the JSON index is atomically replaced.
 pub struct LocalInsightStore {
     dir: PathBuf,
+    #[cfg(test)]
+    fail_writes: std::sync::atomic::AtomicBool,
 }
 
 // Closing only this descriptor is insufficient when a concurrent process spawn
@@ -354,7 +356,11 @@ impl LocalInsightStore {
             .canonicalize()
             .map_err(|_| anyhow!("insights_store_unavailable"))?;
         reject_symlinks(&dir)?;
-        Ok(Self { dir })
+        Ok(Self {
+            dir,
+            #[cfg(test)]
+            fail_writes: std::sync::atomic::AtomicBool::new(false),
+        })
     }
 
     fn locked(&self) -> Result<(StoreLock, Index)> {
@@ -468,6 +474,10 @@ impl LocalInsightStore {
         let bytes = serde_json::to_vec(index)?;
         if bytes.len() as u64 > MAX_SOURCE_BYTES {
             bail!("insights_store_full");
+        }
+        #[cfg(test)]
+        if self.fail_writes.load(std::sync::atomic::Ordering::Relaxed) {
+            bail!("insights_store_write_failed");
         }
         crate::config::write_atomic_0600(&self.dir, &self.dir.join("index.json"), &bytes)
             .map_err(|_| anyhow!("insights_store_write_failed"))
