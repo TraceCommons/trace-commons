@@ -54,13 +54,19 @@ Production enrollment uses the Trace Commons account and permission surface. The
 
 The pilot instead records an operator-asserted participant hash. Its mode remains explicit in stored program state and outputs. An operator verifies stable identity and affiliations outside the ledger. This offers no Sybil guarantee, and a matching digest cannot establish control of a future authenticated account. Conversion to account-owned records requires proof of ownership and an explicit mapping event, with disputes and unmapped awards retained for resolution.
 
-The proposed mapping requires the enrollment issuer and an independent account administrator to verify the original participation records against the authenticated claimant. One pilot participant can have only one active reward principal; account consolidation preserves prior mappings and aggregates their cap usage.
+The proposed mapping requires the enrollment issuer and an independent account administrator to verify the original participation records against the authenticated claimant. One pilot participant can have only one active reward principal; account consolidation preserves prior mappings and aggregates their cap usage, with work and evidence duplicate checks spanning every mapped alias.
 
 Conflicting ownership claims suspend conversion until adjudication. An operator's assertion alone cannot authorize migration of disputed awards, and insufficient retained proof leaves them unmapped.
 
 Reward consent specifies the selected evidence, recipient, review purpose and retention terms, separately from permissions for private analysis, corpus contribution, public attribution and community analytics. An opt-in action shows the projection before transmission and issues a revocable receipt bound to source versions and the evidence digest. Refreshing or rescrubbing a source requires fresh authorization.
 
 The pilot's `consent_hash` records an operator-supplied artifact, with no live grant or subscription to the corpus withdrawal API; operators must invalidate affected pending evidence manually. A production adapter needs a source-specific lifecycle identifier and durable invalidation delivery, with lost authorization or uncertain freshness blocking award admission.
+
+R2's receipt binds a versioned receipt identifier, authenticated subject, tenant, program and terms digest, grant issuer, review purpose, selected projection digest and byte length, source identifiers and versions, allowed recipients, and rights/retention policy digest. It also records issue and expiry times, the revocation authority and lifecycle identifier, and the approved evidence location; locations grant no extra fetch authority and cannot name arbitrary network destinations.
+
+The source retains the exact authorized projection bytes under a versioned encoding and hashes those bytes before issuing the receipt. Preview, upload and evaluation refer to that same digest; a changed encoding or source version requires a new preview and grant, without silently recanonicalizing signed evidence.
+
+Before awarding, the admission service requires the source authority's current grant status and matching source versions. The authority publishes monotonically sequenced invalidations through a durable outbox; the reward consumer deduplicates them in a durable inbox, persists their effects before acknowledgment, and blocks admission on sequence gaps, unavailable authority or expired freshness. R2 must qualify the authority's check-and-admit ordering against concurrent revocation before any automatic awards can launch.
 
 A pilot participant requests withdrawal through the published operator contact. The operator invalidates withdrawn evidence, releasing any pending hold and preventing its reuse; a submitted claim has no participant-facing cancellation command.
 
@@ -107,7 +113,11 @@ Shared serializable admission contracts belong in the permissive protocol crate 
 
 An appeal must not be simulated by changing a program identifier or resubmitting the same evidence under a new participant. Reversal and adjustment commands remain absent until the owner defines their authority, funding effect and participant notice.
 
-Reviewers cannot be the participant, sponsor, issuer, program creator or claim submitter. Database login identity enforces these comparisons in the pilot. Production must additionally verify underlying account identity and affiliations, including evaluator conflicts; two different labels do not establish independence. A provider evaluating its own model cannot become the sole authority for an award-bearing recommendation.
+New offers using R5 keep a rejected claim's allocation held provisionally through their published challenge window and any timely appeal. That window starts from recorded participant notice; final rejection releases the hold, while an independent overturn converts that same hold into at most one award.
+
+Late appeals follow the offer's published admissibility rule and cannot create liability after released capacity has been reused. Any exceptional compensation requires separate funded authority and an audited adjustment; this policy does not retrofit appeal promises onto R0's immediately released rejections.
+
+Reviewers cannot be the participant, sponsor, issuer, program creator or claim submitter. The pilot compares the authenticated login's mapped actor hash with these recorded actors. Production must additionally verify underlying account identity and affiliations, including evaluator conflicts; two different labels do not establish independence. A provider evaluating its own model cannot become the sole authority for an award-bearing recommendation.
 
 Before enrollment, the operator designates a qualified fallback reviewer and publishes the review escalation contact. Multiple reviewer logins can be provisioned, but the pilot has no queue-assignment service; unavailability preserves submitted allocations and pauses new invitations when review capacity is exhausted.
 

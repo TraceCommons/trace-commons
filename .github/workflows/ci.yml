@@ -259,7 +259,15 @@ jobs:
         env:
           TRACE_COMMONS_REWARDS_PG_TEST_URL: postgres://trace@127.0.0.1:5432/reward_test_missions
       - name: reward ledger upgrade preserves existing awards
-        run: cargo test -p trace-commons-server --lib reward_v69_upgrade -- --ignored
+        run: |
+          set -euo pipefail
+          cargo test -p trace-commons-server --lib reward_v69_upgrade -- --ignored
+          # Fail if a renamed filter silently runs zero upgrade tests.
+          test "$(PGPASSWORD=trace psql -qtA -h 127.0.0.1 -U trace reward_test_missions_upgrade \
+            -c "SELECT count(*) = 1 FROM _trace_commons_migrations WHERE version = 70 AND name = 'reward_history_pagination';")" = t
+          # The upgrade fixture creates at least two awards before upgrading.
+          test "$(PGPASSWORD=trace psql -qtA -h 127.0.0.1 -U trace reward_test_missions_upgrade \
+            -c 'SELECT count(*) >= 2 FROM trace_reward_awards;')" = t
         env:
           TRACE_COMMONS_REWARDS_PG_UPGRADE_TEST_URL: postgres://trace@127.0.0.1:5432/reward_test_missions_upgrade
       # `--ignored` is not optional for these three. Without it they report

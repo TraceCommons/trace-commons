@@ -48,6 +48,26 @@ async fn reward_operator_cli_uses_real_login_roles() {
     .await;
     assert_eq!(cli_shown["capacity_units"], json!(4));
     assert_eq!(cli_shown["capacity_used_units"], json!(0));
+    // This fixture owns the program; no mutation runs between the two reads.
+    let default_output =
+        std::process::Command::new(env!("CARGO_BIN_EXE_trace-commons-reward-operator"))
+            .args([
+                "--tenant",
+                tenant,
+                "program-show",
+                "--program",
+                &cli_program.to_string(),
+            ])
+            .env("TRACE_COMMONS_REWARDS_DATABASE_URL", &cli_issuer_url)
+            .output()
+            .expect("run CLI without --json");
+    assert!(default_output.status.success());
+    assert!(default_output.stderr.is_empty());
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&default_output.stdout)
+            .expect("default CLI output is JSON"),
+        cli_shown
+    );
     let cli_reservation = Uuid::new_v4();
     let cli_reserved = cli(
         &cli_issuer_url,

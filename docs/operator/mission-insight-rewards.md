@@ -20,6 +20,8 @@ V70 preserves existing awards while adding stored identity provenance and histor
 
 The runtime group receives `EXECUTE` only on the eight public reward functions. Do not grant table DML, access to `trace_reward_operators`, `BYPASSRLS`, superuser, role administration, database creation, or schema creation to an operator login.
 
+The migration DBA retains administration of the runtime group for provisioning. Runtime membership alone does not authorize an operation: the function also requires the tenant's operator mapping for the actual `session_user`.
+
 Create separate direct-login roles. Run this as a DBA with table-write privileges and BYPASSRLS or superuser authority; never use either operator login for these statements.
 
 ```sql
@@ -43,6 +45,8 @@ VALUES
 `operator_role` is the required column name. Use real, distinct, stable actor hashes; the values above are examples only.
 
 Each `(tenant_id, login_role)` and each `(tenant_id, actor_hash)` is unique. Revoke membership and remove the grant through the DBA change process when an operator leaves the pilot.
+
+Issuer authority covers the tenant, including submission and cancellation of another issuer's unsubmitted reservation. Independence checks compare the stable actor hash mapped to the authenticated login against the recorded participant and responsible actors; manual affiliation checks remain required.
 
 The security-definer functions reject superusers and BYPASSRLS sessions. A tenant setting alone grants nothing. Provision a real tenant before the grant, and confirm the login's `session_user` is the exact mapped `login_role`.
 
@@ -78,6 +82,10 @@ The terms file is JSON, must be 16 KiB or smaller, and rejects unknown fields. U
 ```
 
 ## Operating sequence
+
+The ledger computes `terms_hash` as SHA-256 of PostgreSQL's normalized `jsonb::text`, encoded as UTF-8. Hashing the original JSON file can produce a different digest because its whitespace and key order differ; publish the returned `terms` object together with the returned `terms_hash`, and retain the original intelligible artifacts for participants and reviewers.
+
+Before acceptance, retrieve every required artifact from the approved evidence location, verify its digest against the pinned terms or claim, and assess it against the published rubric. An inaccessible artifact or an unverifiable digest prevents acceptance; the CLI does not fetch or validate external evidence.
 
 Place `--tenant` before the command. Substitute actual UUIDs and lowercase `sha256:` digests; examples below are command shapes, not publishable inputs.
 
@@ -143,7 +151,9 @@ History returns the newest `--limit` entries and full awarded totals, including 
 
 Pass the returned `next_cursor` to `history --before <cursor>` to read older entries; the final page returns `next_cursor: null` and `truncated: false`. Cursors belong to the specified tenant and participant, and newer inserts cannot displace older entries across pages.
 
-Reads share the tenant lock with mutations so each response describes one consistent ledger state; separate pages can reflect subsequent decisions. `programs_scope` is `visible_entries`, and invalidating rejected evidence preserves the rejection and adds the invalidation flag.
+History reads share the tenant lock with mutations so each response describes one consistent ledger state; separate pages can reflect subsequent decisions. `programs_scope` is `visible_entries`, and invalidating rejected evidence preserves the rejection and adds the invalidation flag.
+
+Program inspection reads immutable terms and one capacity aggregate without the history lock. Its capacity display is advisory; only a successful reservation guarantees an allocation.
 
 ## Isolated verification
 

@@ -260,6 +260,7 @@ impl PgBackend {
         .await
     }
 
+    /// Read the first page, preserving the original three-argument history API.
     pub async fn reward_history(
         &self,
         tenant: &str,

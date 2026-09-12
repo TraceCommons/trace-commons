@@ -439,6 +439,25 @@ mod tests {
     }
 
     #[test]
+    fn terms_reader_reports_an_unreadable_file_without_exposing_its_path() {
+        let path = std::env::temp_dir().join(format!("reward-private-{}.json", Uuid::new_v4()));
+        let error = read_terms(&path).unwrap_err();
+        assert!(matches!(error, CliError::TermsUnreadable));
+        assert!(!error.to_string().contains(path.to_str().unwrap()));
+    }
+
+    #[test]
+    fn terms_reader_reports_invalid_json_without_exposing_its_contents() {
+        let path = std::env::temp_dir().join(format!("reward-terms-{}.json", Uuid::new_v4()));
+        let private_marker = "private-invalid-terms-marker";
+        std::fs::write(&path, format!("{{\"{private_marker}\":")).unwrap();
+        let error = read_terms(&path).unwrap_err();
+        std::fs::remove_file(path).unwrap();
+        assert!(matches!(error, CliError::TermsInvalid));
+        assert!(!error.to_string().contains(private_marker));
+    }
+
+    #[test]
     fn terms_reader_rejects_a_file_larger_than_the_byte_limit() {
         let path = std::env::temp_dir().join(format!("reward-terms-{}.json", Uuid::new_v4()));
         std::fs::write(&path, vec![b' '; MAX_TERMS_BYTES as usize + 1]).unwrap();
