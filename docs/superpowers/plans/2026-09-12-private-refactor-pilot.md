@@ -1,6 +1,6 @@
 # Private refactor pilot
 
-Status: preparation; real trace inputs and user outcome reviews are pending.
+Status: preparation; the user authorized locating candidate traces in local Claude history. Source-to-task matching, qualification, and user outcome reviews remain pending.
 Parent: [personal refactor comparison delivery plan](2026-09-12-personal-refactor-comparison.md).
 
 ## First repository and tasks
@@ -93,8 +93,11 @@ Review the preview; use the same arguments with `save-spec` to save the immutabl
 
 ```sh
 "$TC_BIN" --json insights --store-dir "$TC_PILOT_STORE" comparison evaluate "$TC_SPECIFICATION_ID"
-"$TC_BIN" --json insights --store-dir "$TC_PILOT_STORE" comparison explain-result "$TC_SPECIFICATION_ID"
+"$TC_BIN" --json insights --store-dir "$TC_PILOT_STORE" comparison explain-result "$TC_SPECIFICATION_ID" \
+  --audit-digest "$TC_AUDIT_DIGEST"
 ```
+
+Set `TC_AUDIT_DIGEST` to `result.audit_digest` from the evaluated response before explaining it. If the audit is stale, evaluate and review the changed result again; do not silently replace the digest.
 
 Inspect included and excluded tasks, categorical outcome denominators, and coverage/missingness. Pending, unknown, and unassessed outcomes are not rejected work. Observed tokens are not complete task usage, dollar cost, or human time saved. Descriptive or suppressed output is a valid pilot result; it does not prove a model advantage. The interval estimator remains unqualified.
 
@@ -104,14 +107,16 @@ Keep a local record with one row per reviewed task and a separate specification/
 
 | Observation | What to record |
 | --- | --- |
-| Source coverage | Import success, producer version, attribution availability and typed exclusion. |
-| Task boundary | Number of attempts, user confirmation, same-session overlap, unresolved ambiguity. |
-| Context completion | Missing fields, whether values were known or only guessed, difficulty selecting project/policy/template. |
+| Source coverage | Full reviewed-task denominator; import success, producer version, attribution availability; mixed-model, delegated, and unsupported counts/fractions with typed exclusions. |
+| Task boundary | Number of attempts, user confirmation, same-session overlap, unresolved ambiguity; user corrections that split/merge tasks or restore omitted attempts. |
+| Context completion | Missing fields, whether values were known or only guessed, difficulty selecting project/policy/template; time to first reviewed result and where the user abandons the workflow. |
 | Outcome | User report, delayed assessment, substantial human rework noted separately. |
 | Staleness | Which edit invalidated a result or binding; whether the next required review was understandable. |
 | Comparison | Exact context, cohort declarations, included/assessed counts, exclusions, coverage and suppression. |
-| Comprehension | Can the user distinguish recorded model labels, user-reported outcomes, task counts, and observed usage? |
+| Comprehension | Can the user distinguish recorded model labels, user-reported outcomes, task counts, and observed usage? What decision, if any, would the result change? |
 
 On a disposable copy of the pilot store, exercise context edits, delayed outcomes, duplicate-session imports, and deletion. Confirm stale results disappear, old cutoff specifications exclude later evidence, overlapping exports do not become independent after deletion, and reconfirmation requires explicit review. Preserve the original pilot store; never delete real evidence just to perform a drill.
 
 The pilot report should separate real-task observations, synthetic regression results, unresolved source gaps, and product changes. Apply observed corrections before Windows/GTK parity. A subsequent prospective pilot can use two models through a supported harness with consistent settings and comparable scopes; it still requires reviewed independent tasks and a qualified interval method before drawing comparison claims.
+
+These observations address the immediate representativeness and usability concerns in [Kristi’s overall-plan review](https://github.com/TraceCommons/trace-commons/pull/870#issuecomment-5645229086). Keep every selected task in the coverage denominator, including abandoned or unsupported cases; analyzing only admitted tasks would hide whether this product serves the actual workflow.
