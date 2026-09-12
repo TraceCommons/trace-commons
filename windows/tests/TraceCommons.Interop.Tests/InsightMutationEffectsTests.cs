@@ -30,6 +30,7 @@ public sealed class InsightMutationEffectsTests
             {
                 "copy" => Json("""{"copy":{"episode_invalidated_notice":"Episode removed","error":"safe-error"}}"""),
                 "summary" => Json(InsightsSummaryTests.Response),
+                "episode_list" => Json("{\"type\":\"episode_list\",\"episodes\":[]}"),
                 "list" => Json("{\"insights\":[" + InsightsTests.Insight + "]}"),
                 _ => Mutation(type, Legacy)
             });

@@ -33,6 +33,7 @@ public sealed class InsightsTests
             return Task.FromResult(type switch {
                 "copy" => Json("""{"type":"copy","copy":{"unknown":"Unknown","coverage":"Coverage","metric_input_tokens":"Input tokens","error":"safe-error","codex":"Codex rollout"}}"""),
                 "summary" => Json(InsightsSummaryTests.Response),
+                "episode_list" => Json("{\"type\":\"episode_list\",\"episodes\":[]}"),
                 "list" => Json("{\"type\":\"list\",\"insights\":[" + ListedInsights + "]}"),
                 "delete" => Json("{\"type\":\"delete\",\"deleted\":true}"),
                 _ => Json("{\"type\":\"" + type + "\",\"insight\":" + ReturnedInsight + "}")
@@ -138,7 +139,7 @@ public sealed class InsightsTests
         service.Pending = null;
         completion.SetResult(Json("{\"type\":\"copy\",\"copy\":{}}"));
         await Task.WhenAll(first, reentry);
-        Assert.Equal(4, service.Calls.Count);
+        Assert.Equal(5, service.Calls.Count);
         Assert.Single(model.Saved);
         Assert.False(model.Busy);
     }

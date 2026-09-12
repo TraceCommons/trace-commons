@@ -49,11 +49,52 @@
                 </ItemsControl>
             </Expander>
             <Button Content="{Binding [refresh]}" Click="OnRefresh" IsEnabled="{Binding Idle}" />
-            <ListView x:Name="SavedList" ItemsSource="{Binding Saved}" DisplayMemberPath="Label" MaxHeight="200" SelectionMode="Single" IsEnabled="{Binding Idle}" AutomationProperties.Name="{Binding [saved]}" />
+            <ListView x:Name="SavedList" ItemsSource="{Binding Saved}" DisplayMemberPath="Label" MaxHeight="200" SelectionMode="Multiple" IsEnabled="{Binding Idle}" AutomationProperties.Name="{Binding [saved]}" />
             <StackPanel Orientation="Horizontal" Spacing="12">
                 <Button Content="{Binding [explain]}" Click="OnExplain" IsEnabled="{Binding Idle}" />
                 <Button Content="{Binding [delete]}" Click="OnDelete" IsEnabled="{Binding HasSavedSelection}" />
             </StackPanel>
+            <Expander Header="{Binding [episode_title]}" HorizontalAlignment="Stretch">
+                <StackPanel Spacing="10">
+                    <TextBlock Text="{Binding [episode_scope]}" TextWrapping="Wrap" />
+                    <TextBlock Text="{Binding [episode_create_notice]}" TextWrapping="Wrap" />
+                    <Button Content="{Binding [episode_create]}" Click="OnCreateEpisode" IsEnabled="{Binding Idle}" />
+                    <TextBlock Text="{Binding EpisodeStatus}" TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite" />
+                    <ListView x:Name="EpisodeList" ItemsSource="{Binding Episodes}" DisplayMemberPath="Label" MaxHeight="180" SelectionMode="Single" IsEnabled="{Binding Idle}" AutomationProperties.Name="{Binding [episode_saved]}" />
+                    <Button Content="{Binding [episode_open]}" Click="OnOpenEpisode" IsEnabled="{Binding Idle}" />
+                    <TextBlock Text="{Binding [episode_overlap_notice]}" TextWrapping="Wrap" />
+                    <TextBlock x:Name="EpisodeDetail" Text="{Binding EpisodeDetails}" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
+                    <ItemsControl ItemsSource="{Binding EpisodeMembers}">
+                        <ItemsControl.ItemTemplate><DataTemplate>
+                            <Expander Header="{Binding Label}" HorizontalAlignment="Stretch">
+                                <StackPanel Spacing="6">
+                                    <TextBlock Text="{Binding Id}" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
+                                    <TextBlock Text="{Binding Details}" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
+                                </StackPanel>
+                            </Expander>
+                        </DataTemplate></ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                    <TextBlock Text="{Binding [episode_edit_members_notice]}" TextWrapping="Wrap" />
+                    <Button Content="{Binding [episode_save_members]}" Click="OnSaveEpisodeMembers" IsEnabled="{Binding HasEpisodeSelection}" />
+                    <TextBlock Text="{Binding [episode_assessment_notice]}" TextWrapping="Wrap" />
+                    <StackPanel Orientation="Horizontal" Spacing="12">
+                        <ComboBox IsEnabled="{Binding HasEpisodeSelection}" Header="{Binding [category]}" SelectedIndex="{Binding EpisodeCategoryIndex, Mode=TwoWay}">
+                            <ComboBoxItem Content="{Binding [category_refactor]}" /><ComboBoxItem Content="{Binding [category_tests]}" />
+                            <ComboBoxItem Content="{Binding [category_docs]}" /><ComboBoxItem Content="{Binding [category_debugging]}" />
+                            <ComboBoxItem Content="{Binding [category_other]}" /><ComboBoxItem Content="{Binding [category_unknown]}" />
+                        </ComboBox>
+                        <ComboBox IsEnabled="{Binding HasEpisodeSelection}" Header="{Binding [outcome]}" SelectedIndex="{Binding EpisodeOutcomeIndex, Mode=TwoWay}">
+                            <ComboBoxItem Content="{Binding [outcome_accepted]}" /><ComboBoxItem Content="{Binding [outcome_partial]}" />
+                            <ComboBoxItem Content="{Binding [outcome_rejected]}" /><ComboBoxItem Content="{Binding [outcome_unknown]}" />
+                        </ComboBox>
+                    </StackPanel>
+                    <StackPanel Orientation="Horizontal" Spacing="12">
+                        <Button Content="{Binding [episode_save_assessment]}" Click="OnSaveEpisodeAssessment" IsEnabled="{Binding HasEpisodeSelection}" />
+                        <Button Content="{Binding [episode_clear_assessment]}" Click="OnClearEpisodeAssessment" IsEnabled="{Binding HasEpisodeSelection}" />
+                        <Button Content="{Binding [episode_delete]}" Click="OnDeleteEpisode" IsEnabled="{Binding HasEpisodeSelection}" />
+                    </StackPanel>
+                </StackPanel>
+            </Expander>
             <TextBlock Text="{Binding CoverageNotice}" TextWrapping="Wrap" />
             <TextBlock Text="{Binding EvidenceNotice}" TextWrapping="Wrap" />
             <TextBlock Text="{Binding [boundary_notice]}" TextWrapping="Wrap" />

@@ -17,6 +17,25 @@ public sealed record OutcomeEvidenceRow(string Id, string SnapshotId, string Lab
 public sealed record ModelReferenceRow(string Label);
 public sealed record SummaryEvidenceLink(string Id, string Label);
 public sealed record SummaryRow(string Label, string Details, IReadOnlyList<SummaryEvidenceLink> Evidence);
+public sealed record EpisodeRow(string Id, string Label);
+public sealed record EpisodeMemberRow(string Id, string Label, string Details);
+public sealed record EpisodeTarget(string Id, ulong Revision, ulong MembershipRevision, long PresentationVersion);
+
+/// <summary>Owns the frozen revision used by the control's complete member-selection draft.</summary>
+public sealed class EpisodeMemberDraftBinding
+{
+    private EpisodeTarget? _target;
+    public bool HasDraft => _target != null;
+    public EpisodeTarget? Consume() { var target = _target; _target = null; return target; }
+    public void Clear() => _target = null;
+    public bool Reconcile(InsightsViewModel model, string expectedId)
+    {
+        var target = model.CaptureEpisodeTarget();
+        if (target == null || target.Id != expectedId) { Clear(); return false; }
+        _target = target;
+        return true;
+    }
+}
 
 /// <summary>UI-thread state; all IO belongs to the handle-free service. No metrics are calculated here.</summary>
 public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
@@ -25,6 +44,8 @@ public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
     private CancellationTokenSource? _pending;
     private long _generation;
     private long _selectionVersion;
+    private long _episodePresentationVersion;
+    private bool _episodeReviewRequired;
     private bool _closed;
     private Task _active = Task.CompletedTask;
     private readonly Dictionary<string, string> _copy = new();
@@ -43,6 +64,14 @@ public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
     public string SummaryStatus => Summary == null ? this[Busy ? "working" : "summary_unavailable"]
         : Summary.SavedSnapshots == 0 ? this["summary_empty"] : "";
     public ObservableCollection<SummaryRow> SummaryRows { get; } = new();
+    public ObservableCollection<EpisodeRow> Episodes { get; } = new();
+    public ObservableCollection<EpisodeMemberRow> EpisodeMembers { get; } = new();
+    public string EpisodeStatus { get; private set; } = "";
+    public string EpisodeDetails { get; private set; } = "";
+    public string? CurrentEpisodeId { get; private set; }
+    public ulong CurrentEpisodeRevision { get; private set; }
+    public ulong CurrentEpisodeMembershipRevision { get; private set; }
+    public bool HasEpisodeSelection => CurrentEpisodeId != null && Idle;
     public string Status { get; private set; } = "";
     public string MutationNotice { get; private set; } = "";
     public bool Busy { get; private set; }
@@ -52,6 +81,8 @@ public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
     private static readonly string[] Outcomes = { "accepted", "partial", "rejected", "unknown" };
     public int CategoryIndex { get; set; } = 5;
     public int OutcomeIndex { get; set; } = 3;
+    public int EpisodeCategoryIndex { get; set; } = 5;
+    public int EpisodeOutcomeIndex { get; set; } = 3;
     public Task SaveAssessmentAsync() => AnnotateAsync(
         Categories[Math.Clamp(CategoryIndex, 0, Categories.Length - 1)],
         Outcomes[Math.Clamp(OutcomeIndex, 0, Outcomes.Length - 1)]);
@@ -108,6 +139,7 @@ public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
         }
         Status = Saved.Count == 0 ? this["empty"] : "";
         await RefreshSummaryAsync(token);
+        await RefreshEpisodesCoreAsync(token, CurrentEpisodeId);
     }
     public Task AnalyzeAsync(string source, string file, bool save) => Run(async token =>
     {
@@ -126,6 +158,218 @@ public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
         token.ThrowIfCancellationRequested();
         Render(result.GetProperty("insight"), true);
     });
+
+    public Task CreateEpisodeAsync(IEnumerable<string> snapshotIds) => Run(async token =>
+    {
+        string[] ids = snapshotIds.ToArray();
+        if (ids.Length == 0) { EpisodeStatus = this["episode_selection_empty"]; Changed(); return; }
+        try
+        {
+            var response = await _service.CallAsync(new { type = "episode_create", snapshot_ids = ids }, token);
+            token.ThrowIfCancellationRequested();
+            var episode = InsightEpisodeResponses.DecodeMutation(response, "episode_create");
+            bool reconciled = await RefreshEpisodesCoreAsync(token, episode.Id);
+            EpisodeStatus = reconciled ? this["episode_create_success"] : this["episode_create_success"] + "\n" + EpisodeStatus;
+        }
+        catch (InsightsServiceException error) { await HandleEpisodeFailureAsync(error, token, null); }
+        catch (Exception) { ClearEpisodeDetail(); EpisodeStatus = this["error"]; Changed(); }
+    });
+
+    public Task OpenEpisodeAsync(string id) => Run(async token =>
+    {
+        ClearEpisodeDetail();
+        long presentation = _episodePresentationVersion;
+        try
+        {
+            var response = await _service.CallAsync(new { type = "episode_explain", id }, token);
+            token.ThrowIfCancellationRequested();
+            var detail = InsightEpisodeResponses.DecodeDetail(response);
+            if (detail.Episode.Id != id) throw new InvalidOperationException("insights-response-invalid");
+            if (presentation == _episodePresentationVersion) { RenderEpisode(detail); EpisodeStatus = ""; }
+        }
+        catch (InsightsServiceException error) { await HandleEpisodeFailureAsync(error, token, id); }
+        catch (Exception) { ClearEpisodeDetail(); EpisodeStatus = this["episode_detail_unavailable"]; Changed(); }
+    });
+
+    public EpisodeTarget? CaptureEpisodeTarget() => !_closed && HasEpisodeSelection && !_episodeReviewRequired
+        ? new EpisodeTarget(CurrentEpisodeId!, CurrentEpisodeRevision, CurrentEpisodeMembershipRevision, _episodePresentationVersion) : null;
+    private bool ValidEpisodeTarget(EpisodeTarget target) => !_closed && !Busy && !_episodeReviewRequired && target.Id == CurrentEpisodeId &&
+        target.Revision == CurrentEpisodeRevision && target.PresentationVersion == _episodePresentationVersion;
+
+    public Task ReplaceEpisodeMembersAsync(EpisodeTarget target, IEnumerable<string> snapshotIds) =>
+        MutateEpisodeAsync(target, "episode_replace_members", new {
+            type = "episode_replace_members", id = target.Id, expected_revision = target.Revision,
+            snapshot_ids = snapshotIds.ToArray()
+        }, "episode_members_saved");
+    public Task SaveEpisodeAssessmentAsync(EpisodeTarget target) => MutateEpisodeAsync(target, "episode_annotate", new {
+        type = "episode_annotate", id = target.Id, expected_revision = target.Revision,
+        category = Categories[Math.Clamp(EpisodeCategoryIndex, 0, Categories.Length - 1)],
+        outcome = Outcomes[Math.Clamp(EpisodeOutcomeIndex, 0, Outcomes.Length - 1)]
+    }, "episode_assessment_saved");
+    public Task ClearEpisodeAssessmentAsync(EpisodeTarget target) => MutateEpisodeAsync(target, "episode_clear_assessment",
+        new { type = "episode_clear_assessment", id = target.Id, expected_revision = target.Revision }, "episode_assessment_cleared");
+
+    public Task DeleteEpisodeAsync(EpisodeTarget target)
+    {
+        if (!ValidEpisodeTarget(target)) return StaleEpisodeTarget();
+        return Run(async token =>
+        {
+            try
+            {
+                var response = await _service.CallAsync(new { type = "episode_delete", id = target.Id, expected_revision = target.Revision }, token);
+                token.ThrowIfCancellationRequested();
+                var deleted = InsightEpisodeResponses.DecodeMutation(response, "episode_delete");
+                if (deleted.Id != target.Id) throw new InvalidOperationException("insights-response-invalid");
+                ClearEpisodeDetail();
+                bool reconciled = await RefreshEpisodesCoreAsync(token, null);
+                EpisodeStatus = reconciled ? this["episode_deleted"] : this["episode_deleted"] + "\n" + EpisodeStatus;
+            }
+            catch (InsightsServiceException error) { await HandleEpisodeFailureAsync(error, token, target.Id); }
+            catch (Exception) { ClearEpisodeDetail(); EpisodeStatus = this["episode_detail_unavailable"]; Changed(); }
+        });
+    }
+
+    private Task MutateEpisodeAsync(EpisodeTarget target, string responseType, object operation, string successKey)
+    {
+        if (!ValidEpisodeTarget(target)) return StaleEpisodeTarget();
+        return Run(async token =>
+        {
+            try
+            {
+                var response = await _service.CallAsync(operation, token);
+                token.ThrowIfCancellationRequested();
+                var episode = InsightEpisodeResponses.DecodeMutation(response, responseType);
+                if (episode.Id != target.Id) throw new InvalidOperationException("insights-response-invalid");
+                bool reconciled = await RefreshEpisodesCoreAsync(token, target.Id);
+                string committed = successKey == "episode_members_saved" && episode.MembershipRevision != target.MembershipRevision
+                    ? this[successKey] + "\n" + this["episode_membership_changed"] : this[successKey];
+                EpisodeStatus = reconciled ? committed : committed + "\n" + EpisodeStatus;
+            }
+            catch (InsightsServiceException error) { await HandleEpisodeFailureAsync(error, token, target.Id); }
+            catch (Exception) { ClearEpisodeDetail(); EpisodeStatus = this["episode_detail_unavailable"]; Changed(); }
+        });
+    }
+
+    private Task StaleEpisodeTarget()
+    {
+        if (!_closed) { EpisodeStatus = this["episode_revision_conflict"]; Changed(); }
+        return Task.CompletedTask;
+    }
+
+    private async Task HandleEpisodeFailureAsync(InsightsServiceException error, CancellationToken token, string? id)
+    {
+        ++_episodePresentationVersion;
+        if (error.Code == "insights_episode_revision_conflict")
+        {
+            EpisodeStatus = this["episode_revision_conflict"];
+            bool reconciled = await RefreshEpisodesCoreAsync(token, id);
+            _episodeReviewRequired = true;
+            EpisodeStatus = reconciled ? this["episode_revision_conflict"] : this["episode_revision_conflict"] + "\n" + EpisodeStatus;
+        }
+        else if (error.Code == "insights_episode_not_found")
+        {
+            ClearEpisodeDetail();
+            await RefreshEpisodesCoreAsync(token, null);
+            EpisodeStatus = this["episode_missing"];
+        }
+        else EpisodeStatus = this[EpisodeErrorCopyKey(error.Code)];
+        Changed();
+    }
+
+    private static string EpisodeErrorCopyKey(string code) => code switch {
+        "insights_episode_member_limit" => "episode_member_limit",
+        "insights_episode_duplicate_member" or "insights_episode_invalid" or "insights_episode_revision_overflow" => "episode_invalid",
+        "insights_episode_missing_members" => "episode_missing_members",
+        "insights_episode_limit_exceeded" => "episode_limit",
+        "insights_response_too_large" => "episode_response_too_large",
+        _ => "error"
+    };
+
+    private async Task<bool> RefreshEpisodesCoreAsync(CancellationToken token, string? detailId)
+    {
+        try
+        {
+            var response = await _service.CallAsync(new { type = "episode_list" }, token);
+            token.ThrowIfCancellationRequested();
+            var listed = InsightEpisodeResponses.DecodeList(response);
+            Episodes.Clear();
+            foreach (var item in listed)
+                Episodes.Add(new EpisodeRow(item.Episode.Id, item.Episode.Id + " · " + Number((ulong)item.Episode.Members.Count) + " · " + Date(item.Episode.UpdatedAt)));
+            if (detailId == null || !listed.Any(item => item.Episode.Id == detailId))
+            {
+                if (CurrentEpisodeId != null) ClearEpisodeDetail();
+                EpisodeStatus = Episodes.Count == 0 ? this["episode_empty"] : "";
+                return true;
+            }
+            var detailResponse = await _service.CallAsync(new { type = "episode_explain", id = detailId }, token);
+            token.ThrowIfCancellationRequested();
+            var detail = InsightEpisodeResponses.DecodeDetail(detailResponse);
+            if (detail.Episode.Id != detailId) throw new InvalidOperationException("insights-response-invalid");
+            RenderEpisode(detail);
+            return true;
+        }
+        catch (InsightsServiceException error) when (error.Code == "insights_episode_not_found")
+        {
+            ClearEpisodeDetail();
+            EpisodeStatus = this["episode_missing"];
+            return false;
+        }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception)
+        {
+            if (detailId != null) ClearEpisodeDetail();
+            EpisodeStatus = this[detailId == null ? "episode_list_unavailable" : "episode_detail_unavailable"];
+            Changed();
+            return false;
+        }
+    }
+
+    private void RenderEpisode(EpisodeDetail detail)
+    {
+        ++_episodePresentationVersion;
+        CurrentEpisodeId = detail.Episode.Id;
+        CurrentEpisodeRevision = detail.Episode.Revision;
+        CurrentEpisodeMembershipRevision = detail.Episode.MembershipRevision;
+        _episodeReviewRequired = false;
+        EpisodeMembers.Clear();
+        var overlaps = detail.Overlap.ToDictionary(item => item.SnapshotId, StringComparer.Ordinal);
+        foreach (var member in detail.Members)
+        {
+            string overlap = overlaps.TryGetValue(member.SnapshotId, out var item) && item.EpisodeIds.Count != 0
+                ? this["episode_overlaps"] + ": " + string.Join(", ", item.EpisodeIds) : this["episode_no_overlap"];
+            string evidence = member.Evidence.Count == 0 ? this["link_empty"] : string.Join("\n", member.Evidence.Select(item => item.Id + " · " + item.SourceDigest));
+            EpisodeMembers.Add(new EpisodeMemberRow(member.SnapshotId,
+                this[member.SourceFormat] + " · " + Date(member.AnalyzedAt), overlap + "\n" + this["episode_member_evidence"] + "\n" + evidence));
+        }
+        EpisodeCategoryIndex = detail.Episode.Assessment == null ? 5 : Array.IndexOf(Categories, detail.Episode.Assessment.Category);
+        EpisodeOutcomeIndex = detail.Episode.Assessment == null ? 3 : Array.IndexOf(Outcomes, detail.Episode.Assessment.Outcome);
+        var assessment = detail.Episode.Assessment == null ? this["episode_unassessed"] :
+            this["category_" + detail.Episode.Assessment.Category] + " / " + this["outcome_" + detail.Episode.Assessment.Outcome] + " · " + Date(detail.Episode.Assessment.RecordedAt);
+        EpisodeDetails = string.Join("\n", new[] {
+            this["episode_id"] + ": " + detail.Episode.Id,
+            this["episode_revision"] + ": " + Number(detail.Episode.Revision),
+            this["episode_membership_revision"] + ": " + Number(detail.Episode.MembershipRevision),
+            this["episode_created_at"] + ": " + Date(detail.Episode.CreatedAt),
+            this["episode_updated_at"] + ": " + Date(detail.Episode.UpdatedAt),
+            this["episode_resolved"] + ": " + Date(detail.ResolvedAt),
+            this["episode_assessment"] + ": " + assessment
+        });
+        Changed();
+    }
+
+    private void ClearEpisodeDetail()
+    {
+        ++_episodePresentationVersion;
+        CurrentEpisodeId = null;
+        CurrentEpisodeRevision = 0;
+        CurrentEpisodeMembershipRevision = 0;
+        _episodeReviewRequired = false;
+        EpisodeDetails = "";
+        EpisodeMembers.Clear();
+        EpisodeCategoryIndex = 5;
+        EpisodeOutcomeIndex = 3;
+        Changed();
+    }
     public Task DeleteAsync() => Run(async token =>
     {
         if (CurrentId == null) return;
@@ -271,6 +515,8 @@ public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
     private void RenderMutationEffects(JsonElement response)
     {
         var effects = InsightMutationEffects.Decode(response);
+        if (CurrentEpisodeId != null && effects.InvalidatedEpisodeIds.Contains(CurrentEpisodeId, StringComparer.Ordinal))
+            ClearEpisodeDetail();
         MutationNotice = effects.InvalidatedEpisodeIds.Count == 0 ? "" :
             this["episode_invalidated_notice"] + "\n" + string.Join("\n", effects.InvalidatedEpisodeIds);
     }
@@ -418,6 +664,7 @@ public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
         if (_closed) return;
         MutationNotice = "";
         ++_selectionVersion;
+        ++_episodePresentationVersion;
         _pending?.Cancel();
         // Keep mutations serialized until the outstanding operation settles.
         Status = CancellationNotice;
@@ -429,6 +676,7 @@ public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
         _closed = true;
         MutationNotice = "";
         ++_selectionVersion;
+        ++_episodePresentationVersion;
         ++_generation;
         _pending?.Cancel();
     }
