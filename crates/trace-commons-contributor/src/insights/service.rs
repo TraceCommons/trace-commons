@@ -5,6 +5,10 @@ use anyhow::{Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use trace_commons_protocol::insights_cards::{InsightCardResult, InsightQuestionId};
 
+use super::comparison_specs::{
+    ComparisonSpecificationDraftInput, ComparisonSpecificationError, ComparisonSpecificationV1,
+    DescriptiveComparisonResultV1,
+};
 use super::comparison_task_store::ComparisonTaskStoreError;
 use super::comparison_tasks::{
     ComparisonTaskContextInput, ComparisonTaskDetail, ComparisonTaskOutcome,
@@ -364,6 +368,23 @@ pub enum LocalInsightsOperation {
         id: String,
         expected_revision: u64,
     },
+    ComparisonPreviewSpec {
+        input: ComparisonSpecificationDraftInput,
+    },
+    ComparisonSaveSpec {
+        input: ComparisonSpecificationDraftInput,
+    },
+    ComparisonListSpecs {},
+    ComparisonGetSpec {
+        id: String,
+    },
+    ComparisonEvaluate {
+        id: String,
+    },
+    ComparisonExplainResult {
+        specification_id: String,
+        audit_digest: String,
+    },
     Analyze {
         source: SourceFormat,
         file: PathBuf,
@@ -458,6 +479,19 @@ pub enum LocalInsightsResponse {
         #[serde(default)]
         mutation_effects: MutationEffects,
     },
+    ComparisonPreviewSpec {
+        specification: Box<ComparisonSpecificationV1>,
+        result: Box<DescriptiveComparisonResultV1>,
+    },
+    ComparisonSpecification {
+        specification: Box<ComparisonSpecificationV1>,
+    },
+    ComparisonSpecificationList {
+        specifications: Vec<ComparisonSpecificationV1>,
+    },
+    ComparisonResult {
+        result: Box<DescriptiveComparisonResultV1>,
+    },
     Analyze {
         insight: Box<LocalInsight>,
         #[serde(default)]
@@ -549,6 +583,10 @@ fn execute_inner(request: LocalInsightsRequest) -> Result<LocalInsightsResponse>
     let comparison_store = || {
         existing_store(request.store_dir.as_deref())?
             .ok_or_else(|| anyhow!(ComparisonTaskStoreError::NotFound))
+    };
+    let specification_store = || {
+        existing_store(request.store_dir.as_deref())?
+            .ok_or_else(|| anyhow!(ComparisonSpecificationError::NotFound))
     };
     Ok(match request.operation {
         LocalInsightsOperation::QuestionCards {
@@ -749,6 +787,59 @@ fn execute_inner(request: LocalInsightsRequest) -> Result<LocalInsightsResponse>
                 mutation_effects: result.mutation_effects,
             }
         }
+        LocalInsightsOperation::ComparisonPreviewSpec { input } => {
+            let store = existing_store(request.store_dir.as_deref())?
+                .ok_or(ComparisonSpecificationError::NoSavedTasks)?;
+            let (specification, result) = store.comparison_specification_preview(
+                input.evidence_cutoff,
+                input.cohort_labels,
+                input.date_start,
+                input.date_end,
+                input.stratum,
+            )?;
+            LocalInsightsResponse::ComparisonPreviewSpec {
+                specification: Box::new(specification),
+                result: Box::new(result),
+            }
+        }
+        LocalInsightsOperation::ComparisonSaveSpec { input } => {
+            LocalInsightsResponse::ComparisonSpecification {
+                specification: Box::new(store()?.comparison_specification_save(
+                    input.evidence_cutoff,
+                    input.cohort_labels,
+                    input.date_start,
+                    input.date_end,
+                    input.stratum,
+                )?),
+            }
+        }
+        LocalInsightsOperation::ComparisonListSpecs {} => {
+            LocalInsightsResponse::ComparisonSpecificationList {
+                specifications: match existing_store(request.store_dir.as_deref())? {
+                    Some(store) => store.comparison_specification_list()?,
+                    None => Vec::new(),
+                },
+            }
+        }
+        LocalInsightsOperation::ComparisonGetSpec { id } => {
+            LocalInsightsResponse::ComparisonSpecification {
+                specification: Box::new(specification_store()?.comparison_specification_get(&id)?),
+            }
+        }
+        LocalInsightsOperation::ComparisonEvaluate { id } => {
+            LocalInsightsResponse::ComparisonResult {
+                result: Box::new(specification_store()?.comparison_specification_evaluate(&id)?),
+            }
+        }
+        LocalInsightsOperation::ComparisonExplainResult {
+            specification_id,
+            audit_digest,
+        } => LocalInsightsResponse::ComparisonResult {
+            result: Box::new(
+                specification_store()?
+                    .comparison_result_explain(&specification_id, &audit_digest)?,
+            ),
+        },
         LocalInsightsOperation::Analyze { source, file, save } => {
             let (insight, mutation_effects) = if save {
                 let result = store()?.import_with_effects(source, &file)?;
@@ -866,6 +957,9 @@ fn public_error(error: anyhow::Error) -> anyhow::Error {
         return anyhow!(error.to_string());
     }
     if let Some(error) = error.downcast_ref::<ComparisonTaskStoreError>() {
+        return anyhow!(error.to_string());
+    }
+    if let Some(error) = error.downcast_ref::<ComparisonSpecificationError>() {
         return anyhow!(error.to_string());
     }
     if error.downcast_ref::<ResponseTooLarge>().is_some() {
@@ -1312,5 +1406,67 @@ mod tests {
             serde_json::json!({"type":"list","insights":[]})
         );
         assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn retrospective_specification_service_lifecycle_is_typed_and_digest_bound() {
+        let temp = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let store = temp.path().join("insights");
+        let input = serde_json::json!({
+            "evidence_cutoff":"2026-09-11T00:00:00Z",
+            "cohort_labels":["model-a","model-b"],
+            "date_start":"2026-09-01",
+            "date_end":"2026-09-10",
+            "stratum":{
+                "project_id":"00000000-0000-4000-8000-000000000001",
+                "language":"rust",
+                "configuration_fingerprint":"11".repeat(32)
+            }
+        });
+        let call = |operation: serde_json::Value| {
+            let request = serde_json::json!({"store_dir":store,"operation":operation});
+            let response = dispatch_json(&serde_json::to_vec(&request).unwrap()).unwrap();
+            serde_json::from_str::<serde_json::Value>(&response).unwrap()
+        };
+        let saved = call(serde_json::json!({"type":"comparison_save_spec","input":input}));
+        let id = saved["specification"]["id"].as_str().unwrap();
+        assert_eq!(
+            saved["specification"]["provenance"],
+            "retrospective_user_specification"
+        );
+        let listed = call(serde_json::json!({"type":"comparison_list_specs"}));
+        assert_eq!(listed["specifications"].as_array().unwrap().len(), 1);
+        let result = call(serde_json::json!({"type":"comparison_evaluate","id":id}));
+        assert_eq!(result["result"]["cohorts"].as_array().unwrap().len(), 2);
+        assert!(
+            result["result"]["included_task_ids"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        let audit = result["result"]["audit_digest"].as_str().unwrap();
+        let explained = call(serde_json::json!({
+            "type":"comparison_explain_result",
+            "specification_id":id,
+            "audit_digest":audit
+        }));
+        assert_eq!(explained, result);
+
+        let bad = serde_json::json!({"store_dir":store,"operation":{
+            "type":"comparison_explain_result",
+            "specification_id":id,
+            "audit_digest":"ff".repeat(32)
+        }});
+        assert_eq!(
+            dispatch_json(&serde_json::to_vec(&bad).unwrap())
+                .unwrap_err()
+                .to_string(),
+            "insights-comparison-result-stale"
+        );
     }
 }

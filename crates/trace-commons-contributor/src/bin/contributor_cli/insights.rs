@@ -2,6 +2,9 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::{Args, Subcommand, ValueEnum};
+use trace_commons_contributor::insights::comparison_specs::{
+    ComparisonSpecificationDraftInput, ExactComparisonStratumV1,
+};
 use trace_commons_contributor::insights::comparison_tasks::{
     CheckoutProvenance, ComparisonConfigurationV1, ComparisonTaskContextInput, ContextDigest,
     ContextString,
@@ -78,6 +81,11 @@ enum InsightsCommand {
     ComparisonTask {
         #[command(subcommand)]
         command: ComparisonTaskCommand,
+    },
+    /// Save and evaluate retrospective comparisons of reviewed tasks
+    Comparison {
+        #[command(subcommand)]
+        command: ComparisonCommand,
     },
     /// Analyze one selected file locally; persist only when --save is supplied
     Analyze {
@@ -196,6 +204,42 @@ enum ComparisonTaskCommand {
         #[arg(long)]
         expected_revision: u64,
     },
+}
+
+#[derive(Subcommand)]
+enum ComparisonCommand {
+    PreviewSpec(ComparisonSpecArgs),
+    SaveSpec(ComparisonSpecArgs),
+    ListSpecs,
+    GetSpec {
+        id: String,
+    },
+    Evaluate {
+        id: String,
+    },
+    ExplainResult {
+        specification_id: String,
+        #[arg(long)]
+        audit_digest: String,
+    },
+}
+
+#[derive(Args)]
+struct ComparisonSpecArgs {
+    #[arg(long)]
+    evidence_cutoff: String,
+    #[arg(long = "cohort", required = true, num_args = 2)]
+    cohort_labels: Vec<String>,
+    #[arg(long)]
+    date_start: String,
+    #[arg(long)]
+    date_end: String,
+    #[arg(long)]
+    project_id: String,
+    #[arg(long)]
+    language: String,
+    #[arg(long)]
+    configuration_fingerprint: String,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -404,6 +448,33 @@ pub(super) fn run(args: &InsightsArgs, json: bool) -> Result<()> {
             };
             render_comparison_task_operation(args, operation, json)?;
         }
+        InsightsCommand::Comparison { command } => {
+            let operation = match command {
+                ComparisonCommand::PreviewSpec(input) => {
+                    LocalInsightsOperation::ComparisonPreviewSpec {
+                        input: comparison_spec_input(input)?,
+                    }
+                }
+                ComparisonCommand::SaveSpec(input) => LocalInsightsOperation::ComparisonSaveSpec {
+                    input: comparison_spec_input(input)?,
+                },
+                ComparisonCommand::ListSpecs => LocalInsightsOperation::ComparisonListSpecs {},
+                ComparisonCommand::GetSpec { id } => {
+                    LocalInsightsOperation::ComparisonGetSpec { id: id.clone() }
+                }
+                ComparisonCommand::Evaluate { id } => {
+                    LocalInsightsOperation::ComparisonEvaluate { id: id.clone() }
+                }
+                ComparisonCommand::ExplainResult {
+                    specification_id,
+                    audit_digest,
+                } => LocalInsightsOperation::ComparisonExplainResult {
+                    specification_id: specification_id.clone(),
+                    audit_digest: audit_digest.clone(),
+                },
+            };
+            render_comparison_operation(args, operation, json)?;
+        }
         InsightsCommand::Analyze { source, file, save } => {
             let LocalInsightsResponse::Analyze {
                 insight,
@@ -579,6 +650,53 @@ fn context_string(value: &Option<String>) -> ContextString {
         .map_or(ContextString::Unknown, |value| ContextString::Known {
             value: value.clone(),
         })
+}
+
+fn comparison_spec_input(input: &ComparisonSpecArgs) -> Result<ComparisonSpecificationDraftInput> {
+    let mut cohort_labels = input.cohort_labels.clone();
+    cohort_labels.sort();
+    Ok(ComparisonSpecificationDraftInput {
+        evidence_cutoff: input.evidence_cutoff.parse()?,
+        cohort_labels,
+        date_start: input.date_start.parse()?,
+        date_end: input.date_end.parse()?,
+        stratum: ExactComparisonStratumV1 {
+            project_id: input.project_id.clone(),
+            language: input.language.clone(),
+            configuration_fingerprint: input.configuration_fingerprint.clone(),
+        },
+    })
+}
+
+fn render_comparison_operation(
+    args: &InsightsArgs,
+    operation: LocalInsightsOperation,
+    _json: bool,
+) -> Result<()> {
+    let response = execute(LocalInsightsRequest {
+        store_dir: args.store_dir.clone(),
+        operation,
+    })?;
+    match response {
+        LocalInsightsResponse::ComparisonPreviewSpec {
+            specification,
+            result,
+        } => println!(
+            "{}",
+            serde_json::to_string_pretty(&(specification, result))?
+        ),
+        LocalInsightsResponse::ComparisonSpecification { specification } => {
+            println!("{}", serde_json::to_string_pretty(&specification)?)
+        }
+        LocalInsightsResponse::ComparisonSpecificationList { specifications } => {
+            println!("{}", serde_json::to_string_pretty(&specifications)?)
+        }
+        LocalInsightsResponse::ComparisonResult { result } => {
+            println!("{}", serde_json::to_string_pretty(&result)?)
+        }
+        _ => anyhow::bail!("insights-comparison-response-invalid"),
+    }
+    Ok(())
 }
 
 fn render_comparison_task_operation(
