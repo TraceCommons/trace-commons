@@ -18,6 +18,7 @@ pub mod identity;
 pub mod insights;
 pub mod issuer_client;
 pub mod mission_draft;
+pub mod mission_draft_service;
 pub mod onboarding_copy;
 pub mod picker;
 pub mod pricing;

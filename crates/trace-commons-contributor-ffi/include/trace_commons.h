@@ -1801,6 +1801,17 @@ char*       tc_call(tc_handle*, const char* method, const char* params_json);
  * and cleared on success. Request buffers must remain valid until return. */
 char*       tc_insights_call(const uint8_t* request, size_t request_len, char** err);
 
+/* Handle-free local mission draft inbox, available before enrollment.
+ * Synchronous local IO; schedule off the UI thread. Request is borrowed UTF-8
+ * JSON at most 65536 bytes. Optional store_dir selects a dedicated inbox.
+ * Operations: import {file}, list, show {id}, delete {id}, copy. Import/list
+ * return metadata and structural review only; the full bounded proposal is
+ * returned only by explicit show. Proposal strings and URLs are untrusted data
+ * and must never be executed or opened implicitly. No operation fetches sources,
+ * publishes, funds, runs, or authorizes a mission. Responses are owned JSON at
+ * most 1 MiB; errors are owned fixed labels. Free either with tc_string_free. */
+char*       tc_mission_drafts_call(const uint8_t* request, size_t request_len, char** err);
+
 
 /* Events. cb is invoked on a background thread with a JSON event frame
  * each time the daemon publishes one, until tc_unsubscribe is called with

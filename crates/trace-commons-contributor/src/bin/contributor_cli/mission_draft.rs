@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::{Args, Subcommand};
 use trace_commons_contributor::mission_draft::MissionDraftInbox;
+use trace_commons_contributor::mission_draft_service::ui_copy;
 
 #[derive(Args)]
 pub(super) struct MissionDraftsArgs {
@@ -30,6 +31,7 @@ enum MissionDraftsCommand {
 
 pub(super) fn run(args: &MissionDraftsArgs, json: bool) -> Result<()> {
     let inbox = MissionDraftInbox::resolve(args.store_dir.as_deref())?;
+    let copy = ui_copy();
     match &args.command {
         MissionDraftsCommand::Import { file } => {
             let result = inbox.import_file(file)?;
@@ -39,13 +41,13 @@ pub(super) fn run(args: &MissionDraftsArgs, json: bool) -> Result<()> {
                 println!(
                     "{}",
                     if result.inserted {
-                        "Draft added to the local inbox."
+                        &copy["added"]
                     } else {
-                        "This draft is already in the local inbox."
+                        &copy["duplicate"]
                     }
                 );
                 println!("Proposal SHA-256: {}", result.id);
-                println!("Curator review is required; identities and sources are unverified.");
+                println!("{}", copy["review_notice"]);
             }
         }
         MissionDraftsCommand::List => {
@@ -53,7 +55,7 @@ pub(super) fn run(args: &MissionDraftsArgs, json: bool) -> Result<()> {
             if json {
                 println!("{}", serde_json::to_string_pretty(&drafts)?);
             } else if drafts.is_empty() {
-                println!("No local mission drafts.");
+                println!("{}", copy["empty"]);
             } else {
                 println!("Local mission drafts: {}", drafts.len());
                 for draft in drafts {
@@ -75,7 +77,8 @@ pub(super) fn run(args: &MissionDraftsArgs, json: bool) -> Result<()> {
             if json {
                 println!("{}", serde_json::to_string_pretty(&result)?);
             } else {
-                println!("Deleted local mission draft {}.", result.id);
+                println!("{}", copy["deleted"]);
+                println!("Proposal SHA-256: {}", result.id);
             }
         }
     }
