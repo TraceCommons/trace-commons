@@ -6,6 +6,8 @@ The `codex-rust-v0.154.0-task-records-v1` rule recognizes a bounded set of recor
 
 ## Supported evidence
 
+This first rule requires the recorded session metadata `cli_version = 0.154.0`, `originator = codex_cli_rs`, `source = exec`, and `history_mode = legacy`. Base instructions must carry the supported `custom` provenance shape. Interactive/editor origins and default-instruction provenance are not admitted by this version merely because their version number matches. Their generic imports may still succeed, with comparison attribution unavailable. Qualifying ordinary default-instruction runs is a separate coverage follow-up before the private pilot.
+
 | Case | Admission boundary |
 | --- | --- |
 | Direct messages | Complete supported lifecycle, consistent model/context/configuration, and matching identities are required. |
