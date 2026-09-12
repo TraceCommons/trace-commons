@@ -48,6 +48,10 @@ struct InsightsView: View {
                         }.disabled(model.busy)
                         if model.selectedIsSaved {
                             assessment
+                            InsightEvidenceControls(model: model, insight: insight)
+                                .id(insight.id)
+                        } else {
+                            Text(model.text("link_saved_required")).font(.caption)
                         }
                     }
                     Divider()
@@ -115,6 +119,7 @@ struct InsightDetail: View {
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }
+            InsightModelSection(observations: insight.model_observations, copy: copy)
             Text(text("unknown_notice"))
             Text(text("coverage_notice"))
             Text("\(text("cost")): \(text("unknown"))")

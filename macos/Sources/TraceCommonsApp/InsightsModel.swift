@@ -9,6 +9,7 @@ final class InsightsModel {
     private var task: Task<Void, Never>?
     private var generation = UUID()
     private var active = false
+    private var selectionRevision = UUID()
     private(set) var busy = false
     private(set) var copy: [String: String] = [:]
     func text(_ key: String) -> String { copy[key] ?? "" }
@@ -21,6 +22,7 @@ final class InsightsModel {
     var assessmentOutcome = "unknown"
     private(set) var selected: LocalInsight? {
         didSet {
+            selectionRevision = UUID()
             assessmentCategory = selected?.manual_annotation?.category ?? "unknown"
             assessmentOutcome = selected?.manual_annotation?.outcome ?? "unknown"
         }
@@ -31,7 +33,7 @@ final class InsightsModel {
 
     init(service: @escaping Service = { request in
         try await Task.detached {
-            let file = request.operation.file.map { URL(fileURLWithPath: $0) }
+            let file = (request.operation.file ?? request.operation.repository).map { URL(fileURLWithPath: $0) }
             let scoped = file?.startAccessingSecurityScopedResource() ?? false
             defer { if scoped { file?.stopAccessingSecurityScopedResource() } }
             return try TCInsights.call(request)
@@ -73,12 +75,51 @@ final class InsightsModel {
         guard selectedIsSaved, let selected else { return }
         perform(.init("clear_annotation", id: selected.id))
     }
+    struct EvidenceSelection: Equatable, Sendable {
+        let snapshotID: String
+        fileprivate let generation: UUID
+        fileprivate let revision: UUID
+    }
+    func evidenceSelection() -> EvidenceSelection? {
+        guard active, !busy, selectedIsSaved, let selected else { return nil }
+        return EvidenceSelection(snapshotID: selected.id, generation: generation, revision: selectionRevision)
+    }
+    func linkGit(selection: EvidenceSelection, repository: URL, commit: String) {
+        guard acceptsEvidenceSelection(selection) else { return }
+        performEvidence(.init("link_git", id: selection.snapshotID, repository: repository.path, commit: commit))
+    }
+    func linkTestReport(selection: EvidenceSelection, file: URL) {
+        guard acceptsEvidenceSelection(selection) else { return }
+        performEvidence(.init("link_test_report", file: file.path, id: selection.snapshotID))
+    }
+    func unlinkEvidence(selection: EvidenceSelection, evidenceID: String) {
+        guard acceptsEvidenceSelection(selection),
+              selected?.outcome_links?.contains(where: { $0.id == evidenceID }) == true else { return }
+        performEvidence(.init("unlink_evidence", id: selection.snapshotID, evidenceID: evidenceID))
+    }
+    private func acceptsEvidenceSelection(_ selection: EvidenceSelection) -> Bool {
+        guard active, !busy else { return false }
+        guard evidenceSelection() == selection else {
+            error = text("link_changed_selection")
+            return false
+        }
+        return true
+    }
+    private func performEvidence(_ operation: InsightsRequest.Operation) {
+        // The picker token has been checked; clear the old detail so failure
+        // cannot masquerade as a successful association to another snapshot.
+        selected = nil; selectedIsSaved = false; selectedFile = nil
+        perform(operation)
+    }
+    private func isEvidenceMutation(_ operation: InsightsRequest.Operation) -> Bool {
+        ["link_git", "link_test_report", "unlink_evidence"].contains(operation.type)
+    }
     private func perform(_ operation: InsightsRequest.Operation) {
         guard active, !busy else { return }
         busy = true; error = nil
         if operation.type == "copy" || operation.type == "list" || operation.type == "summary"
             || operation.type == "delete" || operation.type == "annotate"
-            || operation.type == "clear_annotation" || operation.save == true {
+            || operation.type == "clear_annotation" || operation.save == true || isEvidenceMutation(operation) {
             summary = nil; summaryError = nil; loadingSummary = true
         }
         let token = generation
@@ -112,6 +153,9 @@ final class InsightsModel {
                     self.selected = nil; self.selectedFile = nil; self.selectedIsSaved = false
                 default:
                     guard let value = response.insight else { throw InsightsError.invalidResponse }
+                    if self.isEvidenceMutation(operation), value.id != operation.id {
+                        throw InsightsError.invalidResponse
+                    }
                     self.selected = value
                     self.selectedIsSaved = operation.type != "analyze" || operation.save == true
                     if self.selectedIsSaved {
@@ -121,7 +165,7 @@ final class InsightsModel {
                 }
                 self.busy = false
                 if operation.type == "copy" || operation.save == true || operation.type == "delete"
-                    || operation.type == "annotate" || operation.type == "clear_annotation" {
+                    || operation.type == "annotate" || operation.type == "clear_annotation" || self.isEvidenceMutation(operation) {
                     self.refresh()
                 } else if operation.type == "list" {
                     self.perform(.init("summary"))

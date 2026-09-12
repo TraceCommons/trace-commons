@@ -17,7 +17,12 @@ public enum TCInsights {
         }
         guard let result, error == nil,
               let text = String(validatingCString: result) else { throw InsightsError.operationFailed }
-        do { return try JSONDecoder().decode(InsightsResponse.self, from: Data(text.utf8)) }
+        do {
+            let response = try JSONDecoder().decode(InsightsResponse.self, from: Data(text.utf8))
+            try response.insight?.validateSupportedEvidence()
+            for snapshot in response.insights ?? [] { try snapshot.validateSupportedEvidence() }
+            return response
+        }
         catch { throw InsightsError.invalidResponse }
     }
 }
@@ -37,10 +42,15 @@ public struct InsightsRequest: Encodable, Sendable {
         public var id: String?
         public var category: String?
         public var outcome: String?
+        public var repository: String?
+        public var commit: String?
+        public var evidence_id: String?
         public init(_ type: String, source: String? = nil, file: String? = nil,
-                    save: Bool? = nil, id: String? = nil, category: String? = nil, outcome: String? = nil) {
+                    save: Bool? = nil, id: String? = nil, category: String? = nil, outcome: String? = nil,
+                    repository: String? = nil, commit: String? = nil, evidenceID: String? = nil) {
             self.type = type; self.source = source; self.file = file; self.save = save
             self.id = id; self.category = category; self.outcome = outcome
+            self.repository = repository; self.commit = commit; self.evidence_id = evidenceID
         }
     }
 }
@@ -58,6 +68,8 @@ public struct LocalInsight: Decodable, Sendable, Identifiable {
     public let estimated_cost_usd: Double?
     public let cost_unavailable_reason: String
     public let manual_annotation: Annotation?
+    public let model_observations: InsightModelObservations?
+    public let outcome_links: [InsightOutcomeLink]?
     public struct Annotation: Decodable, Sendable {
         public let category, outcome, provenance, recorded_at, source_digest: String
     }
