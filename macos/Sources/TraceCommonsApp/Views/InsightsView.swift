@@ -66,7 +66,8 @@ struct InsightsView: View {
                     Divider()
                     InsightsEpisodesView(model: model)
                     Divider()
-                    ComparisonTasksView(model: comparisonModel, episodes: model.episodes, copy: model.copy)
+                    ComparisonTasksView(model: comparisonModel, episodes: model.episodes, copy: model.copy,
+                                        openEpisode: model.openEpisode, openSnapshot: model.explain)
                     Divider()
                     InsightCardsView(model: model)
                     Divider()

@@ -19,6 +19,23 @@ final class ComparisonTaskBridgeTests: XCTestCase {
         XCTAssertEqual((encoded["checkout_provenance"] as? [String: Any])?["state"] as? String, "unavailable")
     }
 
+    func testSharedCopyCoversStructuredComparisonReview() throws {
+        let copy = try XCTUnwrap(TCInsights.call(.init(operation: .init("copy"))).copy)
+        let fixed = ["comparison_task_revision", "comparison_task_resolved",
+                     "comparison_task_frozen_evidence", "comparison_task_stale_none",
+                     "comparison_task_advanced_evidence", "comparison_task_project",
+                     "comparison_task_new_project", "comparison_task_current_missing",
+                     "comparison_task_current_matches_frozen", "comparison_task_current_changed",
+                     "comparison_task_open_current_episode", "comparison_task_open_frozen_snapshot"]
+        XCTAssertTrue(fixed.allSatisfy { copy[$0]?.isEmpty == false })
+        XCTAssertTrue(ComparisonReasoningEffort.allCases.allSatisfy {
+            copy["comparison_task_reasoning_\($0.rawValue)"]?.isEmpty == false
+        })
+        XCTAssertTrue(ComparisonTaskStaleReason.allCases.allSatisfy {
+            copy["comparison_task_stale_\($0.rawValue)"]?.isEmpty == false
+        })
+    }
+
     func testMalformedTaskDataIsRejectedByValidation() throws {
         let response = try JSONDecoder().decode(InsightsResponse.self, from: Data(Self.response(
             type: "comparison_task", task: Self.task(id: "not-a-uuid")).utf8))
@@ -29,6 +46,39 @@ final class ComparisonTaskBridgeTests: XCTestCase {
         let list = try JSONDecoder().decode(InsightsResponse.self, from: try JSONSerialization.data(
             withJSONObject: ["type": "comparison_task_list", "tasks": [duplicate]]))
         XCTAssertThrowsError(try XCTUnwrap(list.tasks?.first).validateSupportedSchema())
+    }
+
+    func testActualServiceComparisonTaskRoundTrip() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appendingPathComponent("source.json")
+        try Data("[{\"role\":\"meta\",\"source\":\"fixture\",\"model\":\"fixture\"},{\"role\":\"user\",\"timestamp\":\"2026-09-12T00:00:00Z\",\"content\":\"refactor task\"}]".utf8).write(to: source)
+        let store = root.appendingPathComponent("store").path
+        let saved = try TCInsights.call(.init(storeDirectory: store,
+            operation: .init("analyze", source: "trajectory", file: source.path, save: true)))
+        let snapshotID = try XCTUnwrap(saved.insight?.id)
+        let episodeResponse = try TCInsights.call(.init(storeDirectory: store,
+            operation: .init("episode_create", snapshotIDs: [snapshotID])))
+        let episode = try XCTUnwrap(episodeResponse.episode)
+        let createdResponse = try TCInsights.call(.init(storeDirectory: store,
+            operation: .init("comparison_task_create", episodeIDs: [episode.id])))
+        let created = try XCTUnwrap(createdResponse.task)
+        try created.validateSupportedSchema()
+        let explained = try TCInsights.call(.init(storeDirectory: store,
+            operation: .init("comparison_task_explain", id: created.id)))
+        try XCTUnwrap(explained.comparisonTaskDetail).validateSupportedSchema(expectedID: created.id)
+        let pending = try TCInsights.call(.init(storeDirectory: store,
+            operation: .init("comparison_task_set_outcome", id: created.id, outcome: "pending",
+                             expectedRevision: created.revision)))
+        XCTAssertEqual(pending.task?.outcome?.value, .pending)
+        let listed = try TCInsights.call(.init(storeDirectory: store,
+            operation: .init("comparison_task_list")))
+        XCTAssertEqual(listed.tasks?.map(\.id), [created.id])
+        let deleted = try TCInsights.call(.init(storeDirectory: store,
+            operation: .init("comparison_task_delete", id: created.id,
+                             expectedRevision: try XCTUnwrap(pending.task?.revision))))
+        XCTAssertEqual(deleted.task?.id, created.id)
     }
 
     static func response(type: String, task: [String: Any]) -> String {

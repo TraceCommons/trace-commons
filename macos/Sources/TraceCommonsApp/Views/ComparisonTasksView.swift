@@ -5,6 +5,8 @@ struct ComparisonTasksView: View {
     @Bindable var model: ComparisonTasksModel
     let episodes: [EpisodeListEntry]
     let copy: [String: String]
+    let openEpisode: (String) -> Void
+    let openSnapshot: (String) -> Void
     @State private var reconfirmation: ComparisonTasksModel.Confirmation?
     @State private var deletion: ComparisonTasksModel.Confirmation?
 
@@ -52,8 +54,9 @@ struct ComparisonTasksView: View {
             ForEach(model.tasks) { item in
                 Button { model.select(item.id) } label: {
                     VStack(alignment: .leading, spacing: 3) {
-                        Text(item.id).font(.caption.monospaced()).lineLimit(1)
-                        Text("\(text("comparison_task_revision")): \(item.task.revision)").font(.caption)
+                        Text(taskLabel(item)).font(.headline)
+                        Text("\(item.task.episodes.count) \(text("comparison_task_frozen_evidence"))")
+                            .font(.caption)
                         status(item).font(.caption).foregroundStyle(.secondary)
                     }.frame(maxWidth: .infinity, alignment: .leading)
                 }
@@ -70,13 +73,24 @@ struct ComparisonTasksView: View {
                     deletion = model.deletion()
                 }
             }
-            Group {
-                Text(detail.task.id)
-                Text("\(text("comparison_task_revision")): \(detail.task.revision)")
-                Text("\(text("comparison_task_material_digest")): \(detail.task.material_digest)")
-                Text("\(text("comparison_task_resolved")): \(InsightsDate.label(detail.resolved_at))")
-            }.font(.caption.monospaced()).textSelection(.enabled)
+            Text(taskLabel(detail)).font(.headline)
+            DisclosureGroup(text("comparison_task_advanced_evidence")) {
+                Group {
+                    Text(detail.task.id)
+                    Text("\(text("comparison_task_revision")): \(detail.task.revision)")
+                    Text("\(text("comparison_task_material_digest")): \(detail.task.material_digest)")
+                    Text("\(text("comparison_task_resolved")): \(InsightsDate.label(detail.resolved_at))")
+                }.font(.caption.monospaced()).textSelection(.enabled)
+            }
             status(detail)
+            if let context = detail.task.context {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("\(text("comparison_task_project_id")): \(context.project_id)")
+                    Text("\(text("comparison_task_category")): \(text("category_\(context.category)"))")
+                    Text("\(text("comparison_task_task_date")): \(context.task_date)")
+                    Text("\(text("comparison_task_configuration_fingerprint")): \(context.configuration_fingerprint)")
+                }.font(.caption).textSelection(.enabled)
+            }
             staleReview(detail)
             frozenEvidence(detail)
             episodeEditor(detail)
@@ -94,8 +108,7 @@ struct ComparisonTasksView: View {
                       ? "comparison_task_context_complete" : "comparison_task_context_incomplete"))
             Text(text(detail.task.outcome == nil
                       ? "comparison_task_outcome_unassessed" : "outcome_\(detail.task.outcome!.value.rawValue)"))
-            let current = detail.task.independence_confirmation?.material_revision == detail.task.material_revision
-                && detail.task.independence_confirmation?.material_digest == detail.task.material_digest
+            let current = confirmationIsCurrent(detail)
             Text(text(current ? "comparison_task_confirmation_current" : "comparison_task_confirmation_missing"))
             if detail.stale_reasons.contains(.attributionPendingQualification) {
                 Text(text("comparison_task_attribution_pending"))
@@ -111,7 +124,7 @@ struct ComparisonTasksView: View {
                 Text(text("comparison_task_stale_\(reason.rawValue)"))
             }
             if !detail.overlapping_task_ids.isEmpty {
-                Text(text("comparison_task_overlapping_tasks")).font(.headline)
+                Text(text("comparison_task_overlap")).font(.headline)
                 ForEach(detail.overlapping_task_ids, id: \.self) { Text($0).font(.caption.monospaced()) }
             }
         }
@@ -122,11 +135,25 @@ struct ComparisonTasksView: View {
             Text(text("comparison_task_frozen_evidence")).font(.headline)
             ForEach(detail.task.episodes) { episode in
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(episode.episode_id).font(.caption.monospaced())
-                    Text("\(text("comparison_task_revision")): \(episode.revision) · \(text("episode_membership_revision")): \(episode.membership_revision)")
-                    Text(episode.members_digest).font(.caption.monospaced()).textSelection(.enabled)
+                    let current = episodes.first { $0.id == episode.episode_id }?.episode
+                    Text(current == nil ? text("comparison_task_current_missing")
+                         : current?.revision == episode.revision && current?.membership_revision == episode.membership_revision
+                            ? text("comparison_task_current_matches_frozen")
+                            : text("comparison_task_current_changed"))
+                    Text("\(episode.members.count) \(text("episode_members"))").font(.caption)
+                    if current != nil {
+                        Button(text("comparison_task_open_current_episode")) { openEpisode(episode.episode_id) }
+                    }
                     ForEach(episode.members, id: \.snapshot_id) { member in
-                        Text(member.snapshot_id).font(.caption.monospaced()).lineLimit(1)
+                        Button(text("comparison_task_open_frozen_snapshot")) { openSnapshot(member.snapshot_id) }
+                    }
+                    DisclosureGroup(text("comparison_task_advanced_evidence")) {
+                        Text(episode.episode_id).font(.caption.monospaced())
+                        Text("\(text("comparison_task_revision")): \(episode.revision) · \(text("episode_membership_revision")): \(episode.membership_revision)")
+                        Text(episode.members_digest).font(.caption.monospaced()).textSelection(.enabled)
+                        ForEach(episode.members, id: \.snapshot_id) { member in
+                            Text(member.snapshot_id).font(.caption.monospaced()).lineLimit(1)
+                        }
                     }
                 }.padding(8).background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
             }
@@ -148,7 +175,16 @@ struct ComparisonTasksView: View {
     private func contextEditor(_ detail: ComparisonTaskDetail) -> some View {
         VStack(alignment: .leading, spacing: 7) {
             Text(text("comparison_task_set_context")).font(.headline)
-            TextField(text("comparison_task_project_id"), text: $model.projectID)
+            Picker(text("comparison_task_project"), selection: $model.projectID) {
+                ForEach(model.knownProjectIDs, id: \.self) { id in Text(id).tag(id) }
+                if !model.knownProjectIDs.contains(model.projectID) {
+                    Text(text("comparison_task_new_project")).tag(model.projectID)
+                }
+            }
+            Button(text("comparison_task_new_project")) { model.startNewProject() }
+            DisclosureGroup(text("comparison_task_advanced_evidence")) {
+                TextField(text("comparison_task_project_id"), text: $model.projectID)
+            }
             TextField(text("comparison_task_task_date"), text: $model.taskDate)
             TextField(text("comparison_task_language"), text: $model.language)
             TextField(text("comparison_task_harness_id"), text: $model.harnessID)
@@ -187,12 +223,29 @@ struct ComparisonTasksView: View {
                     if selected { selection.wrappedValue.insert(entry.id) }
                     else { selection.wrappedValue.remove(entry.id) }
                 })) {
-                    Text(entry.id).font(.caption.monospaced()).lineLimit(1)
+                    VStack(alignment: .leading) {
+                        Text("\(entry.episode.members.count) \(text("episode_members")) · \(InsightsDate.label(entry.episode.updated_at))")
+                        Text(entry.episode.manual_assessment.map { text("outcome_\($0.outcome)") }
+                             ?? text("episode_unassessed")).font(.caption).foregroundStyle(.secondary)
+                    }
                 }.toggleStyle(.checkbox)
             }
         }
     }
     private func confirmationBinding(_ value: Binding<ComparisonTasksModel.Confirmation?>) -> Binding<Bool> {
         Binding(get: { value.wrappedValue != nil }, set: { if !$0 { value.wrappedValue = nil } })
+    }
+    private func taskLabel(_ detail: ComparisonTaskDetail) -> String {
+        let date = detail.task.context?.task_date ?? InsightsDate.label(detail.task.created_at)
+        let outcome = detail.task.outcome.map { text("outcome_\($0.value.rawValue)") }
+            ?? text("comparison_task_outcome_unassessed")
+        return "\(date) · \(outcome)"
+    }
+    private func confirmationIsCurrent(_ detail: ComparisonTaskDetail) -> Bool {
+        let upstream: Set<ComparisonTaskStaleReason> = [.episodeMissing, .episodeRevisionChanged,
+            .episodeMembershipChanged, .snapshotMissingOrReplaced, .independenceMaterialChanged]
+        return upstream.isDisjoint(with: detail.stale_reasons)
+            && detail.task.independence_confirmation?.material_revision == detail.task.material_revision
+            && detail.task.independence_confirmation?.material_digest == detail.task.material_digest
     }
 }

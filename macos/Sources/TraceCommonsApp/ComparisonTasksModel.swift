@@ -19,8 +19,8 @@ final class ComparisonTasksModel {
     var createSelection = Set<String>()
     var editSelection = Set<String>()
     private(set) var editingEpisodes = false
-    var projectID = ""
-    var taskDate = ""
+    var projectID = UUID().uuidString.lowercased()
+    var taskDate = String(Date().ISO8601Format().prefix(10))
     var language = ""
     var harnessID = ""
     var harnessVersion = ""
@@ -56,6 +56,10 @@ final class ComparisonTasksModel {
         presentation = UUID(); detail = nil; editSelection = []; editingEpisodes = false
         error = nil; notice = nil
     }
+    var knownProjectIDs: [String] {
+        Array(Set(tasks.compactMap { $0.task.context?.project_id })).sorted()
+    }
+    func startNewProject() { projectID = UUID().uuidString.lowercased() }
     func beginEpisodeEdit() {
         guard let detail else { return }
         editSelection = Set(detail.task.episodes.map(\.episode_id)); editingEpisodes = true
