@@ -270,6 +270,18 @@ Provider extensibility is an internal architectural requirement from packet 2. T
 
 Scouts extend the mission program after its core participation and evaluation flow works. Packets 13–14 do not expand the first private-insights release. Unattended scout publication and additional live source adapters are follow-on decisions based on the bounded pilot, not prerequisites.
 
+## Review follow-through
+
+[Kristi’s review of the original plan](https://github.com/TraceCommons/trace-commons/pull/870#issuecomment-5645229086) supports the direction and identifies evidence and product risks. These requirements attach to existing milestones:
+
+- **Current pilot:** follow the [private pilot runbook](2026-09-12-private-refactor-pilot.md). Report the full reviewed-task denominator, mixed-model/delegated/unsupported/missing-context exclusions, boundary split/merge and omitted-attempt corrections, time and manual effort to a reviewed result, abandonment, and decision usefulness. Report overlapping exclusion reasons separately without double-counting the total excluded tasks. User confirmation is an assertion to assess, not validation by itself.
+- **Provider recommendations:** disclosure alone is insufficient for a provider's self-model evaluation. Require independent, unaffiliated evaluation before promoting such a finding into a model recommendation. Attributed descriptive findings can remain available within their evidence limits.
+- **Phase 3 / packet 8:** publish the semantic execution decision before implementation: rules, local model, or attested remote; supported hardware and licensing; history/input caps; CPU/GPU/RAM/time and monetary budgets; cancellation; and cache invalidation. Choose the method from qualification evidence.
+- **Bounded mission path:** distinguish technical access, permitted collection, retained excerpts, attribution, artifact redistribution, and mission publication rights. Treat starting artifacts and dependencies as untrusted. Bind execution to reviewed digests and test substitution plus prohibited filesystem/network access. Contribution credits and mission funding remain separate; attach a verified accounting contract and any required counsel checklist before enabling funding or redemption claims.
+- **Phase 5 / packet 12:** require a reviewed privacy design with an accountable owner, privacy unit, named mechanism, contribution bounds, repeated-query composition/accounting, cumulative release budget, and revocation limits before public analytics implementation. This remains a later gate.
+
+External lessons are patterns to evaluate, not permission to import another product's schemas or text. These requirements strengthen the existing sequence; they do not make hosted analytics or public missions prerequisites for the local pilot.
+
 ## Verification and rollout
 
 - Use synthetic fixtures for routine development; real trace inspection requires the relevant authorization and permitted purpose.
