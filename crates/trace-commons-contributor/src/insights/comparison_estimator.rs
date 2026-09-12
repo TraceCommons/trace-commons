@@ -40,7 +40,6 @@ pub struct EstimatorTaskV1 {
 #[serde(deny_unknown_fields)]
 pub struct EstimatorInputV1 {
     pub specification_digest: String,
-    pub estimation_input_digest: String,
     /// Canonical label order fixes each contrast as index 1 minus index 0.
     pub cohort_labels: [String; 2],
     pub tasks: Vec<EstimatorTaskV1>,
@@ -92,11 +91,11 @@ pub enum EstimateState {
 pub struct OutcomeContrastV1 {
     pub outcome: AssessedOutcome,
     /// Rounded presentation values; decisions use the exact ratios below.
-    pub first_cohort_proportion_bps: u16,
-    pub second_cohort_proportion_bps: u16,
-    pub observed_difference_bps: i32,
-    pub exact_difference_numerator: i64,
-    pub exact_difference_denominator: u64,
+    pub first_cohort_proportion_bps: Option<u16>,
+    pub second_cohort_proportion_bps: Option<u16>,
+    pub observed_difference_bps: Option<i32>,
+    pub exact_difference_numerator: Option<i64>,
+    pub exact_difference_denominator: Option<u64>,
     pub interval_lower_numerator: Option<i64>,
     pub interval_upper_numerator: Option<i64>,
     pub interval_denominator: Option<u64>,
@@ -108,6 +107,7 @@ pub struct OutcomeContrastV1 {
 pub struct TaskOutcomeEstimateV1 {
     pub schema_version: u32,
     pub seed_digest: String,
+    pub assessed_estimation_input_digest: String,
     pub first_cohort_assessed_tasks: u64,
     pub second_cohort_assessed_tasks: u64,
     pub contrasts: Vec<OutcomeContrastV1>,
@@ -116,7 +116,7 @@ pub struct TaskOutcomeEstimateV1 {
 #[derive(Serialize)]
 struct SeedFields<'a> {
     specification_digest: &'a str,
-    estimation_input_digest: &'a str,
+    assessed_estimation_input_digest: &'a str,
     cohort_labels: &'a [String; 2],
     outcomes: &'a [AssessedOutcome; 3],
     rules: &'a EstimatorRulesV1,
@@ -133,7 +133,8 @@ pub fn estimate_task_outcomes(
     let first = cell(&tasks, &input.cohort_labels[0]);
     let second = cell(&tasks, &input.cohort_labels[1]);
     let denominator = common_denominator(first.len(), second.len())?;
-    let seed_digest = make_seed_digest(input, rules, &tasks)?;
+    let assessed_estimation_input_digest = assessed_input_digest(&tasks)?;
+    let seed_digest = make_seed_digest(input, rules, &tasks, &assessed_estimation_input_digest)?;
     let seed = decode_digest(&seed_digest)?;
     let supported = first.len() >= 2 && second.len() >= 2;
     let mut samples = AssessedOutcome::ALL.map(|_| Vec::new());
@@ -162,7 +163,10 @@ pub fn estimate_task_outcomes(
     for (index, outcome) in AssessedOutcome::ALL.into_iter().enumerate() {
         let first_count = first.iter().filter(|task| task.outcome == outcome).count();
         let second_count = second.iter().filter(|task| task.outcome == outcome).count();
-        let observed = difference_numerator(first_count, first.len(), second_count, second.len())?;
+        let estimand_defined = !first.is_empty() && !second.is_empty();
+        let observed = estimand_defined
+            .then(|| difference_numerator(first_count, first.len(), second_count, second.len()))
+            .transpose()?;
         let homogeneous = first_count == 0
             || first_count == first.len()
             || second_count == 0
@@ -182,26 +186,31 @@ pub fn estimate_task_outcomes(
             let threshold_scaled = i128::from(rules.maximum_interval_width_bps)
                 .checked_mul(i128::from(denominator))
                 .ok_or_else(invalid)?;
-            let state = if homogeneous || lower == 0 || upper == 0 {
-                EstimateState::IndeterminateBoundary
-            } else if width_scaled == threshold_scaled {
-                EstimateState::IndeterminateBoundary
-            } else if width_scaled > threshold_scaled {
-                EstimateState::InsufficientPrecision
-            } else if lower < 0 && upper > 0 {
-                EstimateState::UncertainDifference
-            } else {
-                EstimateState::ObservedDifference
-            };
+            let state =
+                if homogeneous || lower == 0 || upper == 0 || width_scaled == threshold_scaled {
+                    EstimateState::IndeterminateBoundary
+                } else if width_scaled > threshold_scaled {
+                    EstimateState::InsufficientPrecision
+                } else if lower < 0 && upper > 0 {
+                    EstimateState::UncertainDifference
+                } else {
+                    EstimateState::ObservedDifference
+                };
             (Some(lower), Some(upper), Some(denominator), state)
         };
         contrasts.push(OutcomeContrastV1 {
             outcome,
-            first_cohort_proportion_bps: display_proportion(first_count, first.len())?,
-            second_cohort_proportion_bps: display_proportion(second_count, second.len())?,
-            observed_difference_bps: display_ratio(observed, denominator)?,
+            first_cohort_proportion_bps: (!first.is_empty())
+                .then(|| display_proportion(first_count, first.len()))
+                .transpose()?,
+            second_cohort_proportion_bps: (!second.is_empty())
+                .then(|| display_proportion(second_count, second.len()))
+                .transpose()?,
+            observed_difference_bps: observed
+                .map(|value| display_ratio(value, denominator))
+                .transpose()?,
             exact_difference_numerator: observed,
-            exact_difference_denominator: denominator,
+            exact_difference_denominator: estimand_defined.then_some(denominator),
             interval_lower_numerator: lower,
             interval_upper_numerator: upper,
             interval_denominator,
@@ -211,6 +220,7 @@ pub fn estimate_task_outcomes(
     Ok(TaskOutcomeEstimateV1 {
         schema_version: 1,
         seed_digest,
+        assessed_estimation_input_digest,
         first_cohort_assessed_tasks: first.len() as u64,
         second_cohort_assessed_tasks: second.len() as u64,
         contrasts,
@@ -219,7 +229,6 @@ pub fn estimate_task_outcomes(
 
 fn validate(input: &EstimatorInputV1, rules: &EstimatorRulesV1) -> Result<()> {
     if !valid_digest(&input.specification_digest)
-        || !valid_digest(&input.estimation_input_digest)
         || input.cohort_labels[0] >= input.cohort_labels[1]
         || input.cohort_labels.iter().any(|label| !valid_label(label))
         || input.tasks.len() > MAX_TASKS
@@ -257,10 +266,11 @@ fn make_seed_digest(
     input: &EstimatorInputV1,
     rules: &EstimatorRulesV1,
     ordered_tasks: &[EstimatorTaskV1],
+    assessed_estimation_input_digest: &str,
 ) -> Result<String> {
     let bytes = serde_json::to_vec(&SeedFields {
         specification_digest: &input.specification_digest,
-        estimation_input_digest: &input.estimation_input_digest,
+        assessed_estimation_input_digest,
         cohort_labels: &input.cohort_labels,
         outcomes: &AssessedOutcome::ALL,
         rules,
@@ -268,6 +278,15 @@ fn make_seed_digest(
     })?;
     let mut hash = Sha256::new();
     hash.update(b"trace-commons-task-outcome-estimator-seed-v1\0");
+    hash.update((bytes.len() as u64).to_be_bytes());
+    hash.update(bytes);
+    Ok(format!("{:x}", hash.finalize()))
+}
+
+fn assessed_input_digest(ordered_tasks: &[EstimatorTaskV1]) -> Result<String> {
+    let bytes = serde_json::to_vec(ordered_tasks)?;
+    let mut hash = Sha256::new();
+    hash.update(b"trace-commons-assessed-outcome-estimation-input-v1\0");
     hash.update((bytes.len() as u64).to_be_bytes());
     hash.update(bytes);
     Ok(format!("{:x}", hash.finalize()))
@@ -442,7 +461,6 @@ mod tests {
         }
         EstimatorInputV1 {
             specification_digest: "11".repeat(32),
-            estimation_input_digest: "22".repeat(32),
             cohort_labels: ["model-a".into(), "model-b".into()],
             tasks,
         }
@@ -464,11 +482,14 @@ mod tests {
         .unwrap();
         assert_eq!(estimate.first_cohort_assessed_tasks, 40);
         assert_eq!(estimate.second_cohort_assessed_tasks, 40);
-        assert_eq!(estimate.contrasts[0].exact_difference_numerator, -400);
-        assert_eq!(estimate.contrasts[0].exact_difference_denominator, 1_600);
-        assert_eq!(estimate.contrasts[0].observed_difference_bps, -2_500);
-        assert_eq!(estimate.contrasts[1].observed_difference_bps, 0);
-        assert_eq!(estimate.contrasts[2].observed_difference_bps, 2_500);
+        assert_eq!(estimate.contrasts[0].exact_difference_numerator, Some(-400));
+        assert_eq!(
+            estimate.contrasts[0].exact_difference_denominator,
+            Some(1_600)
+        );
+        assert_eq!(estimate.contrasts[0].observed_difference_bps, Some(-2_500));
+        assert_eq!(estimate.contrasts[1].observed_difference_bps, Some(0));
+        assert_eq!(estimate.contrasts[2].observed_difference_bps, Some(2_500));
         assert_eq!(
             estimate.contrasts[1].state,
             EstimateState::UncertainDifference
@@ -483,7 +504,7 @@ mod tests {
             estimate
                 .contrasts
                 .iter()
-                .all(|contrast| contrast.exact_difference_numerator == 0)
+                .all(|contrast| contrast.exact_difference_numerator == Some(0))
         );
         assert!(estimate.contrasts.iter().all(|contrast| {
             matches!(
@@ -507,6 +528,22 @@ mod tests {
             contrast.state == EstimateState::InsufficientResamplingSupport
                 && contrast.interval_lower_numerator.is_none()
                 && contrast.interval_upper_numerator.is_none()
+        }));
+    }
+
+    #[test]
+    fn empty_cell_has_typed_unavailable_estimand() {
+        let estimate = estimate_task_outcomes(
+            &input(&[], &[AssessedOutcome::Accepted, AssessedOutcome::Rejected]),
+            &rules(),
+        )
+        .unwrap();
+        assert!(estimate.contrasts.iter().all(|contrast| {
+            contrast.first_cohort_proportion_bps.is_none()
+                && contrast.observed_difference_bps.is_none()
+                && contrast.exact_difference_numerator.is_none()
+                && contrast.exact_difference_denominator.is_none()
+                && contrast.state == EstimateState::InsufficientResamplingSupport
         }));
     }
 
@@ -555,7 +592,7 @@ mod tests {
         assert_eq!(first, second);
         assert_eq!(
             first.seed_digest,
-            "0e91a2822e32f7699bfaa1959a0401ba1824e2ca56c7b82431a25adba1d8bec4"
+            "2045586eb1f0510bb7a9e309bf2a1d24b3cc345075b93ad047890b86329ce263"
         );
     }
 
@@ -572,7 +609,7 @@ mod tests {
                 .seed_digest
         );
         let mut changed_input = value;
-        changed_input.estimation_input_digest = "33".repeat(32);
+        changed_input.tasks[0].outcome = AssessedOutcome::Rejected;
         assert_ne!(
             baseline.seed_digest,
             estimate_task_outcomes(&changed_input, &rules())
