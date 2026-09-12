@@ -11,7 +11,7 @@
 //! Swift side. The symbol still links; the call is simply made with the
 //! wrong argument shape, at runtime, in a shipped app. So comparing the two
 //! copies to each other is not enough -- they can agree and both be wrong.
-//! This test parses `src/lib.rs` for every `#[unsafe(no_mangle)] extern "C"`
+//! This test parses the FFI source modules for every `#[unsafe(no_mangle)] extern "C"`
 //! function and requires BOTH headers to declare exactly that set with
 //! exactly those signatures.
 //!
@@ -83,6 +83,7 @@ fn rust_base_type_to_c(ty: &str) -> String {
         "tc_handle" => "tc_handle",
         "tc_preview" => "tc_preview",
         "tc_compute_handle" => "tc_compute_handle",
+        "usize" => "size_t",
         "u64" => "uint64_t",
         "u32" => "uint32_t",
         "i64" => "int64_t",
@@ -176,7 +177,7 @@ fn split_top_level_commas(s: &str) -> Vec<String> {
 }
 
 fn rust_surface() -> BTreeMap<String, Signature> {
-    let src = ["src/lib.rs", "src/compute.rs"]
+    let src = ["src/lib.rs", "src/compute.rs", "src/insights.rs"]
         .map(|path| {
             std::fs::read_to_string(ffi_crate_dir().join(path)).expect("failed to read FFI source")
         })

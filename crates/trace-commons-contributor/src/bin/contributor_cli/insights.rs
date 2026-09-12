@@ -1,9 +1,9 @@
 use std::path::PathBuf;
 
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use clap::{Args, Subcommand, ValueEnum};
 use trace_commons_contributor::insights::{
-    LocalInsight, LocalInsightStore, SourceFormat, analyze_file,
+    LocalInsight, LocalInsightStore, SourceFormat, analyze_file, service::open_store,
 };
 use trace_commons_protocol::insights::MetricId;
 
@@ -52,14 +52,7 @@ impl From<Source> for SourceFormat {
 }
 
 fn store(args: &InsightsArgs) -> Result<LocalInsightStore> {
-    let path = match &args.store_dir {
-        Some(path) => path.clone(),
-        None => dirs::data_local_dir()
-            .ok_or_else(|| anyhow!("insights-local-directory-unavailable"))?
-            .join("trace-commons")
-            .join("insights"),
-    };
-    LocalInsightStore::open(&path)
+    open_store(args.store_dir.as_deref())
 }
 
 pub(super) fn run(args: &InsightsArgs, json: bool) -> Result<()> {
