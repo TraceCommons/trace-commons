@@ -82,8 +82,10 @@ impl RecordedTimeEvidence {
             || classified != Some(self.total_eligible_records)
             || (self.valid_timestamps == 0) != self.earliest.is_none()
             || (self.valid_timestamps == 0) != self.latest.is_none()
-            || (self.source_format == SourceFormat::Codex
-                && self.coordinates != TimeRecordCoordinates::JsonlPhysicalLinesOneBased)
+            || (matches!(
+                self.source_format,
+                SourceFormat::Codex | SourceFormat::ClaudeCode
+            ) && self.coordinates != TimeRecordCoordinates::JsonlPhysicalLinesOneBased)
         {
             return Err(invalid());
         }
@@ -194,6 +196,7 @@ pub fn extract_recorded_time_evidence(
             records.push((index as u64 + 1, record));
         }
         match source {
+            SourceFormat::ClaudeCode => return Err(invalid()),
             SourceFormat::Codex => {
                 observe_codex_records(&mut result, records.iter().map(|(i, v)| (*i, v)))?
             }

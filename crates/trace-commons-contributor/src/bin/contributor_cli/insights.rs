@@ -252,6 +252,7 @@ enum NativeUsageSource {
 #[derive(Clone, Copy, ValueEnum)]
 enum Source {
     Codex,
+    ClaudeCode,
     Trajectory,
 }
 
@@ -259,6 +260,7 @@ impl From<Source> for SourceFormat {
     fn from(value: Source) -> Self {
         match value {
             Source::Codex => Self::Codex,
+            Source::ClaudeCode => Self::ClaudeCode,
             Source::Trajectory => Self::Trajectory,
         }
     }

@@ -10,6 +10,7 @@
             <StackPanel Orientation="Horizontal" Spacing="12">
                 <ComboBox x:Name="Source" Header="{Binding [source]}" SelectedIndex="0" IsEnabled="{Binding Idle}">
                     <ComboBoxItem Content="{Binding [codex]}" Tag="codex" />
+                    <ComboBoxItem Content="{Binding [claude_code]}" Tag="claude_code" />
                     <ComboBoxItem Content="{Binding [trajectory]}" Tag="trajectory" />
                 </ComboBox>
                 <Button Content="{Binding [choose_file]}" Click="OnChoose" IsEnabled="{Binding Idle}" VerticalAlignment="Bottom" />

@@ -8,7 +8,7 @@ use trace_commons_contributor::insights::service::{MAX_REQUEST_BYTES, dispatch_j
 ///
 /// The request is UTF-8 JSON, at most 65536 bytes, without a trailing NUL:
 /// `{"store_dir":"/chosen/store","operation":{"type":"list"}}`.
-/// Analyze: `{"type":"analyze","source":"codex","file":"/chosen/file","save":false}`.
+/// Analyze: `{"type":"analyze","source":"codex|claude_code|trajectory","file":"/chosen/file","save":false}`.
 /// Explain/delete: `{"type":"explain","id":"..."}` / `{"type":"delete","id":"..."}`.
 /// User assessment: `{"type":"annotate","id":"...","category":"docs","outcome":"partial"}`.
 /// Clear assessment: `{"type":"clear_annotation","id":"..."}`.
@@ -211,6 +211,32 @@ mod tests {
             json_call(&store, serde_json::json!({"type":"episode_list"})).unwrap_err(),
             "insights-operation-failed"
         );
+    }
+
+    #[test]
+    fn claude_code_source_round_trips_through_the_native_json_abi() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = temp.path().join("insights");
+        let source = temp.path().join("claude.jsonl");
+        std::fs::write(
+            &source,
+            b"{\"type\":\"user\",\"message\":{\"content\":\"synthetic request\"}}\n",
+        )
+        .unwrap();
+
+        let analyzed = json_call(
+            &store,
+            serde_json::json!({
+                "type":"analyze", "source":"claude_code", "file":source, "save":true
+            }),
+        )
+        .unwrap();
+        assert_eq!(analyzed["insight"]["source_format"], "claude_code");
+        assert!(analyzed["insight"]["model_observations"].is_null());
+        assert!(analyzed["insight"]["usage_evidence"].is_null());
+        assert!(analyzed["insight"]["task_attribution"].is_null());
+        let listed = json_call(&store, serde_json::json!({"type":"list"})).unwrap();
+        assert_eq!(listed["insights"][0]["source_format"], "claude_code");
     }
 
     #[test]

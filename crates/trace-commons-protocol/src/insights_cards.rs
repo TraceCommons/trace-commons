@@ -51,6 +51,7 @@ impl InsightQuestionId {
 #[serde(rename_all = "snake_case")]
 pub enum CardSourceFormat {
     Codex,
+    ClaudeCode,
     Trajectory,
 }
 
