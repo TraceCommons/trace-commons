@@ -51,6 +51,25 @@ final class ComparisonSpecificationsModelTests: XCTestCase {
     }
 
     @MainActor
+    func testCommittedSaveRejectsMismatchedReconciliationDetail() async throws {
+        let service = SpecificationFakeService()
+        let model = ComparisonSpecificationsModel(service: { try await service.call($0) })
+        model.open(); try await settle(model)
+        model.updateSources(tasks: [try Self.task()], snapshots: try Self.snapshots())
+        model.setCohort("model-a", selected: true); model.setCohort("model-b", selected: true)
+        model.preview(); try await settle(model)
+        await service.holdWrongNextGet(); model.save()
+        try await Task.sleep(for: .milliseconds(20))
+        XCTAssertTrue(model.busy)
+        await service.releaseGet(); try await settle(model)
+        XCTAssertNil(model.selected)
+        XCTAssertEqual(model.notice, "comparison_specification_saved_notice")
+        XCTAssertEqual(model.error, "comparison_specification_committed_reload_failed")
+        let saves = await service.count("comparison_save_spec")
+        XCTAssertEqual(saves, 1)
+    }
+
+    @MainActor
     func testUpstreamInvalidationDuringHeldReadIsCoalesced() async throws {
         let service = SpecificationFakeService(seed: true)
         let model = ComparisonSpecificationsModel(service: { try await service.call($0) })
@@ -73,7 +92,7 @@ final class ComparisonSpecificationsModelTests: XCTestCase {
     }
 
     @MainActor func testDraftDayUsesPickerCalendarRatherThanUTCDate() {
-        var calendar = Calendar(identifier: .gregorian)
+        var calendar = Calendar(identifier: .buddhist)
         calendar.timeZone = TimeZone(secondsFromGMT: 14 * 60 * 60)!
         var utc = Calendar(identifier: .gregorian); utc.timeZone = TimeZone(secondsFromGMT: 0)!
         let instant = utc.date(from: .init(year: 2026, month: 9, day: 10, hour: 20))!
@@ -196,8 +215,10 @@ private actor SpecificationFakeService {
     private var listContinuation: CheckedContinuation<Void, Never>?
     private var failListContinuation: CheckedContinuation<Void, Never>?
     private var previewContinuation: CheckedContinuation<Void, Never>?
+    private var getContinuation: CheckedContinuation<Void, Never>?
     private var holdFailListFlag = false
     private var holdPreviewFlag = false, failEvaluationFlag = false
+    private var holdWrongGetFlag = false
     init(seed: Bool = false) { if seed { saved = Self.specification() } }
     func operations() -> [String] { calls }
     func count(_ operation: String) -> Int { calls.filter { $0 == operation }.count }
@@ -209,6 +230,8 @@ private actor SpecificationFakeService {
     func holdPreview() { holdPreviewFlag = true }
     func releasePreview() { previewContinuation?.resume(); previewContinuation = nil }
     func failNextEvaluation() { failEvaluationFlag = true }
+    func holdWrongNextGet() { holdWrongGetFlag = true }
+    func releaseGet() { getContinuation?.resume(); getContinuation = nil }
     func releaseList() { listContinuation?.resume(); listContinuation = nil }
     func releaseFailingList() { failListContinuation?.resume(); failListContinuation = nil }
     func call(_ request: InsightsRequest) async throws -> InsightsResponse {
@@ -236,7 +259,13 @@ private actor SpecificationFakeService {
             if holdSaveFlag { holdSaveFlag = false; await withCheckedContinuation { saveContinuation = $0 } }
             saved = Self.specification(); payload["type"] = "comparison_specification"; payload["specification"] = saved
         case "comparison_get_spec":
-            payload["type"] = "comparison_specification"; payload["specification"] = saved
+            var returned = saved
+            if holdWrongGetFlag {
+                holdWrongGetFlag = false
+                await withCheckedContinuation { getContinuation = $0 }
+                returned?["id"] = "50c18c96-6093-49f5-bb6f-6092ef0630b9"
+            }
+            payload["type"] = "comparison_specification"; payload["specification"] = returned
         case "comparison_evaluate", "comparison_explain_result":
             if failEvaluationFlag { failEvaluationFlag = false; throw InsightsError.invalidResponse }
             payload["type"] = "comparison_result"; payload["result"] = Self.result()

@@ -11,6 +11,16 @@ struct ComparisonStratumOption: Identifiable, Equatable, Sendable {
     var id: String { "\(stratum.project_id):\(stratum.language):\(stratum.configuration_fingerprint)" }
 }
 
+enum ComparisonLocalCalendar {
+    static func day(_ date: Date, calendar: Calendar = .current) -> String {
+        var gregorian = Calendar(identifier: .gregorian)
+        gregorian.timeZone = calendar.timeZone
+        let parts = gregorian.dateComponents([.year, .month, .day], from: date)
+        guard let year = parts.year, let month = parts.month, let day = parts.day else { return "" }
+        return String(format: "%04d-%02d-%02d", year, month, day)
+    }
+}
+
 @Observable @MainActor
 final class ComparisonSpecificationsModel {
     typealias Service = @Sendable (InsightsRequest) async throws -> InsightsResponse
@@ -168,7 +178,7 @@ final class ComparisonSpecificationsModel {
                 try spec.validateStructure()
                 guard self.active else { return }
                 self.notice = "comparison_specification_saved_notice"
-                self.reconcileSaved(id: spec.id)
+                self.reconcileSaved(specification: spec)
             } catch {
                 guard let self else { return }; self.saveTask = nil; self.busy = false
                 guard self.active else { return }; self.error = "comparison_specification_error"
@@ -176,7 +186,8 @@ final class ComparisonSpecificationsModel {
             }
         }
     }
-    private func reconcileSaved(id: String) {
+    private func reconcileSaved(specification saved: ComparisonSpecification) {
+        let id = saved.id
         let retained = notice; let screen = generation
         presentation = UUID(); selected = nil; result = nil; busy = true
         let service = service; let token = presentation
@@ -187,12 +198,20 @@ final class ComparisonSpecificationsModel {
                       !Task.isCancelled else { return }
                 guard list.type == "comparison_specification_list",
                       let specs = list.specifications else { throw InsightsError.invalidResponse }
-                try specs.forEach { try $0.validateStructure() }; self.specifications = specs
+                try specs.forEach { try $0.validateStructure() }
+                guard specs.contains(where: {
+                    $0.id == id && $0.specification_digest == saved.specification_digest
+                        && $0.saved_record_digest == saved.saved_record_digest
+                }) else { throw InsightsError.invalidResponse }
+                self.specifications = specs
                 let response = try await service(.init(operation: .init("comparison_get_spec", id: id)))
                 guard self.active, self.generation == screen, self.presentation == token,
                       !Task.isCancelled else { return }
                 guard response.type == "comparison_specification",
-                      let spec = response.specification else { throw InsightsError.invalidResponse }
+                      let spec = response.specification, spec.id == id,
+                      spec.specification_digest == saved.specification_digest,
+                      spec.saved_record_digest == saved.saved_record_digest
+                else { throw InsightsError.invalidResponse }
                 try spec.validateStructure(); self.selected = spec; self.notice = retained; self.finish()
             } catch {
                 guard let self, self.active, self.generation == screen, self.presentation == token,
@@ -255,9 +274,7 @@ final class ComparisonSpecificationsModel {
                      dateStart: Self.day(dateStart), dateEnd: Self.day(dateEnd), stratum: option.stratum)
     }
     static func day(_ date: Date, calendar: Calendar = .current) -> String {
-        let parts = calendar.dateComponents([.year, .month, .day], from: date)
-        guard let year = parts.year, let month = parts.month, let day = parts.day else { return "" }
-        return String(format: "%04d-%02d-%02d", year, month, day)
+        ComparisonLocalCalendar.day(date, calendar: calendar)
     }
     private static func known(_ value: ComparisonContextString) -> String {
         if case .known(let text) = value { return text }

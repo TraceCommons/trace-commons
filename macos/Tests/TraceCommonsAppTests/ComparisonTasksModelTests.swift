@@ -5,6 +5,23 @@ import TCBridge
 
 final class ComparisonTasksModelTests: XCTestCase {
     @MainActor
+    func testTaskDateUsesLocalCalendarOnCreationAndIncompleteTaskReset() async throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = try XCTUnwrap(TimeZone(secondsFromGMT: 14 * 60 * 60))
+        var utc = Calendar(identifier: .gregorian)
+        utc.timeZone = try XCTUnwrap(TimeZone(secondsFromGMT: 0))
+        let instant = try XCTUnwrap(utc.date(from: .init(year: 2026, month: 9, day: 10, hour: 20)))
+        let service = ComparisonFakeService(seed: true)
+        let model = ComparisonTasksModel(calendar: calendar, now: { instant },
+                                         service: { try await service.call($0) })
+        XCTAssertEqual(model.taskDate, "2026-09-11")
+        model.taskDate = "1999-01-01"
+        model.open(); try await settle(model)
+        model.select(ComparisonFakeService.taskID); try await settle(model)
+        XCTAssertEqual(model.taskDate, "2026-09-11")
+    }
+
+    @MainActor
     func testCreateOutcomeReconfirmReplaceAndDeleteUseCASWithoutRetries() async throws {
         let service = ComparisonFakeService()
         let model = ComparisonTasksModel(service: { try await service.call($0) })
