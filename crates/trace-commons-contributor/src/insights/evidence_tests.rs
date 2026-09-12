@@ -182,7 +182,7 @@ fn legacy_v4_mutation_preserves_existing_evidence_and_episodes_without_inventing
     assert_eq!(store.episode_explain(&episode.id).unwrap().members.len(), 1);
     let migrated: serde_json::Value =
         serde_json::from_slice(&fs::read(&index_path).unwrap()).unwrap();
-    assert_eq!(migrated["version"], 5);
+    assert_eq!(migrated["version"], super::STORE_VERSION);
     assert!(migrated["reports"][&saved.id]["time_evidence"].is_null());
 }
 
