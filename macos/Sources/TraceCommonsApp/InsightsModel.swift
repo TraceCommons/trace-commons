@@ -14,7 +14,14 @@ final class InsightsModel {
     func text(_ key: String) -> String { copy[key] ?? "" }
     private(set) var error: String?
     private(set) var snapshots: [LocalInsight] = []
-    private(set) var selected: LocalInsight?
+    var assessmentCategory = "unknown"
+    var assessmentOutcome = "unknown"
+    private(set) var selected: LocalInsight? {
+        didSet {
+            assessmentCategory = selected?.manual_annotation?.category ?? "unknown"
+            assessmentOutcome = selected?.manual_annotation?.outcome ?? "unknown"
+        }
+    }
     private(set) var selectedIsSaved = false
     private(set) var selectedFile: URL?
     private var selectedSource = "codex"

@@ -6,8 +6,6 @@ struct InsightsView: View {
     @State private var model = InsightsModel()
     @State private var choosingFile = false
     @State private var source = "codex"
-    @State private var category = "unknown"
-    @State private var outcome = "unknown"
 
     var body: some View {
         ScrollView {
@@ -47,7 +45,7 @@ struct InsightsView: View {
                 ForEach(model.snapshots) { insight in
                     Button { model.explain(insight.id) } label: {
                         VStack(alignment: .leading) {
-                            Text(insight.source_format.capitalized)
+                            Text(model.text(insight.source_format))
                             Text(InsightsDate.label(insight.analyzed_at)).font(.caption)
                             Text(insight.id).font(.caption.monospaced()).lineLimit(1)
                         }.frame(maxWidth: .infinity, alignment: .leading)
@@ -67,17 +65,17 @@ struct InsightsView: View {
         VStack(alignment: .leading) {
             Text(model.text("assessment_notice"))
             HStack {
-                Picker(model.text("category"), selection: $category) {
+                Picker(model.text("category"), selection: $model.assessmentCategory) {
                     ForEach(["unknown", "refactor", "tests", "docs", "debugging", "other"], id: \.self) {
                         Text(model.text("category_" + $0)).tag($0)
                     }
                 }
-                Picker(model.text("outcome"), selection: $outcome) {
+                Picker(model.text("outcome"), selection: $model.assessmentOutcome) {
                     ForEach(["unknown", "accepted", "partial", "rejected"], id: \.self) {
                         Text(model.text("outcome_" + $0)).tag($0)
                     }
                 }
-                Button(model.text("save_assessment")) { model.annotate(category: category, outcome: outcome) }
+                Button(model.text("save_assessment")) { model.annotate(category: model.assessmentCategory, outcome: model.assessmentOutcome) }
                 Button(model.text("clear_assessment")) { model.clearAnnotation() }
             }.disabled(model.busy)
         }
