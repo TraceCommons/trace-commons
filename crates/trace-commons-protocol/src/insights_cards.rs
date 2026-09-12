@@ -625,17 +625,19 @@ fn expected_activity_card(
     };
     Ok(card(
         request,
-        InsightQuestionId::RecordedActivity,
-        state,
-        rows,
-        coverage,
-        None,
-        vec![
-            CardLimitation::TimestampsAreRecordSpan,
-            CardLimitation::RecordSpanIsNotActiveTime,
-            CardLimitation::ToolFailuresAreNotRejections,
-        ],
-        false,
+        CardCore {
+            question: InsightQuestionId::RecordedActivity,
+            state,
+            rows,
+            coverage,
+            episode_denominator: None,
+            limitations: vec![
+                CardLimitation::TimestampsAreRecordSpan,
+                CardLimitation::RecordSpanIsNotActiveTime,
+                CardLimitation::ToolFailuresAreNotRejections,
+            ],
+            rows_omitted: false,
+        },
     ))
 }
 
@@ -735,13 +737,15 @@ fn expected_episode_card(request: &InsightCardRequest) -> Result<InsightCard, Ca
     }
     Ok(card(
         request,
-        InsightQuestionId::EpisodeOutcomes,
-        state,
-        rows,
-        vec![coverage(CoverageUnit::EpisodeGroups, assessed, eligible)],
-        Some(denominator),
-        limitations,
-        false,
+        CardCore {
+            question: InsightQuestionId::EpisodeOutcomes,
+            state,
+            rows,
+            coverage: vec![coverage(CoverageUnit::EpisodeGroups, assessed, eligible)],
+            episode_denominator: Some(denominator),
+            limitations,
+            rows_omitted: false,
+        },
     ))
 }
 
@@ -784,46 +788,49 @@ fn expected_models_card(request: &InsightCardRequest) -> Result<InsightCard, Car
     };
     Ok(card(
         request,
-        InsightQuestionId::ObservedModels,
-        state,
-        rows,
-        vec![
-            coverage(
-                CoverageUnit::SavedSnapshots,
-                observed_snapshots,
-                request.snapshots.len() as u64,
-            ),
-            coverage(CoverageUnit::ModelRecords, observed, eligible),
-        ],
-        None,
-        vec![CardLimitation::ModelDeclarationsAreObservedMetadata],
-        rows_omitted,
+        CardCore {
+            question: InsightQuestionId::ObservedModels,
+            state,
+            rows,
+            coverage: vec![
+                coverage(
+                    CoverageUnit::SavedSnapshots,
+                    observed_snapshots,
+                    request.snapshots.len() as u64,
+                ),
+                coverage(CoverageUnit::ModelRecords, observed, eligible),
+            ],
+            episode_denominator: None,
+            limitations: vec![CardLimitation::ModelDeclarationsAreObservedMetadata],
+            rows_omitted,
+        },
     ))
 }
 
 fn expected_cost_card(request: &InsightCardRequest) -> InsightCard {
     card(
         request,
-        InsightQuestionId::EstimatedCost,
-        CardState::Unavailable,
-        vec![optional_row(
-            CardRowId::EstimatedCost,
-            None,
-            MissingReason::UsageNotPersisted,
-        )],
-        vec![coverage(
-            CoverageUnit::SavedSnapshots,
-            0,
-            request.snapshots.len() as u64,
-        )],
-        None,
-        vec![CardLimitation::CostUnavailableWithoutPersistedUsageAndPricing],
-        false,
+        CardCore {
+            question: InsightQuestionId::EstimatedCost,
+            state: CardState::Unavailable,
+            rows: vec![optional_row(
+                CardRowId::EstimatedCost,
+                None,
+                MissingReason::UsageNotPersisted,
+            )],
+            coverage: vec![coverage(
+                CoverageUnit::SavedSnapshots,
+                0,
+                request.snapshots.len() as u64,
+            )],
+            episode_denominator: None,
+            limitations: vec![CardLimitation::CostUnavailableWithoutPersistedUsageAndPricing],
+            rows_omitted: false,
+        },
     )
 }
 
-fn card(
-    request: &InsightCardRequest,
+struct CardCore {
     question: InsightQuestionId,
     state: CardState,
     rows: Vec<CardRow>,
@@ -831,15 +838,17 @@ fn card(
     episode_denominator: Option<EpisodeDenominator>,
     limitations: Vec<CardLimitation>,
     rows_omitted: bool,
-) -> InsightCard {
-    let episode_question = question == InsightQuestionId::EpisodeOutcomes;
+}
+
+fn card(request: &InsightCardRequest, core: CardCore) -> InsightCard {
+    let episode_question = core.question == InsightQuestionId::EpisodeOutcomes;
     InsightCard {
-        question,
-        metric_version: question.metric_version().into(),
-        state,
-        rows,
-        coverage,
-        episode_denominator,
+        question: core.question,
+        metric_version: core.question.metric_version().into(),
+        state: core.state,
+        rows: core.rows,
+        coverage: core.coverage,
+        episode_denominator: core.episode_denominator,
         evidence_ids: if episode_question {
             request
                 .episodes
@@ -856,8 +865,8 @@ fn card(
         } else {
             Vec::new()
         },
-        limitations,
-        rows_omitted,
+        limitations: core.limitations,
+        rows_omitted: core.rows_omitted,
     }
 }
 
