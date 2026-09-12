@@ -1,10 +1,52 @@
+import AppKit
 import Foundation
+import SwiftUI
+import Vision
 import XCTest
 import TCBridge
 import TCShellCore
 @testable import TraceCommonsApp
 
 final class InsightsStoreRoutingIntegrationTests: XCTestCase {
+    @MainActor
+    func testActualSelectedStoreRendersLocationAndPopulatedComparisonSections() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = root.appendingPathComponent("selected-store")
+        let seeded = try seedStore(store, marker: "visible", includeComparisonData: true)
+        let copy = try XCTUnwrap(TCInsights.copy())
+        _ = NSApplication.shared
+        let size = CGSize(width: 1_180, height: 3_200)
+        let content = InsightsView(storeSelection: .custom(store.path), storeCopy: copy)
+            .frame(width: size.width, height: size.height, alignment: .topLeading)
+            .background(Color(nsColor: .windowBackgroundColor))
+        let hosting = NSHostingView(rootView: content)
+        let bounds = NSRect(origin: .zero, size: size)
+        hosting.frame = bounds
+        let window = NSWindow(contentRect: bounds, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false; window.contentView = hosting
+        defer { window.close() }
+        for _ in 0..<100 {
+            hosting.layoutSubtreeIfNeeded(); window.displayIfNeeded()
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let bitmap = try XCTUnwrap(hosting.bitmapImageRepForCachingDisplay(in: bounds))
+        hosting.cacheDisplay(in: bounds, to: bitmap)
+        let png = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
+        XCTAssertGreaterThan(png.count, 20_000)
+        if let path = ProcessInfo.processInfo.environment["TC_INSIGHTS_STORE_RENDER"] {
+            try png.write(to: URL(fileURLWithPath: path))
+        }
+        XCTAssertNotNil(seeded.taskID); XCTAssertNotNil(seeded.specificationID)
+        let topText = try recognizedText(bitmap, region: .init(x: 0, y: 0.94, width: 1, height: 0.06))
+        XCTAssertTrue(topText.contains("Insights store"), topText)
+        XCTAssertTrue(topText.contains("selected-store"), topText)
+        let text = try recognizedText(bitmap)
+        XCTAssertTrue(text.contains("Source attribution is pending qualification"), text)
+        XCTAssertTrue(text.contains("model-a") && text.contains("model-b"), text)
+    }
+
     @MainActor
     func testActualServiceKeepsAllModelsAndDrilldownsInSelectedStore() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -103,6 +145,17 @@ final class InsightsStoreRoutingIntegrationTests: XCTestCase {
             operation: .init("comparison_save_spec", input: input)))
         return .init(snapshotID: snapshotID, episodeID: episodeID, taskID: taskID,
                      specificationID: try XCTUnwrap(specResponse.specification?.id))
+    }
+
+    private func recognizedText(_ bitmap: NSBitmapImageRep, region: CGRect = .init(x: 0, y: 0, width: 1, height: 1))
+        throws -> String {
+        let request = VNRecognizeTextRequest()
+        request.recognitionLevel = .accurate
+        request.usesLanguageCorrection = false
+        request.regionOfInterest = region
+        let handler = VNImageRequestHandler(cgImage: try XCTUnwrap(bitmap.cgImage), options: [:])
+        try handler.perform([request])
+        return (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }.joined(separator: "\n")
     }
 }
 
