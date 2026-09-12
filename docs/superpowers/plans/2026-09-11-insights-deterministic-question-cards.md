@@ -143,6 +143,10 @@ Native shells render the shared rows and limitations. Platform tests verify deco
 
 ## Follow-on: persisted usage and pricing
 
+The concrete contracts, migration, arithmetic, pricing provenance, and release
+sequence are specified in the [persisted native usage and versioned pricing
+plan](2026-09-11-insights-persisted-usage-pricing.md).
+
 Cost becomes eligible only after a separate design and migration stores native input/output/cache/reasoning usage with source digest, model attribution, adapter provenance, observed/eligible coverage, and usage schema version. A versioned local pricing table must record provider, model/version applicability, currency, unit rates, effective interval, and table provenance. Keep actual billed cost distinct from a deterministic estimate. Mixed models, missing usage, unknown prices, and price-window mismatch remain partial or unavailable. Historical cards must be reproducible against their price-table version. No provider network call or billing credential is authorized by this follow-on description.
 
 Time-saved and active-time cards remain out of scope even after timestamp coverage exists. They require a separately approved measurement design and baseline.
