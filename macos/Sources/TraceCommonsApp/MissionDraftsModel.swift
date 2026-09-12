@@ -90,13 +90,13 @@ final class MissionDraftsModel {
 
     func refresh() { refresh(showNotice: true) }
 
-    private func refresh(showNotice: Bool) {
+    private func refresh(showNotice: Bool, preservingError: Bool = false) {
         guard active else { return }
         listPresentation = UUID()
         let presentation = listPresentation
         let screen = generation
         loading = true
-        error = nil
+        if !preservingError { error = nil }
         let service = service
         listTask?.cancel()
         listTask = Task { [weak self] in
@@ -195,7 +195,9 @@ final class MissionDraftsModel {
                 self.mutationBusy = false
                 guard let effect = accept(response) else {
                     if self.active { self.error = self.errorText() }
-                    if self.active, self.generation != screen { self.refresh(showNotice: false) }
+                    if self.active, self.generation != screen {
+                        self.refresh(showNotice: false, preservingError: true)
+                    }
                     return
                 }
                 guard self.active, self.generation == screen,
@@ -229,7 +231,7 @@ final class MissionDraftsModel {
                     self.mutationBusy = false
                     self.error = self.errorText()
                     self.invalidateDetail()
-                    self.refresh(showNotice: false)
+                    self.refresh(showNotice: false, preservingError: true)
                 }
             }
         }

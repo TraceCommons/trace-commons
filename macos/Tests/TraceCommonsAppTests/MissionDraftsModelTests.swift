@@ -119,6 +119,25 @@ final class MissionDraftsModelTests: XCTestCase {
     }
 
     @MainActor
+    func testHeldMutationFailureAfterReopenSurvivesSuccessfulReconciliation() async throws {
+        let service = MissionDraftFakeService()
+        let model = MissionDraftsModel(service: { try await service.call($0) })
+        model.open(); try await settle(model)
+        await service.holdNextImport()
+        await service.failNextImport()
+        model.importFile(URL(fileURLWithPath: "/synthetic/draft.json"))
+        model.close()
+        model.open()
+        try await waitForHeldImport(service)
+        await service.releaseImport()
+        try await settle(model)
+        XCTAssertEqual(model.error, "error copy")
+        XCTAssertTrue(model.drafts.isEmpty)
+        let listCalls = await service.listCalls
+        XCTAssertEqual(listCalls, 2)
+    }
+
+    @MainActor
     func testMissionNavigationDoesNotActivateEnrollmentServices() async throws {
         let navigation = MainWindowNavigation()
         var starts = 0
@@ -142,6 +161,14 @@ final class MissionDraftsModelTests: XCTestCase {
         }
         XCTFail("Mission draft model did not settle")
     }
+
+    private func waitForHeldImport(_ service: MissionDraftFakeService) async throws {
+        for _ in 0..<100 {
+            if await service.importIsWaiting { return }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        XCTFail("Import did not reach controlled native hold")
+    }
 }
 
 private actor MissionDraftFakeService {
@@ -151,7 +178,9 @@ private actor MissionDraftFakeService {
     private var failShow = false
     private var showContinuation: CheckedContinuation<Void, Never>?
     private var holdImport = false
+    private var failImport = false
     private var importContinuation: CheckedContinuation<Void, Never>?
+    private(set) var importIsWaiting = false
     private var failList = false
     private var failDelete = false
     private(set) var deleteCalls = 0
@@ -165,7 +194,10 @@ private actor MissionDraftFakeService {
     func failNextList() { failList = true }
     func failNextDelete() { failDelete = true }
     func holdNextImport() { holdImport = true }
-    func releaseImport() { importContinuation?.resume(); importContinuation = nil }
+    func failNextImport() { failImport = true }
+    func releaseImport() {
+        importContinuation?.resume(); importContinuation = nil; importIsWaiting = false
+    }
 
     func call(_ request: MissionDraftRequest) async throws -> MissionDraftResponse {
         switch request.operation.type {
@@ -181,8 +213,10 @@ private actor MissionDraftFakeService {
         case "import":
             if holdImport {
                 holdImport = false
+                importIsWaiting = true
                 await withCheckedContinuation { importContinuation = $0 }
             }
+            if failImport { failImport = false; throw MissionDraftBridgeError.service("import-failed") }
             let inserted = !seeded
             seeded = true
             return try decode("""
