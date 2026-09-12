@@ -1772,10 +1772,10 @@ char*       tc_call(tc_handle*, const char* method, const char* params_json);
  * request is borrowed readable UTF-8 bytes (no trailing NUL), at most 65536.
  * Example: {"operation":{"type":"list"}}. Optional top-level store_dir selects
  * a dedicated store; omitted uses the platform local-data Insights directory.
- * Operations: analyze {source:codex|trajectory,file,save:false}, list,
+ * Operations: analyze {source:codex|trajectory,file,save:false}, list, summary,
  * explain {id}, delete {id}, annotate {id,category,outcome}, clear_annotation {id},
  * usage {source:codex|claude_code,file}, copy; each has a "type" discriminator.
- * copy returns shared UI vocabulary. Listing an absent store creates no state.
+ * copy returns shared UI vocabulary. list/summary create no state for an absent store.
  * Returns owned JSON tagged by type, or NULL plus owned fixed-label *err.
  * Free result/error with tc_string_free. err may be NULL; otherwise writable
  * and cleared on success. Request buffers must remain valid until return. */

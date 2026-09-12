@@ -2,7 +2,7 @@
 
 Date: 2026-09-11
 
-This packet extends the [local implementation plan](2026-09-11-local-insights-implementation.md) and the [unified Insights program](2026-09-11-trace-insights-program.md). It supplies common service contracts, user-reported evidence, source-native usage inspection, and a local mission proposal check. Desktop screens and mission discovery remain follow-on work.
+This packet extends the [local implementation plan](2026-09-11-local-insights-implementation.md) and the [unified Insights program](2026-09-11-trace-insights-program.md). It supplies common service contracts, user-reported evidence, source-native usage inspection, and a local mission proposal check. Native individual-snapshot screens are tracked in the [desktop story record](2026-09-11-insights-desktop-stories.md). Mission discovery remains follow-on work.
 
 The intended product remains one Trace Commons experience. Native shells consume shared results and preserve the same evidence labels, missingness, and lifecycle. Multiple evaluator or scout implementations can eventually supply results without requiring separate dashboards.
 
@@ -10,7 +10,8 @@ The intended product remains one Trace Commons experience. Native shells consume
 
 | Slice | Entry point | Current behavior |
 | --- | --- | --- |
-| Local service | `insights::service::execute` and `dispatch_json` | Analyze, list, explain, delete, annotate, clear annotation, and inspect usage independently of enrollment or daemon startup |
+| Local service | `insights::service::execute` and `dispatch_json` | Analyze, list, summary, shared copy, explain, delete, annotate, clear annotation, and inspect usage independently of enrollment or daemon startup |
+| Saved-history summary | `insights summary` and service `summary` | [Shared deterministic counts](2026-09-11-insights-saved-summary.md) of saved sessions, user-reported assessments, and observed metrics with snapshot and record coverage |
 | Native bridge | `tc_insights_call` | Handle-free synchronous JSON request/response API with owned strings and fixed error labels |
 | Manual assessment | `LocalInsightStore::annotate` and `clear_annotation` | Typed category/outcome on an already saved snapshot, with timestamp and source-digest provenance |
 | Native usage | `insights usage` | Inspect explicitly selected Codex or Claude Code JSONL without persistence, pricing, or per-model allocation |
@@ -32,11 +33,11 @@ The request has an optional `store_dir` and a tagged `operation`. Examples:
 {"store_dir":"/chosen/insights","operation":{"type":"annotate","id":"SNAPSHOT_ID","category":"refactor","outcome":"partial"}}
 ```
 
-Operation tags are `analyze`, `list`, `explain`, `delete`, `annotate`, `clear_annotation`, and `usage`. JSON rejects unknown request fields and operation tags. `analyze` accepts `codex` or `trajectory`; `usage` accepts `codex` or `claude_code` in JSON. Responses use the corresponding `type` tag.
+Operation tags are `analyze`, `list`, `summary`, `copy`, `explain`, `delete`, `annotate`, `clear_annotation`, and `usage`. JSON rejects unknown request fields and operation tags. `analyze` accepts `codex` or `trajectory`; `usage` accepts `codex` or `claude_code` in JSON. Responses use the corresponding `type` tag.
 
 `tc_insights_call(request, request_len, err)` accepts UTF-8 JSON without a trailing NUL and bounds request size to 64 KiB before reading caller memory. Success returns an owned JSON string; failure returns NULL with an owned fixed error label when `err` is supplied. Callers free returned strings using `tc_string_free` and keep input buffers alive through return.
 
-Operations perform synchronous local I/O. Desktop integrations must call them off the UI thread. Closing a window or dropping a UI task does not cancel a mutation that has started. This packet does not add SwiftUI, GTK, or Windows views, a daemon RPC method, or a remote analytics service.
+Operations perform synchronous local I/O. Desktop integrations must call them off the UI thread. Closing a window or dropping a UI task does not cancel a mutation that has started. The [desktop story record](2026-09-11-insights-desktop-stories.md) covers the individual-snapshot SwiftUI, GTK, and Windows views. Summary presentation, a daemon RPC method, and a remote analytics service remain separate work.
 
 ## Manual assessments and snapshot lifecycle
 

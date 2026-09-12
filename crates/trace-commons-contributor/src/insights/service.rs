@@ -81,6 +81,7 @@ pub enum LocalInsightsOperation {
     },
     List {},
     Copy {},
+    Summary {},
     Explain {
         id: String,
     },
@@ -109,6 +110,9 @@ pub enum LocalInsightsResponse {
     },
     List {
         insights: Vec<LocalInsight>,
+    },
+    Summary {
+        summary: Box<super::summary::SavedInsightsSummary>,
     },
     Copy {
         copy: std::collections::BTreeMap<String, String>,
@@ -173,6 +177,9 @@ pub fn execute(request: LocalInsightsRequest) -> Result<LocalInsightsResponse> {
         LocalInsightsOperation::List {} => LocalInsightsResponse::List {
             insights: list_saved(request.store_dir.as_deref())?,
         },
+        LocalInsightsOperation::Summary {} => LocalInsightsResponse::Summary {
+            summary: Box::new(super::summary::read_saved(request.store_dir.as_deref())?),
+        },
         LocalInsightsOperation::Copy {} => LocalInsightsResponse::Copy { copy: ui_copy() },
         LocalInsightsOperation::Explain { id } => LocalInsightsResponse::Explain {
             insight: Box::new(store()?.explain(&id)?),
@@ -217,6 +224,7 @@ mod tests {
             br#"{"operation":{"type":"list","secret":"private"}}"#.as_slice(),
             br#"{"operation":{"type":"copy","secret":"private"}}"#,
             br#"{"operation":{"type":"upload"}}"#,
+            br#"{"operation":{"type":"summary","secret":"private"}}"#,
             br#"{"operation":{"type":"list"},"secret":"private"}"#,
         ] {
             assert_eq!(
