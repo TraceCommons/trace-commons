@@ -248,7 +248,31 @@ public sealed class InsightEvidenceTests
             Assert.True(File.Exists(file));
             Assert.False(File.Exists(Path.Combine(root, "contributor.json")));
         }
-        finally { Directory.Delete(root, true); }
+        finally { DeleteTestTree(root); }
+    }
+    private static void DeleteTestTree(string root)
+    {
+        if (!Directory.Exists(root)) return;
+        // Git for Windows marks loose objects read-only. Normalize fixture files
+        // before recursive deletion so cleanup cannot fail after a passing test.
+        foreach (string file in Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories))
+            File.SetAttributes(file, FileAttributes.Normal);
+        Directory.Delete(root, true);
+    }
+
+    [Fact]
+    public void TestTreeCleanupRemovesReadOnlyGitStyleFiles()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "tc-evidence-cleanup-" + Guid.NewGuid().ToString("N"));
+        string objects = Path.Combine(root, "repository", ".git", "objects", "aa");
+        Directory.CreateDirectory(objects);
+        string looseObject = Path.Combine(objects, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+        File.WriteAllText(looseObject, "fixture");
+        File.SetAttributes(looseObject, File.GetAttributes(looseObject) | FileAttributes.ReadOnly);
+
+        DeleteTestTree(root);
+
+        Assert.False(Directory.Exists(root));
     }
     private static string Git(string repository, string input, params string[] arguments)
     {
