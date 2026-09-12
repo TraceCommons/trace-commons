@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "candidate": "percentile_bootstrap_bonferroni_three_v1",
+  "qualified_for_saved_specifications": false,
+  "rejection_reason": "sparse_imbalanced_null_interval_undercoverage",
+  "replicates": 1000,
+  "familywise_confidence_bps": 9500,
+  "null_probability_bps": [[500, 1500, 8000], [3300, 3400, 3300], [8000, 1500, 500]],
+  "null_cell_sizes": [[8, 32], [20, 20], [32, 8]],
+  "experiments_per_null_setting": 8,
+  "null_contrasts_covered": 60,
+  "null_contrasts_total": 72,
+  "null_experiments_with_observed_difference": 0,
+  "null_experiments_total": 24,
+  "alternative_probability_bps": [[3000, 3000, 4000], [5000, 2000, 3000]],
+  "alternative_cell_sizes": [30, 30],
+  "alternative_accepted_contrasts_covered": 12,
+  "alternative_experiments_total": 12,
+  "limitations": [
+    "exploratory_grid_too_small_for_admission",
+    "raw_interval_coverage_below_nominal_target",
+    "outcome_missingness_not_modeled",
+    "retrospective_descriptive_estimand_only"
+  ],
+  "references": [
+    "Efron 1979, Bootstrap Methods: Another Look at the Jackknife",
+    "Hall and Wilson 1991, Two Guidelines for Bootstrap Hypothesis Testing"
+  ]
+}

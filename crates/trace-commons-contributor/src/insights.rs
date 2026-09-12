@@ -5,6 +5,7 @@
 pub mod card_presentation;
 pub mod card_store;
 pub mod cards;
+pub(crate) mod comparison_estimator;
 pub mod comparison_spec_store;
 pub mod comparison_specs;
 pub mod comparison_task_store;
