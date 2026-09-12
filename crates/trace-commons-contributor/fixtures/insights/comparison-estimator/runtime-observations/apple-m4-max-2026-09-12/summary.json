@@ -1,0 +1,462 @@
+{
+  "schema_version": 1,
+  "source_commit": "331486223caec66b8f3a06d4e717ed101d816a74",
+  "source_tree": "500d079a263e270fc6a60c8a04c8e7590c2fda0b",
+  "binaries": {
+    "debug": {
+      "path": "/private/tmp/trace-insights-comparison-task-target/debug/deps/trace_commons_contributor-49a7b4fab0833b73",
+      "sha256": "c958685e432e3a529bb961d1e4f6ffd771e7c7af4a4f32673151f0ee4782ead0"
+    },
+    "release": {
+      "path": "/private/tmp/trace-insights-comparison-task-target/release/deps/trace_commons_contributor-eab0f816bda952f4",
+      "sha256": "fc47e3c7ec6e8d751845198083a0a06bdf4a130ffedd6cbeef393e6372fbe7fb"
+    }
+  },
+  "machine": {
+    "system": "Darwin",
+    "release": "25.6.0",
+    "machine": "arm64",
+    "processor": "arm",
+    "cpu": "Apple M4 Max",
+    "memory_bytes": 137438953472,
+    "logical_cpus": 16,
+    "physical_cpus": 16
+  },
+  "scope": "candidate_evaluation_only_excludes_source_parsing_task_eligibility_service_and_ui",
+  "warmup_run_index": 0,
+  "measured_run_indexes": [
+    1,
+    2,
+    3
+  ],
+  "profiles": {
+    "debug": {
+      "balanced_boundary": {
+        "expected_status": "supported",
+        "candidate_elapsed_nanos": {
+          "values": [
+            39984667,
+            40290542,
+            40533291
+          ],
+          "median": 40290542,
+          "minimum": 39984667,
+          "maximum": 40533291
+        },
+        "process_real_seconds": {
+          "values": [
+            0.05,
+            0.05,
+            0.05
+          ],
+          "median": 0.05,
+          "minimum": 0.05,
+          "maximum": 0.05
+        },
+        "process_user_seconds": {
+          "values": [
+            0.04,
+            0.04,
+            0.04
+          ],
+          "median": 0.04,
+          "minimum": 0.04,
+          "maximum": 0.04
+        },
+        "process_system_seconds": {
+          "values": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "median": 0.0,
+          "minimum": 0.0,
+          "maximum": 0.0
+        },
+        "maximum_rss_bytes": {
+          "values": [
+            13647872,
+            13664256,
+            13680640
+          ],
+          "median": 13664256,
+          "minimum": 13647872,
+          "maximum": 13680640
+        }
+      },
+      "balanced_interior": {
+        "expected_status": "supported",
+        "candidate_elapsed_nanos": {
+          "values": [
+            88883792,
+            88929125,
+            92387459
+          ],
+          "median": 88929125,
+          "minimum": 88883792,
+          "maximum": 92387459
+        },
+        "process_real_seconds": {
+          "values": [
+            0.1,
+            0.1,
+            0.1
+          ],
+          "median": 0.1,
+          "minimum": 0.1,
+          "maximum": 0.1
+        },
+        "process_user_seconds": {
+          "values": [
+            0.09,
+            0.09,
+            0.09
+          ],
+          "median": 0.09,
+          "minimum": 0.09,
+          "maximum": 0.09
+        },
+        "process_system_seconds": {
+          "values": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "median": 0.0,
+          "minimum": 0.0,
+          "maximum": 0.0
+        },
+        "maximum_rss_bytes": {
+          "values": [
+            13697024,
+            13680640,
+            13680640
+          ],
+          "median": 13680640,
+          "minimum": 13680640,
+          "maximum": 13697024
+        }
+      },
+      "imbalanced_supported": {
+        "expected_status": "supported",
+        "candidate_elapsed_nanos": {
+          "values": [
+            203209667,
+            236711375,
+            267657208
+          ],
+          "median": 236711375,
+          "minimum": 203209667,
+          "maximum": 267657208
+        },
+        "process_real_seconds": {
+          "values": [
+            0.21,
+            0.25,
+            0.28
+          ],
+          "median": 0.25,
+          "minimum": 0.21,
+          "maximum": 0.28
+        },
+        "process_user_seconds": {
+          "values": [
+            0.2,
+            0.24,
+            0.27
+          ],
+          "median": 0.24,
+          "minimum": 0.2,
+          "maximum": 0.27
+        },
+        "process_system_seconds": {
+          "values": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "median": 0.0,
+          "minimum": 0.0,
+          "maximum": 0.0
+        },
+        "maximum_rss_bytes": {
+          "values": [
+            13713408,
+            13697024,
+            13713408
+          ],
+          "median": 13713408,
+          "minimum": 13697024,
+          "maximum": 13713408
+        }
+      },
+      "imbalanced_suppressed": {
+        "expected_status": "suppressed_below_minimum_cohort_support",
+        "candidate_elapsed_nanos": {
+          "values": [
+            18084,
+            18541,
+            17750
+          ],
+          "median": 18084,
+          "minimum": 17750,
+          "maximum": 18541
+        },
+        "process_real_seconds": {
+          "values": [
+            0.01,
+            0.01,
+            0.01
+          ],
+          "median": 0.01,
+          "minimum": 0.01,
+          "maximum": 0.01
+        },
+        "process_user_seconds": {
+          "values": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "median": 0.0,
+          "minimum": 0.0,
+          "maximum": 0.0
+        },
+        "process_system_seconds": {
+          "values": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "median": 0.0,
+          "minimum": 0.0,
+          "maximum": 0.0
+        },
+        "maximum_rss_bytes": {
+          "values": [
+            12173312,
+            12189696,
+            12189696
+          ],
+          "median": 12189696,
+          "minimum": 12173312,
+          "maximum": 12189696
+        }
+      }
+    },
+    "release": {
+      "balanced_boundary": {
+        "expected_status": "supported",
+        "candidate_elapsed_nanos": {
+          "values": [
+            5336542,
+            5323459,
+            5253125
+          ],
+          "median": 5323459,
+          "minimum": 5253125,
+          "maximum": 5336542
+        },
+        "process_real_seconds": {
+          "values": [
+            0.01,
+            0.01,
+            0.01
+          ],
+          "median": 0.01,
+          "minimum": 0.01,
+          "maximum": 0.01
+        },
+        "process_user_seconds": {
+          "values": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "median": 0.0,
+          "minimum": 0.0,
+          "maximum": 0.0
+        },
+        "process_system_seconds": {
+          "values": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "median": 0.0,
+          "minimum": 0.0,
+          "maximum": 0.0
+        },
+        "maximum_rss_bytes": {
+          "values": [
+            10338304,
+            10354688,
+            10321920
+          ],
+          "median": 10338304,
+          "minimum": 10321920,
+          "maximum": 10354688
+        }
+      },
+      "balanced_interior": {
+        "expected_status": "supported",
+        "candidate_elapsed_nanos": {
+          "values": [
+            10978958,
+            11177458,
+            11034166
+          ],
+          "median": 11034166,
+          "minimum": 10978958,
+          "maximum": 11177458
+        },
+        "process_real_seconds": {
+          "values": [
+            0.02,
+            0.02,
+            0.02
+          ],
+          "median": 0.02,
+          "minimum": 0.02,
+          "maximum": 0.02
+        },
+        "process_user_seconds": {
+          "values": [
+            0.01,
+            0.01,
+            0.01
+          ],
+          "median": 0.01,
+          "minimum": 0.01,
+          "maximum": 0.01
+        },
+        "process_system_seconds": {
+          "values": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "median": 0.0,
+          "minimum": 0.0,
+          "maximum": 0.0
+        },
+        "maximum_rss_bytes": {
+          "values": [
+            10289152,
+            10387456,
+            10371072
+          ],
+          "median": 10371072,
+          "minimum": 10289152,
+          "maximum": 10387456
+        }
+      },
+      "imbalanced_supported": {
+        "expected_status": "supported",
+        "candidate_elapsed_nanos": {
+          "values": [
+            20749500,
+            20322000,
+            20273333
+          ],
+          "median": 20322000,
+          "minimum": 20273333,
+          "maximum": 20749500
+        },
+        "process_real_seconds": {
+          "values": [
+            0.03,
+            0.03,
+            0.03
+          ],
+          "median": 0.03,
+          "minimum": 0.03,
+          "maximum": 0.03
+        },
+        "process_user_seconds": {
+          "values": [
+            0.02,
+            0.02,
+            0.02
+          ],
+          "median": 0.02,
+          "minimum": 0.02,
+          "maximum": 0.02
+        },
+        "process_system_seconds": {
+          "values": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "median": 0.0,
+          "minimum": 0.0,
+          "maximum": 0.0
+        },
+        "maximum_rss_bytes": {
+          "values": [
+            10272768,
+            10338304,
+            10403840
+          ],
+          "median": 10338304,
+          "minimum": 10272768,
+          "maximum": 10403840
+        }
+      },
+      "imbalanced_suppressed": {
+        "expected_status": "suppressed_below_minimum_cohort_support",
+        "candidate_elapsed_nanos": {
+          "values": [
+            208,
+            83,
+            250
+          ],
+          "median": 208,
+          "minimum": 83,
+          "maximum": 250
+        },
+        "process_real_seconds": {
+          "values": [
+            0.01,
+            0.01,
+            0.01
+          ],
+          "median": 0.01,
+          "minimum": 0.01,
+          "maximum": 0.01
+        },
+        "process_user_seconds": {
+          "values": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "median": 0.0,
+          "minimum": 0.0,
+          "maximum": 0.0
+        },
+        "process_system_seconds": {
+          "values": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "median": 0.0,
+          "minimum": 0.0,
+          "maximum": 0.0
+        },
+        "maximum_rss_bytes": {
+          "values": [
+            9895936,
+            9928704,
+            9928704
+          ],
+          "median": 9928704,
+          "minimum": 9895936,
+          "maximum": 9928704
+        }
+      }
+    }
+  }
+}
