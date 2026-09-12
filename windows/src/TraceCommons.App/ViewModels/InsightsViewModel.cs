@@ -54,9 +54,25 @@ public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
         var response = await _service.CallAsync(new { type = "list" }, token);
         token.ThrowIfCancellationRequested();
         Saved.Clear();
+        bool selectedStillPresent = false;
         foreach (var insight in response.GetProperty("insights").EnumerateArray())
-            Saved.Add(new SavedInsight(insight.GetProperty("id").GetString()!,
-                insight.GetProperty("source_format").GetString() + " · " + Date(insight.GetProperty("analyzed_at"))));
+        {
+            string id = insight.GetProperty("id").GetString()!;
+            Saved.Add(new SavedInsight(id,
+                this[insight.GetProperty("source_format").GetString()!] + " · " + Date(insight.GetProperty("analyzed_at"))));
+            if (CurrentId == id)
+            {
+                selectedStillPresent = true;
+                Render(insight, true);
+            }
+        }
+        // A CLI deletion or replacement invalidates the displayed saved snapshot.
+        // Ephemeral previews have no saved identity and survive a list refresh.
+        if (CurrentId != null && !selectedStillPresent)
+        {
+            CurrentId = null;
+            Details = "";
+        }
         Status = Saved.Count == 0 ? this["empty"] : "";
     }
     public Task AnalyzeAsync(string source, string file, bool save) => Run(async token =>

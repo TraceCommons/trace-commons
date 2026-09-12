@@ -22,6 +22,7 @@ public sealed class InsightsTests
     {
         public List<JsonElement> Calls { get; } = new();
         public TaskCompletionSource<JsonElement>? Pending;
+        public string ListedInsights = Insight;
         public Task<JsonElement> CallAsync(object operation, CancellationToken cancellationToken)
         {
             var request = JsonSerializer.SerializeToElement(operation);
@@ -29,8 +30,8 @@ public sealed class InsightsTests
             string type = request.GetProperty("type").GetString()!;
             if (Pending != null) return Pending.Task;
             return Task.FromResult(type switch {
-                "copy" => Json("""{"type":"copy","copy":{"unknown":"Unknown","coverage":"Coverage","metric_input_tokens":"Input tokens","error":"safe-error"}}"""),
-                "list" => Json("{\"type\":\"list\",\"insights\":[" + Insight + "]}"),
+                "copy" => Json("""{"type":"copy","copy":{"unknown":"Unknown","coverage":"Coverage","metric_input_tokens":"Input tokens","error":"safe-error","codex":"Codex rollout"}}"""),
+                "list" => Json("{\"type\":\"list\",\"insights\":[" + ListedInsights + "]}"),
                 "delete" => Json("{\"type\":\"delete\",\"deleted\":true}"),
                 _ => Json("{\"type\":\"" + type + "\",\"insight\":" + Insight + "}")
             });
@@ -58,6 +59,41 @@ public sealed class InsightsTests
         await model.DeleteAsync();
         Assert.Null(model.CurrentId);
         Assert.Equal("", model.Details);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task RefreshClearsSavedSnapshotDeletedOrReplacedByAnotherClient(bool replacement)
+    {
+        var service = new Service();
+        using var model = new InsightsViewModel(service);
+        await model.LoadAsync();
+        Assert.StartsWith("Codex rollout", model.Saved[0].Label);
+        await model.ExplainAsync("snapshot-a");
+        Assert.True(model.HasSavedSelection);
+        Assert.NotEmpty(model.Details);
+        service.ListedInsights = replacement ? Insight.Replace("snapshot-a", "snapshot-b", StringComparison.Ordinal) : "";
+        await model.RefreshAsync();
+        Assert.Null(model.CurrentId);
+        Assert.Empty(model.Details);
+        Assert.False(model.HasSavedSelection);
+        Assert.Equal(replacement ? 1 : 0, model.Saved.Count);
+    }
+
+    [Fact]
+    public async Task RefreshPreservesEphemeralPreviewWhenSavedListChanges()
+    {
+        var service = new Service();
+        using var model = new InsightsViewModel(service);
+        await model.LoadAsync();
+        await model.AnalyzeAsync("codex", "/selected/file", false);
+        string preview = model.Details;
+        service.ListedInsights = "";
+        await model.RefreshAsync();
+        Assert.Null(model.CurrentId);
+        Assert.NotEmpty(preview);
+        Assert.Equal(preview, model.Details);
     }
 
     [Fact]
