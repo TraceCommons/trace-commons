@@ -2,6 +2,10 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::{Args, Subcommand, ValueEnum};
+use trace_commons_contributor::insights::service::{
+    LocalInsightsOperation, LocalInsightsRequest, LocalInsightsResponse, execute,
+};
+use trace_commons_contributor::insights::usage::UsageSource;
 use trace_commons_contributor::insights::{
     LocalInsight, LocalInsightStore, SourceFormat, TaskCategory, TaskOutcome, analyze_file,
     service::open_store,
@@ -45,6 +49,19 @@ enum InsightsCommand {
     },
     /// Remove your assessment without deleting the saved snapshot
     ClearAnnotation { id: String },
+    /// Inspect source-native usage in one file; does not save or estimate prices
+    Usage {
+        #[arg(long, value_enum)]
+        source: NativeUsageSource,
+        #[arg(long)]
+        file: PathBuf,
+    },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum NativeUsageSource {
+    Codex,
+    ClaudeCode,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -110,6 +127,32 @@ pub(super) fn run(args: &InsightsArgs, json: bool) -> Result<()> {
         }
         InsightsCommand::ClearAnnotation { id } => {
             render(&store(args)?.clear_annotation(id)?, json)?
+        }
+        InsightsCommand::Usage { source, file } => {
+            let source = match source {
+                NativeUsageSource::Codex => UsageSource::Codex,
+                NativeUsageSource::ClaudeCode => UsageSource::ClaudeCode,
+            };
+            let LocalInsightsResponse::Usage { usage } = execute(LocalInsightsRequest {
+                store_dir: args.store_dir.clone(),
+                operation: LocalInsightsOperation::Usage {
+                    source,
+                    file: file.clone(),
+                },
+            })?
+            else {
+                anyhow::bail!("insights-usage-response-invalid")
+            };
+            if !json {
+                println!(
+                    "Source-native usage from one selected file. Not a bill or a per-model allocation."
+                );
+                println!(
+                    "Record coverage: {}/{}",
+                    usage.complete_records, usage.usage_records
+                );
+            }
+            println!("{}", serde_json::to_string_pretty(&usage)?);
         }
     }
     Ok(())
