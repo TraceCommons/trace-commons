@@ -11,7 +11,7 @@ import TCShellCore
 final class PrivateInferenceDestinationTests: XCTestCase {
     @MainActor
     func testTheDestinationHasAGlyphNothingElseUses() {
-        XCTAssertEqual(MainWindowView.Section.allCases.count, 6)
+        XCTAssertEqual(MainWindowView.Section.allCases.count, 7)
         XCTAssertTrue(MainWindowView.Section.allCases.contains(.privateInference))
         let glyph = MainWindowView.Section.privateInference.glyph
         XCTAssertNotEqual(glyph, MainWindowView.Section.queue.glyph)
@@ -20,13 +20,13 @@ final class PrivateInferenceDestinationTests: XCTestCase {
         XCTAssertNotEqual(glyph, MainWindowView.Section.settings.glyph)
     }
 
-    /// Every destination has one of Cmd-1..6 and no two share one. In-app
+    /// Every destination has one of Cmd-1..7 and no two share one. In-app
     /// only: a global system-wide hotkey is out of scope.
     @MainActor
     func testEveryDestinationHasItsOwnNumberShortcut() {
         let shortcuts = MainWindowView.Section.allCases.compactMap(\.shortcut)
-        XCTAssertEqual(shortcuts.count, 6)
-        XCTAssertEqual(Set(shortcuts), Set("123456"))
+        XCTAssertEqual(shortcuts.count, 7)
+        XCTAssertEqual(Set(shortcuts), Set("1234567"))
         for (index, section) in MainWindowView.Section.allCases.enumerated() {
             XCTAssertEqual(
                 section.shortcut, Character("\(index + 1)"),

@@ -16,6 +16,7 @@ struct TraceCommonsShell: App {
     @StateObject private var model = AppModel()
     @State private var compute = ComputeModel()
     @State private var navigation = MainWindowNavigation()
+    @State private var missionDrafts = MissionDraftsModel()
     /// Quit confirmation, Dock reopen and invite links all arrive outside
     /// SwiftUI's reach. See `AppDelegate`.
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
@@ -37,11 +38,12 @@ struct TraceCommonsShell: App {
                 .environmentObject(model)
                 .tint(TC.green)
         } label: {
-            Launcher(model: model, compute: compute, navigation: navigation, appDelegate: appDelegate)
+            Launcher(model: model, compute: compute, navigation: navigation,
+                     appDelegate: appDelegate, missionDrafts: missionDrafts)
         }
 
         Window("Trace Commons", id: WindowID.main) {
-            MainWindowView(navigation: navigation)
+            MainWindowView(navigation: navigation, missionDrafts: missionDrafts)
                 .environmentObject(model)
                 .environment(compute)
                 .frame(minWidth: 760, minHeight: 520)
@@ -56,11 +58,12 @@ struct TraceCommonsShell: App {
                 .tint(TC.green)
         }
         .defaultSize(width: 940, height: 660)
-        // Cmd-1..6 for the six destinations, and Cmd-Shift-M for the one
+        // Cmd-1..7 for the seven destinations, and Cmd-Shift-M for the one
         // switch worth reaching without the window. Menu items, so they are
         // in-app only; see `MainWindowCommands`.
         .commands {
-            MainWindowCommands(model: model, compute: compute, navigation: navigation)
+            MainWindowCommands(model: model, compute: compute, navigation: navigation,
+                               missionDrafts: missionDrafts)
         }
     }
 }
@@ -73,6 +76,7 @@ private struct Launcher: View {
     let compute: ComputeModel
     let navigation: MainWindowNavigation
     let appDelegate: AppDelegate
+    let missionDrafts: MissionDraftsModel
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
@@ -99,6 +103,7 @@ private struct Launcher: View {
 
     @MainActor
     private func launch() {
+        missionDrafts.loadCopy()
         OpenMainWindow.handler = {
             NSApp.activate(ignoringOtherApps: true)
             openWindow(id: WindowID.main)
