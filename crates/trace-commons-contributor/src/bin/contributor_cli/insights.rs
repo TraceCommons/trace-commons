@@ -3,7 +3,8 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::{Args, Subcommand, ValueEnum};
 use trace_commons_contributor::insights::comparison_specs::{
-    ComparisonSpecificationDraftInput, ExactComparisonStratumV1,
+    ComparisonSpecificationDraftInput, ComparisonSpecificationV1, DescriptiveComparisonResultV1,
+    ExactComparisonStratumV1,
 };
 use trace_commons_contributor::insights::comparison_tasks::{
     CheckoutProvenance, ComparisonConfigurationV1, ComparisonTaskContextInput, ContextDigest,
@@ -671,31 +672,126 @@ fn comparison_spec_input(input: &ComparisonSpecArgs) -> Result<ComparisonSpecifi
 fn render_comparison_operation(
     args: &InsightsArgs,
     operation: LocalInsightsOperation,
-    _json: bool,
+    json: bool,
 ) -> Result<()> {
     let response = execute(LocalInsightsRequest {
         store_dir: args.store_dir.clone(),
         operation,
     })?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&response)?);
+        return Ok(());
+    }
+    let copy = trace_commons_contributor::insights::service::ui_copy();
     match response {
         LocalInsightsResponse::ComparisonPreviewSpec {
             specification,
             result,
-        } => println!(
-            "{}",
-            serde_json::to_string_pretty(&(specification, result))?
-        ),
+        } => {
+            println!("{}", copy["comparison_preview_notice"]);
+            render_comparison_specification(&specification, &copy);
+            render_comparison_result(&result, &copy)?;
+        }
         LocalInsightsResponse::ComparisonSpecification { specification } => {
-            println!("{}", serde_json::to_string_pretty(&specification)?)
+            render_comparison_specification(&specification, &copy);
         }
         LocalInsightsResponse::ComparisonSpecificationList { specifications } => {
-            println!("{}", serde_json::to_string_pretty(&specifications)?)
+            if specifications.is_empty() {
+                println!("{}", copy["comparison_specifications_empty"]);
+            }
+            for specification in specifications {
+                render_comparison_specification(&specification, &copy);
+            }
         }
         LocalInsightsResponse::ComparisonResult { result } => {
-            println!("{}", serde_json::to_string_pretty(&result)?)
+            render_comparison_result(&result, &copy)?;
         }
         _ => anyhow::bail!("insights-comparison-response-invalid"),
     }
+    Ok(())
+}
+
+fn render_comparison_specification(
+    specification: &ComparisonSpecificationV1,
+    copy: &std::collections::BTreeMap<String, String>,
+) {
+    println!(
+        "{}: {}",
+        copy["comparison_specification_title"], specification.id
+    );
+    println!("{}", copy["comparison_retrospective_notice"]);
+    println!("Cohorts: {}", specification.cohort_labels.join(" / "));
+    println!(
+        "Project: {} · Language: {}",
+        specification.stratum.project_id, specification.stratum.language
+    );
+    println!(
+        "Task dates: {} through {}",
+        specification.date_start, specification.date_end
+    );
+    println!("Evidence cutoff: {}", specification.evidence_cutoff);
+    println!(
+        "Configuration: {}",
+        specification.stratum.configuration_fingerprint
+    );
+}
+
+fn render_comparison_result(
+    result: &DescriptiveComparisonResultV1,
+    copy: &std::collections::BTreeMap<String, String>,
+) -> Result<()> {
+    println!(
+        "{}: {}",
+        copy["comparison_specification_title"], result.specification_id
+    );
+    println!("{}", copy["comparison_retrospective_notice"]);
+    println!("{}", copy["comparison_descriptive_notice"]);
+    if result.included_task_ids.is_empty() {
+        println!("{}", copy["comparison_no_eligible_evidence"]);
+    }
+    for cohort in &result.cohorts {
+        let outcomes = &cohort.outcomes;
+        println!(
+            "{}: {} included tasks; {} assessed",
+            cohort.cohort_label, cohort.included_tasks, outcomes.assessed
+        );
+        println!(
+            "  Accepted: {} · Partial: {} · Rejected: {}",
+            outcomes.accepted, outcomes.partial, outcomes.rejected
+        );
+        println!(
+            "  Pending: {} · Unknown: {} · Unassessed: {}",
+            outcomes.pending, outcomes.unknown, outcomes.unassessed
+        );
+        println!(
+            "  Observed attributed tokens: {} across {} tasks; unavailable for {} tasks",
+            cohort.usage.observed_attributed_tokens,
+            cohort.usage.tasks_with_observed_attributed_tokens,
+            cohort.usage.tasks_without_observed_attributed_tokens
+        );
+    }
+    println!("{}", copy["comparison_denominator_notice"]);
+    for task_id in &result.included_task_ids {
+        println!("Included task: {task_id}");
+    }
+    for task in &result.excluded_tasks {
+        let reasons = task
+            .reasons
+            .iter()
+            .map(|reason| {
+                let value = serde_json::to_value(reason)?;
+                let key = format!(
+                    "comparison_exclusion_{}",
+                    value.as_str().unwrap_or("unknown")
+                );
+                copy.get(&key)
+                    .cloned()
+                    .ok_or_else(|| anyhow::anyhow!("insights-comparison-copy-missing"))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        println!("Excluded task {}: {}", task.task_id, reasons.join("; "));
+    }
+    println!("Audit digest: {}", result.audit_digest);
     Ok(())
 }
 
