@@ -14,6 +14,12 @@ use trace_commons_contributor::insights::summary::{
     CoverageUnit, SavedInsightsSummary, SnapshotEvidence, SummaryLimitation,
 };
 use trace_commons_contributor::insights::{LocalInsight, SourceFormat, TaskCategory, TaskOutcome};
+use trace_commons_contributor::insights::{
+    episode_store::EpisodeStoreError,
+    episodes::{
+        EpisodeDetail, EpisodeListEntry, EpisodeOverlap, EpisodeValidationError, LocalEpisode,
+    },
+};
 
 #[path = "insights_evidence.rs"]
 mod evidence;
@@ -27,6 +33,31 @@ struct ChooserTicket {
 impl ChooserTicket {
     fn matches(&self, generation: u64, snapshot: Option<&str>) -> bool {
         self.generation == generation && self.snapshot.as_deref() == snapshot
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct EpisodeDraftTicket {
+    generation: u64,
+    id: Option<String>,
+    revision: Option<u64>,
+}
+impl EpisodeDraftTicket {
+    fn matches(&self, generation: u64, episode: Option<(&str, u64)>) -> bool {
+        self.generation == generation
+            && self.id.as_deref() == episode.map(|(id, _)| id)
+            && self.revision == episode.map(|(_, revision)| revision)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct EpisodeReadTicket {
+    generation: u64,
+    requested_id: Option<String>,
+}
+impl EpisodeReadTicket {
+    fn accepts(&self, generation: u64, returned_id: Option<&str>) -> bool {
+        self.generation == generation && self.requested_id.as_deref() == returned_id
     }
 }
 
@@ -60,6 +91,12 @@ impl Flight {
     }
 }
 
+enum EpisodeResult {
+    Response(Response),
+    Conflict(Vec<EpisodeListEntry>),
+    Failed(&'static str),
+}
+
 pub struct InsightsView {
     pub root: gtk::Box,
     controls: gtk::Box,
@@ -86,6 +123,17 @@ pub struct InsightsView {
     category: gtk::DropDown,
     outcome: gtk::DropDown,
     current_id: RefCell<Option<String>>,
+    episode_generation: Cell<u64>,
+    current_episode: RefCell<Option<(String, u64)>>,
+    current_membership_revision: Cell<Option<u64>>,
+    episode_choices: RefCell<Vec<(String, gtk::CheckButton)>>,
+    episode_choices_box: gtk::Box,
+    episodes: gtk::Box,
+    episode_detail: gtk::Label,
+    episode_edit: gtk::Box,
+    episode_category: gtk::DropDown,
+    episode_outcome: gtk::DropDown,
+    episode_success_notice: RefCell<Option<String>>,
     flight: RefCell<Flight>,
     store_dir: Option<PathBuf>,
 }
@@ -156,6 +204,57 @@ impl InsightsView {
             .child(&summary_body)
             .build();
         content.append(&summary_expander);
+        let episode_body = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        episode_body.append(&label(copy("episode_scope")));
+        episode_body.append(&label(copy("episode_overlap_notice")));
+        let episode_choices_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        episode_body.append(&label(copy("episode_select_members")));
+        episode_body.append(&episode_choices_box);
+        let create_episode = gtk::Button::with_label(copy("episode_create"));
+        episode_body.append(&create_episode);
+        let refresh_episodes = gtk::Button::with_label(copy("refresh"));
+        episode_body.append(&refresh_episodes);
+        let episodes = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        episode_body.append(&episodes);
+        let episode_detail = label("");
+        episode_body.append(&episode_detail);
+        let episode_edit = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        episode_edit.append(&label(copy("episode_assessment_notice_short")));
+        let episode_category = gtk::DropDown::from_strings(&[
+            copy("category_unknown"),
+            copy("category_refactor"),
+            copy("category_tests"),
+            copy("category_docs"),
+            copy("category_debugging"),
+            copy("category_other"),
+        ]);
+        let episode_outcome = gtk::DropDown::from_strings(&[
+            copy("outcome_unknown"),
+            copy("outcome_accepted"),
+            copy("outcome_partial"),
+            copy("outcome_rejected"),
+        ]);
+        episode_edit.append(&episode_category);
+        episode_edit.append(&episode_outcome);
+        let save_episode_assessment = gtk::Button::with_label(copy("episode_save_assessment"));
+        let clear_episode_assessment = gtk::Button::with_label(copy("episode_clear_assessment"));
+        let save_episode_members = gtk::Button::with_label(copy("episode_save_members"));
+        let delete_episode = gtk::Button::with_label(copy("episode_delete"));
+        for button in [
+            &save_episode_assessment,
+            &clear_episode_assessment,
+            &save_episode_members,
+            &delete_episode,
+        ] {
+            episode_edit.append(button);
+        }
+        episode_edit.set_visible(false);
+        episode_body.append(&episode_edit);
+        let episode_expander = gtk::Expander::builder()
+            .label(copy("episode_title"))
+            .child(&episode_body)
+            .build();
+        content.append(&episode_expander);
         let detail = label("");
         content.append(&detail);
         let evidence_body = gtk::Box::new(gtk::Orientation::Vertical, 8);
@@ -242,8 +341,109 @@ impl InsightsView {
             category,
             outcome,
             current_id: RefCell::new(None),
+            episode_generation: Cell::new(0),
+            current_episode: RefCell::new(None),
+            current_membership_revision: Cell::new(None),
+            episode_choices: RefCell::new(Vec::new()),
+            episode_choices_box,
+            episodes,
+            episode_detail,
+            episode_edit,
+            episode_category,
+            episode_outcome,
+            episode_success_notice: RefCell::new(None),
             flight: RefCell::new(Flight::default()),
             store_dir,
+        });
+        view.rebuild_episode_choices(&[], &view.episode_choices_box);
+        let weak = Rc::downgrade(&view);
+        create_episode.connect_clicked(move |_| {
+            if let Some(view) = weak.upgrade() {
+                view.create_episode();
+            }
+        });
+        let weak = Rc::downgrade(&view);
+        refresh_episodes.connect_clicked(move |_| {
+            if let Some(view) = weak.upgrade() {
+                view.mutation_notice.set_text("");
+                view.episode_success_notice.borrow_mut().take();
+                view.invalidate_episode_draft();
+                view.refresh_episodes();
+            }
+        });
+        let weak = Rc::downgrade(&view);
+        save_episode_assessment.connect_clicked(move |_| {
+            if let Some(view) = weak.upgrade() {
+                view.annotate_episode();
+            }
+        });
+        let weak = Rc::downgrade(&view);
+        let parent = window.downgrade();
+        clear_episode_assessment.connect_clicked(move |_| {
+            let (Some(view), Some(parent)) = (weak.upgrade(), parent.upgrade()) else {
+                return;
+            };
+            let ticket = view.episode_ticket();
+            if ticket.id.is_none() || !view.accepts_episode_ticket(&ticket) {
+                return;
+            }
+            let dialog = adw::MessageDialog::new(
+                Some(&parent),
+                Some(copy("episode_clear_assessment")),
+                Some(copy("episode_clear_assessment_confirm")),
+            );
+            dialog.add_responses(&[
+                ("cancel", copy("cancel")),
+                ("confirm", copy("episode_clear_assessment")),
+            ]);
+            dialog.set_close_response("cancel");
+            let weak = Rc::downgrade(&view);
+            dialog.connect_response(None, move |dialog, response| {
+                dialog.close();
+                if response == "confirm" {
+                    if let Some(view) = weak.upgrade() {
+                        view.clear_episode_assessment_with(ticket.clone());
+                    }
+                }
+            });
+            dialog.present();
+        });
+        let weak = Rc::downgrade(&view);
+        save_episode_members.connect_clicked(move |_| {
+            if let Some(view) = weak.upgrade() {
+                view.replace_episode_members();
+            }
+        });
+        let weak = Rc::downgrade(&view);
+        let parent = window.downgrade();
+        delete_episode.connect_clicked(move |_| {
+            let (Some(view), Some(parent)) = (weak.upgrade(), parent.upgrade()) else {
+                return;
+            };
+            let ticket = view.episode_ticket();
+            if ticket.id.is_none() || !view.accepts_episode_ticket(&ticket) {
+                return;
+            }
+            let dialog = adw::MessageDialog::new(
+                Some(&parent),
+                Some(copy("episode_delete")),
+                Some(copy("episode_delete_confirm")),
+            );
+            dialog.add_responses(&[
+                ("cancel", copy("cancel")),
+                ("confirm", copy("episode_delete")),
+            ]);
+            dialog.set_close_response("cancel");
+            let weak = Rc::downgrade(&view);
+            dialog.connect_response(None, move |dialog, response| {
+                dialog.close();
+                if response == "confirm" {
+                    if let Some(view) = weak.upgrade() {
+                        view.delete_episode_with(ticket.clone());
+                    }
+                }
+            });
+            dialog.present();
         });
         let weak = Rc::downgrade(&view);
         let parent = window.downgrade();
@@ -298,6 +498,7 @@ impl InsightsView {
         refresh.connect_clicked(move |_| {
             if let Some(v) = weak.upgrade() {
                 v.mutation_notice.set_text("");
+                v.episode_success_notice.borrow_mut().take();
                 v.summary_expander.set_expanded(true);
                 v.refresh_history();
             }
@@ -307,7 +508,9 @@ impl InsightsView {
             if let Some(v) = weak.upgrade() {
                 v.flight.borrow_mut().cancelled = true;
                 v.mutation_notice.set_text("");
+                v.episode_success_notice.borrow_mut().take();
                 v.invalidate_choosers();
+                v.invalidate_episode_draft();
                 v.status.set_text(copy("cancelled"));
             }
         });
@@ -353,7 +556,9 @@ impl InsightsView {
             if let Some(view) = weak.upgrade() {
                 view.flight.borrow_mut().cancelled = true;
                 view.mutation_notice.set_text("");
+                view.episode_success_notice.borrow_mut().take();
                 view.invalidate_choosers();
+                view.invalidate_episode_draft();
             }
             gtk::glib::Propagation::Proceed
         });
@@ -362,7 +567,9 @@ impl InsightsView {
             if let Some(view) = weak.upgrade() {
                 view.flight.borrow_mut().cancelled = true;
                 view.mutation_notice.set_text("");
+                view.episode_success_notice.borrow_mut().take();
                 view.invalidate_choosers();
+                view.invalidate_episode_draft();
             }
         });
         let weak = Rc::downgrade(&view);
@@ -373,6 +580,8 @@ impl InsightsView {
                     view.assessment.set_sensitive(true);
                     view.saved.set_sensitive(true);
                     view.evidence_expander.set_sensitive(true);
+                    view.episodes.set_sensitive(true);
+                    view.episode_edit.set_sensitive(true);
                 }
             }
         });
@@ -380,6 +589,7 @@ impl InsightsView {
         view.root.connect_unmap(move |_| {
             if let Some(view) = weak.upgrade() {
                 view.invalidate_choosers();
+                view.invalidate_episode_draft();
                 view.flight.borrow_mut().cancelled = true;
             }
         });
@@ -387,11 +597,15 @@ impl InsightsView {
         view.root.connect_map(move |_| {
             if let Some(view) = weak.upgrade() {
                 view.mutation_notice.set_text("");
+                view.episode_success_notice.borrow_mut().take();
+                view.invalidate_episode_draft();
                 if !view.flight.borrow().busy && !view.flight.borrow().closed {
                     view.controls.set_sensitive(true);
                     view.assessment.set_sensitive(true);
                     view.saved.set_sensitive(true);
                     view.evidence_expander.set_sensitive(true);
+                    view.episodes.set_sensitive(true);
+                    view.episode_edit.set_sensitive(true);
                 }
                 view.summary_expander.set_expanded(true);
                 view.refresh_history();
@@ -407,6 +621,7 @@ impl InsightsView {
     }
 
     fn analyze(self: &Rc<Self>, save: bool) {
+        self.episode_success_notice.borrow_mut().take();
         let file = self.selected.borrow().clone();
         if let Some(file) = file {
             if self.flight.borrow().busy || self.flight.borrow().closed {
@@ -446,6 +661,423 @@ impl InsightsView {
     fn invalidate_choosers(&self) {
         self.chooser_generation
             .set(self.chooser_generation.get().wrapping_add(1));
+    }
+
+    fn invalidate_episode_draft(&self) {
+        self.episode_generation
+            .set(self.episode_generation.get().wrapping_add(1));
+        *self.current_episode.borrow_mut() = None;
+        self.current_membership_revision.set(None);
+        self.episode_detail.set_text("");
+        self.episode_edit.set_visible(false);
+    }
+
+    fn episode_ticket(&self) -> EpisodeDraftTicket {
+        let episode = self.current_episode.borrow();
+        EpisodeDraftTicket {
+            generation: self.episode_generation.get(),
+            id: episode.as_ref().map(|(id, _)| id.clone()),
+            revision: episode.as_ref().map(|(_, revision)| *revision),
+        }
+    }
+
+    fn accepts_episode_ticket(&self, ticket: &EpisodeDraftTicket) -> bool {
+        let episode = self.current_episode.borrow();
+        ticket.matches(
+            self.episode_generation.get(),
+            episode
+                .as_ref()
+                .map(|(id, revision)| (id.as_str(), *revision)),
+        ) && !self.flight.borrow().closed
+    }
+
+    fn selected_episode_members(&self) -> Vec<String> {
+        self.episode_choices
+            .borrow()
+            .iter()
+            .filter(|(_, choice)| choice.is_active())
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
+    fn rebuild_episode_choices(&self, ids: &[String], container: &gtk::Box) {
+        while let Some(child) = container.first_child() {
+            container.remove(&child);
+        }
+        let selected: std::collections::BTreeSet<_> = self
+            .episode_choices
+            .borrow()
+            .iter()
+            .filter(|(_, choice)| choice.is_active())
+            .map(|(id, _)| id.clone())
+            .collect();
+        let mut choices = Vec::new();
+        for id in ids {
+            let choice = gtk::CheckButton::with_label(id);
+            choice.set_active(selected.contains(id));
+            choice.set_tooltip_text(Some(copy("episode_member_id")));
+            container.append(&choice);
+            choices.push((id.clone(), choice));
+        }
+        *self.episode_choices.borrow_mut() = choices;
+    }
+
+    fn select_episode_members(&self, members: &[String]) {
+        let members: std::collections::BTreeSet<_> = members.iter().collect();
+        for (id, choice) in self.episode_choices.borrow().iter() {
+            choice.set_active(members.contains(id));
+        }
+    }
+
+    fn create_episode(self: &Rc<Self>) {
+        let snapshot_ids = self.selected_episode_members();
+        if snapshot_ids.is_empty() {
+            self.status.set_text(copy("episode_selection_empty"));
+            return;
+        }
+        self.request_episode(Op::EpisodeCreate { snapshot_ids }, None);
+    }
+
+    fn refresh_episodes(self: &Rc<Self>) {
+        self.request_episode(Op::EpisodeList {}, None);
+    }
+
+    fn open_episode(self: &Rc<Self>, id: String) {
+        self.mutation_notice.set_text("");
+        self.episode_success_notice.borrow_mut().take();
+        self.invalidate_episode_draft();
+        self.request_episode(Op::EpisodeExplain { id }, None);
+    }
+
+    fn replace_episode_members(self: &Rc<Self>) {
+        let ticket = self.episode_ticket();
+        if !self.accepts_episode_ticket(&ticket) {
+            return;
+        }
+        let (Some(id), Some(expected_revision)) = (ticket.id.clone(), ticket.revision) else {
+            return;
+        };
+        let snapshot_ids = self.selected_episode_members();
+        if snapshot_ids.is_empty() {
+            self.status.set_text(copy("episode_selection_empty"));
+            return;
+        }
+        self.request_episode(
+            Op::EpisodeReplaceMembers {
+                id,
+                expected_revision,
+                snapshot_ids,
+            },
+            Some(ticket),
+        );
+    }
+
+    fn annotate_episode(self: &Rc<Self>) {
+        let ticket = self.episode_ticket();
+        let (Some(id), Some(expected_revision)) = (ticket.id.clone(), ticket.revision) else {
+            return;
+        };
+        self.request_episode(
+            Op::EpisodeAnnotate {
+                id,
+                expected_revision,
+                category: category_at(self.episode_category.selected()),
+                outcome: outcome_at(self.episode_outcome.selected()),
+            },
+            Some(ticket),
+        );
+    }
+
+    fn clear_episode_assessment_with(self: &Rc<Self>, ticket: EpisodeDraftTicket) {
+        if !self.accepts_episode_ticket(&ticket) {
+            return;
+        }
+        let (Some(id), Some(expected_revision)) = (ticket.id.clone(), ticket.revision) else {
+            return;
+        };
+        self.request_episode(
+            Op::EpisodeClearAssessment {
+                id,
+                expected_revision,
+            },
+            Some(ticket),
+        );
+    }
+
+    fn delete_episode_with(self: &Rc<Self>, ticket: EpisodeDraftTicket) {
+        if !self.accepts_episode_ticket(&ticket) {
+            return;
+        }
+        let (Some(id), Some(expected_revision)) = (ticket.id.clone(), ticket.revision) else {
+            return;
+        };
+        self.request_episode(
+            Op::EpisodeDelete {
+                id,
+                expected_revision,
+            },
+            Some(ticket),
+        );
+    }
+
+    fn request_episode(self: &Rc<Self>, operation: Op, ticket: Option<EpisodeDraftTicket>) {
+        if !self.flight.borrow_mut().begin() {
+            return;
+        }
+        let mutation = matches!(
+            &operation,
+            Op::EpisodeCreate { .. }
+                | Op::EpisodeReplaceMembers { .. }
+                | Op::EpisodeAnnotate { .. }
+                | Op::EpisodeClearAssessment { .. }
+                | Op::EpisodeDelete { .. }
+        );
+        let read_ticket = (!mutation).then(|| EpisodeReadTicket {
+            generation: self.episode_generation.get(),
+            requested_id: match &operation {
+                Op::EpisodeExplain { id } => Some(id.clone()),
+                _ => None,
+            },
+        });
+        if mutation {
+            self.mutation_notice.set_text("");
+            self.episode_success_notice.borrow_mut().take();
+        }
+        self.controls.set_sensitive(false);
+        self.assessment.set_sensitive(false);
+        self.saved.set_sensitive(false);
+        self.summary_evidence.set_sensitive(false);
+        self.evidence_expander.set_sensitive(false);
+        self.episodes.set_sensitive(false);
+        self.episode_edit.set_sensitive(false);
+        if self.episode_success_notice.borrow().is_none() {
+            self.status.set_text(copy("working"));
+        }
+        let (tx, rx) = async_channel::bounded(1);
+        let store_dir = self.store_dir.clone();
+        std::thread::spawn(move || {
+            let request = LocalInsightsRequest {
+                store_dir: store_dir.clone(),
+                operation,
+            };
+            let result = match std::panic::catch_unwind(|| service::execute(request)) {
+                Ok(Ok(response)) => EpisodeResult::Response(response),
+                Ok(Err(error))
+                    if error.downcast_ref::<EpisodeStoreError>()
+                        == Some(&EpisodeStoreError::RevisionConflict) =>
+                {
+                    let refreshed = service::execute(LocalInsightsRequest {
+                        store_dir,
+                        operation: Op::EpisodeList {},
+                    });
+                    match refreshed {
+                        Ok(Response::EpisodeList { episodes }) => EpisodeResult::Conflict(episodes),
+                        _ => EpisodeResult::Failed("episode_list_unavailable"),
+                    }
+                }
+                Ok(Err(error)) => EpisodeResult::Failed(episode_error_copy_key(&error)),
+                _ => EpisodeResult::Failed("episode_detail_unavailable"),
+            };
+            let _ = tx.send_blocking(result);
+        });
+        let weak = Rc::downgrade(self);
+        gtk::glib::spawn_future_local(async move {
+            let Ok(result) = rx.recv().await else {
+                return;
+            };
+            let Some(view) = weak.upgrade() else {
+                return;
+            };
+            if !view.flight.borrow_mut().finish() {
+                return;
+            }
+            view.controls.set_sensitive(true);
+            view.assessment.set_sensitive(true);
+            view.saved.set_sensitive(true);
+            view.summary_evidence.set_sensitive(true);
+            view.evidence_expander.set_sensitive(true);
+            view.episodes.set_sensitive(true);
+            view.episode_edit.set_sensitive(true);
+            if ticket
+                .as_ref()
+                .is_some_and(|ticket| !view.accepts_episode_ticket(ticket))
+            {
+                if mutation {
+                    view.refresh_episodes();
+                }
+                return;
+            }
+            if let Some(read_ticket) = &read_ticket {
+                let returned_id = match &result {
+                    EpisodeResult::Response(Response::EpisodeExplain { detail }) => {
+                        Some(detail.episode.id.as_str())
+                    }
+                    EpisodeResult::Response(Response::EpisodeList { .. }) => None,
+                    _ => read_ticket.requested_id.as_deref(),
+                };
+                if !read_ticket.accepts(view.episode_generation.get(), returned_id) {
+                    return;
+                }
+            }
+            match result {
+                EpisodeResult::Response(Response::EpisodeList { episodes }) => {
+                    view.render_episode_list(&episodes);
+                    view.render_episode_status(copy("refreshed"));
+                    if let Some((id, _)) = view.current_episode.borrow().clone() {
+                        view.request_episode(Op::EpisodeExplain { id }, None);
+                    }
+                }
+                EpisodeResult::Response(Response::EpisodeExplain { detail }) => {
+                    view.render_episode_detail(&detail);
+                    view.render_episode_status(copy("refreshed"));
+                }
+                EpisodeResult::Response(Response::EpisodeDelete { .. }) => {
+                    view.invalidate_episode_draft();
+                    view.set_episode_success(copy("episode_deleted"));
+                    view.refresh_episodes();
+                }
+                EpisodeResult::Response(Response::EpisodeCreate { episode }) => {
+                    view.present_episode(&episode);
+                    view.set_episode_success(copy("episode_create_success"));
+                    view.refresh_episodes();
+                }
+                EpisodeResult::Response(Response::EpisodeReplaceMembers { episode }) => {
+                    let membership_changed =
+                        view.current_membership_revision.get() != Some(episode.membership_revision);
+                    view.present_episode(&episode);
+                    if membership_changed {
+                        view.set_episode_success(&format!(
+                            "{}\n{}",
+                            copy("episode_members_saved"),
+                            copy("episode_membership_changed")
+                        ));
+                    } else {
+                        view.set_episode_success(copy("episode_members_saved"));
+                    }
+                    view.refresh_episodes();
+                }
+                EpisodeResult::Response(Response::EpisodeAnnotate { episode }) => {
+                    view.present_episode(&episode);
+                    view.set_episode_success(copy("episode_assessment_saved"));
+                    view.refresh_episodes();
+                }
+                EpisodeResult::Response(Response::EpisodeClearAssessment { episode }) => {
+                    view.present_episode(&episode);
+                    view.set_episode_success(copy("episode_assessment_cleared"));
+                    view.refresh_episodes();
+                }
+                EpisodeResult::Conflict(episodes) => {
+                    view.invalidate_episode_draft();
+                    view.episode_success_notice.borrow_mut().take();
+                    view.render_episode_list(&episodes);
+                    view.status.set_text(copy("episode_revision_conflict"));
+                }
+                EpisodeResult::Failed(key) => {
+                    view.invalidate_episode_draft();
+                    let error = copy(key);
+                    let status = episode_failure_status(
+                        view.episode_success_notice.borrow().as_deref(),
+                        error,
+                    );
+                    view.status.set_text(&status);
+                }
+                _ => {
+                    view.invalidate_episode_draft();
+                    let error = copy("episode_detail_unavailable");
+                    let status = episode_failure_status(
+                        view.episode_success_notice.borrow().as_deref(),
+                        error,
+                    );
+                    view.status.set_text(&status);
+                }
+            }
+        });
+    }
+
+    fn set_episode_success(&self, notice: &str) {
+        *self.episode_success_notice.borrow_mut() = Some(notice.to_owned());
+        self.status.set_text(notice);
+    }
+
+    fn render_episode_status(&self, fallback: &str) {
+        self.status.set_text(
+            self.episode_success_notice
+                .borrow()
+                .as_deref()
+                .unwrap_or(fallback),
+        );
+    }
+
+    fn render_episode_list(self: &Rc<Self>, entries: &[EpisodeListEntry]) {
+        while let Some(child) = self.episodes.first_child() {
+            self.episodes.remove(&child);
+        }
+        self.episodes.append(&label(&format!(
+            "{}: {}",
+            copy("episode_count"),
+            entries.len()
+        )));
+        if entries.is_empty() {
+            self.episodes.append(&label(copy("episode_empty")));
+            return;
+        }
+        for entry in entries {
+            let row = gtk::Box::new(gtk::Orientation::Vertical, 3);
+            row.append(&label(&format!(
+                "{}: {}\n{}: {}\n{}: {}",
+                copy("episode_id"),
+                entry.episode.id,
+                copy("episode_members"),
+                entry.episode.members.len(),
+                copy("episode_overlaps"),
+                entry.overlapping_episode_ids.len(),
+            )));
+            let open = gtk::Button::with_label(copy("episode_open"));
+            let weak = Rc::downgrade(self);
+            let id = entry.episode.id.clone();
+            open.connect_clicked(move |_| {
+                if let Some(view) = weak.upgrade() {
+                    view.open_episode(id.clone());
+                }
+            });
+            row.append(&open);
+            self.episodes.append(&row);
+        }
+    }
+
+    fn present_episode(&self, episode: &LocalEpisode) {
+        self.episode_generation
+            .set(self.episode_generation.get().wrapping_add(1));
+        *self.current_episode.borrow_mut() = Some((episode.id.clone(), episode.revision));
+        self.current_membership_revision
+            .set(Some(episode.membership_revision));
+        let members = episode
+            .members
+            .iter()
+            .map(|member| member.snapshot_id.clone())
+            .collect::<Vec<_>>();
+        self.select_episode_members(&members);
+        self.episode_detail.set_text(&render_episode(episode, &[]));
+        self.episode_edit.set_visible(true);
+        if let Some(assessment) = &episode.manual_assessment {
+            self.episode_category
+                .set_selected(category_index(assessment.category));
+            self.episode_outcome
+                .set_selected(outcome_index(assessment.outcome));
+        } else {
+            self.episode_category.set_selected(0);
+            self.episode_outcome.set_selected(0);
+        }
+    }
+
+    fn render_episode_detail(&self, detail: &EpisodeDetail) {
+        self.present_episode(&detail.episode);
+        let mut text = render_episode(&detail.episode, &detail.overlap);
+        text.push_str(&format!("\n{}\n", copy("episode_member_evidence")));
+        for member in &detail.members {
+            text.push_str(&render(member));
+        }
+        self.episode_detail.set_text(&text);
     }
 
     fn chooser_ticket(&self) -> ChooserTicket {
@@ -586,6 +1218,7 @@ impl InsightsView {
         if self.flight.borrow().busy || self.flight.borrow().closed {
             return;
         }
+        self.episode_success_notice.borrow_mut().take();
         // An explicit lookup replaces the previous selection immediately,
         // including an unsaved preview. Failed/deleted evidence cannot leave
         // that earlier successful result looking like the requested snapshot.
@@ -639,6 +1272,8 @@ impl InsightsView {
         self.saved.set_sensitive(false);
         self.summary_evidence.set_sensitive(false);
         self.evidence_expander.set_sensitive(false);
+        self.episodes.set_sensitive(false);
+        self.episode_edit.set_sensitive(false);
         self.status.set_text(copy("working"));
         let refresh_saved = matches!(
             &operation,
@@ -680,6 +1315,8 @@ impl InsightsView {
                     view.saved.set_sensitive(true);
                     view.summary_evidence.set_sensitive(true);
                     view.evidence_expander.set_sensitive(true);
+                    view.episodes.set_sensitive(true);
+                    view.episode_edit.set_sensitive(true);
                     if view.pending_refresh.get() {
                         view.refresh_history();
                     }
@@ -691,6 +1328,8 @@ impl InsightsView {
             view.saved.set_sensitive(true);
             view.summary_evidence.set_sensitive(true);
             view.evidence_expander.set_sensitive(true);
+            view.episodes.set_sensitive(true);
+            view.episode_edit.set_sensitive(true);
             let mutation_notice = match &result {
                 Some(Response::Analyze {
                     mutation_effects, ..
@@ -700,6 +1339,22 @@ impl InsightsView {
                 }) => Some(render_mutation_notice(mutation_effects)),
                 _ => None,
             };
+            let invalidates_current_episode = match &result {
+                Some(Response::Analyze {
+                    mutation_effects, ..
+                })
+                | Some(Response::Delete {
+                    mutation_effects, ..
+                }) => view
+                    .current_episode
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|(id, _)| mutation_effects.invalidated_episode_ids.contains(id)),
+                _ => false,
+            };
+            if invalidates_current_episode {
+                view.invalidate_episode_draft();
+            }
             match result {
                 Some(Response::Analyze { insight, .. })
                 | Some(Response::Explain { insight })
@@ -734,6 +1389,8 @@ impl InsightsView {
                     });
                     if refresh_saved {
                         view.refresh_history();
+                    } else {
+                        view.refresh_episodes();
                     }
                 }
                 Some(Response::Summary { summary }) => {
@@ -742,6 +1399,8 @@ impl InsightsView {
                     let selected = view.current_id.borrow().clone();
                     if let Some(id) = selected {
                         view.request(Op::Explain { id }, true);
+                    } else {
+                        view.refresh_episodes();
                     }
                 }
                 Some(Response::List { .. }) => view.refresh_history(),
@@ -785,6 +1444,12 @@ impl InsightsView {
         self.summary.set_text(&render_summary_text(&summary));
         self.saved_heading.set_text(copy("saved"));
         let summary = Rc::new(*summary);
+        let ids = summary
+            .snapshots
+            .iter()
+            .map(|snapshot| snapshot.id.clone())
+            .collect::<Vec<_>>();
+        self.rebuild_episode_choices(&ids, &self.episode_choices_box);
         self.render_saved(summary.snapshots.iter());
         for category in &summary.user_reported.categories {
             self.evidence_button(
@@ -908,6 +1573,79 @@ fn render_mutation_notice(
         copy("episode_invalidated_notice"),
         effects.invalidated_episode_ids.join("\n")
     )
+}
+fn episode_error_copy_key(error: &anyhow::Error) -> &'static str {
+    if let Some(error) = error.downcast_ref::<EpisodeStoreError>() {
+        return match error {
+            EpisodeStoreError::NotFound => "episode_missing",
+            EpisodeStoreError::MissingMembers => "episode_missing_members",
+            EpisodeStoreError::Full => "episode_limit",
+            EpisodeStoreError::RevisionConflict => "episode_revision_conflict",
+            EpisodeStoreError::RevisionOverflow => "episode_invalid",
+        };
+    }
+    if let Some(error) = error.downcast_ref::<EpisodeValidationError>() {
+        return match error {
+            EpisodeValidationError::MemberLimit => "episode_member_limit",
+            EpisodeValidationError::Invalid | EpisodeValidationError::DuplicateMember => {
+                "episode_invalid"
+            }
+        };
+    }
+    if error.downcast_ref::<service::ResponseTooLarge>().is_some() {
+        return "episode_response_too_large";
+    }
+    "episode_detail_unavailable"
+}
+fn episode_failure_status(committed: Option<&str>, error: &str) -> String {
+    committed
+        .map(|notice| format!("{notice}\n{error}"))
+        .unwrap_or_else(|| error.to_owned())
+}
+fn render_episode(episode: &LocalEpisode, overlap: &[EpisodeOverlap]) -> String {
+    let mut lines = vec![
+        format!("{}: {}", copy("episode_id"), episode.id),
+        format!("{}: {}", copy("episode_revision"), episode.revision),
+        format!(
+            "{}: {}",
+            copy("episode_membership_revision"),
+            episode.membership_revision
+        ),
+        format!("{}: {}", copy("episode_created_at"), episode.created_at),
+        format!("{}: {}", copy("episode_updated_at"), episode.updated_at),
+        format!("{}:", copy("episode_members")),
+    ];
+    lines.extend(
+        episode
+            .members
+            .iter()
+            .map(|member| format!("  {}", member.snapshot_id)),
+    );
+    if let Some(assessment) = &episode.manual_assessment {
+        lines.push(format!(
+            "{}: {} / {}",
+            copy("episode_assessment"),
+            category_label(assessment.category),
+            outcome_label(assessment.outcome)
+        ));
+    } else {
+        lines.push(format!(
+            "{}: {}",
+            copy("episode_assessment"),
+            copy("episode_unassessed")
+        ));
+    }
+    if overlap.is_empty() {
+        lines.push(copy("episode_no_overlap").to_owned());
+    } else {
+        lines.push(format!("{}:", copy("episode_overlaps")));
+        lines.extend(
+            overlap
+                .iter()
+                .map(|item| format!("  {}: {}", item.snapshot_id, item.episode_ids.join(", "))),
+        );
+    }
+    lines.join("\n")
 }
 fn category_at(i: u32) -> TaskCategory {
     [
@@ -1206,6 +1944,34 @@ mod tests {
         assert!(!preview.matches(8, None));
     }
     #[test]
+    fn episode_drafts_bind_generation_id_and_revision() {
+        let ticket = EpisodeDraftTicket {
+            generation: 4,
+            id: Some("episode-a".into()),
+            revision: Some(7),
+        };
+        assert!(ticket.matches(4, Some(("episode-a", 7))));
+        assert!(!ticket.matches(5, Some(("episode-a", 7))));
+        assert!(!ticket.matches(4, Some(("episode-b", 7))));
+        assert!(!ticket.matches(4, Some(("episode-a", 8))));
+        assert!(!ticket.matches(4, None));
+        let read = EpisodeReadTicket {
+            generation: 9,
+            requested_id: Some("episode-a".into()),
+        };
+        assert!(read.accepts(9, Some("episode-a")));
+        assert!(!read.accepts(10, Some("episode-a")));
+        assert!(!read.accepts(9, Some("episode-b")));
+        assert_eq!(
+            episode_failure_status(Some("Committed"), "Refresh failed"),
+            "Committed\nRefresh failed"
+        );
+        assert_eq!(
+            episode_failure_status(None, "Refresh failed"),
+            "Refresh failed"
+        );
+    }
+    #[test]
     fn cancelled_read_cannot_publish_and_next_request_waits_for_completion() {
         let mut f = Flight::default();
         assert!(f.begin());
@@ -1415,6 +2181,121 @@ mod tests {
         view.analyze(true);
         settle();
         let id = view.current_id.borrow().clone().expect("saved id");
+        let first_choice = view
+            .episode_choices
+            .borrow()
+            .first()
+            .expect("saved snapshot choice")
+            .1
+            .clone();
+        first_choice.set_active(true);
+        view.create_episode();
+        settle();
+        let (episode_id, revision) = view
+            .current_episode
+            .borrow()
+            .clone()
+            .expect("created episode remains presented");
+        assert_eq!(revision, 1);
+        assert!(view.episode_detail.text().contains(&episode_id));
+        assert!(
+            view.episode_detail
+                .text()
+                .contains(copy("episode_no_overlap"))
+        );
+        let second_file = temp.join("second.jsonl");
+        std::fs::write(
+            &second_file,
+            concat!(
+                "{\"role\":\"meta\",\"source\":\"claude-code\",\"model\":\"fixture\"}\n",
+                "{\"role\":\"user\",\"timestamp\":\"2026-09-11T12:01:00Z\",\"content\":\"SECOND_PRIVATE_BODY\"}\n"
+            ),
+        )
+        .unwrap();
+        let second = service::execute(LocalInsightsRequest {
+            store_dir: Some(store.clone()),
+            operation: Op::Analyze {
+                source: SourceFormat::Trajectory,
+                file: second_file,
+                save: true,
+            },
+        })
+        .unwrap();
+        let Response::Analyze {
+            insight: second, ..
+        } = second
+        else {
+            panic!("second analyze response");
+        };
+        view.refresh_history();
+        settle();
+        assert_eq!(view.episode_choices.borrow().len(), 2);
+        for (_, choice) in view.episode_choices.borrow().iter() {
+            choice.set_active(true);
+        }
+        view.replace_episode_members();
+        settle();
+        assert_eq!(view.current_membership_revision.get(), Some(2));
+        assert_eq!(view.current_episode.borrow().as_ref().unwrap().1, 2);
+        assert!(view.status.text().contains(copy("episode_members_saved")));
+        assert!(
+            view.status
+                .text()
+                .contains(copy("episode_membership_changed"))
+        );
+        view.replace_episode_members();
+        settle();
+        assert_eq!(view.current_episode.borrow().as_ref().unwrap().1, 2);
+        assert_eq!(view.status.text(), copy("episode_members_saved"));
+        view.episode_category
+            .set_selected(category_index(TaskCategory::Tests));
+        view.episode_outcome
+            .set_selected(outcome_index(TaskOutcome::Accepted));
+        view.annotate_episode();
+        settle();
+        let revision = view.current_episode.borrow().as_ref().unwrap().1;
+        assert_eq!(revision, 3);
+        assert!(
+            view.episode_detail
+                .text()
+                .contains(copy("outcome_accepted"))
+        );
+        service::open_store(Some(&store))
+            .unwrap()
+            .episode_annotate(
+                &episode_id,
+                revision,
+                TaskCategory::Docs,
+                TaskOutcome::Partial,
+            )
+            .unwrap();
+        view.clear_episode_assessment_with(view.episode_ticket());
+        settle();
+        assert!(view.current_episode.borrow().is_none());
+        assert_eq!(view.status.text(), copy("episode_revision_conflict"));
+        view.open_episode(episode_id.clone());
+        settle();
+        assert_eq!(view.current_episode.borrow().as_ref().unwrap().1, 4);
+        view.delete_episode_with(view.episode_ticket());
+        settle();
+        assert!(view.current_episode.borrow().is_none());
+        assert!(
+            service::open_store(Some(&store))
+                .unwrap()
+                .episode_list()
+                .unwrap()
+                .is_empty()
+        );
+        // Episode membership coverage needs two saved snapshots. Remove its
+        // temporary second member before continuing the original single-
+        // snapshot evidence and summary lifecycle assertions below.
+        service::execute(LocalInsightsRequest {
+            store_dir: Some(store.clone()),
+            operation: Op::Delete { id: second.id },
+        })
+        .unwrap();
+        view.refresh_history();
+        settle();
         assert!(view.evidence_expander.is_visible());
         assert!(view.evidence_controls.is_visible());
         let report = temp.join("test-report.json");
@@ -1660,8 +2541,18 @@ mod tests {
             .unwrap()
             .episode_create(std::slice::from_ref(&id))
             .unwrap();
+        view.open_episode(group.id.clone());
+        settle();
+        assert_eq!(
+            view.current_episode.borrow().as_ref().map(|(id, _)| id),
+            Some(&group.id)
+        );
         view.request(Op::Delete { id }, false);
         settle();
+        assert!(
+            view.current_episode.borrow().is_none(),
+            "committed snapshot cleanup immediately invalidates the open episode"
+        );
         assert!(
             view.mutation_notice.text().contains(&group.id),
             "cleanup notice survives automatic empty-history refresh"
