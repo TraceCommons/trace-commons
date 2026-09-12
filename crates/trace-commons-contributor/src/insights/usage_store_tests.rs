@@ -131,7 +131,7 @@ fn versions_one_through_five_remain_read_only_and_do_not_invent_usage() {
         );
         assert_eq!(annotated.report, read.report);
         let upgraded: Value = serde_json::from_slice(&fs::read(&index_path).unwrap()).unwrap();
-        assert_eq!(upgraded["version"], 6);
+        assert_eq!(upgraded["version"], super::STORE_VERSION);
         assert_eq!(upgraded["episodes"], legacy["episodes"]);
         source(&path, 150);
         let reimported = store.import(SourceFormat::Codex, &path).unwrap();
