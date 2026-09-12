@@ -397,10 +397,8 @@ async fn public_run_publish_and_withdraw_race_cannot_reopen_a_revoked_trace() {
 }
 
 /// These tests deliberately contend on the production-wide provenance lock.
-/// Keep them out of each other's measurement window: the sourced-publication
-/// test probes whether that lock is available, and PostgreSQL cannot tell that
-/// probe whether a competing holder belongs to the operation under test or to
-/// this module's root-publication test running on another harness thread.
+/// Keep them out of each other's measurement window so the explicit lock holder
+/// in one test cannot delay the operation exercised by the other.
 fn provenance_graph_lock_test_guard() -> &'static tokio::sync::Mutex<()> {
     static GUARD: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
     GUARD.get_or_init(Default::default)
@@ -651,31 +649,55 @@ async fn sourced_publications_wait_for_the_provenance_graph_lock() {
         "the sourced publication must wait for its submission row"
     );
 
-    let mut probe_client = backend
+    let row_lock_backend_pid: i32 = row_lock_tx
+        .query_one("SELECT pg_backend_pid() AS pid", &[])
+        .await
+        .expect("read submission row-lock backend pid")
+        .get("pid");
+    let probe_client = backend
         .raw_pool_for_tests_and_diagnostics()
         .get()
         .await
-        .expect("get provenance lock probe connection");
-    let probe_tx = probe_client
-        .transaction()
-        .await
-        .expect("start provenance lock probe transaction");
-    let graph_lock_available: bool = probe_tx
-        .query_one(
-            "SELECT pg_try_advisory_xact_lock($1, $2) AS acquired",
-            &[&lock_class, &lock_object],
+        .expect("get blocked publication probe connection");
+    let blocked_publications = probe_client
+        .query(
+            "SELECT pid
+             FROM pg_stat_activity
+             WHERE datname = current_database()
+               AND $1 = ANY(pg_blocking_pids(pid))
+               AND wait_event_type = 'Lock'",
+            &[&row_lock_backend_pid],
         )
         .await
-        .expect("probe provenance graph lock")
-        .get("acquired");
+        .expect("identify publication blocked by submission row lock");
+    assert_eq!(
+        blocked_publications.len(),
+        1,
+        "the submission row lock must block exactly the publication under test"
+    );
+    let blocked_publication_pid: i32 = blocked_publications[0].get("pid");
+    let lock_class = i64::from(lock_class);
+    let lock_object = i64::from(lock_object);
+    let blocked_publication_holds_graph_lock: bool = probe_client
+        .query_one(
+            "SELECT EXISTS (
+                 SELECT 1
+                 FROM pg_locks
+                 WHERE pid = $1
+                   AND locktype = 'advisory'
+                   AND classid::bigint = $2
+                   AND objid::bigint = $3
+                   AND granted
+             ) AS held",
+            &[&blocked_publication_pid, &lock_class, &lock_object],
+        )
+        .await
+        .expect("inspect blocked publication provenance lock ownership")
+        .get("held");
     assert!(
-        graph_lock_available,
+        !blocked_publication_holds_graph_lock,
         "a local submission row wait must not retain the global provenance graph lock"
     );
-    probe_tx
-        .rollback()
-        .await
-        .expect("release probed provenance graph lock");
     row_lock_tx
         .rollback()
         .await
