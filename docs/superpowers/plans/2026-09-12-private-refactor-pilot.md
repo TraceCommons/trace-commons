@@ -5,6 +5,12 @@ Parent: [personal refactor comparison delivery plan](2026-09-12-personal-refacto
 
 Reward systems for both missions and insights are outside scope and owned by Abhishek. This pilot collects evidence and user assessments without reward eligibility, compensation, or payout features.
 
+## Native pilot preparation checkpoint
+
+A new isolated working copy of the original two-file pilot store was verified byte-for-byte; the original remained unchanged. Existing accepted outcomes were preserved without adding context or independence confirmations. Its private location and hash manifest stay local. The three selected tasks still share one model cohort and a root session; copying the store does not change eligibility.
+
+The macOS date and saved-record reconciliation fixes are in [#944](https://github.com/TraceCommons/trace-commons/pull/944). Explicit store routing is implemented and Astra-reviewed in `f44e7bc3`, with 25/25 focused Swift tests passing across the combined slices, but routing publication and actual app pilot remain outstanding. Once integrated, launch the app with `--insights-store` and the absolute path to the existing working-copy directory. Verify the visible custom-store location before interacting; malformed, missing, relative, duplicate, or non-directory selections must not fall back to the normal store. Keep task context, outcome, and independence review separate.
+
 ## First repository and tasks
 
 Use Trace Commons for the first local retrospective pilot. Start with these completed refactors, then add other accepted, revised, or abandoned work to reach roughly 6–10 tasks if suitable traces exist. That is a usability sample, not a statistical sample-size claim.
