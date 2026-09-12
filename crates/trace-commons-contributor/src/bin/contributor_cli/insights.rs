@@ -51,6 +51,22 @@ enum InsightsCommand {
     },
     /// Remove your assessment without deleting the saved snapshot
     ClearAnnotation { id: String },
+    /// Explicitly link a local commit object; does not establish acceptance or merge
+    LinkGit {
+        id: String,
+        #[arg(long)]
+        repository: PathBuf,
+        #[arg(long)]
+        commit: String,
+    },
+    /// Link a structured test report as user-supplied evidence, without executing tests
+    LinkTestReport {
+        id: String,
+        #[arg(long)]
+        file: PathBuf,
+    },
+    /// Remove a saved evidence link, preserving the original repository or report
+    UnlinkEvidence { id: String, evidence_id: String },
     /// Inspect source-native usage in one file; does not save or estimate prices
     Usage {
         #[arg(long, value_enum)]
@@ -152,6 +168,41 @@ pub(super) fn run(args: &InsightsArgs, json: bool) -> Result<()> {
         InsightsCommand::ClearAnnotation { id } => {
             render(&store(args)?.clear_annotation(id)?, json)?
         }
+        InsightsCommand::LinkGit {
+            id,
+            repository,
+            commit,
+        } => {
+            render_operation(
+                args,
+                LocalInsightsOperation::LinkGit {
+                    id: id.clone(),
+                    repository: repository.clone(),
+                    commit: commit.clone(),
+                },
+                json,
+            )?;
+        }
+        InsightsCommand::LinkTestReport { id, file } => {
+            render_operation(
+                args,
+                LocalInsightsOperation::LinkTestReport {
+                    id: id.clone(),
+                    file: file.clone(),
+                },
+                json,
+            )?;
+        }
+        InsightsCommand::UnlinkEvidence { id, evidence_id } => {
+            render_operation(
+                args,
+                LocalInsightsOperation::UnlinkEvidence {
+                    id: id.clone(),
+                    evidence_id: evidence_id.clone(),
+                },
+                json,
+            )?;
+        }
         InsightsCommand::Usage { source, file } => {
             let source = match source {
                 NativeUsageSource::Codex => UsageSource::Codex,
@@ -180,6 +231,24 @@ pub(super) fn run(args: &InsightsArgs, json: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn render_operation(
+    args: &InsightsArgs,
+    operation: LocalInsightsOperation,
+    json: bool,
+) -> Result<()> {
+    let response = execute(LocalInsightsRequest {
+        store_dir: args.store_dir.clone(),
+        operation,
+    })?;
+    let insight = match response {
+        LocalInsightsResponse::LinkGit { insight }
+        | LocalInsightsResponse::LinkTestReport { insight }
+        | LocalInsightsResponse::UnlinkEvidence { insight } => insight,
+        _ => anyhow::bail!("insights-evidence-response-invalid"),
+    };
+    render(&insight, json)
 }
 
 fn render(insight: &LocalInsight, json: bool) -> Result<()> {
@@ -237,6 +306,22 @@ fn render(insight: &LocalInsight, json: bool) -> Result<()> {
                     _ => "session snapshots",
                 }
             );
+        }
+        if let Some(models) = &insight.model_observations {
+            println!(
+                "Declared model metadata only; not verified serving identity or per-model work allocation:"
+            );
+            println!("{}", serde_json::to_string_pretty(models)?);
+        } else {
+            println!(
+                "Model observations unavailable in this saved snapshot; explicitly reimport to refresh."
+            );
+        }
+        if !insight.outcome_links.is_empty() {
+            println!(
+                "Explicit user-linked evidence; Git objects and imported reports do not establish accepted work:"
+            );
+            println!("{}", serde_json::to_string_pretty(&insight.outcome_links)?);
         }
         println!("Evidence references:");
         for evidence in &insight.report.evidence {

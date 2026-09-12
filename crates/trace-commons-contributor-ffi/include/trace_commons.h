@@ -1775,6 +1775,8 @@ char*       tc_call(tc_handle*, const char* method, const char* params_json);
  * Operations: analyze {source:codex|trajectory,file,save:false}, list, summary,
  * explain {id}, delete {id}, annotate {id,category,outcome}, clear_annotation {id},
  * usage {source:codex|claude_code,file}, copy; each has a "type" discriminator.
+ * Explicit links: link_git {id,repository,commit}, link_test_report {id,file},
+ * unlink_evidence {id,evidence_id}. Links do not establish verified task success.
  * copy returns shared UI vocabulary. list/summary create no state for an absent store.
  * Returns owned JSON tagged by type, or NULL plus owned fixed-label *err.
  * Free result/error with tc_string_free. err may be NULL; otherwise writable
