@@ -14,6 +14,7 @@ final class InsightsModel {
     private(set) var copy: [String: String] = [:]
     func text(_ key: String) -> String { copy[key] ?? "" }
     private(set) var error: String?
+    private(set) var invalidatedEpisodeIDs: [String] = []
     private(set) var summary: SavedInsightsSummary?
     private(set) var summaryError: String?
     private(set) var loadingSummary = false
@@ -44,6 +45,7 @@ final class InsightsModel {
     func close() {
         active = false; generation = UUID(); task?.cancel(); task = nil; busy = false
         loadingSummary = false
+        invalidatedEpisodeIDs = []
     }
     func refresh() { perform(.init("list")) }
     func analyze(file: URL, source: String) {
@@ -114,9 +116,10 @@ final class InsightsModel {
     private func isEvidenceMutation(_ operation: InsightsRequest.Operation) -> Bool {
         ["link_git", "link_test_report", "unlink_evidence"].contains(operation.type)
     }
-    private func perform(_ operation: InsightsRequest.Operation) {
+    private func perform(_ operation: InsightsRequest.Operation, preservingMutationEffects: Bool = false) {
         guard active, !busy else { return }
         busy = true; error = nil
+        if !preservingMutationEffects { invalidatedEpisodeIDs = [] }
         if operation.type == "copy" || operation.type == "list" || operation.type == "summary"
             || operation.type == "delete" || operation.type == "annotate"
             || operation.type == "clear_annotation" || operation.save == true || isEvidenceMutation(operation) {
@@ -163,15 +166,19 @@ final class InsightsModel {
                         self.snapshots.insert(value, at: 0)
                     }
                 }
+                if operation.type == "analyze" || operation.type == "delete" {
+                    self.invalidatedEpisodeIDs = response.invalidatedEpisodeIDs
+                }
                 self.busy = false
                 if operation.type == "copy" || operation.save == true || operation.type == "delete"
                     || operation.type == "annotate" || operation.type == "clear_annotation" || self.isEvidenceMutation(operation) {
-                    self.refresh()
+                    self.perform(.init("list"), preservingMutationEffects: true)
                 } else if operation.type == "list" {
-                    self.perform(.init("summary"))
+                    self.perform(.init("summary"), preservingMutationEffects: true)
                 }
             } catch {
                 guard let self, self.active, self.generation == token, !Task.isCancelled else { return }
+                if !preservingMutationEffects { self.invalidatedEpisodeIDs = [] }
                 self.error = self.copy["error"] ?? "insights-operation-failed"
                 if self.loadingSummary {
                     self.summary = nil

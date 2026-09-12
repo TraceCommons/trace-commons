@@ -56,3 +56,9 @@ acceptance or model attribution. Removing a link preserves original files.
 Each picker freezes its snapshot selection (and Git commit); refresh, selection
 changes, and closing invalidate pending selections. Successful link changes
 refresh saved detail, history, and summary; failures clear prior detail.
+
+Snapshot replacement or deletion can remove episode groups created through the
+local CLI. The screen shows the committed group IDs and explains the loss of
+grouping and assessments. This notice survives automatic refresh, including a
+refresh failure, and clears on the next user action or closing Insights. Full
+episode creation and editing controls are a later native slice.
