@@ -42,3 +42,17 @@ first-run navigation, explicit persistence, summary refresh/failure, missing
 evidence navigation, unknown/zero/partial coverage, and completion after close.
 The automated suite does not qualify VoiceOver, the native file picker,
 Gatekeeper/notarization, or all display sizes on a packaged release.
+
+Saved details show bounded declared-model metadata with physical source
+coordinates, missing/invalid/omitted counts, and its source digest. Older
+snapshots remain unknown until explicitly reimported. Declarations do not
+verify serving identity or allocate work to a model.
+
+Saved snapshots can link an explicitly selected local repository and full
+commit object ID, or import a selected structured test-report JSON file. The
+import control explains the accepted fields. Git inspection and imported
+report assertions have separate authority labels; neither establishes task
+acceptance or model attribution. Removing a link preserves original files.
+Each picker freezes its snapshot selection (and Git commit); refresh, selection
+changes, and closing invalidate pending selections. Successful link changes
+refresh saved detail, history, and summary; failures clear prior detail.

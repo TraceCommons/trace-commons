@@ -1,0 +1,79 @@
+import Foundation
+
+public struct InsightModelObservations: Decodable, Sendable {
+    public let schema_version: UInt32
+    public let scope: Scope
+    public let source_format, source_digest: String
+    public let coordinates: Coordinates
+    public let record_count, candidate_records, valid_declarations: UInt64
+    public let missing_declarations, invalid_declarations, omitted_declarations: UInt64
+    public let model_labels_omitted, mixed_declared_models: Bool
+    public let declared_models: [String]
+    public let declarations: [Declaration]
+    public enum Scope: String, Decodable, Sendable {
+        case declaredMetadataOnly = "declared_metadata_only"
+    }
+    public enum Coordinates: String, Decodable, Sendable {
+        case jsonlPhysicalLinesOneBased = "jsonl_physical_lines_one_based"
+        case trajectoryArrayIndexesZeroBased = "trajectory_array_indexes_zero_based"
+    }
+    public struct Declaration: Decodable, Sendable, Identifiable {
+        public let model: String
+        public let record_index: UInt64
+        public let kind: Kind
+        public var id: UInt64 { record_index }
+    }
+    public enum Kind: String, Decodable, Sendable {
+        case codexSessionMetadata = "codex_session_metadata"
+        case codexTurnContext = "codex_turn_context"
+        case codexAssistantMessage = "codex_assistant_message"
+        case trajectoryMetadata = "trajectory_metadata"
+    }
+}
+
+public struct InsightOutcomeLink: Decodable, Sendable, Identifiable {
+    public let id, source_digest, linked_at: String
+    public let provenance: Provenance
+    public let evidence: Evidence
+    public enum Provenance: String, Decodable, Sendable { case userLinked = "user_linked" }
+    public enum Evidence: Decodable, Sendable {
+        case gitCommit(GitCommit)
+        case testReport(TestReport)
+        private enum CodingKeys: String, CodingKey { case type, evidence }
+        private enum Kind: String, Decodable { case gitCommit = "git_commit", testReport = "test_report" }
+        public init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            switch try container.decode(Kind.self, forKey: .type) {
+            case .gitCommit: self = .gitCommit(try container.decode(GitCommit.self, forKey: .evidence))
+            case .testReport: self = .testReport(try container.decode(TestReport.self, forKey: .evidence))
+            }
+        }
+    }
+    public struct GitCommit: Decodable, Sendable {
+        public let repository_path_digest, object_id, tree_id, inspected_at: String
+        public let parent_ids: [String]
+        public let provenance: Authority
+        public enum Authority: String, Decodable, Sendable { case inspectedLocalObject = "inspected_local_object" }
+    }
+    public struct TestReport: Decodable, Sendable {
+        public let schema_version: UInt32
+        public let runner, observed_at, artifact_digest, imported_at: String
+        public let commit_id: String?
+        public let passed, failed, skipped: UInt64
+        public let provenance: Authority
+        public enum Authority: String, Decodable, Sendable { case importedReport = "imported_report" }
+    }
+}
+
+extension LocalInsight {
+    func validateSupportedEvidence() throws {
+        if let models = model_observations, models.schema_version != 1 {
+            throw InsightsError.invalidResponse
+        }
+        for link in outcome_links ?? [] {
+            if case .testReport(let report) = link.evidence, report.schema_version != 1 {
+                throw InsightsError.invalidResponse
+            }
+        }
+    }
+}
