@@ -24,6 +24,18 @@
     "interval_strictly_excludes_zero": "interval_excludes_zero_candidate"
   },
   "qualification_seed_domain": "trace-commons-exact-component-qualification-v1",
+  "qualification_protocol": {
+    "scenario_iteration_order": "null_then_nonnull__array_index_order__size_pair_index__removal_index__experiment_0_to_9999__cohort_0_then_1__draw_0_to_n_minus_1",
+    "outcome_seed_bytes": "domain_utf8__zero__family_u8__probability_index_u32be__size_index_u32be__removal_index_u32be__experiment_u32be__cohort_u8__draw_u16be__retry_u32be",
+    "removal_seed_bytes": "domain_utf8__zero__ascii_removal__family_u8__probability_index_u32be__size_index_u32be__removal_index_u32be__experiment_u32be__cohort_u8__draw_u16be__retry_u32be",
+    "prf": "sha256",
+    "uniform_sampling": "first_u64_be_with_rejection_to_largest_multiple_of_10000_below_2_pow_64__then_modulo_10000",
+    "categorical_sampling": "first cumulative probability_bps strictly_greater_than_uniform_bucket",
+    "assessed_removal": "independent_mcar_after_outcome_generation__remove_when_uniform_bucket_less_than_removal_bps",
+    "missingness_claim_limit": "mcar_fixture_only__no_mnar_generalization",
+    "per_setting_uncertainty": "two_sided_95_percent_clopper_pearson_for_binomial_failure_count__continuous_endpoints_rounded_outward_to_millionths",
+    "aggregation": "none_for_admission__each_frozen_setting_must_pass_its_own_upper_bound"
+  },
   "null_probability_bps": [
     [100, 1900, 8000],
     [500, 1500, 8000],
