@@ -1,18 +1,43 @@
 import SwiftUI
 import TCBridge
+import TCShellCore
 import UniformTypeIdentifiers
 
 struct InsightsView: View {
-    @State private var model = InsightsModel()
-    @State private var comparisonModel = ComparisonTasksModel()
-    @State private var specificationModel = ComparisonSpecificationsModel()
+    @State private var model: InsightsModel
+    @State private var comparisonModel: ComparisonTasksModel
+    @State private var specificationModel: ComparisonSpecificationsModel
+    private let storeSelection: InsightsStoreSelection
     @State private var choosingFile = false
     @State private var source = "codex"
 
+    @MainActor init(storeSelection: InsightsStoreSelection = .standard) {
+        self.storeSelection = storeSelection
+        let router = InsightsServiceRouter(selection: storeSelection)
+        let service: InsightsModel.Service = { request in try await router.call(request) }
+        _model = State(initialValue: InsightsModel(service: service))
+        _comparisonModel = State(initialValue: ComparisonTasksModel(service: service))
+        _specificationModel = State(initialValue: ComparisonSpecificationsModel(service: service))
+    }
+
+    @ViewBuilder
     var body: some View {
+        if let refusal = storeSelection.refusal {
+            ContentUnavailableView("Insights store unavailable",
+                                   systemImage: "externaldrive.badge.exclamationmark",
+                                   description: Text(refusalMessage(refusal)))
+        } else {
+            content
+        }
+    }
+
+    private var content: some View {
         ScrollViewReader { proxy in
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
+                    if case .custom(let path) = storeSelection {
+                        Text("Insights store: \(path)").font(.caption).textSelection(.enabled)
+                    }
                     Text(model.text("intro"))
                     HStack {
                         Picker(model.text("source"), selection: $source) {
@@ -110,6 +135,15 @@ struct InsightsView: View {
             specificationModel.upstreamEvidenceChanged()
         }
         .onDisappear { model.close(); comparisonModel.close(); specificationModel.close() }
+    }
+    private func refusalMessage(_ refusal: InsightsStoreSelection.Refusal) -> String {
+        switch refusal {
+        case .duplicateOption: return "Choose one --insights-store directory and relaunch."
+        case .missingPath: return "--insights-store requires an absolute directory path."
+        case .relativePath: return "The Insights store path must be absolute."
+        case .pathMissing: return "The selected Insights store directory does not exist."
+        case .notADirectory: return "The selected Insights store path is not a directory."
+        }
     }
     private func updateSpecificationSources() {
         specificationModel.updateSources(tasks: comparisonModel.tasks, snapshots: model.snapshots)

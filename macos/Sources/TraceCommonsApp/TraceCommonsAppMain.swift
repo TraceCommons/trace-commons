@@ -13,6 +13,7 @@ import TCShellCore
 /// door.
 @main
 struct TraceCommonsShell: App {
+    private let insightsStoreSelection: InsightsStoreSelection
     @StateObject private var model = AppModel()
     @State private var compute = ComputeModel()
     @State private var navigation = MainWindowNavigation()
@@ -22,6 +23,7 @@ struct TraceCommonsShell: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
     init() {
+        insightsStoreSelection = .parse(arguments: CommandLine.arguments)
         // Earlier builds wrote the preview sheet's recent-search list to
         // UserDefaults. That list is the contributor's own record of what
         // they were checking for -- client names, employers, unreleased
@@ -43,7 +45,8 @@ struct TraceCommonsShell: App {
         }
 
         Window("Trace Commons", id: WindowID.main) {
-            MainWindowView(navigation: navigation, missionDrafts: missionDrafts)
+            MainWindowView(navigation: navigation, missionDrafts: missionDrafts,
+                           insightsStoreSelection: insightsStoreSelection)
                 .environmentObject(model)
                 .environment(compute)
                 .frame(minWidth: 760, minHeight: 520)
