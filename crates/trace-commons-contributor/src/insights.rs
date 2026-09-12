@@ -9,6 +9,7 @@ pub mod outcomes;
 pub mod provider;
 pub mod service;
 pub mod summary;
+pub mod time_evidence;
 pub mod usage;
 
 use std::collections::{BTreeMap, BTreeSet};
