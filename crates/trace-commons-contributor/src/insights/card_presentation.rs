@@ -250,7 +250,7 @@ pub fn ui_copy() -> BTreeMap<String, String> {
     copy.insert("card_episodes".into(), "Episode evidence".into());
     copy.insert(
         "card_more_models".into(),
-        "Additional model labels were omitted by display limits.".into(),
+        "Some model labels or declaration references were omitted by limits.".into(),
     );
     copy
 }
@@ -294,7 +294,8 @@ pub fn render_text(
             lines.push(limitation_copy(*limitation).1.into());
         }
         if card.rows_omitted {
-            lines.push("Additional model labels were omitted by display limits.".into());
+            lines
+                .push("Some model labels or declaration references were omitted by limits.".into());
         }
         if !card.evidence_ids.is_empty() {
             lines.push(format!(

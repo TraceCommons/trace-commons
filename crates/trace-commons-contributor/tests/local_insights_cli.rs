@@ -3,6 +3,81 @@ use std::path::Path;
 use std::process::{Command, Output};
 
 #[test]
+fn question_cards_use_saved_evidence_and_invalidate_deleted_selections() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("enrollment");
+    let store = dir.path().join("insights");
+    let empty = value(invoke(&config, &store, &["cards"]));
+    assert_eq!(empty["type"], "question_cards");
+    assert_eq!(empty["result"]["cards"].as_array().unwrap().len(), 4);
+    assert!(!store.exists());
+    assert!(!config.exists());
+
+    let file = dir.path().join("PRIVATE_SOURCE.jsonl");
+    fixture(&file, false);
+    let saved = value(invoke(
+        &config,
+        &store,
+        &[
+            "analyze",
+            "--source",
+            "trajectory",
+            "--file",
+            file.to_str().unwrap(),
+            "--save",
+        ],
+    ));
+    let id = saved["id"].as_str().unwrap();
+    std::fs::remove_file(&file).unwrap();
+    let cards = value(invoke(&config, &store, &["cards", "--snapshot", id]));
+    assert_eq!(
+        cards,
+        value(invoke(&config, &store, &["cards", "--snapshot", id]))
+    );
+    let rows = cards["result"]["cards"][0]["rows"].as_array().unwrap();
+    let row = |name| rows.iter().find(|row| row["id"] == name).unwrap();
+    assert_eq!(
+        row("saved_snapshots")["value"],
+        serde_json::json!({"type":"count","value":1})
+    );
+    assert_eq!(
+        row("record_span")["value"],
+        serde_json::json!({"type":"milliseconds","value":60000})
+    );
+    assert!(cards["result"]["cards"][3]["rows"][0]["value"].is_null());
+    let text = cards["text"].as_str().unwrap();
+    assert!(text.contains("Span between recorded events: 60000 ms"));
+    assert!(text.contains("Saved usage evidence is not available."));
+    for private in [
+        "SECRET_FIXTURE_BODY",
+        "PRIVATE_SOURCE",
+        "/private/fixture-project",
+    ] {
+        assert!(!cards.to_string().contains(private));
+    }
+    let plain = Command::new(env!("CARGO_BIN_EXE_trace-commons-contributor"))
+        .arg("--config-dir")
+        .arg(&config)
+        .args(["insights", "--store-dir"])
+        .arg(&store)
+        .args(["cards", "--snapshot", id])
+        .output()
+        .unwrap();
+    assert!(plain.status.success());
+    assert_eq!(
+        String::from_utf8(plain.stdout).unwrap(),
+        format!("{text}\n")
+    );
+
+    value(invoke(&config, &store, &["delete", id]));
+    let missing = invoke(&config, &store, &["cards", "--snapshot", id]);
+    assert!(!missing.status.success());
+    let error: serde_json::Value = serde_json::from_slice(&missing.stdout).unwrap();
+    assert_eq!(error["error"], "insights_card_snapshot_not_found");
+    assert!(!config.exists());
+}
+
+#[test]
 fn empty_history_does_not_initialize_insights_or_enrollment() {
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("enrollment");
