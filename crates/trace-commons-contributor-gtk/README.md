@@ -51,6 +51,9 @@ The summary distinguishes unassessed snapshots from explicit Unknown assessments
 and shows observed totals beside available/missing snapshots and record coverage.
 Its dates describe analysis time. Category, outcome, and metric evidence buttons
 show only their contributing saved snapshots; open a row to inspect its evidence.
+The summary collapses and the scroll position returns to the evidence area when
+a filter or snapshot is selected. Explicit snapshot lookup clears earlier detail
+before reading, so a missing snapshot cannot retain an unrelated successful preview.
 Refresh returns to the complete saved population. A failed operation clears the
 summary and its evidence rows instead of retaining stale totals as current.
 

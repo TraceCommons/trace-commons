@@ -54,6 +54,8 @@ pub struct InsightsView {
     status: gtk::Label,
     detail: gtk::Label,
     summary: gtk::Label,
+    summary_expander: gtk::Expander,
+    scroller: gtk::ScrolledWindow,
     summary_evidence: gtk::Box,
     pending_refresh: Cell<bool>,
     saved: gtk::Box,
@@ -120,11 +122,17 @@ impl InsightsView {
         let status = label(copy("empty"));
         root.append(&status);
         let content = gtk::Box::new(gtk::Orientation::Vertical, 12);
-        content.append(&label(copy("summary_title")));
+        let summary_body = gtk::Box::new(gtk::Orientation::Vertical, 8);
         let summary = label("");
-        content.append(&summary);
+        summary_body.append(&summary);
         let summary_evidence = gtk::Box::new(gtk::Orientation::Vertical, 4);
-        content.append(&summary_evidence);
+        summary_body.append(&summary_evidence);
+        let summary_expander = gtk::Expander::builder()
+            .label(copy("summary_title"))
+            .expanded(true)
+            .child(&summary_body)
+            .build();
+        content.append(&summary_expander);
         let detail = label("");
         content.append(&detail);
         let assessment = gtk::Box::new(gtk::Orientation::Vertical, 8);
@@ -174,6 +182,8 @@ impl InsightsView {
             status,
             detail,
             summary,
+            summary_expander,
+            scroller,
             summary_evidence,
             pending_refresh: Cell::new(false),
             saved,
@@ -228,6 +238,7 @@ impl InsightsView {
         let weak = Rc::downgrade(&view);
         refresh.connect_clicked(move |_| {
             if let Some(v) = weak.upgrade() {
+                v.summary_expander.set_expanded(true);
                 v.refresh_history();
             }
         });
@@ -306,6 +317,7 @@ impl InsightsView {
                     view.assessment.set_sensitive(true);
                     view.saved.set_sensitive(true);
                 }
+                view.summary_expander.set_expanded(true);
                 view.refresh_history();
             }
         });
@@ -341,6 +353,30 @@ impl InsightsView {
                 save,
             );
         }
+    }
+
+    fn clear_detail(&self) {
+        self.detail.set_text("");
+        self.assessment.set_visible(false);
+        *self.current_id.borrow_mut() = None;
+    }
+
+    fn reveal_evidence(&self) {
+        self.summary_expander.set_expanded(false);
+        let adjustment = self.scroller.vadjustment();
+        adjustment.set_value(adjustment.lower());
+    }
+
+    fn explain(self: &Rc<Self>, id: String) {
+        if self.flight.borrow().busy || self.flight.borrow().closed {
+            return;
+        }
+        // An explicit lookup replaces the previous selection immediately,
+        // including an unsaved preview. Failed/deleted evidence cannot leave
+        // that earlier successful result looking like the requested snapshot.
+        self.clear_detail();
+        self.reveal_evidence();
+        self.request(Op::Explain { id }, true);
     }
 
     fn refresh_history(self: &Rc<Self>) {
@@ -582,7 +618,7 @@ impl InsightsView {
             let id = insight.id.clone();
             explain.connect_clicked(move |_| {
                 if let Some(v) = weak.upgrade() {
-                    v.request(Op::Explain { id: id.clone() }, true);
+                    v.explain(id.clone());
                 }
             });
             let weak = Rc::downgrade(self);
@@ -1180,6 +1216,25 @@ mod tests {
             preview,
             "history refresh preserves unsaved preview"
         );
+        assert!(!view.detail.text().is_empty());
+        view.explain("deleted-snapshot".to_owned());
+        assert!(
+            view.detail.text().is_empty(),
+            "explicit evidence selection clears previous unsaved preview immediately"
+        );
+        assert!(
+            !view.summary_expander.is_expanded(),
+            "explicit evidence is revealed above the collapsed summary"
+        );
+        settle();
+        assert!(
+            view.detail.text().is_empty(),
+            "missing evidence cannot retain prior success"
+        );
+        assert!(view.current_id.borrow().is_none());
+        assert!(!view.assessment.is_visible());
+        view.analyze(false);
+        settle();
         let index = store.join("index.json");
         let valid_index = std::fs::read(&index).unwrap();
         std::fs::write(&index, b"invalid saved store").unwrap();
