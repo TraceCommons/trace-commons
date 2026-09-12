@@ -6,6 +6,8 @@ Status: four clean worktrees prepared at the pinned base; Sol task selection and
 
 The user chose four new independent refactor sessions instead of continuing historical discovery. Preserve the original #616/#606/#632 evidence and accepted assessments as a separate retrospective audit. Those shared-root tasks do not become independent observations.
 
+The user closed the current task before paid pilot execution. This document is retained for optional follow-up; its remaining pilot steps do not block that closure. See the [current task closure](2026-09-11-trace-insights-program.md#current-task-closure) for the exact handoff state and outstanding program gates.
+
 ## Prepared task allocation
 
 [Task briefs and verification commands](2026-09-12-fresh-refactor-task-briefs.md) define four scopes. Allocation is fixed before execution: task 1 Cline to cohort A, task 2 Gemini to cohort B, task 3 OpenCode to cohort B, task 4 trajectory to cohort A. Cohort A/B are preparation slots, not model declarations; bind exact model selectors before launch and retain observed labels independently. All worktrees were verified clean at the same base. Local manifests contain unique allocated session UUIDs and explicitly mark each session as not started. Four complete prompts and a common instruction template are prepared with SHA-256 digests; exact selectors, effective tool policy and execution limits remain unfilled launch fields. Astra reviewed the pinned source and cleared the corrected briefs for preparation freeze.

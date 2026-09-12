@@ -4,6 +4,14 @@ Date: 2026-09-11
 Updated: 2026-09-12
 Status: Delivery sequence revised around a complete personal-comparison workflow. Implementation remains in open PRs; this document does not authorize merging, deployment, new dependencies, hosted processing, or public publication.
 
+## Current task closure
+
+The user closed the current task at the implementation and handoff boundary on 2026-09-12, before launching the proposed paid comparison pilot. The prepared Opus/Sonnet sessions, their execution settings and spending approval are optional follow-up work, not requirements for closing this task. No fresh model sessions ran and no pilot spending was authorized.
+
+This closes the current agent assignment, not every milestone in the program or a release-readiness gate. The open implementation PRs and remaining program work below remain tracked. At handoff, #947 head `ae90faee38905ed14e07dfbe755d16b8cb204892` has 25 successful CI checks and one running default-feature test job. The reviewed activation branch `insights/78-exact-comparison-default` at `22cf378996cf90afcad3e958650758fd40ae709c` remains local and unpublished. Its publication gate is still successful parent CI; no merge or release is implied. A real pilot and qualification of fresh Claude source formats remain future evidence requirements for any claims that depend on them.
+
+The four task briefs, clean pinned worktrees, hashed prompts and 59 passing baseline tests remain available for an optional future pilot. Windows/GTK comparison parity, the controlled mission loop and later program milestones retain their recorded scope. Rewards stay outside this team's scope and owned by Abhishek.
+
 ## Canonical plan and implementation status
 
 [PR #870](https://github.com/TraceCommons/trace-commons/pull/870) is the single review entry point and source of truth for this program. Update its program plan, linked delivery plan, and pilot runbook when scope or sequence changes; implementation PRs link here rather than becoming competing plans. Historical branch snapshots are not the current authority.

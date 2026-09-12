@@ -5,6 +5,8 @@ Parent: [personal refactor comparison delivery plan](2026-09-12-personal-refacto
 
 Reward systems for both missions and insights are outside scope and owned by Abhishek. This pilot collects evidence and user assessments without reward eligibility, compensation, or payout features.
 
+The user closed the current task before paid pilot execution. This document is retained for optional follow-up; its remaining pilot steps do not block that closure. See the [current task closure](2026-09-11-trace-insights-program.md#current-task-closure) for the exact handoff state and outstanding program gates.
+
 ## Native pilot preparation checkpoint
 
 A new isolated working copy of the original two-file pilot store was verified byte-for-byte; the original remained unchanged. Existing accepted outcomes were preserved without adding context or independence confirmations. Its private location and hash manifest stay local. The three selected tasks still share one model cohort and a root session; copying the store does not change eligibility.

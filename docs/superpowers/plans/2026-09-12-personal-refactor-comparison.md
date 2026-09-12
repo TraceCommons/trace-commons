@@ -4,6 +4,8 @@ Date: 2026-09-12
 Parent: [Trace insights program](2026-09-11-trace-insights-program.md).
 Status: Revised delivery plan; implementation and pilot qualification remain outstanding.
 
+The user closed the current task before paid pilot execution. This document is retained for optional follow-up; its remaining pilot steps do not block that closure. See the [current task closure](2026-09-11-trace-insights-program.md#current-task-closure) for the exact handoff state and outstanding program gates.
+
 ## Implementation checkpoint
 
 The task lifecycle is implemented in [PR #932](https://github.com/TraceCommons/trace-commons/pull/932), with the macOS task workflow stacked in [PR #933](https://github.com/TraceCommons/trace-commons/pull/933). Both remain open. The earlier daemon-preview stack overflow was corrected; #932 at `e6c65868` has passed all reported CI checks, including Windows contributor tests. That verifies this implementation slice, not the private pilot.
