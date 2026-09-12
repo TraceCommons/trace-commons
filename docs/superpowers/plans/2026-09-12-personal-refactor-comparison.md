@@ -86,6 +86,9 @@ The approved bounded integration freezes `QualifiedExactCategoricalV1` in each n
 
 Existing `NotYetCalibrated` specifications and schema-1 result bytes/digests remain unchanged and uncalibrated. Newly qualified results use schema 2; older clients explicitly reject them rather than being claimed compatible through additive fields. A new domain-separated output digest binds the frozen method state, canonical cohort order, assessed counts/denominators, six component intervals, and three ordered contrasts/statuses. Preserve existing audit/input digest semantics. Validate qualified results against the saved state and recomputed counts/intervals. Complete CLI, FFI, and macOS evaluation and cross-state rejection tests before the separate admission change enables new qualified specifications.
 
+
+Implementation checkpoint: the production integration remains local and is not yet admitted or published. Sol reports 13/13 specification tests and 6/6 arithmetic/oracle tests passing against the production primitive, including actual schema-1 fixture re-projection and unchanged bytes/digests. CLI and macOS presentation separate signed observed percentage-point differences from intervals and statuses using shared Rust copy. Complete lifecycle, adversarial decoding, native wording, routing integration, and Astra final review remain required before the separate admission change. Direct native rendering has independent review evidence, but neither rendering nor synthetic fixtures satisfy the two-cohort human pilot.
+
 For any resampling candidate, define and serialize the actual estimator inputs before deriving its seed:
 
 1. Canonically order task IDs, cohorts, strata, outcomes, and fixed weights.
