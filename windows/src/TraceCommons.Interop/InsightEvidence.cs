@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
@@ -30,6 +31,29 @@ public sealed class DeclaredModelObservations
     public required bool MixedDeclaredModels { get; init; }
     public required string[] DeclaredModels { get; init; }
     public required ModelDeclaration[] Declarations { get; init; }
+
+    public bool IsSupported()
+    {
+        if (SchemaVersion == 1) return true;
+        if (SchemaVersion != 2 || SourceFormat != "codex" || Coordinates != "jsonl_physical_lines_one_based" ||
+            CandidateRecords > RecordCount || !TryAdd(ValidDeclarations, MissingDeclarations, out ulong known) ||
+            !TryAdd(known, InvalidDeclarations, out ulong total) || total != CandidateRecords ||
+            !TryAdd((ulong)Declarations.Length, OmittedDeclarations, out ulong retained) || retained != ValidDeclarations ||
+            MixedDeclaredModels != (DeclaredModels.Length > 1) || DeclaredModels.Distinct(StringComparer.Ordinal).Count() != DeclaredModels.Length ||
+            (ValidDeclarations > 0 && Declarations.Length == 0) || (ModelLabelsOmitted && (DeclaredModels.Length != 32 || OmittedDeclarations == 0)) ||
+            Declarations.Zip(Declarations.Skip(1)).Any(pair => pair.First.RecordIndex >= pair.Second.RecordIndex) ||
+            Declarations.Any(value => value.Kind != "codex_turn_context" || value.RecordIndex == 0 || value.RecordIndex > RecordCount))
+            return false;
+        var labels = DeclaredModels.ToHashSet(StringComparer.Ordinal);
+        var referenced = Declarations.Select(value => value.Model).ToHashSet(StringComparer.Ordinal);
+        return labels.SetEquals(referenced);
+    }
+
+    private static bool TryAdd(ulong left, ulong right, out ulong result)
+    {
+        result = left + right;
+        return result >= left;
+    }
 }
 public sealed class ModelDeclaration
 {

@@ -95,6 +95,29 @@ public sealed class InsightEvidenceTests
         Assert.Equal("imported_report", report.Provenance);
     }
     [Fact]
+    public void CodexTurnContextSchemaAcceptsKnownAbsenceAndRejectsForgedCoverage()
+    {
+        const string valid = """
+          {"schema_version":2,"scope":"declared_metadata_only","source_format":"codex","source_digest":"source-digest",
+           "coordinates":"jsonl_physical_lines_one_based","record_count":2,"candidate_records":0,"valid_declarations":0,
+           "missing_declarations":0,"invalid_declarations":0,"omitted_declarations":0,"model_labels_omitted":false,
+           "mixed_declared_models":false,"declared_models":[],"declarations":[]}
+          """;
+        var supported = JsonSerializer.Deserialize<DeclaredModelObservations>(valid,
+            new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower })!;
+        Assert.True(supported.IsSupported());
+        foreach (string malformed in new[] {
+            valid.Replace("\"candidate_records\":0", "\"candidate_records\":1", StringComparison.Ordinal),
+            valid.Replace("\"source_format\":\"codex\"", "\"source_format\":\"trajectory\"", StringComparison.Ordinal),
+            valid.Replace("\"declarations\":[]", "\"declarations\":[{\"model\":\"x\",\"record_index\":1,\"kind\":\"codex_session_metadata\"}]", StringComparison.Ordinal)
+        })
+        {
+            var rejected = JsonSerializer.Deserialize<DeclaredModelObservations>(malformed,
+                new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower })!;
+            Assert.False(rejected.IsSupported());
+        }
+    }
+    [Fact]
     public async Task RenderKeepsDeclarationsAndImportedReportsSeparateFromVerifiedOutcomes()
     {
         var service = new Service();
@@ -131,6 +154,24 @@ public sealed class InsightEvidenceTests
         await model.ExplainAsync("snapshot-a");
         Assert.Equal("Unavailable until reimport", model.ModelDetails);
         Assert.Empty(model.OutcomeEvidence);
+    }
+    [Fact]
+    public async Task RenderAcceptsSchemaTwoKnownAbsenceWithoutInventingAModel()
+    {
+        var snapshot = JsonNode.Parse(InsightsTests.Insight)!;
+        snapshot["model_observations"] = JsonNode.Parse("""
+          {"schema_version":2,"scope":"declared_metadata_only","source_format":"codex","source_digest":"source-digest",
+           "coordinates":"jsonl_physical_lines_one_based","record_count":2,"candidate_records":0,"valid_declarations":0,
+           "missing_declarations":0,"invalid_declarations":0,"omitted_declarations":0,"model_labels_omitted":false,
+           "mixed_declared_models":false,"declared_models":[],"declarations":[]}
+          """);
+        var service = new Service { Snapshot = snapshot.ToJsonString() };
+        using var model = new InsightsViewModel(service);
+        await model.LoadAsync();
+        await model.ExplainAsync("snapshot-a");
+        Assert.Contains("model_no_labels", model.ModelDetails);
+        Assert.Contains("model_candidates: 0", model.ModelDetails);
+        Assert.Empty(model.ModelReferences);
     }
     [Fact]
     public async Task PickerTicketIsBoundToSelectionReentryAndClosedLifetime()
@@ -223,8 +264,11 @@ public sealed class InsightEvidenceTests
             Assert.False(Directory.Exists(store));
             await model.AnalyzeAsync("codex", file, true);
             Assert.NotNull(model.CurrentId);
-            Assert.Contains("model-a, model-b", model.ModelDetails);
-            Assert.Equal(2, model.ModelReferences.Count);
+            Assert.Contains("model-b", model.ModelDetails);
+            Assert.DoesNotContain("model-a", model.ModelDetails);
+            Assert.Single(model.ModelReferences);
+            await model.AnalyzeAsync("codex", file, true);
+            Assert.Single(model.Saved);
             string reportFile = Path.Combine(root, "report.json");
             await File.WriteAllTextAsync(reportFile, JsonSerializer.Serialize(new {
                 schema_version = 1, runner = "synthetic-test", passed = 1, failed = 0, skipped = 0,
@@ -247,6 +291,14 @@ public sealed class InsightEvidenceTests
             Assert.Equal("Inspected local Git object", Assert.Single(model.OutcomeEvidence).Label);
             Assert.True(File.Exists(reportFile));
             Assert.True(File.Exists(file));
+            string absent = Path.Combine(root, "absent.jsonl");
+            await File.WriteAllTextAsync(absent, "{\"type\":\"session_meta\",\"payload\":{\"model\":\"ignored\"}}\n{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"model\":\"ignored\",\"content\":[]}}\n");
+            await model.AnalyzeAsync("codex", absent, true);
+            Assert.Contains("No valid model names were retained.", model.ModelDetails);
+            Assert.Contains("Supported metadata records: 0", model.ModelDetails);
+            Assert.DoesNotContain("ignored", model.ModelDetails);
+            Assert.Empty(model.ModelReferences);
+            Assert.Equal(2, model.Saved.Count);
             Assert.False(File.Exists(Path.Combine(root, "contributor.json")));
         }
         finally { DeleteTestTree(root); }

@@ -43,4 +43,41 @@ final class InsightsBridgeTests: XCTestCase {
         }
         XCTAssertThrowsError(try TCInsights.call(.init(operation: .init(String(repeating: "x", count: 70_000)))))
     }
+
+    func testCodexModelSchemaTwoAnalyzeSaveReimportAndListLifecycle() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = root.appendingPathComponent("insights")
+        let qualified = root.appendingPathComponent("qualified.jsonl")
+        let absent = root.appendingPathComponent("absent.jsonl")
+        try Data("""
+        {"type":"session_meta","timestamp":"2026-09-11T00:00:00Z","payload":{"id":"fixture","model_provider":"openai"}}
+        {"type":"turn_context","timestamp":"2026-09-11T00:00:01Z","payload":{"model":"fixture-model"}}
+        {"type":"response_item","timestamp":"2026-09-11T00:00:02Z","payload":{"type":"message","role":"assistant","content":[]}}
+        """.utf8).write(to: qualified)
+        try Data("""
+        {"type":"session_meta","timestamp":"2026-09-11T00:00:00Z","payload":{"id":"fixture-absent","model_provider":"openai","model":"ignored"}}
+        {"type":"response_item","timestamp":"2026-09-11T00:00:01Z","payload":{"type":"message","role":"assistant","model":"ignored","content":[]}}
+        """.utf8).write(to: absent)
+        func call(_ operation: InsightsRequest.Operation) throws -> InsightsResponse {
+            try TCInsights.call(.init(storeDirectory: store.path, operation: operation))
+        }
+
+        let preview = try XCTUnwrap(call(.init("analyze", source: "codex", file: qualified.path, save: false)).insight)
+        XCTAssertEqual(preview.model_observations?.schema_version, 2)
+        XCTAssertEqual(preview.model_observations?.candidate_records, 1)
+        XCTAssertEqual(preview.model_observations?.declared_models, ["fixture-model"])
+        let saved = try XCTUnwrap(call(.init("analyze", source: "codex", file: qualified.path, save: true)).insight)
+        XCTAssertEqual(try call(.init("analyze", source: "codex", file: qualified.path, save: true)).insight?.id, saved.id)
+        let absentSaved = try XCTUnwrap(call(.init("analyze", source: "codex", file: absent.path, save: true)).insight)
+        XCTAssertEqual(absentSaved.model_observations?.schema_version, 2)
+        XCTAssertEqual(absentSaved.model_observations?.candidate_records, 0)
+        XCTAssertEqual(absentSaved.model_observations?.valid_declarations, 0)
+        XCTAssertEqual(absentSaved.model_observations?.missing_declarations, 0)
+        XCTAssertEqual(absentSaved.model_observations?.declared_models, [])
+        let listed = try XCTUnwrap(call(.init("list")).insights)
+        XCTAssertEqual(Set(listed.map(\.id)), Set([saved.id, absentSaved.id]))
+        XCTAssertTrue(listed.allSatisfy { $0.model_observations?.schema_version == 2 })
+    }
 }

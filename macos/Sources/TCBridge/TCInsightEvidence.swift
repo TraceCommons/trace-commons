@@ -67,13 +67,48 @@ public struct InsightOutcomeLink: Decodable, Sendable, Identifiable {
 
 extension LocalInsight {
     func validateSupportedEvidence() throws {
-        if let models = model_observations, models.schema_version != 1 {
-            throw InsightsError.invalidResponse
+        if let models = model_observations {
+            switch models.schema_version {
+            case 1:
+                break
+            case 2:
+                try models.validateCodexTurnContextSchema()
+            default:
+                throw InsightsError.invalidResponse
+            }
         }
         for link in outcome_links ?? [] {
             if case .testReport(let report) = link.evidence, report.schema_version != 1 {
                 throw InsightsError.invalidResponse
             }
+        }
+    }
+}
+
+private extension InsightModelObservations {
+    func validateCodexTurnContextSchema() throws {
+        let (known, knownOverflow) = valid_declarations.addingReportingOverflow(missing_declarations)
+        let (total, totalOverflow) = known.addingReportingOverflow(invalid_declarations)
+        let (retained, retainedOverflow) = UInt64(declarations.count).addingReportingOverflow(omitted_declarations)
+        let labels = Set(declared_models)
+        let referenced = Set(declarations.map(\.model))
+        guard source_format == "codex",
+              coordinates == .jsonlPhysicalLinesOneBased,
+              !knownOverflow, !totalOverflow, total == candidate_records,
+              candidate_records <= record_count,
+              !retainedOverflow, retained == valid_declarations,
+              labels.count == declared_models.count,
+              labels == referenced,
+              mixed_declared_models == (declared_models.count > 1),
+              valid_declarations == 0 || !declarations.isEmpty,
+              !model_labels_omitted || (declared_models.count == 32 && omitted_declarations > 0),
+              zip(declarations, declarations.dropFirst()).allSatisfy({ pair in
+                  pair.0.record_index < pair.1.record_index
+              }),
+              declarations.allSatisfy({
+                  $0.kind == .codexTurnContext && $0.record_index > 0 && $0.record_index <= record_count
+              }) else {
+            throw InsightsError.invalidResponse
         }
     }
 }

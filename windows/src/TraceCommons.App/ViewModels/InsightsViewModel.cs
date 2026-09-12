@@ -568,7 +568,7 @@ public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
         OutcomeEvidence.Clear();
         if (projection.ModelObservations is { } models)
         {
-            if (models.SchemaVersion != 1 || models.Scope != "declared_metadata_only" ||
+            if (!models.IsSupported() || models.Scope != "declared_metadata_only" ||
                 models.Coordinates is not ("jsonl_physical_lines_one_based" or "trajectory_array_indexes_zero_based"))
                 throw new InvalidOperationException("insights-response-invalid");
             var lines = new List<string> { this["model_notice"],
