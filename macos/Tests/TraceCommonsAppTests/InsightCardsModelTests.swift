@@ -5,6 +5,20 @@ import TCBridge
 
 final class InsightCardsModelTests: XCTestCase {
     @MainActor
+    func testEmptySelectionRequestsNoEvidenceRatherThanFallingBackToAll() async throws {
+        let service = CardResponseGate()
+        let model = InsightsModel(service: { try await service.call($0) })
+        model.open(); try await settle(model)
+        model.generateCards()
+        let operation = await service.waitForCardRequest()
+        XCTAssertEqual(operation.snapshot_ids, [])
+        XCTAssertEqual(operation.episode_ids, [])
+        await service.resolveCard(cardResponseJSON())
+        try await settle(model)
+        XCTAssertNotNil(model.cardResult)
+    }
+
+    @MainActor
     func testCardRequestFreezesSortedExplicitSelectionsAndPublishesValidatedResult() async throws {
         let service = CardResponseGate()
         let model = InsightsModel(service: { try await service.call($0) })

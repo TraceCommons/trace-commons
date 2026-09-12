@@ -18,6 +18,11 @@ final class InsightCardsBridgeTests: XCTestCase {
         let copy = try TCInsights.call(.init(storeDirectory: store.path, operation: .init("copy")))
         XCTAssertEqual(copy.copy?["card_question_recorded_activity"], "Recorded activity")
         XCTAssertEqual(copy.copy?["card_state_partial"], "Partial coverage")
+        XCTAssertEqual(copy.copy?["card_title"], "Questions about saved evidence")
+        XCTAssertEqual(copy.copy?["card_selection_notice"],
+                       "Choose saved snapshots and episode groups to include. An empty selection has no evidence.")
+        XCTAssertEqual(copy.copy?["card_update"], "Update cards")
+        XCTAssertEqual(copy.copy?["card_choose_evidence"], "Choose evidence")
     }
 
     func testTypedValidationRejectsWrongProviderAndMalformedRows() throws {

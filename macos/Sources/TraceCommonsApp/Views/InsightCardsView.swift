@@ -6,12 +6,12 @@ struct InsightCardsView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Questions about saved evidence").font(.title2)
-            Text("Choose saved snapshots and episode groups. Empty selections cover all saved evidence.")
+            Text(model.text("card_title")).font(.title2)
+            Text(model.text("card_selection_notice"))
                 .font(.callout).foregroundStyle(.secondary)
             selection
             HStack {
-                Button("Update cards") { model.generateCards() }
+                Button(model.text("card_update")) { model.generateCards() }
                 if model.cardBusy { ProgressView().controlSize(.small) }
             }
             if let error = model.cardError { Text(error).foregroundStyle(.red) }
@@ -24,7 +24,7 @@ struct InsightCardsView: View {
     }
 
     private var selection: some View {
-        DisclosureGroup("Choose evidence") {
+        DisclosureGroup(model.text("card_choose_evidence")) {
             VStack(alignment: .leading, spacing: 6) {
                 Text(model.text("saved")).font(.headline)
                 ForEach(model.snapshots) { snapshot in
