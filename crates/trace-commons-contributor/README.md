@@ -124,6 +124,51 @@ identical copies share a result. Saved snapshots are not monitored for changes t
 the original files: reimport to refresh, or use `delete` to remove the saved result
 and its references. Deletion leaves the original transcript intact.
 
+Record your own assessment of a saved snapshot:
+
+```bash
+trace-commons-contributor insights annotate INSIGHT_ID --category refactor --outcome accepted
+trace-commons-contributor insights clear-annotation INSIGHT_ID
+```
+
+Use the same `--store-dir` as the saved snapshot if you selected a custom store.
+Categories are `refactor`, `tests`, `docs`, `debugging`, `other`, or `unknown`;
+outcomes are `accepted`, `partial`, `rejected`, or `unknown`. Assessments carry
+user-reported provenance, a timestamp, and the source digest. They remain
+separate from verified outcome metrics and reset when the source content changes.
+
+Inspect native usage separately from the saved descriptive report:
+
+```bash
+trace-commons-contributor --json insights usage --source codex --file rollout.jsonl
+trace-commons-contributor --json insights usage --source claude-code --file session.jsonl
+```
+
+This reads only the chosen file and saves nothing. Codex cumulative snapshots
+are not added together; Claude message snapshots are deduplicated by message ID.
+The output preserves each source's cache accounting and reports coverage and
+reasons for unavailable totals. Model labels are source declarations, not verified
+attribution. No price estimates, per-model rankings, or time-saved claims are made.
+
+Native shells can use the same local service through `tc_insights_call` without
+starting a daemon or enrolling. This is a bridge foundation; desktop Insights
+screens are still follow-on work.
+
+## Local mission draft review
+
+```bash
+trace-commons-contributor --json mission-draft --file mission-draft.json
+```
+
+The [example draft](../trace-commons-protocol/tests/fixtures/mission-draft.json)
+shows the required proposal fields. Replace its placeholder source and artifact
+before seeking review. The command checks structure and limits, hashes the
+proposal, and returns `needs_curator_review`. It does not fetch sources, verify
+claims or artifact bytes, execute tasks, or publish missions. The review JSON is
+not an authorization token. See the
+[next-wave implementation record](../../docs/superpowers/plans/2026-09-11-local-insights-next-wave.md)
+for the native API and remaining work.
+
 ## Consent model
 
 - The instance's onboarding policy template sets a **ceiling**: it lists the

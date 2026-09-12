@@ -3,6 +3,7 @@ pub mod canonical_json;
 pub mod community_handle;
 pub mod insights;
 pub mod llm;
+pub mod mission_draft;
 pub mod onboarding;
 pub mod public_run;
 mod redaction;
