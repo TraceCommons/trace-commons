@@ -819,7 +819,7 @@ fn expected_cost_card(request: &InsightCardRequest) -> InsightCard {
             rows: vec![optional_row(
                 CardRowId::EstimatedCost,
                 None,
-                MissingReason::UsageNotPersisted,
+                MissingReason::PricingUnavailable,
             )],
             coverage: vec![coverage(
                 CoverageUnit::SavedSnapshots,
@@ -1954,7 +1954,7 @@ mod tests {
                     unit: CardUnit::UsDollars,
                     label: None,
                     value: None,
-                    missing_reason: Some(MissingReason::UsageNotPersisted),
+                    missing_reason: Some(MissingReason::PricingUnavailable),
                 }],
                 coverage: vec![CardCoverage {
                     unit: CoverageUnit::SavedSnapshots,

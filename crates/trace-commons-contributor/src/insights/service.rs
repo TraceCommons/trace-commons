@@ -683,7 +683,7 @@ mod tests {
             panic!("card response expected");
         };
         assert_eq!(result.cards.len(), 4);
-        assert!(text.contains("Saved usage evidence is not available."));
+        assert!(text.contains("Applicable versioned pricing evidence is not available."));
         assert!(!directory.exists());
         let error = execute(request(vec!["a".repeat(64)])).unwrap_err();
         assert_eq!(

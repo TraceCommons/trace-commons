@@ -357,7 +357,7 @@ mod tests {
         for question in InsightQuestionId::ALL {
             assert!(text.contains(question_copy(question).1));
         }
-        assert!(text.contains("Saved usage evidence is not available."));
+        assert!(text.contains("Applicable versioned pricing evidence is not available."));
         assert!(text.contains("Episode groups do not establish independent tasks."));
         let mut forged = result;
         forged.cards[0].rows[0].value = Some(CardValue::Count(99));

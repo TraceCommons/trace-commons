@@ -141,7 +141,7 @@ public sealed class InsightCardTests
             Assert.Equal(4, model.QuestionCards.Count);
             Assert.Contains(model.QuestionCards[0].Rows, row => row.Label == model["card_row_record_span"] && row.Value.Contains("1,001", StringComparison.Ordinal));
             Assert.Contains(model.QuestionCards[2].Rows, row => row.Label.Contains("fixture-model", StringComparison.Ordinal));
-            Assert.Contains(model["card_missing_usage_not_persisted"], model.QuestionCards[3].Rows[0].Value, StringComparison.Ordinal);
+            Assert.Contains(model["card_missing_pricing_unavailable"], model.QuestionCards[3].Rows[0].Value, StringComparison.Ordinal);
             var missing = await Assert.ThrowsAsync<InsightsServiceException>(() => service.CallAsync(new {
                 type = "question_cards", questions = new[] { "recorded_activity" },
                 snapshot_ids = new[] { new string('b', 64) }, episode_ids = Array.Empty<string>()
