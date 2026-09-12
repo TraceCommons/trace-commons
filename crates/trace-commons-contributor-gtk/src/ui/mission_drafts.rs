@@ -220,16 +220,6 @@ impl MissionDraftsView {
                 }
             }
         });
-        window.connect_close_request({
-            let weak = Rc::downgrade(&view);
-            move |_| {
-                if let Some(view) = weak.upgrade() {
-                    view.invalidate();
-                    view.flight.borrow_mut().cancelled = true;
-                }
-                gtk::glib::Propagation::Proceed
-            }
-        });
         if let Some(application) = window.application() {
             application.connect_shutdown({
                 let weak = Rc::downgrade(&view);
@@ -319,13 +309,10 @@ impl MissionDraftsView {
         if self.flight.borrow().busy || self.flight.borrow().closed {
             return;
         }
-        self.advance();
-        *self.selected_id.borrow_mut() = Some(id.clone());
-        self.detail.set_text("");
         let ticket = RequestTicket {
-            generation: self.generation.get(),
+            generation: self.advance(),
             requested_id: Some(id.clone()),
-            selection_id: Some(id.clone()),
+            selection_id: self.selected_id.borrow().clone(),
             selected_file: self.selected_file.borrow().clone(),
         };
         self.request(Op::Show { id }, ticket);
@@ -433,6 +420,7 @@ impl MissionDraftsView {
             Completion::Response(Response::Show { draft })
                 if response_id_matches(ticket, &draft.id) =>
             {
+                *self.selected_id.borrow_mut() = Some(draft.id.clone());
                 self.detail.set_text(&render_detail(&draft));
                 self.status.set_text(copy("needs_curator_review"));
             }
@@ -655,6 +643,19 @@ mod tests {
         settle();
         assert!(view.detail.text().contains("https://example.com/paper"));
         assert!(view.detail.text().contains(copy("author_unverified")));
+        let retained_detail = view.detail.text();
+        let retained_id = view.selected_id.borrow().clone();
+        view.show("0".repeat(64));
+        settle();
+        assert_eq!(view.status.text(), copy("error"));
+        assert_eq!(view.detail.text(), retained_detail);
+        assert_eq!(*view.selected_id.borrow(), retained_id);
+
+        let declined_close = window.connect_close_request(|_| gtk::glib::Propagation::Stop);
+        window.close();
+        assert!(view.root.is_mapped());
+        assert!(!view.flight.borrow().cancelled);
+        window.disconnect(declined_close);
         view.delete(id);
         settle();
         assert_eq!(view.notice.text(), copy("deleted"));

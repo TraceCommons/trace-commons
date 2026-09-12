@@ -2197,21 +2197,65 @@ pub fn present_local<F: Fn() + 'static>(application: &adw::Application, contribu
         .default_width(840)
         .default_height(760)
         .build();
-    let page = InsightsView::new(&window);
+    let stack = local_first_stack(&window);
     let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
     let header = adw::HeaderBar::new();
     let button = gtk::Button::with_label(copy("contributions"));
     header.pack_start(&button);
+    let switcher = adw::ViewSwitcher::new();
+    switcher.set_stack(Some(&stack));
+    header.set_title_widget(Some(&switcher));
     content.append(&header);
-    content.append(&page.root);
+    content.append(&stack);
+    stack.set_vexpand(true);
     window.set_content(Some(&content));
     button.connect_clicked(move |_| contribute());
     window.present();
 }
 
+pub(super) fn local_first_stack(window: &adw::ApplicationWindow) -> adw::ViewStack {
+    let stack = adw::ViewStack::new();
+    let insights = InsightsView::new(window);
+    let missions = super::mission_drafts::MissionDraftsView::new(window);
+    stack
+        .add_titled(&insights.root, Some("insights"), copy("title"))
+        .set_icon_name(Some("view-statistics-symbolic"));
+    let mission_title = trace_commons_contributor::mission_draft_service::ui_copy()
+        .remove("title")
+        .expect("shared mission draft title");
+    stack
+        .add_titled(&missions.root, Some("mission-drafts"), &mission_title)
+        .set_icon_name(Some("document-edit-symbolic"));
+    stack.set_visible_child_name("insights");
+    stack
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires a Linux GTK display; run alone with --ignored --test-threads=1"]
+    fn local_first_window_exposes_insights_and_mission_drafts_without_a_worker() {
+        assert_eq!(
+            std::env::consts::OS,
+            "linux",
+            "requires a Linux GTK display"
+        );
+        let context = gtk::glib::MainContext::default();
+        let _owner = context.acquire().unwrap();
+        adw::init().expect("GTK display unavailable");
+        let window = adw::ApplicationWindow::builder().build();
+        let stack = local_first_stack(&window);
+        assert!(stack.child_by_name("insights").is_some());
+        assert!(stack.child_by_name("mission-drafts").is_some());
+        stack.set_visible_child_name("mission-drafts");
+        assert_eq!(
+            stack.visible_child_name().as_deref(),
+            Some("mission-drafts")
+        );
+        window.close();
+    }
     #[test]
     fn episode_cleanup_notice_only_describes_reported_removed_groups() {
         use trace_commons_contributor::insights::MutationEffects;
