@@ -80,6 +80,32 @@ fn resolve_bindings(index: &Index, episode_ids: &[String]) -> Result<Vec<FrozenE
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect();
+        binding.claude_root_session_identity_sha256 = episode
+            .members
+            .iter()
+            .filter_map(|member| {
+                index
+                    .reports
+                    .get(&member.snapshot_id)
+                    .and_then(|report| report.claude_task_attribution.as_ref())
+                    .and_then(|attribution| attribution.root_session_identity_sha256.clone())
+            })
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        binding.claude_agent_branch_identity_sha256 = episode
+            .members
+            .iter()
+            .filter_map(|member| {
+                index
+                    .reports
+                    .get(&member.snapshot_id)
+                    .and_then(|report| report.claude_task_attribution.as_ref())
+                    .and_then(|attribution| attribution.agent_branch_identity_sha256.clone())
+            })
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
         bindings.push(binding);
     }
     bindings.sort_by(|a, b| a.episode_id.cmp(&b.episode_id));
@@ -134,6 +160,20 @@ fn canonical_evidence(task: &LocalComparisonTaskV1) -> BTreeSet<String> {
         .flat_map(|binding| &binding.source_session_identity_sha256)
     {
         evidence.insert(format!("codex_session:{identity}"));
+    }
+    for identity in task
+        .episodes
+        .iter()
+        .flat_map(|binding| &binding.claude_root_session_identity_sha256)
+    {
+        evidence.insert(format!("claude_root_session:{identity}"));
+    }
+    for identity in task
+        .episodes
+        .iter()
+        .flat_map(|binding| &binding.claude_agent_branch_identity_sha256)
+    {
+        evidence.insert(format!("claude_agent_branch:{identity}"));
     }
     evidence
 }
@@ -242,10 +282,18 @@ fn source_qualification(
     index: &Index,
     task: &LocalComparisonTaskV1,
 ) -> Option<ComparisonTaskSourceQualification> {
+    use super::claude_task_attribution::ClaudeTaskAttributionState;
     use super::task_attribution::{
         CodexTaskSourceProfile, QualificationScope, TaskAttributionState,
     };
 
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Rule {
+        Codex,
+        Claude,
+    }
+
+    let mut rule = None;
     let mut declared_model = None;
     let mut recorded_configuration = None;
     for binding in &task.episodes {
@@ -254,46 +302,102 @@ fn source_qualification(
             if report.report.evidence[0].source_digest != member.source_digest {
                 return None;
             }
-            let attribution = report.task_attribution.as_ref()?;
-            if attribution.source_digest != member.source_digest
-                || attribution.source_profile.profile
-                    != CodexTaskSourceProfile::CodexRustV0_154_0TaskRecords
-                || attribution.source_profile.qualification_scope
-                    != QualificationScope::ReleasedWriterTaskRecords
+            if report.task_attribution.is_some() == report.claude_task_attribution.is_some()
+                || !matches!(
+                    report.source_format,
+                    super::SourceFormat::Codex | super::SourceFormat::ClaudeCode
+                )
+                || (report.source_format == super::SourceFormat::Codex
+                    && report.claude_task_attribution.is_some())
+                || (report.source_format == super::SourceFormat::ClaudeCode
+                    && report.task_attribution.is_some())
             {
                 return None;
             }
-            let session_identity = attribution.session_identity_sha256.as_ref()?;
-            if binding
-                .source_session_identity_sha256
-                .binary_search(session_identity)
-                .is_err()
-            {
-                return None;
-            }
-            let TaskAttributionState::Attributed { turns } = &attribution.state else {
-                return None;
-            };
-            for turn in turns {
-                if declared_model
-                    .as_deref()
-                    .is_some_and(|known| known != turn.declared_model)
-                    || recorded_configuration
-                        .as_deref()
-                        .is_some_and(|known| known != turn.recorded_configuration_sha256)
+            if let Some(attribution) = &report.task_attribution {
+                if rule.is_some_and(|known| known != Rule::Codex)
+                    || attribution.source_digest != member.source_digest
+                    || attribution.source_profile.profile
+                        != CodexTaskSourceProfile::CodexRustV0_154_0TaskRecords
+                    || attribution.source_profile.qualification_scope
+                        != QualificationScope::ReleasedWriterTaskRecords
                 {
                     return None;
                 }
-                declared_model.get_or_insert_with(|| turn.declared_model.clone());
-                recorded_configuration
-                    .get_or_insert_with(|| turn.recorded_configuration_sha256.clone());
+                rule = Some(Rule::Codex);
+                let session_identity = attribution.session_identity_sha256.as_ref()?;
+                if binding
+                    .source_session_identity_sha256
+                    .binary_search(session_identity)
+                    .is_err()
+                {
+                    return None;
+                }
+                let TaskAttributionState::Attributed { turns } = &attribution.state else {
+                    return None;
+                };
+                for turn in turns {
+                    if declared_model
+                        .as_deref()
+                        .is_some_and(|known| known != turn.declared_model)
+                        || recorded_configuration
+                            .as_deref()
+                            .is_some_and(|known| known != turn.recorded_configuration_sha256)
+                    {
+                        return None;
+                    }
+                    declared_model.get_or_insert_with(|| turn.declared_model.clone());
+                    recorded_configuration
+                        .get_or_insert_with(|| turn.recorded_configuration_sha256.clone());
+                }
+            } else if let Some(attribution) = &report.claude_task_attribution {
+                if rule.is_some_and(|known| known != Rule::Claude)
+                    || attribution.source_digest != member.source_digest
+                    || attribution.qualification_scope != "observed_writer_agent_branch_records"
+                {
+                    return None;
+                }
+                rule = Some(Rule::Claude);
+                let root_identity = attribution.root_session_identity_sha256.as_ref()?;
+                let branch_identity = attribution.agent_branch_identity_sha256.as_ref()?;
+                if binding
+                    .claude_root_session_identity_sha256
+                    .binary_search(root_identity)
+                    .is_err()
+                    || binding
+                        .claude_agent_branch_identity_sha256
+                        .binary_search(branch_identity)
+                        .is_err()
+                {
+                    return None;
+                }
+                let ClaudeTaskAttributionState::Attributed { .. } = &attribution.state else {
+                    return None;
+                };
+                let model = attribution.declared_model.as_ref()?;
+                if declared_model
+                    .as_deref()
+                    .is_some_and(|known| known != model)
+                {
+                    return None;
+                }
+                declared_model.get_or_insert_with(|| model.clone());
+            } else {
+                return None;
             }
         }
     }
     Some(ComparisonTaskSourceQualification {
-        rule: super::comparison_specs::QualifiedSourceRule::CodexRustV0_154_0TaskRecordsV1,
+        rule: match rule? {
+            Rule::Codex => {
+                super::comparison_specs::QualifiedSourceRule::CodexRustV0_154_0TaskRecordsV1
+            }
+            Rule::Claude => {
+                super::comparison_specs::QualifiedSourceRule::ClaudeCodeV2_1_260AgentBranchV1
+            }
+        },
         declared_model_cohort: declared_model?,
-        recorded_configuration_sha256: recorded_configuration?,
+        recorded_configuration_sha256: recorded_configuration,
         material_revision: task.material_revision,
         material_digest: task.material_digest.clone(),
     })
@@ -613,6 +717,10 @@ mod tests {
     const RELEASE_DEFAULT: &[u8] = include_bytes!(
         "../../fixtures/insights/codex-task-attribution/codex-release-0.154.0-default-instructions.jsonl"
     );
+    const CLAUDE_ALPHA: &[u8] =
+        include_bytes!("../../fixtures/insights/claude-task-attribution/agent-alpha.jsonl");
+    const CLAUDE_BETA: &[u8] =
+        include_bytes!("../../fixtures/insights/claude-task-attribution/agent-beta.jsonl");
 
     fn source(path: &Path, content: &str) {
         fs::write(
@@ -643,6 +751,84 @@ mod tests {
     fn import_codex(store: &LocalInsightStore, path: &Path, bytes: &[u8]) -> String {
         fs::write(path, bytes).unwrap();
         store.import(SourceFormat::Codex, path).unwrap().id
+    }
+
+    fn import_claude(store: &LocalInsightStore, path: &Path, bytes: &[u8]) -> String {
+        fs::write(path, bytes).unwrap();
+        store.import(SourceFormat::ClaudeCode, path).unwrap().id
+    }
+
+    #[test]
+    fn claude_branches_qualify_but_shared_root_sessions_overlap() {
+        let root = tempfile::tempdir().unwrap();
+        let store = LocalInsightStore::open(&root.path().join("store")).unwrap();
+        let alpha_id = import_claude(&store, &root.path().join("alpha"), CLAUDE_ALPHA);
+        let beta_id = import_claude(&store, &root.path().join("beta"), CLAUDE_BETA);
+        let alpha_episode = store
+            .episode_create(std::slice::from_ref(&alpha_id))
+            .unwrap();
+        let beta_episode = store.episode_create(&[beta_id]).unwrap();
+        let alpha = store.comparison_task_create(&[alpha_episode.id]).unwrap();
+        let beta = store.comparison_task_create(&[beta_episode.id]).unwrap();
+
+        let alpha_detail = store.comparison_task_explain(&alpha.id).unwrap();
+        assert_eq!(
+            alpha_detail.source_qualification.as_ref().unwrap().rule,
+            super::super::comparison_specs::QualifiedSourceRule::ClaudeCodeV2_1_260AgentBranchV1
+        );
+        assert_eq!(
+            alpha_detail
+                .source_qualification
+                .as_ref()
+                .unwrap()
+                .declared_model_cohort,
+            "claude-opus-5"
+        );
+        assert!(
+            alpha_detail
+                .source_qualification
+                .as_ref()
+                .unwrap()
+                .recorded_configuration_sha256
+                .is_none()
+        );
+        assert!(alpha_detail.overlapping_task_ids.contains(&beta.id));
+        assert!(
+            store
+                .comparison_task_explain(&beta.id)
+                .unwrap()
+                .overlapping_task_ids
+                .contains(&alpha.id)
+        );
+
+        let different_bytes = String::from_utf8(CLAUDE_ALPHA.to_vec())
+            .unwrap()
+            .replace("synthetic alpha response", "synthetic alpha reexport");
+        let reexport_id = import_claude(
+            &store,
+            &root.path().join("alpha-reexport"),
+            different_bytes.as_bytes(),
+        );
+        let reexport_episode = store.episode_create(&[reexport_id]).unwrap();
+        let reexport = store
+            .comparison_task_create(&[reexport_episode.id])
+            .unwrap();
+        assert!(
+            store
+                .comparison_task_explain(&alpha.id)
+                .unwrap()
+                .overlapping_task_ids
+                .contains(&reexport.id)
+        );
+        store.delete_with_effects(&alpha_id).unwrap();
+        assert!(
+            store
+                .comparison_task_explain(&beta.id)
+                .unwrap()
+                .overlapping_task_ids
+                .contains(&alpha.id),
+            "deleting a Claude source must retain its frozen root-session overlap edge"
+        );
     }
 
     #[test]

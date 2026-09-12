@@ -10,7 +10,26 @@ final class InsightEvidenceBridgeTests: XCTestCase {
         let value = try JSONDecoder().decode(LocalInsight.self, from: Data(legacy.utf8))
         XCTAssertNil(value.model_observations)
         XCTAssertNil(value.outcome_links)
+        XCTAssertNil(value.claude_task_attribution)
         try value.validateSupportedEvidence()
+    }
+    func testClaudeAttributionIsAdditiveAndSourceSpecific() throws {
+        // Shared Rust-generated fixture: the attributed branch must contain real
+        // evidence, even though this decoder only consumes its display envelope.
+        let repository = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+        let fixture = repository.appendingPathComponent(
+            "crates/trace-commons-contributor/fixtures/insights/claude-task-attribution/native-agent-alpha-snapshot.json")
+        var snapshot = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: fixture)) as? [String: Any])
+        let current = try JSONDecoder().decode(LocalInsight.self, from: JSONSerialization.data(withJSONObject: snapshot))
+        XCTAssertEqual(current.claude_task_attribution?.state.status, "attributed")
+        try current.validateSupportedEvidence()
+        XCTAssertEqual(current.claude_task_attribution?.declared_model, "claude-opus-5")
+        XCTAssertEqual(current.claude_task_attribution?.record_count, 3)
+        snapshot["source_format"] = "codex"
+        let mismatched = try JSONDecoder().decode(LocalInsight.self, from: JSONSerialization.data(withJSONObject: snapshot))
+        XCTAssertThrowsError(try mismatched.validateSupportedEvidence())
     }
     func testMixedDeclarationsAndMissingnessRemainTyped() throws {
         let json = """

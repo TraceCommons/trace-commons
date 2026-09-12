@@ -9,10 +9,29 @@ namespace TraceCommons.Interop;
 public sealed class InsightEvidence
 {
     public DeclaredModelObservations? ModelObservations { get; init; }
+    public ClaudeTaskAttributionEvidence? ClaudeTaskAttribution { get; init; }
     public OutcomeLink[] OutcomeLinks { get; init; } = Array.Empty<OutcomeLink>();
     public static InsightEvidence Decode(JsonElement insight) => insight.Deserialize<InsightEvidence>(
         new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower })
         ?? throw new InvalidOperationException("insights-response-invalid");
+}
+public sealed class ClaudeTaskAttributionEvidence
+{
+    public required uint SchemaVersion { get; init; }
+    public required uint ExtractorVersion { get; init; }
+    public required string ProfileId { get; init; }
+    public required string ObservedWriterVersion { get; init; }
+    public required string QualificationScope { get; init; }
+    public required string SourceDigest { get; init; }
+    public required ulong RecordCount { get; init; }
+    public required ulong RecognizedRecords { get; init; }
+    public required JsonElement State { get; init; }
+    public bool IsSupported(string sourceFormat) => sourceFormat == "claude_code" && SchemaVersion == 1 &&
+        ExtractorVersion == 1 && ProfileId == "claude-code-v2.1.260-observed-agent-branch-v1" &&
+        ObservedWriterVersion == "2.1.260" && QualificationScope == "observed_writer_agent_branch_records" &&
+        RecordCount > 0 && RecognizedRecords <= RecordCount && State.ValueKind == JsonValueKind.Object &&
+        State.TryGetProperty("status", out JsonElement status) &&
+        status.GetString() is "attributed" or "unavailable";
 }
 public sealed class DeclaredModelObservations
 {

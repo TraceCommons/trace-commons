@@ -39,6 +39,10 @@ pub struct FrozenEpisodeBinding {
     /// overlapping exports remain connected after source deletion.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub source_session_identity_sha256: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub claude_root_session_identity_sha256: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub claude_agent_branch_identity_sha256: Vec<String>,
 }
 
 impl FrozenEpisodeBinding {
@@ -50,6 +54,8 @@ impl FrozenEpisodeBinding {
             members_digest: members_digest(&episode.members)?,
             members: episode.members.clone(),
             source_session_identity_sha256: Vec::new(),
+            claude_root_session_identity_sha256: Vec::new(),
+            claude_agent_branch_identity_sha256: Vec::new(),
         })
     }
 }
@@ -184,7 +190,8 @@ pub enum ComparisonTaskStaleReason {
 pub struct ComparisonTaskSourceQualification {
     pub rule: super::comparison_specs::QualifiedSourceRule,
     pub declared_model_cohort: String,
-    pub recorded_configuration_sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recorded_configuration_sha256: Option<String>,
     pub material_revision: u64,
     pub material_digest: String,
 }
@@ -386,6 +393,22 @@ pub fn validate_episode_bindings(bindings: &[FrozenEpisodeBinding]) -> Result<()
                 .source_session_identity_sha256
                 .windows(2)
                 .all(|pair| pair[0] < pair[1])
+            || !binding
+                .claude_root_session_identity_sha256
+                .iter()
+                .all(|identity| validate_digest(identity).is_ok())
+            || !binding
+                .claude_root_session_identity_sha256
+                .windows(2)
+                .all(|pair| pair[0] < pair[1])
+            || !binding
+                .claude_agent_branch_identity_sha256
+                .iter()
+                .all(|identity| validate_digest(identity).is_ok())
+            || !binding
+                .claude_agent_branch_identity_sha256
+                .windows(2)
+                .all(|pair| pair[0] < pair[1])
         {
             return Err(ComparisonTaskValidationError::Invalid.into());
         }
@@ -487,5 +510,14 @@ mod tests {
         let mut unknown = value.clone();
         unknown.reasoning_effort = ReasoningEffort::Unknown;
         assert_ne!(value.fingerprint().unwrap(), unknown.fingerprint().unwrap());
+    }
+
+    #[test]
+    fn additive_claude_identities_preserve_legacy_codex_binding_bytes() {
+        let legacy = r#"{"episode_id":"episode-1","revision":1,"membership_revision":1,"members_digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","members":[],"source_session_identity_sha256":["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"]}"#;
+        let binding: FrozenEpisodeBinding = serde_json::from_str(legacy).unwrap();
+        assert!(binding.claude_root_session_identity_sha256.is_empty());
+        assert!(binding.claude_agent_branch_identity_sha256.is_empty());
+        assert_eq!(serde_json::to_string(&binding).unwrap(), legacy);
     }
 }

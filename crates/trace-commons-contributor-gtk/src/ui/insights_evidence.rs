@@ -3,9 +3,39 @@
 use super::{copy, local_date};
 use trace_commons_contributor::insights::{
     OutcomeLink,
+    claude_task_attribution::{ClaudeTaskAttributionEvidence, ClaudeTaskAttributionState},
     models::{DeclarationKind, ModelObservations, RecordCoordinates},
     outcomes::OutcomeEvidence,
 };
+
+pub(super) fn render_claude_attribution(
+    evidence: Option<&ClaudeTaskAttributionEvidence>,
+) -> Option<String> {
+    let evidence = evidence?;
+    let mut text = format!(
+        "{}\n{}\n{}: {}\n",
+        copy("claude_attribution_title"),
+        copy("claude_attribution_notice"),
+        copy("source_digest"),
+        evidence.source_digest
+    );
+    match &evidence.state {
+        ClaudeTaskAttributionState::Attributed { branch } => text.push_str(&format!(
+            "{}\n{}: {}\n{}: {}\n{}: {}",
+            copy("claude_attribution_attributed"),
+            copy("claude_attribution_terminal_line"),
+            branch.terminal_physical_line,
+            copy("claude_attribution_tool_pairs"),
+            branch.tool_pairs.len(),
+            copy("claude_attribution_background"),
+            branch.background_work.len()
+        )),
+        ClaudeTaskAttributionState::Unavailable { .. } => {
+            text.push_str(copy("claude_attribution_unavailable"));
+        }
+    }
+    Some(text)
+}
 
 pub(super) fn render_models(observation: Option<&ModelObservations>) -> String {
     let mut text = format!("{}\n{}\n", copy("model_title"), copy("model_notice"));
@@ -148,11 +178,40 @@ mod tests {
     use super::*;
     use trace_commons_contributor::insights::{
         OutcomeLinkProvenance, SourceFormat,
+        claude_task_attribution::ClaudeTaskUnavailableReason,
         models::{ModelDeclaration, ModelObservationScope},
         outcomes::{
             GitCommitEvidence, GitEvidenceProvenance, TestEvidenceProvenance, TestReportEvidence,
         },
     };
+
+    #[test]
+    fn unavailable_claude_branch_keeps_the_scope_limitation_visible() {
+        let evidence = ClaudeTaskAttributionEvidence {
+            schema_version: 1,
+            extractor_version: 1,
+            profile_id: "claude-code-v2.1.260-observed-agent-branch-v1".into(),
+            observed_writer_version: "2.1.260".into(),
+            qualification_scope: "observed_writer_agent_branch_records".into(),
+            source_digest: "a".repeat(64),
+            record_count: 3,
+            recognized_records: 2,
+            root_session_identity_sha256: None,
+            agent_branch_identity_sha256: None,
+            declared_model: None,
+            model_selector: None,
+            context_window_selector: None,
+            state: ClaudeTaskAttributionState::Unavailable {
+                reason: ClaudeTaskUnavailableReason::UnsupportedRecord,
+                physical_line: Some(3),
+            },
+        };
+        evidence.validate().unwrap();
+        let text = render_claude_attribution(Some(&evidence)).unwrap();
+        assert!(text.contains(copy("claude_attribution_notice")));
+        assert!(text.contains(copy("claude_attribution_unavailable")));
+        assert!(text.contains(&evidence.source_digest));
+    }
 
     #[test]
     fn claude_declarations_render_physical_line_evidence() {
