@@ -14,10 +14,12 @@ public interface ILocalInsights
 /// <summary>Handle-free bounded calls. Cancellation stops waiting, not an already-started mutation.</summary>
 public sealed class LocalInsights : ILocalInsights
 {
-    private static readonly HashSet<string> PublicEpisodeErrors = new(StringComparer.Ordinal) {
+    private static readonly HashSet<string> PublicInsightsErrors = new(StringComparer.Ordinal) {
         "insights_episode_invalid", "insights_episode_member_limit", "insights_episode_duplicate_member",
         "insights_episode_not_found", "insights_episode_missing_members", "insights_episode_revision_conflict",
-        "insights_episode_limit_exceeded", "insights_episode_revision_overflow", "insights_response_too_large"
+        "insights_episode_limit_exceeded", "insights_episode_revision_overflow", "insights_response_too_large",
+        "insights_card_invalid_selection", "insights_card_snapshot_limit", "insights_card_snapshot_not_found",
+        "insights_card_episode_limit", "insights_card_episode_not_found"
     };
     private static readonly SemaphoreSlim Calls = new(1, 1);
     private readonly string? _storeDirectory;
@@ -43,7 +45,7 @@ public sealed class LocalInsights : ILocalInsights
             if (error != IntPtr.Zero || response == IntPtr.Zero)
             {
                 string? code = error == IntPtr.Zero ? null : NativeMethods.BorrowedString(error);
-                if (code != null && PublicEpisodeErrors.Contains(code)) throw new InsightsServiceException(code);
+                if (code != null && PublicInsightsErrors.Contains(code)) throw new InsightsServiceException(code);
                 throw new InvalidOperationException("insights-operation-failed");
             }
             string json = NativeMethods.BorrowedString(response)

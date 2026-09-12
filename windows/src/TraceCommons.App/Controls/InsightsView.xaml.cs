@@ -65,6 +65,21 @@ public sealed partial class InsightsView : UserControl, IDisposable
         BringSnapshotIntoView(selected.Id);
     }
     private string[] SelectedSnapshotIds() => SavedList.SelectedItems.Cast<SavedInsight>().Select(item => item.Id).ToArray();
+    private async void OnLoadQuestionCards(object sender, RoutedEventArgs args) => await ViewModel.LoadQuestionCardsAsync(
+        CardSavedList.SelectedItems.Cast<SavedInsight>().Select(item => item.Id),
+        CardEpisodeList.SelectedItems.Cast<EpisodeRow>().Select(item => item.Id));
+    private async void OnCardEvidence(object sender, RoutedEventArgs args)
+    {
+        if (sender is not Button { Tag: string id }) return;
+        await ViewModel.OpenCardEvidenceAsync(id);
+        BringSnapshotIntoView(id);
+    }
+    private async void OnCardEpisode(object sender, RoutedEventArgs args)
+    {
+        if (sender is not Button { Tag: string id }) return;
+        await ViewModel.OpenCardEpisodeAsync(id);
+        if (!_closed && ViewModel.CurrentEpisodeId == id) ReconcileEpisodeMemberDraft(id);
+    }
     private async void OnCreateEpisode(object sender, RoutedEventArgs args)
     {
         await ViewModel.CreateEpisodeAsync(SelectedSnapshotIds());
