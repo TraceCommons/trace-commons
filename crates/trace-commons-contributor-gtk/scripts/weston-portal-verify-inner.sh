@@ -124,6 +124,21 @@ else
     fail "first-run Insights created contributor state"
   fi
 
+  # Mission drafts must be reachable without starting Contributions, and
+  # inspection/quit failures must preserve the live local view.
+  if ! WAYLAND_DISPLAY="$WAYLAND_SOCKET" GDK_BACKEND=wayland GSETTINGS_BACKEND=memory \
+      cargo test --locked --manifest-path "$GTK_MANIFEST" --lib \
+      ui::insights::tests::local_first_window_exposes_insights_and_mission_drafts_without_a_worker \
+      -- --exact --ignored --test-threads=1; then
+    fail "local-first mission draft navigation required contributor startup"
+  fi
+  if ! WAYLAND_DISPLAY="$WAYLAND_SOCKET" GDK_BACKEND=wayland GSETTINGS_BACKEND=memory \
+      cargo test --locked --manifest-path "$GTK_MANIFEST" --lib \
+      ui::mission_drafts::tests::account_free_view_imports_shows_and_deletes_plain_text_draft \
+      -- --exact --ignored --test-threads=1; then
+    fail "mission draft lifecycle, failed inspection or declined close failed"
+  fi
+
   # --- axis 2: a real portal daemon ------------------------------------------
   if ! WAYLAND_DISPLAY="$WAYLAND_SOCKET" GDK_BACKEND=wayland GSETTINGS_BACKEND=memory \
       cargo test --locked --manifest-path "$GTK_MANIFEST" --lib \
