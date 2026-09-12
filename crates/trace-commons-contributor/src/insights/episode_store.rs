@@ -57,7 +57,10 @@ pub(super) fn validate_index_episodes(index: &Index) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn invalidate_missing_members(index: &mut Index) -> MutationEffects {
+pub(super) fn invalidate_missing_members(
+    index: &mut Index,
+    affected_snapshot_ids: &BTreeSet<String>,
+) -> MutationEffects {
     let mut effects = MutationEffects::default();
     index.episodes.retain(|id, episode| {
         let retain = episode
@@ -69,39 +72,55 @@ pub(super) fn invalidate_missing_members(index: &mut Index) -> MutationEffects {
         }
         retain
     });
-    effects.stale_comparison_task_ids = index
+    let invalidated_episode_ids = effects
+        .invalidated_episode_ids
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    effects.stale_comparison_tasks = index
         .comparison_tasks
         .values()
-        .filter(|task| {
-            task.episodes.iter().any(|binding| {
-                index
-                    .episodes
-                    .get(&binding.episode_id)
-                    .is_none_or(|episode| {
-                        episode.revision != binding.revision || episode.members != binding.members
-                    })
-                    || binding.members.iter().any(|member| {
-                        index
+        .filter_map(|task| {
+            let touches_affected_input = task.episodes.iter().any(|binding| {
+                binding
+                    .members
+                    .iter()
+                    .any(|member| affected_snapshot_ids.contains(&member.snapshot_id))
+            });
+            let binds_invalidated_episode = task
+                .episodes
+                .iter()
+                .any(|binding| invalidated_episode_ids.contains(&binding.episode_id));
+            if !touches_affected_input && !binds_invalidated_episode {
+                return None;
+            }
+            let mut reasons = BTreeSet::new();
+            for binding in &task.episodes {
+                if !index.episodes.contains_key(&binding.episode_id) {
+                    reasons.insert(super::ComparisonTaskMutationReason::EpisodeMissing);
+                }
+                if binding.members.iter().any(|member| {
+                    affected_snapshot_ids.contains(&member.snapshot_id)
+                        && index
                             .reports
                             .get(&member.snapshot_id)
                             .is_none_or(|snapshot| {
                                 snapshot.report.evidence[0].source_digest != member.source_digest
                             })
-                    })
+                }) {
+                    reasons.insert(super::ComparisonTaskMutationReason::SnapshotMissingOrReplaced);
+                }
+            }
+            (!reasons.is_empty()).then(|| super::StaleComparisonTaskEffect {
+                task_id: task.id.clone(),
+                reasons: reasons.into_iter().collect(),
             })
         })
-        .map(|task| task.id.clone())
         .collect();
-    effects.stale_comparison_tasks = effects
-        .stale_comparison_task_ids
+    effects.stale_comparison_task_ids = effects
+        .stale_comparison_tasks
         .iter()
-        .map(|task_id| super::StaleComparisonTaskEffect {
-            task_id: task_id.clone(),
-            reasons: vec![
-                super::comparison_tasks::ComparisonTaskStaleReason::EpisodeMissing,
-                super::comparison_tasks::ComparisonTaskStaleReason::SnapshotMissingOrReplaced,
-            ],
-        })
+        .map(|effect| effect.task_id.clone())
         .collect();
     effects
 }
@@ -187,7 +206,7 @@ fn overlap(reverse: &BTreeMap<&str, Vec<&str>>, episode: &LocalEpisode) -> Vec<E
 fn task_effects_for_episode(
     index: &Index,
     episode_id: &str,
-    reasons: Vec<super::comparison_tasks::ComparisonTaskStaleReason>,
+    reasons: Vec<super::ComparisonTaskMutationReason>,
 ) -> MutationEffects {
     let stale_comparison_task_ids = index
         .comparison_tasks
@@ -317,8 +336,8 @@ impl LocalInsightStore {
             &index,
             id,
             vec![
-                super::comparison_tasks::ComparisonTaskStaleReason::EpisodeRevisionChanged,
-                super::comparison_tasks::ComparisonTaskStaleReason::EpisodeMembershipChanged,
+                super::ComparisonTaskMutationReason::EpisodeRevisionChanged,
+                super::ComparisonTaskMutationReason::EpisodeMembershipChanged,
             ],
         );
         self.save(&index)?;
@@ -375,7 +394,7 @@ impl LocalInsightStore {
         let mutation_effects = task_effects_for_episode(
             &index,
             id,
-            vec![super::comparison_tasks::ComparisonTaskStaleReason::EpisodeRevisionChanged],
+            vec![super::ComparisonTaskMutationReason::EpisodeRevisionChanged],
         );
         self.save(&index)?;
         Ok(super::SnapshotMutation {
@@ -413,7 +432,7 @@ impl LocalInsightStore {
         let mutation_effects = task_effects_for_episode(
             &index,
             id,
-            vec![super::comparison_tasks::ComparisonTaskStaleReason::EpisodeRevisionChanged],
+            vec![super::ComparisonTaskMutationReason::EpisodeRevisionChanged],
         );
         self.save(&index)?;
         Ok(super::SnapshotMutation {
@@ -439,7 +458,7 @@ impl LocalInsightStore {
         let mutation_effects = task_effects_for_episode(
             &index,
             id,
-            vec![super::comparison_tasks::ComparisonTaskStaleReason::EpisodeMissing],
+            vec![super::ComparisonTaskMutationReason::EpisodeMissing],
         );
         self.save(&index)?;
         Ok(super::SnapshotMutation {

@@ -167,7 +167,7 @@ fn overlap_effects(ids: impl IntoIterator<Item = String>) -> super::MutationEffe
         .iter()
         .map(|task_id| super::StaleComparisonTaskEffect {
             task_id: task_id.clone(),
-            reasons: vec![ComparisonTaskStaleReason::OverlappingTaskEvidence],
+            reasons: vec![super::ComparisonTaskMutationReason::OverlapChanged],
         })
         .collect();
     super::MutationEffects {
@@ -636,12 +636,90 @@ mod tests {
         );
         let effects = store.delete_with_effects(&ids[0]).unwrap().mutation_effects;
         assert!(effects.stale_comparison_task_ids.contains(&first.id));
+        let first_effect = effects
+            .stale_comparison_tasks
+            .iter()
+            .find(|effect| effect.task_id == first.id)
+            .unwrap();
+        assert_eq!(
+            first_effect.reasons,
+            vec![
+                crate::insights::ComparisonTaskMutationReason::EpisodeMissing,
+                crate::insights::ComparisonTaskMutationReason::SnapshotMissingOrReplaced,
+            ]
+        );
         assert!(
             store
                 .comparison_task_explain(&first.id)
                 .unwrap()
                 .stale_reasons
                 .contains(&ComparisonTaskStaleReason::EpisodeMissing)
+        );
+    }
+
+    #[test]
+    fn unrelated_import_does_not_report_false_missing_evidence_for_revision_stale_task() {
+        let (root, store, ids) = setup();
+        let episode = store.episode_create(&ids[..1]).unwrap();
+        let task = store
+            .comparison_task_create(std::slice::from_ref(&episode.id))
+            .unwrap();
+        store
+            .episode_annotate(
+                &episode.id,
+                1,
+                crate::insights::TaskCategory::Refactor,
+                TaskOutcome::Accepted,
+            )
+            .unwrap();
+
+        let unrelated = root.path().join("unrelated");
+        source(&unrelated, "unrelated");
+        let effects = store
+            .import_with_effects(SourceFormat::Trajectory, &unrelated)
+            .unwrap()
+            .mutation_effects;
+
+        assert!(effects.stale_comparison_task_ids.is_empty());
+        assert!(effects.stale_comparison_tasks.is_empty());
+        let detail = store.comparison_task_explain(&task.id).unwrap();
+        assert!(
+            detail
+                .stale_reasons
+                .contains(&ComparisonTaskStaleReason::EpisodeRevisionChanged)
+        );
+        assert!(
+            !detail
+                .stale_reasons
+                .contains(&ComparisonTaskStaleReason::EpisodeMissing)
+        );
+        assert!(
+            !detail
+                .stale_reasons
+                .contains(&ComparisonTaskStaleReason::SnapshotMissingOrReplaced)
+        );
+    }
+
+    #[test]
+    fn deleting_current_episode_member_reports_missing_episode_to_frozen_task() {
+        let (_root, store, ids) = setup();
+        let episode = store.episode_create(&ids[..1]).unwrap();
+        let task = store
+            .comparison_task_create(std::slice::from_ref(&episode.id))
+            .unwrap();
+        store
+            .episode_replace_members(&episode.id, 1, &ids[1..])
+            .unwrap();
+
+        let effects = store.delete_with_effects(&ids[1]).unwrap().mutation_effects;
+        let effect = effects
+            .stale_comparison_tasks
+            .iter()
+            .find(|effect| effect.task_id == task.id)
+            .unwrap();
+        assert_eq!(
+            effect.reasons,
+            vec![crate::insights::ComparisonTaskMutationReason::EpisodeMissing]
         );
     }
 
