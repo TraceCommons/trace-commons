@@ -14,6 +14,7 @@ pub mod service;
 pub mod summary;
 pub mod time_evidence;
 pub mod usage;
+pub mod usage_evidence;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
