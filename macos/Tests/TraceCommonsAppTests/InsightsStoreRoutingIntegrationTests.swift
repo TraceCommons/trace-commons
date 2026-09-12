@@ -15,6 +15,9 @@ final class InsightsStoreRoutingIntegrationTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         let store = root.appendingPathComponent("selected-store")
         let seeded = try seedStore(store, marker: "visible", includeComparisonData: true)
+        let task = try XCTUnwrap(TCInsights.call(.init(
+            storeDirectory: store.path, operation: .init("comparison_task_list"))).tasks?.first)
+        XCTAssertTrue(task.stale_reasons.contains(.attributionPendingQualification))
         let copy = try XCTUnwrap(TCInsights.copy())
         _ = NSApplication.shared
         let size = CGSize(width: 1_180, height: 3_200)
@@ -43,7 +46,8 @@ final class InsightsStoreRoutingIntegrationTests: XCTestCase {
         XCTAssertTrue(topText.contains("Insights store"), topText)
         XCTAssertTrue(topText.contains("selected-store"), topText)
         let text = try recognizedText(bitmap)
-        XCTAssertTrue(text.contains("Source attribution is pending qualification"), text)
+        XCTAssertTrue(text.contains("Whole saved snapshot members"), text)
+        XCTAssertTrue(text.contains("Outcome is unassessed"), text)
         XCTAssertTrue(text.contains("model-a") && text.contains("model-b"), text)
     }
 
