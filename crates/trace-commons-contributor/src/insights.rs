@@ -25,7 +25,7 @@ use trace_commons_protocol::insights::{
 };
 
 const MAX_SOURCE_BYTES: u64 = 16 * 1024 * 1024;
-const STORE_VERSION: u32 = 4;
+const STORE_VERSION: u32 = 5;
 const MAX_OUTCOME_LINKS: usize = 128;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -118,6 +118,10 @@ pub struct LocalInsight {
     /// Explicit many-to-many evidence associations; no inferred success metric.
     #[serde(default)]
     pub outcome_links: Vec<OutcomeLink>,
+    /// Timestamp coverage from records in the exact imported source bytes.
+    /// Legacy snapshots remain unknown until explicit reimport.
+    #[serde(default)]
+    pub time_evidence: Option<time_evidence::RecordedTimeEvidence>,
     /// Import snapshot time; source freshness requires explicit reimport.
     pub analyzed_at: chrono::DateTime<chrono::Utc>,
 }
@@ -227,6 +231,7 @@ pub fn analyze_file(format: SourceFormat, path: &Path) -> Result<LocalInsight> {
         id: id.clone(),
         source_digest,
     };
+    let time_evidence = time_evidence::extract_recorded_time_evidence(format, &bytes)?;
     let input = provider::ProviderInput::first_party(evidence, &events);
     let report = provider::dispatch(&provider::FirstPartyProvider, &input)?;
     Ok(LocalInsight {
@@ -240,6 +245,7 @@ pub fn analyze_file(format: SourceFormat, path: &Path) -> Result<LocalInsight> {
         manual_annotation: None,
         model_observations: Some(models::extract_model_observations(format, &bytes)?),
         outcome_links: Vec::new(),
+        time_evidence: Some(time_evidence),
         analyzed_at: chrono::Utc::now(),
     })
 }
@@ -390,6 +396,17 @@ impl LocalInsightStore {
             {
                 bail!("insights_store_invalid");
             }
+            if index.version < 5 && insight.time_evidence.is_some() {
+                bail!("insights_store_invalid");
+            }
+            if let Some(time_evidence) = &insight.time_evidence {
+                time_evidence.validate()?;
+                if time_evidence.source_digest != evidence[0].source_digest
+                    || time_evidence.source_format != insight.source_format
+                {
+                    bail!("insights_store_invalid");
+                }
+            }
             if let Some(models) = &insight.model_observations {
                 models.validate()?;
                 if models.source_digest != evidence[0].source_digest
@@ -420,7 +437,7 @@ impl LocalInsightStore {
             bail!("insights_store_invalid");
         }
         episode_store::validate_index_episodes(&index)?;
-        // Legacy snapshots remain readable; the next mutation persists v4.
+        // Legacy snapshots remain readable; the next mutation persists v5.
         index.version = STORE_VERSION;
         Ok((lock, index))
     }
@@ -860,6 +877,10 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .remove("outcome_links");
+        legacy["reports"][&insight.id]
+            .as_object_mut()
+            .unwrap()
+            .remove("time_evidence");
         fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
         assert!(
             store

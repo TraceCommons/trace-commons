@@ -511,11 +511,12 @@ mod tests {
     fn legacy_reads_do_not_infer_or_persist_episodes_and_invalid_bindings_fail_closed() {
         let (_root, store, ids) = fixture();
         let original: serde_json::Value = serde_json::from_slice(&bytes(&store)).unwrap();
-        for version in [1, 2, 3] {
+        for version in [1, 2, 3, 4] {
             let mut legacy = original.clone();
             legacy["version"] = version.into();
             legacy.as_object_mut().unwrap().remove("episodes");
             for report in legacy["reports"].as_object_mut().unwrap().values_mut() {
+                report.as_object_mut().unwrap().remove("time_evidence");
                 if version < 3 {
                     report.as_object_mut().unwrap().remove("model_observations");
                     report.as_object_mut().unwrap().remove("outcome_links");
@@ -527,7 +528,7 @@ mod tests {
             assert_eq!(bytes(&store), before);
             store.episode_create(&ids[..1]).unwrap();
             let migrated: serde_json::Value = serde_json::from_slice(&bytes(&store)).unwrap();
-            assert_eq!(migrated["version"], 4);
+            assert_eq!(migrated["version"], 5);
             assert_eq!(migrated["episodes"].as_object().unwrap().len(), 1);
         }
         let valid: serde_json::Value = serde_json::from_slice(&bytes(&store)).unwrap();
@@ -539,6 +540,9 @@ mod tests {
             .unwrap();
         let mut corrupt = valid.clone();
         corrupt["version"] = 3.into();
+        for report in corrupt["reports"].as_object_mut().unwrap().values_mut() {
+            report.as_object_mut().unwrap().remove("time_evidence");
+        }
         write_index(&store, &corrupt);
         assert!(store.episode_list().is_err());
         let mut corrupt = valid.clone();
