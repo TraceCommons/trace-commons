@@ -1,4 +1,5 @@
 using System;
+using System.Threading.Tasks;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using TraceCommons.App.ViewModels;
@@ -19,14 +20,9 @@ public sealed partial class InsightsView : UserControl, IDisposable
         InitializeComponent();
         _window = window;
         DataContext = ViewModel;
-        Loaded += OnLoaded;
         Unloaded += (_, _) => ViewModel.Cancel();
     }
-    private async void OnLoaded(object sender, RoutedEventArgs args)
-    {
-        Loaded -= OnLoaded;
-        await ViewModel.LoadAsync();
-    }
+    public Task ActivateAsync() => ViewModel.LoadAsync();
     private async void OnChoose(object sender, RoutedEventArgs args)
     {
         try
@@ -67,8 +63,7 @@ public sealed partial class InsightsView : UserControl, IDisposable
         if (await dialog.ShowAsync() == ContentDialogResult.Primary && !_closed)
             await ViewModel.DeleteAsync();
     }
-    private async void OnAnnotate(object sender, RoutedEventArgs args) => await ViewModel.AnnotateAsync(
-        ((ComboBoxItem)Category.SelectedItem).Tag.ToString()!, ((ComboBoxItem)Outcome.SelectedItem).Tag.ToString()!);
+    private async void OnAnnotate(object sender, RoutedEventArgs args) => await ViewModel.SaveAssessmentAsync();
     private async void OnClear(object sender, RoutedEventArgs args) => await ViewModel.ClearAnnotationAsync();
     private void OnCancel(object sender, RoutedEventArgs args) => ViewModel.Cancel();
     private void OnContributions(object sender, RoutedEventArgs args) => ContributionSetupRequested?.Invoke(this, EventArgs.Empty);

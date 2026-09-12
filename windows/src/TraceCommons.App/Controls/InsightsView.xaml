@@ -35,7 +35,7 @@
             <TextBlock Text="{Binding Details}" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
             <TextBlock Text="{Binding AssessmentNotice}" TextWrapping="Wrap" />
             <StackPanel Orientation="Horizontal" Spacing="12">
-                <ComboBox x:Name="Category" Header="{Binding [category]}" SelectedIndex="5">
+                <ComboBox x:Name="Category" IsEnabled="{Binding HasSavedSelection}" Header="{Binding [category]}" SelectedIndex="{Binding CategoryIndex, Mode=TwoWay}">
                     <ComboBoxItem Content="{Binding [category_refactor]}" Tag="refactor" />
                     <ComboBoxItem Content="{Binding [category_tests]}" Tag="tests" />
                     <ComboBoxItem Content="{Binding [category_docs]}" Tag="docs" />
@@ -43,7 +43,7 @@
                     <ComboBoxItem Content="{Binding [category_other]}" Tag="other" />
                     <ComboBoxItem Content="{Binding [category_unknown]}" Tag="unknown" />
                 </ComboBox>
-                <ComboBox x:Name="Outcome" Header="{Binding [outcome]}" SelectedIndex="3">
+                <ComboBox x:Name="Outcome" IsEnabled="{Binding HasSavedSelection}" Header="{Binding [outcome]}" SelectedIndex="{Binding OutcomeIndex, Mode=TwoWay}">
                     <ComboBoxItem Content="{Binding [outcome_accepted]}" Tag="accepted" />
                     <ComboBoxItem Content="{Binding [outcome_partial]}" Tag="partial" />
                     <ComboBoxItem Content="{Binding [outcome_rejected]}" Tag="rejected" />

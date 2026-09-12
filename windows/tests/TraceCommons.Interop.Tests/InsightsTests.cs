@@ -23,6 +23,7 @@ public sealed class InsightsTests
         public List<JsonElement> Calls { get; } = new();
         public TaskCompletionSource<JsonElement>? Pending;
         public string ListedInsights = Insight;
+        public string ReturnedInsight = Insight;
         public Task<JsonElement> CallAsync(object operation, CancellationToken cancellationToken)
         {
             var request = JsonSerializer.SerializeToElement(operation);
@@ -33,7 +34,7 @@ public sealed class InsightsTests
                 "copy" => Json("""{"type":"copy","copy":{"unknown":"Unknown","coverage":"Coverage","metric_input_tokens":"Input tokens","error":"safe-error","codex":"Codex rollout"}}"""),
                 "list" => Json("{\"type\":\"list\",\"insights\":[" + ListedInsights + "]}"),
                 "delete" => Json("{\"type\":\"delete\",\"deleted\":true}"),
-                _ => Json("{\"type\":\"" + type + "\",\"insight\":" + Insight + "}")
+                _ => Json("{\"type\":\"" + type + "\",\"insight\":" + ReturnedInsight + "}")
             });
         }
     }
@@ -94,6 +95,51 @@ public sealed class InsightsTests
         Assert.Null(model.CurrentId);
         Assert.NotEmpty(preview);
         Assert.Equal(preview, model.Details);
+    }
+
+    [Fact]
+    public async Task ExistingAssessmentPopulatesSelectorsAndClearsWithSnapshot()
+    {
+        string annotated = Insight.Replace("\"manual_annotation\":null", "\"manual_annotation\":{\"category\":\"docs\",\"outcome\":\"accepted\",\"recorded_at\":\"2026-09-11T10:00:00Z\"}", StringComparison.Ordinal);
+        var service = new Service { ReturnedInsight = annotated };
+        using var model = new InsightsViewModel(service);
+        await model.LoadAsync();
+        await model.ExplainAsync("snapshot-a");
+        Assert.Equal(2, model.CategoryIndex);
+        Assert.Equal(0, model.OutcomeIndex);
+        await model.SaveAssessmentAsync();
+        Assert.Equal("docs", service.Calls[^1].GetProperty("category").GetString());
+        Assert.Equal("accepted", service.Calls[^1].GetProperty("outcome").GetString());
+        service.ListedInsights = annotated.Replace("accepted", "partial", StringComparison.Ordinal);
+        await model.RefreshAsync();
+        Assert.Equal(1, model.OutcomeIndex);
+        service.ReturnedInsight = Insight;
+        await model.ClearAnnotationAsync();
+        Assert.Equal(5, model.CategoryIndex);
+        Assert.Equal(3, model.OutcomeIndex);
+        model.CategoryIndex = 0;
+        model.OutcomeIndex = 0;
+        await model.AnalyzeAsync("codex", "/selected/file", false);
+        Assert.Equal(5, model.CategoryIndex);
+        Assert.Equal(3, model.OutcomeIndex);
+    }
+
+    [Fact]
+    public async Task ReentryWaitsForCancelledInitialLoadThenReloads()
+    {
+        var completion = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var service = new Service { Pending = completion };
+        using var model = new InsightsViewModel(service);
+        var first = model.LoadAsync();
+        model.Cancel();
+        var reentry = model.LoadAsync();
+        Assert.Single(service.Calls);
+        service.Pending = null;
+        completion.SetResult(Json("{\"type\":\"copy\",\"copy\":{}}"));
+        await Task.WhenAll(first, reentry);
+        Assert.Equal(3, service.Calls.Count);
+        Assert.Single(model.Saved);
+        Assert.False(model.Busy);
     }
 
     [Fact]

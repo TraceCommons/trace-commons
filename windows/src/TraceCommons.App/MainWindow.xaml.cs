@@ -924,7 +924,7 @@ public sealed partial class MainWindow : Window
     /// </remarks>
     private void OnShowInsights(object sender, RoutedEventArgs e) => ShowInsightsPane();
 
-    private void ShowInsightsPane()
+    private async void ShowInsightsPane()
     {
         if (InsightsPane.Content is not InsightsView)
         {
@@ -936,6 +936,7 @@ public sealed partial class MainWindow : Window
             InsightsPane.Content = page;
         }
         ViewModel.ShowInsights();
+        await ((InsightsView)InsightsPane.Content).ActivateAsync();
     }
 
     private async void OnShowSettings(object sender, RoutedEventArgs e)

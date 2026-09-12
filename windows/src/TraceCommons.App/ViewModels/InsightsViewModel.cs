@@ -19,6 +19,7 @@ public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
     private CancellationTokenSource? _pending;
     private long _generation;
     private bool _closed;
+    private Task _active = Task.CompletedTask;
     private readonly Dictionary<string, string> _copy = new();
     public InsightsViewModel(ILocalInsights? service = null) => _service = service ?? new LocalInsights();
     public event PropertyChangedEventHandler? PropertyChanged;
@@ -28,6 +29,14 @@ public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
     public bool Busy { get; private set; }
     public bool Idle => !Busy;
     public string? CurrentId { get; private set; }
+    private static readonly string[] Categories = { "refactor", "tests", "docs", "debugging", "other", "unknown" };
+    private static readonly string[] Outcomes = { "accepted", "partial", "rejected", "unknown" };
+    public int CategoryIndex { get; set; } = 5;
+    public int OutcomeIndex { get; set; } = 3;
+    public Task SaveAssessmentAsync() => AnnotateAsync(
+        Categories[Math.Clamp(CategoryIndex, 0, Categories.Length - 1)],
+        Outcomes[Math.Clamp(OutcomeIndex, 0, Outcomes.Length - 1)]);
+    private void ResetAssessment() { CategoryIndex = 5; OutcomeIndex = 3; }
     public bool HasSavedSelection => CurrentId != null && Idle;
     public string this[string key] => _copy.TryGetValue(key, out var text) ? text : key;
     public string Title => this["title"];
@@ -40,14 +49,18 @@ public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
     public string AssessmentNotice => this["assessment_notice"];
 
     private void Changed() => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(null));
-    public Task LoadAsync() => Run(async token =>
+    public async Task LoadAsync()
     {
-        var result = await _service.CallAsync(new { type = "copy" }, token);
-        token.ThrowIfCancellationRequested();
-        foreach (var pair in result.GetProperty("copy").EnumerateObject())
-            _copy[pair.Name] = pair.Value.GetString() ?? pair.Name;
-        await RefreshCoreAsync(token);
-    });
+        await _active;
+        await Run(async token =>
+        {
+            var result = await _service.CallAsync(new { type = "copy" }, token);
+            token.ThrowIfCancellationRequested();
+            foreach (var pair in result.GetProperty("copy").EnumerateObject())
+                _copy[pair.Name] = pair.Value.GetString() ?? pair.Name;
+            await RefreshCoreAsync(token);
+        });
+    }
     public Task RefreshAsync() => Run(RefreshCoreAsync);
     private async Task RefreshCoreAsync(CancellationToken token)
     {
@@ -72,6 +85,7 @@ public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
         {
             CurrentId = null;
             Details = "";
+            ResetAssessment();
         }
         Status = Saved.Count == 0 ? this["empty"] : "";
     }
@@ -95,6 +109,7 @@ public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
         token.ThrowIfCancellationRequested();
         CurrentId = null;
         Details = "";
+        ResetAssessment();
         await RefreshCoreAsync(token);
     });
     public Task AnnotateAsync(string category, string outcome) => Run(async token =>
@@ -133,12 +148,25 @@ public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
         lines.Add(UnknownNotice);
         foreach (var evidence in report.GetProperty("evidence").EnumerateArray())
             lines.Add(this["evidence"] + ": " + evidence.GetProperty("id").GetString() + "\nSHA-256: " + evidence.GetProperty("source_digest").GetString());
+        ResetAssessment();
         if (insight.TryGetProperty("manual_annotation", out var annotation) && annotation.ValueKind != JsonValueKind.Null)
+        {
+            CategoryIndex = Array.IndexOf(Categories, annotation.GetProperty("category").GetString());
+            OutcomeIndex = Array.IndexOf(Outcomes, annotation.GetProperty("outcome").GetString());
+            if (CategoryIndex < 0) CategoryIndex = 5;
+            if (OutcomeIndex < 0) OutcomeIndex = 3;
             lines.Add(AssessmentNotice + "\n" + this["category_" + annotation.GetProperty("category").GetString()] + " / " +
                 this["outcome_" + annotation.GetProperty("outcome").GetString()] + " · " + Date(annotation.GetProperty("recorded_at")));
+        }
         Details = string.Join("\n\n", lines);
     }
-    private async Task Run(Func<CancellationToken, Task> action)
+    private Task Run(Func<CancellationToken, Task> action)
+    {
+        if (_closed || Busy) return Task.CompletedTask;
+        _active = RunCore(action);
+        return _active;
+    }
+    private async Task RunCore(Func<CancellationToken, Task> action)
     {
         if (_closed || Busy) return;
         var generation = ++_generation;
