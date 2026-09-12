@@ -142,7 +142,7 @@ Apply pilot corrections, then port to Windows and GTK with actual WinUI runtime/
 
 ### 6. One bounded mission path
 
-Connect the local mission inbox to one qualified source adapter and one structured task/evaluator shape. Preserve source digest/provenance, unverified identities, curator review, and explicit import. The bounded mission milestone continues through explicit user-authorized controlled participation, a qualified execution boundary, declared evaluation, and evidence-linked results; draft review alone is not completion. Keep publication and funding authority separate and absent. Qualify this one path end to end before adding providers or variants.
+Connect the local mission inbox to one qualified source adapter and one structured task/evaluator shape. Preserve source digest/provenance, unverified identities, curator review, and explicit import. The bounded mission milestone continues through explicit user-authorized controlled participation, a qualified execution boundary, declared evaluation, and evidence-linked results; draft review alone is not completion. Keep publication authority absent in this bounded delivery. User rewards for missions and insights are outside scope and owned by Abhishek; execution budgets are not reward funding. Qualify this one path end to end before adding providers or variants.
 
 ## Verification and claim boundary
 
@@ -150,4 +150,4 @@ Test legacy reads, canonical serialization, revision/digest conflicts, every ret
 
 Run warning-denied protocol/contributor/FFI tests, repository-allowlist Clippy, license boundary, CLI fixtures, Swift build/tests, and actual local FFI lifecycle. Run platform-native checks as later layers land. Add no dependency.
 
-Keep enrollment, contribution credit, remote providers, hosted analytics, pricing, rewards, public comparisons, exclusive model attribution, causal claims, code-rejection inference, and time-saved estimation out of the first delivery. The full program retains them only behind separately approved evidence contracts and qualification gates.
+User reward systems for missions and insights, including reward eligibility, credits, funding, redemption, and payouts, are outside this program and owned by Abhishek. They are not later delivery requirements for this team. Keep enrollment, remote providers, hosted analytics, pricing, public comparisons, exclusive model attribution, causal claims, code-rejection inference, and time-saved estimation out of the first delivery; the full program retains those separate capabilities behind their evidence contracts and qualification gates.

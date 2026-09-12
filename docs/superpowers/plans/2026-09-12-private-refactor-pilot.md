@@ -3,6 +3,8 @@
 Status: preparation; the user authorized locating candidate traces in local Claude history. Source-to-task matching, qualification, and user outcome reviews remain pending.
 Parent: [personal refactor comparison delivery plan](2026-09-12-personal-refactor-comparison.md).
 
+Reward systems for both missions and insights are outside scope and owned by Abhishek. This pilot collects evidence and user assessments without reward eligibility, compensation, or payout features.
+
 ## First repository and tasks
 
 Use Trace Commons for the first local retrospective pilot. Start with these completed refactors, then add other accepted, revised, or abandoned work to reach roughly 6–10 tasks if suitable traces exist. That is a usability sample, not a statistical sample-size claim.

@@ -12,6 +12,10 @@ Start with a private Insights view in the contributor product that works without
 
 Trace Commons owns a unified product with Insights, Coaching, and Missions. Multiple participants may supply analytics, specialist coaching, missions, and evaluations through shared interfaces. Users receive a useful default experience without selecting a provider or creating provider-specific accounts. Local use remains available without a Trace Commons account; hosted features use one Trace Commons account and permission surface.
 
+## Rewards ownership and scope
+
+Abhishek owns the system for rewarding users for missions and insights. Reward design and implementation are outside this program's scope, not deferred work for this agent team. Do not add reward eligibility, points/credits, reward terms, funding, wallets, redemption, settlement, payouts, or reward-specific UI/API/schema requirements. Analytics evidence and mission results remain within scope; they do not determine or promise compensation. Any future integration with Abhishek's work needs a separately agreed interface and authorization and is not a completion dependency here. Execution-resource budgets remain in scope and are distinct from user rewards.
+
 ## Current delivery priority
 
 The architecture and full user-story scope remain intact. The sequence below supersedes the numerical order of the phase and packet inventory. Progress is measured by user questions answered with inspectable evidence, not by contracts, test counts, or platform implementations completed.
@@ -39,11 +43,11 @@ The detailed comparison plan is [Personal refactor comparison delivery](2026-09-
 | --- | --- | --- |
 | Analytics or coaching provider | Structured findings and specialist methods | Common evidence standards, presentation, qualification, and default selection. |
 | Mission scout | Discover external developments and turn them into evidence-linked mission drafts | Source provenance, deduplication, draft validation, publication policy, and a unified discovery feed. |
-| Mission author or sponsor | Versioned tasks, budgets, success criteria, and proposed rewards | Mission discovery, participation flow, attribution, and published rules. |
+| Mission author or sponsor | Versioned tasks, execution-resource budgets, and success criteria | Mission discovery, participation flow, attribution, and published rules. |
 | Evaluator | Assessments tied to evidence and rubric versions | Result validation, conflict disclosures, challenges, and reproducibility requirements. |
 | Contributor | Authorized evidence or mission attempts | Clear permissions, evidence access, and lifecycle controls. |
 
-An organization may hold several roles. Record and display sponsor/evaluator relationships, including evaluation of a provider's own models. Mission rewards, contribution credits, and analytics scores remain separate concepts and accounting paths; a mission definition does not authorize payouts.
+An organization may hold several roles. Record and display sponsor/evaluator relationships, including evaluation of a provider's own models. Analytics scores and mission results do not grant compensation. Reward systems for both missions and insights belong to Abhishek and are outside this plan.
 
 Trace Commons supplies shared cards, terminology, comparison views, evidence drilldowns, and permission controls. Providers return structured results rather than arbitrary UI or competing dashboards. Provider attribution is available on each result and prominent where sponsorship or conflicts affect interpretation. Specialist capabilities appear in task context; a provider catalog is deferred until independent implementations prove useful within the shared experience.
 
@@ -104,10 +108,10 @@ Proposed concepts, not existing type or table names:
 | Provider manifest | Stable identity, implementation version, capabilities, execution mode, input needs, output schema, retention policy, budget model, and qualification status. |
 | Evaluation | Input digest, provider identity, evaluator/rubric version, execution mode, structured judgments, supporting event references, confidence, coverage, and verifiable provenance where remote. |
 | Insight | Metric and denominator, filters/cohort, date window, missingness, uncertainty, supporting evaluations, validity state, and human-readable explanation. |
-| Mission | Author/sponsor identity, immutable definition version, starting artifact, allowed tools/models, budget, success rubric, declared evaluators/conflicts, evidence rules, challenge process, and separate reward terms. |
+| Mission | Author/sponsor identity, immutable definition version, starting artifact, allowed tools/models, budget, success rubric, declared evaluators/conflicts, evidence rules, and challenge process. Reward terms are outside this contract’s scope. |
 | Mission proposal | Scout identity/version, source URL and retrieval time in an authorized content artifact, source/content digest, attributed claim, reproducible task proposal, evaluator requirements, duplicate lineage, and review/publication state. Operational logs retain hashes and safe labels only. |
 
-One session can contain several episodes; one episode can span sessions and models. Preserve those relationships. Prefer explicit task identifiers and user confirmation; semantic boundary detection is a labeled inference. Do not award all credit to the final model. Report mixed-model episodes separately until a defensible attribution policy exists.
+One session can contain several episodes; one episode can span sessions and models. Preserve those relationships. Prefer explicit task identifiers and user confirmation; semantic boundary detection is a labeled inference. Do not attribute all work to the final model. Report mixed-model episodes separately until a defensible attribution policy exists.
 
 Distinguish observed facts, user reports, evaluator judgments, and estimates in both storage and UI. A model saying “tests passed” is not a test-run record. Record evidence freshness and delayed outcomes; later reviews and reverts can revise insights. Preserve native usage categories and pricing version. Missing usage is never zero, and list-price estimates are not billed spend.
 
@@ -204,7 +208,7 @@ Acceptance:
 
 Version mission definitions: task, starting artifact, permitted models/tools, budget, time rules, independent success rubric, and submission evidence. Isolate any code execution in a qualified sandbox; replaying arbitrary traces is not authorized by this plan. Evaluate mission success independently from contribution credits and keep named participation consent separate from analytics permissions.
 
-Allow distinct authors, sponsors, and evaluators to participate through the common mission contract. Publish attribution, conflicts, evaluator versions, reward terms, and challenge rules before an attempt starts; bind attempts to that immutable version. Results and participation stay in Trace Commons Missions. Qualification and moderation can suspend a provider or mission while retaining audit provenance and a clear participant status.
+Allow distinct authors, sponsors, and evaluators to participate through the common mission contract. Publish attribution, conflicts, evaluator versions, and challenge rules before an attempt starts; bind attempts to that immutable version. Results and participation stay in Trace Commons Missions. Qualification and moderation can suspend a provider or mission while retaining audit provenance and a clear participant status.
 
 Start with a bounded mission that has objectively testable outcomes. Control or record harness/settings and use randomized or counterbalanced assignments where feasible. Handle duplicate submissions, repeated attempts, leakage, and evaluator gaming. Predeclare analysis rules before collecting the comparison set.
 
@@ -266,7 +270,7 @@ The packets below are a scope/dependency inventory, not an instruction to finish
 
 The descriptive release boundary remains packets 1–5 and needs consolidation and rollout qualification. Much of outcome linkage has been implemented in the open stack. The next development milestone combines the necessary parts of packets 1, 6, and 7 with a single macOS pilot flow; packet completion alone does not prove that milestone. No schedule is committed before evidence qualification identifies the remaining extraction and pilot gaps.
 
-Provider extensibility is an internal architectural requirement from packet 2. The first release remains a curated first-party experience. A public provider catalog, self-service onboarding, provider billing, and automated mission reward settlement are deferred; two independent evaluators must first pass conformance and product usability checks.
+Provider extensibility is an internal architectural requirement from packet 2. The first release remains a curated first-party experience. User rewards and reward settlement are excluded and owned by Abhishek. A public provider catalog, self-service onboarding, and provider billing are deferred; two independent evaluators must first pass conformance and product usability checks.
 
 Scouts extend the mission program after its core participation and evaluation flow works. Packets 13–14 do not expand the first private-insights release. Unattended scout publication and additional live source adapters are follow-on decisions based on the bounded pilot, not prerequisites.
 
@@ -277,7 +281,7 @@ Scouts extend the mission program after its core participation and evaluation fl
 - **Current pilot:** follow the [private pilot runbook](2026-09-12-private-refactor-pilot.md). Report the full reviewed-task denominator, mixed-model/delegated/unsupported/missing-context exclusions, boundary split/merge and omitted-attempt corrections, time and manual effort to a reviewed result, abandonment, and decision usefulness. Report overlapping exclusion reasons separately without double-counting the total excluded tasks. User confirmation is an assertion to assess, not validation by itself.
 - **Provider recommendations:** disclosure alone is insufficient for a provider's self-model evaluation. Require independent, unaffiliated evaluation before promoting such a finding into a model recommendation. Attributed descriptive findings can remain available within their evidence limits.
 - **Phase 3 / packet 8:** publish the semantic execution decision before implementation: rules, local model, or attested remote; supported hardware and licensing; history/input caps; CPU/GPU/RAM/time and monetary budgets; cancellation; and cache invalidation. Choose the method from qualification evidence.
-- **Bounded mission path:** distinguish technical access, permitted collection, retained excerpts, attribution, artifact redistribution, and mission publication rights. Treat starting artifacts and dependencies as untrusted. Bind execution to reviewed digests and test substitution plus prohibited filesystem/network access. Contribution credits and mission funding remain separate; attach a verified accounting contract and any required counsel checklist before enabling funding or redemption claims.
+- **Bounded mission path:** distinguish technical access, permitted collection, retained excerpts, attribution, artifact redistribution, and mission publication rights. Treat starting artifacts and dependencies as untrusted. Bind execution to reviewed digests and test substitution plus prohibited filesystem/network access. Reward accounting, mission funding for user rewards, and redemption are outside this work and owned by Abhishek; no reward contract or counsel checklist is a delivery requirement here.
 - **Phase 5 / packet 12:** require a reviewed privacy design with an accountable owner, privacy unit, named mechanism, contribution bounds, repeated-query composition/accounting, cumulative release budget, and revocation limits before public analytics implementation. This remains a later gate.
 
 External lessons are patterns to evaluate, not permission to import another product's schemas or text. These requirements strengthen the existing sequence; they do not make hosted analytics or public missions prerequisites for the local pilot.
