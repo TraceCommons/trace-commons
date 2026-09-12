@@ -13,6 +13,7 @@ use sha2::{Digest, Sha256};
 
 const BASIS_POINTS: i128 = 10_000;
 const MAX_TASKS: usize = 256;
+const MAX_CALIBRATION_EXPERIMENTS: usize = 10_000;
 const MIN_REPLICATES: u32 = 1_000;
 const MAX_REPLICATES: u32 = 100_000;
 const EXACT_GRID: u32 = 1_000_000;
@@ -374,18 +375,39 @@ fn wilson_component_interval(successes: usize, total: usize) -> Result<(i64, i64
 /// noncoverage to 5%, without assuming independence between outcome counts.
 /// This remains test-only until the frozen qualification artifact is run.
 fn exact_component_interval(successes: usize, total: usize) -> Result<(u32, u32)> {
-    if total == 0 || total > MAX_TASKS || successes > total {
+    if total > MAX_TASKS {
+        return Err(invalid());
+    }
+    exact_binomial_interval(successes, total, BONFERRONI_ONE_SIDED_DENOMINATOR)
+}
+
+fn exact_binomial_interval(
+    successes: usize,
+    total: usize,
+    one_sided_tail_denominator: u32,
+) -> Result<(u32, u32)> {
+    if total == 0 || total > MAX_CALIBRATION_EXPERIMENTS || successes > total {
         return Err(invalid());
     }
     let lower = if successes == 0 {
         0
     } else {
-        last_grid_point_with_small_tail(successes, total, Tail::AtLeast)?
+        last_grid_point_with_small_tail(
+            successes,
+            total,
+            Tail::AtLeast,
+            one_sided_tail_denominator,
+        )?
     };
     let upper = if successes == total {
         EXACT_GRID
     } else {
-        first_grid_point_with_small_tail(successes, total, Tail::AtMost)?
+        first_grid_point_with_small_tail(
+            successes,
+            total,
+            Tail::AtMost,
+            one_sided_tail_denominator,
+        )?
     };
     if lower > upper {
         return Err(invalid());
@@ -399,12 +421,17 @@ enum Tail {
     AtMost,
 }
 
-fn last_grid_point_with_small_tail(successes: usize, total: usize, tail: Tail) -> Result<u32> {
+fn last_grid_point_with_small_tail(
+    successes: usize,
+    total: usize,
+    tail: Tail,
+    denominator: u32,
+) -> Result<u32> {
     let mut low = 0u32;
     let mut high = EXACT_GRID;
     while low < high {
         let middle = low + (high - low).div_ceil(2);
-        if tail_is_at_most_one_over_240(successes, total, middle, tail)? {
+        if tail_is_at_most(successes, total, middle, tail, denominator)? {
             low = middle;
         } else {
             high = middle - 1;
@@ -413,12 +440,17 @@ fn last_grid_point_with_small_tail(successes: usize, total: usize, tail: Tail) -
     Ok(low)
 }
 
-fn first_grid_point_with_small_tail(successes: usize, total: usize, tail: Tail) -> Result<u32> {
+fn first_grid_point_with_small_tail(
+    successes: usize,
+    total: usize,
+    tail: Tail,
+    denominator: u32,
+) -> Result<u32> {
     let mut low = 0u32;
     let mut high = EXACT_GRID;
     while low < high {
         let middle = low + (high - low) / 2;
-        if tail_is_at_most_one_over_240(successes, total, middle, tail)? {
+        if tail_is_at_most(successes, total, middle, tail, denominator)? {
             high = middle;
         } else {
             low = middle + 1;
@@ -433,36 +465,104 @@ fn tail_is_at_most_one_over_240(
     probability_millionths: u32,
     tail: Tail,
 ) -> Result<bool> {
-    if successes > total || total > MAX_TASKS || probability_millionths > EXACT_GRID {
+    tail_is_at_most(
+        successes,
+        total,
+        probability_millionths,
+        tail,
+        BONFERRONI_ONE_SIDED_DENOMINATOR,
+    )
+}
+
+fn tail_is_at_most(
+    successes: usize,
+    total: usize,
+    probability_millionths: u32,
+    tail: Tail,
+    denominator_multiplier: u32,
+) -> Result<bool> {
+    if successes > total
+        || total > MAX_CALIBRATION_EXPERIMENTS
+        || probability_millionths > EXACT_GRID
+    {
         return Err(invalid());
     }
-    let mut probabilities = vec![BigNat::zero(); total + 1];
-    probabilities[0] = BigNat::one();
-    let failure = EXACT_GRID - probability_millionths;
-    for trials in 0..total {
-        let mut next = vec![BigNat::zero(); total + 1];
-        for count in 0..=trials {
-            next[count].add_assign(&probabilities[count].mul_small(failure));
-            next[count + 1].add_assign(&probabilities[count].mul_small(probability_millionths));
-        }
-        probabilities = next;
+    if denominator_multiplier == 0 {
+        return Err(invalid());
     }
-    let range: Box<dyn Iterator<Item = usize>> = match tail {
-        Tail::AtLeast => Box::new(successes..=total),
-        Tail::AtMost => Box::new(0..=successes),
-    };
-    let mut numerator = BigNat::zero();
-    for count in range {
-        numerator.add_assign(&probabilities[count]);
+    if probability_millionths == EXACT_GRID {
+        return Ok(match tail {
+            Tail::AtMost => successes < total,
+            Tail::AtLeast => false,
+        });
     }
     let mut denominator = BigNat::one();
     for _ in 0..total {
         denominator = denominator.mul_small(EXACT_GRID);
     }
-    Ok(numerator
-        .mul_small(BONFERRONI_ONE_SIDED_DENOMINATOR)
-        .cmp(&denominator)
-        .is_le())
+    let (maximum, complement) = match tail {
+        Tail::AtMost => (successes, false),
+        Tail::AtLeast if successes == 0 => return Ok(false),
+        // P[X >= x] = 1 - P[X <= x-1]. Comparing the complement
+        // algebraically keeps the recurrence bounded by the observed tail.
+        Tail::AtLeast => (successes - 1, true),
+    };
+    let success_probability = probability_millionths;
+    let failure_probability = EXACT_GRID - success_probability;
+    let mut term = BigNat::one();
+    for _ in 0..total {
+        term = term.mul_small(failure_probability);
+    }
+    let mut numerator = BigNat::zero();
+    for count in 0..=maximum {
+        numerator.add_assign(&term);
+        if count != maximum {
+            term = apply_binomial_term_ratio(
+                term,
+                [u32::try_from(total - count)?, success_probability],
+                [u32::try_from(count + 1)?, failure_probability],
+            )?;
+        }
+    }
+    if complement {
+        Ok(denominator
+            .mul_small(denominator_multiplier - 1)
+            .cmp(&numerator.mul_small(denominator_multiplier))
+            .is_le())
+    } else {
+        Ok(numerator
+            .mul_small(denominator_multiplier)
+            .cmp(&denominator)
+            .is_le())
+    }
+}
+
+fn apply_binomial_term_ratio(
+    mut value: BigNat,
+    mut numerators: [u32; 2],
+    mut denominators: [u32; 2],
+) -> Result<BigNat> {
+    for numerator in &mut numerators {
+        for denominator in &mut denominators {
+            let common = gcd(*numerator, *denominator);
+            *numerator /= common;
+            *denominator /= common;
+        }
+    }
+    for numerator in numerators {
+        value = value.mul_small(numerator);
+    }
+    for denominator in denominators {
+        value = value.div_exact_small(denominator)?;
+    }
+    Ok(value)
+}
+
+fn gcd(mut left: u32, mut right: u32) -> u32 {
+    while right != 0 {
+        (left, right) = (right, left % right);
+    }
+    left
 }
 
 /// Minimal unsigned integer needed by exact binomial-tail comparisons.
@@ -511,6 +611,25 @@ impl BigNat {
             self.0.push(carry as u32);
         }
         self.normalize();
+    }
+
+    fn div_exact_small(&self, divisor: u32) -> Result<Self> {
+        if divisor == 0 {
+            return Err(invalid());
+        }
+        let mut result = vec![0u32; self.0.len()];
+        let mut remainder = 0u64;
+        for index in (0..self.0.len()).rev() {
+            let value = (remainder << 32) | u64::from(self.0[index]);
+            result[index] = (value / u64::from(divisor)) as u32;
+            remainder = value % u64::from(divisor);
+        }
+        if remainder != 0 {
+            return Err(invalid());
+        }
+        let mut result = Self(result);
+        result.normalize();
+        Ok(result)
     }
 
     fn normalize(&mut self) {
@@ -620,6 +739,10 @@ fn decode_digest(value: &str) -> Result<[u8; 32]> {
 fn invalid() -> anyhow::Error {
     anyhow::anyhow!("insights-comparison-estimator-invalid")
 }
+
+#[cfg(test)]
+#[path = "comparison_estimator_calibration.rs"]
+mod calibration;
 
 #[cfg(test)]
 mod tests {
@@ -1049,6 +1172,15 @@ mod tests {
         assert!(interval.0 < 500_000);
         assert!(interval.1 > 500_000);
         assert!(interval.0 < interval.1);
+    }
+
+    #[test]
+    fn exact_calibration_uncertainty_supports_frozen_experiment_count() {
+        let interval = exact_binomial_interval(0, 10_000, 40).unwrap();
+        assert_eq!(interval.0, 0);
+        assert!(interval.1 < 1_000);
+        let nonzero = exact_binomial_interval(50, 10_000, 40).unwrap();
+        assert!(nonzero.0 < 5_000 && nonzero.1 > 5_000);
     }
 
     #[test]
