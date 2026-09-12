@@ -44,6 +44,7 @@ public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
         : Summary.SavedSnapshots == 0 ? this["summary_empty"] : "";
     public ObservableCollection<SummaryRow> SummaryRows { get; } = new();
     public string Status { get; private set; } = "";
+    public string MutationNotice { get; private set; } = "";
     public bool Busy { get; private set; }
     public bool Idle => !Busy;
     public string? CurrentId { get; private set; }
@@ -115,6 +116,7 @@ public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
         var result = await _service.CallAsync(new { type = "analyze", source, file, save }, token);
         token.ThrowIfCancellationRequested();
         Render(result.GetProperty("insight"), save);
+        RenderMutationEffects(result);
         if (save) await RefreshCoreAsync(token);
     });
     public Task ExplainAsync(string id) => Run(async token =>
@@ -128,9 +130,10 @@ public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
     {
         if (CurrentId == null) return;
         ClearSummary();
-        await _service.CallAsync(new { type = "delete", id = CurrentId }, token);
+        var result = await _service.CallAsync(new { type = "delete", id = CurrentId }, token);
         token.ThrowIfCancellationRequested();
         ClearSelectedInsight();
+        RenderMutationEffects(result);
         await RefreshCoreAsync(token);
     });
     public Task AnnotateAsync(string category, string outcome) => Run(async token =>
@@ -265,6 +268,12 @@ public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
             OutcomeEvidence.Add(new OutcomeEvidenceRow(link.Id, snapshotId, label, string.Join("\n", lines), this["unlink_evidence"]));
         }
     }
+    private void RenderMutationEffects(JsonElement response)
+    {
+        var effects = InsightMutationEffects.Decode(response);
+        MutationNotice = effects.InvalidatedEpisodeIds.Count == 0 ? "" :
+            this["episode_invalidated_notice"] + "\n" + string.Join("\n", effects.InvalidatedEpisodeIds);
+    }
     private void ClearSummary()
     {
         Summary = null;
@@ -374,6 +383,7 @@ public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
         _pending = cancellation;
         Busy = true;
         Status = "";
+        MutationNotice = "";
         Changed();
         try { await action(cancellation.Token); }
         catch (OperationCanceledException) { }
@@ -399,12 +409,14 @@ public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
     public void ReportError()
     {
         if (_closed) return;
+        MutationNotice = "";
         Status = this["error"];
         Changed();
     }
     public void Cancel()
     {
         if (_closed) return;
+        MutationNotice = "";
         ++_selectionVersion;
         _pending?.Cancel();
         // Keep mutations serialized until the outstanding operation settles.
@@ -413,7 +425,9 @@ public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
     }
     public void Dispose()
     {
+        if (_closed) return;
         _closed = true;
+        MutationNotice = "";
         ++_selectionVersion;
         ++_generation;
         _pending?.Cancel();

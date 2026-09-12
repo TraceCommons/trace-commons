@@ -22,6 +22,14 @@ struct InsightsView: View {
                         if model.busy { ProgressView().controlSize(.small) }
                     }.disabled(model.busy)
                     if let error = model.error { Text(error).foregroundStyle(.red) }
+                    if !model.invalidatedEpisodeIDs.isEmpty {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text(model.text("episode_invalidated_notice"))
+                            ForEach(model.invalidatedEpisodeIDs, id: \.self) { id in
+                                Text(id).font(.caption.monospaced())
+                            }
+                        }.textSelection(.enabled)
+                    }
                     Text(model.text("snapshot_notice"))
                         .font(.callout).foregroundStyle(.secondary)
                     if model.loadingSummary {

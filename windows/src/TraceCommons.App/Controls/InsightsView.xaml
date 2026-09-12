@@ -23,6 +23,7 @@
             <TextBlock Text="{Binding [save_notice]}" TextWrapping="Wrap" />
             <TextBlock Text="{Binding CancellationNotice}" TextWrapping="Wrap" />
             <TextBlock Text="{Binding Status}" TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite" />
+            <TextBlock Text="{Binding MutationNotice}" TextWrapping="Wrap" IsTextSelectionEnabled="True" AutomationProperties.LiveSetting="Polite" />
             <TextBlock Text="{Binding [summary_title]}" FontSize="22" />
             <TextBlock Text="{Binding SummaryStatus}" TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite" />
             <TextBlock Text="{Binding SummaryDetails}" TextWrapping="Wrap" IsTextSelectionEnabled="True" />

@@ -1,21 +1,52 @@
 //! Account-free local Insights entry point shared by native shells and CLI.
-use std::path::PathBuf;
+use std::{io::Write, path::PathBuf};
 
 use anyhow::{Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 
+use super::episode_store::EpisodeStoreError;
+use super::episodes::{EpisodeDetail, EpisodeListEntry, EpisodeValidationError, LocalEpisode};
 use super::usage::{UsageSource, UsageSummary, extract_usage};
 use super::{
-    LocalInsight, LocalInsightStore, SourceFormat, TaskCategory, TaskOutcome, analyze_file,
+    LocalInsight, LocalInsightStore, MutationEffects, SourceFormat, TaskCategory, TaskOutcome,
+    analyze_file,
 };
 
 /// Bound request bytes before parsing or reading caller-owned FFI memory.
 pub const MAX_REQUEST_BYTES: usize = 64 * 1024;
+pub const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+
+#[derive(Debug)]
+pub struct ResponseTooLarge;
+impl std::fmt::Display for ResponseTooLarge {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("insights_response_too_large")
+    }
+}
+impl std::error::Error for ResponseTooLarge {}
 
 /// Shared desktop vocabulary; shells render observations without inventing claims.
 pub fn ui_copy() -> std::collections::BTreeMap<String, String> {
     [
         ("title", "Insights"),
+        ("episode_title", "Episodes"),
+        ("episode_scope", "Episodes group whole saved snapshots you select. They do not establish task boundaries or independent tasks."),
+        ("episode_assessment_notice", "An episode assessment is your independent report. Member assessments, model declarations, and linked artifacts do not verify its outcome."),
+        ("episode_overlap_notice", "Episodes may reuse the same snapshots. Inspect overlap before interpreting these groups."),
+        ("episode_invalidated_notice", "These episode groups and their assessments were removed because a member snapshot was removed or replaced. The grouping is lost; surviving snapshots and original files remain."),
+        ("episode_deleted", "Removed the episode and its assessment. Saved snapshots and original files remain."),
+        ("episode_revision_conflict", "This episode changed in another window or client. Refresh and review it before editing again."),
+        ("episode_membership_changed", "Changing episode members clears its previous assessment."),
+        ("episode_empty", "No saved episodes. Select whole saved snapshots to create a group."),
+        ("episode_revision", "Revision"),
+        ("episode_membership_revision", "Membership revision"),
+        ("episode_members", "Whole saved snapshot members"),
+        ("episode_assessment", "Independent user-reported episode assessment"),
+        ("episode_unassessed", "Unassessed"),
+        ("episode_overlaps", "Overlapping episode IDs"),
+        ("episode_no_overlap", "No overlapping episodes"),
+        ("episode_member_evidence", "Current saved member evidence"),
+        ("episode_resolved", "Evidence resolved at"),
         ("intro", "Analyze a file on this device without an account or upload."),
         ("snapshot_notice", "This is a dated snapshot. Reimport the file to refresh it."),
         ("unknown_notice", "Cost, independently verified outcomes, and model comparisons need more evidence."),
@@ -159,6 +190,32 @@ pub struct LocalInsightsRequest {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum LocalInsightsOperation {
+    EpisodeCreate {
+        snapshot_ids: Vec<String>,
+    },
+    EpisodeList {},
+    EpisodeExplain {
+        id: String,
+    },
+    EpisodeReplaceMembers {
+        id: String,
+        expected_revision: u64,
+        snapshot_ids: Vec<String>,
+    },
+    EpisodeAnnotate {
+        id: String,
+        expected_revision: u64,
+        category: TaskCategory,
+        outcome: TaskOutcome,
+    },
+    EpisodeClearAssessment {
+        id: String,
+        expected_revision: u64,
+    },
+    EpisodeDelete {
+        id: String,
+        expected_revision: u64,
+    },
     Analyze {
         source: SourceFormat,
         file: PathBuf,
@@ -204,8 +261,31 @@ pub enum LocalInsightsOperation {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum LocalInsightsResponse {
+    EpisodeCreate {
+        episode: Box<LocalEpisode>,
+    },
+    EpisodeList {
+        episodes: Vec<EpisodeListEntry>,
+    },
+    EpisodeExplain {
+        detail: Box<EpisodeDetail>,
+    },
+    EpisodeReplaceMembers {
+        episode: Box<LocalEpisode>,
+    },
+    EpisodeAnnotate {
+        episode: Box<LocalEpisode>,
+    },
+    EpisodeClearAssessment {
+        episode: Box<LocalEpisode>,
+    },
+    EpisodeDelete {
+        episode: Box<LocalEpisode>,
+    },
     Analyze {
         insight: Box<LocalInsight>,
+        #[serde(default)]
+        mutation_effects: MutationEffects,
     },
     List {
         insights: Vec<LocalInsight>,
@@ -221,6 +301,8 @@ pub enum LocalInsightsResponse {
     },
     Delete {
         deleted: bool,
+        #[serde(default)]
+        mutation_effects: MutationEffects,
     },
     Annotate {
         insight: Box<LocalInsight>,
@@ -259,27 +341,117 @@ fn store_path(store_dir: Option<&std::path::Path>) -> Result<PathBuf> {
 
 /// Reading an empty history must not create state before an explicit save.
 pub fn list_saved(store_dir: Option<&std::path::Path>) -> Result<Vec<LocalInsight>> {
+    match existing_store(store_dir)? {
+        Some(store) => store.list(),
+        None => Ok(Vec::new()),
+    }
+}
+
+fn existing_store(store_dir: Option<&std::path::Path>) -> Result<Option<LocalInsightStore>> {
     let path = store_path(store_dir)?;
     match std::fs::symlink_metadata(&path) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(_) => bail!("insights-local-directory-unavailable"),
-        Ok(_) => LocalInsightStore::open(&path)?.list(),
+        Ok(_) => LocalInsightStore::open(&path).map(Some),
     }
 }
 
 /// Synchronous local IO. Native callers must schedule this off the UI thread.
 /// Dropping a UI task does not cancel a save/delete that has already started.
 pub fn execute(request: LocalInsightsRequest) -> Result<LocalInsightsResponse> {
+    let response = execute_inner(request)?;
+    response_json(&response)?;
+    Ok(response)
+}
+
+fn execute_inner(request: LocalInsightsRequest) -> Result<LocalInsightsResponse> {
     let store = || open_store(request.store_dir.as_deref());
+    let episode_store = || {
+        existing_store(request.store_dir.as_deref())?
+            .ok_or_else(|| anyhow!(EpisodeStoreError::NotFound))
+    };
     Ok(match request.operation {
+        LocalInsightsOperation::EpisodeCreate { snapshot_ids } => {
+            super::episodes::validate_snapshot_ids(&snapshot_ids)?;
+            let store = existing_store(request.store_dir.as_deref())?
+                .ok_or_else(|| anyhow!(EpisodeStoreError::MissingMembers))?;
+            LocalInsightsResponse::EpisodeCreate {
+                episode: Box::new(store.episode_create(&snapshot_ids)?),
+            }
+        }
+        LocalInsightsOperation::EpisodeList {} => LocalInsightsResponse::EpisodeList {
+            episodes: match existing_store(request.store_dir.as_deref())? {
+                Some(store) => store.episode_list()?,
+                None => Vec::new(),
+            },
+        },
+        LocalInsightsOperation::EpisodeExplain { id } => {
+            super::episodes::validate_episode_id(&id)?;
+            LocalInsightsResponse::EpisodeExplain {
+                detail: Box::new(episode_store()?.episode_explain(&id)?),
+            }
+        }
+        LocalInsightsOperation::EpisodeReplaceMembers {
+            id,
+            expected_revision,
+            snapshot_ids,
+        } => {
+            super::episodes::validate_episode_id(&id)?;
+            super::episodes::validate_snapshot_ids(&snapshot_ids)?;
+            LocalInsightsResponse::EpisodeReplaceMembers {
+                episode: Box::new(episode_store()?.episode_replace_members(
+                    &id,
+                    expected_revision,
+                    &snapshot_ids,
+                )?),
+            }
+        }
+        LocalInsightsOperation::EpisodeAnnotate {
+            id,
+            expected_revision,
+            category,
+            outcome,
+        } => {
+            super::episodes::validate_episode_id(&id)?;
+            LocalInsightsResponse::EpisodeAnnotate {
+                episode: Box::new(episode_store()?.episode_annotate(
+                    &id,
+                    expected_revision,
+                    category,
+                    outcome,
+                )?),
+            }
+        }
+        LocalInsightsOperation::EpisodeClearAssessment {
+            id,
+            expected_revision,
+        } => {
+            super::episodes::validate_episode_id(&id)?;
+            LocalInsightsResponse::EpisodeClearAssessment {
+                episode: Box::new(
+                    episode_store()?.episode_clear_assessment(&id, expected_revision)?,
+                ),
+            }
+        }
+        LocalInsightsOperation::EpisodeDelete {
+            id,
+            expected_revision,
+        } => {
+            super::episodes::validate_episode_id(&id)?;
+            LocalInsightsResponse::EpisodeDelete {
+                episode: Box::new(episode_store()?.episode_delete(&id, expected_revision)?),
+            }
+        }
         LocalInsightsOperation::Analyze { source, file, save } => {
-            let insight = if save {
-                store()?.import(source, &file)?
+            let (insight, mutation_effects) = if save {
+                let result = store()?.import_with_effects(source, &file)?;
+                (result.value, result.mutation_effects)
             } else {
-                analyze_file(source, &file)?
+                (analyze_file(source, &file)?, MutationEffects::default())
             };
             LocalInsightsResponse::Analyze {
                 insight: Box::new(insight),
+                mutation_effects,
             }
         }
         LocalInsightsOperation::List {} => LocalInsightsResponse::List {
@@ -292,9 +464,13 @@ pub fn execute(request: LocalInsightsRequest) -> Result<LocalInsightsResponse> {
         LocalInsightsOperation::Explain { id } => LocalInsightsResponse::Explain {
             insight: Box::new(store()?.explain(&id)?),
         },
-        LocalInsightsOperation::Delete { id } => LocalInsightsResponse::Delete {
-            deleted: store()?.delete(&id)?,
-        },
+        LocalInsightsOperation::Delete { id } => {
+            let result = store()?.delete_with_effects(&id)?;
+            LocalInsightsResponse::Delete {
+                deleted: result.value,
+                mutation_effects: result.mutation_effects,
+            }
+        }
         LocalInsightsOperation::Annotate {
             id,
             category,
@@ -351,13 +527,247 @@ pub fn dispatch_json(bytes: &[u8]) -> Result<String> {
     }
     let text = std::str::from_utf8(bytes).map_err(|_| anyhow!("insights-request-invalid-utf8"))?;
     let request = serde_json::from_str(text).map_err(|_| anyhow!("insights-request-invalid"))?;
-    let response = execute(request).map_err(|_| anyhow!("insights-operation-failed"))?;
-    serde_json::to_string(&response).map_err(|_| anyhow!("insights-response-invalid"))
+    let response = execute_inner(request).map_err(public_error)?;
+    response_json(&response).map_err(public_error)
+}
+
+/// Only concrete, payload-free types may cross the JSON/FFI error boundary.
+fn public_error(error: anyhow::Error) -> anyhow::Error {
+    if let Some(error) = error.downcast_ref::<EpisodeValidationError>() {
+        return anyhow!(match error {
+            EpisodeValidationError::Invalid => "insights_episode_invalid",
+            EpisodeValidationError::MemberLimit => "insights_episode_member_limit",
+            EpisodeValidationError::DuplicateMember => "insights_episode_duplicate_member",
+        });
+    }
+    if let Some(error) = error.downcast_ref::<EpisodeStoreError>() {
+        return anyhow!(match error {
+            EpisodeStoreError::NotFound => "insights_episode_not_found",
+            EpisodeStoreError::MissingMembers => "insights_episode_missing_members",
+            EpisodeStoreError::RevisionConflict => "insights_episode_revision_conflict",
+            EpisodeStoreError::Full => "insights_episode_limit_exceeded",
+            EpisodeStoreError::RevisionOverflow => "insights_episode_revision_overflow",
+        });
+    }
+    if error.downcast_ref::<ResponseTooLarge>().is_some() {
+        return anyhow!(ResponseTooLarge);
+    }
+    anyhow!("insights-operation-failed")
+}
+
+fn response_json(response: &LocalInsightsResponse) -> Result<String> {
+    struct Bounded {
+        bytes: Vec<u8>,
+        exceeded: bool,
+    }
+    impl Write for Bounded {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if bytes.len() > MAX_RESPONSE_BYTES.saturating_sub(self.bytes.len()) {
+                self.exceeded = true;
+                return Err(std::io::Error::other("bounded response"));
+            }
+            self.bytes.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut writer = Bounded {
+        bytes: Vec::new(),
+        exceeded: false,
+    };
+    let result = serde_json::to_writer(&mut writer, response);
+    if writer.exceeded {
+        return Err(ResponseTooLarge.into());
+    }
+    result.map_err(|_| anyhow!("insights-response-invalid"))?;
+    String::from_utf8(writer.bytes).map_err(|_| anyhow!("insights-response-invalid"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn episode_error_whitelist_is_typed_and_never_forwards_context_or_impostors() {
+        let errors: Vec<anyhow::Error> = vec![
+            EpisodeValidationError::Invalid.into(),
+            EpisodeValidationError::MemberLimit.into(),
+            EpisodeValidationError::DuplicateMember.into(),
+            EpisodeStoreError::NotFound.into(),
+            EpisodeStoreError::MissingMembers.into(),
+            EpisodeStoreError::RevisionConflict.into(),
+            EpisodeStoreError::Full.into(),
+            EpisodeStoreError::RevisionOverflow.into(),
+            ResponseTooLarge.into(),
+        ];
+        for error in errors {
+            let expected = error.to_string();
+            assert_eq!(
+                public_error(error.context("PRIVATE_PATH_AND_CONTENT")).to_string(),
+                expected
+            );
+            assert_eq!(
+                public_error(anyhow!(expected)).to_string(),
+                "insights-operation-failed"
+            );
+        }
+        assert_eq!(
+            public_error(anyhow!("PRIVATE_SOURCE parser detail")).to_string(),
+            "insights-operation-failed"
+        );
+    }
+
+    #[test]
+    fn response_limit_rejects_oversize_without_truncating_or_allocating_its_tail() {
+        let response = LocalInsightsResponse::Copy {
+            copy: [("fixture".into(), "x".repeat(MAX_RESPONSE_BYTES))].into(),
+        };
+        let error = response_json(&response).unwrap_err();
+        assert!(error.downcast_ref::<ResponseTooLarge>().is_some());
+        assert_eq!(
+            public_error(error).to_string(),
+            "insights_response_too_large"
+        );
+        let response = LocalInsightsResponse::Copy {
+            copy: [("fixture".into(), "x".repeat(MAX_RESPONSE_BYTES - 1024))].into(),
+        };
+        let encoded = response_json(&response).unwrap();
+        assert!(encoded.len() <= MAX_RESPONSE_BYTES);
+        assert!(serde_json::from_str::<LocalInsightsResponse>(&encoded).is_ok());
+    }
+
+    fn wire(store: &std::path::Path, operation: serde_json::Value) -> Result<serde_json::Value> {
+        let request =
+            serde_json::to_vec(&serde_json::json!({"store_dir":store,"operation":operation}))?;
+        Ok(serde_json::from_str(&dispatch_json(&request)?)?)
+    }
+
+    #[test]
+    fn episode_absence_and_invalid_requests_create_no_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = dir.path().join("absent");
+        assert_eq!(
+            wire(&store, serde_json::json!({"type":"episode_list"})).unwrap(),
+            serde_json::json!({"type":"episode_list","episodes":[]})
+        );
+        let id = uuid::Uuid::new_v4().to_string();
+        for kind in [
+            "episode_explain",
+            "episode_clear_assessment",
+            "episode_delete",
+        ] {
+            let mut operation = serde_json::json!({"type":kind,"id":id});
+            if kind != "episode_explain" {
+                operation["expected_revision"] = 1.into();
+            }
+            assert_eq!(
+                wire(&store, operation).unwrap_err().to_string(),
+                "insights_episode_not_found"
+            );
+        }
+        assert_eq!(
+            wire(
+                &store,
+                serde_json::json!({"type":"episode_create","snapshot_ids":["a".repeat(64)]})
+            )
+            .unwrap_err()
+            .to_string(),
+            "insights_episode_missing_members"
+        );
+        assert_eq!(
+            wire(
+                &store,
+                serde_json::json!({"type":"episode_create","snapshot_ids":[]})
+            )
+            .unwrap_err()
+            .to_string(),
+            "insights_episode_member_limit"
+        );
+        assert_eq!(
+            wire(
+                &store,
+                serde_json::json!({"type":"episode_explain","id":"PRIVATE_INPUT"})
+            )
+            .unwrap_err()
+            .to_string(),
+            "insights_episode_invalid"
+        );
+        assert_eq!(wire(&store, serde_json::json!({"type":"episode_delete","id":id,"expected_revision":1,"secret":"PRIVATE_INPUT"})).unwrap_err().to_string(), "insights-request-invalid");
+        assert!(!store.exists());
+    }
+
+    #[test]
+    fn episode_wire_edits_conflicts_overlap_and_cleanup_preserve_snapshot_summary() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = dir.path().join("insights");
+        let source = dir.path().join("source.jsonl");
+        std::fs::write(&source, b"{\"role\":\"meta\",\"source\":\"claude-code\",\"model\":\"fixture\"}\n{\"role\":\"user\",\"timestamp\":\"2026-09-11T12:00:00Z\",\"content\":\"PRIVATE_BODY\"}\n").unwrap();
+        let snapshot = wire(
+            &store,
+            serde_json::json!({"type":"analyze","source":"trajectory","file":source,"save":true}),
+        )
+        .unwrap();
+        let snapshot_id = snapshot["insight"]["id"].as_str().unwrap();
+        assert_eq!(
+            snapshot["mutation_effects"]["invalidated_episode_ids"],
+            serde_json::json!([])
+        );
+        let summary = wire(&store, serde_json::json!({"type":"summary"})).unwrap();
+        let create = serde_json::json!({"type":"episode_create","snapshot_ids":[snapshot_id]});
+        let first = wire(&store, create.clone()).unwrap();
+        let second = wire(&store, create).unwrap();
+        let id = first["episode"]["id"].as_str().unwrap();
+        let other = second["episode"]["id"].as_str().unwrap();
+        assert_ne!(id, other);
+        let edited = wire(&store, serde_json::json!({"type":"episode_annotate","id":id,"expected_revision":1,"category":"tests","outcome":"accepted"})).unwrap();
+        assert_eq!(edited["episode"]["revision"], 2);
+        assert_eq!(edited["episode"]["membership_revision"], 1);
+        let conflict = wire(
+            &store,
+            serde_json::json!({"type":"episode_delete","id":id,"expected_revision":1}),
+        )
+        .unwrap_err();
+        assert_eq!(conflict.to_string(), "insights_episode_revision_conflict");
+        let detail = wire(
+            &store,
+            serde_json::json!({"type":"episode_explain","id":id}),
+        )
+        .unwrap();
+        assert_eq!(
+            detail["detail"]["overlap"][0]["episode_ids"],
+            serde_json::json!([other])
+        );
+        assert_eq!(detail["detail"]["members"][0]["id"], snapshot_id);
+        assert!(!detail.to_string().contains("PRIVATE_BODY"));
+        assert_eq!(
+            wire(&store, serde_json::json!({"type":"summary"})).unwrap(),
+            summary
+        );
+        let cleared = wire(
+            &store,
+            serde_json::json!({"type":"episode_clear_assessment","id":id,"expected_revision":2}),
+        )
+        .unwrap();
+        assert!(cleared["episode"]["manual_assessment"].is_null());
+        let deleted = wire(
+            &store,
+            serde_json::json!({"type":"delete","id":snapshot_id}),
+        )
+        .unwrap();
+        let mut removed = vec![id, other];
+        removed.sort();
+        assert_eq!(
+            deleted["mutation_effects"]["invalidated_episode_ids"],
+            serde_json::json!(removed)
+        );
+        assert_eq!(
+            wire(&store, serde_json::json!({"type":"episode_list"})).unwrap()["episodes"],
+            serde_json::json!([])
+        );
+        assert!(source.exists());
+    }
 
     #[test]
     fn rejects_untrusted_request_without_echoing_content() {
@@ -405,11 +815,13 @@ mod tests {
             })
             .unwrap()
         };
-        let LocalInsightsResponse::Analyze { insight } = call(LocalInsightsOperation::Analyze {
-            source: SourceFormat::Trajectory,
-            file: file.clone(),
-            save: false,
-        }) else {
+        let LocalInsightsResponse::Analyze { insight, .. } =
+            call(LocalInsightsOperation::Analyze {
+                source: SourceFormat::Trajectory,
+                file: file.clone(),
+                save: false,
+            })
+        else {
             panic!("expected analysis")
         };
         assert!(!store.exists());
@@ -454,7 +866,7 @@ mod tests {
         assert!(cleared.manual_annotation.is_none());
         assert!(matches!(
             call(LocalInsightsOperation::Delete { id: insight.id }),
-            LocalInsightsResponse::Delete { deleted: true }
+            LocalInsightsResponse::Delete { deleted: true, .. }
         ));
         assert!(
             matches!(call(LocalInsightsOperation::List {}), LocalInsightsResponse::List { insights } if insights.is_empty())

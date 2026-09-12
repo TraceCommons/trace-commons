@@ -45,14 +45,19 @@ public struct InsightsRequest: Encodable, Sendable {
         public var repository: String?
         public var commit: String?
         public var evidence_id: String?
+        public var snapshot_ids: [String]?
         public init(_ type: String, source: String? = nil, file: String? = nil,
                     save: Bool? = nil, id: String? = nil, category: String? = nil, outcome: String? = nil,
-                    repository: String? = nil, commit: String? = nil, evidenceID: String? = nil) {
+                    repository: String? = nil, commit: String? = nil, evidenceID: String? = nil, snapshotIDs: [String]? = nil) {
             self.type = type; self.source = source; self.file = file; self.save = save
             self.id = id; self.category = category; self.outcome = outcome
             self.repository = repository; self.commit = commit; self.evidence_id = evidenceID
+            self.snapshot_ids = snapshotIDs
         }
     }
+}
+public struct InsightMutationEffects: Decodable, Sendable {
+    public let invalidated_episode_ids: [String]
 }
 public struct InsightsResponse: Decodable, Sendable {
     public let type: String
@@ -61,6 +66,8 @@ public struct InsightsResponse: Decodable, Sendable {
     public let deleted: Bool?
     public let copy: [String: String]?
     public let summary: SavedInsightsSummary?
+    public let mutation_effects: InsightMutationEffects?
+    public var invalidatedEpisodeIDs: [String] { mutation_effects?.invalidated_episode_ids ?? [] }
 }
 public struct LocalInsight: Decodable, Sendable, Identifiable {
     public let id, source_format, boundary, analyzed_at: String

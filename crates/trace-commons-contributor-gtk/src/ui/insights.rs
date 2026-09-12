@@ -67,6 +67,7 @@ pub struct InsightsView {
     selected: RefCell<Option<PathBuf>>,
     selected_label: gtk::Label,
     status: gtk::Label,
+    mutation_notice: gtk::Label,
     detail: gtk::Label,
     summary: gtk::Label,
     summary_expander: gtk::Expander,
@@ -141,6 +142,8 @@ impl InsightsView {
         root.append(&label(copy("cancellation_notice")));
         let status = label(copy("empty"));
         root.append(&status);
+        let mutation_notice = label("");
+        root.append(&mutation_notice);
         let content = gtk::Box::new(gtk::Orientation::Vertical, 12);
         let summary_body = gtk::Box::new(gtk::Orientation::Vertical, 8);
         let summary = label("");
@@ -220,6 +223,7 @@ impl InsightsView {
             selected: RefCell::new(None),
             selected_label,
             status,
+            mutation_notice,
             detail,
             summary,
             summary_expander,
@@ -293,6 +297,7 @@ impl InsightsView {
         let weak = Rc::downgrade(&view);
         refresh.connect_clicked(move |_| {
             if let Some(v) = weak.upgrade() {
+                v.mutation_notice.set_text("");
                 v.summary_expander.set_expanded(true);
                 v.refresh_history();
             }
@@ -301,6 +306,7 @@ impl InsightsView {
         cancel.connect_clicked(move |_| {
             if let Some(v) = weak.upgrade() {
                 v.flight.borrow_mut().cancelled = true;
+                v.mutation_notice.set_text("");
                 v.invalidate_choosers();
                 v.status.set_text(copy("cancelled"));
             }
@@ -346,6 +352,7 @@ impl InsightsView {
         window.connect_close_request(move |_| {
             if let Some(view) = weak.upgrade() {
                 view.flight.borrow_mut().cancelled = true;
+                view.mutation_notice.set_text("");
                 view.invalidate_choosers();
             }
             gtk::glib::Propagation::Proceed
@@ -354,6 +361,7 @@ impl InsightsView {
         window.connect_hide(move |_| {
             if let Some(view) = weak.upgrade() {
                 view.flight.borrow_mut().cancelled = true;
+                view.mutation_notice.set_text("");
                 view.invalidate_choosers();
             }
         });
@@ -378,6 +386,7 @@ impl InsightsView {
         let weak = Rc::downgrade(&view);
         view.root.connect_map(move |_| {
             if let Some(view) = weak.upgrade() {
+                view.mutation_notice.set_text("");
                 if !view.flight.borrow().busy && !view.flight.borrow().closed {
                     view.controls.set_sensitive(true);
                     view.assessment.set_sensitive(true);
@@ -421,6 +430,7 @@ impl InsightsView {
     }
 
     fn clear_detail(&self) {
+        self.mutation_notice.set_text("");
         self.invalidate_choosers();
         self.detail.set_text("");
         self.assessment.set_visible(false);
@@ -608,6 +618,15 @@ impl InsightsView {
             return;
         }
         self.invalidate_choosers();
+        // Summary/Explain here include automatic reconciliation after a write.
+        // Explicit selection/refresh clears the notice at its user entry point.
+        let retains_committed_notice = matches!(
+            &operation,
+            Op::Summary {} | Op::List {} | Op::Explain { .. }
+        );
+        if !retains_committed_notice {
+            self.mutation_notice.set_text("");
+        }
         let evidence_mutation = matches!(
             &operation,
             Op::LinkGit { .. } | Op::LinkTestReport { .. } | Op::UnlinkEvidence { .. }
@@ -672,8 +691,17 @@ impl InsightsView {
             view.saved.set_sensitive(true);
             view.summary_evidence.set_sensitive(true);
             view.evidence_expander.set_sensitive(true);
+            let mutation_notice = match &result {
+                Some(Response::Analyze {
+                    mutation_effects, ..
+                })
+                | Some(Response::Delete {
+                    mutation_effects, ..
+                }) => Some(render_mutation_notice(mutation_effects)),
+                _ => None,
+            };
             match result {
-                Some(Response::Analyze { insight })
+                Some(Response::Analyze { insight, .. })
                 | Some(Response::Explain { insight })
                 | Some(Response::Annotate { insight })
                 | Some(Response::ClearAnnotation { insight })
@@ -717,7 +745,7 @@ impl InsightsView {
                     }
                 }
                 Some(Response::List { .. }) => view.refresh_history(),
-                Some(Response::Delete { deleted }) => {
+                Some(Response::Delete { deleted, .. }) => {
                     view.clear_detail();
                     view.status.set_text(if deleted {
                         copy("deleted")
@@ -727,6 +755,7 @@ impl InsightsView {
                     view.refresh_history();
                 }
                 _ => {
+                    let committed_notice = view.mutation_notice.text();
                     view.clear_summary();
                     view.summary.set_text(copy("summary_unavailable"));
                     while let Some(child) = view.saved.first_child() {
@@ -735,8 +764,16 @@ impl InsightsView {
                     if view.current_id.borrow().is_some() {
                         view.clear_detail();
                     }
+                    view.mutation_notice.set_text(if retains_committed_notice {
+                        &committed_notice
+                    } else {
+                        ""
+                    });
                     view.status.set_text(copy("error"));
                 }
+            }
+            if let Some(notice) = mutation_notice {
+                view.mutation_notice.set_text(&notice);
             }
             if view.pending_refresh.get() && !view.flight.borrow().busy && view.root.is_mapped() {
                 view.refresh_history();
@@ -859,6 +896,18 @@ impl InsightsView {
             });
         }
     }
+}
+fn render_mutation_notice(
+    effects: &trace_commons_contributor::insights::MutationEffects,
+) -> String {
+    if effects.invalidated_episode_ids.is_empty() {
+        return String::new();
+    }
+    format!(
+        "{}\n{}",
+        copy("episode_invalidated_notice"),
+        effects.invalidated_episode_ids.join("\n")
+    )
 }
 fn category_at(i: u32) -> TaskCategory {
     [
@@ -1129,6 +1178,16 @@ pub fn present_local<F: Fn() + 'static>(application: &adw::Application, contribu
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn episode_cleanup_notice_only_describes_reported_removed_groups() {
+        use trace_commons_contributor::insights::MutationEffects;
+        assert!(render_mutation_notice(&MutationEffects::default()).is_empty());
+        let notice = render_mutation_notice(&MutationEffects {
+            invalidated_episode_ids: vec!["group-a".into(), "group-b".into()],
+        });
+        assert!(notice.starts_with(copy("episode_invalidated_notice")));
+        assert!(notice.ends_with("group-a\ngroup-b"));
+    }
     #[test]
     fn chooser_tickets_reject_switch_and_return_to_same_snapshot() {
         let ticket = ChooserTicket {
@@ -1537,6 +1596,7 @@ mod tests {
         .unwrap();
         let Response::Analyze {
             insight: replacement,
+            ..
         } = replacement
         else {
             panic!("analyze response");
@@ -1596,13 +1656,38 @@ mod tests {
                 .text()
                 .contains(&format!("{}: 1", copy("summary_unassessed")))
         );
+        let group = service::open_store(Some(&store))
+            .unwrap()
+            .episode_create(std::slice::from_ref(&id))
+            .unwrap();
         view.request(Op::Delete { id }, false);
+        settle();
+        assert!(
+            view.mutation_notice.text().contains(&group.id),
+            "cleanup notice survives automatic empty-history refresh"
+        );
+        let index_path = store.join("index.json");
+        let healthy_index = std::fs::read(&index_path).unwrap();
+        std::fs::write(&index_path, b"broken refresh fixture").unwrap();
+        view.refresh_history();
+        settle();
+        assert_eq!(view.status.text(), copy("error"));
+        assert!(
+            view.mutation_notice.text().contains(&group.id),
+            "confirmed removal survives a subsequent reconciliation failure"
+        );
+        std::fs::write(&index_path, healthy_index).unwrap();
+        view.refresh_history();
         settle();
         assert!(file.exists());
         assert!(service::list_saved(Some(&store)).unwrap().is_empty());
         assert!(view.summary.text().contains(copy("summary_empty")));
         view.analyze(true);
         settle();
+        assert!(
+            view.mutation_notice.text().is_empty(),
+            "next analysis clears prior cleanup notice"
+        );
         let id = view.current_id.borrow().clone().unwrap();
         service::open_store(Some(&store))
             .unwrap()
