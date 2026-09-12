@@ -5,10 +5,15 @@ use std::time::Instant;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-use super::{MAX_TASKS, exact_binomial_interval, exact_component_interval};
+use super::super::comparison_exact::{
+    ExactCandidateCounts as Counts, ExactCandidateDecision as CandidateDecision,
+    ExactCandidateEvaluation as CandidateEvaluation, MAX_TASKS,
+    combine_exact_candidate_intervals as combine_candidate_intervals,
+    evaluate_exact_candidate_counts as evaluate_candidate_counts, exact_binomial_interval,
+    exact_component_interval,
+};
 
 const EXPERIMENTS: u32 = 10_000;
-const MAXIMUM_WIDTH: i64 = 500_000;
 
 #[derive(Serialize)]
 struct CalibrationArtifact {
@@ -66,92 +71,6 @@ struct AdmissionResult {
     settings_passing_noncoverage_bound: u32,
     admitted: bool,
     reason: &'static str,
-}
-
-#[derive(Clone, Copy, Default)]
-struct Counts {
-    total: usize,
-    outcomes: [usize; 3],
-}
-
-#[derive(Clone, Copy, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum CandidateDecision {
-    InsufficientPrecision,
-    IndeterminateBoundary,
-    ExcludesZero,
-    IncludesZero,
-}
-
-#[derive(Serialize)]
-struct CandidateContrast {
-    lower_millionths: i64,
-    upper_millionths: i64,
-    width_millionths: i64,
-    decision: CandidateDecision,
-}
-
-#[derive(Serialize)]
-#[serde(tag = "status", rename_all = "snake_case")]
-enum CandidateEvaluation {
-    Supported { contrasts: [CandidateContrast; 3] },
-    SuppressedBelowMinimumCohortSupport,
-}
-
-fn combine_candidate_intervals(first: (u32, u32), second: (u32, u32)) -> CandidateContrast {
-    let lower = i64::from(second.0) - i64::from(first.1);
-    let upper = i64::from(second.1) - i64::from(first.0);
-    let width = upper - lower;
-    let decision = if width > MAXIMUM_WIDTH {
-        CandidateDecision::InsufficientPrecision
-    } else if width == MAXIMUM_WIDTH || lower == 0 || upper == 0 {
-        CandidateDecision::IndeterminateBoundary
-    } else if upper < 0 || lower > 0 {
-        CandidateDecision::ExcludesZero
-    } else {
-        CandidateDecision::IncludesZero
-    };
-    CandidateContrast {
-        lower_millionths: lower,
-        upper_millionths: upper,
-        width_millionths: width,
-        decision,
-    }
-}
-
-fn evaluate_candidate_counts(
-    first: &Counts,
-    second: &Counts,
-) -> anyhow::Result<CandidateEvaluation> {
-    let checked_sum = |outcomes: &[usize; 3]| {
-        outcomes
-            .iter()
-            .try_fold(0_usize, |sum, value| sum.checked_add(*value))
-    };
-    if checked_sum(&first.outcomes) != Some(first.total)
-        || checked_sum(&second.outcomes) != Some(second.total)
-        || first
-            .total
-            .checked_add(second.total)
-            .is_none_or(|total| total > MAX_TASKS)
-    {
-        return Err(anyhow::anyhow!("insights-comparison-estimator-invalid"));
-    }
-    if first.total < 2 || second.total < 2 {
-        return Ok(CandidateEvaluation::SuppressedBelowMinimumCohortSupport);
-    }
-    let mut contrasts = Vec::with_capacity(3);
-    for outcome in 0..3 {
-        contrasts.push(combine_candidate_intervals(
-            exact_component_interval(first.outcomes[outcome], first.total)?,
-            exact_component_interval(second.outcomes[outcome], second.total)?,
-        ));
-    }
-    Ok(CandidateEvaluation::Supported {
-        contrasts: contrasts
-            .try_into()
-            .map_err(|_| anyhow::anyhow!("insights-comparison-estimator-invalid"))?,
-    })
 }
 
 #[test]

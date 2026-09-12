@@ -4,7 +4,7 @@ use anyhow::Result;
 use clap::{Args, Subcommand, ValueEnum};
 use trace_commons_contributor::insights::comparison_specs::{
     ComparisonSpecificationDraftInput, ComparisonSpecificationV1, DescriptiveComparisonResultV1,
-    ExactComparisonStratumV1,
+    ExactCandidateDecision, ExactCandidateEvaluation, ExactComparisonStratumV1,
 };
 use trace_commons_contributor::insights::comparison_tasks::{
     CheckoutProvenance, ComparisonConfigurationV1, ComparisonTaskContextInput, ContextDigest,
@@ -747,7 +747,11 @@ fn render_comparison_result(
         copy["comparison_specification_title"], result.specification_id
     );
     println!("{}", copy["comparison_retrospective_notice"]);
-    println!("{}", copy["comparison_descriptive_notice"]);
+    if result.schema_version == 1 {
+        println!("{}", copy["comparison_descriptive_notice"]);
+    } else {
+        println!("{}", copy["comparison_exact_notice"]);
+    }
     if result.included_task_ids.is_empty() {
         println!("{}", copy["comparison_no_eligible_evidence"]);
     }
@@ -773,6 +777,9 @@ fn render_comparison_result(
         );
     }
     println!("{}", copy["comparison_denominator_notice"]);
+    if let Some(estimation) = &result.exact_estimation {
+        render_exact_estimation(result, estimation, copy)?;
+    }
     for task_id in &result.included_task_ids {
         println!("Included task: {task_id}");
     }
@@ -795,6 +802,91 @@ fn render_comparison_result(
     }
     println!("Audit digest: {}", result.audit_digest);
     Ok(())
+}
+
+fn render_exact_estimation(
+    result: &DescriptiveComparisonResultV1,
+    estimation: &trace_commons_contributor::insights::comparison_specs::QualifiedExactEstimationV1,
+    copy: &std::collections::BTreeMap<String, String>,
+) -> Result<()> {
+    let [first_label, second_label] = &estimation.cohort_labels;
+    println!(
+        "{second_label} {} {first_label}",
+        copy["comparison_exact_minus"]
+    );
+    println!("{}", copy["comparison_exact_orientation"]);
+    for ((label, counts), cohort) in estimation
+        .cohort_labels
+        .iter()
+        .zip(&estimation.assessed_counts)
+        .zip(&result.cohorts)
+    {
+        println!(
+            "{label}: {}: {} / {}: {}",
+            copy["comparison_specification_assessed"],
+            counts.total,
+            copy["comparison_specification_included"],
+            cohort.included_tasks
+        );
+    }
+    match &estimation.evaluation {
+        ExactCandidateEvaluation::SuppressedBelowMinimumCohortSupport => {
+            println!("{}", copy["comparison_exact_support_unavailable"]);
+        }
+        ExactCandidateEvaluation::Supported { contrasts, .. } => {
+            let names = ["Accepted", "Partial", "Rejected"];
+            for (index, (name, contrast)) in names.iter().zip(contrasts).enumerate() {
+                let first = &estimation.assessed_counts[0];
+                let second = &estimation.assessed_counts[1];
+                let first_count = [first.accepted, first.partial, first.rejected][index];
+                let second_count = [second.accepted, second.partial, second.rejected][index];
+                println!(
+                    "{name}: {first_count}/{} ({:.2}%) {} {second_count}/{} ({:.2}%)",
+                    first.total,
+                    percent(first_count, first.total),
+                    copy["comparison_exact_versus"],
+                    second.total,
+                    percent(second_count, second.total)
+                );
+                let observed =
+                    percent(second_count, second.total) - percent(first_count, first.total);
+                println!(
+                    "  {}: {observed:+.4} {}",
+                    copy["comparison_exact_observed_difference"],
+                    copy["comparison_exact_percentage_points"]
+                );
+                println!(
+                    "  {}: [{:+.4}, {:+.4}] {}",
+                    copy["comparison_exact_interval"],
+                    contrast.lower_millionths as f64 / 10_000.0,
+                    contrast.upper_millionths as f64 / 10_000.0,
+                    copy["comparison_exact_percentage_points"]
+                );
+                let key = match contrast.decision {
+                    ExactCandidateDecision::InsufficientPrecision => {
+                        "comparison_exact_insufficient_precision"
+                    }
+                    ExactCandidateDecision::IndeterminateBoundary => {
+                        "comparison_exact_indeterminate_boundary"
+                    }
+                    ExactCandidateDecision::IncludesZero => "comparison_exact_includes_zero",
+                    ExactCandidateDecision::ExcludesZero => "comparison_exact_excludes_zero",
+                };
+                println!("  {}", copy[key]);
+            }
+            println!("{}", copy["comparison_exact_positive_direction"]);
+        }
+    }
+    println!("Exact output digest: {}", estimation.output_digest);
+    Ok(())
+}
+
+fn percent(count: u64, total: u64) -> f64 {
+    if total == 0 {
+        0.0
+    } else {
+        count as f64 * 100.0 / total as f64
+    }
 }
 
 fn render_comparison_task_operation(

@@ -15,7 +15,6 @@ struct ComparisonSpecificationsView: View {
                 if model.busy { ProgressView().controlSize(.small) }
             }
             Text(text("comparison_retrospective_notice")).foregroundStyle(.secondary)
-            Text(text("comparison_descriptive_notice")).foregroundStyle(.secondary)
             if let notice = model.notice { Text(text(notice)).foregroundStyle(.green) }
             if let error = model.error { Text(text(error)).foregroundStyle(.red) }
             draft
@@ -111,6 +110,8 @@ struct ComparisonSpecificationsView: View {
     private func resultView(_ result: DescriptiveComparisonResult) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(text("comparison_specification_result")).font(.headline)
+            Text(text(result.exact_estimation == nil ? "comparison_descriptive_notice" : "comparison_exact_notice"))
+                .foregroundStyle(.secondary)
             if result.included_task_ids.isEmpty { Text(text("comparison_no_eligible_evidence")) }
             ForEach(result.cohorts) { cohort in
                 VStack(alignment: .leading) {
@@ -126,6 +127,7 @@ struct ComparisonSpecificationsView: View {
                 }.padding(8).background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
             }
             Text(text("comparison_denominator_notice")).font(.caption).foregroundStyle(.secondary)
+            if let exact = result.exact_estimation { exactResult(exact, cohorts: result.cohorts) }
             if !result.included_task_ids.isEmpty {
                 Text(text("comparison_specification_included")).font(.headline)
                 ForEach(result.included_task_ids, id: \.self) { id in
@@ -145,6 +147,60 @@ struct ComparisonSpecificationsView: View {
                 Text(result.audit_digest); Text(result.estimation_input_digest)
             }.font(.caption.monospaced()).textSelection(.enabled)
         }
+    }
+    private func exactResult(_ exact: QualifiedExactEstimation,
+                             cohorts: [CohortDescriptiveResult]) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("\(exact.cohort_labels[1]) \(text("comparison_exact_minus")) \(exact.cohort_labels[0])")
+                .font(.headline)
+            Text(text("comparison_exact_orientation")).font(.caption).foregroundStyle(.secondary)
+            ForEach(Array(zip(exact.assessed_counts, cohorts).enumerated()), id: \.offset) { _, row in
+                Text("\(row.1.cohort_label): \(text("comparison_specification_assessed")): \(row.0.total) / \(text("comparison_specification_included")): \(row.1.included_tasks)")
+            }
+            switch exact.evaluation {
+            case .suppressedBelowMinimumCohortSupport:
+                Text(text("comparison_exact_support_unavailable"))
+            case .supported(_, _, let contrasts):
+                ForEach(Array(zip(DescriptiveOutcome.assessed, contrasts).enumerated()), id: \.offset) { index, row in
+                    let first = exact.assessed_counts[0]; let second = exact.assessed_counts[1]
+                    let firstCount = assessedCount(row.0, first); let secondCount = assessedCount(row.0, second)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(outcomeLabel(row.0)).font(.headline)
+                        Text("\(firstCount)/\(first.total) (\(percent(firstCount, first.total))) \(text("comparison_exact_versus")) \(secondCount)/\(second.total) (\(percent(secondCount, second.total)))")
+                        Text("\(text("comparison_exact_observed_difference")): \(observedPoints(firstCount, first.total, secondCount, second.total)) \(text("comparison_exact_percentage_points"))")
+                        Text("\(text("comparison_exact_interval")): [\(points(row.1.lower_millionths)), \(points(row.1.upper_millionths))] \(text("comparison_exact_percentage_points"))")
+                        Text(text(decisionKey(row.1.decision))).foregroundStyle(.secondary)
+                    }.padding(.vertical, 3).id(index)
+                }
+                Text(text("comparison_exact_positive_direction")).font(.caption).foregroundStyle(.secondary)
+            }
+            DisclosureGroup(text("comparison_task_advanced_evidence")) {
+                Text(exact.output_digest)
+            }.font(.caption.monospaced()).textSelection(.enabled)
+        }
+    }
+    private func assessedCount(_ outcome: DescriptiveOutcome, _ counts: AssessedCategoricalCounts) -> UInt64 {
+        switch outcome { case .accepted: counts.accepted; case .partial: counts.partial
+        case .rejected: counts.rejected; default: 0 }
+    }
+    private func percent(_ count: UInt64, _ total: UInt64) -> String {
+        guard total > 0 else { return "0.00%" }
+        return String(format: "%.2f%%", Double(count) * 100 / Double(total))
+    }
+    private func points(_ millionths: Int64) -> String {
+        String(format: "%+.4f", Double(millionths) / 10_000)
+    }
+    private func observedPoints(_ firstCount: UInt64, _ firstTotal: UInt64,
+                                _ secondCount: UInt64, _ secondTotal: UInt64) -> String {
+        guard firstTotal > 0, secondTotal > 0 else { return "+0.0000" }
+        return String(format: "%+.4f", Double(secondCount) * 100 / Double(secondTotal)
+            - Double(firstCount) * 100 / Double(firstTotal))
+    }
+    private func decisionKey(_ decision: ExactCandidateDecision) -> String {
+        switch decision { case .insufficientPrecision: "comparison_exact_insufficient_precision"
+        case .indeterminateBoundary: "comparison_exact_indeterminate_boundary"
+        case .includesZero: "comparison_exact_includes_zero"
+        case .excludesZero: "comparison_exact_excludes_zero" }
     }
     private func count(_ outcome: DescriptiveOutcome, in counts: ComparisonOutcomeCounts) -> UInt64 {
         switch outcome { case .accepted: counts.accepted; case .partial: counts.partial

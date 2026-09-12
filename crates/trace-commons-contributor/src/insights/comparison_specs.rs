@@ -8,6 +8,14 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::TaskCategory;
+use super::comparison_exact::{
+    EXACT_CANDIDATE_METHOD, EXACT_CANDIDATE_PROTOCOL_SHA256, ExactCandidateCounts,
+    evaluate_exact_candidate_counts,
+};
+pub use super::comparison_exact::{
+    ExactCandidateComponentInterval, ExactCandidateContrast, ExactCandidateDecision,
+    ExactCandidateEvaluation,
+};
 use super::comparison_tasks::{
     ComparisonTaskDetail, ComparisonTaskOutcome, ComparisonTaskStaleReason, ContextString,
     LocalComparisonTaskV1, MAX_CONTEXT_LABEL_BYTES,
@@ -140,8 +148,84 @@ pub enum QualifiedSourceRule {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 pub enum EstimatorSpecificationState {
     NotYetCalibrated,
+    QualifiedExactCategoricalV1 {
+        method: String,
+        protocol_sha256: String,
+        contrast_orientation: String,
+        outcome_order: Vec<String>,
+        interval_grid_denominator: u32,
+        one_sided_tail_denominator: u32,
+        minimum_assessed_tasks_per_cohort: u32,
+        maximum_total_assessed_tasks: u32,
+        maximum_interval_width_millionths: u32,
+    },
+}
+
+impl EstimatorSpecificationState {
+    fn qualified_exact_v1() -> Self {
+        Self::QualifiedExactCategoricalV1 {
+            method: EXACT_CANDIDATE_METHOD.into(),
+            protocol_sha256: EXACT_CANDIDATE_PROTOCOL_SHA256.into(),
+            contrast_orientation: "second_canonical_cohort_minus_first".into(),
+            outcome_order: ["accepted", "partial", "rejected"].map(Into::into).into(),
+            interval_grid_denominator: 1_000_000,
+            one_sided_tail_denominator: 240,
+            minimum_assessed_tasks_per_cohort: 2,
+            maximum_total_assessed_tasks: 256,
+            maximum_interval_width_millionths: 500_000,
+        }
+    }
+
+    fn validate(&self) -> Result<()> {
+        match self {
+            Self::NotYetCalibrated => Ok(()),
+            Self::QualifiedExactCategoricalV1 {
+                method,
+                protocol_sha256,
+                contrast_orientation,
+                outcome_order,
+                interval_grid_denominator,
+                one_sided_tail_denominator,
+                minimum_assessed_tasks_per_cohort,
+                maximum_total_assessed_tasks,
+                maximum_interval_width_millionths,
+            } if method == EXACT_CANDIDATE_METHOD
+                && protocol_sha256 == EXACT_CANDIDATE_PROTOCOL_SHA256
+                && contrast_orientation == "second_canonical_cohort_minus_first"
+                && outcome_order == &["accepted", "partial", "rejected"]
+                && *interval_grid_denominator == 1_000_000
+                && *one_sided_tail_denominator == 240
+                && *minimum_assessed_tasks_per_cohort == 2
+                && *maximum_total_assessed_tasks == 256
+                && *maximum_interval_width_millionths == 500_000 =>
+            {
+                Ok(())
+            }
+            Self::QualifiedExactCategoricalV1 { .. } => Err(invalid()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AssessedCategoricalCountsV1 {
+    pub accepted: u64,
+    pub partial: u64,
+    pub rejected: u64,
+    pub total: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct QualifiedExactEstimationV1 {
+    pub cohort_labels: [String; 2],
+    pub assessed_counts: [AssessedCategoricalCountsV1; 2],
+    pub assessed_estimation_input_digest: String,
+    pub evaluation: ExactCandidateEvaluation,
+    pub output_digest: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -242,13 +326,15 @@ pub struct DescriptiveComparisonResultV1 {
     pub included_task_ids: Vec<String>,
     pub excluded_tasks: Vec<ExcludedComparisonTask>,
     pub cohorts: Vec<CohortDescriptiveResult>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exact_estimation: Option<QualifiedExactEstimationV1>,
 }
 
 impl DescriptiveComparisonResultV1 {
     pub fn validate(&self) -> Result<()> {
         let specification_id =
             uuid::Uuid::parse_str(&self.specification_id).map_err(|_| invalid())?;
-        if self.schema_version != 1
+        if !matches!(self.schema_version, 1 | 2)
             || specification_id.is_nil()
             || specification_id.to_string() != self.specification_id
             || !valid_digest(&self.specification_digest)
@@ -315,8 +401,144 @@ impl DescriptiveComparisonResultV1 {
         if total != u64::try_from(self.included_task_ids.len()).map_err(|_| invalid())? {
             return Err(invalid());
         }
+        match (self.schema_version, &self.exact_estimation) {
+            (1, None) => {}
+            (2, Some(estimation)) => {
+                if self
+                    .included_task_ids
+                    .len()
+                    .checked_add(self.excluded_tasks.len())
+                    .is_none_or(|total| total > MAX_FACTS)
+                {
+                    return Err(invalid());
+                }
+                validate_exact_estimation(&self.cohorts, estimation)?;
+            }
+            _ => return Err(invalid()),
+        }
         Ok(())
     }
+
+    pub fn validate_for_specification(
+        &self,
+        specification: &ComparisonSpecificationV1,
+    ) -> Result<()> {
+        self.validate()?;
+        specification.validate()?;
+        if self.specification_id != specification.id
+            || self.specification_digest != specification.specification_digest
+            || self.specification_record_digest != specification.saved_record_digest
+            || self
+                .cohorts
+                .iter()
+                .map(|cohort| &cohort.cohort_label)
+                .ne(specification.cohort_labels.iter())
+        {
+            return Err(invalid());
+        }
+        match (
+            &specification.estimator_state,
+            self.schema_version,
+            &self.exact_estimation,
+        ) {
+            (EstimatorSpecificationState::NotYetCalibrated, 1, None)
+            | (EstimatorSpecificationState::QualifiedExactCategoricalV1 { .. }, 2, Some(_)) => {
+                Ok(())
+            }
+            _ => Err(invalid()),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct ExactOutputDigestFields<'a> {
+    estimator_state: &'a EstimatorSpecificationState,
+    cohort_labels: &'a [String; 2],
+    assessed_counts: &'a [AssessedCategoricalCountsV1; 2],
+    assessed_estimation_input_digest: &'a str,
+    evaluation: &'a ExactCandidateEvaluation,
+}
+
+fn assessed_counts(row: &CohortDescriptiveResult) -> AssessedCategoricalCountsV1 {
+    AssessedCategoricalCountsV1 {
+        accepted: row.outcomes.accepted,
+        partial: row.outcomes.partial,
+        rejected: row.outcomes.rejected,
+        total: row.outcomes.assessed,
+    }
+}
+
+fn exact_counts(value: &AssessedCategoricalCountsV1) -> Result<ExactCandidateCounts> {
+    let outcomes = [value.accepted, value.partial, value.rejected]
+        .map(|count| usize::try_from(count).map_err(|_| invalid()))
+        .into_iter()
+        .collect::<Result<Vec<_>>>()?
+        .try_into()
+        .map_err(|_| invalid())?;
+    Ok(ExactCandidateCounts {
+        total: usize::try_from(value.total).map_err(|_| invalid())?,
+        outcomes,
+    })
+}
+
+fn build_exact_estimation(
+    estimator_state: &EstimatorSpecificationState,
+    cohorts: &[CohortDescriptiveResult],
+    assessed_estimation_input_digest: &str,
+) -> Result<QualifiedExactEstimationV1> {
+    estimator_state.validate()?;
+    if !matches!(
+        estimator_state,
+        EstimatorSpecificationState::QualifiedExactCategoricalV1 { .. }
+    ) || cohorts.len() != 2
+        || !valid_digest(assessed_estimation_input_digest)
+    {
+        return Err(invalid());
+    }
+    let cohort_labels = [
+        cohorts[0].cohort_label.clone(),
+        cohorts[1].cohort_label.clone(),
+    ];
+    let assessed_counts = [assessed_counts(&cohorts[0]), assessed_counts(&cohorts[1])];
+    let evaluation = evaluate_exact_candidate_counts(
+        &exact_counts(&assessed_counts[0])?,
+        &exact_counts(&assessed_counts[1])?,
+    )?;
+    let output_digest = digest(
+        b"trace-commons-qualified-exact-categorical-output-v1\0",
+        &ExactOutputDigestFields {
+            estimator_state,
+            cohort_labels: &cohort_labels,
+            assessed_counts: &assessed_counts,
+            assessed_estimation_input_digest,
+            evaluation: &evaluation,
+        },
+    )?;
+    Ok(QualifiedExactEstimationV1 {
+        cohort_labels,
+        assessed_counts,
+        assessed_estimation_input_digest: assessed_estimation_input_digest.into(),
+        evaluation,
+        output_digest,
+    })
+}
+
+fn validate_exact_estimation(
+    cohorts: &[CohortDescriptiveResult],
+    estimation: &QualifiedExactEstimationV1,
+) -> Result<()> {
+    if !valid_digest(&estimation.output_digest) {
+        return Err(invalid());
+    }
+    let expected = build_exact_estimation(
+        &EstimatorSpecificationState::qualified_exact_v1(),
+        cohorts,
+        &estimation.assessed_estimation_input_digest,
+    )?;
+    if &expected != estimation {
+        return Err(invalid());
+    }
+    Ok(())
 }
 
 fn invalid() -> anyhow::Error {
@@ -408,8 +630,24 @@ impl ComparisonSpecificationV1 {
     pub fn create(
         id: String,
         created_at: DateTime<Utc>,
+        cutoff_task_evidence: Vec<CutoffTaskEvidenceV1>,
+        input: ComparisonSpecificationDraftInput,
+    ) -> Result<Self> {
+        Self::create_with_estimator_state(
+            id,
+            created_at,
+            cutoff_task_evidence,
+            input,
+            EstimatorSpecificationState::NotYetCalibrated,
+        )
+    }
+
+    fn create_with_estimator_state(
+        id: String,
+        created_at: DateTime<Utc>,
         mut cutoff_task_evidence: Vec<CutoffTaskEvidenceV1>,
         input: ComparisonSpecificationDraftInput,
+        estimator_state: EstimatorSpecificationState,
     ) -> Result<Self> {
         cutoff_task_evidence.sort_by(|left, right| left.task_id.cmp(&right.task_id));
         let mut value = Self {
@@ -428,7 +666,7 @@ impl ComparisonSpecificationV1 {
             attempt_rule: "canonical-snapshot-union-v1".into(),
             outcome_rubric_version: "categorical-user-report-v1".into(),
             estimands: vec!["categorical-outcome-distribution-v1".into()],
-            estimator_state: EstimatorSpecificationState::NotYetCalibrated,
+            estimator_state,
             specification_digest: String::new(),
             saved_record_digest: String::new(),
         };
@@ -490,13 +728,13 @@ impl ComparisonSpecificationV1 {
             || self.attempt_rule != "canonical-snapshot-union-v1"
             || self.outcome_rubric_version != "categorical-user-report-v1"
             || self.estimands != ["categorical-outcome-distribution-v1"]
-            || self.estimator_state != EstimatorSpecificationState::NotYetCalibrated
             || self.cohort_labels.len() != 2
             || !self.cohort_labels.windows(2).all(|pair| pair[0] < pair[1])
             || self.cohort_labels.iter().any(|label| !valid_label(label))
         {
             return Err(invalid());
         }
+        self.estimator_state.validate()?;
         for evidence in &self.cutoff_task_evidence {
             evidence.validate(self.evidence_cutoff)?;
         }
@@ -505,7 +743,7 @@ impl ComparisonSpecificationV1 {
 
     pub fn validate(&self) -> Result<()> {
         self.validate_without_digest()?;
-        let rebuilt = Self::create(
+        let rebuilt = Self::create_with_estimator_state(
             self.id.clone(),
             self.created_at,
             self.cutoff_task_evidence.clone(),
@@ -516,6 +754,7 @@ impl ComparisonSpecificationV1 {
                 date_end: self.date_end,
                 stratum: self.stratum.clone(),
             },
+            self.estimator_state.clone(),
         )?;
         if rebuilt.specification_digest != self.specification_digest
             || rebuilt.saved_record_digest != self.saved_record_digest
@@ -890,12 +1129,34 @@ pub fn project_descriptive_comparison(
         b"trace-commons-comparison-estimation-input-v1\0",
         &estimation,
     )?;
+    let assessed_estimation = estimation
+        .iter()
+        .filter(|fact| {
+            matches!(
+                fact.outcome,
+                DescriptiveOutcome::Accepted
+                    | DescriptiveOutcome::Partial
+                    | DescriptiveOutcome::Rejected
+            )
+        })
+        .collect::<Vec<_>>();
+    let assessed_estimation_input_digest = digest(
+        b"trace-commons-comparison-assessed-estimation-input-v1\0",
+        &assessed_estimation,
+    )?;
     let audit_digest = digest(
         b"trace-commons-comparison-audit-v1\0",
         &(&ordered, &excluded),
     )?;
+    let cohorts = rows.into_values().collect::<Vec<_>>();
+    let exact_estimation = match &specification.estimator_state {
+        EstimatorSpecificationState::NotYetCalibrated => None,
+        state @ EstimatorSpecificationState::QualifiedExactCategoricalV1 { .. } => Some(
+            build_exact_estimation(state, &cohorts, &assessed_estimation_input_digest)?,
+        ),
+    };
     let result = DescriptiveComparisonResultV1 {
-        schema_version: 1,
+        schema_version: if exact_estimation.is_some() { 2 } else { 1 },
         specification_id: specification.id.clone(),
         specification_digest: specification.specification_digest.clone(),
         specification_record_digest: specification.saved_record_digest.clone(),
@@ -903,9 +1164,10 @@ pub fn project_descriptive_comparison(
         estimation_input_digest,
         included_task_ids: included.iter().map(|fact| fact.task_id.clone()).collect(),
         excluded_tasks: excluded,
-        cohorts: rows.into_values().collect(),
+        cohorts,
+        exact_estimation,
     };
-    result.validate()?;
+    result.validate_for_specification(specification)?;
     Ok(result)
 }
 
@@ -956,6 +1218,41 @@ mod tests {
                 date_end: NaiveDate::from_ymd_opt(2026, 9, 10).unwrap(),
                 stratum: stratum(),
             },
+        )
+        .unwrap()
+    }
+
+    fn qualified_spec() -> ComparisonSpecificationV1 {
+        let baseline = spec();
+        let mut cutoff = baseline.cutoff_task_evidence;
+        cutoff[1].outcome = DescriptiveOutcome::Partial;
+        cutoff[2].outcome = DescriptiveOutcome::Rejected;
+        ComparisonSpecificationV1::create_with_estimator_state(
+            baseline.id,
+            baseline.created_at,
+            cutoff,
+            ComparisonSpecificationDraftInput {
+                evidence_cutoff: baseline.evidence_cutoff,
+                cohort_labels: baseline.cohort_labels,
+                date_start: baseline.date_start,
+                date_end: baseline.date_end,
+                stratum: baseline.stratum,
+            },
+            EstimatorSpecificationState::qualified_exact_v1(),
+        )
+        .unwrap()
+    }
+
+    fn qualified_result() -> DescriptiveComparisonResultV1 {
+        project_descriptive_comparison(
+            &qualified_spec(),
+            &[
+                fact(1, "model-a", DescriptiveOutcome::Accepted),
+                fact(2, "model-a", DescriptiveOutcome::Partial),
+                fact(3, "model-b", DescriptiveOutcome::Rejected),
+                fact(5, "model-b", DescriptiveOutcome::Partial),
+                fact(4, "model-a", DescriptiveOutcome::Unassessed),
+            ],
         )
         .unwrap()
     }
@@ -1053,6 +1350,184 @@ mod tests {
             spec().saved_record_digest,
             different_record.saved_record_digest
         );
+    }
+
+    #[test]
+    fn schema_one_bytes_and_digests_match_the_prequalification_serializer() {
+        let specification_bytes = include_bytes!(
+            "../../fixtures/insights/comparison-estimator/schema1-baseline/specification.json"
+        );
+        let result_bytes = include_bytes!(
+            "../../fixtures/insights/comparison-estimator/schema1-baseline/result.json"
+        );
+        let specification: ComparisonSpecificationV1 =
+            serde_json::from_slice(specification_bytes).unwrap();
+        let result: DescriptiveComparisonResultV1 = serde_json::from_slice(result_bytes).unwrap();
+        specification.validate().unwrap();
+        result.validate_for_specification(&specification).unwrap();
+        assert_eq!(
+            serde_json::to_vec(&specification).unwrap(),
+            &specification_bytes[..specification_bytes.len() - 1]
+        );
+        assert_eq!(
+            serde_json::to_vec(&result).unwrap(),
+            &result_bytes[..result_bytes.len() - 1]
+        );
+        assert_eq!(
+            result.estimation_input_digest,
+            "17c03058c78084fb18155ded180e8c87d7133f82b21f63b30a7f15732c27354d"
+        );
+        assert_eq!(result.cohorts[0].outcomes.pending, 1);
+        assert_eq!(result.cohorts[0].outcomes.unknown, 1);
+        assert_eq!(result.cohorts[0].outcomes.unassessed, 1);
+        let projected = project_descriptive_comparison(
+            &specification,
+            &[
+                fact(1, "model-a", DescriptiveOutcome::Accepted),
+                fact(2, "model-a", DescriptiveOutcome::Pending),
+                fact(3, "model-a", DescriptiveOutcome::Unknown),
+                fact(4, "model-a", DescriptiveOutcome::Unassessed),
+                fact(5, "model-b", DescriptiveOutcome::Partial),
+                fact(6, "model-b", DescriptiveOutcome::Rejected),
+            ],
+        )
+        .unwrap();
+        assert_eq!(projected, result);
+    }
+
+    #[test]
+    fn qualified_schema_two_recomputes_six_components_and_three_contrasts() {
+        let specification = qualified_spec();
+        let result = qualified_result();
+        assert_eq!(result.schema_version, 2);
+        let estimation = result.exact_estimation.as_ref().unwrap();
+        assert_eq!(estimation.cohort_labels, ["model-a", "model-b"]);
+        let ExactCandidateEvaluation::Supported {
+            first_components,
+            second_components,
+            contrasts,
+        } = &estimation.evaluation
+        else {
+            panic!("two assessed tasks per cohort must be supported")
+        };
+        assert_eq!(first_components.len() + second_components.len(), 6);
+        assert_eq!(contrasts.len(), 3);
+        assert_ne!(
+            estimation.assessed_estimation_input_digest,
+            result.estimation_input_digest
+        );
+        result.validate_for_specification(&specification).unwrap();
+
+        let mut forged = result.clone();
+        let Some(exact) = forged.exact_estimation.as_mut() else {
+            unreachable!()
+        };
+        let ExactCandidateEvaluation::Supported { contrasts, .. } = &mut exact.evaluation else {
+            unreachable!()
+        };
+        contrasts[0].lower_millionths += 1;
+        assert!(forged.validate_for_specification(&specification).is_err());
+    }
+
+    #[test]
+    fn qualified_schema_two_shared_native_fixture_matches_the_rust_producer() {
+        let fixture: serde_json::Value = serde_json::from_slice(include_bytes!(
+            "../../fixtures/insights/comparison-estimator/schema2-qualified/preview-response.json"
+        ))
+        .unwrap();
+        let expected = serde_json::json!({
+            "type": "comparison_preview_spec",
+            "specification": qualified_spec(),
+            "result": qualified_result(),
+        });
+        assert_eq!(fixture, expected);
+        let specification: ComparisonSpecificationV1 =
+            serde_json::from_value(fixture["specification"].clone()).unwrap();
+        let result: DescriptiveComparisonResultV1 =
+            serde_json::from_value(fixture["result"].clone()).unwrap();
+        result.validate_for_specification(&specification).unwrap();
+    }
+
+    #[test]
+    fn qualified_schema_two_rejects_unknown_and_contradictory_fields() {
+        let mut specification = serde_json::to_value(qualified_spec()).unwrap();
+        specification["estimator_state"]["qualified_exact_categorical_v1"]["unexpected"] =
+            serde_json::json!(true);
+        assert!(serde_json::from_value::<ComparisonSpecificationV1>(specification).is_err());
+
+        let mut result = serde_json::to_value(
+            project_descriptive_comparison(
+                &qualified_spec(),
+                &[
+                    fact(1, "model-a", DescriptiveOutcome::Accepted),
+                    fact(3, "model-b", DescriptiveOutcome::Rejected),
+                    fact(5, "model-b", DescriptiveOutcome::Partial),
+                ],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        result["exact_estimation"]["evaluation"]["contrasts"] = serde_json::json!([]);
+        assert!(serde_json::from_value::<DescriptiveComparisonResultV1>(result).is_err());
+    }
+
+    #[test]
+    fn schema_two_self_consistency_cannot_override_saved_cohort_order_or_fact_cap() {
+        let specification = qualified_spec();
+        let mut other_labels = qualified_result();
+        other_labels.cohorts[0].cohort_label = "model-c".into();
+        other_labels.cohorts[1].cohort_label = "model-d".into();
+        let assessed_digest = other_labels
+            .exact_estimation
+            .as_ref()
+            .unwrap()
+            .assessed_estimation_input_digest
+            .clone();
+        other_labels.exact_estimation = Some(
+            build_exact_estimation(
+                &EstimatorSpecificationState::qualified_exact_v1(),
+                &other_labels.cohorts,
+                &assessed_digest,
+            )
+            .unwrap(),
+        );
+        other_labels.validate().unwrap();
+        assert!(
+            other_labels
+                .validate_for_specification(&specification)
+                .is_err()
+        );
+
+        let mut too_many = qualified_result();
+        for suffix in 7..=258 {
+            too_many
+                .included_task_ids
+                .push(format!("00000000-0000-4000-8000-{suffix:012}"));
+        }
+        too_many.cohorts[0].included_tasks += 252;
+        too_many.cohorts[0].outcomes.pending += 252;
+        too_many.cohorts[0]
+            .usage
+            .tasks_without_observed_attributed_tokens += 252;
+        assert!(too_many.validate().is_err());
+    }
+
+    #[test]
+    fn qualified_schema_two_suppresses_when_assessed_support_is_below_two() {
+        let specification = qualified_spec();
+        let result = project_descriptive_comparison(
+            &specification,
+            &[
+                fact(1, "model-a", DescriptiveOutcome::Accepted),
+                fact(3, "model-b", DescriptiveOutcome::Rejected),
+                fact(5, "model-b", DescriptiveOutcome::Partial),
+            ],
+        )
+        .unwrap();
+        assert!(matches!(
+            result.exact_estimation.unwrap().evaluation,
+            ExactCandidateEvaluation::SuppressedBelowMinimumCohortSupport
+        ));
     }
 
     #[test]
