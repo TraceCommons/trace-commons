@@ -24,6 +24,37 @@ const OUTPUT_DIR: &str = "/private/tmp/trace-insights-codex-release-writer-fixtu
 const PINNED_REVISION: &str = "6b9826e3aa83b1a5947db50f4332cb9c65f1b340";
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn writes_default_instruction_exec_fixture() -> Result<()> {
+    let output_dir = Path::new("/private/tmp/trace-insights-codex-default-instruction-fixture");
+    std::fs::create_dir_all(output_dir)?;
+    let server = MockServer::start().await;
+    mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("response-default-1"),
+            ev_assistant_message("message-default-1", "synthetic default result"),
+            ev_completed("response-default-1"),
+        ]),
+    )
+    .await;
+    let test = test_codex().with_model("model-default").build(&server).await?;
+    test.codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "synthetic default instruction refactor turn".into(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+    wait_for_event(&test.codex, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+    test.codex.flush_rollout().await?;
+    let rollout_path = test.codex.rollout_path().context("writer created no rollout")?;
+    let raw = std::fs::read_to_string(&rollout_path)?;
+    let sanitized = sanitize_rollout(&raw, "default")?;
+    std::fs::write(output_dir.join("codex-default-instructions.jsonl"), sanitized)?;
+    test.codex.shutdown_and_wait().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn writes_tool_reasoning_profile_fixture() -> Result<()> {
     let output_dir = Path::new("/private/tmp/trace-insights-codex-release-tool-fixtures");
     std::fs::create_dir_all(output_dir)?;

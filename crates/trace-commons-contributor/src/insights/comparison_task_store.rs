@@ -610,6 +610,9 @@ mod tests {
     const RELEASE_BETA: &[u8] = include_bytes!(
         "../../fixtures/insights/codex-task-attribution/codex-release-0.154.0-beta-direct.jsonl"
     );
+    const RELEASE_DEFAULT: &[u8] = include_bytes!(
+        "../../fixtures/insights/codex-task-attribution/codex-release-0.154.0-default-instructions.jsonl"
+    );
 
     fn source(path: &Path, content: &str) {
         fs::write(
@@ -648,14 +651,18 @@ mod tests {
         let store = LocalInsightStore::open(&root.path().join("store")).unwrap();
         let alpha_id = import_codex(&store, &root.path().join("alpha"), RELEASE_ALPHA);
         let beta_id = import_codex(&store, &root.path().join("beta"), RELEASE_BETA);
+        let default_id = import_codex(&store, &root.path().join("default"), RELEASE_DEFAULT);
         let alpha_episode = store
             .episode_create(std::slice::from_ref(&alpha_id))
             .unwrap();
         let beta_episode = store.episode_create(&[beta_id]).unwrap();
+        let default_episode = store.episode_create(&[default_id]).unwrap();
         let alpha = store.comparison_task_create(&[alpha_episode.id]).unwrap();
         let beta = store.comparison_task_create(&[beta_episode.id]).unwrap();
+        let default = store.comparison_task_create(&[default_episode.id]).unwrap();
         let alpha_detail = store.comparison_task_explain(&alpha.id).unwrap();
         let beta_detail = store.comparison_task_explain(&beta.id).unwrap();
+        let default_detail = store.comparison_task_explain(&default.id).unwrap();
         assert_eq!(
             alpha_detail
                 .source_qualification
@@ -671,6 +678,14 @@ mod tests {
                 .unwrap()
                 .declared_model_cohort,
             "model-beta"
+        );
+        assert_eq!(
+            default_detail
+                .source_qualification
+                .as_ref()
+                .unwrap()
+                .declared_model_cohort,
+            "model-default"
         );
         assert!(
             !alpha_detail

@@ -361,6 +361,7 @@ struct SessionFacts {
     cwd: String,
     runtime_workspace_roots: Option<Value>,
     prompt_sha256: String,
+    prompt_declared_model: Option<String>,
     originator: String,
     observed_workspace_version: String,
 }
@@ -458,14 +459,14 @@ fn parse_session(profile: CodexTaskSourceProfile, payload: &Value) -> Result<Ses
         _ => {}
     }
     let prompt = field(payload, "base_instructions")?;
-    if prompt
-        .get("provenance")
-        .and_then(|v| v.get("type"))
-        .and_then(Value::as_str)
-        != Some("custom")
-    {
-        return Err(invalid());
-    }
+    let provenance = field(prompt, "provenance")?;
+    let prompt_declared_model = match (profile, string_field(provenance, "type")?) {
+        (_, "custom") => None,
+        (CodexTaskSourceProfile::CodexRustV0_154_0TaskRecords, "model") => {
+            Some(string_field(provenance, "model")?.to_owned())
+        }
+        _ => return Err(invalid()),
+    };
     let prompt = string_field(prompt, "text")?;
     Ok(SessionFacts {
         identity: identity.into(),
@@ -473,6 +474,7 @@ fn parse_session(profile: CodexTaskSourceProfile, payload: &Value) -> Result<Ses
         cwd: cwd.into(),
         runtime_workspace_roots: roots,
         prompt_sha256: hash_domain("codex-base-instructions-v1", prompt),
+        prompt_declared_model,
         originator: "codex_cli_rs".into(),
         observed_workspace_version: profile_evidence.observed_workspace_version,
     })
@@ -878,6 +880,13 @@ pub fn classify_codex_task_attribution(
                     unavailable_here!(TaskAttributionUnavailableReason::ForkOrDelegation, *index);
                 }
                 let model = string_field(payload, "model")?;
+                if session
+                    .prompt_declared_model
+                    .as_deref()
+                    .is_some_and(|declared| declared != model)
+                {
+                    unavailable_here!(TaskAttributionUnavailableReason::ModelConflict, *index);
+                }
                 if payload
                     .get("collaboration_mode")
                     .and_then(|v| v.get("settings"))
@@ -1181,6 +1190,9 @@ mod tests {
     const RELEASE_TOOL: &[u8] = include_bytes!(
         "../../fixtures/insights/codex-task-attribution/codex-release-0.154.0-tool-reasoning.jsonl"
     );
+    const RELEASE_DEFAULT: &[u8] = include_bytes!(
+        "../../fixtures/insights/codex-task-attribution/codex-release-0.154.0-default-instructions.jsonl"
+    );
     const PROFILE: CodexTaskSourceProfile =
         CodexTaskSourceProfile::PinnedDirectWriterFixtureC4017a87;
 
@@ -1204,7 +1216,14 @@ mod tests {
     }
 
     fn unavailable_reason(bytes: &[u8]) -> TaskAttributionUnavailableReason {
-        match classify_codex_task_attribution(PROFILE, bytes)
+        unavailable_reason_for(PROFILE, bytes)
+    }
+
+    fn unavailable_reason_for(
+        profile: CodexTaskSourceProfile,
+        bytes: &[u8],
+    ) -> TaskAttributionUnavailableReason {
+        match classify_codex_task_attribution(profile, bytes)
             .unwrap()
             .state
         {
@@ -1408,6 +1427,33 @@ mod tests {
         assert_eq!(turns[0].usage_record_status, UsageRecordStatus::Invalid);
         assert!(turns[0].records.token_usage_record.is_none());
         assert!(turns[0].records.token_count_event.is_none());
+    }
+
+    #[test]
+    fn released_default_model_instructions_require_the_same_declared_model() {
+        let profile = CodexTaskSourceProfile::CodexRustV0_154_0TaskRecords;
+        let evidence = classify_codex_task_attribution(profile, RELEASE_DEFAULT).unwrap();
+        let TaskAttributionState::Attributed { turns } = evidence.state else {
+            panic!("released default-instruction fixture was not attributed")
+        };
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].declared_model, "model-default");
+
+        let mut mismatch = decode(RELEASE_DEFAULT);
+        mismatch[0]["payload"]["base_instructions"]["provenance"]["model"] =
+            serde_json::json!("different-model");
+        assert_eq!(
+            unavailable_reason_for(profile, &encode(&mismatch)),
+            TaskAttributionUnavailableReason::ModelConflict
+        );
+
+        let mut unsupported = decode(RELEASE_DEFAULT);
+        unsupported[0]["payload"]["base_instructions"]["provenance"] =
+            serde_json::json!({"type":"bundled"});
+        assert_eq!(
+            unavailable_reason_for(profile, &encode(&unsupported)),
+            TaskAttributionUnavailableReason::SourceProfileMismatch
+        );
     }
 
     #[test]
