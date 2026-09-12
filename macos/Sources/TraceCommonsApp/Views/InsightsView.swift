@@ -1,18 +1,47 @@
 import SwiftUI
 import TCBridge
+import TCShellCore
 import UniformTypeIdentifiers
 
 struct InsightsView: View {
-    @State private var model = InsightsModel()
-    @State private var comparisonModel = ComparisonTasksModel()
-    @State private var specificationModel = ComparisonSpecificationsModel()
+    @State private var model: InsightsModel
+    @State private var comparisonModel: ComparisonTasksModel
+    @State private var specificationModel: ComparisonSpecificationsModel
+    private let storeSelection: InsightsStoreSelection
+    private let storeCopy: [String: String]
     @State private var choosingFile = false
     @State private var source = "codex"
 
+    @MainActor init(storeSelection: InsightsStoreSelection = .standard,
+                    storeCopy: [String: String]? = TCInsights.copy()) {
+        self.storeSelection = storeSelection
+        self.storeCopy = storeCopy ?? [:]
+        let router = InsightsServiceRouter(selection: storeSelection)
+        let service: InsightsModel.Service = { request in try await router.call(request) }
+        _model = State(initialValue: InsightsModel(service: service))
+        _comparisonModel = State(initialValue: ComparisonTasksModel(service: service))
+        _specificationModel = State(initialValue: ComparisonSpecificationsModel(service: service))
+    }
+
+    @ViewBuilder
     var body: some View {
+        if let refusal = storeSelection.refusal {
+            ContentUnavailableView(storeCopy["insights_store_unavailable"] ?? "",
+                                   systemImage: "externaldrive.badge.exclamationmark",
+                                   description: Text(refusalMessage(refusal)))
+        } else {
+            content
+        }
+    }
+
+    private var content: some View {
         ScrollViewReader { proxy in
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
+                    if case .custom(let path) = storeSelection {
+                        Text((storeCopy["insights_store_title"] ?? "") + ": " + path)
+                            .font(.caption).textSelection(.enabled)
+                    }
                     Text(model.text("intro"))
                     HStack {
                         Picker(model.text("source"), selection: $source) {
@@ -110,6 +139,15 @@ struct InsightsView: View {
             specificationModel.upstreamEvidenceChanged()
         }
         .onDisappear { model.close(); comparisonModel.close(); specificationModel.close() }
+    }
+    private func refusalMessage(_ refusal: InsightsStoreSelection.Refusal) -> String {
+        switch refusal {
+        case .duplicateOption: return storeCopy["insights_store_duplicate"] ?? ""
+        case .missingPath: return storeCopy["insights_store_missing_path"] ?? ""
+        case .relativePath: return storeCopy["insights_store_relative_path"] ?? ""
+        case .pathMissing: return storeCopy["insights_store_path_missing"] ?? ""
+        case .notADirectory: return storeCopy["insights_store_not_directory"] ?? ""
+        }
     }
     private func updateSpecificationSources() {
         specificationModel.updateSources(tasks: comparisonModel.tasks, snapshots: model.snapshots)

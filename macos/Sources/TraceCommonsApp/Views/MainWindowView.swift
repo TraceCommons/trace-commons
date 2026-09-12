@@ -6,11 +6,14 @@ struct MainWindowView: View {
     @Environment(ComputeModel.self) private var compute
     let navigation: MainWindowNavigation
     let missionDrafts: MissionDraftsModel
+    let insightsStoreSelection: InsightsStoreSelection
     private var section: Section { navigation.section }
 
-    @MainActor init(navigation: MainWindowNavigation, missionDrafts: MissionDraftsModel) {
+    @MainActor init(navigation: MainWindowNavigation, missionDrafts: MissionDraftsModel,
+                    insightsStoreSelection: InsightsStoreSelection = .standard) {
         self.navigation = navigation
         self.missionDrafts = missionDrafts
+        self.insightsStoreSelection = insightsStoreSelection
     }
 
     @MainActor init(navigation: MainWindowNavigation) {
@@ -157,7 +160,7 @@ struct MainWindowView: View {
                     ComputeView(model: compute)
                 } else if section == .insights {
                     contentHeader
-                    InsightsView()
+                    InsightsView(storeSelection: insightsStoreSelection)
                 } else if section == .missionDrafts {
                     contentHeader
                     MissionDraftsView(model: missionDrafts)

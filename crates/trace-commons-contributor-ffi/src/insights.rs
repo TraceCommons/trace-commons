@@ -2,6 +2,17 @@
 use super::*;
 use trace_commons_contributor::insights::service::{MAX_REQUEST_BYTES, dispatch_json};
 
+/// Return the complete fixed Insights UI vocabulary without opening a store.
+/// The returned JSON string is owned and must be freed with `tc_string_free`.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_insights_copy_json() -> *mut c_char {
+    guarded_string_no_err(|| {
+        let json = serde_json::to_string(&trace_commons_contributor::insights::service::ui_copy())
+            .unwrap_or_else(|_| "{}".to_string());
+        Ok(to_owned_cstring(&json))
+    })
+}
+
 /// Execute a local Insights request without starting a daemon or enrollment.
 /// Returns owned JSON on success, NULL and an owned fixed error label on failure.
 /// Free either owned string with `tc_string_free`. Clears `*err` on success.
@@ -80,6 +91,26 @@ pub unsafe extern "C" fn tc_insights_call(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stateless_copy_includes_store_routing_words() {
+        let result = tc_insights_copy_json();
+        assert!(!result.is_null());
+        let copy: serde_json::Value =
+            serde_json::from_str(unsafe { CStr::from_ptr(result) }.to_str().unwrap()).unwrap();
+        assert_eq!(copy["insights_store_title"], "Insights store");
+        assert_eq!(
+            copy["insights_store_unavailable"],
+            "Insights store unavailable"
+        );
+        assert!(
+            copy["insights_store_missing_path"]
+                .as_str()
+                .unwrap()
+                .contains("absolute")
+        );
+        unsafe { tc_string_free(result) };
+    }
 
     fn failure(bytes: *const u8, len: usize, expected: &str) {
         let mut error = std::ptr::null_mut();
