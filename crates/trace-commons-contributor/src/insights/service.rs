@@ -118,6 +118,13 @@ pub fn ui_copy() -> std::collections::BTreeMap<String, String> {
         ("comparison_specification_usage_unavailable", "Tasks without observed attributed token counts"),
         ("comparison_specification_observed_tokens", "Observed attributed tokens (partial coverage)"),
         ("comparison_specification_error", "The comparison specification could not be loaded or evaluated. Review the selected evidence and try again."),
+        ("insights_store_title", "Insights store"),
+        ("insights_store_unavailable", "Insights store unavailable"),
+        ("insights_store_duplicate", "Choose one --insights-store directory and relaunch."),
+        ("insights_store_missing_path", "--insights-store requires an absolute directory path."),
+        ("insights_store_relative_path", "The Insights store path must be absolute."),
+        ("insights_store_path_missing", "The selected Insights store directory does not exist."),
+        ("insights_store_not_directory", "The selected Insights store path is not a directory."),
         ("comparison_specification_committed_reload_failed", "The specification was saved, but refreshed details could not be loaded. Refresh before continuing."),
         ("comparison_preview_notice", "Preview only. This specification has not been saved."),
         ("comparison_retrospective_notice", "Retrospective user specification based on existing evidence."),
@@ -1430,6 +1437,11 @@ mod tests {
         assert_eq!(value["type"], "copy");
         assert_eq!(value["copy"]["title"], "Insights");
         assert_eq!(value["copy"]["save"], "Re-read and save");
+        assert_eq!(value["copy"]["insights_store_title"], "Insights store");
+        assert_eq!(
+            value["copy"]["insights_store_not_directory"],
+            "The selected Insights store path is not a directory."
+        );
         assert!(
             value["copy"]["assessment_notice"]
                 .as_str()

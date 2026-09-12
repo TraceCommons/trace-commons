@@ -91,7 +91,7 @@
 #![allow(non_camel_case_types)]
 
 mod insights;
-pub use insights::tc_insights_call;
+pub use insights::{tc_insights_call, tc_insights_copy_json};
 mod mission_drafts;
 pub use mission_drafts::tc_mission_drafts_call;
 

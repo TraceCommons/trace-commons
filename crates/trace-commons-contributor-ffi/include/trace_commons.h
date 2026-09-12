@@ -1800,6 +1800,9 @@ char*       tc_call(tc_handle*, const char* method, const char* params_json);
  * Free result/error with tc_string_free. err may be NULL; otherwise writable
  * and cleared on success. Request buffers must remain valid until return. */
 char*       tc_insights_call(const uint8_t* request, size_t request_len, char** err);
+/* Stateless shared Insights UI vocabulary. Opens no store. Owned JSON string;
+ * free with tc_string_free. Returns NULL only after a caught panic. */
+char*       tc_insights_copy_json(void);
 
 /* Handle-free local mission draft inbox, available before enrollment.
  * Synchronous local IO; schedule off the UI thread. Request is borrowed UTF-8

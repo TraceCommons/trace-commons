@@ -5,6 +5,14 @@ import TCShellCore
 @testable import TraceCommonsApp
 
 final class InsightsServiceRouterTests: XCTestCase {
+    func testStatelessInsightsCopySuppliesStoreRoutingWording() throws {
+        let copy = try XCTUnwrap(TCInsights.copy())
+        XCTAssertEqual(copy["insights_store_title"], "Insights store")
+        XCTAssertEqual(copy["insights_store_unavailable"], "Insights store unavailable")
+        XCTAssertEqual(copy["insights_store_not_directory"],
+                       "The selected Insights store path is not a directory.")
+    }
+
     func testCustomStoreRoutesEveryInsightsOperationAndBalancesSourceScope() async throws {
         let record = RouterRecord()
         let router = InsightsServiceRouter(selection: .custom("/pilot/store"), nativeCall: { request in
