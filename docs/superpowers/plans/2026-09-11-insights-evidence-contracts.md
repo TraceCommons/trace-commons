@@ -12,6 +12,17 @@ references. Labels describe declarations, not verified serving identities.
 The caller must validate the source with its adapter before attaching the result,
 and compare the result's source format and digest when reading a saved cache.
 
+Version 2 observations from new Codex imports treat only official
+`turn_context.model` fields as declaration candidates. A Codex source with no
+turn contexts therefore has zero candidates rather than missing model metadata;
+its model answer remains unavailable. Session metadata and assistant messages
+do not declare a model under this version. Trajectory imports and previously
+saved version 1 observations keep their existing meaning. Reads and unrelated
+mutations do not reinterpret version 1 evidence; an explicit reimport writes
+version 2. Store version 6 is unchanged. Older clients that only validate nested
+model-observation version 1 may refuse a snapshot after that reimport, and no
+automatic downgrade is provided.
+
 `outcomes::inspect_git_commit(repository, object_id)` inspects an exact canonical
 lowercase 40- or 64-hex commit ID in an explicitly selected repository. It records
 only repository-path digest, object/tree/parent identifiers, inspection time,

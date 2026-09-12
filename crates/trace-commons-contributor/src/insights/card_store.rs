@@ -388,6 +388,53 @@ mod tests {
     }
 
     #[test]
+    fn codex_without_turn_context_keeps_observed_models_unavailable() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("codex.jsonl");
+        fs::write(
+            &path,
+            concat!(
+                "{\"type\":\"session_meta\",\"timestamp\":\"2026-09-11T00:00:00Z\",\"payload\":{\"id\":\"fixture\",\"model_provider\":\"openai\",\"model\":\"ignored\"}}\n",
+                "{\"type\":\"response_item\",\"timestamp\":\"2026-09-11T00:00:01Z\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"model\":\"ignored\",\"content\":[]}}\n"
+            ),
+        )
+        .unwrap();
+        let store = LocalInsightStore::open(&root.path().join("store")).unwrap();
+        let saved = store.import(SourceFormat::Codex, &path).unwrap();
+        let request = store
+            .resolve_card_request(
+                &[InsightQuestionId::ObservedModels],
+                std::slice::from_ref(&saved.id),
+                &[],
+            )
+            .unwrap();
+        assert_eq!(request.snapshots[0].model_eligible_records, 0);
+        assert_eq!(request.snapshots[0].model_observed_records, 0);
+        assert!(request.snapshots[0].models.is_empty());
+        let card = super::super::cards::project_first_party_question_cards(&request)
+            .unwrap()
+            .cards
+            .remove(0);
+        assert_eq!(
+            card.state,
+            trace_commons_protocol::insights_cards::CardState::Unavailable
+        );
+        assert!(
+            card.rows.is_empty(),
+            "zero candidates are not a zero-model row"
+        );
+        let model_coverage = card
+            .coverage
+            .iter()
+            .find(|item| {
+                item.unit == trace_commons_protocol::insights_cards::CoverageUnit::ModelRecords
+            })
+            .unwrap();
+        assert_eq!(model_coverage.observed, 0);
+        assert_eq!(model_coverage.eligible, 0);
+    }
+
+    #[test]
     fn concurrent_episode_replacement_never_mixes_members_and_snapshot_facts() {
         use std::sync::{Arc, Barrier};
 

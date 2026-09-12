@@ -12,6 +12,8 @@ use super::SourceFormat;
 
 pub const MAX_DECLARED_MODELS: usize = 32;
 pub const MAX_DECLARATION_REFERENCES: usize = 256;
+const LEGACY_MODEL_OBSERVATIONS_SCHEMA_VERSION: u32 = 1;
+const CODEX_MODEL_OBSERVATIONS_SCHEMA_VERSION: u32 = 2;
 const MAX_MODEL_LABEL_BYTES: usize = 96;
 const MAX_SOURCE_BYTES: usize = 16 * 1024 * 1024;
 
@@ -95,7 +97,11 @@ impl ModelObservations {
             .valid_declarations
             .checked_add(self.missing_declarations)
             .and_then(|n| n.checked_add(self.invalid_declarations));
-        if self.schema_version != 1
+        let legacy_schema = self.schema_version == LEGACY_MODEL_OBSERVATIONS_SCHEMA_VERSION;
+        let codex_turn_context_schema = self.schema_version
+            == CODEX_MODEL_OBSERVATIONS_SCHEMA_VERSION
+            && self.source_format == SourceFormat::Codex;
+        if (!legacy_schema && !codex_turn_context_schema)
             || self.source_digest.len() != 64
             || !self
                 .source_digest
@@ -103,7 +109,7 @@ impl ModelObservations {
                 .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
             || self.record_count == 0
             || self.record_count > MAX_SOURCE_BYTES as u64
-            || self.candidate_records == 0
+            || (self.candidate_records == 0 && !codex_turn_context_schema)
             || self.candidate_records > self.record_count
             || valid_plus_missing != Some(self.candidate_records)
             || (self.declarations.len() as u64).checked_add(self.omitted_declarations)
@@ -159,6 +165,9 @@ impl ModelObservations {
                 }
             };
             let kind_matches = match self.source_format {
+                SourceFormat::Codex if codex_turn_context_schema => {
+                    declaration.kind == DeclarationKind::CodexTurnContext
+                }
                 SourceFormat::Codex => declaration.kind != DeclarationKind::TrajectoryMetadata,
                 SourceFormat::Trajectory => {
                     declaration.kind == DeclarationKind::TrajectoryMetadata
@@ -185,7 +194,10 @@ pub fn extract_model_observations(source: SourceFormat, bytes: &[u8]) -> Result<
     let text = std::str::from_utf8(bytes).map_err(|_| invalid())?;
     let is_array = source == SourceFormat::Trajectory && text.trim_start().starts_with('[');
     let mut observation = ModelObservations {
-        schema_version: 1,
+        schema_version: match source {
+            SourceFormat::Codex => CODEX_MODEL_OBSERVATIONS_SCHEMA_VERSION,
+            SourceFormat::Trajectory => LEGACY_MODEL_OBSERVATIONS_SCHEMA_VERSION,
+        },
         scope: ModelObservationScope::DeclaredMetadataOnly,
         source_format: source,
         source_digest: format!("{:x}", Sha256::digest(bytes)),
@@ -271,15 +283,9 @@ fn observe_record(
             match kind {
                 "session_meta" => {
                     *session_meta += 1;
-                    Some((DeclarationKind::CodexSessionMetadata, payload.get("model")))
+                    None
                 }
                 "turn_context" => Some((DeclarationKind::CodexTurnContext, payload.get("model"))),
-                "response_item"
-                    if payload.get("type").and_then(Value::as_str) == Some("message")
-                        && payload.get("role").and_then(Value::as_str) == Some("assistant") =>
-                {
-                    Some((DeclarationKind::CodexAssistantMessage, payload.get("model")))
-                }
                 _ => None,
             }
         }
@@ -373,23 +379,24 @@ mod tests {
             RecordCoordinates::JsonlPhysicalLinesOneBased
         );
         assert_eq!(result.record_count, 10);
-        assert_eq!(result.candidate_records, 6);
-        assert_eq!(result.valid_declarations, 3);
-        assert_eq!(result.missing_declarations, 2);
+        assert_eq!(result.schema_version, 2);
+        assert_eq!(result.candidate_records, 3);
+        assert_eq!(result.valid_declarations, 1);
+        assert_eq!(result.missing_declarations, 1);
         assert_eq!(result.invalid_declarations, 1);
-        assert_eq!(result.declared_models, ["model-a", "model-b", "model-c"]);
-        assert!(result.mixed_declared_models);
+        assert_eq!(result.declared_models, ["model-b"]);
+        assert!(!result.mixed_declared_models);
         assert_eq!(
             result
                 .declarations
                 .iter()
                 .map(|r| r.record_index)
                 .collect::<Vec<_>>(),
-            [2, 3, 4]
+            [3]
         );
         assert_eq!(
-            result.declarations[2].kind,
-            DeclarationKind::CodexAssistantMessage
+            result.declarations[0].kind,
+            DeclarationKind::CodexTurnContext
         );
         assert_eq!(
             result.source_digest,
@@ -413,7 +420,7 @@ mod tests {
         assert_eq!(result.declared_models, ["model-a"]);
         assert!(!result.mixed_declared_models);
         assert_eq!(result.valid_declarations, 2);
-        assert_eq!(result.missing_declarations, 2);
+        assert_eq!(result.missing_declarations, 0);
         assert_eq!(result.declarations.len(), 2);
         assert_eq!(result.declarations[0].record_index, 2);
         assert_eq!(result.declarations[1].record_index, 3);
@@ -424,6 +431,27 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn codex_without_turn_contexts_is_known_absence_not_missing_metadata() {
+        let result = extract_model_observations(
+            SourceFormat::Codex,
+            &codex(vec![
+                meta(json!("ignored-session-model")),
+                json!({"type":"response_item","payload":{"type":"message","role":"assistant","model":"ignored-assistant-model"}}),
+                json!({"type":"event_msg","payload":{"type":"task_complete"}}),
+            ]),
+        )
+        .unwrap();
+        assert_eq!(result.schema_version, 2);
+        assert_eq!(result.candidate_records, 0);
+        assert_eq!(result.valid_declarations, 0);
+        assert_eq!(result.missing_declarations, 0);
+        assert_eq!(result.invalid_declarations, 0);
+        assert!(result.declared_models.is_empty());
+        assert!(result.declarations.is_empty());
+        result.validate().unwrap();
     }
 
     #[test]
@@ -478,7 +506,7 @@ mod tests {
         }
         let result = extract_model_observations(SourceFormat::Codex, &codex(rows)).unwrap();
         assert_eq!(result.invalid_declarations, 7);
-        assert_eq!(result.missing_declarations, 1);
+        assert_eq!(result.missing_declarations, 0);
         assert_eq!(result.valid_declarations, 0);
         assert!(result.declared_models.is_empty());
         assert!(result.declarations.is_empty());
@@ -497,8 +525,8 @@ mod tests {
         let result = extract_model_observations(SourceFormat::Codex, &codex(rows)).unwrap();
         assert_eq!(result.declared_models.len(), MAX_DECLARED_MODELS);
         assert_eq!(result.declarations.len(), MAX_DECLARATION_REFERENCES);
-        assert_eq!(result.valid_declarations, 340);
-        assert_eq!(result.omitted_declarations, 84);
+        assert_eq!(result.valid_declarations, 339);
+        assert_eq!(result.omitted_declarations, 83);
         assert!(result.model_labels_omitted && result.mixed_declared_models);
         for label in &result.declared_models {
             assert!(result.declarations.iter().any(|r| &r.model == label));
@@ -516,11 +544,15 @@ mod tests {
     fn cache_validation_refuses_inconsistent_digest_counts_labels_or_coordinates() {
         let good = extract_model_observations(
             SourceFormat::Codex,
-            &codex(vec![meta(json!("a")), context(json!("b"))]),
+            &codex(vec![
+                meta(json!("ignored")),
+                context(json!("a")),
+                context(json!("b")),
+            ]),
         )
         .unwrap();
         let mutations: Vec<Box<dyn Fn(&mut ModelObservations)>> = vec![
-            Box::new(|r| r.schema_version = 2),
+            Box::new(|r| r.schema_version = 3),
             Box::new(|r| r.source_digest = "private/path".into()),
             Box::new(|r| r.candidate_records += 1),
             Box::new(|r| r.invalid_declarations = u64::MAX),
@@ -530,6 +562,7 @@ mod tests {
             Box::new(|r| r.declarations[1].record_index = 1),
             Box::new(|r| r.declarations[0].record_index = 0),
             Box::new(|r| r.declarations[0].kind = DeclarationKind::TrajectoryMetadata),
+            Box::new(|r| r.declarations[0].kind = DeclarationKind::CodexSessionMetadata),
             Box::new(|r| r.coordinates = RecordCoordinates::TrajectoryArrayIndexesZeroBased),
             Box::new(|r| r.model_labels_omitted = true),
         ];
@@ -538,5 +571,24 @@ mod tests {
             mutate(&mut invalid);
             assert!(invalid.validate().is_err());
         }
+
+        let mut legacy = good;
+        legacy.schema_version = 1;
+        legacy.declarations[0].kind = DeclarationKind::CodexSessionMetadata;
+        legacy.declarations[1].kind = DeclarationKind::CodexAssistantMessage;
+        legacy.validate().unwrap();
+
+        let mut trajectory = extract_model_observations(
+            SourceFormat::Trajectory,
+            &serde_json::to_vec(&vec![json!({
+                "role": "meta",
+                "source": "fixture",
+                "model": "model-a"
+            })])
+            .unwrap(),
+        )
+        .unwrap();
+        trajectory.schema_version = 2;
+        assert!(trajectory.validate().is_err());
     }
 }
