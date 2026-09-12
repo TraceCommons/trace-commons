@@ -15,6 +15,8 @@ const BASIS_POINTS: i128 = 10_000;
 const MAX_TASKS: usize = 256;
 const MIN_REPLICATES: u32 = 1_000;
 const MAX_REPLICATES: u32 = 100_000;
+const EXACT_GRID: u32 = 1_000_000;
+const BONFERRONI_ONE_SIDED_DENOMINATOR: u32 = 240;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
@@ -365,6 +367,174 @@ fn wilson_component_interval(successes: usize, total: usize) -> Result<(i64, i64
     Ok((lower as i64, upper as i64))
 }
 
+/// Candidate exact component interval on a fixed millionth grid.
+///
+/// Each of the six cohort-by-outcome binomial components receives two tails
+/// of probability 1/240. The twelve-tail union bound therefore limits family
+/// noncoverage to 5%, without assuming independence between outcome counts.
+/// This remains test-only until the frozen qualification artifact is run.
+fn exact_component_interval(successes: usize, total: usize) -> Result<(u32, u32)> {
+    if total == 0 || total > MAX_TASKS || successes > total {
+        return Err(invalid());
+    }
+    let lower = if successes == 0 {
+        0
+    } else {
+        last_grid_point_with_small_tail(successes, total, Tail::AtLeast)?
+    };
+    let upper = if successes == total {
+        EXACT_GRID
+    } else {
+        first_grid_point_with_small_tail(successes, total, Tail::AtMost)?
+    };
+    if lower > upper {
+        return Err(invalid());
+    }
+    Ok((lower, upper))
+}
+
+#[derive(Clone, Copy)]
+enum Tail {
+    AtLeast,
+    AtMost,
+}
+
+fn last_grid_point_with_small_tail(successes: usize, total: usize, tail: Tail) -> Result<u32> {
+    let mut low = 0u32;
+    let mut high = EXACT_GRID;
+    while low < high {
+        let middle = low + (high - low).div_ceil(2);
+        if tail_is_at_most_one_over_240(successes, total, middle, tail)? {
+            low = middle;
+        } else {
+            high = middle - 1;
+        }
+    }
+    Ok(low)
+}
+
+fn first_grid_point_with_small_tail(successes: usize, total: usize, tail: Tail) -> Result<u32> {
+    let mut low = 0u32;
+    let mut high = EXACT_GRID;
+    while low < high {
+        let middle = low + (high - low) / 2;
+        if tail_is_at_most_one_over_240(successes, total, middle, tail)? {
+            high = middle;
+        } else {
+            low = middle + 1;
+        }
+    }
+    Ok(low)
+}
+
+fn tail_is_at_most_one_over_240(
+    successes: usize,
+    total: usize,
+    probability_millionths: u32,
+    tail: Tail,
+) -> Result<bool> {
+    if successes > total || total > MAX_TASKS || probability_millionths > EXACT_GRID {
+        return Err(invalid());
+    }
+    let mut probabilities = vec![BigNat::zero(); total + 1];
+    probabilities[0] = BigNat::one();
+    let failure = EXACT_GRID - probability_millionths;
+    for trials in 0..total {
+        let mut next = vec![BigNat::zero(); total + 1];
+        for count in 0..=trials {
+            next[count].add_assign(&probabilities[count].mul_small(failure));
+            next[count + 1].add_assign(&probabilities[count].mul_small(probability_millionths));
+        }
+        probabilities = next;
+    }
+    let range: Box<dyn Iterator<Item = usize>> = match tail {
+        Tail::AtLeast => Box::new(successes..=total),
+        Tail::AtMost => Box::new(0..=successes),
+    };
+    let mut numerator = BigNat::zero();
+    for count in range {
+        numerator.add_assign(&probabilities[count]);
+    }
+    let mut denominator = BigNat::one();
+    for _ in 0..total {
+        denominator = denominator.mul_small(EXACT_GRID);
+    }
+    Ok(numerator
+        .mul_small(BONFERRONI_ONE_SIDED_DENOMINATOR)
+        .cmp(&denominator)
+        .is_le())
+}
+
+/// Minimal unsigned integer needed by exact binomial-tail comparisons.
+/// Limbs are normalized little-endian base 2^32; operations never truncate.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct BigNat(Vec<u32>);
+
+impl BigNat {
+    fn zero() -> Self {
+        Self(Vec::new())
+    }
+
+    fn one() -> Self {
+        Self(vec![1])
+    }
+
+    fn mul_small(&self, factor: u32) -> Self {
+        if factor == 0 || self.0.is_empty() {
+            return Self::zero();
+        }
+        let mut result = Vec::with_capacity(self.0.len() + 1);
+        let mut carry = 0u64;
+        for limb in &self.0 {
+            let value = u64::from(*limb) * u64::from(factor) + carry;
+            result.push(value as u32);
+            carry = value >> 32;
+        }
+        if carry != 0 {
+            result.push(carry as u32);
+        }
+        Self(result)
+    }
+
+    fn add_assign(&mut self, other: &Self) {
+        let length = self.0.len().max(other.0.len());
+        self.0.resize(length, 0);
+        let mut carry = 0u64;
+        for index in 0..length {
+            let value = u64::from(self.0[index])
+                + u64::from(other.0.get(index).copied().unwrap_or(0))
+                + carry;
+            self.0[index] = value as u32;
+            carry = value >> 32;
+        }
+        if carry != 0 {
+            self.0.push(carry as u32);
+        }
+        self.normalize();
+    }
+
+    fn normalize(&mut self) {
+        while self.0.last() == Some(&0) {
+            self.0.pop();
+        }
+    }
+}
+
+impl Ord for BigNat {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.0
+            .len()
+            .cmp(&other.0.len())
+            .then_with(|| self.0.iter().rev().cmp(other.0.iter().rev()))
+    }
+}
+
+impl PartialOrd for BigNat {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 fn common_denominator(first: usize, second: usize) -> Result<u64> {
     if first == 0 || second == 0 {
         return Ok(1);
@@ -441,7 +611,7 @@ fn valid_label(value: &str) -> bool {
 
 fn decode_digest(value: &str) -> Result<[u8; 32]> {
     let mut decoded = [0u8; 32];
-    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+    for (index, pair) in value.as_bytes().as_chunks::<2>().0.iter().enumerate() {
         decoded[index] = u8::from_str_radix(std::str::from_utf8(pair)?, 16)?;
     }
     Ok(decoded)
@@ -857,6 +1027,111 @@ mod tests {
         assert!(
             false_promotion_interval.1 <= 0.06,
             "promoted={promoted}/{experiments}, interval={false_promotion_interval:?}"
+        );
+    }
+
+    #[test]
+    fn exact_component_endpoints_round_outward() {
+        assert!(exact_component_interval(0, 0).is_err());
+        assert_eq!(exact_component_interval(0, 1).unwrap(), (0, 995_834));
+        assert_eq!(exact_component_interval(1, 1).unwrap(), (4_166, 1_000_000));
+        let low = exact_component_interval(0, 255).unwrap();
+        let high = exact_component_interval(1, 1).unwrap();
+        assert_eq!(low.0, 0);
+        assert!(low.1 < EXACT_GRID);
+        assert_eq!(high.1, EXACT_GRID);
+        assert!(exact_component_interval(257, 257).is_err());
+    }
+
+    #[test]
+    fn exact_component_supports_maximum_interior_cell() {
+        let interval = exact_component_interval(128, 256).unwrap();
+        assert!(interval.0 < 500_000);
+        assert!(interval.1 > 500_000);
+        assert!(interval.0 < interval.1);
+    }
+
+    #[test]
+    fn exact_tail_big_nat_matches_small_u128_oracle() {
+        for total in 1..=3usize {
+            for successes in 0..=total {
+                for probability in [0u32, 1, 4_166, 500_000, 995_834, EXACT_GRID] {
+                    for tail in [Tail::AtLeast, Tail::AtMost] {
+                        let exact =
+                            tail_is_at_most_one_over_240(successes, total, probability, tail)
+                                .unwrap();
+                        let numerator = (0..=total)
+                            .filter(|count| match tail {
+                                Tail::AtLeast => *count >= successes,
+                                Tail::AtMost => *count <= successes,
+                            })
+                            .map(|count| {
+                                binomial_coefficient(total, count)
+                                    * u128::from(probability).pow(count as u32)
+                                    * u128::from(EXACT_GRID - probability)
+                                        .pow((total - count) as u32)
+                            })
+                            .sum::<u128>();
+                        let denominator = u128::from(EXACT_GRID).pow(total as u32);
+                        assert_eq!(exact, numerator * 240 <= denominator);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn exhaustive_small_n_component_coverage_meets_exact_allocation() {
+        // The independent u128 oracle is intentionally bounded at n=3:
+        // 1_000_000^4 does not fit u128. Production arithmetic is exercised
+        // at n=255 by exact_component_endpoints_round_outward.
+        for total in 1..=3usize {
+            let intervals = (0..=total)
+                .map(|count| exact_component_interval(count, total).unwrap())
+                .collect::<Vec<_>>();
+            for probability in [1u32, 10_000, 50_000, 200_000, 500_000, 950_000, 999_999] {
+                let covered = (0..=total)
+                    .filter(|count| {
+                        intervals[*count].0 <= probability && probability <= intervals[*count].1
+                    })
+                    .map(|count| {
+                        binomial_coefficient(total, count)
+                            * u128::from(probability).pow(count as u32)
+                            * u128::from(EXACT_GRID - probability).pow((total - count) as u32)
+                    })
+                    .sum::<u128>();
+                let denominator = u128::from(EXACT_GRID).pow(total as u32);
+                assert!(covered * 120 >= denominator * 119);
+            }
+        }
+    }
+
+    fn binomial_coefficient(total: usize, selected: usize) -> u128 {
+        let selected = selected.min(total - selected);
+        (1..=selected).fold(1u128, |value, index| {
+            value * (total - selected + index) as u128 / index as u128
+        })
+    }
+
+    #[test]
+    fn exact_candidate_artifact_freezes_method_and_qualification_grid() {
+        let artifact: serde_json::Value = serde_json::from_str(include_str!(
+            "../../fixtures/insights/comparison-estimator/exact-component-candidate-v1.json"
+        ))
+        .unwrap();
+        assert_eq!(artifact["qualified_for_saved_specifications"], false);
+        assert_eq!(artifact["interval_grid_denominator"], EXACT_GRID);
+        assert_eq!(artifact["one_sided_tail_probability"]["denominator"], 240);
+        assert_eq!(artifact["experiments_per_setting"], 10_000);
+        assert_eq!(artifact["maximum_total_assessed_tasks"], MAX_TASKS);
+        assert_eq!(artifact["cohort_size_pairs"].as_array().unwrap().len(), 7);
+        assert_eq!(
+            artifact["null_probability_bps"].as_array().unwrap().len(),
+            8
+        );
+        assert_eq!(
+            artifact["admission_rule"]["all_frozen_settings_must_complete"],
+            true
         );
     }
 }
