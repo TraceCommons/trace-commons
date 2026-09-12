@@ -151,8 +151,10 @@ reasons for unavailable totals. Model labels are source declarations, not verifi
 attribution. No price estimates, per-model rankings, or time-saved claims are made.
 
 Native shells can use the same local service through `tc_insights_call` without
-starting a daemon or enrolling. This is a bridge foundation; desktop Insights
-screens are still follow-on work.
+starting a daemon or enrolling. Desktop Insights implementations use this bridge
+on macOS and Windows, and the same service directly on GTK. See the
+[desktop story and qualification record](../../docs/superpowers/plans/2026-09-11-insights-desktop-stories.md)
+for launch behavior and outstanding platform release checks.
 
 ## Local mission draft review
 
