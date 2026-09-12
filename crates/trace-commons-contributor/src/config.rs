@@ -996,21 +996,31 @@ fn durable_rename(source: &Path, destination: &Path) -> std::io::Result<()> {
         .encode_wide()
         .chain(Some(0))
         .collect();
-    // SAFETY: both paths are owned, NUL-terminated UTF-16 buffers, alive
-    // throughout this synchronous call. Write-through completes publication
-    // before an old OS credential may be retired.
-    let moved = unsafe {
-        MoveFileExW(
-            source.as_ptr(),
-            destination.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    };
-    if moved == 0 {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(())
+    // Windows readers and file scanners can briefly deny replacement. Retry
+    // only lock/access errors, preserving the old file and the same synced
+    // temporary file throughout. Permanent failures remain errors.
+    for attempt in 0..=10 {
+        // SAFETY: both paths are owned, NUL-terminated UTF-16 buffers, alive
+        // throughout this synchronous call. Write-through completes publication
+        // before an old OS credential may be retired.
+        let moved = unsafe {
+            MoveFileExW(
+                source.as_ptr(),
+                destination.as_ptr(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+        };
+        if moved != 0 {
+            return Ok(());
+        }
+        let error = std::io::Error::last_os_error();
+        // ERROR_ACCESS_DENIED, ERROR_SHARING_VIOLATION, ERROR_LOCK_VIOLATION.
+        if attempt == 10 || !matches!(error.raw_os_error(), Some(5 | 32 | 33)) {
+            return Err(error);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
     }
+    unreachable!("the last attempt returns")
 }
 
 #[cfg(test)]
@@ -1018,6 +1028,49 @@ mod tests {
     use super::*;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
+
+    #[cfg(windows)]
+    #[test]
+    fn atomic_config_write_waits_for_a_windows_reader_to_release_the_file() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
+
+        let (dir, store) = store();
+        let path = store.daemon_path("locked-config.json");
+        std::fs::write(&path, b"original").unwrap();
+        let reader = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .open(&path)
+            .unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            drop(reader);
+        });
+        write_atomic_0600(dir.path(), &path, b"replacement").unwrap();
+        release.join().unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"replacement");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn atomic_config_write_preserves_old_bytes_when_a_windows_reader_stays_open() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
+
+        let (dir, store) = store();
+        let path = store.daemon_path("locked-config.json");
+        std::fs::write(&path, b"original").unwrap();
+        let _reader = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .open(&path)
+            .unwrap();
+        assert!(write_atomic_0600(dir.path(), &path, b"replacement").is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"original");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
 
     fn store() -> (tempfile::TempDir, ConfigStore) {
         let dir = tempfile::tempdir().unwrap();
