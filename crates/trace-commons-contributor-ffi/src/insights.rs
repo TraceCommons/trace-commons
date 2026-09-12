@@ -91,6 +91,7 @@ pub unsafe extern "C" fn tc_insights_call(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use trace_commons_contributor::insights::service::LocalInsightsResponse;
 
     #[test]
     fn stateless_copy_includes_store_routing_words() {
@@ -110,6 +111,75 @@ mod tests {
                 .contains("absolute")
         );
         unsafe { tc_string_free(result) };
+    }
+
+    #[test]
+    fn qualified_schema_two_result_crosses_the_ffi_dependency_boundary() {
+        let response: LocalInsightsResponse = serde_json::from_slice(include_bytes!(
+            "../../trace-commons-contributor/fixtures/insights/comparison-estimator/schema2-qualified/preview-response.json"
+        ))
+        .unwrap();
+        let LocalInsightsResponse::ComparisonPreviewSpec {
+            specification,
+            result,
+        } = response
+        else {
+            panic!("fixture must be a comparison preview response")
+        };
+        specification.validate().unwrap();
+        result.validate_for_specification(&specification).unwrap();
+        assert_eq!(result.schema_version, 2);
+        assert!(result.exact_estimation.is_some());
+    }
+
+    #[test]
+    fn qualified_saved_spec_evaluates_through_tc_insights_call() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = temp.path().join("insights");
+        let saved = json_call(
+            &store,
+            serde_json::json!({
+                "type":"comparison_save_spec",
+                "input":{
+                    "evidence_cutoff":"2026-09-11T12:00:00Z",
+                    "cohort_labels":["model-a","model-b"],
+                    "date_start":"2026-09-01", "date_end":"2026-09-10",
+                    "stratum":{
+                        "project_id":"00000000-0000-4000-8000-000000000001",
+                        "language":"rust", "configuration_fingerprint":"1".repeat(64)
+                    }
+                }
+            }),
+        )
+        .unwrap();
+        let old_id = saved["specification"]["id"].as_str().unwrap();
+        let fixture: serde_json::Value = serde_json::from_slice(include_bytes!(
+            "../../trace-commons-contributor/fixtures/insights/comparison-estimator/schema2-qualified/preview-response.json"
+        ))
+        .unwrap();
+        let qualified = fixture["specification"].clone();
+        let qualified_id = qualified["id"].as_str().unwrap().to_owned();
+        let path = store.join("index.json");
+        let mut index: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        index["comparison_specifications"]
+            .as_object_mut()
+            .unwrap()
+            .remove(old_id);
+        index["comparison_specifications"][&qualified_id] = qualified;
+        std::fs::write(&path, serde_json::to_vec(&index).unwrap()).unwrap();
+
+        let response = json_call(
+            &store,
+            serde_json::json!({"type":"comparison_evaluate","id":qualified_id}),
+        )
+        .unwrap();
+        assert_eq!(response["type"], "comparison_result");
+        assert_eq!(response["result"]["schema_version"], 2);
+        assert_eq!(
+            response["result"]["exact_estimation"]["evaluation"]["status"],
+            "suppressed_below_minimum_cohort_support"
+        );
     }
 
     fn failure(bytes: *const u8, len: usize, expected: &str) {

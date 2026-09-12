@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::path::PathBuf;
 
 use anyhow::Result;
@@ -778,7 +779,7 @@ fn render_comparison_result(
     }
     println!("{}", copy["comparison_denominator_notice"]);
     if let Some(estimation) = &result.exact_estimation {
-        render_exact_estimation(result, estimation, copy)?;
+        print!("{}", exact_estimation_text(result, estimation, copy)?);
     }
     for task_id in &result.included_task_ids {
         println!("Included task: {task_id}");
@@ -804,34 +805,37 @@ fn render_comparison_result(
     Ok(())
 }
 
-fn render_exact_estimation(
+fn exact_estimation_text(
     result: &DescriptiveComparisonResultV1,
     estimation: &trace_commons_contributor::insights::comparison_specs::QualifiedExactEstimationV1,
     copy: &std::collections::BTreeMap<String, String>,
-) -> Result<()> {
+) -> Result<String> {
+    let mut rendered = String::new();
     let [first_label, second_label] = &estimation.cohort_labels;
-    println!(
+    writeln!(
+        rendered,
         "{second_label} {} {first_label}",
         copy["comparison_exact_minus"]
-    );
-    println!("{}", copy["comparison_exact_orientation"]);
+    )?;
+    writeln!(rendered, "{}", copy["comparison_exact_orientation"])?;
     for ((label, counts), cohort) in estimation
         .cohort_labels
         .iter()
         .zip(&estimation.assessed_counts)
         .zip(&result.cohorts)
     {
-        println!(
+        writeln!(
+            rendered,
             "{label}: {}: {} / {}: {}",
             copy["comparison_specification_assessed"],
             counts.total,
             copy["comparison_specification_included"],
             cohort.included_tasks
-        );
+        )?;
     }
     match &estimation.evaluation {
         ExactCandidateEvaluation::SuppressedBelowMinimumCohortSupport => {
-            println!("{}", copy["comparison_exact_support_unavailable"]);
+            writeln!(rendered, "{}", copy["comparison_exact_support_unavailable"])?;
         }
         ExactCandidateEvaluation::Supported { contrasts, .. } => {
             let names = ["Accepted", "Partial", "Rejected"];
@@ -840,28 +844,31 @@ fn render_exact_estimation(
                 let second = &estimation.assessed_counts[1];
                 let first_count = [first.accepted, first.partial, first.rejected][index];
                 let second_count = [second.accepted, second.partial, second.rejected][index];
-                println!(
+                writeln!(
+                    rendered,
                     "{name}: {first_count}/{} ({:.2}%) {} {second_count}/{} ({:.2}%)",
                     first.total,
                     percent(first_count, first.total),
                     copy["comparison_exact_versus"],
                     second.total,
                     percent(second_count, second.total)
-                );
+                )?;
                 let observed =
                     percent(second_count, second.total) - percent(first_count, first.total);
-                println!(
+                writeln!(
+                    rendered,
                     "  {}: {observed:+.4} {}",
                     copy["comparison_exact_observed_difference"],
                     copy["comparison_exact_percentage_points"]
-                );
-                println!(
+                )?;
+                writeln!(
+                    rendered,
                     "  {}: [{:+.4}, {:+.4}] {}",
                     copy["comparison_exact_interval"],
                     contrast.lower_millionths as f64 / 10_000.0,
                     contrast.upper_millionths as f64 / 10_000.0,
                     copy["comparison_exact_percentage_points"]
-                );
+                )?;
                 let key = match contrast.decision {
                     ExactCandidateDecision::InsufficientPrecision => {
                         "comparison_exact_insufficient_precision"
@@ -872,13 +879,17 @@ fn render_exact_estimation(
                     ExactCandidateDecision::IncludesZero => "comparison_exact_includes_zero",
                     ExactCandidateDecision::ExcludesZero => "comparison_exact_excludes_zero",
                 };
-                println!("  {}", copy[key]);
+                writeln!(rendered, "  {}", copy[key])?;
             }
-            println!("{}", copy["comparison_exact_positive_direction"]);
+            writeln!(rendered, "{}", copy["comparison_exact_positive_direction"])?;
         }
     }
-    println!("Exact output digest: {}", estimation.output_digest);
-    Ok(())
+    writeln!(
+        rendered,
+        "Exact output digest: {}",
+        estimation.output_digest
+    )?;
+    Ok(rendered)
 }
 
 fn percent(count: u64, total: u64) -> f64 {
@@ -1232,4 +1243,29 @@ fn render(insight: &LocalInsight, json: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn qualified_exact_result_renders_conditional_orientation_and_statuses() {
+        let response: LocalInsightsResponse = serde_json::from_slice(include_bytes!(
+            "../../../fixtures/insights/comparison-estimator/schema2-qualified/preview-response.json"
+        ))
+        .unwrap();
+        let LocalInsightsResponse::ComparisonPreviewSpec { result, .. } = response else {
+            panic!("fixture must be a comparison preview")
+        };
+        let copy = trace_commons_contributor::insights::service::ui_copy();
+        let text = exact_estimation_text(&result, result.exact_estimation.as_ref().unwrap(), &copy)
+            .unwrap();
+        assert!(text.contains("model-b minus model-a"));
+        assert!(text.contains("Observed difference: +0.0000 percentage points"));
+        assert!(text.contains("Simultaneous interval:"));
+        assert!(text.contains("Interval too wide for a directional conclusion."));
+        assert!(text.contains("Accepted: 1/2"));
+        assert!(!text.contains("better model"));
+    }
 }
