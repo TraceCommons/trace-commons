@@ -57,6 +57,43 @@
             <TextBlock Text="{Binding EvidenceNotice}" TextWrapping="Wrap" />
             <TextBlock Text="{Binding [boundary_notice]}" TextWrapping="Wrap" />
             <TextBlock x:Name="SnapshotDetail" Text="{Binding Details}" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
+            <Expander Header="{Binding [model_title]}" HorizontalAlignment="Stretch">
+                <StackPanel Spacing="8">
+                    <TextBlock Text="{Binding ModelDetails}" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
+                    <Expander Header="{Binding [model_references]}">
+                        <ItemsControl ItemsSource="{Binding ModelReferences}">
+                            <ItemsControl.ItemTemplate><DataTemplate>
+                                <TextBlock Text="{Binding Label}" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
+                            </DataTemplate></ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                    </Expander>
+                </StackPanel>
+            </Expander>
+            <Expander Header="{Binding [linked_evidence_title]}" HorizontalAlignment="Stretch">
+                <StackPanel Spacing="10">
+                    <TextBlock Text="{Binding [link_notice]}" TextWrapping="Wrap" />
+                    <TextBlock Text="{Binding EvidenceSelectionStatus}" TextWrapping="Wrap" />
+                    <TextBlock Text="{Binding OutcomeEvidenceStatus}" TextWrapping="Wrap" />
+                    <TextBlock Text="{Binding [link_git_notice]}" TextWrapping="Wrap" />
+                    <TextBox Header="{Binding [link_commit]}" Text="{Binding CommitId, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" IsEnabled="{Binding HasSavedSelection}" />
+                    <Button Content="{Binding [link_git]}" Click="OnLinkGit" IsEnabled="{Binding HasSavedSelection}" />
+                    <TextBlock Text="{Binding [link_test_notice]}" TextWrapping="Wrap" />
+                    <Expander Header="{Binding [choose_test_report]}">
+                        <TextBlock Text="{Binding [test_report_format]}" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
+                    </Expander>
+                    <Button Content="{Binding [link_test_report]}" Click="OnLinkTestReport" IsEnabled="{Binding HasSavedSelection}" />
+                    <ItemsControl ItemsSource="{Binding OutcomeEvidence}" IsEnabled="{Binding HasSavedSelection}">
+                        <ItemsControl.ItemTemplate><DataTemplate>
+                            <Expander Header="{Binding Label}" HorizontalAlignment="Stretch">
+                                <StackPanel Spacing="8">
+                                    <TextBlock Text="{Binding Details}" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
+                                    <Button Content="{Binding UnlinkLabel}" Tag="{Binding}" Click="OnUnlinkEvidence" />
+                                </StackPanel>
+                            </Expander>
+                        </DataTemplate></ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </StackPanel>
+            </Expander>
             <TextBlock Text="{Binding AssessmentNotice}" TextWrapping="Wrap" />
             <StackPanel Orientation="Horizontal" Spacing="12">
                 <ComboBox x:Name="Category" IsEnabled="{Binding HasSavedSelection}" Header="{Binding [category]}" SelectedIndex="{Binding CategoryIndex, Mode=TwoWay}">

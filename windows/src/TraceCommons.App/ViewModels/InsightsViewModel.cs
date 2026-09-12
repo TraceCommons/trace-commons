@@ -12,6 +12,9 @@ using TraceCommons.Interop;
 namespace TraceCommons.App.ViewModels;
 
 public sealed record SavedInsight(string Id, string Label);
+public sealed record EvidenceTarget(string SnapshotId, long Version);
+public sealed record OutcomeEvidenceRow(string Id, string SnapshotId, string Label, string Details, string UnlinkLabel);
+public sealed record ModelReferenceRow(string Label);
 public sealed record SummaryEvidenceLink(string Id, string Label);
 public sealed record SummaryRow(string Label, string Details, IReadOnlyList<SummaryEvidenceLink> Evidence);
 
@@ -21,6 +24,7 @@ public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
     private readonly ILocalInsights _service;
     private CancellationTokenSource? _pending;
     private long _generation;
+    private long _selectionVersion;
     private bool _closed;
     private Task _active = Task.CompletedTask;
     private readonly Dictionary<string, string> _copy = new();
@@ -28,6 +32,12 @@ public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
     public event PropertyChangedEventHandler? PropertyChanged;
     public ObservableCollection<SavedInsight> Saved { get; } = new();
     public string Details { get; private set; } = "";
+    public string ModelDetails { get; private set; } = "";
+    public string CommitId { get; set; } = "";
+    public ObservableCollection<ModelReferenceRow> ModelReferences { get; } = new();
+    public ObservableCollection<OutcomeEvidenceRow> OutcomeEvidence { get; } = new();
+    public string EvidenceSelectionStatus => CurrentId == null ? this["link_saved_required"] : "";
+    public string OutcomeEvidenceStatus => OutcomeEvidence.Count == 0 ? this["link_empty"] : "";
     public SavedInsightsSummary? Summary { get; private set; }
     public string SummaryDetails { get; private set; } = "";
     public string SummaryStatus => Summary == null ? this[Busy ? "working" : "summary_unavailable"]
@@ -59,6 +69,7 @@ public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
     private void Changed() => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(null));
     public async Task LoadAsync()
     {
+        ++_selectionVersion;
         await _active;
         await Run(async token =>
         {
@@ -92,9 +103,7 @@ public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
         // Ephemeral previews have no saved identity and survive a list refresh.
         if (CurrentId != null && !selectedStillPresent)
         {
-            CurrentId = null;
-            Details = "";
-            ResetAssessment();
+            ClearSelectedInsight();
         }
         Status = Saved.Count == 0 ? this["empty"] : "";
         await RefreshSummaryAsync(token);
@@ -102,6 +111,7 @@ public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
     public Task AnalyzeAsync(string source, string file, bool save) => Run(async token =>
     {
         if (save) ClearSummary();
+        ClearSelectedInsight();
         var result = await _service.CallAsync(new { type = "analyze", source, file, save }, token);
         token.ThrowIfCancellationRequested();
         Render(result.GetProperty("insight"), save);
@@ -109,10 +119,7 @@ public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
     });
     public Task ExplainAsync(string id) => Run(async token =>
     {
-        CurrentId = null;
-        Details = "";
-        ResetAssessment();
-        Changed();
+        ClearSelectedInsight();
         var result = await _service.CallAsync(new { type = "explain", id }, token);
         token.ThrowIfCancellationRequested();
         Render(result.GetProperty("insight"), true);
@@ -123,9 +130,7 @@ public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
         ClearSummary();
         await _service.CallAsync(new { type = "delete", id = CurrentId }, token);
         token.ThrowIfCancellationRequested();
-        CurrentId = null;
-        Details = "";
-        ResetAssessment();
+        ClearSelectedInsight();
         await RefreshCoreAsync(token);
     });
     public Task AnnotateAsync(string category, string outcome) => Run(async token =>
@@ -146,6 +151,120 @@ public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
         Render(result.GetProperty("insight"), true);
         await RefreshSummaryAsync(token);
     });
+    public EvidenceTarget? CaptureEvidenceTarget() => !_closed && HasSavedSelection
+        ? new EvidenceTarget(CurrentId!, ++_selectionVersion) : null;
+    public void CancelEvidenceTarget(EvidenceTarget target)
+    {
+        // An older picker must not invalidate a newer picker when it closes.
+        if (!_closed && target.Version == _selectionVersion && target.SnapshotId == CurrentId)
+            ++_selectionVersion;
+    }
+    private bool ValidTarget(EvidenceTarget target) => !_closed && !Busy &&
+        target.Version == _selectionVersion && target.SnapshotId == CurrentId;
+    private Task LinkOperationAsync(EvidenceTarget target, object operation, string success)
+    {
+        if (!ValidTarget(target))
+        {
+            if (!_closed) { Status = this["link_changed_selection"]; Changed(); }
+            return Task.CompletedTask;
+        }
+        return Run(async token =>
+        {
+            ClearSummary();
+            ClearSelectedInsight();
+            var result = await _service.CallAsync(operation, token);
+            token.ThrowIfCancellationRequested();
+            if (result.GetProperty("type").GetString() != JsonSerializer.SerializeToElement(operation).GetProperty("type").GetString())
+                throw new InvalidOperationException("insights-response-invalid");
+            var insight = result.GetProperty("insight");
+            if (insight.GetProperty("id").GetString() != target.SnapshotId)
+                throw new InvalidOperationException("insights-response-invalid");
+            Render(insight, true);
+            await RefreshCoreAsync(token);
+            Status = this[success];
+        });
+    }
+    public Task LinkGitAsync(EvidenceTarget target, string repository, string commit) =>
+        LinkOperationAsync(target, new { type = "link_git", id = target.SnapshotId, repository, commit }, "link_success");
+    public Task LinkTestReportAsync(EvidenceTarget target, string file) =>
+        LinkOperationAsync(target, new { type = "link_test_report", id = target.SnapshotId, file }, "link_success");
+    public Task UnlinkEvidenceAsync(EvidenceTarget target, string evidenceId) =>
+        LinkOperationAsync(target, new { type = "unlink_evidence", id = target.SnapshotId, evidence_id = evidenceId }, "unlink_success");
+    private void ClearSelectedInsight()
+    {
+        ++_selectionVersion;
+        CurrentId = null;
+        Details = "";
+        ModelDetails = "";
+        ModelReferences.Clear();
+        OutcomeEvidence.Clear();
+        CommitId = "";
+        ResetAssessment();
+        Changed();
+    }
+    private void RenderEvidence(InsightEvidence projection, string? snapshotId)
+    {
+        ModelReferences.Clear();
+        OutcomeEvidence.Clear();
+        if (projection.ModelObservations is { } models)
+        {
+            if (models.SchemaVersion != 1 || models.Scope != "declared_metadata_only" ||
+                models.Coordinates is not ("jsonl_physical_lines_one_based" or "trajectory_array_indexes_zero_based"))
+                throw new InvalidOperationException("insights-response-invalid");
+            var lines = new List<string> { this["model_notice"],
+                this[models.MixedDeclaredModels ? "model_mixed" : "model_not_proven_mixed"],
+                this["model_labels"] + ": " + (models.DeclaredModels.Length == 0 ? this["model_no_labels"] : string.Join(", ", models.DeclaredModels)),
+                this["model_record_count"] + ": " + Number(models.RecordCount),
+                this["model_candidates"] + ": " + Number(models.CandidateRecords),
+                this["model_valid"] + ": " + Number(models.ValidDeclarations),
+                this["model_missing"] + ": " + Number(models.MissingDeclarations),
+                this["model_invalid"] + ": " + Number(models.InvalidDeclarations),
+                this["model_omitted"] + ": " + Number(models.OmittedDeclarations),
+                this["model_coordinates_" + models.Coordinates],
+                this["source_digest"] + ": " + models.SourceDigest
+            };
+            if (models.ModelLabelsOmitted) lines.Add(this["model_labels_omitted"]);
+            ModelDetails = string.Join("\n", lines);
+            foreach (var declaration in models.Declarations)
+            {
+                if (declaration.Kind is not ("codex_session_metadata" or "codex_turn_context" or "codex_assistant_message" or "trajectory_metadata"))
+                    throw new InvalidOperationException("insights-response-invalid");
+                ModelReferences.Add(new ModelReferenceRow(declaration.Model + " · " + this["model_kind_" + declaration.Kind] + " · " +
+                    this["model_record_index"] + ": " + Number(declaration.RecordIndex)));
+            }
+        }
+        else ModelDetails = this["model_legacy"];
+        foreach (var link in projection.OutcomeLinks)
+        {
+            if (snapshotId == null || link.Provenance != "user_linked")
+                throw new InvalidOperationException("insights-response-invalid");
+            string label;
+            var lines = new List<string> { this["link_user_provenance"], this["link_notice"],
+                this["link_recorded_at"] + ": " + Date(link.LinkedAt), this["source_digest"] + ": " + link.SourceDigest,
+                this["link_id"] + ": " + link.Id };
+            switch (link.Evidence)
+            {
+                case GitCommitObservation { Evidence: var git }:
+                    if (git.Provenance != "inspected_local_object") throw new InvalidOperationException("insights-response-invalid");
+                    label = this["link_git_provenance"];
+                    lines.AddRange(new[] { this["link_git_notice"], this["git_object"] + ": " + git.ObjectId,
+                        this["git_tree"] + ": " + git.TreeId, this["git_parents"] + ": " + (git.ParentIds.Length == 0 ? this["git_no_parents"] : string.Join(", ", git.ParentIds)),
+                        this["git_repository_digest"] + ": " + git.RepositoryPathDigest, this["git_inspected_at"] + ": " + Date(git.InspectedAt) });
+                    break;
+                case TestReportObservation { Evidence: var report }:
+                    if (report.Provenance != "imported_report" || report.SchemaVersion != 1) throw new InvalidOperationException("insights-response-invalid");
+                    label = this["link_test_provenance"];
+                    lines.AddRange(new[] { this["link_test_notice"], this["test_runner"] + ": " + report.Runner,
+                        this["test_passed"] + ": " + Number(report.Passed), this["test_failed"] + ": " + Number(report.Failed),
+                        this["test_skipped"] + ": " + Number(report.Skipped), this["test_observed_at"] + ": " + Date(report.ObservedAt),
+                        this["test_imported_at"] + ": " + Date(report.ImportedAt), this["artifact_digest"] + ": " + report.ArtifactDigest,
+                        this["test_claimed_commit"] + ": " + (report.CommitId ?? this["unknown"]) });
+                    break;
+                default: throw new InvalidOperationException("insights-response-invalid");
+            }
+            OutcomeEvidence.Add(new OutcomeEvidenceRow(link.Id, snapshotId, label, string.Join("\n", lines), this["unlink_evidence"]));
+        }
+    }
     private void ClearSummary()
     {
         Summary = null;
@@ -206,7 +325,11 @@ public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
     private static string Date(JsonElement value) => value.GetDateTimeOffset().ToLocalTime().ToString("g", CultureInfo.CurrentCulture);
     private void Render(JsonElement insight, bool saved)
     {
+        var projection = InsightEvidence.Decode(insight);
+        ++_selectionVersion;
+        CommitId = "";
         CurrentId = saved ? insight.GetProperty("id").GetString() : null;
+        RenderEvidence(projection, CurrentId);
         var report = insight.GetProperty("report");
         var provider = report.GetProperty("provider");
         var lines = new List<string> {
@@ -259,6 +382,7 @@ public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
             if (!_closed && generation == _generation)
             {
                 ClearSummary();
+                ClearSelectedInsight();
                 Status = this["error"];
             }
         }
@@ -281,6 +405,7 @@ public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
     public void Cancel()
     {
         if (_closed) return;
+        ++_selectionVersion;
         _pending?.Cancel();
         // Keep mutations serialized until the outstanding operation settles.
         Status = CancellationNotice;
@@ -289,6 +414,7 @@ public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
     public void Dispose()
     {
         _closed = true;
+        ++_selectionVersion;
         ++_generation;
         _pending?.Cancel();
     }

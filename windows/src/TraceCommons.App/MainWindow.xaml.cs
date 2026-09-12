@@ -134,6 +134,11 @@ public sealed partial class MainWindow : Window
         // every event hop targets.
         _host = new DaemonHost(Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread());
         ViewModel = new MainViewModel(_host, new AppUpdater(_host));
+        ViewModel.PropertyChanged += (_, change) =>
+        {
+            if (change.PropertyName == nameof(MainViewModel.ShowingInsights) && !ViewModel.ShowingInsights)
+                (InsightsPane.Content as InsightsView)?.Deactivate();
+        };
 
         // Found once the template is realized, not here: the ScrollViewer
         // inside a ListView's default template does not exist before Loaded.
