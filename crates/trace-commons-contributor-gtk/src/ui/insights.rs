@@ -2212,7 +2212,7 @@ mod tests {
             ),
         )
         .unwrap();
-        service::execute(LocalInsightsRequest {
+        let second = service::execute(LocalInsightsRequest {
             store_dir: Some(store.clone()),
             operation: Op::Analyze {
                 source: SourceFormat::Trajectory,
@@ -2221,6 +2221,12 @@ mod tests {
             },
         })
         .unwrap();
+        let Response::Analyze {
+            insight: second, ..
+        } = second
+        else {
+            panic!("second analyze response");
+        };
         view.refresh_history();
         settle();
         assert_eq!(view.episode_choices.borrow().len(), 2);
@@ -2280,6 +2286,16 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+        // Episode membership coverage needs two saved snapshots. Remove its
+        // temporary second member before continuing the original single-
+        // snapshot evidence and summary lifecycle assertions below.
+        service::execute(LocalInsightsRequest {
+            store_dir: Some(store.clone()),
+            operation: Op::Delete { id: second.id },
+        })
+        .unwrap();
+        view.refresh_history();
+        settle();
         assert!(view.evidence_expander.is_visible());
         assert!(view.evidence_controls.is_visible());
         let report = temp.join("test-report.json");
