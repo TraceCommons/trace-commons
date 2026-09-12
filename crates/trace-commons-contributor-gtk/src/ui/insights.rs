@@ -570,6 +570,7 @@ impl InsightsView {
         let title = title.to_owned();
         button.connect_clicked(move |_| {
             if let Some(view) = weak.upgrade() {
+                view.clear_detail();
                 view.saved_heading
                     .set_text(&format!("{} · {}", copy("summary_evidence"), title));
                 let ids: std::collections::BTreeSet<_> = ids.iter().collect();
@@ -579,6 +580,7 @@ impl InsightsView {
                         .iter()
                         .filter(|snapshot| ids.contains(&snapshot.id)),
                 );
+                view.reveal_evidence();
             }
         });
         self.summary_evidence.append(&button);
@@ -1128,6 +1130,15 @@ mod tests {
             .downcast::<gtk::Button>()
             .unwrap();
         evidence.emit_clicked();
+        assert!(
+            !view.summary_expander.is_expanded(),
+            "filter reveals rows below the collapsed summary"
+        );
+        assert!(
+            view.detail.text().is_empty(),
+            "filter clears previous detail above its results"
+        );
+        assert!(view.current_id.borrow().is_none());
         let row = view.saved.first_child().unwrap();
         let open = row
             .first_child()
