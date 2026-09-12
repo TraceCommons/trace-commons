@@ -199,6 +199,16 @@ return it and revision 1 after persistence. All mutation responses return the
 authoritative committed episode or deleted ID/revision, not speculative UI state.
 Reuse global `--store-dir` and JSON behavior, and preserve stable error codes.
 
+`service::dispatch_json` currently masks execution errors as
+`insights-operation-failed`. Add an explicit whitelist mapping typed episode
+errors to fixed public codes for revision conflict, episode not found, missing
+members, and size/cap violations through the existing generic FFI response.
+Native conflict handling must use those public codes, not hidden Rust errors or
+message matching. Keep all other failures behind the generic error; never
+forward arbitrary `anyhow`, filesystem-path, parser, or source-content details.
+Test each allowed code and a sensitive unexpected error through `dispatch_json`
+and `tc_insights_call`, including that unknown errors remain masked.
+
 ## Stacked implementation sequence
 
 1. **Types and store lifecycle.** Add `episodes.rs`, v4 validation/migration,
