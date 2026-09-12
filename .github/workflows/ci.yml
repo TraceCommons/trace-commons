@@ -170,6 +170,8 @@ jobs:
           for db in onboarding ledger migration ingest invite merge rls store tokens; do
             PGPASSWORD=trace createdb -h 127.0.0.1 -U trace "admission_test_$db"
           done
+          PGPASSWORD=trace createdb -h 127.0.0.1 -U trace reward_test_missions
+          PGPASSWORD=trace createdb -h 127.0.0.1 -U trace reward_test_missions_upgrade
       # Each step carries only the variables its own suite reads, NOT a job-wide
       # `env:` block. That is not tidiness: `trace_invite_registry_pg` reads
       # `TRACE_COMMONS_PG_TEST_DATABASE_URL` as its own main URL, so setting
@@ -245,6 +247,29 @@ jobs:
         run: cargo test -p trace-commons-server --test trace_corpus_pg_store
         env:
           TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_store
+      - name: mission and insight reward ledger
+        run: |
+          set -euo pipefail
+          cargo test -p trace-commons-server --test mission_rewards_pg -- --ignored --test-threads=1
+          # Prove the full migrator and ignored award workflows executed.
+          test "$(PGPASSWORD=trace psql -qtA -h 127.0.0.1 -U trace reward_test_missions \
+            -c 'SELECT count(*) > 0 FROM trace_reward_awards;')" = t
+          test "$(PGPASSWORD=trace psql -qtA -h 127.0.0.1 -U trace reward_test_missions \
+            -c "SELECT count(*) = 1 FROM _trace_commons_migrations WHERE version = 70 AND name = 'reward_history_pagination';")" = t
+        env:
+          TRACE_COMMONS_REWARDS_PG_TEST_URL: postgres://trace@127.0.0.1:5432/reward_test_missions
+      - name: reward ledger upgrade preserves existing awards
+        run: |
+          set -euo pipefail
+          cargo test -p trace-commons-server --lib reward_v69_upgrade -- --ignored
+          # Fail if a renamed filter silently runs zero upgrade tests.
+          test "$(PGPASSWORD=trace psql -qtA -h 127.0.0.1 -U trace reward_test_missions_upgrade \
+            -c "SELECT count(*) = 1 FROM _trace_commons_migrations WHERE version = 70 AND name = 'reward_history_pagination';")" = t
+          # The upgrade fixture creates at least two awards before upgrading.
+          test "$(PGPASSWORD=trace psql -qtA -h 127.0.0.1 -U trace reward_test_missions_upgrade \
+            -c 'SELECT count(*) >= 2 FROM trace_reward_awards;')" = t
+        env:
+          TRACE_COMMONS_REWARDS_PG_UPGRADE_TEST_URL: postgres://trace@127.0.0.1:5432/reward_test_missions_upgrade
       # `--ignored` is not optional for these three. Without it they report
       # `ignored`, the step passes having run nothing, and this job becomes the
       # thing it was built to replace.
