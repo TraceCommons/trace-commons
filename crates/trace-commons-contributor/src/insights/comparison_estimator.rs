@@ -180,11 +180,12 @@ pub fn estimate_task_outcomes(
             )
         } else {
             let (lower, upper) = simultaneous_interval(&samples[index], rules)?;
+            let interval_scale = denominator;
             let width_scaled = i128::from(upper - lower)
                 .checked_mul(BASIS_POINTS)
                 .ok_or_else(invalid)?;
             let threshold_scaled = i128::from(rules.maximum_interval_width_bps)
-                .checked_mul(i128::from(denominator))
+                .checked_mul(i128::from(interval_scale))
                 .ok_or_else(invalid)?;
             let state =
                 if homogeneous || lower == 0 || upper == 0 || width_scaled == threshold_scaled {
@@ -196,7 +197,7 @@ pub fn estimate_task_outcomes(
                 } else {
                     EstimateState::ObservedDifference
                 };
-            (Some(lower), Some(upper), Some(denominator), state)
+            (Some(lower), Some(upper), Some(interval_scale), state)
         };
         contrasts.push(OutcomeContrastV1 {
             outcome,
@@ -339,6 +340,29 @@ fn simultaneous_interval(samples: &[i64], rules: &EstimatorRulesV1) -> Result<(i
         .saturating_sub(1)
         .min(count - 1);
     Ok((samples[lower as usize], samples[upper as usize]))
+}
+
+/// Wilson score component interval at z=2.64, a conservative rounding of
+/// Phi^-1(1 - 0.05 / 12) for six Bonferroni-adjusted two-sided intervals.
+/// Bounds are rounded outward to millionths before they enter decisions.
+fn wilson_component_interval(successes: usize, total: usize) -> Result<(i64, i64)> {
+    if total == 0 || successes > total {
+        return Err(invalid());
+    }
+    let n = total as f64;
+    let proportion = successes as f64 / n;
+    let z = 2.64f64;
+    let z_squared = z * z;
+    let denominator = 1.0 + z_squared / n;
+    let center = (proportion + z_squared / (2.0 * n)) / denominator;
+    let half_width =
+        z * (proportion * (1.0 - proportion) / n + z_squared / (4.0 * n * n)).sqrt() / denominator;
+    let lower = ((center - half_width).max(0.0) * 1_000_000.0).floor();
+    let upper = ((center + half_width).min(1.0) * 1_000_000.0).ceil();
+    if !lower.is_finite() || !upper.is_finite() || lower < 0.0 || upper > 1_000_000.0 {
+        return Err(invalid());
+    }
+    Ok((lower as i64, upper as i64))
 }
 
 fn common_denominator(first: usize, second: usize) -> Result<u64> {
@@ -772,6 +796,67 @@ mod tests {
         assert_eq!(
             artifact["alternative_accepted_contrasts_covered"],
             alternative_covered
+        );
+    }
+
+    fn ordinary_wilson_95(successes: u32, total: u32) -> (f64, f64) {
+        let p = f64::from(successes) / f64::from(total);
+        let z = 1.96;
+        let z2 = z * z;
+        let n = f64::from(total);
+        let center = (p + z2 / (2.0 * n)) / (1.0 + z2 / n);
+        let half = z * (p * (1.0 - p) / n + z2 / (4.0 * n * n)).sqrt() / (1.0 + z2 / n);
+        ((center - half).max(0.0), (center + half).min(1.0))
+    }
+
+    #[test]
+    fn held_out_wilson_candidate_has_joint_null_coverage_with_uncertainty() {
+        let probabilities = [
+            [200, 1_800, 8_000],
+            [3_300, 3_400, 3_300],
+            [8_000, 1_800, 200],
+        ];
+        let sizes = [(8usize, 40usize), (24, 24), (40, 8)];
+        let mut experiments = 0u32;
+        let mut jointly_covered = 0u32;
+        let mut promoted = 0u32;
+        for (probability_index, probability) in probabilities.into_iter().enumerate() {
+            for (size_index, (first_size, second_size)) in sizes.into_iter().enumerate() {
+                for experiment in 0..40u32 {
+                    let fixture_id = 10_000
+                        + probability_index as u32 * 1_000
+                        + size_index as u32 * 100
+                        + experiment;
+                    let first = sampled_outcomes(first_size, probability, fixture_id, 10);
+                    let second = sampled_outcomes(second_size, probability, fixture_id, 11);
+                    experiments += 1;
+                    let covered = AssessedOutcome::ALL.into_iter().all(|outcome| {
+                        let first_count = first.iter().filter(|value| **value == outcome).count();
+                        let second_count = second.iter().filter(|value| **value == outcome).count();
+                        let first_interval =
+                            wilson_component_interval(first_count, first.len()).unwrap();
+                        let second_interval =
+                            wilson_component_interval(second_count, second.len()).unwrap();
+                        second_interval.0 - first_interval.1 <= 0
+                            && second_interval.1 - first_interval.0 >= 0
+                    });
+                    jointly_covered += u32::from(covered);
+                    promoted += u32::from(!covered);
+                }
+            }
+        }
+        assert_eq!(experiments, 360);
+        assert_eq!(promoted, experiments - jointly_covered);
+        let coverage_interval = ordinary_wilson_95(jointly_covered, experiments);
+        let false_promotion_interval = ordinary_wilson_95(promoted, experiments);
+        assert_eq!((jointly_covered, promoted), (360, 0));
+        assert!(
+            coverage_interval.0 >= 0.94,
+            "covered={jointly_covered}/{experiments}, interval={coverage_interval:?}"
+        );
+        assert!(
+            false_promotion_interval.1 <= 0.06,
+            "promoted={promoted}/{experiments}, interval={false_promotion_interval:?}"
         );
     }
 }
