@@ -528,7 +528,7 @@ mod tests {
             assert_eq!(bytes(&store), before);
             store.episode_create(&ids[..1]).unwrap();
             let migrated: serde_json::Value = serde_json::from_slice(&bytes(&store)).unwrap();
-            assert_eq!(migrated["version"], 5);
+            assert_eq!(migrated["version"], super::super::STORE_VERSION);
             assert_eq!(migrated["episodes"].as_object().unwrap().len(), 1);
         }
         let valid: serde_json::Value = serde_json::from_slice(&bytes(&store)).unwrap();

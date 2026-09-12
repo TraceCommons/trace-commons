@@ -2372,6 +2372,7 @@ mod tests {
             model_observations: None,
             outcome_links: Vec::new(),
             time_evidence: None,
+            usage_evidence: None,
             analyzed_at: chrono::Utc::now(),
         };
         let text = render(&insight);

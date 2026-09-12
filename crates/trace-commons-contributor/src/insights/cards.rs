@@ -318,10 +318,14 @@ mod tests {
         assert_eq!(result.cards[1].state, CardState::Unavailable);
         assert_eq!(result.cards[2].state, CardState::Unavailable);
         assert_eq!(result.cards[3].state, CardState::Unavailable);
+        assert_eq!(
+            result.cards[3].rows[0].missing_reason,
+            Some(trace_commons_protocol::insights_cards::MissingReason::PricingUnavailable)
+        );
         let encoded = serde_json::to_vec(&result).unwrap();
         assert_eq!(
             format!("{:x}", Sha256::digest(encoded)),
-            "96c474acf1669b1cb18f2c1e4382b4997ce7fbb2c9f01c7a460eb5bcd402b630"
+            "596b6560fc83d69819e1701861d61ea982da34b291833194e87b086f47536fd3"
         );
     }
 

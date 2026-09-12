@@ -338,7 +338,7 @@ mod tests {
         assert_eq!(result["cards"][2]["rows"][0]["label"], "fixture-model");
         let text = response["text"].as_str().unwrap();
         assert!(text.contains("Recorded activity"));
-        assert!(text.contains("Saved usage evidence is not available."));
+        assert!(text.contains("Applicable versioned pricing evidence is not available."));
         assert!(!text.contains("PRIVATE_BODY"));
     }
 }

@@ -47,7 +47,7 @@ fn question_cards_use_saved_evidence_and_invalidate_deleted_selections() {
     assert!(cards["result"]["cards"][3]["rows"][0]["value"].is_null());
     let text = cards["text"].as_str().unwrap();
     assert!(text.contains("Span between recorded events: 60000 ms"));
-    assert!(text.contains("Saved usage evidence is not available."));
+    assert!(text.contains("Applicable versioned pricing evidence is not available."));
     for private in [
         "SECRET_FIXTURE_BODY",
         "PRIVATE_SOURCE",

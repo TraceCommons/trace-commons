@@ -29,7 +29,7 @@ use trace_commons_protocol::insights::{
 };
 
 const MAX_SOURCE_BYTES: u64 = 16 * 1024 * 1024;
-const STORE_VERSION: u32 = 5;
+const STORE_VERSION: u32 = 6;
 const MAX_OUTCOME_LINKS: usize = 128;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -108,7 +108,8 @@ pub struct LocalInsight {
     pub source_format: SourceFormat,
     pub boundary: EpisodeBoundary,
     pub report: InsightReport,
-    /// Neither initial adapter preserves enough usage to estimate cost.
+    /// Deprecated compatibility field. Estimates require separately validated
+    /// usage attribution and versioned pricing; this field remains null.
     pub estimated_cost_usd: Option<f64>,
     pub cost_unavailable_reason: String,
     /// No semantic task classification is performed in this release.
@@ -126,6 +127,10 @@ pub struct LocalInsight {
     /// Legacy snapshots remain unknown until explicit reimport.
     #[serde(default)]
     pub time_evidence: Option<time_evidence::RecordedTimeEvidence>,
+    /// Native usage from the exact imported bytes. Legacy snapshots stay
+    /// unknown until reimport; trajectory has no supported native contract.
+    #[serde(default)]
+    pub usage_evidence: Option<usage_evidence::PersistedUsageEvidence>,
     /// Import snapshot time; source freshness requires explicit reimport.
     pub analyzed_at: chrono::DateTime<chrono::Utc>,
 }
@@ -236,6 +241,10 @@ pub fn analyze_file(format: SourceFormat, path: &Path) -> Result<LocalInsight> {
         source_digest,
     };
     let time_evidence = time_evidence::extract_recorded_time_evidence(format, &bytes)?;
+    let usage_evidence = match format {
+        SourceFormat::Codex => Some(usage_evidence::extract_codex_usage_evidence(&bytes)?),
+        SourceFormat::Trajectory => None,
+    };
     let input = provider::ProviderInput::first_party(evidence, &events);
     let report = provider::dispatch(&provider::FirstPartyProvider, &input)?;
     Ok(LocalInsight {
@@ -250,6 +259,7 @@ pub fn analyze_file(format: SourceFormat, path: &Path) -> Result<LocalInsight> {
         model_observations: Some(models::extract_model_observations(format, &bytes)?),
         outcome_links: Vec::new(),
         time_evidence: Some(time_evidence),
+        usage_evidence,
         analyzed_at: chrono::Utc::now(),
     })
 }
@@ -402,6 +412,12 @@ impl LocalInsightStore {
             }
             if index.version < 5 && insight.time_evidence.is_some() {
                 bail!("insights_store_invalid");
+            }
+            if index.version < 6 && insight.usage_evidence.is_some() {
+                bail!("insights_store_invalid");
+            }
+            if let Some(usage) = &insight.usage_evidence {
+                usage.validate_binding(insight.source_format, &evidence[0].source_digest)?;
             }
             if let Some(time_evidence) = &insight.time_evidence {
                 time_evidence.validate()?;
@@ -1075,3 +1091,7 @@ mod tests {
 #[cfg(test)]
 #[path = "insights/evidence_tests.rs"]
 mod evidence_tests;
+
+#[cfg(test)]
+#[path = "insights/usage_store_tests.rs"]
+mod usage_store_tests;

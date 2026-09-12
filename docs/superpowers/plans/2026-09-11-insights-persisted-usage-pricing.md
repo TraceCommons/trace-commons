@@ -20,6 +20,28 @@ The two native accounting schemes are intentionally different:
 - Codex `total_token_usage` is a cumulative snapshot. The latest monotonic value is the total; snapshots are not summed. `cached_input_tokens` is a subset of input, and `reasoning_output_tokens` is a subset of output. A billable decomposition can subtract cached input from input with checked arithmetic, but must not add cached input or reasoning output again.
 - Claude Code usage is per assistant message. Repeated `message.id` values are latest monotonic snapshots of the same message and are deduplicated before totals are summed. Input, cache-read input, cache-creation input, and output are separate accounting categories.
 
+Codex source qualification is pinned to the upstream schema and runtime that
+define these rollout records. [`SessionMeta` has `model_provider` but no model
+field](https://github.com/openai/codex/blob/c4017a87aacc7558002b7cb510025e967c1d765e/codex-rs/protocol/src/protocol.rs#L3055-L3131),
+and an assistant [`ResponseItem::Message` also has no model
+field](https://github.com/openai/codex/blob/c4017a87aacc7558002b7cb510025e967c1d765e/codex-rs/protocol/src/models.rs#L997-L1023).
+The authoritative declaration is the required [`TurnContextItem.model`, whose
+record is documented as a durable replay
+baseline](https://github.com/openai/codex/blob/c4017a87aacc7558002b7cb510025e967c1d765e/codex-rs/protocol/src/protocol.rs#L3227-L3267),
+and [the runtime fills it from the effective model
+slug](https://github.com/openai/codex/blob/c4017a87aacc7558002b7cb510025e967c1d765e/codex-rs/core/src/session/turn_context.rs#L654-L677).
+Consequently, absence of `model` on session metadata or assistant messages is
+normal and is not a declaration gap.
+
+Codex [constructs `total_token_usage` by adding the latest response usage and
+replacing `last_token_usage`](https://github.com/openai/codex/blob/c4017a87aacc7558002b7cb510025e967c1d765e/codex-rs/protocol/src/protocol.rs#L2267-L2305),
+but the upstream contract also says a [`TokenCountEvent` may be accumulated,
+estimated, or replayed](https://github.com/openai/codex/blob/c4017a87aacc7558002b7cb510025e967c1d765e/codex-rs/protocol/src/protocol.rs#L1920-L1927).
+A context-window failure can synthesize a full-window count. Complete category accounting,
+monotonicity, and checked subtraction therefore qualify these values as
+observed rollout counters for a deterministic estimate; they do not establish
+provider billing or an invoice.
+
 The current extractor retains bounded model labels but deliberately does not allocate counters to models. For Codex, a final or most recent label cannot own a cumulative total that spans a model switch. Claude records carry a model on each assistant message and can eventually support per-model grouping after duplicate resolution.
 
 Saved store schema 5 binds optional model and timestamp observations to the exact report evidence digest and source format. Versions 1–4 read those fields as unknown and upgrade on the next mutation. `LocalInsight.estimated_cost_usd` is required to remain `None`, and `cost_unavailable_reason` is required to remain `adapter_usage_unavailable`. Those legacy placeholders must be removed rather than populated with `f64`.
@@ -87,9 +109,9 @@ The first priced release does not attribute the latest Codex cumulative total me
 
 Instead, retain the first and final complete monotonic cumulative snapshots with valid source timestamps and calculate only their checked category deltas. `excluded_prior_counts` is the first snapshot, and is never priced. The priced scope is explicitly `observed_counter_delta`, not full file or session cost. A nonzero excluded baseline makes coverage partial even when the later delta is priced. With only one snapshot, a known all-zero value can establish a zero observed delta; a nonzero snapshot has no baseline and is unavailable.
 
-Accept attribution for that delta only when one valid model declaration is established at or before the baseline, all supported declaration candidates through the final snapshot are valid, none are missing, invalid, or semantically omitted, exactly one label is retained, and every usage record belongs to the same validated Codex session. Store that label as `SingleDeclaredModel`. Bounded omission of duplicate supporting record references is allowed when counters, ordering, session identity, timestamps, and model facts remain complete.
+Accept attribution for that delta only when the latest `turn_context` at or before the baseline has a valid model, every later `turn_context` through the final snapshot is valid and names that same model, and every usage record belongs to the same validated Codex session. Earlier contexts can differ or be malformed because their counters are contained in the explicitly unpriced baseline. A malformed latest baseline context is not skipped in favor of an older valid context, and a missing or malformed later context is a semantic gap rather than permission to carry the earlier label forward. Store the qualified label as `SingleDeclaredModel`. Bounded omission of duplicate supporting record references is allowed when counters, ordering, session identity, timestamps, and model facts remain complete.
 
-If declarations are mixed or incomplete, persist the aggregate counts for coverage but set attribution unavailable. Do not allocate cumulative deltas to the nearest `turn_context`, carry a model forward, use the final label, or split evenly. A later schema may add per-turn attribution only after fixtures establish the ordering and reset semantics.
+If the baseline context is absent or invalid, or later contexts change or omit the model, persist the aggregate counts for coverage but set attribution unavailable. Do not allocate cumulative deltas to a later `turn_context`, use the final label, or split evenly. A later schema may add per-turn attribution only after fixtures establish the ordering and reset semantics.
 
 For Claude Code, evolve extraction to deduplicate each message first and then group its complete usage by that message's valid model label. Missing or invalid labels make the aggregate available but attribution incomplete; they do not become an `unknown` price bucket. `PerModel` is eligible only when all complete messages are attributed and no valid model or record reference was omitted. This work can land and be tested in the extractor, but persistence waits for the saved Claude adapter.
 

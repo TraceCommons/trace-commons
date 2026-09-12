@@ -165,6 +165,7 @@ impl PersistedUsageEvidence {
         let complete_plus_incomplete = self.complete_records.checked_add(self.incomplete_records);
         let retained = u64::try_from(self.record_refs.len()).map_err(|_| invalid())?;
         let refs_complete = retained.checked_add(self.omitted_record_refs);
+        let expected_retained = self.complete_records.min(MAX_USAGE_RECORD_REFS as u64);
         if self.schema_version != USAGE_EVIDENCE_SCHEMA_VERSION
             || self.source != UsageSource::Codex
             || self.source_format != SourceFormat::Codex
@@ -173,6 +174,7 @@ impl PersistedUsageEvidence {
             || self.candidate_records > MAX_SOURCE_BYTES as u64
             || self.duplicate_records > self.complete_records
             || self.record_refs.len() > MAX_USAGE_RECORD_REFS
+            || retained != expected_retained
             || refs_complete != Some(self.complete_records)
             || !self
                 .record_refs
@@ -189,7 +191,10 @@ impl PersistedUsageEvidence {
         }
         if let Some(counts) = &self.aggregate_counts {
             counts.validate_accounting().map_err(|_| invalid())?;
-            if self.candidate_records == 0 || self.complete_records != self.candidate_records {
+            if fields(counts).is_none()
+                || self.candidate_records == 0
+                || self.complete_records != self.candidate_records
+            {
                 return Err(invalid());
             }
         }
@@ -200,7 +205,28 @@ impl PersistedUsageEvidence {
         }
         if let Some(interval) = &self.interval {
             interval.validate()?;
-            if self.aggregate_counts.as_ref() != Some(&interval.final_snapshot.counts) {
+            let first_ref = self.record_refs.first().ok_or_else(invalid)?.record_index;
+            let last_ref = self.record_refs.last().ok_or_else(invalid)?.record_index;
+            let endpoint_shape_valid = if self.complete_records == 1 {
+                interval.baseline == interval.final_snapshot
+            } else {
+                self.complete_records > 1
+                    && interval.baseline.record_index < interval.final_snapshot.record_index
+            };
+            let final_ref_valid = if self.omitted_record_refs == 0 {
+                interval.final_snapshot.record_index == last_ref
+            } else {
+                interval
+                    .final_snapshot
+                    .record_index
+                    .checked_sub(last_ref)
+                    .is_some_and(|gap| gap >= self.omitted_record_refs)
+            };
+            if self.aggregate_counts.as_ref() != Some(&interval.final_snapshot.counts)
+                || interval.baseline.record_index != first_ref
+                || !endpoint_shape_valid
+                || !final_ref_valid
+            {
                 return Err(invalid());
             }
         }
@@ -350,26 +376,9 @@ pub fn extract_codex_usage_evidence(bytes: &[u8]) -> Result<PersistedUsageEviden
                 None => session_invalid = true,
             }
         }
-        if matches!(kind, Some("session_meta" | "turn_context")) {
-            declarations.push(
-                match payload
-                    .and_then(|payload| payload.get("model"))
-                    .and_then(Value::as_str)
-                {
-                    Some(model) if safe_model(model) => Declaration::Valid(index, model.to_owned()),
-                    _ => Declaration::Invalid(index),
-                },
-            );
-        } else if kind == Some("response_item")
-            && payload
-                .and_then(|payload| payload.get("type"))
-                .and_then(Value::as_str)
-                == Some("message")
-            && payload
-                .and_then(|payload| payload.get("role"))
-                .and_then(Value::as_str)
-                == Some("assistant")
-        {
+        // Codex session metadata identifies the provider but does not declare a
+        // model. The persisted turn context is the authoritative model scope.
+        if kind == Some("turn_context") {
             declarations.push(
                 match payload
                     .and_then(|payload| payload.get("model"))
@@ -543,40 +552,52 @@ fn attribution(
             reason: ModelAttributionUnavailableReason::NoDeclarationAtBaseline,
         };
     };
-    let relevant = declarations.iter().filter(|declaration| match declaration {
-        Declaration::Valid(index, _) | Declaration::Invalid(index) => {
-            *index <= interval.final_snapshot.record_index
+    // Counters already present at the baseline are explicitly unpriced. Use
+    // the latest durable context at that boundary rather than treating older
+    // model scopes as part of the observed interval.
+    let baseline_declaration = declarations
+        .iter()
+        .rev()
+        .find(|declaration| match declaration {
+            Declaration::Valid(index, _) | Declaration::Invalid(index) => {
+                *index <= interval.baseline.record_index
+            }
+        });
+    let (baseline_index, model) = match baseline_declaration {
+        Some(Declaration::Valid(index, model)) => (*index, model.as_str()),
+        Some(Declaration::Invalid(_)) => {
+            return UsageModelAttribution::Unavailable {
+                reason: ModelAttributionUnavailableReason::MissingOrInvalidDeclaration,
+            };
         }
-    });
-    let mut model: Option<&str> = None;
-    let mut established_at_baseline = false;
-    for declaration in relevant {
+        None => {
+            return UsageModelAttribution::Unavailable {
+                reason: ModelAttributionUnavailableReason::NoDeclarationAtBaseline,
+            };
+        }
+    };
+    for declaration in declarations.iter().filter(|declaration| match declaration {
+        Declaration::Valid(index, _) | Declaration::Invalid(index) => {
+            *index > baseline_index && *index <= interval.final_snapshot.record_index
+        }
+    }) {
         match declaration {
             Declaration::Invalid(_) => {
                 return UsageModelAttribution::Unavailable {
                     reason: ModelAttributionUnavailableReason::MissingOrInvalidDeclaration,
                 };
             }
-            Declaration::Valid(index, value) => {
-                if model.is_some_and(|previous| previous != value) {
+            Declaration::Valid(_, value) => {
+                if model != value {
                     return UsageModelAttribution::Unavailable {
                         reason: ModelAttributionUnavailableReason::ModelChanged,
                     };
                 }
-                model = Some(value);
-                if *index <= interval.baseline.record_index {
-                    established_at_baseline = true;
-                }
             }
         }
     }
-    match (model, established_at_baseline) {
-        (Some(model), true) => UsageModelAttribution::SingleDeclaredModel {
-            model: model.to_owned(),
-        },
-        _ => UsageModelAttribution::Unavailable {
-            reason: ModelAttributionUnavailableReason::NoDeclarationAtBaseline,
-        },
+    UsageModelAttribution::SingleDeclaredModel {
+        model: model.to_owned(),
     }
 }
 
@@ -598,12 +619,23 @@ mod tests {
             .into_bytes()
     }
 
-    fn meta(model: Option<&str>) -> Value {
-        let mut value = json!({"type":"session_meta","payload":{"id":"discard-me"}});
+    fn meta() -> Value {
+        json!({"type":"session_meta","payload":{"id":"discard-me","model_provider":"openai"}})
+    }
+
+    fn context(model: Option<&str>) -> Value {
+        let mut value = json!({"type":"turn_context","payload":{}});
         if let Some(model) = model {
             value["payload"]["model"] = json!(model);
         }
         value
+    }
+
+    fn assistant_message() -> Value {
+        json!({
+            "type":"response_item",
+            "payload":{"type":"message","role":"assistant","content":[]}
+        })
     }
 
     fn usage(at: Option<&str>, input: u64, cached: u64, output: u64, reasoning: u64) -> Value {
@@ -623,8 +655,11 @@ mod tests {
     #[test]
     fn cumulative_total_and_observed_delta_are_separate() {
         let bytes = source(vec![
-            meta(Some("gpt-6")),
+            meta(),
+            meta(),
+            context(Some("gpt-6")),
             usage(Some("2026-01-01T00:00:00Z"), 100, 60, 20, 10),
+            assistant_message(),
             usage(Some("2026-01-01T00:01:00Z"), 180, 100, 50, 20),
         ]);
         let evidence = extract_codex_usage_evidence(&bytes).unwrap();
@@ -648,7 +683,8 @@ mod tests {
     #[test]
     fn sole_nonzero_snapshot_never_infers_prior_history() {
         let evidence = extract_codex_usage_evidence(&source(vec![
-            meta(Some("gpt-6")),
+            meta(),
+            context(Some("gpt-6")),
             usage(Some("2026-01-01T00:00:00Z"), 10, 2, 4, 1),
         ]))
         .unwrap();
@@ -664,14 +700,15 @@ mod tests {
     #[test]
     fn sole_zero_requires_valid_time_session_and_model() {
         let ready = extract_codex_usage_evidence(&source(vec![
-            meta(Some("gpt-6")),
+            meta(),
+            context(Some("gpt-6")),
             usage(Some("2026-01-01T00:00:00Z"), 0, 0, 0, 0),
         ]))
         .unwrap();
         assert!(ready.has_attributed_interval());
 
         let missing_model = extract_codex_usage_evidence(&source(vec![
-            meta(None),
+            meta(),
             usage(Some("2026-01-01T00:00:00Z"), 0, 0, 0, 0),
         ]))
         .unwrap();
@@ -692,7 +729,7 @@ mod tests {
         );
 
         let incomplete = extract_codex_usage_evidence(&source(vec![
-            meta(None),
+            meta(),
             json!({"type":"event_msg","payload":{"type":"token_count","info":{}}}),
         ]))
         .unwrap();
@@ -710,7 +747,8 @@ mod tests {
     #[test]
     fn timestamp_or_model_ambiguity_preserves_usable_aggregate() {
         let missing_time = extract_codex_usage_evidence(&source(vec![
-            meta(Some("gpt-6")),
+            meta(),
+            context(Some("gpt-6")),
             usage(None, 0, 0, 0, 0),
             usage(Some("2026-01-01T00:01:00Z"), 10, 2, 4, 1),
         ]))
@@ -722,7 +760,8 @@ mod tests {
         );
 
         let switched = extract_codex_usage_evidence(&source(vec![
-            meta(Some("gpt-6")),
+            meta(),
+            context(Some("gpt-6")),
             usage(Some("2026-01-01T00:00:00Z"), 0, 0, 0, 0),
             json!({"type":"turn_context","payload":{"model":"gpt-6-mini"}}),
             usage(Some("2026-01-01T00:01:00Z"), 10, 2, 4, 1),
@@ -738,9 +777,94 @@ mod tests {
     }
 
     #[test]
+    fn latest_context_at_baseline_owns_only_the_observed_delta() {
+        let evidence = extract_codex_usage_evidence(&source(vec![
+            meta(),
+            context(Some("gpt-5")),
+            context(None),
+            context(Some("gpt-6")),
+            usage(Some("2026-01-01T00:00:00Z"), 100, 60, 20, 10),
+            assistant_message(),
+            usage(Some("2026-01-01T00:01:00Z"), 180, 100, 50, 20),
+        ]))
+        .unwrap();
+        assert_eq!(
+            evidence.attribution,
+            UsageModelAttribution::SingleDeclaredModel {
+                model: "gpt-6".to_owned()
+            }
+        );
+        assert_eq!(
+            evidence.interval.unwrap().unpriced_prior,
+            codex(100, 60, 20, 10)
+        );
+    }
+
+    #[test]
+    fn latest_invalid_or_late_context_cannot_establish_baseline() {
+        let invalid_baseline = extract_codex_usage_evidence(&source(vec![
+            meta(),
+            context(Some("gpt-6")),
+            context(None),
+            usage(Some("2026-01-01T00:00:00Z"), 0, 0, 0, 0),
+            usage(Some("2026-01-01T00:01:00Z"), 10, 2, 4, 1),
+        ]))
+        .unwrap();
+        assert_eq!(
+            invalid_baseline.attribution,
+            UsageModelAttribution::Unavailable {
+                reason: ModelAttributionUnavailableReason::MissingOrInvalidDeclaration
+            }
+        );
+
+        let late = extract_codex_usage_evidence(&source(vec![
+            meta(),
+            usage(Some("2026-01-01T00:00:00Z"), 0, 0, 0, 0),
+            context(Some("gpt-6")),
+            usage(Some("2026-01-01T00:01:00Z"), 10, 2, 4, 1),
+        ]))
+        .unwrap();
+        assert_eq!(
+            late.attribution,
+            UsageModelAttribution::Unavailable {
+                reason: ModelAttributionUnavailableReason::NoDeclarationAtBaseline
+            }
+        );
+    }
+
+    #[test]
+    fn later_context_must_be_valid_and_unchanged() {
+        let malformed = extract_codex_usage_evidence(&source(vec![
+            meta(),
+            context(Some("gpt-6")),
+            usage(Some("2026-01-01T00:00:00Z"), 0, 0, 0, 0),
+            context(None),
+            usage(Some("2026-01-01T00:01:00Z"), 10, 2, 4, 1),
+        ]))
+        .unwrap();
+        assert_eq!(
+            malformed.attribution,
+            UsageModelAttribution::Unavailable {
+                reason: ModelAttributionUnavailableReason::MissingOrInvalidDeclaration
+            }
+        );
+
+        let unchanged = extract_codex_usage_evidence(&source(vec![
+            meta(),
+            context(Some("gpt-6")),
+            usage(Some("2026-01-01T00:00:00Z"), 0, 0, 0, 0),
+            context(Some("gpt-6")),
+            usage(Some("2026-01-01T00:01:00Z"), 10, 2, 4, 1),
+        ]))
+        .unwrap();
+        assert!(unchanged.has_attributed_interval());
+    }
+
+    #[test]
     fn duplicate_and_reference_omission_are_coverage_not_semantic_loss() {
         let mut records = vec![
-            meta(Some("gpt-6")),
+            meta(),
+            context(Some("gpt-6")),
             usage(Some("2026-01-01T00:00:00Z"), 0, 0, 0, 0),
         ];
         for second in 1..=70 {
@@ -758,7 +882,8 @@ mod tests {
         assert!(evidence.has_attributed_interval());
 
         let duplicate = extract_codex_usage_evidence(&source(vec![
-            meta(Some("gpt-6")),
+            meta(),
+            context(Some("gpt-6")),
             usage(Some("2026-01-01T00:00:00Z"), 0, 0, 0, 0),
             usage(Some("2026-01-01T00:01:00Z"), 0, 0, 0, 0),
         ]))
@@ -770,7 +895,8 @@ mod tests {
     fn invalid_delta_subset_and_reset_fail_closed() {
         // Endpoints are each valid, but cached input grows faster than input.
         let evidence = extract_codex_usage_evidence(&source(vec![
-            meta(Some("gpt-6")),
+            meta(),
+            context(Some("gpt-6")),
             usage(Some("2026-01-01T00:00:00Z"), 10, 0, 2, 0),
             usage(Some("2026-01-01T00:01:00Z"), 11, 2, 3, 0),
         ]))
@@ -782,7 +908,8 @@ mod tests {
         assert!(evidence.aggregate_counts.is_none());
 
         let reset = extract_codex_usage_evidence(&source(vec![
-            meta(Some("gpt-6")),
+            meta(),
+            context(Some("gpt-6")),
             usage(Some("2026-01-01T00:00:00Z"), 10, 2, 4, 1),
             usage(Some("2026-01-01T00:01:00Z"), 9, 2, 4, 1),
         ]))
@@ -791,12 +918,35 @@ mod tests {
             reset.aggregate_unavailable_reason,
             Some(AggregateUnavailableReason::CumulativeReset)
         );
+
+        // Codex may synthesize a full context-window token count with only the
+        // total populated. It is not complete accounting for pricing.
+        let synthetic = extract_codex_usage_evidence(&source(vec![
+            meta(),
+            context(Some("gpt-6")),
+            usage(Some("2026-01-01T00:00:00Z"), 0, 0, 0, 0),
+            json!({
+                "type":"event_msg",
+                "timestamp":"2026-01-01T00:01:00Z",
+                "payload":{"type":"token_count","info":{"total_token_usage":{
+                    "input_tokens":0,"cached_input_tokens":0,"output_tokens":0,
+                    "reasoning_output_tokens":0,"total_tokens":128000
+                }}}
+            }),
+        ]))
+        .unwrap();
+        assert_eq!(
+            synthetic.aggregate_unavailable_reason,
+            Some(AggregateUnavailableReason::IncompleteOrInvalidUsage)
+        );
+        assert!(synthetic.interval.is_none());
     }
 
     #[test]
     fn malformed_persisted_relationships_are_rejected_without_panicking() {
         let valid = extract_codex_usage_evidence(&source(vec![
-            meta(Some("gpt-6")),
+            meta(),
+            context(Some("gpt-6")),
             usage(Some("2026-01-01T00:00:00Z"), 0, 0, 0, 0),
         ]))
         .unwrap();
@@ -819,19 +969,42 @@ mod tests {
         evidence.record_refs.clear();
         assert!(evidence.validate().is_err());
 
-        let mut evidence = valid;
+        let mut evidence = valid.clone();
         let interval = evidence.interval.as_mut().unwrap();
         interval.baseline.counts = codex(1, 0, 0, 0);
         interval.final_snapshot.counts = codex(1, 0, 0, 0);
         interval.unpriced_prior = codex(1, 0, 0, 0);
         evidence.aggregate_counts = Some(codex(1, 0, 0, 0));
         assert!(evidence.validate().is_err());
+
+        let mut fabricated_endpoint = valid.clone();
+        fabricated_endpoint.aggregate_counts = Some(codex(10, 0, 0, 0));
+        let interval = fabricated_endpoint.interval.as_mut().unwrap();
+        interval.final_snapshot.record_index += 1;
+        interval.final_snapshot.counts = codex(10, 0, 0, 0);
+        interval.observed_delta = codex(10, 0, 0, 0);
+        assert!(fabricated_endpoint.validate().is_err());
+
+        let mut wrong_accounting = extract_codex_usage_evidence(&source(vec![
+            meta(),
+            context(Some("gpt-6")),
+            usage(Some("2026-01-01T00:00:00Z"), 10, 2, 4, 1),
+        ]))
+        .unwrap();
+        wrong_accounting.aggregate_counts = Some(NativeTokenCounts::ClaudeCode {
+            input: 10,
+            cache_read_input: 2,
+            cache_creation_input: 0,
+            output: 4,
+        });
+        assert!(wrong_accounting.validate().is_err());
     }
 
     #[test]
     fn serialized_evidence_contains_no_native_id_path_or_body() {
         let evidence = extract_codex_usage_evidence(&source(vec![
-            meta(Some("gpt-6")),
+            meta(),
+            context(Some("gpt-6")),
             usage(Some("2026-01-01T00:00:00Z"), 0, 0, 0, 0),
         ]))
         .unwrap();
