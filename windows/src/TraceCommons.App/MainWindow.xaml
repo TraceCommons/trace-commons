@@ -44,6 +44,7 @@
             <KeyboardAccelerator Modifiers="Control" Key="Number2" Invoked="OnHistoryAccelerator" />
             <KeyboardAccelerator Modifiers="Control" Key="Number3" Invoked="OnPrivateInferenceAccelerator" />
             <KeyboardAccelerator Modifiers="Control" Key="Number4" Invoked="OnSettingsAccelerator" />
+            <KeyboardAccelerator Modifiers="Control" Key="Number5" Invoked="OnInsightsAccelerator" />
             <KeyboardAccelerator Modifiers="Control,Shift" Key="M" Invoked="OnTogglePrivateInferenceAccelerator" />
         </Grid.KeyboardAccelerators>
 
@@ -320,6 +321,8 @@
                                        Fill="{ThemeResource TcGreenFillBrush}" />
                         </Grid>
                     </Button>
+
+                    <Button Content="Insights" Click="OnShowInsights" HorizontalAlignment="Stretch" />
 
                     <Button HorizontalAlignment="Stretch"
                             HorizontalContentAlignment="Stretch"
@@ -666,6 +669,9 @@
                               Grid.Row="2"
                               Grid.Column="1"
                               Visibility="{x:Bind ViewModel.ShowingPrivateInference, Mode=OneWay}" />
+
+            <ContentPresenter x:Name="InsightsPane" Grid.Row="2" Grid.Column="1"
+                              Visibility="{x:Bind ViewModel.ShowingInsights, Mode=OneWay}" />
 
             <ContentPresenter x:Name="SettingsPane"
                               Grid.Row="2"

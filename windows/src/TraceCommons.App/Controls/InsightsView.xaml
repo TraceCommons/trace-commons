@@ -1,0 +1,60 @@
+<UserControl
+    x:Class="TraceCommons.App.Controls.InsightsView"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <ScrollViewer>
+        <StackPanel Padding="28" Spacing="12" MaxWidth="1000" HorizontalAlignment="Stretch">
+            <TextBlock Text="{Binding Title}" FontSize="28" />
+            <TextBlock Text="{Binding Intro}" TextWrapping="Wrap" />
+            <TextBlock Text="{Binding SnapshotNotice}" TextWrapping="Wrap" />
+            <StackPanel Orientation="Horizontal" Spacing="12">
+                <ComboBox x:Name="Source" Header="{Binding [source]}" SelectedIndex="0" IsEnabled="{Binding Idle}">
+                    <ComboBoxItem Content="{Binding [codex]}" Tag="codex" />
+                    <ComboBoxItem Content="{Binding [trajectory]}" Tag="trajectory" />
+                </ComboBox>
+                <Button Content="{Binding [choose_file]}" Click="OnChoose" IsEnabled="{Binding Idle}" VerticalAlignment="Bottom" />
+            </StackPanel>
+            <TextBlock x:Name="SelectedFile" Text="{Binding [no_file]}" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
+            <StackPanel Orientation="Horizontal" Spacing="12">
+                <Button Content="{Binding [analyze]}" Click="OnAnalyze" IsEnabled="{Binding Idle}" />
+                <Button Content="{Binding [save]}" Click="OnSave" IsEnabled="{Binding Idle}" />
+                <Button Content="{Binding [cancel]}" Click="OnCancel" IsEnabled="{Binding Busy}" />
+            </StackPanel>
+            <TextBlock Text="{Binding [save_notice]}" TextWrapping="Wrap" />
+            <TextBlock Text="{Binding CancellationNotice}" TextWrapping="Wrap" />
+            <TextBlock Text="{Binding Status}" TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite" />
+            <Button Content="{Binding [refresh]}" Click="OnRefresh" IsEnabled="{Binding Idle}" />
+            <ListView x:Name="SavedList" ItemsSource="{Binding Saved}" DisplayMemberPath="Label" MaxHeight="200" SelectionMode="Single" IsEnabled="{Binding Idle}" AutomationProperties.Name="{Binding [saved]}" />
+            <StackPanel Orientation="Horizontal" Spacing="12">
+                <Button Content="{Binding [explain]}" Click="OnExplain" IsEnabled="{Binding Idle}" />
+                <Button Content="{Binding [delete]}" Click="OnDelete" IsEnabled="{Binding HasSavedSelection}" />
+            </StackPanel>
+            <TextBlock Text="{Binding CoverageNotice}" TextWrapping="Wrap" />
+            <TextBlock Text="{Binding EvidenceNotice}" TextWrapping="Wrap" />
+            <TextBlock Text="{Binding [boundary_notice]}" TextWrapping="Wrap" />
+            <TextBlock Text="{Binding Details}" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
+            <TextBlock Text="{Binding AssessmentNotice}" TextWrapping="Wrap" />
+            <StackPanel Orientation="Horizontal" Spacing="12">
+                <ComboBox x:Name="Category" Header="{Binding [category]}" SelectedIndex="5">
+                    <ComboBoxItem Content="{Binding [category_refactor]}" Tag="refactor" />
+                    <ComboBoxItem Content="{Binding [category_tests]}" Tag="tests" />
+                    <ComboBoxItem Content="{Binding [category_docs]}" Tag="docs" />
+                    <ComboBoxItem Content="{Binding [category_debugging]}" Tag="debugging" />
+                    <ComboBoxItem Content="{Binding [category_other]}" Tag="other" />
+                    <ComboBoxItem Content="{Binding [category_unknown]}" Tag="unknown" />
+                </ComboBox>
+                <ComboBox x:Name="Outcome" Header="{Binding [outcome]}" SelectedIndex="3">
+                    <ComboBoxItem Content="{Binding [outcome_accepted]}" Tag="accepted" />
+                    <ComboBoxItem Content="{Binding [outcome_partial]}" Tag="partial" />
+                    <ComboBoxItem Content="{Binding [outcome_rejected]}" Tag="rejected" />
+                    <ComboBoxItem Content="{Binding [outcome_unknown]}" Tag="unknown" />
+                </ComboBox>
+            </StackPanel>
+            <StackPanel Orientation="Horizontal" Spacing="12">
+                <Button Content="{Binding [save_assessment]}" Click="OnAnnotate" IsEnabled="{Binding HasSavedSelection}" />
+                <Button Content="{Binding [clear_assessment]}" Click="OnClear" IsEnabled="{Binding HasSavedSelection}" />
+            </StackPanel>
+            <Button Content="{Binding [contributions]}" Click="OnContributions" />
+        </StackPanel>
+    </ScrollViewer>
+</UserControl>
