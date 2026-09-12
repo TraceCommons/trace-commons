@@ -62,3 +62,25 @@ a later independent read, which can observe a newer assessment or deletion.
 Closing, hiding, cancellation, and re-entry retain the same bounded worker rules
 as individual snapshots. The Linux display lifecycle test above also covers
 summary refresh, evidence navigation, failure clearing, and empty-store entry.
+
+### Model declarations and linked artifacts
+
+Each snapshot has a collapsible Evidence section showing the shared typed model
+declarations, missing/invalid/omitted counts, source digest, and declaration
+coordinates. Legacy snapshots explicitly show model information as unavailable.
+A single retained model name does not establish exclusive use or attribute
+tokens, work, or outcomes to that model.
+
+Saved snapshots can link an exact commit from a selected local repository or
+import a selected structured test report. The controls explain the report's JSON
+format. Git object inspection and producer-reported test counts remain separate
+from verified outcomes and user assessments. Each link can be removed without
+deleting its original artifact. Linking and unlinking refresh the snapshot and
+saved-history summary through the shared local service off the GTK thread.
+
+Choosers retain the original snapshot ID and a view generation; switching
+snapshots, starting another operation, cancelling, hiding, or closing invalidates
+their pending responses. Commit text is captured before opening the directory
+chooser. An external replacement of the original saved snapshot fails the link
+instead of applying it to the replacement. The display lifecycle regression
+covers report link/unlink, refresh, stale choosers, and external replacement.
