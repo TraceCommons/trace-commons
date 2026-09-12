@@ -14,6 +14,8 @@ Native Claude import and declaration inspection are in drafts [#939](https://git
 
 Remaining exits retain the original scope: qualified nonempty two-cohort evidence, the estimator and calibration, complete macOS evaluation and a private pilot, Windows/GTK parity, then controlled mission participation and the wider program. Passing a lifecycle test or opening another stacked PR does not satisfy those exits.
 
+The user has selected [four fresh independent refactor sessions](2026-09-12-fresh-refactor-sessions.md) for the real two-cohort pilot. Retain the historical accepted tasks as separate evidence; prepare new disjoint tasks and qualify the actual writer/session shape before comparison admission.
+
 ## First result and delivery order
 
 Ship one complete private, local refactor comparison through the shared protocol/contributor backend, CLI, service/FFI, and macOS. A result may say that user-confirmed refactor tasks in an exact repository/language/harness/configuration context have specified user-reported outcome distributions for declared-model cohorts. It may report an observed difference, insufficient precision, an indeterminate boundary, or no eligible evidence. It must not turn snapshots or attempts into trials, assign mixed work to a final model, call uncertainty a tie, call a task rejection “rejected code,” infer full-task tokens from observed intervals, or estimate time saved.

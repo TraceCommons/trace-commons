@@ -1,6 +1,6 @@
 # Private refactor pilot
 
-Status: local retrospective evidence audit in progress. Three authorized Claude files have been imported into a private pilot store, and the user assessed all three final PR outcomes as accepted. Original patches for #616 and #606 match the corresponding final PR patches; #632 has unresolved later integration changes. Complete task boundaries, historical context, independence, and comparison qualification remain unverified.
+Status: fresh independent session preparation authorized; original retrospective evidence retained. Three authorized Claude files have been imported into a private pilot store, and the user assessed all three final PR outcomes as accepted. Original patches for #616 and #606 match the corresponding final PR patches; #632 has unresolved later integration changes. Complete task boundaries, historical context, independence, and comparison qualification remain unverified.
 Parent: [personal refactor comparison delivery plan](2026-09-12-personal-refactor-comparison.md).
 
 Reward systems for both missions and insights are outside scope and owned by Abhishek. This pilot collects evidence and user assessments without reward eligibility, compensation, or payout features.
@@ -14,15 +14,15 @@ The macOS date and saved-record reconciliation fixes are in [#944](https://githu
 Once integrated, launch the app with `--insights-store` and the absolute path to the existing working-copy directory. Verify the visible custom-store location before interacting; malformed, missing, relative, duplicate, or non-directory selections must not fall back to the normal store. Keep task context, outcome, and independence review separate. The real two-cohort app pilot remains outstanding.
 
 
-## Additional cohort discovery
+## Fresh capture decision and historical discovery
 
 A local metadata audit found that branches using the currently admitted Claude writer profile all share one root session, including the original three selected tasks. Additional roots have other writer versions. A parent session's model declaration also does not identify its subagents' declared models. This is discovery evidence only, not task attribution or outcome review; the detailed manifests remain local.
 
-The next pilot evidence step therefore requires either qualifying an additional source writer profile or obtaining independent captures under a supported profile. Do not broaden version admission based on model metadata alone, infer independence from distinct branch files, or reuse the three accepted outcomes for other work. The human task/context/outcome/independence review remains required.
+The user selected preparation of four fresh independent refactor sessions. Follow the [fresh-session preparation plan](2026-09-12-fresh-refactor-sessions.md): four disjoint tasks from one pinned checkout, separate root sessions, two matched task pairs and two declared-model cohorts. Broad historical discovery is no longer the next step. The installed writer is `2.1.269`, and direct-root sessions differ from the admitted `2.1.260` branch profile; actual-source qualification is required before comparison eligibility. Do not broaden version admission based on model metadata alone, infer independence from distinct branch files, or reuse the three accepted outcomes for other work. The human task/context/outcome/independence review remains required.
 
 ## First repository and tasks
 
-Use Trace Commons for the first local retrospective pilot. Start with these completed refactors, then add other accepted, revised, or abandoned work to reach roughly 6–10 tasks if suitable traces exist. That is a usability sample, not a statistical sample-size claim.
+Use Trace Commons for the first local retrospective pilot. Retain these completed refactors as the historical audit. The active comparison pilot now uses the four fresh work items described above; additional historical searching is not a preparation requirement. Both are usability evidence, not a statistical sample-size claim.
 
 | Candidate | Review focus |
 | --- | --- |
