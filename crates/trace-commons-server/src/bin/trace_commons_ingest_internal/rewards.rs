@@ -25,7 +25,24 @@ use crate::{
     client_ip_for_rate_limit, confirm_is_same_origin,
 };
 
-type RewardHttpResult = Result<Response, Response>;
+type RewardHttpResult = Result<Response, RewardHttpError>;
+
+pub(crate) struct RewardHttpError {
+    status: StatusCode,
+    label: &'static str,
+}
+
+impl RewardHttpError {
+    fn new(status: StatusCode, label: &'static str) -> Self {
+        Self { status, label }
+    }
+}
+
+impl IntoResponse for RewardHttpError {
+    fn into_response(self) -> Response {
+        protected_response(api_error(self.status, self.label))
+    }
+}
 
 pub(crate) fn account_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
     Router::new()
@@ -60,7 +77,7 @@ fn protected_response(response: impl IntoResponse) -> Response {
     response
 }
 
-fn refusal(error: RewardError) -> Response {
+fn refusal(error: RewardError) -> RewardHttpError {
     let status = match error {
         RewardError::Unauthorized => StatusCode::UNAUTHORIZED,
         RewardError::RequestInvalid => StatusCode::BAD_REQUEST,
@@ -68,11 +85,11 @@ fn refusal(error: RewardError) -> Response {
         RewardError::StoreUnavailable => StatusCode::SERVICE_UNAVAILABLE,
         _ => StatusCode::CONFLICT,
     };
-    protected_response(api_error(status, error.label()))
+    RewardHttpError::new(status, error.label())
 }
 
-fn rate_refusal() -> Response {
-    protected_response(api_error(StatusCode::TOO_MANY_REQUESTS, "rate limited"))
+fn rate_refusal() -> RewardHttpError {
+    RewardHttpError::new(StatusCode::TOO_MANY_REQUESTS, "rate limited")
 }
 
 fn database_slot() -> Option<ConcurrencyGuard<'static>> {
@@ -138,10 +155,10 @@ pub(crate) async fn reserve(
     body: Result<Json<RewardReservationRequest>, JsonRejection>,
 ) -> RewardHttpResult {
     if !confirm_is_same_origin(&headers) {
-        return Err(protected_response(api_error(
+        return Err(RewardHttpError::new(
             StatusCode::FORBIDDEN,
             "cross-origin request denied",
-        )));
+        ));
     }
     // R1 permits each existing account credential to acknowledge its own offer.
     // This holds capacity only; stronger authenticator/payout gates are unchanged.
@@ -149,10 +166,7 @@ pub(crate) async fn reserve(
     let Path(program) = path.map_err(|_| refusal(RewardError::RequestInvalid))?;
     let Json(request) = body.map_err(|error| {
         if error.status() == StatusCode::PAYLOAD_TOO_LARGE {
-            protected_response(api_error(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "reward_request_too_large",
-            ))
+            RewardHttpError::new(StatusCode::PAYLOAD_TOO_LARGE, "reward_request_too_large")
         } else {
             refusal(RewardError::RequestInvalid)
         }
