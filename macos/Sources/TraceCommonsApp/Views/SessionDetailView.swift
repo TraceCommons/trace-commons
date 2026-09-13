@@ -1,6 +1,7 @@
 // INTEGRATION: reached from HistoryView and backed only by the account-authenticated
 // history_detail / publish_public_run / unpublish_public_run daemon methods.
 
+import AppKit
 import SwiftUI
 import TCBridge
 
@@ -18,6 +19,22 @@ struct SessionDetailView: View {
         }
         .onAppear {
             model.loadSessionDetail(record)
+            if ContributionStatusPresentation.isTerminal(record.status) {
+                model.ensureLocalInstalledSkillStatus(for: record)
+            }
+        }
+        .onChange(of: record.status) { _, status in
+            if ContributionStatusPresentation.isTerminal(status) {
+                model.ensureLocalInstalledSkillStatus(for: record)
+            }
+        }
+        .onChange(of: model.sessionDetails[record.submissionID]?.accepted) { _, accepted in
+            if accepted == false {
+                model.ensureLocalInstalledSkillStatus(for: record)
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            model.loadSessionDetail(record)
         }
     }
 
@@ -32,6 +49,7 @@ struct SessionDetailView: View {
                 .font(TC.Font_.meta)
             }
             .buttonStyle(.plain)
+            .frame(minHeight: 44)
 
             VStack(alignment: .leading, spacing: TC.Space.xxs) {
                 Text(copy.sessionDetail)
@@ -58,93 +76,83 @@ struct SessionDetailView: View {
                         .frame(minHeight: 44)
                 }
             }
+
+            localInstalledSkillSurface(copy)
+        }
+    }
+
+    @ViewBuilder
+    private func localInstalledSkillSurface(_ copy: PublicRunCopy) -> some View {
+        let state = model.skillLearningState(for: record.submissionID)
+        let detail = model.sessionDetails[record.submissionID]
+        let regularSurfaceIsVisible = detail?.accepted == true
+            && detail?.humanCorrection != nil
+            && !withdrawalCompleted
+            && !ContributionStatusPresentation.isTerminal(detail?.contributionStatus)
+        if !regularSurfaceIsVisible {
+            if state.installedSkill != nil {
+                if let skillCopy = model.skillLearningCopy {
+                    SkillLearningView(record: record, copy: skillCopy)
+                }
+            } else if case .idle = state.phase,
+                      state.failure != nil,
+                      ContributionStatusPresentation.isTerminal(record.status)
+                        || detail?.accepted == false
+            {
+                VStack(alignment: .leading, spacing: TC.Space.s) {
+                    if let message = state.failure {
+                        Text(message)
+                            .font(TC.Font_.footnote)
+                            .foregroundStyle(TC.coralText)
+                    }
+                    Button(copy.retryRead) {
+                        model.ensureLocalInstalledSkillStatus(for: record)
+                    }
+                    .buttonStyle(.bordered)
+                    .frame(minHeight: 44)
+                    .disabled(state.isWorking)
+                }
+                .padding(TC.Space.l)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .tcCard()
+            }
         }
     }
 
     @ViewBuilder
     private func detailContent(_ detail: SessionDetail, copy: PublicRunCopy) -> some View {
-        VStack(alignment: .leading, spacing: TC.Space.s) {
-            TCFieldLabel(copy.creatorReport)
-            Text(detail.taskOutcome)
-                .font(TC.Font_.cardTitle)
-            if let feedbackLine = detail.feedbackLine {
-                Text(feedbackLine)
-                    .font(TC.Font_.footnote)
-                    .foregroundStyle(TC.inkSecondary)
-            }
-        }
-        .padding(TC.Space.l)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .tcCard()
+        let currentStatus = detail.contributionStatus ?? record.status
+        let contributionIsWithdrawn = withdrawalCompleted
+            || ContributionStatusPresentation.isTerminal(currentStatus)
+        let contributionIsActive = detail.accepted == true
+            && detail.taskSuccess != nil
+            && !contributionIsWithdrawn
 
-        VStack(alignment: .leading, spacing: TC.Space.s) {
-            TCFieldLabel(copy.decisiveCorrection)
-            Text(detail.humanCorrection ?? copy.noCorrection)
-                .font(TC.Font_.body)
-                .foregroundStyle(detail.humanCorrection == nil ? TC.inkSecondary : TC.inkPrimary)
-                .textSelection(.enabled)
-        }
-        .padding(TC.Space.l)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .tcCard()
+        SessionContributionOverview(record: record, detail: detail, copy: copy)
 
-        VStack(alignment: .leading, spacing: TC.Space.s) {
-            TCFieldLabel(copy.supportingEvidence)
-            Text(copy.observedInVersion)
-                .font(TC.Font_.footnote)
-                .foregroundStyle(TC.inkSecondary)
-            if detail.evidence.isEmpty {
-                Text(copy.noEvidence)
-                    .font(TC.Font_.body)
-                    .foregroundStyle(TC.inkSecondary)
-            } else {
-                ForEach(detail.evidence) { evidence in
-                    VStack(alignment: .leading, spacing: TC.Space.xxs) {
-                        Text(evidence.label.uppercased())
-                            .font(TC.Font_.fieldLabel)
-                            .tracking(TC.Font_.Tracking.eyebrow)
-                            .foregroundStyle(TC.inkTertiary)
-                        Text(evidence.excerpt)
-                            .font(TC.Font_.footnote)
-                            .textSelection(.enabled)
-                    }
-                    .padding(.vertical, TC.Space.xs)
-                }
-            }
+        if contributionIsActive,
+           detail.humanCorrection != nil,
+           let skillCopy = model.skillLearningCopy {
+            SkillLearningView(record: record, copy: skillCopy)
         }
-        .padding(TC.Space.l)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .tcCard()
 
-        VStack(alignment: .leading, spacing: TC.Space.xs) {
-            TCFieldLabel(copy.contributedVersion)
-            versionLine(copy.envelopeVersion, detail.contributedVersion)
-            versionLine(copy.consentPolicyVersion, detail.consentPolicyVersion)
-            versionLine(copy.redactionVersion, detail.redactionPipelineVersion)
-        }
-        .padding(TC.Space.l)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .tcCard()
-
-        if record.status == "accepted" {
+        if contributionIsActive {
             PublicRunEditor(record: record, detail: detail, copy: copy)
-        } else {
+        } else if !contributionIsWithdrawn {
             Text(copy.publicationAfterAcceptance)
                 .font(TC.Font_.footnote)
                 .foregroundStyle(TC.inkSecondary)
         }
+
+        SessionWithdrawalAction(record: record, currentStatus: currentStatus, copy: copy)
     }
 
-    private func versionLine(_ label: String, _ value: String) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: TC.Space.s) {
-            Text(label)
-                .font(TC.Font_.footnote)
-                .foregroundStyle(TC.inkSecondary)
-                .frame(width: 96, alignment: .leading)
-            Text(value)
-                .font(TC.Font_.ledger)
-                .textSelection(.enabled)
+    private var withdrawalCompleted: Bool {
+        if ContributionStatusPresentation.isTerminal(record.status) { return true }
+        if case .some(.withdrawn) = model.withdrawals[record.submissionID] {
+            return true
         }
+        return false
     }
 
 }
@@ -235,7 +243,12 @@ private struct PublicRunEditor: View {
 
             fieldLabel(copy.pageTitle, count: title.count, maximum: 100)
             TextField("", text: $title)
-                .textFieldStyle(.roundedBorder)
+                .textFieldStyle(.plain)
+                .font(TC.Font_.body)
+                .padding(.horizontal, TC.Space.m)
+                .frame(minHeight: 44)
+                .background(TC.surfaceInset, in: RoundedRectangle(cornerRadius: TC.Radius.control))
+                .overlay { RoundedRectangle(cornerRadius: TC.Radius.control).stroke(TC.line) }
 
             fieldLabel(copy.publicOutcome, count: outcomeSummary.count, maximum: 600)
             TextEditor(text: $outcomeSummary)
@@ -257,7 +270,7 @@ private struct PublicRunEditor: View {
                 ForEach(detail.evidence) { evidence in
                     Toggle(isOn: evidenceBinding(evidence.eventID)) {
                         VStack(alignment: .leading, spacing: TC.Space.xxs) {
-                            Text(evidence.label)
+                            Text(copy.evidenceKindLabel(for: evidence.kind))
                                 .font(TC.Font_.meta)
                             Text(evidence.excerpt)
                                 .font(TC.Font_.footnote)
@@ -288,21 +301,42 @@ private struct PublicRunEditor: View {
 
             VStack(alignment: .leading, spacing: TC.Space.xs) {
                 TCFieldLabel(copy.reusePermission)
-                Picker("", selection: $reusePermission) {
-                    Text(copy.choosePermission).tag(nil as PublicRunReusePermission?)
-                    ForEach(copy.reusePermissions) { choice in
-                        Text([choice.label, choice.explanation].joined(separator: " · "))
-                            .tag(Optional(choice.permission))
-                    }
+                if reusePermission == nil {
+                    Text(copy.choosePermission)
+                        .font(TC.Font_.footnote)
+                        .foregroundStyle(TC.inkSecondary)
                 }
-                .labelsHidden()
-                .pickerStyle(.radioGroup)
+                ForEach(copy.reusePermissions) { choice in
+                    let selected = reusePermission == choice.permission
+                    Button {
+                        reusePermission = choice.permission
+                    } label: {
+                        HStack(alignment: .firstTextBaseline, spacing: TC.Space.s) {
+                            Image(systemName: selected ? "circle.inset.filled" : "circle")
+                                .foregroundStyle(selected ? TC.greenText : TC.inkSecondary)
+                                .accessibilityHidden(true)
+                            Text([choice.label, choice.explanation].joined(separator: " · "))
+                                .font(TC.Font_.footnote)
+                                .multilineTextAlignment(.leading)
+                            Spacer(minLength: 0)
+                        }
+                        .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityAddTraits(selected ? [.isSelected, .isButton] : .isButton)
+                }
             }
 
             VStack(alignment: .leading, spacing: TC.Space.xs) {
                 TCFieldLabel(copy.sourcePublicRun)
                 TextField(copy.sourcePlaceholder, text: $source)
-                    .textFieldStyle(.roundedBorder)
+                    .textFieldStyle(.plain)
+                    .font(TC.Font_.body)
+                    .padding(.horizontal, TC.Space.m)
+                    .frame(minHeight: 44)
+                    .background(TC.surfaceInset, in: RoundedRectangle(cornerRadius: TC.Radius.control))
+                    .overlay { RoundedRectangle(cornerRadius: TC.Radius.control).stroke(TC.line) }
                 Text(copy.sourceHelp)
                     .font(TC.Font_.footnote)
                     .foregroundStyle(TC.inkSecondary)
@@ -335,7 +369,10 @@ private struct PublicRunEditor: View {
             Text(copy.exactPublicPreview)
                 .font(TC.Font_.sectionTitle)
             Text(draft.title).font(TC.Font_.cardTitle)
-            previewField(copy.creatorReport, detail.taskOutcome)
+            previewField(
+                copy.creatorReport,
+                copy.taskOutcomeLabel(for: detail.taskSuccess) ?? copy.outcomeUnavailable
+            )
             previewField(copy.contributedVersion, detail.contributedVersion)
             previewField(copy.publicOutcome, draft.outcomeSummary)
             if let correction = draft.correctionExcerpt {

@@ -7,6 +7,7 @@ pub mod insights_pricing;
 pub mod llm;
 pub mod mission_draft;
 pub mod onboarding;
+pub mod privacy;
 pub mod public_run;
 mod redaction;
 pub mod trace_contribution;
@@ -27,3 +28,9 @@ pub mod privacy_filter_self_hosted;
 pub(crate) mod privacy_filter_spans;
 
 pub mod evidence_import;
+
+pub mod token_distribution;
+
+pub mod token_distribution_chat;
+
+pub mod private_edit_map;

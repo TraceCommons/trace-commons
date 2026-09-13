@@ -1511,6 +1511,7 @@ mod card_preview_tests {
                 previews.insert(
                     id,
                     PreviewSummary {
+                        token_distribution_summary: None,
                         would_send_bytes: 0,
                         raw_session_bytes: 0,
                         event_count: 0,
@@ -1561,6 +1562,7 @@ mod card_preview_tests {
         previews.insert(
             "a".to_string(),
             PreviewSummary {
+                token_distribution_summary: None,
                 would_send_bytes: 10,
                 raw_session_bytes: 10,
                 event_count: 1,

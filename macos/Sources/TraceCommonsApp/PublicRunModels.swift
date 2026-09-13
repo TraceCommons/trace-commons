@@ -3,18 +3,32 @@
 
 import Foundation
 
+enum SessionEvidenceKind: String, Decodable, Equatable {
+    case userMessage = "user_message"
+    case assistantMessage = "assistant_message"
+    case reasoning
+    case toolCall = "tool_call"
+    case toolResult = "tool_result"
+    case routingDecision = "routing_decision"
+    case feedback
+    case httpExchange = "http_exchange"
+    case unknown
+
+    init(from decoder: Decoder) throws {
+        let value = try decoder.singleValueContainer().decode(String.self)
+        self = SessionEvidenceKind(rawValue: value) ?? .unknown
+    }
+}
+
 struct SessionEvidenceCandidate: Decodable, Identifiable, Equatable {
     let eventID: String
-    let kind: String
-    let label: String
+    let kind: SessionEvidenceKind
     let excerpt: String
 
     var id: String { eventID }
-
     enum CodingKeys: String, CodingKey {
         case eventID = "event_id"
         case kind
-        case label
         case excerpt
     }
 }
@@ -34,6 +48,13 @@ struct PublicRunReuseChoice: Decodable, Equatable, Identifiable {
     var id: PublicRunReusePermission { permission }
 }
 
+struct PublicRunValueLabel: Decodable, Equatable, Identifiable {
+    let value: String
+    let label: String
+
+    var id: String { value }
+}
+
 /// Every word on the session-publication surface, decoded all or nothing
 /// from the Rust contributor crate.
 struct PublicRunCopy: Decodable, Equatable {
@@ -42,13 +63,28 @@ struct PublicRunCopy: Decodable, Equatable {
     let sessionDetail: String
     let readingRecord: String
     let retryRead: String
+    let contentUnavailable: String
+    let unavailableValue: String
     let creatorReport: String
+    let task: String
+    let noTask: String
+    let outcome: String
+    let outcomeUnavailable: String
     let decisiveCorrection: String
     let noCorrection: String
     let supportingEvidence: String
     let observedInVersion: String
     let noEvidence: String
     let contributedVersion: String
+    let contributionDetails: String
+    let processingStatus: String
+    let permittedUses: String
+    let noPermittedUses: String
+    let permittedUsesUnavailable: String
+    let unrecognizedValue: String
+    let nextAction: String
+    let withdraw: String
+    let keepContribution: String
     let envelopeVersion: String
     let consentPolicyVersion: String
     let redactionVersion: String
@@ -95,6 +131,11 @@ struct PublicRunCopy: Decodable, Equatable {
     let publicationInvalid: String
     let publicationUnavailable: String
     let credentialStorageWarning: String
+    let taskOutcomeChoices: [PublicRunValueLabel]
+    let feedbackChoices: [PublicRunValueLabel]
+    let evidenceKindChoices: [PublicRunValueLabel]
+    let contributionStatusChoices: [PublicRunValueLabel]
+    let permittedUseChoices: [PublicRunValueLabel]
     let reusePermissions: [PublicRunReuseChoice]
 
     static func decode(fromJSON json: String) -> PublicRunCopy? {
@@ -106,6 +147,38 @@ struct PublicRunCopy: Decodable, Equatable {
 
     func reuseChoice(for permission: PublicRunReusePermission) -> PublicRunReuseChoice? {
         reusePermissions.first { $0.permission == permission }
+    }
+
+    func contributionStatusLabel(for value: String) -> String {
+        contributionStatusChoices.first { $0.value == value }?.label ?? unrecognizedValue
+    }
+
+    func permittedUseLabel(for value: String) -> String {
+        permittedUseChoices.first { $0.value == value }?.label ?? unrecognizedValue
+    }
+
+    func taskOutcomeLabel(for value: String?) -> String? {
+        guard let value else { return nil }
+        return taskOutcomeChoices.first { choice in choice.value == value }?.label
+    }
+
+    func feedbackLabel(for value: String?) -> String? {
+        guard let value else { return nil }
+        return feedbackChoices.first { choice in choice.value == value }?.label
+    }
+
+    func evidenceKindLabel(for kind: SessionEvidenceKind) -> String {
+        evidenceKindChoices.first { $0.value == kind.rawValue }?.label ?? unrecognizedValue
+    }
+}
+
+enum ContributionStatusPresentation {
+    private static let terminalValues: Set<String> = [
+        "withdrawn", "revoked", "purged", "expired",
+    ]
+
+    static func isTerminal(_ value: String?) -> Bool {
+        value.map(terminalValues.contains) ?? false
     }
 }
 
@@ -226,12 +299,17 @@ struct PublicRunUnpublishResult: Decodable, Equatable {
 }
 
 struct SessionDetail: Decodable, Equatable {
-    let taskSuccess: String
-    let taskOutcome: String
-    let userFeedback: String
-    let feedbackLine: String?
+    /// Opaque local binding supplied by the daemon. The app uses it only to
+    /// evict account-owned content when the signed-in account changes.
+    let ownerScopeSHA256: String?
+    let contentUnavailable: Bool?
+    let task: String?
+    let taskSuccess: String?
+    let userFeedback: String?
     let humanCorrection: String?
     let evidence: [SessionEvidenceCandidate]
+    let contributionStatus: String?
+    let permittedUses: [String]?
     let contributedVersion: String
     let consentPolicyVersion: String
     let redactionPipelineVersion: String
@@ -239,13 +317,17 @@ struct SessionDetail: Decodable, Equatable {
     var publicationVersion: Int
     let retainedSourceSlug: String?
 
+    var accepted: Bool { contributionStatus == "accepted" }
     enum CodingKeys: String, CodingKey {
+        case ownerScopeSHA256 = "owner_scope_sha256"
+        case contentUnavailable = "content_unavailable"
+        case task
         case taskSuccess = "task_success"
-        case taskOutcome = "task_outcome"
         case userFeedback = "user_feedback"
-        case feedbackLine = "feedback_line"
         case humanCorrection = "human_correction"
         case evidence
+        case contributionStatus = "contribution_status"
+        case permittedUses = "permitted_uses"
         case contributedVersion = "contributed_version"
         case consentPolicyVersion = "consent_policy_version"
         case redactionPipelineVersion = "redaction_pipeline_version"

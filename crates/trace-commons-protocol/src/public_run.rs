@@ -7,7 +7,6 @@
 //! write only when the supplied digest still covers the exact request body.
 
 use std::collections::BTreeSet;
-use std::sync::OnceLock;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -15,9 +14,14 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::canonical_json::to_canonical_vec;
-use crate::trace_contribution::{
-    DeterministicTraceRedactor, TaskSuccess, TraceContributionEnvelope, TraceContributionEventType,
-    UserFeedback,
+use crate::privacy::validate_outbound_text;
+
+mod session_detail;
+
+#[cfg(test)]
+pub(crate) use session_detail::select_session_evidence;
+pub use session_detail::{
+    PublicRunContributionStatus, PublicRunSessionEvidence, PublicRunSessionRecord,
 };
 
 pub const PUBLIC_RUN_TITLE_MAX_CHARS: usize = 100;
@@ -29,6 +33,7 @@ pub const PUBLIC_RUN_EVIDENCE_MAX_CHARS: usize = 700;
 pub const PUBLIC_RUN_SLUG_MAX_CHARS: usize = 64;
 pub const PUBLIC_RUN_CONTRIBUTED_VERSION_MAX_CHARS: usize = 128;
 pub const PUBLIC_RUN_DETAIL_EVIDENCE_MAX_ITEMS: usize = 24;
+pub const PUBLIC_RUN_TASK_MAX_CHARS: usize = 1_000;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -121,29 +126,6 @@ pub struct PublicRunOwnerState {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct PublicRunSessionEvidence {
-    pub event_id: Uuid,
-    pub kind: TraceContributionEventType,
-    pub excerpt: String,
-}
-
-/// Bounded, account-owned projection used by the native session-detail view.
-/// The stored envelope is reduced inside the server process so the client does
-/// not download a multi-megabyte trace to render at most 24 excerpts.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct PublicRunSessionRecord {
-    pub task_success: TaskSuccess,
-    pub user_feedback: UserFeedback,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub human_correction: Option<String>,
-    pub evidence: Vec<PublicRunSessionEvidence>,
-    pub contributed_version: String,
-    pub consent_policy_version: String,
-    pub redaction_pipeline_version: String,
-    pub owner_state: PublicRunOwnerState,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PublicRunUnpublishResult {
     pub unpublished: bool,
     pub expected_publication_version: u32,
@@ -151,44 +133,6 @@ pub struct PublicRunUnpublishResult {
 
 fn is_false(value: &bool) -> bool {
     !*value
-}
-
-impl PublicRunSessionRecord {
-    #[must_use]
-    pub fn from_envelope(
-        envelope: TraceContributionEnvelope,
-        owner_state: PublicRunOwnerState,
-    ) -> Self {
-        let evidence = envelope
-            .events
-            .iter()
-            .filter_map(|event| {
-                let content = event.redacted_content.as_deref()?.trim();
-                if content.is_empty() {
-                    return None;
-                }
-                Some(PublicRunSessionEvidence {
-                    event_id: event.event_id,
-                    kind: event.event_type,
-                    excerpt: content
-                        .chars()
-                        .take(PUBLIC_RUN_EVIDENCE_MAX_CHARS)
-                        .collect(),
-                })
-            })
-            .take(PUBLIC_RUN_DETAIL_EVIDENCE_MAX_ITEMS)
-            .collect();
-        Self {
-            task_success: envelope.outcome.task_success,
-            user_feedback: envelope.outcome.user_feedback,
-            human_correction: envelope.outcome.human_correction,
-            evidence,
-            contributed_version: envelope.schema_version,
-            consent_policy_version: envelope.consent.policy_version,
-            redaction_pipeline_version: envelope.privacy.redaction_pipeline_version,
-            owner_state,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -226,7 +170,7 @@ impl PublicRunDraft {
             validate_slug(slug)?;
         }
         for text in self.public_text() {
-            validate_public_text(text)?;
+            validate_outbound_text(text).map_err(|_| PublicRunValidationError::SensitiveText)?;
         }
         Ok(())
     }
@@ -311,95 +255,36 @@ fn validate_required(value: &str, max_chars: usize) -> Result<(), PublicRunValid
     Ok(())
 }
 
-fn validate_public_text(value: &str) -> Result<(), PublicRunValidationError> {
-    if contains_near_private_key(value) || resembles_wallet_recovery_phrase(value) {
-        return Err(PublicRunValidationError::SensitiveText);
-    }
-    let redactor = DeterministicTraceRedactor::deterministic_only(Vec::new());
-    let (redacted, report) = redactor.redact_text(value);
-    if redacted != value || report.blocked_secret_detected {
-        return Err(PublicRunValidationError::SensitiveText);
-    }
-    Ok(())
-}
-
-fn contains_near_private_key(value: &str) -> bool {
-    value.match_indices("ed25519:").any(|(start, _)| {
-        let encoded = value[start + "ed25519:".len()..]
-            .chars()
-            .take_while(|character| {
-                character.is_ascii_alphanumeric() && !matches!(character, '0' | 'O' | 'I' | 'l')
-            })
-            .count();
-        encoded >= 80
-    })
-}
-
-fn resembles_wallet_recovery_phrase(value: &str) -> bool {
-    let lowered = value.to_ascii_lowercase();
-    if [
-        "seed phrase",
-        "recovery phrase",
-        "wallet mnemonic",
-        "secret phrase",
-    ]
-    .iter()
-    .any(|cue| lowered.contains(cue))
-    {
-        return true;
-    }
-    let words = value
-        .split(|character: char| !character.is_ascii_alphabetic())
-        .map(str::to_ascii_lowercase)
-        .filter(|word| !word.is_empty())
-        .collect::<Vec<_>>();
-    [12, 15, 18, 21, 24]
-        .into_iter()
-        .any(|word_count| words.windows(word_count).any(is_valid_bip39_mnemonic))
-}
-
-fn is_valid_bip39_mnemonic(words: &[String]) -> bool {
-    // Official BIP-0039 English list, pinned from bitcoin/bips commit
-    // 620871a7a442e276a058b487cd8743775fb499a4 (MIT licensed).
-    static WORDS: OnceLock<Vec<&'static str>> = OnceLock::new();
-    let wordlist = WORDS.get_or_init(|| include_str!("bip39_english.txt").lines().collect());
-    let Some(indices) = words
-        .iter()
-        .map(|word| {
-            wordlist
-                .binary_search_by(|candidate| candidate.cmp(&word.as_str()))
-                .ok()
-        })
-        .collect::<Option<Vec<_>>>()
-    else {
-        return false;
-    };
-
-    let total_bits = indices.len() * 11;
-    let entropy_bits = total_bits * 32 / 33;
-    let checksum_bits = total_bits - entropy_bits;
-    let mut entropy = vec![0u8; entropy_bits / 8];
-    for bit_index in 0..entropy_bits {
-        let word_index = bit_index / 11;
-        let within_word = bit_index % 11;
-        let bit = (indices[word_index] >> (10 - within_word)) & 1;
-        entropy[bit_index / 8] |= (bit as u8) << (7 - (bit_index % 8));
-    }
-    let digest = Sha256::digest(&entropy);
-    (0..checksum_bits).all(|offset| {
-        let mnemonic_bit_index = entropy_bits + offset;
-        let word_index = mnemonic_bit_index / 11;
-        let within_word = mnemonic_bit_index % 11;
-        let actual = (indices[word_index] >> (10 - within_word)) & 1;
-        let expected = (digest[offset / 8] >> (7 - (offset % 8))) & 1;
-        actual as u8 == expected
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::trace_contribution::TaskSuccess;
+    use crate::trace_contribution::{
+        SideEffectLevel, TaskSuccess, TraceAllowedUse, TraceContributionEvent,
+        TraceContributionEventType, UserFeedback,
+    };
+
+    fn evidence_event(
+        event_type: TraceContributionEventType,
+        content: impl Into<String>,
+    ) -> TraceContributionEvent {
+        TraceContributionEvent {
+            event_id: Uuid::new_v4(),
+            parent_event_id: None,
+            event_type,
+            timestamp: Utc::now(),
+            redacted_content: Some(content.into()),
+            structured_payload: serde_json::Value::Null,
+            tool_name: None,
+            tool_category: None,
+            tool_call_id: None,
+            latency_ms: None,
+            token_counts: None,
+            cost_usd: None,
+            success: None,
+            failure_modes: Vec::new(),
+            side_effect: SideEffectLevel::None,
+        }
+    }
 
     fn draft() -> PublicRunDraft {
         PublicRunDraft {
@@ -523,11 +408,25 @@ mod tests {
     #[test]
     fn near_private_keys_and_wallet_recovery_phrases_are_refused() {
         let mut draft = draft();
-        draft.workflow = format!("ed25519:{}", "A".repeat(88));
-        assert_eq!(
-            draft.validate(),
-            Err(PublicRunValidationError::SensitiveText)
-        );
+        for prefix in ["ed25519:", "ED25519:", "Ed25519:"] {
+            for encoded_chars in [64, 88] {
+                draft.workflow = format!("{prefix}{}", "A".repeat(encoded_chars));
+                assert_eq!(
+                    draft.validate(),
+                    Err(PublicRunValidationError::SensitiveText)
+                );
+            }
+        }
+
+        for prefix in ["secp256k1:", "SECP256K1:", "Secp256K1:"] {
+            for encoded_chars in [32, 44] {
+                draft.workflow = format!("{prefix}{}", "A".repeat(encoded_chars));
+                assert_eq!(
+                    draft.validate(),
+                    Err(PublicRunValidationError::SensitiveText)
+                );
+            }
+        }
 
         draft.workflow = "Share only the approved excerpt: abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about. Keep everything else private."
             .to_string();
@@ -573,6 +472,180 @@ mod tests {
         assert_eq!(
             draft.validate(),
             Err(PublicRunValidationError::DuplicateEvidence)
+        );
+    }
+
+    #[test]
+    fn legacy_session_detail_defaults_new_fields_without_granting_acceptance() {
+        let legacy = serde_json::json!({
+            "task_success": "success",
+            "user_feedback": "none",
+            "human_correction": null,
+            "evidence": [],
+            "contributed_version": "trace.contribution.v1",
+            "consent_policy_version": "policy-v1",
+            "redaction_pipeline_version": "privacy-v1",
+            "owner_state": {
+                "expected_publication_version": 0
+            }
+        });
+        let record: PublicRunSessionRecord =
+            serde_json::from_value(legacy.clone()).expect("legacy session detail");
+
+        assert!(!record.is_accepted());
+        assert!(!record.content_unavailable);
+        assert_eq!(record.task_success, Some(TaskSuccess::Success));
+        assert_eq!(record.user_feedback, Some(UserFeedback::None));
+        assert!(record.contribution_status.is_none());
+        assert!(record.task.is_none());
+        assert!(record.permitted_uses.is_empty());
+
+        let mut informational_status = legacy;
+        informational_status["contribution_status"] = serde_json::json!("accepted");
+        let record: PublicRunSessionRecord = serde_json::from_value(informational_status)
+            .expect("session detail with informational status");
+        assert_eq!(
+            record.contribution_status,
+            Some(PublicRunContributionStatus::Accepted)
+        );
+        assert!(record.is_accepted());
+        assert!(!record.content_unavailable);
+    }
+
+    #[test]
+    fn status_only_detail_omits_unobserved_content_and_outcome() {
+        let owner_state = PublicRunOwnerState {
+            publication: None,
+            expected_publication_version: 4,
+            retained_source_slug: None,
+        };
+        let record = PublicRunSessionRecord::status_only(
+            PublicRunContributionStatus::Revoked,
+            vec![TraceAllowedUse::Evaluation],
+            "trace.contribution.v1".to_string(),
+            "policy-v1".to_string(),
+            "privacy-v2".to_string(),
+            owner_state,
+        )
+        .expect("revoked records support status-only detail");
+
+        assert!(!record.is_accepted());
+        assert!(record.content_unavailable);
+        assert!(record.task.is_none());
+        assert!(record.task_success.is_none());
+        assert!(record.user_feedback.is_none());
+        assert!(record.human_correction.is_none());
+        assert!(record.evidence.is_empty());
+        assert_eq!(record.contributed_version, "trace.contribution.v1");
+        assert_eq!(record.permitted_uses, vec![TraceAllowedUse::Evaluation]);
+        let json = serde_json::to_value(&record).expect("serialize status-only detail");
+        for absent in ["task", "task_success", "user_feedback", "human_correction"] {
+            assert!(json.get(absent).is_none(), "{absent} must remain unclaimed");
+        }
+        assert_eq!(json["evidence"], serde_json::json!([]));
+        assert_eq!(json["content_unavailable"], true);
+
+        assert!(
+            PublicRunSessionRecord::status_only(
+                PublicRunContributionStatus::Accepted,
+                Vec::new(),
+                "trace.contribution.v1".to_string(),
+                "policy-v1".to_string(),
+                "privacy-v2".to_string(),
+                PublicRunOwnerState {
+                    publication: None,
+                    expected_publication_version: 0,
+                    retained_source_slug: None,
+                },
+            )
+            .is_none(),
+            "accepted detail must fail closed without its envelope"
+        );
+    }
+
+    #[test]
+    fn detail_prioritizes_correction_context_and_verification_before_bound() {
+        let mut events = (0..30)
+            .map(|index| {
+                evidence_event(
+                    TraceContributionEventType::AssistantMessage,
+                    format!("Earlier transcript event {index}"),
+                )
+            })
+            .collect::<Vec<_>>();
+        let before_correction = evidence_event(
+            TraceContributionEventType::AssistantMessage,
+            "The agent proposed editing the generated output.",
+        );
+        let correction = evidence_event(
+            TraceContributionEventType::UserMessage,
+            "Change the source schema and regenerate the output.",
+        );
+        let after_correction = evidence_event(
+            TraceContributionEventType::AssistantMessage,
+            "The source schema was updated.",
+        );
+        let mut verification_call = evidence_event(
+            TraceContributionEventType::ToolCall,
+            "cargo test -p trace-commons-protocol",
+        );
+        verification_call.tool_name = Some("shell".to_string());
+        let mut verification_result = evidence_event(
+            TraceContributionEventType::ToolResult,
+            "test result: ok. 42 passed; 0 failed",
+        );
+        verification_result.parent_event_id = Some(verification_call.event_id);
+        verification_result.success = Some(true);
+        let prioritized_ids = [
+            before_correction.event_id,
+            correction.event_id,
+            after_correction.event_id,
+            verification_call.event_id,
+            verification_result.event_id,
+        ];
+        events.extend([
+            before_correction,
+            correction,
+            after_correction,
+            verification_call,
+            verification_result,
+        ]);
+
+        let selected = select_session_evidence(
+            &events,
+            Some("Change the source schema and regenerate the output."),
+        );
+        assert_eq!(selected.len(), PUBLIC_RUN_DETAIL_EVIDENCE_MAX_ITEMS);
+        for id in prioritized_ids {
+            assert!(
+                selected.iter().any(|evidence| evidence.event_id == id),
+                "prioritized evidence {id} was truncated"
+            );
+        }
+        assert!(
+            !selected
+                .iter()
+                .any(|evidence| evidence.excerpt == "Earlier transcript event 0"),
+            "lower-priority head events must yield to decisive later evidence"
+        );
+        assert!(
+            selected
+                .windows(2)
+                .all(|pair| pair[0].event_id != pair[1].event_id),
+            "selection must not duplicate evidence"
+        );
+        let selected_positions = selected
+            .iter()
+            .map(|evidence| {
+                events
+                    .iter()
+                    .position(|event| event.event_id == evidence.event_id)
+                    .expect("selected evidence comes from the source trace")
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            selected_positions.windows(2).all(|pair| pair[0] < pair[1]),
+            "prioritization must preserve transcript order"
         );
     }
 
