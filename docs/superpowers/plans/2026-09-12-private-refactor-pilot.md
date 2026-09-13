@@ -1,13 +1,30 @@
 # Private refactor pilot
 
-Status: preparation; the user authorized locating candidate traces in local Claude history. Source-to-task matching and qualification remain pending. The user assessed all three final PR outcomes as accepted; those assessments do not establish complete trace boundaries or independent task attribution.
+Status: fresh independent session preparation authorized; original retrospective evidence retained. Three authorized Claude files have been imported into a private pilot store, and the user assessed all three final PR outcomes as accepted. Original patches for #616 and #606 match the corresponding final PR patches; #632 has unresolved later integration changes. Complete task boundaries, historical context, independence, and comparison qualification remain unverified.
 Parent: [personal refactor comparison delivery plan](2026-09-12-personal-refactor-comparison.md).
 
 Reward systems for both missions and insights are outside scope and owned by Abhishek. This pilot collects evidence and user assessments without reward eligibility, compensation, or payout features.
 
+The user closed the current task before paid pilot execution. This document is retained for optional follow-up; its remaining pilot steps do not block that closure. See the [current task closure](2026-09-11-trace-insights-program.md#current-task-closure) for the exact handoff state and outstanding program gates.
+
+## Native pilot preparation checkpoint
+
+A new isolated working copy of the original two-file pilot store was verified byte-for-byte; the original remained unchanged. Existing accepted outcomes were preserved without adding context or independence confirmations. Its private location and hash manifest stay local. The three selected tasks still share one model cohort and a root session; copying the store does not change eligibility.
+
+The macOS date and saved-record reconciliation fixes are in [#944](https://github.com/TraceCommons/trace-commons/pull/944). Explicit store routing and the reviewed actor/shared-copy fixes are in [#945](https://github.com/TraceCommons/trace-commons/pull/945) at `15f66a62`. The combined focused Swift suite passed 27/27, including real-FFI routing; subsequent shared-copy/wording checks and warning-denied Clippy passed. The subsequent #945 head `9ac49116` passed all 26 CI checks. Astra also cleared local native-render follow-up `02de243a`: a direct Insights view with a synthetic store visibly contains the selected-store location and populated task/specification rows. That follow-up is published in #945 at `9ac49116`; it does not establish interactive workflow or human-pilot completion. The newer exact-comparison FFI passes 31 focused native checks. Draft [#947](https://github.com/TraceCommons/trace-commons/pull/947) includes a reviewed stable task-row OCR assertion that passes the render test 1/1 while separately verifying the backend pending state. Supported nonempty synthetic CLI/FFI comparison validation now passes in #947. The actual supported macOS router/model path also passes, with the full routing integration class 4/4 and Astra review. Current-head CI, separate admission, and the real human pilot remain outstanding.
+
+Once integrated, launch the app with `--insights-store` and the absolute path to the existing working-copy directory. Verify the visible custom-store location before interacting; malformed, missing, relative, duplicate, or non-directory selections must not fall back to the normal store. Keep task context, outcome, and independence review separate. The real two-cohort app pilot remains outstanding.
+
+
+## Fresh capture decision and historical discovery
+
+A local metadata audit found that branches using the currently admitted Claude writer profile all share one root session, including the original three selected tasks. Additional roots have other writer versions. A parent session's model declaration also does not identify its subagents' declared models. This is discovery evidence only, not task attribution or outcome review; the detailed manifests remain local.
+
+The user selected preparation of four fresh independent refactor sessions. Follow the [fresh-session preparation plan](2026-09-12-fresh-refactor-sessions.md): four disjoint tasks from one pinned checkout, separate root sessions, two matched task pairs and two declared-model cohorts. Broad historical discovery is no longer the next step. The installed writer is `2.1.269`, and direct-root sessions differ from the admitted `2.1.260` branch profile; actual-source qualification is required before comparison eligibility. Do not broaden version admission based on model metadata alone, infer independence from distinct branch files, or reuse the three accepted outcomes for other work. The human task/context/outcome/independence review remains required.
+
 ## First repository and tasks
 
-Use Trace Commons for the first local retrospective pilot. Start with these completed refactors, then add other accepted, revised, or abandoned work to reach roughly 6–10 tasks if suitable traces exist. That is a usability sample, not a statistical sample-size claim.
+Use Trace Commons for the first local retrospective pilot. Retain these completed refactors as the historical audit. The active comparison pilot now uses the four fresh work items described above; additional historical searching is not a preparation requirement. Both are usability evidence, not a statistical sample-size claim.
 
 | Candidate | Review focus |
 | --- | --- |
@@ -15,9 +32,9 @@ Use Trace Commons for the first local retrospective pilot. Start with these comp
 | [#606: operator CLI plumbing](https://github.com/TraceCommons/trace-commons/pull/606) | Several callers; request/output compatibility. |
 | [#632: daemon IPC handlers](https://github.com/TraceCommons/trace-commons/pull/632) | Larger extraction; handler behavior and lock lifetime. |
 
-These PRs are merged, but neither merge status nor passing tests supplies the user's outcome assessment. Original traces have not been inspected or qualified. A PR is a candidate work item, not automatically one independent task: check whether several PRs arose from one session or one task spanned multiple PRs.
+These PRs are merged, but neither merge status nor passing tests supplies the user's outcome assessment. Inspection found that all three selected files are child-agent branches of one parent session and retain one valid declared model cohort. They cannot supply a two-model comparison or three independent observations. A PR remains a candidate work item: complete attempt membership and final integration must be reviewed separately from patch matching.
 
-The user selects the original trace paths or an explicit directory to inspect. Do not synthesize a replacement historical trace, alter model labels to create cohorts, infer an outcome from merge status, or replay completed work and call it historical evidence. Keep source files and pilot observations local.
+The user authorized locating these traces under local Claude history; the three selected originals remain unchanged. Further source inspection stays within that authorization. Do not synthesize a replacement historical trace, alter model labels to create cohorts, infer an outcome from merge status, or replay completed work and call it historical evidence. Keep source files and pilot observations local.
 
 ## Prepare the local workflow
 
@@ -31,7 +48,15 @@ TC_PILOT_STORE='/absolute/path/to/private-refactor-pilot/insights'
 "$TC_BIN" --json insights --store-dir "$TC_PILOT_STORE" list
 ```
 
-An empty-store read should leave the store absent. Record the application commit and source format/version in the local pilot notes. A version label alone does not qualify a source. Native Claude Code files can now be imported descriptively with `--source claude-code`; this does not provide model, usage, time, or comparison attribution. The [source profile](../specs/2026-09-12-codex-comparison-source-profile.md) currently admits only bounded Codex 0.154.0 exec traces for comparisons. Older, interactive, delegated, or unsupported traces may still import generically when their selected source parser accepts them, but remain unavailable for comparison; record that as coverage feedback.
+An empty-store read should leave the store absent. Record the application commit and source format/version in the local pilot notes. A version label alone does not qualify a source. Native Claude Code files can be imported descriptively with `--source claude-code` (#939). The model-observation layer (#940) adds source-declared model labels and physical record references; it does not establish serving identity, task authorship, usage, time, or comparison attribution. The [Codex source profile](../specs/2026-09-12-codex-comparison-source-profile.md) admits bounded Codex 0.154.0 exec traces for comparisons. The [Claude agent-branch source profile](../specs/2026-09-12-claude-comparison-source-profile.md) is implemented in draft [#941](https://github.com/TraceCommons/trace-commons/pull/941). Independent source review, bounded acceptance checks, and local Rust/Clippy/GTK/macOS checks passed; all 26 remote checks passed at head `8d018dc1`. Older, interactive, delegated, or unsupported traces may still import generically when their selected source parser accepts them, but remain unavailable for comparison; record that as coverage feedback.
+
+## Current local evidence checkpoint
+
+The original pilot store retains three accepted assessments, no independence confirmations, and zero fully qualified comparison tasks. Historical context and complete task boundaries still need review. No workflow timing, abandonment, or comprehension result has been collected.
+
+A disposable copy exercised the pending Claude attribution implementation: legacy reads preserved the store bytes, explicit reimport did not silently update frozen task bindings, and an explicit same-evidence binding refresh preserved the accepted value and assessment timestamp. Source attribution became available for #616 and #606; #632 remained unavailable at an unsupported terminal record. All three shared the frozen parent-session overlap, which remained after deleting a source from the copy. These checks passed again on the build corresponding to #941 commit `1744f822`, after independent review fixes. Additional CLI checks confirmed typed unavailability for malformed Monitor metadata and uppercase session IDs, plus rejection of cached evidence missing a required Monitor reference. Astra cleared the implementation and its test-only follow-up; local Rust/Clippy/GTK/macOS checks passed, and all 26 remote checks passed at head `8d018dc1`. This is a source implementation checkpoint, not a completed human comparison pilot.
+
+Keep raw files, local paths, identifiers, and detailed pilot artifacts local. Publish only the bounded status and implementation changes here.
 
 ## Import and review one task
 
