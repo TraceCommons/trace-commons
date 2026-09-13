@@ -317,6 +317,19 @@ final class DaemonClient {
         return settings
     }
 
+    func tokenStorageAction(discard: Bool) throws -> TokenStorageView {
+        try call(discard ? "discard_token_reviews" : "remove_token_local_copies", params: ["confirmed": discard], as: TokenStorageView.self)
+    }
+
+    func setTokenContribution(_ enabled: Bool, disclosureConfirmed: Bool) throws -> DaemonSettingsView {
+        guard !enabled || disclosureConfirmed else { throw InferenceEvidenceRefusal.disclosureRequired }
+        let settings = try setSettings(["token_distributions_contribution": enabled])
+        guard settings.tokenDistributionsContribution == enabled else {
+            throw InferenceEvidenceRefusal.unconfirmedWrite
+        }
+        return settings
+    }
+
     enum InferenceEvidenceRefusal: Error {
         case disclosureRequired
         case unconfirmedWrite
@@ -848,7 +861,9 @@ final class DaemonClient {
 
     // MARK: - Plumbing
 
-    private func call<T: Decodable>(
+    /// Shared by focused protocol extensions while raw daemon framing stays
+    /// centralized in this type.
+    func call<T: Decodable>(
         _ method: String,
         params: [String: Any] = [:],
         as type: T.Type

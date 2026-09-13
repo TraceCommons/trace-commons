@@ -737,6 +737,7 @@ final class AppModel: ObservableObject {
 
     private var daemon: TCDaemon?
     private var client: DaemonClient?
+    var skillLearningClient: DaemonClient? { client }
     private var subscription: TCSubscription?
     private var undoTask: Task<Void, Never>?
 
@@ -1537,6 +1538,62 @@ final class AppModel: ObservableObject {
         }
     }
 
+    @Published private(set) var tokenStorageNotice = ""
+    func setLocalTokenCapture(_ enabled: Bool) async {
+        guard !tokenContributionBusy, let client else { return }
+        tokenContributionBusy = true
+        tokenStorageNotice = ""
+        defer { tokenContributionBusy = false }
+        let result = await Task.detached(priority: .userInitiated) {
+            Result { try client.setSettings(["token_capture_enabled": enabled]) }
+        }.value
+        switch result {
+        case .success(let settings): daemonSettings = settings
+        case .failure: tokenStorageNotice = daemonSettings?.tokenStorage?.failureLine ?? ""
+        }
+    }
+    func cleanTokenStorage(discard: Bool) async {
+        guard !tokenContributionBusy, let client else { return }
+        tokenContributionBusy = true
+        tokenStorageNotice = ""
+        defer { tokenContributionBusy = false }
+        let result = await Task.detached(priority: .userInitiated) {
+            Result { try client.tokenStorageAction(discard: discard) }
+        }.value
+        switch result {
+        case .success(let status): daemonSettings?.tokenStorage = status
+        case .failure: tokenStorageNotice = daemonSettings?.tokenStorage?.failureLine ?? ""
+        }
+    }
+
+    @Published private(set) var tokenContributionBusy = false
+    @Published private(set) var tokenContributionSaveFailed = false
+
+    func setTokenContribution(_ enabled: Bool, disclosureConfirmed: Bool = false) async {
+        guard !tokenContributionBusy else { return }
+        tokenContributionSaveFailed = false
+        guard let client else {
+            daemonSettings?.tokenDistributionsContribution = nil
+            tokenContributionSaveFailed = true
+            return
+        }
+        tokenContributionBusy = true
+        defer { tokenContributionBusy = false }
+        let result = await Task.detached(priority: .userInitiated) {
+            Result { try client.setTokenContribution(enabled, disclosureConfirmed: disclosureConfirmed) }
+        }.value
+        switch result {
+        case .success(let settings):
+            daemonSettings = settings
+            refreshAudit()
+        case .failure:
+            if let confirmed = await Task.detached(operation: { try? client.settings() }).value {
+                daemonSettings = confirmed
+            }
+            tokenContributionSaveFailed = true
+        }
+    }
+
     // MARK: - Onboarding resume
 
     /// Whether onboarding has been walked to the end (the Done screen) for
@@ -2074,7 +2131,7 @@ final class AppModel: ObservableObject {
         /// The server withdrew it, and reported this tier. `nil` reach means
         /// the daemon sent a label this build does not know -- which is
         /// reported as not-knowable, never smoothed into the mild answer.
-        case withdrawn(WithdrawalReach?)
+        case withdrawn(WithdrawalReach?, String? = nil)
         /// The daemon has no account session, so the request was never made.
         case noAccountSession
         /// Anything else. Carries the daemon's fixed label, which by
@@ -2089,6 +2146,12 @@ final class AppModel: ObservableObject {
     @Published private(set) var loadingSessionDetails: Set<String> = []
     @Published private(set) var publicRunErrors: [String: String] = [:]
     @Published private(set) var publicRunWorking: Set<String> = []
+    @Published var skillLearningStore = SkillLearningStore()
+    private var accountOwnedContentScope: String?
+    private var sessionDetailRequestSequence: UInt64 = 0
+    @Published private(set) var skillLearningCopy: SkillLearningCopy? = SkillLearningCopy.decode(
+        fromJSON: TCSkillLearning.copyJSON() ?? ""
+    )
     @Published private(set) var publicRunCopy: PublicRunCopy? = PublicRunCopy.decode(
         fromJSON: TCPublicRun.copyJSON() ?? ""
     )
@@ -2119,7 +2182,7 @@ final class AppModel: ObservableObject {
                 self.withdrawing.remove(id)
                 switch outcome {
                 case .success(let value):
-                    self.withdrawals[id] = .withdrawn(value.distributionReach)
+                    self.withdrawals[id] = .withdrawn(value.distributionReach, value.tokenDeletionNote)
                     self.refreshHistory()
                 case .failure(let error):
                     let label = (error as? DaemonClient.Failure)?.message ?? "withdraw-failed"
@@ -2136,28 +2199,57 @@ final class AppModel: ObservableObject {
         let id = record.submissionID
         guard !loadingSessionDetails.contains(id) else { return }
         guard !publicRunWorking.contains(id) else { return }
+        sessionDetailRequestSequence &+= 1
+        let requestSequence = sessionDetailRequestSequence
         loadingSessionDetails.insert(id)
+        sessionDetails[id] = nil
         sessionDetailErrors[id] = nil
         Task.detached(priority: .userInitiated) {
             let result = Result { try client.sessionDetail(submissionID: id) }
             await MainActor.run {
                 self.loadingSessionDetails.remove(id)
+                guard requestSequence == self.sessionDetailRequestSequence else { return }
                 switch result {
                 case .success(let detail):
+                    self.reconcileAccountOwnedContent(scope: detail.ownerScopeSHA256)
                     self.sessionDetails[id] = detail
                 case .failure(let error):
                     self.sessionDetails[id] = nil
                     let label = (error as? DaemonClient.Failure)?.message ?? ""
+                    if label == "account-session-required"
+                        || label == "session-detail-not-found"
+                        || label == "session-owner-changed"
+                    {
+                        self.clearAccountOwnedContent()
+                    }
                     self.sessionDetailErrors[id] = TCPublicRun.sessionDetailErrorLine(label: label)
                 }
             }
         }
     }
 
+    private func reconcileAccountOwnedContent(scope: String?) {
+        guard let scope else { return }
+        if let previous = accountOwnedContentScope, previous != scope {
+            clearAccountOwnedContent()
+        }
+        accountOwnedContentScope = scope
+    }
+
+    private func clearAccountOwnedContent() {
+        accountOwnedContentScope = nil
+        sessionDetails.removeAll()
+        sessionDetailErrors.removeAll()
+        publicRunErrors.removeAll()
+        skillLearningStore = SkillLearningStore()
+    }
+
     func publishPublicRun(_ record: HistoryRecord, draft: PublicRunDraftInput) {
         guard let client else { return }
         let id = record.submissionID
-        guard let detail = sessionDetails[id] else { return }
+        guard let detail = sessionDetails[id],
+              let taskSuccess = detail.taskSuccess
+        else { return }
         guard !publicRunWorking.contains(id) else { return }
         guard !loadingSessionDetails.contains(id) else { return }
         publicRunWorking.insert(id)
@@ -2167,7 +2259,7 @@ final class AppModel: ObservableObject {
                 try client.publishPublicRun(
                     submissionID: id,
                     draft: draft,
-                    taskSuccess: detail.taskSuccess,
+                    taskSuccess: taskSuccess,
                     contributedVersion: detail.contributedVersion,
                     expectedPublicationVersion: detail.publicationVersion
                 )
