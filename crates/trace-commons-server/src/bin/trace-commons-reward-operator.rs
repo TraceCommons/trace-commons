@@ -12,6 +12,9 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
 use secrecy::SecretString;
+use trace_commons_protocol::mission_evaluation::{
+    MISSION_EVALUATION_PACKAGE_MAX_BYTES, MissionEvaluationPackage,
+};
 use trace_commons_server::{
     config::{DatabaseConfig, SslMode},
     db::postgres::PgBackend,
@@ -56,6 +59,8 @@ enum Command {
     OfferPublish(OfferPublishArgs),
     /// Pause or resume new reservations without rewriting published terms.
     OfferSuspend(OfferSuspendArgs),
+    /// Publish an immutable validated mission package for a reward program.
+    MissionPublish(MissionPublishArgs),
     /// Reserve fixed program units for operator-asserted participant work.
     Reserve(ReserveArgs),
     /// Submit retained evidence by digest for manual review.
@@ -100,6 +105,14 @@ struct OfferSuspendArgs {
     program: Uuid,
     #[arg(long, action = clap::ArgAction::Set)]
     suspended: bool,
+}
+
+#[derive(Debug, Args)]
+struct MissionPublishArgs {
+    #[arg(long)]
+    program: Uuid,
+    #[arg(long)]
+    package: PathBuf,
 }
 
 #[derive(Debug, Args)]
@@ -204,6 +217,15 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             .and_then(|offer| {
                 serde_json::to_value(offer).map_err(|_| RewardError::StoreUnavailable)
             }),
+        Command::MissionPublish(args) => {
+            let package = read_mission_package(&args.package)?;
+            backend
+                .reward_mission_publish(&cli.tenant, args.program, &package)
+                .await
+                .and_then(|publication| {
+                    serde_json::to_value(publication).map_err(|_| RewardError::StoreUnavailable)
+                })
+        }
         Command::Reserve(args) => {
             backend
                 .reward_reserve(
@@ -329,6 +351,18 @@ fn read_manifest(path: &PathBuf) -> Result<RewardOfferManifest, CliError> {
     serde_json::from_slice(&bytes).map_err(|_| CliError::ManifestInvalid)
 }
 
+fn read_mission_package(path: &PathBuf) -> Result<MissionEvaluationPackage, CliError> {
+    let file = File::open(path).map_err(|_| CliError::MissionPackageUnreadable)?;
+    let mut bytes = Vec::new();
+    file.take(MISSION_EVALUATION_PACKAGE_MAX_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| CliError::MissionPackageUnreadable)?;
+    if bytes.len() > MISSION_EVALUATION_PACKAGE_MAX_BYTES {
+        return Err(CliError::MissionPackageTooLarge);
+    }
+    MissionEvaluationPackage::parse(&bytes).map_err(|_| CliError::MissionPackageInvalid)
+}
+
 #[derive(Debug)]
 enum CliError {
     MissingDatabaseUrl,
@@ -341,6 +375,9 @@ enum CliError {
     ManifestUnreadable,
     ManifestTooLarge,
     ManifestInvalid,
+    MissionPackageUnreadable,
+    MissionPackageTooLarge,
+    MissionPackageInvalid,
     OutputEncoding,
 }
 
@@ -379,6 +416,15 @@ impl std::fmt::Display for CliError {
             }
             Self::ManifestInvalid => {
                 "reward_manifest_invalid: correct the v1 offer manifest JSON schema and retry"
+            }
+            Self::MissionPackageUnreadable => {
+                "mission_package_unreadable: verify the package file can be read"
+            }
+            Self::MissionPackageTooLarge => {
+                "mission_package_too_large: reduce the package file to 64 KiB or less"
+            }
+            Self::MissionPackageInvalid => {
+                "mission_package_invalid: correct the v1 mission package JSON schema and retry"
             }
             Self::OutputEncoding => "reward_output_failed: retry the command",
         };
@@ -529,5 +575,38 @@ mod tests {
         let result = read_terms(&path);
         let _ = std::fs::remove_file(&path);
         assert!(matches!(result, Err(CliError::TermsTooLarge)));
+    }
+
+    #[test]
+    fn mission_publish_requires_program_and_package() {
+        let result = Cli::try_parse_from([
+            "reward",
+            "--tenant",
+            "tenant",
+            "mission-publish",
+            "--program",
+            "00000000-0000-0000-0000-000000000001",
+        ]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn mission_package_reader_rejects_malformed_content_without_exposing_it() {
+        let path = std::env::temp_dir().join(format!("mission-package-{}.json", Uuid::new_v4()));
+        let private_marker = "private-invalid-mission-marker";
+        std::fs::write(&path, format!("{{\"{private_marker}\":")).unwrap();
+        let error = read_mission_package(&path).unwrap_err();
+        std::fs::remove_file(path).unwrap();
+        assert!(matches!(error, CliError::MissionPackageInvalid));
+        assert!(!error.to_string().contains(private_marker));
+    }
+
+    #[test]
+    fn mission_package_reader_rejects_files_larger_than_the_byte_limit() {
+        let path = std::env::temp_dir().join(format!("mission-package-{}.json", Uuid::new_v4()));
+        std::fs::write(&path, vec![b' '; MISSION_EVALUATION_PACKAGE_MAX_BYTES + 1]).unwrap();
+        let result = read_mission_package(&path);
+        let _ = std::fs::remove_file(&path);
+        assert!(matches!(result, Err(CliError::MissionPackageTooLarge)));
     }
 }

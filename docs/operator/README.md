@@ -39,6 +39,7 @@ the link.
 | Consolidating two contributor devices into one account | [`./account-merge.md`](./account-merge.md) |
 | Setting the NEAR settlement mode or designating payout | [`./settlement-mode.md`](./settlement-mode.md) |
 | Issuing and reviewing mission or Insights rewards | [`./mission-insight-rewards.md`](./mission-insight-rewards.md) |
+| Publishing executable mission packages | [`./mission-packages.md`](./mission-packages.md) |
 | Publishing participant reward offers or provisioning account access | [`./participant-rewards.md`](./participant-rewards.md) |
 | Gating the pilot to invited contributors only | [`./pilot-allowlist.md`](./pilot-allowlist.md) |
 | Onboarding an internal pilot contributor | [`./pilot-contributor-onboarding.md`](./pilot-contributor-onboarding.md) |
@@ -158,6 +159,9 @@ Every runbook in this directory, with a one-line description.
 - [Large-trace chunked scoring](large-trace-chunked-scoring.md) — chunking
   knobs, peak/representative columns, per-chunk revocation.
 - [`./mission-insight-rewards.md`](./mission-insight-rewards.md): provision reward roles, pin program terms, reserve capacity, review claims, and inspect award history.
+- [`./mission-packages.md`](./mission-packages.md) — publish immutable
+  executable mission packages, operate anonymous discovery, and interpret
+  local attempt lifecycle records.
 - [`./model-swap.md`](./model-swap.md) — procedure for upgrading the
   perplexity model or embedder and the gate-version implications.
 - [`./operational-summary.md`](./operational-summary.md) — field-by-field

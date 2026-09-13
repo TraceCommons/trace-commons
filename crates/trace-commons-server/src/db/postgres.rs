@@ -7,6 +7,8 @@ use std::collections::HashSet;
 
 #[path = "postgres_account_onboarding.rs"]
 mod account_onboarding;
+#[path = "postgres_mission_catalog.rs"]
+mod mission_catalog;
 #[path = "postgres_public_run.rs"]
 mod public_run;
 #[path = "postgres_reward_participant.rs"]
@@ -1323,6 +1325,11 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "reward_participant_access",
         include_str!("../../../../migrations/V71__reward_participant_access.sql"),
     ),
+    (
+        72,
+        "published_mission_packages",
+        include_str!("../../../../migrations/V72__published_mission_packages.sql"),
+    ),
 ];
 
 #[async_trait]
@@ -1332,6 +1339,26 @@ impl Database for PgBackend {
         program: Uuid,
     ) -> Result<crate::reward_participant::RewardOffer, crate::mission_rewards::RewardError> {
         self.participant_reward_offer(program).await
+    }
+
+    async fn get_mission_publication(
+        &self,
+        mission: Uuid,
+    ) -> Result<
+        trace_commons_protocol::mission_catalog::MissionPublication,
+        crate::mission_rewards::RewardError,
+    > {
+        self.public_mission_get(mission).await
+    }
+
+    async fn list_mission_catalog(
+        &self,
+        query: &trace_commons_protocol::mission_catalog::MissionCatalogQuery,
+    ) -> Result<
+        trace_commons_protocol::mission_catalog::MissionCatalogPage,
+        crate::mission_rewards::RewardError,
+    > {
+        self.public_mission_list(query).await
     }
 
     async fn reserve_reward_offer(

@@ -16,6 +16,8 @@ pub mod envelope;
 pub mod harness_state;
 pub mod identity;
 pub mod issuer_client;
+pub mod mission_attempt;
+pub mod mission_catalog;
 pub mod onboarding_copy;
 pub mod picker;
 pub mod pricing;

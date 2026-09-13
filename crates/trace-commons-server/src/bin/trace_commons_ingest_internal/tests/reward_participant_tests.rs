@@ -6,6 +6,11 @@
 
 use crate::tests::*;
 
+// Mission HTTP/PG coverage stays nested so it can reuse this suite's private
+// real-router reward fixture without widening or splitting inherited helpers.
+#[path = "mission_catalog_pg.rs"]
+mod mission_catalog_pg;
+
 use axum::body::Body;
 use axum::http::header::{AUTHORIZATION, CONTENT_TYPE, COOKIE};
 use axum::http::{HeaderMap, Request, StatusCode};

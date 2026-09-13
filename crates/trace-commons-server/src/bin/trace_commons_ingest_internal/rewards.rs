@@ -15,14 +15,15 @@ use axum::{
     extract::DefaultBodyLimit,
     routing::{get, post},
 };
+use trace_commons_protocol::mission_catalog::MissionCatalogQuery;
 use trace_commons_server::account_session::AccountCtx;
 use trace_commons_server::mission_rewards::RewardError;
 use trace_commons_server::reward_participant::{RewardHistoryQuery, RewardReservationRequest};
 use uuid::Uuid;
 
 use crate::{
-    ACCOUNT_RATE_LIMITER, AppState, ConcurrencyGuard, account_auth_middleware, api_error,
-    client_ip_for_rate_limit, confirm_is_same_origin,
+    ACCOUNT_RATE_LIMITER, AccountRateLimiter, AppState, ConcurrencyGuard, account_auth_middleware,
+    api_error, client_ip_for_rate_limit, confirm_is_same_origin,
 };
 
 type RewardHttpResult = Result<Response, RewardHttpError>;
@@ -88,14 +89,33 @@ fn refusal(error: RewardError) -> RewardHttpError {
     RewardHttpError::new(status, error.label())
 }
 
+pub(crate) fn public_mission_error(error: RewardError) -> RewardError {
+    match error {
+        RewardError::OfferSuspended | RewardError::ProgramClosed => RewardError::NotFound,
+        error => error,
+    }
+}
+
 fn rate_refusal() -> RewardHttpError {
     RewardHttpError::new(StatusCode::TOO_MANY_REQUESTS, "rate limited")
 }
 
 fn database_slot() -> Option<ConcurrencyGuard<'static>> {
+    database_slot_for(&ACCOUNT_RATE_LIMITER)
+}
+
+fn database_slot_for(limiter: &AccountRateLimiter) -> Option<ConcurrencyGuard<'_>> {
     // Public and account reward queries share this budget, leaving room in the
     // default five-connection pool for authentication and other account work.
-    ACCOUNT_RATE_LIMITER.acquire("reward-database", 2)
+    limiter.acquire("reward-database", 2)
+}
+
+fn public_read_slots_for(limiter: &AccountRateLimiter) -> Option<[ConcurrencyGuard<'_>; 2]> {
+    // Anonymous offer, catalog, and detail reads share one reservation inside
+    // the unchanged two-slot reward database budget.
+    let public = limiter.acquire("reward-public-read", 1)?;
+    let database = database_slot_for(limiter)?;
+    Some([public, database])
 }
 
 fn account_slot(ctx: &AccountCtx) -> Option<[ConcurrencyGuard<'static>; 2]> {
@@ -124,20 +144,24 @@ fn database(state: &AppState) -> Result<&dyn trace_commons_server::db::Database,
         .ok_or(RewardError::StoreUnavailable)
 }
 
+fn public_slot(headers: &HeaderMap, resource: &str) -> Option<[ConcurrencyGuard<'static>; 2]> {
+    if !ACCOUNT_RATE_LIMITER.check(&format!("reward-{resource}-global"), 2_000)
+        || !ACCOUNT_RATE_LIMITER.check(
+            &format!("reward-{resource}-ip:{}", client_ip_for_rate_limit(headers)),
+            120,
+        )
+    {
+        return None;
+    }
+    public_read_slots_for(&ACCOUNT_RATE_LIMITER)
+}
+
 pub(crate) async fn offer(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     path: Result<Path<Uuid>, PathRejection>,
 ) -> RewardHttpResult {
-    if !ACCOUNT_RATE_LIMITER.check("reward-offer-global", 2_000)
-        || !ACCOUNT_RATE_LIMITER.check(
-            &format!("reward-offer-ip:{}", client_ip_for_rate_limit(&headers)),
-            120,
-        )
-    {
-        return Err(rate_refusal());
-    }
-    let _slot = database_slot().ok_or_else(rate_refusal)?;
+    let _slot = public_slot(&headers, "offer").ok_or_else(rate_refusal)?;
     let Path(program) = path.map_err(|_| refusal(RewardError::RequestInvalid))?;
     let offer = database(&state)
         .map_err(refusal)?
@@ -145,6 +169,42 @@ pub(crate) async fn offer(
         .await
         .map_err(refusal)?;
     Ok(protected_response(Json(offer)))
+}
+
+pub(crate) async fn mission_catalog(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    query: Result<Query<MissionCatalogQuery>, QueryRejection>,
+) -> RewardHttpResult {
+    let _slot = public_slot(&headers, "mission-catalog").ok_or_else(rate_refusal)?;
+    let Query(query) = query.map_err(|_| refusal(RewardError::RequestInvalid))?;
+    query
+        .validate()
+        .map_err(|_| refusal(RewardError::RequestInvalid))?;
+    let page = database(&state)
+        .map_err(refusal)?
+        .list_mission_catalog(&query)
+        .await
+        .map_err(refusal)?;
+    Ok(protected_response(Json(page)))
+}
+
+pub(crate) async fn mission_publication(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    path: Result<Path<Uuid>, PathRejection>,
+) -> RewardHttpResult {
+    let _slot = public_slot(&headers, "mission-publication").ok_or_else(rate_refusal)?;
+    let Path(mission) = path.map_err(|_| refusal(RewardError::RequestInvalid))?;
+    if mission.is_nil() {
+        return Err(refusal(RewardError::RequestInvalid));
+    }
+    let publication = database(&state)
+        .map_err(refusal)?
+        .get_mission_publication(mission)
+        .await
+        .map_err(|error| refusal(public_mission_error(error)))?;
+    Ok(protected_response(Json(publication)))
 }
 
 pub(crate) async fn reserve(
@@ -209,4 +269,30 @@ pub(crate) async fn history(
         .await
         .map_err(refusal)?;
     Ok(protected_response(Json(history)))
+}
+
+#[cfg(test)]
+mod limiter_tests {
+    use super::*;
+
+    #[test]
+    fn public_reads_reserve_only_one_of_two_reward_database_slots() {
+        let limiter = AccountRateLimiter::new();
+        let public = public_read_slots_for(&limiter).expect("first public read is admitted");
+        assert!(
+            public_read_slots_for(&limiter).is_none(),
+            "shared public reservation admits only one anonymous read"
+        );
+
+        let account = database_slot_for(&limiter).expect("account keeps the second DB slot");
+        assert!(
+            database_slot_for(&limiter).is_none(),
+            "global reward DB budget remains two"
+        );
+        drop(account);
+        assert!(database_slot_for(&limiter).is_some());
+
+        drop(public);
+        assert!(public_read_slots_for(&limiter).is_some());
+    }
 }

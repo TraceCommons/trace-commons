@@ -191,6 +191,26 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         Err(crate::mission_rewards::RewardError::StoreUnavailable)
     }
 
+    async fn get_mission_publication(
+        &self,
+        _mission: uuid::Uuid,
+    ) -> Result<
+        trace_commons_protocol::mission_catalog::MissionPublication,
+        crate::mission_rewards::RewardError,
+    > {
+        Err(crate::mission_rewards::RewardError::StoreUnavailable)
+    }
+
+    async fn list_mission_catalog(
+        &self,
+        _query: &trace_commons_protocol::mission_catalog::MissionCatalogQuery,
+    ) -> Result<
+        trace_commons_protocol::mission_catalog::MissionCatalogPage,
+        crate::mission_rewards::RewardError,
+    > {
+        Err(crate::mission_rewards::RewardError::StoreUnavailable)
+    }
+
     async fn reserve_reward_offer(
         &self,
         _tenant: &str,

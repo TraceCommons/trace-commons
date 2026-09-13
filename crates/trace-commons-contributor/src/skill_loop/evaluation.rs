@@ -4,27 +4,37 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use tokio::sync::Semaphore;
+use tokio::sync::{Semaphore, watch};
 use tokio::task::JoinSet;
+use trace_commons_protocol::mission_evaluation::{
+    MISSION_EVALUATION_MAX_CONCURRENCY, MISSION_EVALUATION_OUTPUT_TOKEN_LIMIT,
+    MISSION_EVALUATION_REQUEST_TIMEOUT_SECONDS, MISSION_EVALUATION_REQUIRED_MODEL_OWNER,
+    MISSION_EVALUATION_TOTAL_REQUESTS, SkillDraft as ProtocolSkillDraft,
+    render_skill as protocol_render_skill, validate_draft as protocol_validate_draft,
+};
 use uuid::Uuid;
 
-use crate::skill_loop::SkillReview;
+use crate::skill_loop::{SkillReview, SkillSourceTaskFingerprint};
 
 mod fixtures;
+mod mission;
 mod scoring;
 mod transport;
+
+pub use mission::*;
 
 use fixtures::{APPLICABILITY_FIXTURES, FIXTURES, PLAN_TASK_COUNT, select_held_out_fixtures};
 use scoring::{METADATA_CLUSTER, candidate_regressions, score_applicability, score_completion};
 use transport::NearAiEvaluationClient;
 
 /// Maximum completion tokens allowed for each arm of a held-out task.
-pub(super) const OUTPUT_TOKEN_LIMIT: u32 = 900;
+pub(super) const OUTPUT_TOKEN_LIMIT: u32 = MISSION_EVALUATION_OUTPUT_TOKEN_LIMIT;
 /// Per-request timeout applied uniformly across evaluation arms.
-pub(super) const REQUEST_TIMEOUT_SECS: u64 = 90;
+pub(super) const REQUEST_TIMEOUT_SECS: u64 = MISSION_EVALUATION_REQUEST_TIMEOUT_SECONDS as u64;
 /// Maximum number of evaluation requests allowed in flight.
-pub(super) const EVALUATION_CONCURRENCY: usize = 2;
+pub(super) const EVALUATION_CONCURRENCY: usize = MISSION_EVALUATION_MAX_CONCURRENCY as usize;
 
 /// Leaves room for the daemon response envelope and framing below the 1 MiB
 /// IPC line limit. The transport also caps each retained model output.
@@ -74,7 +84,7 @@ pub enum EvaluationArm {
 }
 
 impl EvaluationArm {
-    pub(super) const ALL: [Self; 3] = [
+    pub(crate) const ALL: [Self; 3] = [
         Self::Baseline,
         Self::ManualInstruction,
         Self::CandidateSkill,
@@ -193,13 +203,14 @@ pub struct SkillEvaluationExecution {
 
 /// Complete, bounded evidence report for an approved skill evaluation.
 ///
-/// The report binds results to `review_id` and `skill_sha256`, records source-task
-/// exclusion without source text, and exposes the exact gate used for installation.
+/// The report binds results to an approval/review ID and `skill_sha256`, records
+/// source-task exclusion without source text, and scores plans plus applicability.
+/// It does not execute commands or decide mission rewards or status.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct SkillEvaluationReport {
     /// Unique identifier for this completed evaluation.
     pub evaluation_id: Uuid,
-    /// Approved review evaluated by every arm.
+    /// Mission approval ID, or the legacy review ID on the legacy evaluator path.
     pub review_id: Uuid,
     /// SHA-256 digest of the exact reviewed `SKILL.md` bytes.
     pub skill_sha256: String,
@@ -219,7 +230,10 @@ pub struct SkillEvaluationReport {
     pub trials: Vec<SkillTrialResult>,
     /// Fixture IDs where the candidate failed after a control arm passed.
     pub regressions: Vec<String>,
-    /// Whether the candidate beat both controls and passed all safety gates.
+    /// Whether the candidate beat both controls and passed the legacy skill gate.
+    ///
+    /// This is evaluation evidence only. It does not authorize mission
+    /// publication, reward, spend, execution, or installation.
     pub install_allowed: bool,
     /// Stable explanation for the installation-gate result.
     pub gate_reason: &'static str,
@@ -246,8 +260,18 @@ pub enum SkillEvaluationError {
     ResponseTooLarge,
     /// The provider served a different model during the comparison.
     ModelChanged,
+    /// The supplied mission package failed its shared structural contract.
+    InvalidPackage,
+    /// The package targets a different production evaluator source contract.
+    StaleContract,
+    /// The mission evaluation was not bound to a non-nil local approval.
+    InvalidApproval,
     /// Source-task exclusion left too few held-out fixtures.
     HeldOutSetUnavailable,
+    /// The caller cancelled the evaluation.
+    Cancelled,
+    /// Completed trial evidence could not be persisted.
+    PersistenceUnavailable,
     /// A local invariant, task, serialization, or digest check failed.
     Internal,
 }
@@ -266,7 +290,12 @@ impl SkillEvaluationError {
             Self::FundingRequired => "skill-evaluation-funding-required",
             Self::ResponseTooLarge => "skill-evaluation-response-too-large",
             Self::ModelChanged => "skill-evaluation-model-changed",
+            Self::InvalidPackage => "skill-evaluation-package-invalid",
+            Self::StaleContract => "skill-evaluation-contract-stale",
+            Self::InvalidApproval => "skill-evaluation-approval-invalid",
             Self::HeldOutSetUnavailable => "skill-evaluation-held-out-set-unavailable",
+            Self::Cancelled => "skill-evaluation-cancelled",
+            Self::PersistenceUnavailable => "skill-evaluation-persistence-unavailable",
             Self::Internal => "skill-evaluation-internal",
         }
     }
@@ -285,7 +314,7 @@ pub fn evaluation_contract() -> SkillEvaluationContract {
         total_requests: task_count * EvaluationArm::ALL.len(),
         output_token_limit: OUTPUT_TOKEN_LIMIT,
         request_timeout_seconds: REQUEST_TIMEOUT_SECS,
-        required_model_owner: "nearai",
+        required_model_owner: MISSION_EVALUATION_REQUIRED_MODEL_OWNER,
         fixture_scope: "Six source-excluded client-shipped public repository incidents plus two metadata-only applicability probes; no session task, correction, or evidence is sent.",
         selection_policy: HELD_OUT_SELECTION_POLICY,
     }
@@ -301,25 +330,103 @@ pub async fn evaluate_skill(
     api_key: String,
     review: &SkillReview,
 ) -> Result<SkillEvaluationReport, SkillEvaluationError> {
-    if !review_candidate_is_frozen(review) {
-        return Err(SkillEvaluationError::Internal);
-    }
+    let input = FrozenEvaluatorInput::from_review(review)?;
     let client = NearAiEvaluationClient::discover(api_key).await?;
-    evaluate_with_client(client, review).await
+    run_evaluation(
+        client,
+        input,
+        &NoopEvaluationObserver,
+        closed_cancellation(),
+    )
+    .await
 }
 
+#[cfg(test)]
 async fn evaluate_with_client(
     client: NearAiEvaluationClient,
     review: &SkillReview,
 ) -> Result<SkillEvaluationReport, SkillEvaluationError> {
-    // Freeze the reviewed candidate before the first applicability or body
-    // request. Every later clone derives from the digest-checked value.
-    if !review_candidate_is_frozen(review) {
+    let input = FrozenEvaluatorInput::from_review(review)?;
+    run_evaluation(
+        client,
+        input,
+        &NoopEvaluationObserver,
+        closed_cancellation(),
+    )
+    .await
+}
+
+#[derive(Clone)]
+struct FrozenEvaluatorInput {
+    approval_id: Uuid,
+    draft: ProtocolSkillDraft,
+    skill_md: String,
+    skill_sha256: String,
+    source_task_fingerprint: SkillSourceTaskFingerprint,
+}
+
+impl FrozenEvaluatorInput {
+    fn from_review(review: &SkillReview) -> Result<Self, SkillEvaluationError> {
+        if !review_candidate_is_frozen(review) {
+            return Err(SkillEvaluationError::Internal);
+        }
+        Ok(Self {
+            approval_id: review.review_id,
+            draft: review.draft.clone(),
+            skill_md: review.skill_md.clone(),
+            skill_sha256: review.skill_sha256.clone(),
+            source_task_fingerprint: review.source_task_fingerprint.clone(),
+        })
+    }
+
+    fn has_frozen_bindings(&self) -> bool {
+        !self.approval_id.is_nil()
+            && protocol_validate_draft(&self.draft).is_ok()
+            && protocol_render_skill(&self.draft) == self.skill_md
+            && crate::skill_loop::sha256(self.skill_md.as_bytes()) == self.skill_sha256
+    }
+
+    fn is_frozen(&self) -> bool {
+        self.has_frozen_bindings() && self.source_task_fingerprint.is_valid()
+    }
+}
+
+struct NoopEvaluationObserver;
+
+#[async_trait]
+impl SkillEvaluationObserver for NoopEvaluationObserver {
+    async fn trial_completed(&self, _trial: &SkillTrialResult) -> Result<(), SkillEvaluationError> {
+        Ok(())
+    }
+}
+
+fn closed_cancellation() -> watch::Receiver<bool> {
+    let (sender, receiver) = watch::channel(false);
+    drop(sender);
+    receiver
+}
+
+async fn run_evaluation(
+    client: NearAiEvaluationClient,
+    input: FrozenEvaluatorInput,
+    observer: &dyn SkillEvaluationObserver,
+    mut cancellation: watch::Receiver<bool>,
+) -> Result<SkillEvaluationReport, SkillEvaluationError> {
+    if !input.has_frozen_bindings() {
         return Err(SkillEvaluationError::Internal);
     }
+    if !input.source_task_fingerprint.is_valid() {
+        return Err(SkillEvaluationError::HeldOutSetUnavailable);
+    }
+    if cancellation_requested(&cancellation) {
+        return Err(SkillEvaluationError::Cancelled);
+    }
     let contract = evaluation_contract();
-    let selection = select_held_out_fixtures(&review.source_task_fingerprint)
+    let selection = select_held_out_fixtures(&input.source_task_fingerprint)
         .ok_or(SkillEvaluationError::HeldOutSetUnavailable)?;
+    if contract.total_requests != MISSION_EVALUATION_TOTAL_REQUESTS as usize {
+        return Err(SkillEvaluationError::Internal);
+    }
     let semaphore = Arc::new(Semaphore::new(EVALUATION_CONCURRENCY));
     let mut trials = Vec::with_capacity(contract.total_requests);
 
@@ -328,15 +435,32 @@ async fn evaluate_with_client(
     let mut jobs = JoinSet::new();
     for (fixture_index, fixture) in APPLICABILITY_FIXTURES.iter().copied().enumerate() {
         for arm in scheduled_arms(fixture_index) {
+            if cancellation_requested(&cancellation) {
+                return Err(abort_drain_error(
+                    &mut jobs,
+                    client.model(),
+                    observer,
+                    &mut trials,
+                    SkillEvaluationError::Cancelled,
+                )
+                .await);
+            }
             let permit = Arc::clone(&semaphore);
             let client = client.clone();
-            let skill_name = review.draft.name.clone();
-            let skill_description = review.draft.description.clone();
+            let skill_name = input.draft.name.clone();
+            let skill_description = input.draft.description.clone();
+            let job_cancellation = cancellation.clone();
             jobs.spawn(async move {
+                if cancellation_requested(&job_cancellation) {
+                    return Err(SkillEvaluationError::Cancelled);
+                }
                 let _held = permit
                     .acquire_owned()
                     .await
                     .map_err(|_| SkillEvaluationError::Internal)?;
+                if cancellation_requested(&job_cancellation) {
+                    return Err(SkillEvaluationError::Cancelled);
+                }
                 let completion = client
                     .complete_applicability(fixture, arm, &skill_name, &skill_description)
                     .await?;
@@ -344,20 +468,44 @@ async fn evaluate_with_client(
             });
         }
     }
-    collect_job_results(&mut jobs, client.model(), &mut trials).await?;
+    collect_job_results(
+        &mut jobs,
+        client.model(),
+        observer,
+        &mut cancellation,
+        &mut trials,
+    )
+    .await?;
 
     let mut jobs = JoinSet::new();
     for (fixture_index, fixture) in selection.selected.iter().copied().enumerate() {
         for arm in scheduled_arms(fixture_index) {
+            if cancellation_requested(&cancellation) {
+                return Err(abort_drain_error(
+                    &mut jobs,
+                    client.model(),
+                    observer,
+                    &mut trials,
+                    SkillEvaluationError::Cancelled,
+                )
+                .await);
+            }
             let permit = Arc::clone(&semaphore);
             let client = client.clone();
-            let skill_name = review.draft.name.clone();
-            let skill_md = review.skill_md.clone();
+            let skill_name = input.draft.name.clone();
+            let skill_md = input.skill_md.clone();
+            let job_cancellation = cancellation.clone();
             jobs.spawn(async move {
+                if cancellation_requested(&job_cancellation) {
+                    return Err(SkillEvaluationError::Cancelled);
+                }
                 let _held = permit
                     .acquire_owned()
                     .await
                     .map_err(|_| SkillEvaluationError::Internal)?;
+                if cancellation_requested(&job_cancellation) {
+                    return Err(SkillEvaluationError::Cancelled);
+                }
                 let completion = client
                     .complete(fixture, arm, &skill_name, &skill_md)
                     .await?;
@@ -366,7 +514,14 @@ async fn evaluate_with_client(
         }
     }
 
-    collect_job_results(&mut jobs, client.model(), &mut trials).await?;
+    collect_job_results(
+        &mut jobs,
+        client.model(),
+        observer,
+        &mut cancellation,
+        &mut trials,
+    )
+    .await?;
     trials.sort_by(|left, right| {
         left.task_id
             .cmp(&right.task_id)
@@ -438,14 +593,14 @@ async fn evaluate_with_client(
     }
     let report = SkillEvaluationReport {
         evaluation_id: Uuid::new_v4(),
-        review_id: review.review_id,
-        skill_sha256: review.skill_sha256.clone(),
+        review_id: input.approval_id,
+        skill_sha256: input.skill_sha256.clone(),
         contract,
         execution: SkillEvaluationExecution {
             requested_model: client.model().to_string(),
             served_model,
-            model_owned_by: "nearai",
-            source_task_fingerprint_sha256: review.source_task_fingerprint.sha256.clone(),
+            model_owned_by: MISSION_EVALUATION_REQUIRED_MODEL_OWNER,
+            source_task_fingerprint_sha256: input.source_task_fingerprint.sha256.clone(),
             selected_plan_task_ids,
             excluded_source_overlap_task_ids: selection.source_overlap_ids,
             reserve_plan_task_ids: selection.reserve_ids,
@@ -476,27 +631,130 @@ async fn evaluate_with_client(
 async fn collect_job_results(
     jobs: &mut JoinSet<Result<SkillTrialResult, SkillEvaluationError>>,
     expected_model: &str,
+    observer: &dyn SkillEvaluationObserver,
+    cancellation: &mut watch::Receiver<bool>,
     trials: &mut Vec<SkillTrialResult>,
 ) -> Result<(), SkillEvaluationError> {
-    while let Some(joined) = jobs.join_next().await {
+    while !jobs.is_empty() {
+        let joined = tokio::select! {
+            biased;
+            joined = jobs.join_next() => joined,
+            () = wait_for_cancellation(cancellation) => {
+                return Err(
+                    abort_drain_error(
+                        jobs,
+                        expected_model,
+                        observer,
+                        trials,
+                        SkillEvaluationError::Cancelled,
+                    )
+                    .await,
+                );
+            }
+        };
+        let Some(joined) = joined else {
+            break;
+        };
         let trial = match joined {
             Ok(Ok(trial)) => trial,
             Ok(Err(error)) => {
-                jobs.abort_all();
-                return Err(error);
+                return Err(abort_drain_error(jobs, expected_model, observer, trials, error).await);
             }
             Err(_) => {
-                jobs.abort_all();
-                return Err(SkillEvaluationError::Internal);
+                return Err(abort_drain_error(
+                    jobs,
+                    expected_model,
+                    observer,
+                    trials,
+                    SkillEvaluationError::Internal,
+                )
+                .await);
             }
         };
         if trial.served_model != expected_model {
-            jobs.abort_all();
-            return Err(SkillEvaluationError::ModelChanged);
+            return Err(abort_drain_error(
+                jobs,
+                expected_model,
+                observer,
+                trials,
+                SkillEvaluationError::ModelChanged,
+            )
+            .await);
+        }
+        if observer.trial_completed(&trial).await.is_err() {
+            return Err(abort_drain_error(
+                jobs,
+                expected_model,
+                observer,
+                trials,
+                SkillEvaluationError::PersistenceUnavailable,
+            )
+            .await);
         }
         trials.push(trial);
     }
     Ok(())
+}
+
+async fn abort_drain_error(
+    jobs: &mut JoinSet<Result<SkillTrialResult, SkillEvaluationError>>,
+    expected_model: &str,
+    observer: &dyn SkillEvaluationObserver,
+    trials: &mut Vec<SkillTrialResult>,
+    primary: SkillEvaluationError,
+) -> SkillEvaluationError {
+    jobs.abort_all();
+    // Durable evidence loss outranks the provider or cancellation failure that
+    // initiated the drain, so callers never mistake an incomplete journal for
+    // a provider-only refusal.
+    if drain_job_results(jobs, expected_model, observer, trials).await {
+        SkillEvaluationError::PersistenceUnavailable
+    } else {
+        primary
+    }
+}
+
+async fn drain_job_results(
+    jobs: &mut JoinSet<Result<SkillTrialResult, SkillEvaluationError>>,
+    expected_model: &str,
+    observer: &dyn SkillEvaluationObserver,
+    trials: &mut Vec<SkillTrialResult>,
+) -> bool {
+    let mut persistence_failed = false;
+    while let Some(joined) = jobs.join_next().await {
+        let Ok(Ok(trial)) = joined else {
+            continue;
+        };
+        if trial.served_model != expected_model {
+            continue;
+        }
+        if observer.trial_completed(&trial).await.is_ok() {
+            trials.push(trial);
+        } else {
+            persistence_failed = true;
+        }
+    }
+    persistence_failed
+}
+
+fn cancellation_requested(cancellation: &watch::Receiver<bool>) -> bool {
+    *cancellation.borrow()
+}
+
+async fn wait_for_cancellation(cancellation: &mut watch::Receiver<bool>) {
+    if cancellation_requested(cancellation) {
+        return;
+    }
+    loop {
+        if cancellation.changed().await.is_err() {
+            // The default closed-false channel means "never cancel"; closure is
+            // not itself a cancellation request and must not create a hot loop.
+            std::future::pending::<()>().await;
+        }
+        if cancellation_requested(cancellation) {
+            return;
+        }
+    }
 }
 
 fn scheduled_arms(task_index: usize) -> [EvaluationArm; 3] {

@@ -193,6 +193,35 @@ fn default_generated_source_review() -> SkillReview {
 }
 
 #[tokio::test]
+async fn legacy_review_without_source_fingerprint_has_held_out_refusal_without_requests() {
+    let state = RecordingState::default();
+    let app = Router::new()
+        .route("/v1/chat/completions", post(completion))
+        .with_state(state.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let address = listener.local_addr().expect("address");
+    let server = tokio::spawn(async move { axum::serve(listener, app).await });
+    let client = NearAiEvaluationClient::at(
+        format!("http://{address}/v1"),
+        "synthetic-key".to_string(),
+        MODEL.to_string(),
+    )
+    .expect("client");
+    let mut legacy = review();
+    legacy.source_task_fingerprint = SkillSourceTaskFingerprint::default();
+
+    assert_eq!(
+        evaluate_with_client(client, &legacy).await,
+        Err(SkillEvaluationError::HeldOutSetUnavailable)
+    );
+    assert_eq!(state.request_sequence.load(Ordering::SeqCst), 0);
+    assert!(state.requests.lock().expect("request lock").is_empty());
+    server.abort();
+}
+
+#[tokio::test]
 async fn three_arm_evaluation_uses_24_equal_budget_public_requests_and_gates() {
     let state = RecordingState::default();
     let app = Router::new()

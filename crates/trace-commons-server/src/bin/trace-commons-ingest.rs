@@ -7600,6 +7600,11 @@ fn community_cors_origins() -> Vec<HeaderValue> {
 fn app(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/v1/reward-offers/{program_id}", get(rewards::offer))
+        .route("/v1/missions", get(rewards::mission_catalog))
+        .route(
+            "/v1/missions/{mission_id}",
+            get(rewards::mission_publication),
+        )
         .route("/v1/token-bundles/query", post(token_bundles::query))
         .route(
             "/v1/research/token-bundles/query",

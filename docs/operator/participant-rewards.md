@@ -45,6 +45,8 @@ Both commands return the public offer projection. There is no list or search end
 
 ## HTTP contract
 
+The [mission package runbook](mission-packages.md) covers immutable mission publication and public catalog discovery for these offers.
+
 | Method and path | Authentication | Result |
 | --- | --- | --- |
 | `GET /v1/reward-offers/{program_id}` | Public | Readable manifest, version, units, capacity, deadline and suspension |
@@ -66,9 +68,9 @@ Invalidation preserves an existing award and its capacity consumption. An expire
 
 Errors use existing safe `reward_*` labels: invalid input is 400, missing account authentication is 401, foreign/unknown objects are 404, unavailable storage is 503, and state/capacity/version conflicts are 409. Cross-site writes return 403 and exhausted request limits return 429. Render actionable copy from the label; keep server/internal identifiers out of user-facing error prose.
 
-Each ingest process admits at most two concurrent reward database queries across public and account routes, with at most one account reward operation per tenant. Contending requests return 429 before waiting for a database connection.
+Each ingest process admits at most two concurrent reward database queries across public and account routes, with at most one account reward operation per tenant. Anonymous reward offer, mission catalog and mission detail reads additionally share one public-read permit, so they can occupy at most one of the two database slots. Account operations retain the existing tenant and global budgets. Contending requests return 429 before waiting for a database connection.
 
-This leaves capacity in the default five-connection pool for other account operations; smaller custom pools offer less isolation. These limits are per process. PostgreSQL locks continue to enforce ledger consistency across processes and operator calls.
+These per-process limits leave capacity in the default five-connection pool for other account operations; smaller custom pools offer less isolation. PostgreSQL locks enforce ledger consistency across processes and operator calls.
 
 Capacity and awarded totals are calculated from the ledger on each request. Their cost grows with program participation and account history, including merged aliases. Profile these queries against the intended deployment's data volume before raising request limits or expanding the pilot; the functional tests do not establish a production load envelope.
 

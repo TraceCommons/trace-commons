@@ -2,6 +2,8 @@ pub mod admission;
 pub mod canonical_json;
 pub mod community_handle;
 pub mod llm;
+pub mod mission_catalog;
+pub mod mission_evaluation;
 pub mod onboarding;
 pub mod privacy;
 pub mod public_run;

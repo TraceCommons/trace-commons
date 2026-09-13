@@ -174,6 +174,8 @@ jobs:
           PGPASSWORD=trace createdb -h 127.0.0.1 -U trace reward_test_missions_upgrade
           PGPASSWORD=trace createdb -h 127.0.0.1 -U trace reward_test_participants
           PGPASSWORD=trace createdb -h 127.0.0.1 -U trace reward_test_participant_http
+          PGPASSWORD=trace createdb -h 127.0.0.1 -U trace reward_test_mission_packages
+          PGPASSWORD=trace createdb -h 127.0.0.1 -U trace reward_test_mission_http
       # Each step carries only the variables its own suite reads, NOT a job-wide
       # `env:` block. That is not tidiness: `trace_invite_registry_pg` reads
       # `TRACE_COMMONS_PG_TEST_DATABASE_URL` as its own main URL, so setting
@@ -288,6 +290,26 @@ jobs:
             -c 'SELECT count(*) > 0 FROM trace_reward_participant_reservations;')" = t
         env:
           TRACE_COMMONS_REWARDS_PG_TEST_URL: postgres://trace@127.0.0.1:5432/reward_test_participant_http
+      - name: published mission authorization and catalog
+        run: |
+          set -euo pipefail
+          cargo test -p trace-commons-server --test mission_publication_pg -- --ignored --test-threads=1
+          test "$(PGPASSWORD=trace psql -qtA -h 127.0.0.1 -U trace reward_test_mission_packages \
+            -c 'SELECT count(*) > 0 FROM trace_reward_mission_packages;')" = t
+          test "$(PGPASSWORD=trace psql -qtA -h 127.0.0.1 -U trace reward_test_mission_packages \
+            -c "SELECT count(*) = 1 FROM _trace_commons_migrations WHERE version = 72 AND name = 'published_mission_packages';")" = t
+        env:
+          TRACE_COMMONS_REWARDS_PG_TEST_URL: postgres://trace@127.0.0.1:5432/reward_test_mission_packages
+      - name: published mission HTTP contract
+        run: |
+          set -euo pipefail
+          cargo test -p trace-commons-server --bin trace-commons-ingest public_mission_catalog_http_is_bounded_anonymous_and_side_effect_free -- --ignored --test-threads=1
+          test "$(PGPASSWORD=trace psql -qtA -h 127.0.0.1 -U trace reward_test_mission_http \
+            -c 'SELECT count(*) = 2 FROM trace_reward_mission_packages;')" = t
+          test "$(PGPASSWORD=trace psql -qtA -h 127.0.0.1 -U trace reward_test_mission_http \
+            -c 'SELECT count(*) = 0 FROM trace_reward_reservations;')" = t
+        env:
+          TRACE_COMMONS_REWARDS_PG_TEST_URL: postgres://trace@127.0.0.1:5432/reward_test_mission_http
       # `--ignored` is not optional for these three. Without it they report
       # `ignored`, the step passes having run nothing, and this job becomes the
       # thing it was built to replace.

@@ -3,11 +3,16 @@
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use trace_commons_protocol::privacy::validate_outbound_text;
 use trace_commons_protocol::trace_contribution::{TraceContributionEventType, UserFeedback};
 use uuid::Uuid;
 
 use crate::public_run::SessionDetail;
+
+pub use trace_commons_protocol::mission_evaluation::{
+    GENERATED_SOURCE_FAMILY, SKILL_DESCRIPTION_MAX_CHARS, SKILL_NAME_MAX_CHARS,
+    SKILL_PROCEDURE_MAX_CHARS, SkillDraft, SkillDraftError, render_skill, valid_skill_name,
+    validate_draft,
+};
 
 mod copy;
 mod evaluation;
@@ -17,18 +22,10 @@ pub use copy::*;
 pub use evaluation::*;
 pub use install::*;
 
-/// Stable family identifier for corrections that repair generated files at their source.
-pub const GENERATED_SOURCE_FAMILY: &str = "generated-source-repair";
 /// Default Agent Skill name proposed for the generated-source repair family.
 pub const DEFAULT_SKILL_NAME: &str = "repair-generated-sources";
 /// Simple instruction used as the stronger-than-baseline evaluation control.
 pub const MANUAL_CONTROL_INSTRUCTION: &str = "When a requested file is generated, edit its source and regenerate it instead of changing the generated file directly.";
-/// Maximum number of Unicode scalar values accepted in an Agent Skill name.
-pub const SKILL_NAME_MAX_CHARS: usize = 64;
-/// Maximum number of Unicode scalar values accepted in a skill description.
-pub const SKILL_DESCRIPTION_MAX_CHARS: usize = 1_024;
-/// Maximum number of Unicode scalar values accepted in a skill procedure.
-pub const SKILL_PROCEDURE_MAX_CHARS: usize = 12_000;
 
 const SOURCE_TASK_MAX_TOKENS: usize = 256;
 const SOURCE_TASK_SIMHASH_BITS: usize = 128;
@@ -63,17 +60,6 @@ pub struct SkillSourceEvidence {
     pub kind: TraceContributionEventType,
     /// Bounded source excerpt shown during candidate review.
     pub excerpt: String,
-}
-
-/// Owner-editable fields from which the exact installable `SKILL.md` is rendered.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SkillDraft {
-    /// Lowercase, hyphenated Agent Skill directory and metadata name.
-    pub name: String,
-    /// Applicability guidance used for Agent Skill discovery.
-    pub description: String,
-    /// Markdown procedure inserted into the skill body.
-    pub procedure: String,
 }
 
 /// A bounded, text-free fingerprint of the real session task. It persists
@@ -171,41 +157,6 @@ pub struct SkillReview {
     pub skill_md: String,
     /// Lowercase SHA-256 digest of the exact `skill_md` bytes.
     pub skill_sha256: String,
-}
-
-/// Stable validation failures for owner-edited Agent Skill fields.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SkillDraftError {
-    /// The name violates the lowercase, hyphenated Agent Skill name rules.
-    InvalidName,
-    /// The description is empty or has surrounding whitespace.
-    DescriptionRequired,
-    /// The description exceeds [`SKILL_DESCRIPTION_MAX_CHARS`].
-    DescriptionTooLong,
-    /// The procedure is empty or has surrounding whitespace.
-    ProcedureRequired,
-    /// The procedure exceeds [`SKILL_PROCEDURE_MAX_CHARS`].
-    ProcedureTooLong,
-    /// A field contains a disallowed control character.
-    ControlCharacter,
-    /// The description or procedure matches the public-text secret filter.
-    SensitiveText,
-}
-
-impl SkillDraftError {
-    #[must_use]
-    /// Returns the stable daemon refusal label for this validation failure.
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::InvalidName => "skill-name-invalid",
-            Self::DescriptionRequired => "skill-description-required",
-            Self::DescriptionTooLong => "skill-description-too-long",
-            Self::ProcedureRequired => "skill-procedure-required",
-            Self::ProcedureTooLong => "skill-procedure-too-long",
-            Self::ControlCharacter => "skill-control-character",
-            Self::SensitiveText => "skill-sensitive-text",
-        }
-    }
 }
 
 #[must_use]
@@ -307,71 +258,6 @@ pub fn propose_candidate(
     })
 }
 
-/// Validates owner-edited fields before rendering or approving an Agent Skill.
-///
-/// Validation enforces Agent Skill naming, bounded content, control-character rules,
-/// and the shared outbound privacy filter used by public session projections.
-pub fn validate_draft(draft: &SkillDraft) -> Result<(), SkillDraftError> {
-    if !valid_skill_name(&draft.name) {
-        return Err(SkillDraftError::InvalidName);
-    }
-    validate_field(
-        &draft.description,
-        SKILL_DESCRIPTION_MAX_CHARS,
-        SkillDraftError::DescriptionRequired,
-        SkillDraftError::DescriptionTooLong,
-        false,
-    )?;
-    validate_field(
-        &draft.procedure,
-        SKILL_PROCEDURE_MAX_CHARS,
-        SkillDraftError::ProcedureRequired,
-        SkillDraftError::ProcedureTooLong,
-        true,
-    )?;
-    for value in [&draft.description, &draft.procedure] {
-        validate_outbound_text(value).map_err(|_| SkillDraftError::SensitiveText)?;
-    }
-    Ok(())
-}
-
-fn validate_field(
-    value: &str,
-    max_chars: usize,
-    empty: SkillDraftError,
-    too_long: SkillDraftError,
-    allow_newline: bool,
-) -> Result<(), SkillDraftError> {
-    if value.trim().is_empty() || value.trim() != value {
-        return Err(empty);
-    }
-    if value.chars().count() > max_chars {
-        return Err(too_long);
-    }
-    if value.chars().any(|character| {
-        character.is_control() && !(allow_newline && matches!(character, '\n' | '\t'))
-    }) {
-        return Err(SkillDraftError::ControlCharacter);
-    }
-    if !allow_newline && (value.contains('\n') || value.contains('\r')) {
-        return Err(SkillDraftError::ControlCharacter);
-    }
-    Ok(())
-}
-
-#[must_use]
-/// Returns whether `value` is a bounded lowercase Agent Skill name.
-pub fn valid_skill_name(value: &str) -> bool {
-    !value.is_empty()
-        && value.chars().count() <= SKILL_NAME_MAX_CHARS
-        && !value.starts_with('-')
-        && !value.ends_with('-')
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
-        && !value.contains("--")
-}
-
 /// Freezes an approved draft into exact `SKILL.md` bytes and their SHA-256 digest.
 ///
 /// The review keeps account-owned submission and evidence identifiers for lineage,
@@ -398,35 +284,6 @@ pub fn review_candidate(
         skill_md,
         skill_sha256,
     })
-}
-
-#[must_use]
-/// Renders validated draft fields as an Agent Skills specification package.
-///
-/// Call [`review_candidate`] when the rendered bytes must be validated and
-/// digest-bound for evaluation or installation.
-pub fn render_skill(draft: &SkillDraft) -> String {
-    format!(
-        "---\nname: {}\ndescription: {}\ncompatibility: Designed for coding agents with repository read, edit, and command tools.\nmetadata:\n  author: Trace Commons contributor\n  family: {}\n---\n\n{}\n",
-        draft.name,
-        yaml_double_quoted(&draft.description),
-        GENERATED_SOURCE_FAMILY,
-        draft.procedure
-    )
-}
-
-fn yaml_double_quoted(value: &str) -> String {
-    let mut output = String::with_capacity(value.len() + 2);
-    output.push('"');
-    for character in value.chars() {
-        match character {
-            '\\' => output.push_str("\\\\"),
-            '"' => output.push_str("\\\""),
-            _ => output.push(character),
-        }
-    }
-    output.push('"');
-    output
 }
 
 #[must_use]
@@ -512,197 +369,5 @@ fn similarity_distance(left: &str, right: &str) -> Option<u32> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::public_run::SessionEvidenceCandidate;
-
-    fn detail(correction: Option<&str>) -> SessionDetail {
-        SessionDetail {
-            content_unavailable: false,
-            task: Some("Repair the generated package manifest from its source schema.".to_string()),
-            contribution_status: Some(
-                trace_commons_protocol::public_run::PublicRunContributionStatus::Accepted,
-            ),
-            permitted_uses: Vec::new(),
-            task_success: Some(trace_commons_protocol::trace_contribution::TaskSuccess::Partial),
-            user_feedback: Some(UserFeedback::Correction),
-            human_correction: correction.map(str::to_string),
-            evidence: vec![SessionEvidenceCandidate {
-                event_id: Uuid::nil(),
-                kind: trace_commons_protocol::trace_contribution::TraceContributionEventType::AssistantMessage,
-                excerpt: "Changed the checked-in output directly.".to_string(),
-            }],
-            contributed_version: "2.0".to_string(),
-            consent_policy_version: "2.0".to_string(),
-            redaction_pipeline_version: "2.0".to_string(),
-            publication: None,
-            publication_version: 0,
-            retained_source_slug: None,
-        }
-    }
-
-    #[test]
-    fn trigger_requires_generated_source_and_corrective_action_signals() {
-        assert!(correction_matches_generated_source_family(
-            "Do not edit the generated file. Change the source schema and regenerate it."
-        ));
-        assert!(!correction_matches_generated_source_family(
-            "The generated file has the wrong value."
-        ));
-        assert!(!correction_matches_generated_source_family(
-            "Change the source schema before the release."
-        ));
-        assert!(!correction_matches_generated_source_family(
-            "The generator documentation is useful."
-        ));
-    }
-
-    #[test]
-    fn candidate_keeps_source_evidence_out_of_the_package() {
-        let correction =
-            "Do not edit the generated file. Change the source schema and regenerate it.";
-        let candidate = propose_candidate(Uuid::nil(), &detail(Some(correction)))
-            .expect("supported correction");
-        assert_eq!(candidate.replaces_review_id, None);
-        assert_eq!(
-            candidate.source_evidence[0].kind,
-            TraceContributionEventType::AssistantMessage
-        );
-        let review = review_candidate(&candidate, candidate.draft.clone()).expect("valid review");
-        assert!(!review.skill_md.contains(correction));
-        assert!(
-            !review
-                .skill_md
-                .contains("Changed the checked-in output directly.")
-        );
-        assert_eq!(review.source_evidence_ids, vec![Uuid::nil()]);
-        assert_eq!(review.skill_sha256, sha256(review.skill_md.as_bytes()));
-    }
-
-    #[test]
-    fn unsupported_corrections_are_not_made_generic() {
-        let result = propose_candidate(
-            Uuid::nil(),
-            &detail(Some(
-                "Retry the network request after renewing the session.",
-            )),
-        );
-        assert_eq!(result, Err("skill-family-not-supported"));
-    }
-
-    #[test]
-    fn non_accepted_sessions_cannot_produce_a_skill() {
-        let mut source = detail(Some(
-            "Do not edit the generated file. Change the source schema and regenerate it.",
-        ));
-        source.contribution_status =
-            Some(trace_commons_protocol::public_run::PublicRunContributionStatus::Quarantined);
-        assert_eq!(
-            propose_candidate(Uuid::nil(), &source),
-            Err("skill-session-not-accepted")
-        );
-    }
-
-    #[test]
-    fn review_refuses_credentials_and_wallet_recovery_cues() {
-        let mut draft = SkillDraft {
-            name: DEFAULT_SKILL_NAME.to_string(),
-            description: DEFAULT_DESCRIPTION.to_string(),
-            procedure: DEFAULT_PROCEDURE.to_string(),
-        };
-        draft.procedure.push_str("\nUse recovery phrase here.");
-        assert_eq!(validate_draft(&draft), Err(SkillDraftError::SensitiveText));
-        draft.procedure = format!(
-            "{}\napi_key = {}{}",
-            DEFAULT_PROCEDURE,
-            "sk-proj-",
-            "x".repeat(16)
-        );
-        assert_eq!(validate_draft(&draft), Err(SkillDraftError::SensitiveText));
-
-        let mnemonic = std::iter::repeat_n("abandon", 11)
-            .chain(["about"])
-            .collect::<Vec<_>>()
-            .join(" ");
-        draft.procedure = format!("{DEFAULT_PROCEDURE}\n{mnemonic}");
-        assert_eq!(validate_draft(&draft), Err(SkillDraftError::SensitiveText));
-
-        for prefix in ["ED25519:", "Ed25519:"] {
-            draft.procedure = format!("{DEFAULT_PROCEDURE}\n{prefix}{}", "1".repeat(88));
-            assert_eq!(
-                validate_draft(&draft),
-                Err(SkillDraftError::SensitiveText),
-                "NEAR private-key prefixes must be rejected case-insensitively"
-            );
-        }
-    }
-
-    #[test]
-    fn names_are_bounded_lowercase_kebab_case() {
-        assert!(valid_skill_name("repair-generated-sources"));
-        assert!(valid_skill_name(&"a".repeat(SKILL_NAME_MAX_CHARS)));
-        assert!(!valid_skill_name(&"a".repeat(SKILL_NAME_MAX_CHARS + 1)));
-        for value in [
-            "",
-            "Repair-files",
-            "repair_files",
-            "-repair",
-            "repair-",
-            "a--b",
-        ] {
-            assert!(!valid_skill_name(value), "{value}");
-        }
-    }
-
-    #[test]
-    fn draft_text_limits_accept_the_boundary_and_reject_one_character_more() {
-        let boundary = SkillDraft {
-            name: "boundary-skill".to_string(),
-            description: "d".repeat(SKILL_DESCRIPTION_MAX_CHARS),
-            procedure: "p".repeat(SKILL_PROCEDURE_MAX_CHARS),
-        };
-        assert_eq!(validate_draft(&boundary), Ok(()));
-
-        let mut too_long = boundary.clone();
-        too_long.description.push('d');
-        assert_eq!(
-            validate_draft(&too_long),
-            Err(SkillDraftError::DescriptionTooLong)
-        );
-        too_long = boundary;
-        too_long.procedure.push('p');
-        assert_eq!(
-            validate_draft(&too_long),
-            Err(SkillDraftError::ProcedureTooLong)
-        );
-    }
-
-    #[test]
-    fn source_task_fingerprint_matches_only_exact_or_lexically_near_tasks() {
-        let source = source_task_fingerprint(
-            "Change the Windows package tile background and regenerate every display scale.",
-        )
-        .expect("source fingerprint");
-        let near = source_task_fingerprint(
-            "Change the Windows package tile background, then regenerate every display scale.",
-        )
-        .expect("near fingerprint");
-        let unrelated = source_task_fingerprint(
-            "Correct punctuation in a handwritten README without changing generated files.",
-        )
-        .expect("unrelated fingerprint");
-        assert!(source.is_exact_or_near_duplicate(&source));
-        assert_eq!(
-            similarity_distance(&source.similarity_hash, &near.similarity_hash),
-            Some(32)
-        );
-        assert!(source.is_exact_or_near_duplicate(&near));
-        assert!(!source.is_exact_or_near_duplicate(&unrelated));
-
-        let embedded = source_task_fingerprint(
-            "Change the Windows package tile background and regenerate every display scale while also replacing the network protocol, rewriting account storage, migrating databases, and updating unrelated documentation.",
-        )
-        .expect("embedded fingerprint");
-        assert!(!source.is_exact_or_near_duplicate(&embedded));
-    }
-}
+#[path = "mod_tests.rs"]
+mod tests;
