@@ -39,6 +39,7 @@ the link.
 | Consolidating two contributor devices into one account | [`./account-merge.md`](./account-merge.md) |
 | Setting the NEAR settlement mode or designating payout | [`./settlement-mode.md`](./settlement-mode.md) |
 | Issuing and reviewing mission or Insights rewards | [`./mission-insight-rewards.md`](./mission-insight-rewards.md) |
+| Publishing participant reward offers or provisioning account access | [`./participant-rewards.md`](./participant-rewards.md) |
 | Gating the pilot to invited contributors only | [`./pilot-allowlist.md`](./pilot-allowlist.md) |
 | Onboarding an internal pilot contributor | [`./pilot-contributor-onboarding.md`](./pilot-contributor-onboarding.md) |
 | Managing the HuggingFace dataset / model cache | [`./hf-dataset-cache-hygiene.md`](./hf-dataset-cache-hygiene.md) |
@@ -165,6 +166,7 @@ Every runbook in this directory, with a one-line description.
   workflows for `trace-commons-{review,admin,worker,tenant}`: install,
   env-var matrix, common sequences, defense-in-depth notes, and an
   error-variant troubleshooting table.
+- [`./participant-rewards.md`](./participant-rewards.md): publish readable offers, provision account access, and inspect participant reservations and history.
 - [`./pii-classify-policy.md`](./pii-classify-policy.md) — `TRACE_COMMONS_PII_CLASSIFY_POLICY`
   (`all-events` / `prose-only`): the measured ~10x round-trip reduction from
   restricting the NEAR AI privacy filter to prose events, the accepted

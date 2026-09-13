@@ -7,6 +7,8 @@ use super::*;
 mod public_run_lifecycle_tests;
 #[path = "tests/public_run_tests.rs"]
 mod public_run_tests;
+#[path = "tests/reward_participant_tests.rs"]
+mod reward_participant_tests;
 
 /// Shorthand for the direct-call handler tests. See [SubmitBody::for_test].
 fn submit_body(envelope: TraceContributionEnvelope) -> SubmitBody {

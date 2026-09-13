@@ -184,6 +184,46 @@ impl Drop for CreditSettlementAdvisoryLock {
 
 #[async_trait]
 pub trait Database: TraceCorpusStore + Send + Sync {
+    async fn get_reward_offer(
+        &self,
+        _program: uuid::Uuid,
+    ) -> Result<crate::reward_participant::RewardOffer, crate::mission_rewards::RewardError> {
+        Err(crate::mission_rewards::RewardError::StoreUnavailable)
+    }
+
+    async fn reserve_reward_offer(
+        &self,
+        _tenant: &str,
+        _account: uuid::Uuid,
+        _program: uuid::Uuid,
+        _request: &crate::reward_participant::RewardReservationRequest,
+    ) -> Result<crate::reward_participant::RewardReservation, crate::mission_rewards::RewardError>
+    {
+        Err(crate::mission_rewards::RewardError::StoreUnavailable)
+    }
+
+    async fn get_reward_reservation(
+        &self,
+        _tenant: &str,
+        _account: uuid::Uuid,
+        _reservation: uuid::Uuid,
+    ) -> Result<crate::reward_participant::RewardReservation, crate::mission_rewards::RewardError>
+    {
+        Err(crate::mission_rewards::RewardError::StoreUnavailable)
+    }
+
+    async fn get_reward_history(
+        &self,
+        _tenant: &str,
+        _account: uuid::Uuid,
+        _query: &crate::reward_participant::RewardHistoryQuery,
+    ) -> Result<
+        crate::reward_participant::RewardParticipantHistory,
+        crate::mission_rewards::RewardError,
+    > {
+        Err(crate::mission_rewards::RewardError::StoreUnavailable)
+    }
+
     async fn get_near_provisioned_anchor(
         &self,
         _tenant_id: &str,

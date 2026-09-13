@@ -147,10 +147,15 @@ async fn full_migrations_preserve_rewards_and_expose_only_guarded_runtime_surfac
         .map(|function| (function.get(0), function.get(1)))
         .collect();
     let expected: Vec<(String, String)> = [
+        // V71 exposes this compatibility hook publicly. Alias-bearing calls
+        // still require the participant grant and a consumed transaction proof.
+        ("trace_reward_accounts_merge", "text, uuid, uuid, uuid"),
         ("trace_reward_cancel", "text, uuid, uuid"),
         ("trace_reward_claim_submit", "text, uuid, text, text"),
         ("trace_reward_history", "text, text, integer, uuid"),
         ("trace_reward_invalidate", "text, text, uuid"),
+        ("trace_reward_offer_publish", "text, uuid, jsonb, jsonb"),
+        ("trace_reward_offer_suspend", "text, uuid, boolean"),
         ("trace_reward_program_create", "text, uuid, jsonb"),
         ("trace_reward_program_show", "text, uuid"),
         ("trace_reward_reserve", "text, uuid, uuid, text, text, text"),
@@ -164,7 +169,12 @@ async fn full_migrations_preserve_rewards_and_expose_only_guarded_runtime_surfac
         "runtime exposes only the permitted API"
     );
     for function in &executable_functions {
-        assert_eq!(function.get::<_, String>(2), "trace_reward_guard");
+        let expected_owner = if function.get::<_, String>(0) == "trace_reward_accounts_merge" {
+            "trace_reward_participant_guard"
+        } else {
+            "trace_reward_guard"
+        };
+        assert_eq!(function.get::<_, String>(2), expected_owner);
     }
     let history = executable_functions
         .iter()

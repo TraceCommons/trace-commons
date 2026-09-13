@@ -172,6 +172,8 @@ jobs:
           done
           PGPASSWORD=trace createdb -h 127.0.0.1 -U trace reward_test_missions
           PGPASSWORD=trace createdb -h 127.0.0.1 -U trace reward_test_missions_upgrade
+          PGPASSWORD=trace createdb -h 127.0.0.1 -U trace reward_test_participants
+          PGPASSWORD=trace createdb -h 127.0.0.1 -U trace reward_test_participant_http
       # Each step carries only the variables its own suite reads, NOT a job-wide
       # `env:` block. That is not tidiness: `trace_invite_registry_pg` reads
       # `TRACE_COMMONS_PG_TEST_DATABASE_URL` as its own main URL, so setting
@@ -270,6 +272,22 @@ jobs:
             -c 'SELECT count(*) >= 2 FROM trace_reward_awards;')" = t
         env:
           TRACE_COMMONS_REWARDS_PG_UPGRADE_TEST_URL: postgres://trace@127.0.0.1:5432/reward_test_missions_upgrade
+      - name: participant reward ownership and capacity
+        run: |
+          set -euo pipefail
+          cargo test -p trace-commons-server --test reward_participant_pg -- --ignored --test-threads=1
+          test "$(PGPASSWORD=trace psql -qtA -h 127.0.0.1 -U trace reward_test_participants \
+            -c 'SELECT count(*) > 0 FROM trace_reward_participant_reservations;')" = t
+        env:
+          TRACE_COMMONS_REWARDS_PG_TEST_URL: postgres://trace@127.0.0.1:5432/reward_test_participants
+      - name: participant reward HTTP account sessions
+        run: |
+          set -euo pipefail
+          cargo test -p trace-commons-server --bin trace-commons-ingest reward_participant_http_contract -- --ignored --test-threads=1
+          test "$(PGPASSWORD=trace psql -qtA -h 127.0.0.1 -U trace reward_test_participant_http \
+            -c 'SELECT count(*) > 0 FROM trace_reward_participant_reservations;')" = t
+        env:
+          TRACE_COMMONS_REWARDS_PG_TEST_URL: postgres://trace@127.0.0.1:5432/reward_test_participant_http
       # `--ignored` is not optional for these three. Without it they report
       # `ignored`, the step passes having run nothing, and this job becomes the
       # thing it was built to replace.

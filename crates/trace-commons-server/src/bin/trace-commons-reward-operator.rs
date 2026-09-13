@@ -16,6 +16,7 @@ use trace_commons_server::{
     config::{DatabaseConfig, SslMode},
     db::postgres::PgBackend,
     mission_rewards::{RewardError, RewardProgramTerms},
+    reward_participant::{MAX_REWARD_MANIFEST_BYTES, RewardOfferManifest},
 };
 use uuid::Uuid;
 
@@ -26,10 +27,10 @@ const MAX_TERMS_BYTES: u64 = 16 * 1024;
 #[command(
     name = "trace-commons-reward-operator",
     about = "Operator-managed reward pilot CLI",
-    long_about = "Tenant-scoped reward pilot for operator-asserted participant identities.\n\
-Review is manual and program units are nonredeemable; this CLI performs no\n\
-automatic mission verification. Database session authentication determines\n\
-issuer and reviewer authority.",
+    long_about = "Tenant-scoped reward programs and published account-bound offers.\n\
+Review is manual; this CLI performs no automatic mission verification or\n\
+Cloud-credit delivery. Database session authentication determines issuer\n\
+and reviewer authority.",
     version = trace_commons_build_info::version_line(env!("CARGO_PKG_VERSION"))
 )]
 struct Cli {
@@ -51,6 +52,10 @@ enum Command {
     ProgramCreate(ProgramCreateArgs),
     /// Show an authorized program and its capacity projection.
     ProgramShow(ProgramShowArgs),
+    /// Publish immutable readable terms for authenticated participant reservations.
+    OfferPublish(OfferPublishArgs),
+    /// Pause or resume new reservations without rewriting published terms.
+    OfferSuspend(OfferSuspendArgs),
     /// Reserve fixed program units for operator-asserted participant work.
     Reserve(ReserveArgs),
     /// Submit retained evidence by digest for manual review.
@@ -77,6 +82,24 @@ struct ProgramCreateArgs {
 struct ProgramShowArgs {
     #[arg(long)]
     program: Uuid,
+}
+
+#[derive(Debug, Args)]
+struct OfferPublishArgs {
+    #[arg(long)]
+    program: Uuid,
+    #[arg(long)]
+    terms: PathBuf,
+    #[arg(long)]
+    manifest: PathBuf,
+}
+
+#[derive(Debug, Args)]
+struct OfferSuspendArgs {
+    #[arg(long)]
+    program: Uuid,
+    #[arg(long, action = clap::ArgAction::Set)]
+    suspended: bool,
 }
 
 #[derive(Debug, Args)]
@@ -165,6 +188,22 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 .await
         }
         Command::ProgramShow(args) => backend.reward_program_show(&cli.tenant, args.program).await,
+        Command::OfferPublish(args) => {
+            let terms = read_terms(&args.terms)?;
+            let manifest = read_manifest(&args.manifest)?;
+            backend
+                .reward_offer_publish(&cli.tenant, args.program, &terms, &manifest)
+                .await
+                .and_then(|offer| {
+                    serde_json::to_value(offer).map_err(|_| RewardError::StoreUnavailable)
+                })
+        }
+        Command::OfferSuspend(args) => backend
+            .reward_offer_suspend(&cli.tenant, args.program, args.suspended)
+            .await
+            .and_then(|offer| {
+                serde_json::to_value(offer).map_err(|_| RewardError::StoreUnavailable)
+            }),
         Command::Reserve(args) => {
             backend
                 .reward_reserve(
@@ -278,6 +317,18 @@ fn read_terms(path: &PathBuf) -> Result<RewardProgramTerms, CliError> {
     serde_json::from_slice(&bytes).map_err(|_| CliError::TermsInvalid)
 }
 
+fn read_manifest(path: &PathBuf) -> Result<RewardOfferManifest, CliError> {
+    let file = File::open(path).map_err(|_| CliError::ManifestUnreadable)?;
+    let mut bytes = Vec::new();
+    file.take(MAX_REWARD_MANIFEST_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| CliError::ManifestUnreadable)?;
+    if bytes.len() as u64 > MAX_REWARD_MANIFEST_BYTES {
+        return Err(CliError::ManifestTooLarge);
+    }
+    serde_json::from_slice(&bytes).map_err(|_| CliError::ManifestInvalid)
+}
+
 #[derive(Debug)]
 enum CliError {
     MissingDatabaseUrl,
@@ -287,6 +338,9 @@ enum CliError {
     TermsUnreadable,
     TermsTooLarge,
     TermsInvalid,
+    ManifestUnreadable,
+    ManifestTooLarge,
+    ManifestInvalid,
     OutputEncoding,
 }
 
@@ -317,6 +371,15 @@ impl std::fmt::Display for CliError {
             Self::TermsInvalid => {
                 "reward_terms_invalid: correct the v1 reward terms JSON schema and retry"
             }
+            Self::ManifestUnreadable => {
+                "reward_manifest_unreadable: verify the manifest file can be read"
+            }
+            Self::ManifestTooLarge => {
+                "reward_manifest_too_large: reduce the manifest file to 32 KiB or less"
+            }
+            Self::ManifestInvalid => {
+                "reward_manifest_invalid: correct the v1 offer manifest JSON schema and retry"
+            }
             Self::OutputEncoding => "reward_output_failed: retry the command",
         };
         formatter.write_str(message)
@@ -332,6 +395,8 @@ fn operation_next_action(error: RewardError) -> &'static str {
         RewardError::NotFound => "verify the tenant and resource identifier",
         RewardError::PayloadConflict => "retry with the original request payload",
         RewardError::ProgramClosed => "use an open program",
+        RewardError::OfferSuspended => "select an active offer",
+        RewardError::OfferChanged => "read and acknowledge the current offer version",
         RewardError::CapacityExhausted => "select a program with available capacity",
         RewardError::ParticipantCap => "inspect this participant's program history",
         RewardError::WorkDuplicate => "inspect the existing reservation for this work",

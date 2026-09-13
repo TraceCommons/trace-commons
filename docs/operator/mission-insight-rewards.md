@@ -1,5 +1,7 @@
 # Mission and insight rewards
 
+For account-bound public offers, reservations and participant history, use the [participant rewards runbook](participant-rewards.md). The workflow below remains the operator-asserted pilot.
+
 The reward pilot records fixed, program-specific units for a published evidence task. It is a tenant-scoped, operator-managed PostgreSQL workflow. A participant hash is `operator_asserted`: it does not authenticate a Trace Commons account, prove a unique person, establish independence, or identify a wallet. Units have no redemption, exchange rate, settlement, cash value, clawback, or adjustment path.
 
 An issuer reserves and submits evidence. An independent reviewer accepts or rejects it under the published rubric. Qualified negative and inconclusive results may qualify when the rubric permits them. Local mission drafts, private Insights work, and a digest by itself do not establish completion.

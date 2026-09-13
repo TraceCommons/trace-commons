@@ -34,6 +34,7 @@ pub mod near_credit;
 pub mod near_legion_claim;
 pub mod redaction_witness;
 pub mod register_stats;
+pub mod reward_participant;
 pub mod secrets;
 pub mod trace_artifact_gcs;
 pub mod trace_artifact_kek;

@@ -52,6 +52,8 @@ pub enum RewardError {
     NotFound,
     PayloadConflict,
     ProgramClosed,
+    OfferSuspended,
+    OfferChanged,
     CapacityExhausted,
     ParticipantCap,
     WorkDuplicate,
@@ -71,6 +73,8 @@ impl RewardError {
             Self::NotFound => "reward_not_found",
             Self::PayloadConflict => "reward_payload_conflict",
             Self::ProgramClosed => "reward_program_closed",
+            Self::OfferSuspended => "reward_offer_suspended",
+            Self::OfferChanged => "reward_offer_changed",
             Self::CapacityExhausted => "reward_capacity_exhausted",
             Self::ParticipantCap => "reward_participant_cap",
             Self::WorkDuplicate => "reward_work_duplicate",
@@ -83,7 +87,7 @@ impl RewardError {
         }
     }
 
-    fn from_postgres(error: tokio_postgres::Error) -> Self {
+    pub(crate) fn from_postgres(error: tokio_postgres::Error) -> Self {
         // P0001 is an explicit application refusal. Constraint violations,
         // connection errors and arbitrary database messages stay opaque.
         let Some(db) = error.as_db_error() else {
@@ -98,6 +102,8 @@ impl RewardError {
             "reward_not_found" => Self::NotFound,
             "reward_payload_conflict" => Self::PayloadConflict,
             "reward_program_closed" => Self::ProgramClosed,
+            "reward_offer_suspended" => Self::OfferSuspended,
+            "reward_offer_changed" => Self::OfferChanged,
             "reward_capacity_exhausted" => Self::CapacityExhausted,
             "reward_participant_cap" => Self::ParticipantCap,
             "reward_work_duplicate" => Self::WorkDuplicate,
@@ -122,7 +128,7 @@ impl std::error::Error for RewardError {}
 impl PgBackend {
     // Only static statements below reach this helper. Each SQL function checks
     // session_user's tenant grant itself; setting the tenant GUC is not auth.
-    async fn reward_query(
+    pub(crate) async fn reward_query(
         &self,
         tenant: &str,
         statement: &'static str,
