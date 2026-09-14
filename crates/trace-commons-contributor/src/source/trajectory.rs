@@ -95,6 +95,18 @@ fn required_str(record: &Value, key: &str) -> Result<String> {
         .ok_or_else(|| anyhow!("malformed_record"))
 }
 
+/// The record roles this adapter turns into session events, excluding the
+/// leading `meta` record. This is the adapter's own eligibility rule and the
+/// only copy of it: anything that counts adapter-supported records must call
+/// this rather than keep a private list, or a role added here refuses a file
+/// the adapter accepts.
+pub(crate) fn is_event_record_role(role: &str) -> bool {
+    matches!(
+        role,
+        "user" | "assistant" | "reasoning" | "tool" | "system" | "observation"
+    )
+}
+
 pub(crate) fn parse_trajectory(bytes: &[u8]) -> Result<ParsedTrajectory> {
     let records = records_from(bytes)?;
     let Some(first) = records.first() else {
@@ -120,8 +132,15 @@ pub(crate) fn parse_trajectory(bytes: &[u8]) -> Result<ParsedTrajectory> {
 
     for record in records.iter().skip(1) {
         let role = record.get("role").and_then(|v| v.as_str()).unwrap_or("");
+        if role == "meta" {
+            bail!("duplicate_meta_record");
+        }
+        // The single eligibility gate. Arms below handle an accepted role; the
+        // catch-all is unreachable while they agree with the predicate.
+        if !is_event_record_role(role) {
+            bail!("unknown_record");
+        }
         match role {
-            "meta" => bail!("duplicate_meta_record"),
             // Upstream added `system` and `observation` to trajectory-v1 after
             // this reader was written, and the catch-all below rejects the
             // whole file on an unrecognised role. A contributor with a valid,
