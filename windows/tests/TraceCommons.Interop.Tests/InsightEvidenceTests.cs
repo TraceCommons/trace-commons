@@ -209,6 +209,26 @@ public sealed class InsightEvidenceTests
         Assert.Contains("ShowingInsights) && !ViewModel.ShowingInsights", File.ReadAllText(Path.Combine(root, "MainWindow.xaml.cs.txt")));
     }
     [Fact]
+    public void OnExplainReadsWellDefinedSelectionUnderMultiSelect()
+    {
+        var root = Path.Combine(AppContext.BaseDirectory, "shell-source", "TraceCommons.App");
+        string xaml = File.ReadAllText(Path.Combine(root, "Controls", "InsightsView.xaml.txt"));
+        // SavedList's SelectionMode is Multiple, to support checking several
+        // snapshots for episode-member picking (SelectedSnapshotIds), so
+        // SelectedItem on it is implementation-defined once more than one row
+        // is checked.
+        Assert.Contains("x:Name=\"SavedList\"", xaml);
+        Assert.Contains("SelectionMode=\"Multiple\"", xaml);
+        string code = File.ReadAllText(Path.Combine(root, "Controls", "InsightsView.xaml.cs.txt"));
+        int start = code.IndexOf("private async void OnExplain", StringComparison.Ordinal);
+        string method = code[start..code.IndexOf("private string[] SelectedSnapshotIds", start, StringComparison.Ordinal)];
+        // OnExplain must read the well-defined SelectedItems collection, not
+        // the implementation-defined singular SelectedItem, so a click while
+        // several rows are checked for an episode acts on a known snapshot.
+        Assert.DoesNotContain("SavedList.SelectedItem ", method);
+        Assert.Contains("SavedList.SelectedItems", method);
+    }
+    [Fact]
     public async Task NativeEvidenceLifecycleUsesSyntheticFilesWithoutStartingDaemon()
     {
         string root = Path.Combine(Path.GetTempPath(), "tc-evidence-" + Guid.NewGuid().ToString("N"));

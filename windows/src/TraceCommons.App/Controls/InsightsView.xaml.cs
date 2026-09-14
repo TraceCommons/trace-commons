@@ -60,7 +60,11 @@ public sealed partial class InsightsView : UserControl, IDisposable
     private async void OnRefresh(object sender, RoutedEventArgs args) => await ViewModel.RefreshAsync();
     private async void OnExplain(object sender, RoutedEventArgs args)
     {
-        if (SavedList.SelectedItem is not SavedInsight selected) return;
+        // SelectionMode is Multiple (for episode-member picking), so
+        // SelectedItem is implementation-defined once more than one row is
+        // checked. SelectedItems is the well-defined collection; take its
+        // first entry rather than an unspecified one.
+        if (SavedList.SelectedItems.Cast<SavedInsight>().FirstOrDefault() is not { } selected) return;
         await ViewModel.ExplainAsync(selected.Id);
         BringSnapshotIntoView(selected.Id);
     }
