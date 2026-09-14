@@ -10,7 +10,7 @@ use std::fs::File;
 use std::io::Read;
 use std::path::PathBuf;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, CommandFactory, Parser, Subcommand};
 use secrecy::SecretString;
 use trace_commons_protocol::mission_evaluation::{
     MISSION_EVALUATION_PACKAGE_MAX_BYTES, MissionEvaluationPackage,
@@ -180,10 +180,35 @@ struct HistoryArgs {
 
 #[tokio::main]
 async fn main() {
-    let result = run(Cli::parse()).await;
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(error) => exit_for_argument_error(error),
+    };
+    let result = run(cli).await;
     if let Err(error) = result {
         eprintln!("error: {error}");
         std::process::exit(1);
+    }
+}
+
+// clap renders the offending argument value into its own diagnostics, which
+// would put an operator-supplied identifier on stderr and defeat the label-only
+// discipline every other error path here holds. Help and version carry no
+// caller input, so they print unchanged; everything else collapses to a fixed
+// label plus the static usage line.
+fn exit_for_argument_error(error: clap::Error) -> ! {
+    use clap::error::ErrorKind;
+
+    match error.kind() {
+        ErrorKind::DisplayHelp
+        | ErrorKind::DisplayVersion
+        | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand => error.exit(),
+        _ => {
+            eprintln!("error: {}", CliError::ArgumentsInvalid);
+            eprintln!("{}", Cli::command().render_usage());
+            eprintln!("For more information, try '--help'.");
+            std::process::exit(2);
+        }
     }
 }
 
@@ -365,6 +390,7 @@ fn read_mission_package(path: &PathBuf) -> Result<MissionEvaluationPackage, CliE
 
 #[derive(Debug)]
 enum CliError {
+    ArgumentsInvalid,
     MissingDatabaseUrl,
     DatabaseUnavailable,
     UnsafeTransport,
@@ -384,6 +410,9 @@ enum CliError {
 impl std::fmt::Display for CliError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let message = match self {
+            Self::ArgumentsInvalid => {
+                "reward_request_invalid: correct the command inputs and retry"
+            }
             Self::MissingDatabaseUrl => {
                 "reward_database_url_missing: set TRACE_COMMONS_REWARDS_DATABASE_URL and retry"
             }

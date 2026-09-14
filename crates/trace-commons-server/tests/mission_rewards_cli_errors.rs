@@ -77,3 +77,90 @@ fn reward_operator_requires_a_nonblank_dedicated_database_url() {
         );
     }
 }
+
+#[test]
+fn reward_operator_rejects_invalid_arguments_without_echoing_their_values() {
+    for (case, arguments) in [
+        (
+            "malformed identifier",
+            vec![
+                "--tenant",
+                "reward-cli-errors",
+                "program-show",
+                "--program",
+                "private-program-marker",
+            ],
+        ),
+        (
+            "unexpected argument",
+            vec![
+                "--tenant",
+                "reward-cli-errors",
+                "--private-flag-marker",
+                "program-show",
+                "--program",
+                "00000000-0000-0000-0000-000000000001",
+            ],
+        ),
+        (
+            "out of range value",
+            vec![
+                "--tenant",
+                "reward-cli-errors",
+                "history",
+                "--participant-hash",
+                "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                "--limit",
+                "private-limit-marker",
+            ],
+        ),
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_trace-commons-reward-operator"))
+            .args(&arguments)
+            .env_remove("TRACE_COMMONS_REWARDS_DATABASE_URL")
+            .output()
+            .unwrap_or_else(|error| panic!("run reward CLI for {case}: {error}"));
+        assert!(
+            !output.status.success(),
+            "{case} must not exit successfully"
+        );
+        assert!(output.stdout.is_empty(), "{case} must not emit JSON output");
+        let stderr = String::from_utf8(output.stderr)
+            .unwrap_or_else(|error| panic!("{case} stderr must be UTF-8: {error}"));
+        assert!(
+            stderr.starts_with(
+                "error: reward_request_invalid: correct the command inputs and retry\n"
+            ),
+            "{case} must lead with the fixed label: {stderr}"
+        );
+        for argument in &arguments {
+            if argument.contains("marker") {
+                assert!(
+                    !stderr.contains(argument),
+                    "{case} must not echo the offending value: {stderr}"
+                );
+            }
+        }
+        assert!(
+            stderr.contains("Usage: trace-commons-reward-operator"),
+            "{case} must keep usage guidance: {stderr}"
+        );
+    }
+}
+
+#[test]
+fn reward_operator_still_prints_help_and_version() {
+    for flag in ["--help", "--version"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_trace-commons-reward-operator"))
+            .arg(flag)
+            .env_remove("TRACE_COMMONS_REWARDS_DATABASE_URL")
+            .output()
+            .unwrap_or_else(|error| panic!("run reward CLI with {flag}: {error}"));
+        assert!(output.status.success(), "{flag} must exit successfully");
+        assert!(output.stderr.is_empty(), "{flag} must not write to stderr");
+        assert!(
+            !output.stdout.is_empty(),
+            "{flag} must still print its own text"
+        );
+    }
+}
