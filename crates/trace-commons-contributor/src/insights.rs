@@ -269,6 +269,44 @@ pub fn analyze_file(format: SourceFormat, path: &Path) -> Result<LocalInsight> {
     })
 }
 
+/// The operational outcomes a native shell has to tell apart. Each carries a
+/// fixed label and nothing else: no path, no identifier, no parser detail. The
+/// type is what survives the bridge -- a plain string error would be masked as
+/// a generic failure there, which is how a routine lock contention came to be
+/// indistinguishable from a corrupt store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InsightsStoreError {
+    /// No saved entry has that identifier.
+    NotFound,
+    /// That evidence association is not on this snapshot.
+    EvidenceLinkNotFound,
+    /// Another window or client holds the store. Retrying is the remedy.
+    Busy,
+    /// The entry cannot be read. `repair` removes exactly what is unreadable.
+    Invalid,
+    /// A symlink stands where the store or its index must be.
+    SymlinkRefused,
+    /// The store directory is reachable by someone other than its owner.
+    PrivateDirectoryRequired,
+    /// Local storage could not be opened, read, or written.
+    Unavailable,
+}
+
+impl std::fmt::Display for InsightsStoreError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::NotFound => "insights_not_found",
+            Self::EvidenceLinkNotFound => "insights_evidence_link_not_found",
+            Self::Busy => "insights_store_busy",
+            Self::Invalid => "insights_store_invalid",
+            Self::SymlinkRefused => "insights_store_symlink_refused",
+            Self::PrivateDirectoryRequired => "insights_store_requires_private_directory",
+            Self::Unavailable => "insights_store_unavailable",
+        })
+    }
+}
+impl std::error::Error for InsightsStoreError {}
+
 /// Effects committed atomically with a snapshot mutation. Never persisted as evidence.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MutationEffects {
@@ -487,18 +525,18 @@ impl LocalInsightStore {
             builder.recursive(true).mode(0o700);
             builder
                 .create(dir)
-                .map_err(|_| anyhow!("insights_store_unavailable"))?;
+                .map_err(|_| anyhow!(InsightsStoreError::Unavailable))?;
             let permissions = fs::metadata(dir)?.permissions();
             if permissions.mode() & 0o077 != 0 {
-                bail!("insights_store_requires_private_directory");
+                bail!(InsightsStoreError::PrivateDirectoryRequired);
             }
         }
         #[cfg(not(unix))]
-        fs::create_dir_all(dir).map_err(|_| anyhow!("insights_store_unavailable"))?;
+        fs::create_dir_all(dir).map_err(|_| anyhow!(InsightsStoreError::Unavailable))?;
         reject_leaf_symlink(dir)?;
         let dir = dir
             .canonicalize()
-            .map_err(|_| anyhow!("insights_store_unavailable"))?;
+            .map_err(|_| anyhow!(InsightsStoreError::Unavailable))?;
         reject_symlinks(&dir)?;
         Ok(Self {
             dir,
@@ -512,10 +550,10 @@ impl LocalInsightStore {
         let lock_path = self.dir.join("store.lock");
         reject_symlinks(&lock_path)?;
         match fs::symlink_metadata(&lock_path) {
-            Ok(metadata) if !metadata.is_file() => bail!("insights_store_lock_not_file"),
+            Ok(metadata) if !metadata.is_file() => bail!(InsightsStoreError::SymlinkRefused),
             Ok(_) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(_) => bail!("insights_store_lock_unavailable"),
+            Err(_) => bail!(InsightsStoreError::Unavailable),
         }
         let mut options = OpenOptions::new();
         options.read(true).write(true).create(true).truncate(false);
@@ -526,9 +564,9 @@ impl LocalInsightStore {
         }
         let lock = options
             .open(lock_path)
-            .map_err(|_| anyhow!("insights_store_lock_unavailable"))?;
+            .map_err(|_| anyhow!(InsightsStoreError::Unavailable))?;
         lock.try_lock()
-            .map_err(|_| anyhow!("insights_store_busy"))?;
+            .map_err(|_| anyhow!(InsightsStoreError::Busy))?;
         let lock = StoreLock { file: lock };
         let path = self.dir.join("index.json");
         reject_symlinks(&path)?;
@@ -536,7 +574,7 @@ impl LocalInsightStore {
             Ok(_) => {
                 let bytes = bounded_read(&path)?;
                 serde_json::from_slice::<RawIndex>(&bytes)
-                    .map_err(|_| anyhow!("insights_store_invalid"))?
+                    .map_err(|_| anyhow!(InsightsStoreError::Invalid))?
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => RawIndex {
                 version: STORE_VERSION,
@@ -544,10 +582,10 @@ impl LocalInsightStore {
                 reports: BTreeMap::new(),
                 episodes: BTreeMap::new(),
             },
-            Err(_) => bail!("insights_store_unreadable"),
+            Err(_) => bail!(InsightsStoreError::Unavailable),
         };
         if !(1..=STORE_VERSION).contains(&raw.version) {
-            bail!("insights_store_version_unsupported");
+            bail!(InsightsStoreError::Invalid);
         }
         // One unreadable entry must not take the store with it. Both the
         // schema and the invariants are checked per entry: a failing snapshot
@@ -688,7 +726,7 @@ impl LocalInsightStore {
         let insight = index
             .reports
             .get_mut(id)
-            .ok_or_else(|| anyhow!("insights_not_found"))?;
+            .ok_or_else(|| anyhow!(InsightsStoreError::NotFound))?;
         insight.manual_annotation = Some(ManualAnnotation {
             category,
             outcome,
@@ -707,7 +745,7 @@ impl LocalInsightStore {
         let insight = index
             .reports
             .get_mut(id)
-            .ok_or_else(|| anyhow!("insights_not_found"))?;
+            .ok_or_else(|| anyhow!(InsightsStoreError::NotFound))?;
         insight.manual_annotation = None;
         let result = insight.clone();
         self.save(&index)?;
@@ -727,7 +765,7 @@ impl LocalInsightStore {
         let insight = index
             .reports
             .get_mut(id)
-            .ok_or_else(|| anyhow!("insights_not_found"))?;
+            .ok_or_else(|| anyhow!(InsightsStoreError::NotFound))?;
         if !insight
             .outcome_links
             .iter()
@@ -759,11 +797,11 @@ impl LocalInsightStore {
         let insight = index
             .reports
             .get_mut(id)
-            .ok_or_else(|| anyhow!("insights_not_found"))?;
+            .ok_or_else(|| anyhow!(InsightsStoreError::NotFound))?;
         let before = insight.outcome_links.len();
         insight.outcome_links.retain(|link| link.id != evidence_id);
         if insight.outcome_links.len() == before {
-            bail!("insights_evidence_link_not_found");
+            bail!(InsightsStoreError::EvidenceLinkNotFound);
         }
         let result = insight.clone();
         self.save(&index)?;
@@ -781,13 +819,13 @@ impl LocalInsightStore {
     pub fn explain(&self, id: &str) -> Result<LocalInsight> {
         let (_lock, index) = self.locked()?;
         if index.quarantine.reports.contains_key(id) {
-            bail!("insights_store_invalid");
+            bail!(InsightsStoreError::Invalid);
         }
         index
             .reports
             .get(id)
             .cloned()
-            .ok_or_else(|| anyhow!("insights_not_found"))
+            .ok_or_else(|| anyhow!(InsightsStoreError::NotFound))
     }
 
     /// Identifiers of the entries this store is withholding, if any.
@@ -844,11 +882,11 @@ impl LocalInsightStore {
 /// invalid between two reads.
 fn validate_stored_report(version: u32, id: &str, insight: &LocalInsight) -> Result<()> {
     if id != insight.id || insight.report.provider != ProviderManifest::first_party() {
-        bail!("insights_store_invalid");
+        bail!(InsightsStoreError::Invalid);
     }
     let evidence = &insight.report.evidence;
     let Some(reference) = evidence.first() else {
-        bail!("insights_store_invalid");
+        bail!(InsightsStoreError::Invalid);
     };
     if evidence.len() != 1
         || reference.id != *id
@@ -857,29 +895,29 @@ fn validate_stored_report(version: u32, id: &str, insight: &LocalInsight) -> Res
         || insight.task_category.is_some()
         || insight.cost_unavailable_reason != "adapter_usage_unavailable"
     {
-        bail!("insights_store_invalid");
+        bail!(InsightsStoreError::Invalid);
     }
     if let Some(annotation) = &insight.manual_annotation
         && (version == 1 || annotation.source_digest != reference.source_digest)
     {
-        bail!("insights_store_invalid");
+        bail!(InsightsStoreError::Invalid);
     }
     insight
         .report
         .validate_for(&ProviderManifest::first_party(), evidence)?;
     validate_local_metrics(insight)?;
     if version < 3 && (insight.model_observations.is_some() || !insight.outcome_links.is_empty()) {
-        bail!("insights_store_invalid");
+        bail!(InsightsStoreError::Invalid);
     }
     if version < 5 && insight.time_evidence.is_some() {
-        bail!("insights_store_invalid");
+        bail!(InsightsStoreError::Invalid);
     }
     if let Some(time_evidence) = &insight.time_evidence {
         time_evidence.validate()?;
         if time_evidence.source_digest != reference.source_digest
             || time_evidence.source_format != insight.source_format
         {
-            bail!("insights_store_invalid");
+            bail!(InsightsStoreError::Invalid);
         }
     }
     if let Some(models) = &insight.model_observations {
@@ -887,11 +925,11 @@ fn validate_stored_report(version: u32, id: &str, insight: &LocalInsight) -> Res
         if models.source_digest != reference.source_digest
             || models.source_format != insight.source_format
         {
-            bail!("insights_store_invalid");
+            bail!(InsightsStoreError::Invalid);
         }
     }
     if insight.outcome_links.len() > MAX_OUTCOME_LINKS {
-        bail!("insights_store_invalid");
+        bail!(InsightsStoreError::Invalid);
     }
     let mut link_ids = BTreeSet::new();
     for link in &insight.outcome_links {
@@ -900,7 +938,7 @@ fn validate_stored_report(version: u32, id: &str, insight: &LocalInsight) -> Res
             || link.id != link.evidence.identity_digest()?
             || !link_ids.insert(&link.id)
         {
-            bail!("insights_store_invalid");
+            bail!(InsightsStoreError::Invalid);
         }
     }
     Ok(())
@@ -911,14 +949,14 @@ fn validate_stored_report(version: u32, id: &str, insight: &LocalInsight) -> Res
 fn validate_local_metrics(insight: &LocalInsight) -> Result<()> {
     let metrics = &insight.report.metrics;
     if metrics.len() != 7 {
-        bail!("insights_store_invalid");
+        bail!(InsightsStoreError::Invalid);
     }
     let events = metrics
         .iter()
         .find(|metric| metric.id == MetricId::Events)
         .and_then(|metric| metric.value)
         .filter(|count| *count > 0)
-        .ok_or_else(|| anyhow!("insights_store_invalid"))?;
+        .ok_or_else(|| anyhow!(InsightsStoreError::Invalid))?;
     for id in [
         MetricId::Sessions,
         MetricId::Events,
@@ -931,9 +969,9 @@ fn validate_local_metrics(insight: &LocalInsight) -> Result<()> {
         let metric = metrics
             .iter()
             .find(|metric| metric.id == id)
-            .ok_or_else(|| anyhow!("insights_store_invalid"))?;
+            .ok_or_else(|| anyhow!(InsightsStoreError::Invalid))?;
         if metric.evidence_ids != [insight.id.clone()] {
-            bail!("insights_store_invalid");
+            bail!(InsightsStoreError::Invalid);
         }
         let Coverage { observed, total } = metric.coverage;
         let valid = match id {
@@ -950,7 +988,7 @@ fn validate_local_metrics(insight: &LocalInsight) -> Result<()> {
             }
         };
         if !valid {
-            bail!("insights_store_invalid");
+            bail!(InsightsStoreError::Invalid);
         }
     }
     Ok(())
@@ -959,11 +997,11 @@ fn validate_local_metrics(insight: &LocalInsight) -> Result<()> {
 fn reject_leaf_symlink(path: &Path) -> Result<()> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_symlink() => {
-            bail!("insights_store_symlink_refused")
+            bail!(InsightsStoreError::SymlinkRefused)
         }
         Ok(_) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(_) => bail!("insights_store_unavailable"),
+        Err(_) => bail!(InsightsStoreError::Unavailable),
     }
 }
 
@@ -971,11 +1009,11 @@ fn reject_symlinks(path: &Path) -> Result<()> {
     for ancestor in path.ancestors() {
         match fs::symlink_metadata(ancestor) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
-                bail!("insights_store_symlink_refused")
+                bail!(InsightsStoreError::SymlinkRefused)
             }
             Ok(_) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(_) => bail!("insights_store_unavailable"),
+            Err(_) => bail!(InsightsStoreError::Unavailable),
         }
     }
     Ok(())

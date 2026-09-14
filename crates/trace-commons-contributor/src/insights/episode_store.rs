@@ -58,7 +58,7 @@ fn validate_index_episode(index: &Index, id: &str, episode: &LocalEpisode) -> Re
                 .is_none_or(|evidence| evidence.source_digest != member.source_digest)
         })
     {
-        bail!("insights_store_invalid");
+        bail!(crate::insights::InsightsStoreError::Invalid);
     }
     Ok(())
 }
@@ -103,7 +103,7 @@ fn checked_episode<'a>(
 ) -> Result<&'a mut LocalEpisode> {
     validate_episode_id(id)?;
     if index.quarantine_holds_episode(id) {
-        bail!("insights_store_invalid");
+        bail!(crate::insights::InsightsStoreError::Invalid);
     }
     let episode = index
         .episodes
@@ -211,7 +211,7 @@ impl LocalInsightStore {
         validate_episode_id(id)?;
         let (_lock, index) = self.locked()?;
         if index.quarantine_holds_episode(id) {
-            bail!("insights_store_invalid");
+            bail!(crate::insights::InsightsStoreError::Invalid);
         }
         let episode = index.episodes.get(id).ok_or(EpisodeStoreError::NotFound)?;
         let members = episode

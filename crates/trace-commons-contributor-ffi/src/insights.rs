@@ -205,7 +205,108 @@ mod tests {
         std::fs::write(store.join("index.json"), b"PRIVATE_PARSER_CONTENT").unwrap();
         assert_eq!(
             json_call(&store, serde_json::json!({"type":"episode_list"})).unwrap_err(),
-            "insights-operation-failed"
+            "insights_store_invalid"
         );
+    }
+
+    /// Every operational outcome a shell has to act on differently must arrive
+    /// as its own label. Flattening them left "another window is writing" and
+    /// "your store is damaged" indistinguishable on the far side of the ABI.
+    #[test]
+    fn each_store_outcome_keeps_its_own_label_across_the_abi() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = temp.path().join("insights");
+        let source = temp.path().join("source.jsonl");
+        std::fs::write(&source, b"{\"role\":\"meta\",\"source\":\"fixture\"}\n{\"role\":\"user\",\"timestamp\":\"2026-09-11T12:00:00Z\",\"content\":\"PRIVATE_BODY\"}\n").unwrap();
+        let saved = json_call(
+            &store,
+            serde_json::json!({"type":"analyze","source":"trajectory","file":source,"save":true}),
+        )
+        .unwrap();
+        let id = saved["insight"]["id"].as_str().unwrap().to_owned();
+
+        // not found
+        assert_eq!(
+            json_call(
+                &store,
+                serde_json::json!({"type":"explain","id":"a".repeat(64)})
+            )
+            .unwrap_err(),
+            "insights_not_found"
+        );
+        // evidence link not found
+        assert_eq!(
+            json_call(
+                &store,
+                serde_json::json!({"type":"unlink_evidence","id":id,"evidence_id":"b".repeat(64)})
+            )
+            .unwrap_err(),
+            "insights_evidence_link_not_found"
+        );
+        // busy: another holder of the same store lock
+        let contender = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(store.join("store.lock"))
+            .unwrap();
+        contender.try_lock().unwrap();
+        assert_eq!(
+            json_call(&store, serde_json::json!({"type":"list"})).unwrap_err(),
+            "insights_store_busy"
+        );
+        contender.unlock().unwrap();
+        drop(contender);
+        // refused: the store location is a link, not a directory
+        let link = temp.path().join("linked-store");
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&store, &link).unwrap();
+            assert_eq!(
+                json_call(&link, serde_json::json!({"type":"list"})).unwrap_err(),
+                "insights_store_symlink_refused"
+            );
+        }
+        // io: a file standing where the store directory must be
+        let occupied = temp.path().join("occupied");
+        std::fs::write(&occupied, b"not a directory").unwrap();
+        assert_eq!(
+            json_call(
+                &occupied,
+                serde_json::json!({"type":"analyze","source":"trajectory","file":source,"save":true})
+            )
+            .unwrap_err(),
+            "insights_store_unavailable"
+        );
+        // corrupt: an entry the store cannot read, named without its content
+        let mut index: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(store.join("index.json")).unwrap()).unwrap();
+        index["reports"][&id]["cost_unavailable_reason"] = "PRIVATE_INVENTED".into();
+        std::fs::write(
+            store.join("index.json"),
+            serde_json::to_vec(&index).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            json_call(&store, serde_json::json!({"type":"explain","id":id})).unwrap_err(),
+            "insights_store_invalid"
+        );
+        let listed = json_call(&store, serde_json::json!({"type":"list"})).unwrap();
+        assert_eq!(listed["insights"], serde_json::json!([]));
+        assert_eq!(
+            listed["quarantined"]["snapshot_ids"],
+            serde_json::json!([id])
+        );
+        // Nothing about the request or the stored bytes rides along.
+        for label in [
+            "insights_not_found",
+            "insights_evidence_link_not_found",
+            "insights_store_busy",
+            "insights_store_invalid",
+            "insights_store_symlink_refused",
+            "insights_store_unavailable",
+        ] {
+            assert!(!label.contains("PRIVATE"));
+        }
+        let _ = link;
     }
 }
