@@ -39,7 +39,10 @@ use trace_commons_protocol::insights::{
 };
 
 const MAX_SOURCE_BYTES: u64 = 16 * 1024 * 1024;
-const STORE_VERSION: u32 = 10;
+// Advanced to 11 for model-observation schemas 2 and 3. A nested schema bump
+// without one here lets an older client accept the store and then reject
+// individual snapshots, with no diagnosable event and no downgrade path.
+const STORE_VERSION: u32 = 11;
 const MAX_OUTCOME_LINKS: usize = 128;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -493,6 +496,14 @@ impl LocalInsightStore {
                 bail!("insights_store_invalid");
             }
             if index.version < 10 && insight.claude_task_attribution.is_some() {
+                bail!("insights_store_invalid");
+            }
+            if index.version < models::MODEL_OBSERVATIONS_STORE_VERSION_FLOOR
+                && insight
+                    .model_observations
+                    .as_ref()
+                    .is_some_and(models::ModelObservations::requires_store_version_floor)
+            {
                 bail!("insights_store_invalid");
             }
             if let Some(usage) = &insight.usage_evidence {

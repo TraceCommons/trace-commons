@@ -15,6 +15,11 @@ pub const MAX_DECLARATION_REFERENCES: usize = 256;
 const LEGACY_MODEL_OBSERVATIONS_SCHEMA_VERSION: u32 = 1;
 const CODEX_MODEL_OBSERVATIONS_SCHEMA_VERSION: u32 = 2;
 const CLAUDE_MODEL_OBSERVATIONS_SCHEMA_VERSION: u32 = 3;
+/// Store version at which a nested model-observation schema above the legacy
+/// shape became writable. A new nested schema must advance `STORE_VERSION`
+/// with it, so a client that cannot read the shape refuses the whole store by
+/// version rather than hard-rejecting individual snapshots at read time.
+pub const MODEL_OBSERVATIONS_STORE_VERSION_FLOOR: u32 = 11;
 const MAX_MODEL_LABEL_BYTES: usize = 96;
 const MAX_SOURCE_BYTES: usize = 16 * 1024 * 1024;
 
@@ -90,6 +95,12 @@ fn invalid() -> anyhow::Error {
 }
 
 impl ModelObservations {
+    /// True when this nested schema post-dates the legacy shape, and so needs
+    /// a store at [`MODEL_OBSERVATIONS_STORE_VERSION_FLOOR`] or newer.
+    pub const fn requires_store_version_floor(&self) -> bool {
+        self.schema_version > LEGACY_MODEL_OBSERVATIONS_SCHEMA_VERSION
+    }
+
     /// Structural cache validation. The store must also compare source_format
     /// and source_digest with its containing snapshot's evidence binding.
     pub fn validate(&self) -> Result<()> {

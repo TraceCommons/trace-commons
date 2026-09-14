@@ -198,6 +198,61 @@ fn legacy_v4_mutation_preserves_existing_evidence_and_episodes_without_inventing
     assert!(migrated["reports"][&saved.id]["time_evidence"].is_null());
 }
 
+/// A nested model-observation schema above the legacy shape is only readable
+/// in a store at the floor version. Without that coupling an older client
+/// accepts the store and then rejects individual snapshots one at a time.
+#[test]
+fn a_post_legacy_model_schema_requires_the_store_version_floor() {
+    const {
+        assert!(
+            super::STORE_VERSION >= models::MODEL_OBSERVATIONS_STORE_VERSION_FLOOR,
+            "STORE_VERSION must advance with the nested model-observation schema"
+        );
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let file = temp.path().join("source.jsonl");
+    codex_source(&file);
+    let store = LocalInsightStore::open(&temp.path().join("store")).unwrap();
+    let saved = store.import(SourceFormat::Codex, &file).unwrap();
+    assert_eq!(saved.model_observations.as_ref().unwrap().schema_version, 2);
+
+    let index_path = store.dir.join("index.json");
+    let current: serde_json::Value =
+        serde_json::from_slice(&fs::read(&index_path).unwrap()).unwrap();
+    assert_eq!(current["version"], super::STORE_VERSION);
+
+    let mut below = current.clone();
+    below["version"] = (models::MODEL_OBSERVATIONS_STORE_VERSION_FLOOR - 1).into();
+    fs::write(&index_path, serde_json::to_vec(&below).unwrap()).unwrap();
+    assert_eq!(
+        store.list().unwrap_err().to_string(),
+        "insights_store_invalid",
+        "schema 2 must not be readable below the floor"
+    );
+
+    let mut legacy = below.clone();
+    legacy["reports"][&saved.id]["model_observations"]["schema_version"] = 1.into();
+    fs::write(&index_path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+    assert_eq!(
+        store.list().unwrap()[0]
+            .model_observations
+            .as_ref()
+            .unwrap()
+            .schema_version,
+        1,
+        "the legacy shape stays readable below the floor"
+    );
+
+    let mut future = current;
+    future["version"] = (super::STORE_VERSION + 1).into();
+    fs::write(&index_path, serde_json::to_vec(&future).unwrap()).unwrap();
+    assert_eq!(
+        store.list().unwrap_err().to_string(),
+        "insights_store_version_unsupported",
+        "one diagnosable refusal of the whole store, not a per-snapshot reject"
+    );
+}
+
 #[test]
 fn legacy_model_schema_is_preserved_until_explicit_identical_content_reimport() {
     let temp = tempfile::tempdir().unwrap();
