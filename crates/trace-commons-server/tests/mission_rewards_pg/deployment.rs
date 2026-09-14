@@ -154,6 +154,11 @@ async fn full_migrations_preserve_rewards_and_expose_only_guarded_runtime_surfac
         ("trace_reward_claim_submit", "text, uuid, text, text"),
         ("trace_reward_history", "text, text, integer, uuid"),
         ("trace_reward_invalidate", "text, text, uuid"),
+        // V72 mirrors `trace_reward_offer_publish`: the runtime may call it, and
+        // the body still demands the issuer grant through
+        // `trace_reward_authorize(p_tenant, 'issuer')`, so EXECUTE alone
+        // publishes nothing.
+        ("trace_reward_mission_publish", "text, uuid, text"),
         ("trace_reward_offer_publish", "text, uuid, jsonb, jsonb"),
         ("trace_reward_offer_suspend", "text, uuid, boolean"),
         ("trace_reward_program_create", "text, uuid, jsonb"),
