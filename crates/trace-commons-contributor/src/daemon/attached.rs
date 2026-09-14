@@ -184,6 +184,16 @@ impl AttachedDaemon {
         rx.recv().map_err(|_| AttachError::Disconnected)
     }
 
+    /// Stop delivering pushed events.
+    ///
+    /// The connection stays open and `call` keeps working: this drops the
+    /// sink only. There is no "unsubscribe" on the wire, and inventing one
+    /// would be a protocol change; a host that no longer wants events wants
+    /// its callback to stop being invoked, which is exactly this.
+    pub fn clear_sink(&self) {
+        *self.sink.lock().unwrap() = None;
+    }
+
     /// Install the sink pushed events are delivered to, then subscribe.
     ///
     /// Ordering matters: the daemon answers `subscribe` and then begins

@@ -97,6 +97,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 
 use trace_commons_contributor::config::ConfigStore;
+use trace_commons_contributor::daemon::attached::{AttachError, AttachedDaemon};
 use trace_commons_contributor::daemon::ipc::{self, ERR_BAD_PARAMS, Response};
 use trace_commons_contributor::daemon::settings::{
     DaemonSettings, apply_settings_object, roots_declared,
@@ -440,6 +441,21 @@ struct RunningDaemon {
 /// function that does, and must not race a call still using the handle.
 pub struct tc_handle {
     rt: tokio::runtime::Runtime,
+    /// Set when this handle reaches a daemon in ANOTHER process over the
+    /// socket, instead of owning one in this one.
+    ///
+    /// The two backings are exclusive: `running` is always `None` on an
+    /// attached handle and `attached` is always `None` on an embedded one.
+    /// Every function that reads the daemon checks this first, because an
+    /// attached handle has no `DaemonShared` to borrow -- `shared_of` would
+    /// report it as stopped, which is the exact false statement this whole
+    /// path exists to stop making.
+    ///
+    /// An attached handle still owns `rt`: nothing in it needs a runtime,
+    /// but `tc_handle_free`'s contract is written around a handle owning
+    /// one, and a handle that sometimes did not would make that contract
+    /// conditional for no gain.
+    attached: Option<Arc<AttachedDaemon>>,
     /// `None` once the daemon has been claimed for teardown -- by
     /// `tc_daemon_stop`, or implicitly by `tc_handle_free` tearing it down
     /// before freeing. Deliberately a plain `Option` and not a
@@ -466,6 +482,11 @@ pub struct tc_handle {
 /// reporting a healthy daemon. An undetectable zombie. Reading the flag
 /// here, rather than special-casing `"shutdown"` in `tc_call`, keeps one
 /// definition of "stopped" for all three entry points.
+/// The attached daemon behind this handle, if it has one.
+fn attached_of(handle: &tc_handle) -> Option<Arc<AttachedDaemon>> {
+    handle.attached.as_ref().map(Arc::clone)
+}
+
 fn shared_of(handle: &tc_handle) -> Option<Arc<ipc::DaemonShared>> {
     let running = handle.running.lock().unwrap_or_else(|p| p.into_inner());
     let shared = running.as_ref().map(|r| Arc::clone(&r.embedded.shared))?;
@@ -514,6 +535,7 @@ fn start_daemon_handle(store: ConfigStore) -> anyhow::Result<tc_handle> {
     ));
     Ok(tc_handle {
         rt,
+        attached: None,
         running: Mutex::new(Some(RunningDaemon {
             embedded,
             supervisor,
@@ -594,6 +616,121 @@ pub unsafe extern "C" fn tc_daemon_start(
         // `guarded_scalar`'s tail -- this closure converts every
         // business-logic error to `Ok` and never lets one get there.
         Ok(finish_daemon_start(result, err))
+    })
+}
+
+/// The fixed label `tc_daemon_attach` reports when nothing is listening on
+/// the state directory's endpoint -- no daemon was ever started, or a
+/// crashed one left the socket file behind with nothing behind it.
+///
+/// Deliberately distinct from `ERR_ALREADY_RUNNING`'s mirror image: a host
+/// that just got `already-running` from a start and then this from an attach
+/// is looking at a daemon that exited in between, which is a different
+/// sentence from either failure alone.
+/// The error-frame code and label for a stop asked of an attached handle.
+const ERR_REFUSED: &str = "refused";
+const ERR_ATTACHED_STOP_REFUSED: &str = "attached-stop-refused";
+/// The label `tc_preview_open` reports on an attached handle: the redacted
+/// body is the in-process content exemption and the socket does not carry it.
+const ERR_PREVIEW_REQUIRES_EMBEDDED: &str = "preview-requires-embedded";
+
+const ERR_NO_DAEMON_LISTENING: &str = "no-daemon-listening";
+
+/// The fixed label for an attach that reached the endpoint and could not
+/// hold it.
+const ERR_ATTACH_FAILED: &str = "attach-failed";
+
+/// Attach to a daemon ALREADY RUNNING in another process, over its socket.
+///
+/// This is the answer to `tc_daemon_start` reporting `already-running`.
+/// That label means another process holds `daemon.lock`, which the header
+/// documents as "not an error to repair: the daemon the contributor wants is
+/// already up" -- and until this existed a host had no way to act on that,
+/// so every shell that hit it told the contributor their watcher was not
+/// running while it was running.
+///
+/// The returned handle is a `tc_handle*` in every respect that matters to a
+/// caller: `tc_call`, `tc_subscribe`, `tc_unsubscribe` and `tc_handle_free`
+/// all take it, and `tc_handle_free` is still the only thing that frees it.
+/// Three deliberate differences from a started handle, each reported rather
+/// than silently degraded:
+///
+///   - `tc_daemon_stop` does NOT stop the daemon. The process on the other
+///     end may be a service-managed daemon or another window, and a shell
+///     that did not start it does not get to end it. Stop closes this
+///     connection instead. `tc_call(h, "shutdown", ...)` is refused with
+///     `"attached-stop-refused"` for the same reason.
+///   - `tc_preview_open` is refused with `"preview-requires-embedded"`.
+///     Previewing a redacted BODY is this ABI's in-process content
+///     exemption; the socket's `preview` returns the summary only, and
+///     answering with a summary where a body was asked for would be a
+///     content promise this path cannot keep.
+///   - Events arrive over the socket, so a subscriber gets the `snapshot`
+///     frame the daemon sends a client that just subscribed -- which the
+///     in-process `tc_subscribe` path never receives.
+///
+/// Returns NULL and sets `*err` to a fixed label on failure:
+/// `"no-daemon-listening"` (nothing is there) or `"attach-failed"`.
+///
+/// # Safety
+/// `config_dir` must be a valid, NUL-terminated UTF-8 C string (or NULL).
+/// `err`, if non-null, must point to writable `*mut c_char` storage.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_daemon_attach(
+    config_dir: *const c_char,
+    err: *mut *mut c_char,
+) -> *mut tc_handle {
+    guarded_scalar(err, std::ptr::null_mut(), || {
+        let fail = |label: &'static str| -> *mut tc_handle {
+            set_last_error(label);
+            if !err.is_null() {
+                unsafe { *err = to_owned_cstring(label) };
+            }
+            std::ptr::null_mut()
+        };
+
+        let store = {
+            let opened: anyhow::Result<ConfigStore> = (|| {
+                let dir = unsafe { borrow_str(config_dir) }?;
+                ConfigStore::open(std::path::PathBuf::from(dir))
+            })();
+            match opened {
+                Ok(store) => store,
+                // Same rule as every other start path: the anyhow context
+                // behind this embeds the state-directory path, so the label
+                // is fixed and the error text never crosses.
+                Err(_) => return Ok(fail(ERR_STATE_DIR_NOT_WRITABLE)),
+            }
+        };
+
+        let attached = match AttachedDaemon::connect(&store) {
+            Ok(attached) => attached,
+            Err(AttachError::NotListening) => return Ok(fail(ERR_NO_DAEMON_LISTENING)),
+            Err(_) => return Ok(fail(ERR_ATTACH_FAILED)),
+        };
+
+        // One worker is enough: an attached handle runs no daemon loops and
+        // spawns no tasks. It owns a runtime only so `tc_handle_free`'s
+        // contract stays unconditional -- see `tc_handle::attached`.
+        let rt = match tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => rt,
+            Err(_) => return Ok(fail(ERR_ATTACH_FAILED)),
+        };
+
+        let handle = tc_handle {
+            rt,
+            attached: Some(Arc::new(attached)),
+            running: Mutex::new(None),
+            subscriptions: Mutex::new(HashMap::new()),
+            next_subscription: AtomicU64::new(1),
+        };
+        let raw = Box::into_raw(Box::new(handle));
+        registry_insert(raw as usize, AllocKind::Handle);
+        Ok(raw)
     })
 }
 
@@ -792,6 +929,16 @@ pub unsafe extern "C" fn tc_daemon_start_with_settings(
 /// call `tc_handle_free` concurrently with `tc_daemon_stop`. Both are
 /// stated in the header.
 fn stop_embedded(handle: &tc_handle) {
+    // An attached handle does not own the daemon, so "stop" can only mean
+    // "stop listening to it". Dropping the sink ends event delivery; the
+    // connection itself closes when the handle is freed. Stopping the daemon
+    // here would let any window tear down a service-managed daemon, which is
+    // the thing `AttachedDaemon` refuses on the wire -- this is the same
+    // refusal at the other end of the same handle.
+    if let Some(attached) = attached_of(handle) {
+        attached.clear_sink();
+        return;
+    }
     let running = handle
         .running
         .lock()
@@ -1020,6 +1167,28 @@ pub unsafe extern "C" fn tc_call(
                 Ok(v) => v,
                 Err(_) => return error_frame(ERR_BAD_PARAMS, "invalid-params-json"),
             };
+            // An attached handle has no `DaemonShared` to borrow: the
+            // daemon is in another process. Checked before `shared_of`,
+            // which would otherwise report a perfectly healthy attached
+            // handle as a stopped daemon.
+            if let Some(attached) = attached_of(handle) {
+                return match attached.call(method, &params) {
+                    Ok(response) => serde_json::to_string(&response)
+                        .unwrap_or_else(|_| error_frame("unavailable", "serialize-failed")),
+                    Err(AttachError::StopRefused) => {
+                        error_frame(ERR_REFUSED, ERR_ATTACHED_STOP_REFUSED)
+                    }
+                    Err(AttachError::NotListening) | Err(AttachError::Disconnected) => {
+                        error_frame("unavailable", "daemon-disconnected")
+                    }
+                    Err(AttachError::Transport(_)) => {
+                        // The transport error carries an OS message that can
+                        // name the socket path. Fixed label, as everywhere
+                        // else on this boundary.
+                        error_frame("unavailable", "attached-transport-failed")
+                    }
+                };
+            }
             let Some(shared) = shared_of(handle) else {
                 return error_frame("unavailable", "daemon-stopped");
             };
@@ -1132,15 +1301,40 @@ pub unsafe extern "C" fn tc_subscribe(
             set_last_error(ERR_NULL_CALLBACK);
             return Ok(0u64);
         };
-        let Some(shared) = shared_of(handle_ref) else {
-            set_last_error(ERR_DAEMON_NOT_RUNNING);
-            return Ok(0u64);
-        };
         // Raw pointers are not `Send`; `ctx` is a caller-supplied opaque
         // token the caller promised (per this function's safety contract)
         // stays valid, so it is sound to hand across the spawned task.
         struct SendPtr(*mut c_void);
         unsafe impl Send for SendPtr {}
+
+        // Attached first, for the same reason as `tc_call`: there is no
+        // `DaemonShared` here and `shared_of` would refuse a healthy handle.
+        // Events come off the socket, so the subscriber also receives the
+        // `snapshot` frame the daemon sends whoever just subscribed -- the
+        // courtesy the in-process path below never gets.
+        if let Some(attached) = attached_of(handle_ref) {
+            let ctx = SendPtr(ctx);
+            let token = handle_ref.next_subscription.fetch_add(1, Ordering::Relaxed);
+            if attached
+                .subscribe(move |event| {
+                    let ctx = &ctx;
+                    let json = serde_json::to_string(&event).unwrap_or_default();
+                    if let Ok(c) = CString::new(json) {
+                        cb(c.as_ptr(), ctx.0);
+                    }
+                })
+                .is_err()
+            {
+                set_last_error(ERR_DAEMON_NOT_RUNNING);
+                return Ok(0u64);
+            }
+            return Ok(token);
+        }
+
+        let Some(shared) = shared_of(handle_ref) else {
+            set_last_error(ERR_DAEMON_NOT_RUNNING);
+            return Ok(0u64);
+        };
         let ctx = SendPtr(ctx);
 
         // Subscribed here, synchronously, rather than inside the spawned
@@ -1248,6 +1442,17 @@ pub unsafe extern "C" fn tc_unsubscribe(handle: *mut tc_handle, token: u64) {
     if token == 0 {
         return;
     }
+    {
+        // Attached handles keep no task per token -- there is one socket and
+        // one sink -- so unsubscribing is dropping that sink. Done before the
+        // runtime-context refusal below, which guards a join this path does
+        // not perform.
+        let handle_ref = unsafe { &*handle };
+        if let Some(attached) = attached_of(handle_ref) {
+            attached.clear_sink();
+            return;
+        }
+    }
     if tokio::runtime::Handle::try_current().is_ok() {
         // Refuse without touching `subscriptions`: a callback calling
         // `tc_unsubscribe` on its own token from inside itself would
@@ -1336,6 +1541,15 @@ pub unsafe extern "C" fn tc_preview_open(
             anyhow::bail!("{ERR_INVALID_HANDLE_POINTER}");
         }
         let handle = unsafe { &*handle };
+        // The redacted body is this ABI's in-process content exemption:
+        // the socket's `preview` answers with the summary only. Refusing
+        // is the honest outcome -- a summary where a body was asked for
+        // would be a content promise this path cannot keep, and falling
+        // through to `shared_of` would report a healthy attached handle
+        // as a stopped daemon.
+        if handle.attached.is_some() {
+            anyhow::bail!("{ERR_PREVIEW_REQUIRES_EMBEDDED}");
+        }
         let entry_id = unsafe { borrow_str(entry_id) }?;
         // Inferred as `uuid::Uuid` from `ipc::open_preview`'s signature
         // below -- the `uuid` crate is a transitive dependency (via
@@ -1454,6 +1668,15 @@ pub unsafe extern "C" fn tc_preview_turns_json(
             anyhow::bail!("{ERR_INVALID_HANDLE_POINTER}");
         }
         let handle = unsafe { &*handle };
+        // The redacted body is this ABI's in-process content exemption:
+        // the socket's `preview` answers with the summary only. Refusing
+        // is the honest outcome -- a summary where a body was asked for
+        // would be a content promise this path cannot keep, and falling
+        // through to `shared_of` would report a healthy attached handle
+        // as a stopped daemon.
+        if handle.attached.is_some() {
+            anyhow::bail!("{ERR_PREVIEW_REQUIRES_EMBEDDED}");
+        }
         let entry_id = unsafe { borrow_str(entry_id) }?;
         let digest = unsafe { borrow_str(body_digest) }?.to_string();
         let id = entry_id
