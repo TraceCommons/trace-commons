@@ -83,7 +83,11 @@ fn refusal(error: RewardError) -> RewardHttpError {
         RewardError::Unauthorized => StatusCode::UNAUTHORIZED,
         RewardError::RequestInvalid => StatusCode::BAD_REQUEST,
         RewardError::NotFound => StatusCode::NOT_FOUND,
-        RewardError::StoreUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+        // A missing control, not a client fault: the deployment never provisioned
+        // the participant database login.
+        RewardError::ParticipantUnprovisioned | RewardError::StoreUnavailable => {
+            StatusCode::SERVICE_UNAVAILABLE
+        }
         _ => StatusCode::CONFLICT,
     };
     RewardHttpError::new(status, error.label())
@@ -118,7 +122,25 @@ fn public_read_slots_for(limiter: &AccountRateLimiter) -> Option<[ConcurrencyGua
     Some([public, database])
 }
 
+/// Reservations take the tenant's EXCLUSIVE advisory lock, so only one may be
+/// in flight per tenant.
 fn account_slot(ctx: &AccountCtx) -> Option<[ConcurrencyGuard<'static>; 2]> {
+    account_slot_in(ctx, "reward-tenant", 1)
+}
+
+/// Status and history take only the SHARED advisory lock, so they neither need
+/// nor benefit from the write path's serialization. Sharing its slot of one
+/// made a single in-flight reservation refuse every other participant's read in
+/// that tenant. They stay bounded by the reward database budget instead.
+fn account_read_slot(ctx: &AccountCtx) -> Option<[ConcurrencyGuard<'static>; 2]> {
+    account_slot_in(ctx, "reward-tenant-read", 2)
+}
+
+fn account_slot_in(
+    ctx: &AccountCtx,
+    namespace: &str,
+    tenant_limit: u32,
+) -> Option<[ConcurrencyGuard<'static>; 2]> {
     let key = format!(
         "reward-account:{}:{}",
         ctx.tenant_id,
@@ -132,7 +154,8 @@ fn account_slot(ctx: &AccountCtx) -> Option<[ConcurrencyGuard<'static>; 2]> {
     // Acquire before checking out a database connection. Same-tenant reward
     // operations serialize in PostgreSQL, so excess requests must not queue
     // there while holding the shared pool's connections.
-    let tenant = ACCOUNT_RATE_LIMITER.acquire(&format!("reward-tenant:{}", ctx.tenant_id), 1)?;
+    let tenant =
+        ACCOUNT_RATE_LIMITER.acquire(&format!("{namespace}:{}", ctx.tenant_id), tenant_limit)?;
     let database = database_slot()?;
     Some([tenant, database])
 }
@@ -245,7 +268,7 @@ pub(crate) async fn reservation(
     Extension(ctx): Extension<AccountCtx>,
     path: Result<Path<Uuid>, PathRejection>,
 ) -> RewardHttpResult {
-    let _slot = account_slot(&ctx).ok_or_else(rate_refusal)?;
+    let _slot = account_read_slot(&ctx).ok_or_else(rate_refusal)?;
     let Path(reservation) = path.map_err(|_| refusal(RewardError::RequestInvalid))?;
     let reservation = database(&state)
         .map_err(refusal)?
@@ -260,7 +283,7 @@ pub(crate) async fn history(
     Extension(ctx): Extension<AccountCtx>,
     query: Result<Query<RewardHistoryQuery>, QueryRejection>,
 ) -> RewardHttpResult {
-    let _slot = account_slot(&ctx).ok_or_else(rate_refusal)?;
+    let _slot = account_read_slot(&ctx).ok_or_else(rate_refusal)?;
     let Query(query) = query.map_err(|_| refusal(RewardError::RequestInvalid))?;
     query.validate().map_err(refusal)?;
     let history = database(&state)
@@ -274,6 +297,18 @@ pub(crate) async fn history(
 #[cfg(test)]
 mod limiter_tests {
     use super::*;
+
+    #[test]
+    fn unprovisioned_participant_login_refuses_as_a_missing_control() {
+        let missing_control = refusal(RewardError::ParticipantUnprovisioned);
+        assert_eq!(missing_control.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(missing_control.label, "reward_participant_unprovisioned");
+        assert_eq!(
+            refusal(RewardError::Unauthorized).status,
+            StatusCode::UNAUTHORIZED,
+            "a credential failure stays a credential failure"
+        );
+    }
 
     #[test]
     fn public_reads_reserve_only_one_of_two_reward_database_slots() {

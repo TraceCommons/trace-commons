@@ -132,18 +132,18 @@ CREATE INDEX trace_reward_participant_reservations_work_idx
         tenant_id, participant_hash, work_namespace_hash
     );
 
-ALTER TABLE public.trace_reward_offers ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.trace_reward_offers FORCE ROW LEVEL SECURITY;
-ALTER TABLE public.trace_reward_offer_controls ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.trace_reward_offer_controls FORCE ROW LEVEL SECURITY;
-ALTER TABLE public.trace_reward_participant_logins ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.trace_reward_participant_logins FORCE ROW LEVEL SECURITY;
-ALTER TABLE public.trace_reward_principals ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.trace_reward_principals FORCE ROW LEVEL SECURITY;
-ALTER TABLE public.trace_reward_principal_accounts ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.trace_reward_principal_accounts FORCE ROW LEVEL SECURITY;
-ALTER TABLE public.trace_reward_participant_reservations ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.trace_reward_participant_reservations FORCE ROW LEVEL SECURITY;
+ALTER TABLE trace_reward_offers ENABLE ROW LEVEL SECURITY;
+ALTER TABLE trace_reward_offers FORCE ROW LEVEL SECURITY;
+ALTER TABLE trace_reward_offer_controls ENABLE ROW LEVEL SECURITY;
+ALTER TABLE trace_reward_offer_controls FORCE ROW LEVEL SECURITY;
+ALTER TABLE trace_reward_participant_logins ENABLE ROW LEVEL SECURITY;
+ALTER TABLE trace_reward_participant_logins FORCE ROW LEVEL SECURITY;
+ALTER TABLE trace_reward_principals ENABLE ROW LEVEL SECURITY;
+ALTER TABLE trace_reward_principals FORCE ROW LEVEL SECURITY;
+ALTER TABLE trace_reward_principal_accounts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE trace_reward_principal_accounts FORCE ROW LEVEL SECURITY;
+ALTER TABLE trace_reward_participant_reservations ENABLE ROW LEVEL SECURITY;
+ALTER TABLE trace_reward_participant_reservations FORCE ROW LEVEL SECURITY;
 
 CREATE POLICY trace_reward_operator_tenant_access ON public.trace_reward_offers
     TO trace_reward_guard
@@ -154,28 +154,33 @@ CREATE POLICY trace_reward_operator_tenant_access ON public.trace_reward_offer_c
     USING (tenant_id = public.trace_current_tenant_id())
     WITH CHECK (tenant_id = public.trace_current_tenant_id());
 
-CREATE POLICY trace_corpus_tenant_isolation ON public.trace_reward_offers
+DROP POLICY IF EXISTS trace_corpus_tenant_isolation ON trace_reward_offers;
+CREATE POLICY trace_corpus_tenant_isolation ON trace_reward_offers
     TO trace_reward_participant_guard
     USING (tenant_id = public.trace_current_tenant_id())
     WITH CHECK (tenant_id = public.trace_current_tenant_id());
-CREATE POLICY trace_corpus_tenant_isolation ON public.trace_reward_offer_controls
+DROP POLICY IF EXISTS trace_corpus_tenant_isolation ON trace_reward_offer_controls;
+CREATE POLICY trace_corpus_tenant_isolation ON trace_reward_offer_controls
     TO trace_reward_participant_guard
     USING (tenant_id = public.trace_current_tenant_id())
     WITH CHECK (tenant_id = public.trace_current_tenant_id());
-CREATE POLICY trace_corpus_tenant_isolation ON public.trace_reward_participant_logins
+DROP POLICY IF EXISTS trace_corpus_tenant_isolation ON trace_reward_participant_logins;
+CREATE POLICY trace_corpus_tenant_isolation ON trace_reward_participant_logins
     TO trace_reward_participant_guard
     USING (tenant_id = public.trace_current_tenant_id())
     WITH CHECK (tenant_id = public.trace_current_tenant_id());
-CREATE POLICY trace_corpus_tenant_isolation ON public.trace_reward_principals
+DROP POLICY IF EXISTS trace_corpus_tenant_isolation ON trace_reward_principals;
+CREATE POLICY trace_corpus_tenant_isolation ON trace_reward_principals
     TO trace_reward_participant_guard
     USING (tenant_id = public.trace_current_tenant_id())
     WITH CHECK (tenant_id = public.trace_current_tenant_id());
-CREATE POLICY trace_corpus_tenant_isolation ON public.trace_reward_principal_accounts
+DROP POLICY IF EXISTS trace_corpus_tenant_isolation ON trace_reward_principal_accounts;
+CREATE POLICY trace_corpus_tenant_isolation ON trace_reward_principal_accounts
     TO trace_reward_participant_guard
     USING (tenant_id = public.trace_current_tenant_id())
     WITH CHECK (tenant_id = public.trace_current_tenant_id());
-CREATE POLICY trace_corpus_tenant_isolation
-    ON public.trace_reward_participant_reservations
+DROP POLICY IF EXISTS trace_corpus_tenant_isolation ON trace_reward_participant_reservations;
+CREATE POLICY trace_corpus_tenant_isolation ON trace_reward_participant_reservations
     TO trace_reward_participant_guard
     USING (tenant_id = public.trace_current_tenant_id())
     WITH CHECK (tenant_id = public.trace_current_tenant_id());
@@ -351,8 +356,14 @@ BEGIN
       INTO v_super, v_bypass
       FROM pg_catalog.pg_roles role
      WHERE role.rolname = session_user;
-    IF NOT FOUND OR v_super OR v_bypass
-        OR NOT pg_catalog.pg_has_role(
+    IF NOT FOUND OR v_super OR v_bypass THEN
+        RAISE EXCEPTION USING MESSAGE = 'reward_unauthorized';
+    END IF;
+    -- The remaining two causes are configuration, not credentials: a deployment
+    -- that never ran the DBA provisioning step. Refusing them as
+    -- reward_unauthorized renders as 401 and is indistinguishable from a bad
+    -- credential, so name the missing control and let it render as 503.
+    IF NOT pg_catalog.pg_has_role(
             session_user, 'trace_reward_participant_runtime', 'member'
         )
         OR NOT EXISTS (
@@ -360,7 +371,7 @@ BEGIN
              WHERE login.tenant_id = p_tenant
                AND login.login_role = session_user::NAME
         ) THEN
-        RAISE EXCEPTION USING MESSAGE = 'reward_unauthorized';
+        RAISE EXCEPTION USING MESSAGE = 'reward_participant_unprovisioned';
     END IF;
 END;
 $$;
@@ -690,7 +701,8 @@ CREATE FUNCTION public.trace_reward_participant_reservation_projection(
 )
 RETURNS JSONB
 LANGUAGE SQL
-STABLE
+-- Not STABLE: clock_timestamp() below decides the expired state.
+VOLATILE
 SET search_path = pg_catalog
 AS $$
     SELECT pg_catalog.jsonb_build_object(
@@ -1126,6 +1138,7 @@ AS $$
 DECLARE
     v_surviving_principal UUID;
     v_absorbed_principal UUID;
+    v_aliases TEXT[];
 BEGIN
     IF p_tenant IS NULL OR p_tenant = ''
         OR p_tenant IS DISTINCT FROM public.trace_current_tenant_id()
@@ -1176,11 +1189,62 @@ BEGIN
            AND proposal.surviving_account_id = p_surviving_account
            AND proposal.absorbed_account_id = p_absorbed_account
            AND proposal.consumed_at IS NOT NULL
-           AND proposal.xmin::TEXT = pg_catalog.pg_current_xact_id()::TEXT
+           -- xmin is a 32-bit xid; pg_current_xact_id() is a 64-bit xid8 whose
+           -- high word is the wraparound epoch. Casting the xid8 down to xid
+           -- discards exactly that epoch, so this holds in every epoch;
+           -- comparing their text renderings only holds while the epoch is 0.
+           -- The consuming UPDATE must run in this transaction proper: inside
+           -- a SAVEPOINT or a plpgsql EXCEPTION block xmin is the
+           -- subtransaction id and this check refuses.
+           AND proposal.xmin = pg_catalog.pg_current_xact_id()::xid
            AND survivor.closed_at IS NULL
            AND absorbed.closed_at IS NULL
     ) THEN
         RAISE EXCEPTION USING MESSAGE = 'reward_unauthorized';
+    END IF;
+
+    -- Re-check, over the joined alias set, the two invariants
+    -- trace_reward_participant_reserve enforces when a reservation is created.
+    -- A merge that joined two groups without this could leave one payout
+    -- identity holding more than participant_cap_units on a program, or two
+    -- reservations in one work namespace. Refuse rather than create state the
+    -- reserve path forbids; the cap refusal clears on its own once the excess
+    -- reservations expire or reach a terminal state, the work-namespace one is
+    -- lifetime, matching the reserve check it mirrors.
+    SELECT pg_catalog.array_agg(binding.participant_hash)
+      INTO v_aliases
+      FROM public.trace_reward_principal_accounts binding
+     WHERE binding.tenant_id = p_tenant
+       AND (
+           binding.reward_principal_id = v_surviving_principal
+           OR binding.reward_principal_id = v_absorbed_principal
+       );
+    IF EXISTS (
+        SELECT 1
+          FROM public.trace_reward_programs program
+         WHERE program.tenant_id = p_tenant
+           AND EXISTS (
+               SELECT 1
+                 FROM public.trace_reward_reservations reservation
+                WHERE reservation.tenant_id = p_tenant
+                  AND reservation.program_id = program.program_id
+                  AND reservation.participant_hash = ANY(v_aliases)
+           )
+           AND public.trace_reward_capacity_used_for_aliases(
+                   p_tenant, program.program_id, v_aliases
+               ) > program.participant_cap_units::NUMERIC
+    ) THEN
+        RAISE EXCEPTION USING MESSAGE = 'reward_merge_participant_cap';
+    END IF;
+    IF EXISTS (
+        SELECT 1
+          FROM public.trace_reward_participant_reservations participant
+         WHERE participant.tenant_id = p_tenant
+           AND participant.participant_hash = ANY(v_aliases)
+         GROUP BY participant.work_namespace_hash
+        HAVING pg_catalog.count(*) > 1
+    ) THEN
+        RAISE EXCEPTION USING MESSAGE = 'reward_merge_work_duplicate';
     END IF;
 
     IF v_surviving_principal IS NULL THEN

@@ -48,6 +48,9 @@ pub struct RewardProgramTerms {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RewardError {
     Unauthorized,
+    /// A configuration fault, not a credential failure: the participant
+    /// database login is missing its runtime membership or its tenant row.
+    ParticipantUnprovisioned,
     RequestInvalid,
     NotFound,
     PayloadConflict,
@@ -69,6 +72,7 @@ impl RewardError {
     pub fn label(self) -> &'static str {
         match self {
             Self::Unauthorized => "reward_unauthorized",
+            Self::ParticipantUnprovisioned => "reward_participant_unprovisioned",
             Self::RequestInvalid => "reward_request_invalid",
             Self::NotFound => "reward_not_found",
             Self::PayloadConflict => "reward_payload_conflict",
@@ -98,6 +102,7 @@ impl RewardError {
         }
         match db.message() {
             "reward_unauthorized" => Self::Unauthorized,
+            "reward_participant_unprovisioned" => Self::ParticipantUnprovisioned,
             "reward_request_invalid" => Self::RequestInvalid,
             "reward_not_found" => Self::NotFound,
             "reward_payload_conflict" => Self::PayloadConflict,

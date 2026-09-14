@@ -4478,6 +4478,12 @@ impl Database for PgBackend {
             return Ok(None);
         }
 
+        // The reward hook re-reads the proposal and admits it only when its
+        // `xmin` is this transaction's id, which is how it knows the consuming
+        // UPDATE above is its own. That holds only while the consume runs in
+        // the transaction proper: wrapping it in a SAVEPOINT, or moving it
+        // inside a plpgsql EXCEPTION block, stamps `xmin` with a
+        // subtransaction id and the hook refuses every merge.
         tx.execute(
             "SELECT public.trace_reward_accounts_merge($1, $2, $3, $4)",
             &[
@@ -4488,7 +4494,7 @@ impl Database for PgBackend {
             ],
         )
         .await
-        .map_err(DatabaseError::Postgres)?;
+        .map_err(reward_merge_refusal)?;
 
         // Move B's ACTIVE principal links onto A. PK-column UPDATE; collision-free
         // because (tenant_id, principal_ref) is UNIQUE and a principal has at most
@@ -5181,6 +5187,25 @@ impl Database for PgBackend {
             })
             .collect())
     }
+}
+
+/// The reward hook refuses a merge that would put one payout identity over a
+/// program's participant cap, or leave it holding two reservations in one work
+/// namespace -- exactly the states `trace_reward_participant_reserve` refuses.
+/// Surface those two as the named control so the refusal is legible; every
+/// other driver error stays opaque.
+fn reward_merge_refusal(error: tokio_postgres::Error) -> DatabaseError {
+    const NAMED: [&str; 2] = [
+        "reward_merge_participant_cap",
+        "reward_merge_work_duplicate",
+    ];
+    if let Some(db) = error.as_db_error()
+        && db.code().code() == "P0001"
+        && let Some(label) = NAMED.iter().find(|label| **label == db.message())
+    {
+        return DatabaseError::Constraint((*label).to_string());
+    }
+    DatabaseError::Postgres(error)
 }
 
 fn device_key_record_from_row(row: Row) -> crate::db::DeviceKeyRecord {
@@ -6498,16 +6523,8 @@ mod tests {
 
     #[test]
     fn trace_commons_rls_registry_matches_migration_policy_coverage() {
-        // The participant migration qualifies SQL names and wraps long policy
-        // statements. Normalize those forms without relaxing the RLS contract.
-        let participant_migration =
-            include_str!("../../../../migrations/V71__reward_participant_access.sql")
-                .replace("public.", "")
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ");
         let central_policy_migrations = [
-            participant_migration.as_str(),
+            include_str!("../../../../migrations/V71__reward_participant_access.sql"),
             include_str!("../../../../migrations/V18__trace_central_rls_tenant_predicate.sql"),
             include_str!("../../../../migrations/V21__trace_near_credit_account_outbox.sql"),
             include_str!("../../../../migrations/V26__trace_contributor_profiles.sql"),
@@ -6525,7 +6542,7 @@ mod tests {
             include_str!("../../../../migrations/V69__mission_insight_rewards.sql"),
         ];
         let force_rls_migrations = [
-            participant_migration.as_str(),
+            include_str!("../../../../migrations/V71__reward_participant_access.sql"),
             include_str!("../../../../migrations/V6__trace_force_rls.sql"),
             include_str!("../../../../migrations/V11__trace_ranking_worker_runs.sql"),
             include_str!("../../../../migrations/V14__trace_ranking_preference_labels.sql"),
@@ -6552,7 +6569,7 @@ mod tests {
                 central_policy_migrations.iter().any(|migration| {
                     migration.contains(&format!(
                         "DROP POLICY IF EXISTS trace_corpus_tenant_isolation ON {table};"
-                    )) || migration.contains(&format!("CREATE TABLE {table} ("))
+                    ))
                 }),
                 "{table} is missing from the central RLS policy migration cleanup"
             );
