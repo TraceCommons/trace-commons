@@ -316,7 +316,7 @@ Scouts extend the mission program after its core participation and evaluation fl
 
 ## Review follow-through
 
-[Kristi’s review of the original plan](https://github.com/TraceCommons/trace-commons/pull/870#issuecomment-5645229086) supports the direction and identifies evidence and product risks. These requirements attach to existing milestones:
+[poldsam’s review of the original plan](https://github.com/TraceCommons/trace-commons/pull/870#issuecomment-5645229086) supports the direction and identifies evidence and product risks. These requirements attach to existing milestones:
 
 - **Current pilot:** follow the [private pilot runbook](2026-09-12-private-refactor-pilot.md). Report the full reviewed-task denominator, mixed-model/delegated/unsupported/missing-context exclusions, boundary split/merge and omitted-attempt corrections, time and manual effort to a reviewed result, abandonment, and decision usefulness. Report overlapping exclusion reasons separately without double-counting the total excluded tasks. User confirmation is an assertion to assess, not validation by itself.
 - **Provider recommendations:** disclosure alone is insufficient for a provider's self-model evaluation. Require independent, unaffiliated evaluation before promoting such a finding into a model recommendation. Attributed descriptive findings can remain available within their evidence limits.

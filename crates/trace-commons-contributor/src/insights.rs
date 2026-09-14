@@ -53,6 +53,20 @@ pub enum TaskCategory {
     Unknown,
 }
 
+impl TaskCategory {
+    /// Every variant, in the order sibling tables (summaries, CLI parsers)
+    /// should present them. A new variant must be added here or the
+    /// exhaustive-match test in `insights::tests` fails to compile.
+    pub const ALL: [TaskCategory; 6] = [
+        TaskCategory::Refactor,
+        TaskCategory::Tests,
+        TaskCategory::Docs,
+        TaskCategory::Debugging,
+        TaskCategory::Other,
+        TaskCategory::Unknown,
+    ];
+}
+
 /// User-reported assessment; does not establish independent task success.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -61,6 +75,18 @@ pub enum TaskOutcome {
     Partial,
     Rejected,
     Unknown,
+}
+
+impl TaskOutcome {
+    /// Every variant, in the order sibling tables (summaries, CLI parsers)
+    /// should present them. A new variant must be added here or the
+    /// exhaustive-match test in `insights::tests` fails to compile.
+    pub const ALL: [TaskOutcome; 4] = [
+        TaskOutcome::Accepted,
+        TaskOutcome::Partial,
+        TaskOutcome::Rejected,
+        TaskOutcome::Unknown,
+    ];
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -692,6 +718,78 @@ fn reject_symlinks(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Adding a `TaskCategory` variant without updating this match is a
+    /// compile error, and adding it here without also listing it in `ALL`
+    /// fails this assertion. Both must move together.
+    #[test]
+    fn task_category_all_covers_every_variant_exhaustively() {
+        fn ordinal(value: TaskCategory) -> usize {
+            match value {
+                TaskCategory::Refactor => 0,
+                TaskCategory::Tests => 1,
+                TaskCategory::Docs => 2,
+                TaskCategory::Debugging => 3,
+                TaskCategory::Other => 4,
+                TaskCategory::Unknown => 5,
+            }
+        }
+        assert_eq!(TaskCategory::ALL.len(), 6);
+        for (index, value) in TaskCategory::ALL.iter().enumerate() {
+            assert_eq!(ordinal(*value), index);
+        }
+    }
+
+    /// Same guarantee as above, for `TaskOutcome`.
+    #[test]
+    fn task_outcome_all_covers_every_variant_exhaustively() {
+        fn ordinal(value: TaskOutcome) -> usize {
+            match value {
+                TaskOutcome::Accepted => 0,
+                TaskOutcome::Partial => 1,
+                TaskOutcome::Rejected => 2,
+                TaskOutcome::Unknown => 3,
+            }
+        }
+        assert_eq!(TaskOutcome::ALL.len(), 4);
+        for (index, value) in TaskOutcome::ALL.iter().enumerate() {
+            assert_eq!(ordinal(*value), index);
+        }
+    }
+
+    /// The CLI's hand-written `value_parser` string lists
+    /// (`contributor_cli/insights.rs`) must accept exactly the wire form of
+    /// every variant. This does not touch the CLI directly (it lives in a
+    /// separate binary crate) but pins the wire strings the CLI list is
+    /// required to mirror, so a diff here is a signal to update it too.
+    #[test]
+    fn task_category_and_outcome_wire_forms_match_the_cli_value_parser_lists() {
+        let category_cli_list = ["refactor", "tests", "docs", "debugging", "other", "unknown"];
+        let category_wire: Vec<String> = TaskCategory::ALL
+            .iter()
+            .map(|c| {
+                serde_json::to_value(c)
+                    .unwrap()
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(category_wire, category_cli_list);
+
+        let outcome_cli_list = ["accepted", "partial", "rejected", "unknown"];
+        let outcome_wire: Vec<String> = TaskOutcome::ALL
+            .iter()
+            .map(|o| {
+                serde_json::to_value(o)
+                    .unwrap()
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(outcome_wire, outcome_cli_list);
+    }
 
     #[cfg(unix)]
     #[test]

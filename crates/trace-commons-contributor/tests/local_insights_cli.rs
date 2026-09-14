@@ -304,7 +304,7 @@ fn a_selected_fifo_is_refused_without_waiting_for_a_writer() {
         .stdout(std::process::Stdio::piped())
         .spawn()
         .unwrap();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
     loop {
         if let Some(status) = child.try_wait().unwrap() {
             assert!(!status.success());

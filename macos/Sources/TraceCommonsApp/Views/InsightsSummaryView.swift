@@ -58,7 +58,7 @@ struct InsightsSummaryView: View {
 
     private var analysisRange: String {
         guard let range = summary.snapshot_analysis_range else { return text("unknown") }
-        return "\(InsightsDate.label(range.oldest)) – \(InsightsDate.label(range.newest))"
+        return "\(InsightsDate.label(range.oldest)) to \(InsightsDate.label(range.newest))"
     }
 
     private var categories: some View {

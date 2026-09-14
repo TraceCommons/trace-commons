@@ -11,6 +11,11 @@ use serde::{Deserialize, Serialize};
 
 pub const INSIGHT_SCHEMA_VERSION: u32 = 1;
 
+/// Evidence is deserialized from a store file or an FFI request before it is
+/// bounded by anything else in this contract; cap the count here so the bound
+/// lives with the contract rather than with each caller's own byte cap.
+pub const MAX_EVIDENCE: usize = 128;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionMode {
@@ -126,6 +131,8 @@ pub enum InsightValidationError {
     DuplicateMetric,
     #[error("insight-coverage-invalid")]
     InvalidCoverage,
+    #[error("insight-evidence-too-many")]
+    TooManyEvidence,
 }
 
 impl InsightReport {
@@ -136,6 +143,9 @@ impl InsightReport {
             return Err(InsightValidationError::SchemaVersion);
         }
         self.provider.validate()?;
+        if self.evidence.len() > MAX_EVIDENCE {
+            return Err(InsightValidationError::TooManyEvidence);
+        }
         let evidence = evidence_index(&self.evidence)?;
         let mut metrics = BTreeSet::new();
         for metric in &self.metrics {
@@ -358,6 +368,63 @@ mod tests {
         value.metrics[0].value = Some(0);
         value.metrics[0].evidence_ids.clear();
         value.validate().unwrap();
+    }
+
+    #[test]
+    fn rejects_invalid_provider_fields() {
+        let mut value = report();
+        value.provider.id = String::new();
+        assert_eq!(value.validate(), Err(InsightValidationError::InvalidField));
+        value.provider.id = "a".repeat(129);
+        assert_eq!(value.validate(), Err(InsightValidationError::InvalidField));
+        value.provider.id = "trace-commons-local".into();
+        value.provider.rubric_version = "not/ascii label".into();
+        assert_eq!(value.validate(), Err(InsightValidationError::InvalidField));
+        value.provider.rubric_version = "descriptive-counts-v1".into();
+        value.provider.version = "café".into();
+        assert_eq!(value.validate(), Err(InsightValidationError::InvalidField));
+    }
+
+    #[test]
+    fn rejects_provider_with_invalid_field_when_parsed_from_json() {
+        let mut json = serde_json::to_value(report()).unwrap();
+        json["provider"]["id"] = "x".repeat(200).into();
+        let parsed: InsightReport = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed.validate(), Err(InsightValidationError::InvalidField));
+    }
+
+    #[test]
+    fn rejects_evidence_over_the_count_cap() {
+        let mut value = report();
+        value.metrics.clear();
+        value.evidence = (0..=MAX_EVIDENCE)
+            .map(|i| EvidenceRef {
+                id: format!("source-{i}"),
+                source_digest: "ab".repeat(32),
+            })
+            .collect();
+        assert_eq!(
+            value.validate(),
+            Err(InsightValidationError::TooManyEvidence)
+        );
+    }
+
+    #[test]
+    fn rejects_evidence_over_the_count_cap_when_parsed_from_json() {
+        let mut value = report();
+        value.metrics.clear();
+        value.evidence = (0..=MAX_EVIDENCE)
+            .map(|i| EvidenceRef {
+                id: format!("source-{i}"),
+                source_digest: "ab".repeat(32),
+            })
+            .collect();
+        let json = serde_json::to_vec(&value).unwrap();
+        let parsed: InsightReport = serde_json::from_slice(&json).unwrap();
+        assert_eq!(
+            parsed.validate(),
+            Err(InsightValidationError::TooManyEvidence)
+        );
     }
 
     #[test]
