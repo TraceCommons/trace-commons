@@ -235,8 +235,8 @@ public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
     private static string CardErrorCopyKey(string code) => code switch {
         "insights_card_snapshot_not_found" => "episode_missing_members",
         "insights_card_episode_not_found" => "episode_missing",
-        "insights_card_snapshot_limit" => "episode_member_limit",
-        "insights_card_episode_limit" => "episode_limit",
+        "insights_card_snapshot_limit" => "card_snapshot_limit",
+        "insights_card_episode_limit" => "card_episode_limit",
         _ => "error"
     };
 

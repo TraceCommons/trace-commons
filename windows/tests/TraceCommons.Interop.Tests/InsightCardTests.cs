@@ -37,14 +37,17 @@ public sealed class InsightCardTests
     {
         public List<JsonElement> Calls { get; } = new();
         public TaskCompletionSource<JsonElement>? PendingCards;
+        public string? FailCardsWithCode;
         public Task<JsonElement> CallAsync(object operation, CancellationToken cancellationToken)
         {
             var request = JsonSerializer.SerializeToElement(operation);
             Calls.Add(request);
             string type = request.GetProperty("type").GetString()!;
             if (type == "question_cards" && PendingCards != null) return PendingCards.Task;
+            if (type == "question_cards" && FailCardsWithCode != null)
+                throw new InsightsServiceException(FailCardsWithCode);
             return Task.FromResult(type switch {
-                "copy" => Json("""{"type":"copy","copy":{"working":"Working","error":"Safe error","card_question_recorded_activity":"Recorded activity","card_question_episode_outcomes":"Your episode outcomes","card_question_observed_models":"Observed model labels","card_question_estimated_cost":"Estimated cost","card_state_observed":"Observed","card_state_unavailable":"Unavailable","card_row_saved_snapshots":"Saved snapshots","card_row_estimated_cost":"Estimated cost","card_coverage_saved_snapshots":"Saved snapshots","card_limitation_timestamps_are_record_span":"Record span caution","card_missing_usage_not_persisted":"Usage unavailable","card_evidence":"Saved evidence","card_episodes":"Episode evidence"}}"""),
+                "copy" => Json("""{"type":"copy","copy":{"working":"Working","error":"Safe error","card_question_recorded_activity":"Recorded activity","card_question_episode_outcomes":"Your episode outcomes","card_question_observed_models":"Observed model labels","card_question_estimated_cost":"Estimated cost","card_state_observed":"Observed","card_state_unavailable":"Unavailable","card_row_saved_snapshots":"Saved snapshots","card_row_estimated_cost":"Estimated cost","card_coverage_saved_snapshots":"Saved snapshots","card_limitation_timestamps_are_record_span":"Record span caution","card_missing_usage_not_persisted":"Usage unavailable","card_evidence":"Saved evidence","card_episodes":"Episode evidence","card_snapshot_limit":"Select 1024 or fewer saved snapshots for cards.","card_episode_limit":"Select 256 or fewer episode groups for cards.","episode_member_limit":"Select between 1 and 64 saved snapshots.","episode_limit":"This store already has 256 episodes. Delete a group before creating another."}}"""),
                 "list" => Json("{\"type\":\"list\",\"insights\":[]}"),
                 "summary" => Json(InsightsSummaryTests.Response),
                 "episode_list" => Json("{\"type\":\"episode_list\",\"episodes\":[]}"),
@@ -101,6 +104,22 @@ public sealed class InsightCardTests
         var call = service.Calls.Single(item => item.GetProperty("type").GetString() == "question_cards");
         Assert.Empty(call.GetProperty("snapshot_ids").EnumerateArray());
         Assert.Empty(call.GetProperty("episode_ids").EnumerateArray());
+    }
+
+    [Fact]
+    public async Task CardSelectionLimitErrorsUseDedicatedCardCopyNotEpisodeCreationCopy()
+    {
+        var service = new Service { FailCardsWithCode = "insights_card_snapshot_limit" };
+        using var model = new InsightsViewModel(service);
+        await model.LoadAsync();
+        await model.LoadQuestionCardsAsync(new[] { Snapshot }, Array.Empty<string>());
+        Assert.Equal(model["card_snapshot_limit"], model.CardStatus);
+        Assert.NotEqual(model["episode_member_limit"], model.CardStatus);
+
+        service.FailCardsWithCode = "insights_card_episode_limit";
+        await model.LoadQuestionCardsAsync(new[] { Snapshot }, new[] { Episode });
+        Assert.Equal(model["card_episode_limit"], model.CardStatus);
+        Assert.NotEqual(model["episode_limit"], model.CardStatus);
     }
 
     [Fact]

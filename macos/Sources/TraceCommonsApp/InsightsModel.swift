@@ -114,7 +114,7 @@ final class InsightsModel {
                 guard let self, self.active, self.generation == screenGeneration,
                       self.cardPresentation == presentation, !Task.isCancelled else { return }
                 self.cardResult = nil; self.cardText = nil; self.cardBusy = false
-                self.cardError = self.text("error")
+                self.cardError = self.cardMessage(for: error)
             }
         }
     }
@@ -460,6 +460,17 @@ final class InsightsModel {
     }
     private func recordComparisonEffects(_ response: InsightsResponse) {
         if !response.staleComparisonTaskIDs.isEmpty { comparisonInvalidationGeneration = UUID() }
+    }
+    private func cardMessage(for error: Error) -> String {
+        if case let InsightsError.service(code) = error {
+            let key: String? = switch code {
+            case "insights_card_snapshot_limit": "card_snapshot_limit"
+            case "insights_card_episode_limit": "card_episode_limit"
+            default: nil
+            }
+            if let key { return text(key) }
+        }
+        return text("error")
     }
     private func episodeMessage(for error: Error, list: Bool) -> String {
         if case let InsightsError.service(code) = error {

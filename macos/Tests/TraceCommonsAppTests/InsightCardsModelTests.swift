@@ -54,6 +54,22 @@ final class InsightCardsModelTests: XCTestCase {
     }
 
     @MainActor
+    func testSelectionLimitErrorsUseDedicatedCardCopyNotTheGenericError() async throws {
+        let service = CardResponseGate()
+        let model = InsightsModel(service: { try await service.call($0) })
+        model.open(); try await settle(model)
+        model.generateCards(); _ = await service.waitForCardRequest()
+        await service.failCard("insights_card_snapshot_limit")
+        try await settle(model)
+        XCTAssertEqual(model.cardError, "Select 1024 or fewer saved snapshots for cards.")
+
+        model.generateCards(); _ = await service.waitForCardRequest()
+        await service.failCard("insights_card_episode_limit")
+        try await settle(model)
+        XCTAssertEqual(model.cardError, "Select 256 or fewer episode groups for cards.")
+    }
+
+    @MainActor
     func testListRefreshRemovesDeletedSelectionAndInvalidatesPresentedCards() async throws {
         let service = CardResponseGate()
         let model = InsightsModel(service: { try await service.call($0) })
@@ -82,7 +98,7 @@ private actor CardResponseGate {
     private var continuation: CheckedContinuation<InsightsResponse, Error>?
     func call(_ request: InsightsRequest) async throws -> InsightsResponse {
         switch request.operation.type {
-        case "copy": return try decode("{\"type\":\"copy\",\"copy\":{\"error\":\"Unavailable\"}}")
+        case "copy": return try decode("{\"type\":\"copy\",\"copy\":{\"error\":\"Unavailable\",\"card_snapshot_limit\":\"Select 1024 or fewer saved snapshots for cards.\",\"card_episode_limit\":\"Select 256 or fewer episode groups for cards.\"}}")
         case "list": return try decode("{\"type\":\"list\",\"insights\":[]}")
         case "summary": return try decode(emptySummaryJSON)
         case "episode_list": return try decode("{\"type\":\"episode_list\",\"episodes\":[]}")
@@ -98,6 +114,9 @@ private actor CardResponseGate {
     }
     func resolveCard(_ json: String) {
         continuation?.resume(with: Result { try decode(json) }); continuation = nil
+    }
+    func failCard(_ code: String) {
+        continuation?.resume(throwing: InsightsError.service(code)); continuation = nil
     }
     private func decode(_ json: String) throws -> InsightsResponse {
         try JSONDecoder().decode(InsightsResponse.self, from: Data(json.utf8))
