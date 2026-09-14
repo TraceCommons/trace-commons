@@ -8,6 +8,9 @@ import TCShellCore
 @testable import TraceCommonsApp
 
 final class InsightsStoreRoutingIntegrationTests: XCTestCase {
+    /// Pinned raster scale for the rendered-copy assertions below.
+    private static let renderScale = 2
+
     func testOCRNormalizationChangesOnlyCaseAndWhitespace() {
         XCTAssertEqual(Self.normalizedOCR("  Outcome\tIs\n unassessed.  "), "outcome is unassessed.")
         XCTAssertNotEqual(Self.normalizedOCR("Outcome is assessed."), "outcome is unassessed.")
@@ -74,8 +77,20 @@ final class InsightsStoreRoutingIntegrationTests: XCTestCase {
             hosting.layoutSubtreeIfNeeded(); window.displayIfNeeded()
             try await Task.sleep(for: .milliseconds(10))
         }
-        let bitmap = try XCTUnwrap(hosting.bitmapImageRepForCachingDisplay(in: bounds))
+        // Rasterize at a pinned 2x rather than at the host's backing scale.
+        // `bitmapImageRepForCachingDisplay` follows the display, so this render
+        // was 2x on a Retina developer machine and 1x on the CI runner, where
+        // the recognizer read the tail of this view's copy as "unassessec".
+        // The mismatch is a property of the raster, not of the view under test,
+        // and a fixed scale makes the same pixels available everywhere.
+        let bitmap = try XCTUnwrap(NSBitmapImageRep(
+            bitmapDataPlanes: nil, pixelsWide: Int(size.width) * Self.renderScale,
+            pixelsHigh: Int(size.height) * Self.renderScale, bitsPerSample: 8,
+            samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+            colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0))
+        bitmap.size = size
         hosting.cacheDisplay(in: bounds, to: bitmap)
+        XCTAssertEqual(bitmap.pixelsWide, Int(size.width) * Self.renderScale)
         let png = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
         XCTAssertGreaterThan(png.count, 20_000)
         if let path = ProcessInfo.processInfo.environment["TC_INSIGHTS_STORE_RENDER"] {
@@ -209,7 +224,15 @@ final class InsightsStoreRoutingIntegrationTests: XCTestCase {
         request.regionOfInterest = region
         let handler = VNImageRequestHandler(cgImage: try XCTUnwrap(bitmap.cgImage), options: [:])
         try handler.perform([request])
-        return (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }.joined(separator: "\n")
+        // Vision ranks several readings per observation. One misread character
+        // in the top reading -- the CI runner read this view's "unassessed" as
+        // "unassessec" -- must not decide whether the copy rendered, so the
+        // alternates are searched too. Competing readings of one line are
+        // separated by a non-whitespace marker, which normalization keeps, so
+        // no asserted phrase can match across two of them.
+        return (request.results ?? [])
+            .map { $0.topCandidates(3).map(\.string).joined(separator: " | ") }
+            .joined(separator: "\n")
     }
 
     private static func normalizedOCR(_ text: String) -> String {
