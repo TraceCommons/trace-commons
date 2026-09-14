@@ -179,14 +179,45 @@ public enum ComparisonTaskStaleReason: String, Codable, Sendable, CaseIterable {
     case overlappingTaskEvidence = "overlapping_task_evidence"
 }
 
+/// The rule under which a source qualifies to contribute a cohort.
+///
+/// A `String`-raw enum on a `Decodable`, so a rule a newer Rust side adds
+/// fails the whole response rather than being read as some other rule.
+public enum QualifiedSourceRule: String, Decodable, Sendable, Equatable, CaseIterable {
+    case codexRustV0_154_0TaskRecordsV1 = "codex_rust_v0_154_0_task_records_v1"
+    case claudeCodeV2_1_260AgentBranchV1 = "claude_code_v2_1_260_agent_branch_v1"
+}
+
+/// The cohort the evaluator will actually count for a task.
+///
+/// This is the only field that decides a cohort. A snapshot's observed model
+/// labels are not: they include every label seen, mixed-model sessions
+/// included, and those are the sessions attribution refuses.
+public struct ComparisonTaskSourceQualification: Decodable, Sendable, Equatable {
+    public let rule: QualifiedSourceRule
+    public let declared_model_cohort: String
+    public let recorded_configuration_sha256: String?
+    public let material_revision: UInt64
+    public let material_digest: String
+    public func validateSupportedSchema() throws {
+        guard !declared_model_cohort.isEmpty,
+              LocalComparisonTask.digest(material_digest),
+              recorded_configuration_sha256.map({ LocalComparisonTask.digest($0) }) ?? true else {
+            throw InsightsError.invalidResponse
+        }
+    }
+}
+
 public struct ComparisonTaskDetail: Decodable, Sendable, Equatable, Identifiable {
     public let task: LocalComparisonTask
+    public let source_qualification: ComparisonTaskSourceQualification?
     public let stale_reasons: [ComparisonTaskStaleReason]
     public let overlapping_task_ids: [String]
     public let resolved_at: String
     public var id: String { task.id }
     public func validateSupportedSchema(expectedID: String? = nil) throws {
         try task.validateSupportedSchema()
+        try source_qualification?.validateSupportedSchema()
         guard expectedID == nil || task.id == expectedID,
               Set(stale_reasons).count == stale_reasons.count,
               Set(overlapping_task_ids).count == overlapping_task_ids.count,

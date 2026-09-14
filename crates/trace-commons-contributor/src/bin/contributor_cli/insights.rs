@@ -723,7 +723,11 @@ fn render_comparison_specification(
         copy["comparison_specification_title"], specification.id
     );
     println!("{}", copy["comparison_retrospective_notice"]);
-    println!("Cohorts: {}", specification.cohort_labels.join(" / "));
+    println!(
+        "Cohorts: {} {}",
+        specification.cohort_labels.join(" / "),
+        copy["comparison_cohort_declared_not_verified"]
+    );
     println!(
         "Project: {} · Language: {}",
         specification.stratum.project_id, specification.stratum.language
@@ -756,11 +760,15 @@ fn render_comparison_result(
     if result.included_task_ids.is_empty() {
         println!("{}", copy["comparison_no_eligible_evidence"]);
     }
+    println!("{}", copy["comparison_cohort_declaration_notice"]);
     for cohort in &result.cohorts {
         let outcomes = &cohort.outcomes;
         println!(
-            "{}: {} included tasks; {} assessed",
-            cohort.cohort_label, cohort.included_tasks, outcomes.assessed
+            "{} {}: {} included tasks; {} assessed",
+            cohort.cohort_label,
+            copy["comparison_cohort_declared_not_verified"],
+            cohort.included_tasks,
+            outcomes.assessed
         );
         println!(
             "  Accepted: {} · Partial: {} · Rejected: {}",

@@ -97,6 +97,8 @@ pub fn ui_copy() -> std::collections::BTreeMap<String, String> {
         ("comparison_specification_stratum", "Exact project, language, and configuration"),
         ("comparison_specification_matching_tasks", "matching tasks"),
         ("comparison_specification_candidate_declarations", "Candidate cohort declarations"),
+        ("comparison_cohort_declared_not_verified", "(declared, not verified)"),
+        ("comparison_cohort_declaration_notice", "A cohort is the model label the recording harness wrote into the trace. It is not verified: it does not prove which model served a request."),
         ("comparison_specification_need_cohorts", "At least two declared model labels are needed across matching task evidence."),
         ("comparison_specification_date_start", "Task window starts"),
         ("comparison_specification_date_end", "Task window ends"),

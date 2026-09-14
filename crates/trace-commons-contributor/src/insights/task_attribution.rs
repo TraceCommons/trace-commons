@@ -52,6 +52,10 @@ pub enum TaskAttributionUnavailableReason {
     MissingRequiredRecord,
     IdentityConflict,
     ForkOrDelegation,
+    /// A `session_meta` key this profile's pinned upstream revision does not
+    /// define. Any such key may be a resume or delegation marker, so it is
+    /// refused rather than ignored.
+    UnrecognizedSessionField,
     ModelConflict,
     ContextConflict,
     ConfigurationConflict,
@@ -340,19 +344,31 @@ fn unavailable(
     Ok(evidence)
 }
 
+/// The hashed configuration projection.
+///
+/// Every borrowed subtree is a `Value` parsed out of the recorded source, so
+/// its serialized bytes depend on whether `serde_json::Map` resolves to a
+/// `BTreeMap` or, under `preserve_order`, to an insertion-ordered `IndexMap`.
+/// `preserve_order` is on in this crate's graph through
+/// `trace-commons-attestation` -> `dcap-qvl`, and off when a permissive crate
+/// is built alone. The fields below are therefore canonicalized on the way in,
+/// per the rule in `trace_commons_protocol::canonical_json`: every path whose
+/// bytes are hashed routes through `canonicalize`. The struct itself is a
+/// derive-`Serialize` record written in declaration order, with no map in the
+/// way, so it needs no canonicalization of its own.
 #[derive(Serialize)]
 struct ConfigurationProjection<'a> {
     originator: &'a str,
     observed_workspace_version: &'a str,
     prompt_sha256: String,
-    approval_policy: &'a Value,
-    approvals_reviewer: &'a Value,
-    active_permission_profile_id: Option<&'a Value>,
-    permission_profile: &'a Value,
-    sandbox_policy: &'a Value,
-    collaboration_mode: &'a Value,
-    reasoning_effort: &'a Value,
-    multi_agent_version: &'a Value,
+    approval_policy: Value,
+    approvals_reviewer: Value,
+    active_permission_profile_id: Option<Value>,
+    permission_profile: Value,
+    sandbox_policy: Value,
+    collaboration_mode: Value,
+    reasoning_effort: Value,
+    multi_agent_version: Value,
 }
 
 struct SessionFacts {
@@ -431,6 +447,47 @@ fn text_blocks_match(payload: &Value, block_type: &str) -> bool {
                         && block.get("text").is_some_and(Value::is_string)
                 })
         })
+}
+
+/// The `session_meta` keys the pinned upstream revision of each profile emits.
+///
+/// Unknown record *types* already fail closed. Unknown *fields* used to be
+/// ignored, which left the resume/fork gate as a two-name check
+/// (`parent_thread_id`, `forked_from_id`): a rollout that marked a resumed
+/// session under any other key read as an independent session, and the whole
+/// point of the gate is that a resumed session must not be counted twice.
+/// Each profile is bound to an exact upstream revision, so the legal key set
+/// is knowable; anything outside it is refused.
+fn known_session_meta_fields(profile: CodexTaskSourceProfile) -> &'static [&'static str] {
+    match profile {
+        CodexTaskSourceProfile::PinnedDirectWriterFixtureC4017a87 => &[
+            "base_instructions",
+            "cli_version",
+            "context_window",
+            "cwd",
+            "history_mode",
+            "id",
+            "model_provider",
+            "originator",
+            "runtime_workspace_roots",
+            "session_id",
+            "source",
+            "timestamp",
+        ],
+        CodexTaskSourceProfile::CodexRustV0_154_0TaskRecords => &[
+            "base_instructions",
+            "cli_version",
+            "context_window",
+            "cwd",
+            "history_mode",
+            "id",
+            "model_provider",
+            "originator",
+            "session_id",
+            "source",
+            "timestamp",
+        ],
+    }
 }
 
 fn parse_session(profile: CodexTaskSourceProfile, payload: &Value) -> Result<SessionFacts> {
@@ -547,6 +604,11 @@ fn supported_record_semantics(
     }
 }
 
+/// Key-order-independent bytes for one borrowed source subtree.
+fn canonical(value: &Value) -> Value {
+    trace_commons_protocol::canonical_json::canonical_value(value)
+}
+
 fn config_digest(session: &SessionFacts, context: &Value) -> Result<String> {
     let collaboration = field(context, "collaboration_mode")?;
     let settings = field(collaboration, "settings")?;
@@ -554,16 +616,17 @@ fn config_digest(session: &SessionFacts, context: &Value) -> Result<String> {
         originator: &session.originator,
         observed_workspace_version: &session.observed_workspace_version,
         prompt_sha256: session.prompt_sha256.clone(),
-        approval_policy: field(context, "approval_policy")?,
-        approvals_reviewer: field(context, "approvals_reviewer")?,
+        approval_policy: canonical(field(context, "approval_policy")?),
+        approvals_reviewer: canonical(field(context, "approvals_reviewer")?),
         active_permission_profile_id: context
             .get("active_permission_profile")
-            .and_then(|profile| profile.get("id")),
-        permission_profile: field(context, "permission_profile")?,
-        sandbox_policy: field(context, "sandbox_policy")?,
-        collaboration_mode: field(collaboration, "mode")?,
-        reasoning_effort: field(settings, "reasoning_effort")?,
-        multi_agent_version: field(context, "multi_agent_version")?,
+            .and_then(|profile| profile.get("id"))
+            .map(canonical),
+        permission_profile: canonical(field(context, "permission_profile")?),
+        sandbox_policy: canonical(field(context, "sandbox_policy")?),
+        collaboration_mode: canonical(field(collaboration, "mode")?),
+        reasoning_effort: canonical(field(settings, "reasoning_effort")?),
+        multi_agent_version: canonical(field(context, "multi_agent_version")?),
     };
     let bytes = serde_json::to_vec(&projection).map_err(|_| invalid())?;
     Ok(format!("{:x}", Sha256::digest(bytes)))
@@ -730,6 +793,23 @@ pub fn classify_codex_task_attribution(
             1,
             None,
             TaskAttributionUnavailableReason::ForkOrDelegation,
+            Some(*first_index),
+        );
+    }
+    let known_fields = known_session_meta_fields(profile);
+    if first_payload
+        .as_object()
+        .ok_or_else(invalid)?
+        .keys()
+        .any(|key| !known_fields.contains(&key.as_str()))
+    {
+        return unavailable(
+            profile,
+            source_digest,
+            record_count,
+            1,
+            None,
+            TaskAttributionUnavailableReason::UnrecognizedSessionField,
             Some(*first_index),
         );
     }
@@ -1213,6 +1293,87 @@ mod tests {
             .into_bytes();
         encoded.push(b'\n');
         encoded
+    }
+
+    /// Rebuild every object in `value` with its keys inserted in reverse
+    /// sorted order.
+    ///
+    /// Under `preserve_order` this is observable in the serialized bytes;
+    /// under a `BTreeMap` it is a no-op, which is the condition
+    /// `trace_commons_protocol::canonical_json` documents.
+    fn reverse_key_order(value: &Value) -> Value {
+        match value {
+            Value::Object(map) => {
+                let mut entries = map
+                    .iter()
+                    .map(|(key, entry)| (key.clone(), reverse_key_order(entry)))
+                    .collect::<Vec<_>>();
+                entries.sort_by(|left, right| right.0.cmp(&left.0));
+                Value::Object(entries.into_iter().collect())
+            }
+            Value::Array(items) => Value::Array(items.iter().map(reverse_key_order).collect()),
+            other => other.clone(),
+        }
+    }
+
+    #[test]
+    fn an_unknown_session_meta_field_is_refused_rather_than_read_as_independent() {
+        for (profile, fixture) in [
+            (PROFILE, ALPHA),
+            (
+                CodexTaskSourceProfile::CodexRustV0_154_0TaskRecords,
+                RELEASE_ALPHA,
+            ),
+        ] {
+            let baseline = classify_codex_task_attribution(profile, fixture).unwrap();
+            assert!(
+                matches!(baseline.state, TaskAttributionState::Attributed { .. }),
+                "the unmodified fixture must attribute, or the case below proves nothing"
+            );
+            for marker in [
+                "resumed_from_thread_id",
+                "continued_session_id",
+                "rollout_parent",
+            ] {
+                let mut records = decode(fixture);
+                records[0]["payload"][marker] = json!("parent-session");
+                assert_eq!(
+                    unavailable_reason_for(profile, &encode(&records)),
+                    TaskAttributionUnavailableReason::UnrecognizedSessionField,
+                    "an unrecognized session_meta key must exclude the session"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn recorded_configuration_digest_ignores_source_json_key_order() {
+        let records = decode(RELEASE_ALPHA);
+        let reordered = records.iter().map(reverse_key_order).collect::<Vec<_>>();
+        assert_ne!(
+            encode(&records),
+            encode(&reordered),
+            "the reordering must reach the serialized bytes for this test to mean anything"
+        );
+        let digest = |bytes: &[u8]| match classify_codex_task_attribution(
+            CodexTaskSourceProfile::CodexRustV0_154_0TaskRecords,
+            bytes,
+        )
+        .unwrap()
+        .state
+        {
+            TaskAttributionState::Attributed { turns } => {
+                turns[0].recorded_configuration_sha256.clone()
+            }
+            TaskAttributionState::Unavailable { reason, .. } => {
+                panic!("fixture was not attributed: {reason:?}")
+            }
+        };
+        assert_eq!(
+            digest(&encode(&records)),
+            digest(&encode(&reordered)),
+            "two turn_context records differing only in key order are one configuration"
+        );
     }
 
     fn unavailable_reason(bytes: &[u8]) -> TaskAttributionUnavailableReason {

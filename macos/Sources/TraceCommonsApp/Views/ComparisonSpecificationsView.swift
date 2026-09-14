@@ -44,11 +44,13 @@ struct ComparisonSpecificationsView: View {
                     Text(option.stratum.configuration_fingerprint).font(.caption.monospaced())
                 }
                 Text(text("comparison_specification_candidate_declarations")).font(.headline)
+                Text(text("comparison_cohort_declaration_notice")).font(.caption).foregroundStyle(.secondary)
                 if option.cohortCandidates.count < 2 {
                     Text(text("comparison_specification_need_cohorts"))
                 }
                 ForEach(option.cohortCandidates, id: \.self) { label in
-                    Toggle(label, isOn: Binding(get: { model.selectedCohorts.contains(label) },
+                    Toggle("\(label) \(text("comparison_cohort_declared_not_verified"))",
+                        isOn: Binding(get: { model.selectedCohorts.contains(label) },
                         set: { model.setCohort(label, selected: $0) })).toggleStyle(.checkbox)
                 }
             }
@@ -90,7 +92,7 @@ struct ComparisonSpecificationsView: View {
     private func specificationView(_ spec: ComparisonSpecification) -> some View {
         VStack(alignment: .leading, spacing: 5) {
             Text("\(spec.date_start) – \(spec.date_end)").font(.headline)
-            Text(spec.cohort_labels.joined(separator: " / "))
+            Text("\(spec.cohort_labels.joined(separator: " / ")) \(text("comparison_cohort_declared_not_verified"))")
             Text("\(text("comparison_specification_cutoff")): \(InsightsDate.label(spec.evidence_cutoff))")
             Text(text("comparison_specification_cutoff_evidence")).font(.headline)
             ForEach(spec.cutoff_task_evidence) { evidence in
@@ -115,7 +117,7 @@ struct ComparisonSpecificationsView: View {
             if result.included_task_ids.isEmpty { Text(text("comparison_no_eligible_evidence")) }
             ForEach(result.cohorts) { cohort in
                 VStack(alignment: .leading) {
-                    Text(cohort.cohort_label).font(.headline)
+                    Text("\(cohort.cohort_label) \(text("comparison_cohort_declared_not_verified"))").font(.headline)
                     Text("\(text("comparison_specification_included")): \(cohort.included_tasks)")
                     ForEach(DescriptiveOutcome.allCases, id: \.self) { outcome in
                         Text("\(outcomeLabel(outcome)): \(count(outcome, in: cohort.outcomes))")
