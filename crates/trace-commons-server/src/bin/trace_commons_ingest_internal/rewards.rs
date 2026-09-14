@@ -100,20 +100,27 @@ fn rate_refusal() -> RewardHttpError {
     RewardHttpError::new(StatusCode::TOO_MANY_REQUESTS, "rate limited")
 }
 
+// Public and account reward queries share this budget, leaving room in the
+// default five-connection pool for authentication and other account work.
+const REWARD_DATABASE_SLOTS: u32 = 3;
+// Anonymous reads get their own admission strictly below the shared budget, so
+// a slot always remains for authenticated account work no matter how many
+// anonymous readers arrive. A bound of one would have serialized every
+// anonymous reader behind a single slow request.
+const REWARD_PUBLIC_READ_SLOTS: u32 = REWARD_DATABASE_SLOTS - 1;
+
 fn database_slot() -> Option<ConcurrencyGuard<'static>> {
     database_slot_for(&ACCOUNT_RATE_LIMITER)
 }
 
 fn database_slot_for(limiter: &AccountRateLimiter) -> Option<ConcurrencyGuard<'_>> {
-    // Public and account reward queries share this budget, leaving room in the
-    // default five-connection pool for authentication and other account work.
-    limiter.acquire("reward-database", 2)
+    limiter.acquire("reward-database", REWARD_DATABASE_SLOTS)
 }
 
 fn public_read_slots_for(limiter: &AccountRateLimiter) -> Option<[ConcurrencyGuard<'_>; 2]> {
-    // Anonymous offer, catalog, and detail reads share one reservation inside
-    // the unchanged two-slot reward database budget.
-    let public = limiter.acquire("reward-public-read", 1)?;
+    // Anonymous offer, catalog, and detail reads share this bounded admission
+    // inside the reward database budget.
+    let public = limiter.acquire("reward-public-read", REWARD_PUBLIC_READ_SLOTS)?;
     let database = database_slot_for(limiter)?;
     Some([public, database])
 }
@@ -276,23 +283,42 @@ mod limiter_tests {
     use super::*;
 
     #[test]
-    fn public_reads_reserve_only_one_of_two_reward_database_slots() {
+    fn concurrent_public_reads_are_admitted_up_to_their_own_bound() {
         let limiter = AccountRateLimiter::new();
-        let public = public_read_slots_for(&limiter).expect("first public read is admitted");
+        let first = public_read_slots_for(&limiter).expect("first anonymous read is admitted");
+        // A bound of one made every anonymous reader wait behind one slow
+        // request, which the pre-existing offer endpoint never did.
+        let second = public_read_slots_for(&limiter).expect("second anonymous read is admitted");
+
+        let refusal = public_read_slots_for(&limiter)
+            .map(|_| ())
+            .ok_or_else(rate_refusal)
+            .expect_err("a third concurrent anonymous read is refused");
+        assert_eq!(refusal.status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(refusal.label, "rate limited");
+
+        drop(second);
+        assert!(public_read_slots_for(&limiter).is_some());
+        drop(first);
+    }
+
+    #[test]
+    fn saturated_public_reads_still_leave_a_database_slot_for_account_work() {
+        let limiter = AccountRateLimiter::new();
+        let _first = public_read_slots_for(&limiter).expect("first anonymous read is admitted");
+        let _second = public_read_slots_for(&limiter).expect("second anonymous read is admitted");
         assert!(
             public_read_slots_for(&limiter).is_none(),
-            "shared public reservation admits only one anonymous read"
+            "anonymous admission stays bounded"
         );
 
-        let account = database_slot_for(&limiter).expect("account keeps the second DB slot");
+        let account = database_slot_for(&limiter)
+            .expect("account work keeps a reward database slot while anonymous reads saturate");
         assert!(
             database_slot_for(&limiter).is_none(),
-            "global reward DB budget remains two"
+            "the shared reward database budget is not widened beyond its cap"
         );
         drop(account);
         assert!(database_slot_for(&limiter).is_some());
-
-        drop(public);
-        assert!(public_read_slots_for(&limiter).is_some());
     }
 }
