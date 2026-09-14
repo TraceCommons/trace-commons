@@ -87,6 +87,8 @@ pub enum ProviderError {
     Unavailable,
     #[error("insights-provider-result-invalid")]
     InvalidResult,
+    #[error("insights-provider-purpose-unsupported")]
+    UnsupportedPurpose,
 }
 
 /// Only trusted implementations explicitly selected by the host may run here.
@@ -96,6 +98,11 @@ pub enum ProviderError {
 /// Remote evaluation requires a separate authorization and execution boundary.
 pub trait LocalInsightProvider {
     fn manifest(&self) -> ProviderManifest;
+    /// Whether this implementation serves the request's stated purpose.
+    /// Dispatch refuses a purpose an implementation does not claim, so a
+    /// purpose added later is not silently evaluated under an unrelated
+    /// rubric; an implementation that does not enumerate it fails closed.
+    fn supports_purpose(&self, purpose: AnalysisPurpose) -> bool;
     fn evaluate(
         &self,
         request: &ProviderRequest,
@@ -159,6 +166,9 @@ fn dispatch_projected(
     if provider.manifest() != request.provider {
         return Err(ProviderError::Incompatible);
     }
+    if !provider.supports_purpose(request.purpose) {
+        return Err(ProviderError::UnsupportedPurpose);
+    }
     let result = provider.evaluate(request, events)?;
     result
         .validate_for(&request.provider, std::slice::from_ref(&request.evidence))
@@ -174,6 +184,14 @@ pub struct FirstPartyProvider;
 impl LocalInsightProvider for FirstPartyProvider {
     fn manifest(&self) -> ProviderManifest {
         ProviderManifest::first_party()
+    }
+
+    fn supports_purpose(&self, purpose: AnalysisPurpose) -> bool {
+        // Exhaustive on purpose: a new variant is a compile error here rather
+        // than a silent reuse of the descriptive-counts rubric.
+        match purpose {
+            AnalysisPurpose::PrivateDescriptive => true,
+        }
     }
 
     fn evaluate(
@@ -268,10 +286,14 @@ mod tests {
         calls: Cell<u32>,
         fail: bool,
         forge_evidence: bool,
+        decline_purpose: bool,
     }
     impl LocalInsightProvider for TestProvider {
         fn manifest(&self) -> ProviderManifest {
             self.manifest.clone()
+        }
+        fn supports_purpose(&self, _purpose: AnalysisPurpose) -> bool {
+            !self.decline_purpose
         }
         fn evaluate(
             &self,
@@ -298,7 +320,27 @@ mod tests {
             calls: Cell::new(0),
             fail: false,
             forge_evidence: false,
+            decline_purpose: false,
         }
+    }
+
+    #[test]
+    fn a_purpose_the_selected_provider_does_not_serve_is_refused_before_execution() {
+        let mut provider = test_provider();
+        let mut request = request();
+        request.provider = provider.manifest();
+        provider.decline_purpose = true;
+        assert_eq!(
+            dispatch_projected(&provider, &request, &events()),
+            Err(ProviderError::UnsupportedPurpose)
+        );
+        assert_eq!(
+            ProviderError::UnsupportedPurpose.to_string(),
+            "insights-provider-purpose-unsupported"
+        );
+        assert_eq!(provider.calls.get(), 0, "refused before the provider runs");
+        provider.decline_purpose = false;
+        assert!(dispatch_projected(&provider, &request, &events()).is_ok());
     }
 
     #[test]
