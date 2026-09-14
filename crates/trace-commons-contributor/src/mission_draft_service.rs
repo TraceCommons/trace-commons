@@ -202,6 +202,71 @@ mod tests {
         Ok(serde_json::from_str(&dispatch_json(&bytes)?)?)
     }
 
+    /// Every native shell hand-copies this key set (macOS asserts exact
+    /// equality at runtime, Windows checks required keys, GTK reads the map
+    /// directly). Pin it here so adding, removing, or renaming a key is a
+    /// conscious, reviewed decision instead of silently drifting from what
+    /// the shells expect: see docs on the cross-platform copy-map contract.
+    const UI_COPY_KEYS: &[&str] = &[
+        "added",
+        "allowed_models",
+        "allowed_tools",
+        "author_unverified",
+        "authority_notice",
+        "cancel",
+        "choose_file",
+        "close",
+        "delete",
+        "delete_confirm",
+        "delete_confirm_title",
+        "deleted",
+        "display_notice",
+        "duplicate",
+        "empty",
+        "error",
+        "evaluator_unverified",
+        "file_selected",
+        "import",
+        "input_tokens",
+        "intro",
+        "needs_curator_review",
+        "output_tokens",
+        "proposal_sha256",
+        "proposal_title",
+        "proposed_budget",
+        "required_evidence",
+        "refresh",
+        "refreshed",
+        "review_notice",
+        "rubric_version",
+        "show",
+        "source_claim",
+        "source_count",
+        "source_urls",
+        "starting_artifact",
+        "starting_artifact_digest",
+        "success_criteria",
+        "task",
+        "title",
+        "working",
+        "duration_seconds",
+    ];
+
+    #[test]
+    fn ui_copy_key_set_is_pinned_so_a_new_key_is_a_reviewed_decision() {
+        let copy = ui_copy();
+        let mut expected: Vec<&str> = UI_COPY_KEYS.to_vec();
+        expected.sort_unstable();
+        let mut actual: Vec<&str> = copy.keys().map(String::as_str).collect();
+        actual.sort_unstable();
+        assert_eq!(
+            actual, expected,
+            "ui_copy() key set changed: update UI_COPY_KEYS here and the \
+             hand-copied lists in macos/Sources/TCBridge/TCMissionDrafts.swift \
+             and windows/src/TraceCommons.Interop/MissionDrafts.cs together"
+        );
+    }
+
     #[test]
     fn list_and_copy_do_not_create_an_absent_store() {
         let root = tempfile::tempdir().unwrap();

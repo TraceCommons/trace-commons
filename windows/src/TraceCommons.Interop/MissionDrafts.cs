@@ -82,6 +82,10 @@ public static class MissionDraftDecoding
     public static IReadOnlyDictionary<string, string> Copy(JsonElement response)
     {
         var copy = Decode<MissionCopyResponse>(response, "copy").Copy;
+        // Exact-set equality, not presence-only: a shared vocabulary key added
+        // or removed on the Rust side must fail loudly here rather than being
+        // silently ignored, matching the macOS bridge's exact-set check.
+        if (copy.Count != RequiredCopyKeys.Length) Invalid();
         foreach (string key in RequiredCopyKeys)
             if (!copy.TryGetValue(key, out string? value) || string.IsNullOrWhiteSpace(value)) Invalid();
         return copy;
