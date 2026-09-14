@@ -194,6 +194,11 @@ const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "pipeline_export_snapshots",
     "pipeline_export_snapshot_items",
     "pipeline_bundle_qualifications",
+    "pipeline_tenant_routing",
+    "pipeline_activation_events",
+    "pipeline_receipt_ownership",
+    "pipeline_legacy_owned_work",
+    "pipeline_legacy_writer_status",
 ];
 
 const TRACE_COMMONS_RLS_POLICY_EXPRESSION_VARIANTS: &[&str] = &[
@@ -1965,6 +1970,26 @@ impl Database for PgBackend {
                 .execute(
                     "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
                     &[&52_i32, &"versioned_pipeline_qualification"],
+                )
+                .await?;
+        }
+        let already_applied = client
+            .query_opt(
+                "SELECT 1 FROM _trace_commons_migrations WHERE version = $1",
+                &[&53_i32],
+            )
+            .await?
+            .is_some();
+        if !already_applied {
+            client
+                .batch_execute(include_str!(
+                    "../../../../migrations/V53__versioned_pipeline_activation.sql"
+                ))
+                .await?;
+            client
+                .execute(
+                    "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
+                    &[&53_i32, &"versioned_pipeline_activation"],
                 )
                 .await?;
         }
@@ -5276,7 +5301,10 @@ mod tests {
             include_str!("../../../../migrations/V43__trace_withdrawal.sql"),
             include_str!("../../../../migrations/V47__versioned_pipeline.sql"),
             include_str!("../../../../migrations/V48__versioned_pipeline_durability.sql"),
+            include_str!("../../../../migrations/V50__versioned_pipeline_authority_privacy.sql"),
+            include_str!("../../../../migrations/V51__versioned_pipeline_product_integration.sql"),
             include_str!("../../../../migrations/V52__versioned_pipeline_qualification.sql"),
+            include_str!("../../../../migrations/V53__versioned_pipeline_activation.sql"),
         ];
         let force_rls_migrations = [
             include_str!("../../../../migrations/V6__trace_force_rls.sql"),
@@ -5295,6 +5323,10 @@ mod tests {
             include_str!("../../../../migrations/V43__trace_withdrawal.sql"),
             include_str!("../../../../migrations/V47__versioned_pipeline.sql"),
             include_str!("../../../../migrations/V48__versioned_pipeline_durability.sql"),
+            include_str!("../../../../migrations/V50__versioned_pipeline_authority_privacy.sql"),
+            include_str!("../../../../migrations/V51__versioned_pipeline_product_integration.sql"),
+            include_str!("../../../../migrations/V52__versioned_pipeline_qualification.sql"),
+            include_str!("../../../../migrations/V53__versioned_pipeline_activation.sql"),
         ];
 
         for table in TRACE_COMMONS_RLS_TABLES {

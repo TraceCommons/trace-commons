@@ -74,7 +74,8 @@ Pass the current promotion decision, deployed code revision, and dependency
 profile to `activate_qualified_bundle`. The operation rejects stale evidence,
 a revision mismatch, or a non-production dependency.
 
-Phase 8 owns tenant activation and production rollback observation.
+Phase 8 owns tenant activation and production rollback observation. See
+[phase-8.md](./phase-8.md).
 
 ## Local runner limit
 

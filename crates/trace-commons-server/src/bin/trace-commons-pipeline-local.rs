@@ -38,6 +38,9 @@ use trace_commons_server::versioned_pipeline::{
     PhaseOutcomeRecord, PipelineInspection, PipelineReceiptResult, PipelineReviewClaim,
     PipelineRunState, PipelineService, PipelineSubmitReceipt,
 };
+use trace_commons_server::versioned_pipeline_activation::{
+    PipelineActivationStore, SwitchedReceipt,
+};
 use trace_commons_server::versioned_pipeline_product::{
     PIPELINE_EXPORT_ITEM_MAX, PipelineContributorStatus, PipelineExportSnapshot,
     PipelineProductStore, sha256_prefixed as product_sha256_prefixed,
@@ -138,6 +141,7 @@ struct LocalAuth {
 
 struct HttpState {
     pipeline: Arc<PipelineService>,
+    activation: PipelineActivationStore,
     backend: Arc<PgBackend>,
     product: PipelineProductStore,
     attestation_signing: Option<AttestationSigningState>,
@@ -368,6 +372,7 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
     let bundle_id = pipeline.bundle_id().to_string();
     let state = Arc::new(HttpState {
         pipeline,
+        activation: PipelineActivationStore::new(backend.clone()),
         product: PipelineProductStore::new(backend.clone()),
         backend,
         attestation_signing,
@@ -378,6 +383,10 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
         .route("/health", get(|| async { "ok" }))
         .route("/ready", get(readiness_handler))
         .route("/v1/pipeline/submissions", post(submit_handler))
+        .route(
+            "/v1/pipeline/switched-submissions",
+            post(switched_submit_handler),
+        )
         .route("/v1/traces", post(submit_handler))
         .route("/v1/traces/{submission_id}", delete(withdraw_handler))
         .route(
@@ -420,6 +429,12 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
         .route(
             "/v1/admin/pipeline-runs/{run_id}/traceability",
             get(forensic_trace_handler),
+        )
+        .route("/v1/admin/pipeline-routing", get(pipeline_routing_handler))
+        .route("/v1/admin/pipeline-contain", post(pipeline_contain_handler))
+        .route(
+            "/v1/admin/pipeline-retire-legacy-writer",
+            post(pipeline_retire_legacy_writer_handler),
         )
         .route(
             "/v1/workers/pipeline-index-invalidation/{run_id}",
@@ -501,7 +516,162 @@ async fn submit_handler(
             status: StatusCode::CONFLICT,
             label: "idempotency_content_conflict",
         }),
+        PipelineReceiptResult::LegacyOwned { .. } => Err(HttpError {
+            status: StatusCode::CONFLICT,
+            label: "legacy_receipt_owned",
+        }),
     }
+}
+
+#[derive(Debug, Serialize)]
+struct SwitchedReceiptResponse {
+    owner: String,
+    submission_id: Option<Uuid>,
+    run_id: Option<Uuid>,
+    replayed: bool,
+    pending_work: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct PipelineReasonRequest {
+    reason_code: String,
+}
+
+async fn switched_submit_handler(
+    State(state): State<Arc<HttpState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> HttpResult<Json<SwitchedReceiptResponse>> {
+    let auth = authenticate(&state, &headers, LocalRole::Contributor)?;
+    let idempotency_key = headers
+        .get("idempotency-key")
+        .and_then(|value| value.to_str().ok())
+        .ok_or(HttpError {
+            status: StatusCode::BAD_REQUEST,
+            label: "idempotency_key_required",
+        })?;
+    let result = state
+        .activation
+        .submit_switched(
+            &state.pipeline,
+            &auth.tenant_id,
+            &auth.principal_ref,
+            idempotency_key,
+            &body,
+        )
+        .await
+        .map_err(|_| HttpError {
+            status: StatusCode::BAD_REQUEST,
+            label: "submission_failed",
+        })?;
+    match result {
+        SwitchedReceipt::Pipeline(result) => match *result {
+            PipelineReceiptResult::Created(run) => Ok(Json(SwitchedReceiptResponse {
+                owner: "pipeline".to_string(),
+                submission_id: Some(run.submission_id),
+                run_id: Some(run.run_id),
+                replayed: false,
+                pending_work: false,
+            })),
+            PipelineReceiptResult::Replayed(run) => Ok(Json(SwitchedReceiptResponse {
+                owner: "pipeline".to_string(),
+                submission_id: Some(run.submission_id),
+                run_id: Some(run.run_id),
+                replayed: true,
+                pending_work: false,
+            })),
+            PipelineReceiptResult::ContentConflict => Err(HttpError {
+                status: StatusCode::CONFLICT,
+                label: "idempotency_content_conflict",
+            }),
+            PipelineReceiptResult::LegacyOwned { .. } => Err(HttpError {
+                status: StatusCode::CONFLICT,
+                label: "legacy_receipt_owned",
+            }),
+        },
+        SwitchedReceipt::ContentConflict => Err(HttpError {
+            status: StatusCode::CONFLICT,
+            label: "idempotency_content_conflict",
+        }),
+        SwitchedReceipt::Legacy {
+            submission_id,
+            replayed,
+            pending_work,
+            ..
+        } => Ok(Json(SwitchedReceiptResponse {
+            owner: "legacy".to_string(),
+            submission_id: Some(submission_id),
+            run_id: None,
+            replayed,
+            pending_work,
+        })),
+        SwitchedReceipt::Contained => Err(HttpError {
+            status: StatusCode::CONFLICT,
+            label: "pipeline_contained",
+        }),
+        SwitchedReceipt::WriterDisabled => Err(HttpError {
+            status: StatusCode::CONFLICT,
+            label: "legacy_writer_disabled",
+        }),
+    }
+}
+
+async fn pipeline_routing_handler(
+    State(state): State<Arc<HttpState>>,
+    headers: HeaderMap,
+) -> HttpResult<Json<serde_json::Value>> {
+    let auth = authenticate(&state, &headers, LocalRole::Operator)?;
+    let routing = state
+        .activation
+        .routing(&auth.tenant_id)
+        .await
+        .map_err(|_| HttpError {
+            status: StatusCode::BAD_REQUEST,
+            label: "pipeline_routing_unavailable",
+        })?;
+    Ok(Json(serde_json::json!({
+        "routing_state": routing.as_ref().map(|item| match item.routing_state {
+            trace_commons_server::versioned_pipeline_activation::RoutingState::Legacy => "legacy",
+            trace_commons_server::versioned_pipeline_activation::RoutingState::Pipeline => "pipeline",
+            trace_commons_server::versioned_pipeline_activation::RoutingState::Contained => "contained",
+        }),
+        "selected_bundle_id": routing.as_ref().and_then(|item| item.selected_bundle_id.clone()),
+        "activation_record_id": routing.as_ref().map(|item| item.activation_record_id),
+    })))
+}
+
+async fn pipeline_contain_handler(
+    State(state): State<Arc<HttpState>>,
+    headers: HeaderMap,
+    Json(body): Json<PipelineReasonRequest>,
+) -> HttpResult<StatusCode> {
+    let auth = authenticate(&state, &headers, LocalRole::Operator)?;
+    state
+        .activation
+        .contain_pipeline(&auth.tenant_id, &auth.principal_ref, &body.reason_code)
+        .await
+        .map_err(|_| HttpError {
+            status: StatusCode::CONFLICT,
+            label: "pipeline_contain_failed",
+        })?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn pipeline_retire_legacy_writer_handler(
+    State(state): State<Arc<HttpState>>,
+    headers: HeaderMap,
+    Json(body): Json<PipelineReasonRequest>,
+) -> HttpResult<StatusCode> {
+    let auth = authenticate(&state, &headers, LocalRole::Operator)?;
+    state
+        .activation
+        .retire_legacy_writer(&auth.tenant_id, &auth.principal_ref, &body.reason_code)
+        .await
+        .map_err(|_| HttpError {
+            status: StatusCode::CONFLICT,
+            label: "legacy_writer_retire_failed",
+        })?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn withdraw_handler(

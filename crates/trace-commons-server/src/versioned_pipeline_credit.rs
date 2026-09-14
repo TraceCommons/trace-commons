@@ -70,6 +70,15 @@ pub fn pipeline_credit_event_id(tenant_id: &str, run_id: Uuid, score_outcome_id:
     )
 }
 
+pub fn pipeline_ledger_source_key(tenant_id: &str, request_idempotency_key: &str) -> String {
+    format!(
+        "sha256:{:x}",
+        Sha256::digest(
+            format!("tracecommons:ledger-source:{tenant_id}:{request_idempotency_key}").as_bytes()
+        )
+    )
+}
+
 pub fn pipeline_settlement_batch_id(tenant_id: &str, source_list_hash: &str) -> Uuid {
     Uuid::new_v5(
         &Uuid::NAMESPACE_URL,

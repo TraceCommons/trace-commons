@@ -23,13 +23,21 @@ use trace_commons_server::trace_corpus_storage::{
 };
 use trace_commons_server::versioned_pipeline::{
     MinimalPolicyBundle, PIPELINE_FIXED_POSITIVE_MICROCREDITS, PIPELINE_SCORE_DEPENDENCY_LABEL,
-    PgPipelineStore, PipelineCrashPoint, PipelineReceiptResult, PipelineRunState, PipelineService,
-    StoredPhaseResult,
+    PgPipelineStore, PipelineCrashPoint, PipelineReceiptResult, PipelineRunRecord,
+    PipelineRunState, PipelineService, StoredPhaseResult,
+};
+use trace_commons_server::versioned_pipeline_activation::{
+    ACTIVATION_READINESS_FAILED_LABEL, ActivationReadiness, BOUND_POLICY_MUST_BE_SUSPENDED_LABEL,
+    EARLIER_QUALIFIED_BUNDLE_REQUIRED_LABEL, LEDGER_SOURCE_CONFLICT_LABEL,
+    LEGACY_WRITER_DISABLED_LABEL, LEGACY_WRITER_PENDING_LABEL, PipelineActivationStore,
+    ReceiptOwner, RoutingState, SwitchedReceipt,
 };
 use trace_commons_server::versioned_pipeline_compat::{
     CompatibilityBundleConfig, CompatibilityScoreRuntime,
 };
-use trace_commons_server::versioned_pipeline_credit::RecordingNearAdapter;
+use trace_commons_server::versioned_pipeline_credit::{
+    RecordingNearAdapter, pipeline_ledger_source_key,
+};
 use trace_commons_server::versioned_pipeline_index::{
     IndexFault, IsolatedPipelineIndex, PIPELINE_EMBEDDER_MODEL_ID, PIPELINE_INDEX_ID,
     PIPELINE_PROJECTION_ID,
@@ -40,8 +48,8 @@ use trace_commons_server::versioned_pipeline_product::{
 use trace_commons_server::versioned_pipeline_qualification::{
     BundlePackageSignature, BundlePackageTrustStore, BundleQualificationMetadata, DrillEvidence,
     DrillStatus, PACKAGE_QUALIFICATION_MISSING_LABEL, PACKAGE_SIGNATURE_ALGORITHM,
-    PipelineQualificationStore, ProductionDependencyProfile, REQUIRED_PHASE_SEVEN_DRILLS,
-    SignedBundlePackage, TrustedBundleKey, evaluate_promotion,
+    PipelineQualificationStore, ProductionDependencyProfile, PromotionDecision,
+    REQUIRED_PHASE_SEVEN_DRILLS, SignedBundlePackage, TrustedBundleKey, evaluate_promotion,
 };
 use uuid::Uuid;
 
@@ -441,6 +449,9 @@ async fn concurrent_receipts_and_workers_commit_one_logical_result() {
                 run.run_id
             }
             PipelineReceiptResult::ContentConflict => panic!("equal receipts cannot conflict"),
+            PipelineReceiptResult::LegacyOwned { .. } => {
+                panic!("concurrent pipeline receipts are not legacy-owned")
+            }
         })
         .collect::<Vec<_>>();
     assert_eq!(run_ids[0], run_ids[1]);
@@ -2939,4 +2950,637 @@ async fn phase_seven_operational_summary_and_traceability_are_hash_only() {
     }));
     let output = serde_json::to_string(&(summary, trace)).unwrap();
     assert!(!output.contains("ghp_PHASE7_SECRET_MUST_NOT_APPEAR"));
+}
+
+fn production_bundle_config(projection_id: &str) -> CompatibilityBundleConfig {
+    let mut config = CompatibilityBundleConfig::local_reference();
+    config.scorer_model_id = "near-ai-qwen-qualified-v1".to_string();
+    config.embedder_model_id = "production-embedder-v1".to_string();
+    config.projection_id = projection_id.to_string();
+    config.index_id = "trace-commons-production-index-v1".to_string();
+    config
+}
+
+fn sign_package(
+    package: trace_commons_gate_api::pipeline::BundlePackage,
+    key_id: &str,
+) -> (SignedBundlePackage, BundlePackageTrustStore) {
+    let random = ring::rand::SystemRandom::new();
+    let pkcs8 = Ed25519KeyPair::generate_pkcs8(&random).unwrap();
+    let key_pair = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
+    let package_hash = package.package_hash().unwrap();
+    let signed = SignedBundlePackage {
+        package,
+        signature: BundlePackageSignature {
+            algorithm: PACKAGE_SIGNATURE_ALGORITHM.to_string(),
+            key_id: key_id.to_string(),
+            package_hash: package_hash.clone(),
+            signature_base64url: base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .encode(key_pair.sign(package_hash.as_bytes()).as_ref()),
+        },
+    };
+    let trust = BundlePackageTrustStore::new([TrustedBundleKey {
+        key_id: signed.signature.key_id.clone(),
+        public_key_base64url: base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(key_pair.public_key().as_ref()),
+    }])
+    .unwrap();
+    (signed, trust)
+}
+
+fn qualification_metadata(label: &str) -> BundleQualificationMetadata {
+    BundleQualificationMetadata {
+        corpus_digest: sha256_prefixed(format!("{label}-corpus").as_bytes()),
+        input_digest: sha256_prefixed(format!("{label}-input").as_bytes()),
+        configuration_digest: sha256_prefixed(format!("{label}-configuration").as_bytes()),
+        code_revision_hash: sha256_prefixed(b"phase8-code"),
+        evidence_hash: sha256_prefixed(format!("{label}-evidence").as_bytes()),
+    }
+}
+
+fn passing_promotion() -> PromotionDecision {
+    let now = Utc::now();
+    let evidence = REQUIRED_PHASE_SEVEN_DRILLS
+        .iter()
+        .map(|drill_id| DrillEvidence {
+            drill_id: (*drill_id).to_string(),
+            status: DrillStatus::Pass,
+            safe_blockers: Vec::new(),
+            observed_at: now,
+            maximum_age_seconds: 3_600,
+            evidence_hash: sha256_prefixed(drill_id.as_bytes()),
+        })
+        .collect::<Vec<_>>();
+    evaluate_promotion(&evidence, now).unwrap()
+}
+
+fn expect_pipeline_created(result: SwitchedReceipt) -> PipelineRunRecord {
+    match result {
+        SwitchedReceipt::Pipeline(boxed) => match *boxed {
+            PipelineReceiptResult::Created(created) => created,
+            other => panic!("expected created pipeline receipt, got {other:?}"),
+        },
+        other => panic!("expected pipeline owner, got {other:?}"),
+    }
+}
+
+async fn qualify_signed_bundle(
+    backend: Arc<PgBackend>,
+    tenant: &str,
+    signed: &SignedBundlePackage,
+    trust: &BundlePackageTrustStore,
+    metadata: &BundleQualificationMetadata,
+) {
+    PipelineQualificationStore::new(backend)
+        .qualify_bundle(
+            tenant,
+            signed,
+            trust,
+            metadata,
+            &ProductionDependencyProfile::production(),
+        )
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn phase_eight_legacy_retry_does_not_start_a_pipeline_run() {
+    let Some(backend) = backend().await else {
+        return;
+    };
+    let tenant = format!("pipeline-phase8-switch-{}", Uuid::new_v4());
+    let root = tempfile::tempdir().unwrap();
+    let service =
+        PipelineService::new_compatibility(backend.clone(), artifact_store(&root)).unwrap();
+    let activation = PipelineActivationStore::new(backend.clone());
+    let runtime = CompatibilityScoreRuntime::reference(IsolatedPipelineIndex::new());
+    let package = MinimalPolicyBundle::build_compatibility_candidate(
+        &runtime,
+        production_bundle_config("trace-commons-production-projection-v1"),
+    )
+    .unwrap()
+    .package;
+    let (signed, trust) = sign_package(package, "phase8-release-key");
+    let metadata = qualification_metadata("phase8-switch");
+    qualify_signed_bundle(backend.clone(), &tenant, &signed, &trust, &metadata).await;
+
+    let legacy_bytes = envelope_bytes(Uuid::new_v4(), "phase8-legacy-secret").await;
+    let SwitchedReceipt::Legacy {
+        submission_id: legacy_submission,
+        replayed,
+        pending_work,
+        ..
+    } = activation
+        .record_legacy_receipt(
+            &tenant,
+            "principal_sha256:test",
+            "legacy-before-switch",
+            &legacy_bytes,
+            true,
+            PIPELINE_FIXED_POSITIVE_MICROCREDITS,
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("pre-switch receipt must be legacy-owned");
+    };
+    assert!(!replayed);
+    assert!(pending_work);
+    assert_eq!(
+        activation
+            .phase_outcome_count_for_submission(&tenant, legacy_submission)
+            .await
+            .unwrap(),
+        0
+    );
+
+    let readiness = ActivationReadiness::passing(Utc::now());
+    activation
+        .activate_tenant(
+            &tenant,
+            &signed.package.bundle_id,
+            "operator_sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            "activate_cohort",
+            &passing_promotion(),
+            &readiness,
+            &metadata.code_revision_hash,
+            &ProductionDependencyProfile::production(),
+        )
+        .await
+        .unwrap();
+
+    let replay = activation
+        .submit_switched(
+            &service,
+            &tenant,
+            "principal_sha256:test",
+            "legacy-before-switch",
+            &legacy_bytes,
+        )
+        .await
+        .unwrap();
+    match replay {
+        SwitchedReceipt::Legacy {
+            submission_id,
+            replayed: true,
+            ..
+        } => assert_eq!(submission_id, legacy_submission),
+        other => panic!("legacy retry must not start a pipeline run: {other:?}"),
+    }
+    let direct = service
+        .submit(
+            &tenant,
+            "principal_sha256:test",
+            "legacy-before-switch",
+            &legacy_bytes,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        direct,
+        PipelineReceiptResult::LegacyOwned { submission_id, .. }
+            if submission_id == legacy_submission
+    ));
+    assert_eq!(
+        activation
+            .phase_outcome_count_for_submission(&tenant, legacy_submission)
+            .await
+            .unwrap(),
+        0
+    );
+
+    let pipeline_bytes = envelope_bytes(Uuid::new_v4(), "phase8-pipeline-secret").await;
+    let created = expect_pipeline_created(
+        activation
+            .submit_switched(
+                &service,
+                &tenant,
+                "principal_sha256:test",
+                "pipeline-after-switch",
+                &pipeline_bytes,
+            )
+            .await
+            .unwrap(),
+    );
+    assert_eq!(created.bundle_id, signed.package.bundle_id);
+    let owned = activation
+        .ownership(&tenant, "pipeline-after-switch")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(owned.owner, ReceiptOwner::Pipeline);
+    assert_eq!(owned.submission_id, created.submission_id);
+
+    let mut changed = legacy_bytes.clone();
+    changed.push(b' ');
+    assert!(matches!(
+        activation
+            .submit_switched(
+                &service,
+                &tenant,
+                "principal_sha256:test",
+                "legacy-before-switch",
+                &changed,
+            )
+            .await
+            .unwrap(),
+        SwitchedReceipt::ContentConflict
+    ));
+
+    let legacy_source = activation
+        .ownership(&tenant, "legacy-before-switch")
+        .await
+        .unwrap()
+        .unwrap()
+        .ledger_source_key;
+    assert_eq!(
+        legacy_source,
+        pipeline_ledger_source_key(&tenant, &sha256_prefixed(b"legacy-before-switch"))
+    );
+    let conflict = activation
+        .insert_conflicting_ledger_award(
+            &tenant,
+            legacy_submission,
+            created.trace_id,
+            &legacy_source,
+            "principal_sha256:test",
+        )
+        .await
+        .unwrap_err();
+    assert!(conflict.to_string().contains(LEDGER_SOURCE_CONFLICT_LABEL));
+}
+
+#[tokio::test]
+async fn phase_eight_tenant_activation_is_explicit_and_gated() {
+    let Some(backend) = backend().await else {
+        return;
+    };
+    let tenant_a = format!("pipeline-phase8-activate-a-{}", Uuid::new_v4());
+    let tenant_b = format!("pipeline-phase8-activate-b-{}", Uuid::new_v4());
+    let runtime = CompatibilityScoreRuntime::reference(IsolatedPipelineIndex::new());
+    let package = MinimalPolicyBundle::build_compatibility_candidate(
+        &runtime,
+        production_bundle_config("trace-commons-production-projection-v1"),
+    )
+    .unwrap()
+    .package;
+    let (signed, trust) = sign_package(package, "phase8-activate-key");
+    let metadata = qualification_metadata("phase8-activate");
+    qualify_signed_bundle(backend.clone(), &tenant_a, &signed, &trust, &metadata).await;
+    qualify_signed_bundle(backend.clone(), &tenant_b, &signed, &trust, &metadata).await;
+    let activation = PipelineActivationStore::new(backend.clone());
+    let mut failed = ActivationReadiness::passing(Utc::now());
+    failed.error_count = 1;
+    failed.evidence_hash = sha256_prefixed(
+        format!(
+            "trace_commons.pipeline_activation_readiness.v1\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}",
+            failed.drills_ready,
+            failed.readiness_ok,
+            failed.corpus_evidence_current,
+            failed.error_count,
+            failed.max_work_age_seconds,
+            failed.credit_reconciled,
+            failed.index_consistent,
+            failed.invalidation_clear
+        )
+        .as_bytes(),
+    );
+    let blocked = activation
+        .activate_tenant(
+            &tenant_a,
+            &signed.package.bundle_id,
+            "operator_sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            "activate_cohort",
+            &passing_promotion(),
+            &failed,
+            &metadata.code_revision_hash,
+            &ProductionDependencyProfile::production(),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        blocked
+            .to_string()
+            .contains(ACTIVATION_READINESS_FAILED_LABEL)
+    );
+    let passing = ActivationReadiness::passing(Utc::now());
+    let routing = activation
+        .activate_tenant(
+            &tenant_a,
+            &signed.package.bundle_id,
+            "operator_sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            "activate_cohort",
+            &passing_promotion(),
+            &passing,
+            &metadata.code_revision_hash,
+            &ProductionDependencyProfile::production(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(routing.routing_state, RoutingState::Pipeline);
+    assert_eq!(
+        routing.selected_bundle_id.as_deref(),
+        Some(signed.package.bundle_id.as_str())
+    );
+
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = client.transaction().await.unwrap();
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&tenant_a],
+    )
+    .await
+    .unwrap();
+    tx.execute(
+        "UPDATE pipeline_active_bundles SET selected_at = NOW() - INTERVAL '30 days'
+          WHERE tenant_id = $1",
+        &[&tenant_a],
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    let after_timestamp_tamper = activation.routing(&tenant_a).await.unwrap().unwrap();
+    assert_eq!(
+        after_timestamp_tamper.selected_bundle_id.as_deref(),
+        Some(signed.package.bundle_id.as_str())
+    );
+
+    let expanded = activation
+        .expand_activation(
+            &tenant_a,
+            &tenant_b,
+            &signed.package.bundle_id,
+            "operator_sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            "expand_cohort",
+            &passing_promotion(),
+            &failed,
+            &metadata.code_revision_hash,
+            &ProductionDependencyProfile::production(),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        expanded
+            .to_string()
+            .contains(ACTIVATION_READINESS_FAILED_LABEL)
+    );
+    let expanded = activation
+        .expand_activation(
+            &tenant_a,
+            &tenant_b,
+            &signed.package.bundle_id,
+            "operator_sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            "expand_cohort",
+            &passing_promotion(),
+            &passing,
+            &metadata.code_revision_hash,
+            &ProductionDependencyProfile::production(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(expanded.routing_state, RoutingState::Pipeline);
+}
+
+#[tokio::test]
+async fn phase_eight_rollback_containment_and_legacy_retirement() {
+    let Some(backend) = backend().await else {
+        return;
+    };
+    let tenant = format!("pipeline-phase8-rollback-{}", Uuid::new_v4());
+    let root = tempfile::tempdir().unwrap();
+    let service =
+        PipelineService::new_compatibility(backend.clone(), artifact_store(&root)).unwrap();
+    let activation = PipelineActivationStore::new(backend.clone());
+    let runtime = CompatibilityScoreRuntime::reference(IsolatedPipelineIndex::new());
+    let package_a = MinimalPolicyBundle::build_compatibility_candidate(
+        &runtime,
+        production_bundle_config("trace-commons-production-projection-v1"),
+    )
+    .unwrap()
+    .package;
+    let package_b = MinimalPolicyBundle::build_compatibility_candidate(
+        &runtime,
+        production_bundle_config("trace-commons-production-projection-v2"),
+    )
+    .unwrap()
+    .package;
+    let (signed_a, trust_a) = sign_package(package_a, "phase8-bundle-a");
+    let (signed_b, trust_b) = sign_package(package_b, "phase8-bundle-b");
+    let metadata = qualification_metadata("phase8-rollback");
+    qualify_signed_bundle(backend.clone(), &tenant, &signed_a, &trust_a, &metadata).await;
+    qualify_signed_bundle(backend.clone(), &tenant, &signed_b, &trust_b, &metadata).await;
+    let passing = ActivationReadiness::passing(Utc::now());
+    activation
+        .activate_tenant(
+            &tenant,
+            &signed_a.package.bundle_id,
+            "operator_sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            "activate_cohort",
+            &passing_promotion(),
+            &passing,
+            &metadata.code_revision_hash,
+            &ProductionDependencyProfile::production(),
+        )
+        .await
+        .unwrap();
+
+    let first_bytes = envelope_bytes(Uuid::new_v4(), "phase8-bound-a").await;
+    let first = expect_pipeline_created(
+        activation
+            .submit_switched(
+                &service,
+                &tenant,
+                "principal_sha256:test",
+                "bound-to-a",
+                &first_bytes,
+            )
+            .await
+            .unwrap(),
+    );
+    assert_eq!(first.bundle_id, signed_a.package.bundle_id);
+    let refused = activation
+        .switch_bound_run_bundle(&tenant, first.run_id, &signed_b.package.bundle_id)
+        .await
+        .unwrap_err();
+    assert!(
+        refused
+            .to_string()
+            .contains(BOUND_POLICY_MUST_BE_SUSPENDED_LABEL)
+    );
+    service
+        .intervene_policy(
+            &tenant,
+            &signed_a.package.bundle_id,
+            Phase::Admission,
+            "suspend",
+            "operator_sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            "unsafe_bound_policy",
+        )
+        .await
+        .unwrap();
+    service
+        .intervene_policy(
+            &tenant,
+            &signed_a.package.bundle_id,
+            Phase::Admission,
+            "resume",
+            "operator_sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            "resume_after_suspend",
+        )
+        .await
+        .unwrap();
+
+    let same_bundle = activation
+        .rollback_bundle(
+            &tenant,
+            &signed_a.package.bundle_id,
+            "operator_sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            "rollback_bundle",
+            &passing_promotion(),
+            &metadata.code_revision_hash,
+            &ProductionDependencyProfile::production(),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        same_bundle
+            .to_string()
+            .contains(EARLIER_QUALIFIED_BUNDLE_REQUIRED_LABEL)
+    );
+    activation
+        .rollback_bundle(
+            &tenant,
+            &signed_b.package.bundle_id,
+            "operator_sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            "rollback_bundle",
+            &passing_promotion(),
+            &metadata.code_revision_hash,
+            &ProductionDependencyProfile::production(),
+        )
+        .await
+        .unwrap();
+    let later_bytes = envelope_bytes(Uuid::new_v4(), "phase8-bound-b").await;
+    let later = expect_pipeline_created(
+        activation
+            .submit_switched(
+                &service,
+                &tenant,
+                "principal_sha256:test",
+                "bound-to-b",
+                &later_bytes,
+            )
+            .await
+            .unwrap(),
+    );
+    assert_eq!(later.bundle_id, signed_b.package.bundle_id);
+    assert_eq!(
+        service
+            .inspect(&tenant, first.run_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .run
+            .bundle_id,
+        signed_a.package.bundle_id
+    );
+
+    let pending_bytes = envelope_bytes(Uuid::new_v4(), "phase8-pending-legacy").await;
+    activation
+        .record_legacy_receipt(
+            &tenant,
+            "principal_sha256:test",
+            "legacy-pending",
+            &pending_bytes,
+            true,
+            0,
+        )
+        .await
+        .unwrap();
+    let pending_retire = activation
+        .retire_legacy_writer(
+            &tenant,
+            "operator_sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            "retire_legacy_writer",
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        pending_retire
+            .to_string()
+            .contains(LEGACY_WRITER_PENDING_LABEL)
+    );
+    activation
+        .complete_legacy_work(&tenant, "legacy-pending")
+        .await
+        .unwrap();
+    activation
+        .retire_legacy_writer(
+            &tenant,
+            "operator_sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            "retire_legacy_writer",
+        )
+        .await
+        .unwrap();
+    let writer_disabled = activation
+        .record_legacy_receipt(
+            &tenant,
+            "principal_sha256:test",
+            "legacy-after-retire",
+            &envelope_bytes(Uuid::new_v4(), "phase8-retired").await,
+            true,
+            0,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(writer_disabled, SwitchedReceipt::WriterDisabled));
+    let _ = LEGACY_WRITER_DISABLED_LABEL;
+
+    activation
+        .contain_pipeline(
+            &tenant,
+            "operator_sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            "contain_first_rollout",
+        )
+        .await
+        .unwrap();
+    let contained = activation
+        .submit_switched(
+            &service,
+            &tenant,
+            "principal_sha256:test",
+            "after-contain",
+            &envelope_bytes(Uuid::new_v4(), "phase8-contained").await,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(contained, SwitchedReceipt::Contained));
+    assert_eq!(
+        service
+            .inspect(&tenant, first.run_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .run
+            .bundle_id,
+        signed_a.package.bundle_id
+    );
+    let restarted = PipelineActivationStore::new(backend);
+    assert_eq!(
+        restarted
+            .routing(&tenant)
+            .await
+            .unwrap()
+            .unwrap()
+            .routing_state,
+        RoutingState::Contained
+    );
+    assert_eq!(
+        restarted
+            .ownership(&tenant, "bound-to-a")
+            .await
+            .unwrap()
+            .unwrap()
+            .run_id,
+        Some(first.run_id)
+    );
 }

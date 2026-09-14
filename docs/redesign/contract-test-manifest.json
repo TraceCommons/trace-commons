@@ -1,6 +1,6 @@
 {
   "schema": "trace_commons.contract_test_manifest.v1",
-  "updated_for_phase": 7,
+  "updated_for_phase": 8,
   "status_values": ["planned", "partial", "passing", "deferred"],
   "contract_groups": [
     {
@@ -50,8 +50,8 @@
       "boundary": "receipt identity and exact replay",
       "implementation_phase": 2,
       "evidence_status": "passing",
-      "test_ids": ["versioned_pipeline_pg::concurrent_receipts_and_workers_commit_one_logical_result", "versioned_pipeline_pg::phase_four_admission_limit_is_global_and_replay_counts_once", "minimal_pipeline_corpus"],
-      "note": "Phase 2 covers new-path receipts. Phase 8 must qualify retries that started on the legacy path."
+      "test_ids": ["versioned_pipeline_pg::concurrent_receipts_and_workers_commit_one_logical_result", "versioned_pipeline_pg::phase_four_admission_limit_is_global_and_replay_counts_once", "minimal_pipeline_corpus", "versioned_pipeline_pg::phase_eight_legacy_retry_does_not_start_a_pipeline_run"],
+      "note": "Phase 8 qualifies retries that started on the legacy path."
     },
     {
       "contract_ids": ["SUB-005", "SUB-006", "SUB-007"],
@@ -65,7 +65,7 @@
       "boundary": "bundle identity, traits, binding, and integrity",
       "implementation_phase": 1,
       "evidence_status": "passing",
-      "test_ids": ["pipeline::package_validation_binds_manifest_and_all_artifacts", "pipeline::every_immutable_policy_input_changes_bundle_identity", "versioned_pipeline_qualification::package_signature_binds_canonical_package_and_trusted_key", "versioned_pipeline_pg::phase_seven_signed_package_qualification_gates_activation", "versioned_pipeline_pg::bound_bundle_survives_activation_and_rollback", "versioned_pipeline_pg::activation_after_resolution_does_not_rebind_the_receipt"]
+      "test_ids": ["pipeline::package_validation_binds_manifest_and_all_artifacts", "pipeline::every_immutable_policy_input_changes_bundle_identity", "versioned_pipeline_qualification::package_signature_binds_canonical_package_and_trusted_key", "versioned_pipeline_pg::phase_seven_signed_package_qualification_gates_activation", "versioned_pipeline_pg::bound_bundle_survives_activation_and_rollback", "versioned_pipeline_pg::activation_after_resolution_does_not_rebind_the_receipt", "versioned_pipeline_pg::phase_eight_tenant_activation_is_explicit_and_gated", "versioned_pipeline_pg::phase_eight_rollback_containment_and_legacy_retirement"]
     },
     {
       "contract_ids": ["REV-001", "REV-002", "REV-003", "REV-004"],
@@ -164,15 +164,15 @@
       "boundary": "corpus, test levels, and lab separation",
       "implementation_phase": 5,
       "evidence_status": "passing",
-      "test_ids": ["product_pipeline_corpus", "versioned_pipeline_pg", "versioned_pipeline_qualification", "phase7-interface-inventory", "pipeline-backup-restore-smoke", "versioned_pipeline_compat::legacy_mapping_keeps_inserts_out_of_score", "versioned_pipeline_compat::shadow_score_does_not_write_the_active_index"]
+      "test_ids": ["product_pipeline_corpus", "versioned_pipeline_pg", "versioned_pipeline_qualification", "phase7-interface-inventory", "pipeline-backup-restore-smoke", "versioned_pipeline_compat::legacy_mapping_keeps_inserts_out_of_score", "versioned_pipeline_compat::shadow_score_does_not_write_the_active_index", "versioned_pipeline_pg::phase_eight_tenant_activation_is_explicit_and_gated", "versioned_pipeline_pg::phase_eight_rollback_containment_and_legacy_retirement"]
     },
     {
       "contract_ids": ["CMP-001", "CMP-002"],
       "boundary": "public compatibility and prohibited dependencies",
       "implementation_phase": 6,
-      "evidence_status": "partial",
-      "test_ids": ["product_pipeline_corpus", "versioned_pipeline_qualification::local_and_synthetic_dependencies_cannot_qualify_production", "trace_commons_ingest_internal::managed_eddsa_signed_token_config_requires_issuer_audience_and_managed_keyset", "trace_commons_ingest_internal::rejects_static_tenant_token_when_managed_eddsa_required", "versioned_pipeline_pg::phase_six_contributor_status_derives_processing_credit_and_payout", "versioned_pipeline_pg::phase_six_export_snapshot_is_immutable_and_withdrawal_invalidates_it"],
-      "note": "Phase 7 qualifies prohibited-dependency refusal. Phase 8 retires superseded legacy writers."
+      "evidence_status": "passing",
+      "test_ids": ["product_pipeline_corpus", "versioned_pipeline_qualification::local_and_synthetic_dependencies_cannot_qualify_production", "trace_commons_ingest_internal::managed_eddsa_signed_token_config_requires_issuer_audience_and_managed_keyset", "trace_commons_ingest_internal::rejects_static_tenant_token_when_managed_eddsa_required", "versioned_pipeline_pg::phase_six_contributor_status_derives_processing_credit_and_payout", "versioned_pipeline_pg::phase_six_export_snapshot_is_immutable_and_withdrawal_invalidates_it", "versioned_pipeline_pg::phase_eight_rollback_containment_and_legacy_retirement"],
+      "note": "Phase 8 retires superseded legacy writers after owned work completes."
     },
     {
       "contract_ids": ["CMP-003", "CMP-004"],
@@ -197,6 +197,6 @@
     {"scenario_id": "SCN-012", "implementation_phase": 7, "evidence_status": "passing", "test_ids": ["versioned_pipeline_pg::phase_one_pipeline_is_idempotent_tenant_scoped_and_complete", "product_pipeline_corpus", "phase7-interface-inventory"]},
     {"scenario_id": "SCN-013", "implementation_phase": 7, "evidence_status": "passing", "test_ids": ["versioned_pipeline_qualification::local_and_synthetic_dependencies_cannot_qualify_production", "versioned_pipeline_pg::phase_seven_signed_package_qualification_gates_activation"]},
     {"scenario_id": "SCN-014", "implementation_phase": 6, "evidence_status": "passing", "test_ids": ["versioned_pipeline_pg::phase_six_export_snapshot_is_immutable_and_withdrawal_invalidates_it"]},
-    {"scenario_id": "SCN-015", "implementation_phase": 7, "evidence_status": "passing", "test_ids": ["product_pipeline_corpus", "versioned_pipeline_pg::phase_seven_signed_package_qualification_gates_activation"], "note": "Phase 7 qualifies staging activation. Phase 8 records the production activation and rollback observation."}
+    {"scenario_id": "SCN-015", "implementation_phase": 8, "evidence_status": "passing", "test_ids": ["product_pipeline_corpus", "versioned_pipeline_pg::phase_seven_signed_package_qualification_gates_activation", "versioned_pipeline_pg::phase_eight_tenant_activation_is_explicit_and_gated", "versioned_pipeline_pg::phase_eight_rollback_containment_and_legacy_retirement"], "note": "Phase 8 records production activation, rollback, containment, and writer retirement."}
   ]
 }

@@ -29,6 +29,7 @@ pub mod trace_upload_claim_allowlist;
 pub mod trace_upload_claim_issuer;
 pub mod trace_upload_claim_issuer_admin;
 pub mod versioned_pipeline;
+pub mod versioned_pipeline_activation;
 pub mod versioned_pipeline_compat;
 pub mod versioned_pipeline_credit;
 pub mod versioned_pipeline_index;

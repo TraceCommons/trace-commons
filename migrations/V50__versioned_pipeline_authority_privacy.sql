@@ -215,30 +215,35 @@ CREATE TRIGGER pipeline_review_assessments_reject_delete
 
 ALTER TABLE pipeline_policy_interventions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE pipeline_policy_interventions FORCE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS trace_corpus_tenant_isolation ON pipeline_policy_interventions;
 CREATE POLICY trace_corpus_tenant_isolation ON pipeline_policy_interventions
     USING (tenant_id = trace_current_tenant_id())
     WITH CHECK (tenant_id = trace_current_tenant_id());
 
 ALTER TABLE pipeline_admission_usage ENABLE ROW LEVEL SECURITY;
 ALTER TABLE pipeline_admission_usage FORCE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS trace_corpus_tenant_isolation ON pipeline_admission_usage;
 CREATE POLICY trace_corpus_tenant_isolation ON pipeline_admission_usage
     USING (tenant_id = trace_current_tenant_id())
     WITH CHECK (tenant_id = trace_current_tenant_id());
 
 ALTER TABLE pipeline_review_claims ENABLE ROW LEVEL SECURITY;
 ALTER TABLE pipeline_review_claims FORCE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS trace_corpus_tenant_isolation ON pipeline_review_claims;
 CREATE POLICY trace_corpus_tenant_isolation ON pipeline_review_claims
     USING (tenant_id = trace_current_tenant_id())
     WITH CHECK (tenant_id = trace_current_tenant_id());
 
 ALTER TABLE pipeline_review_assessments ENABLE ROW LEVEL SECURITY;
 ALTER TABLE pipeline_review_assessments FORCE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS trace_corpus_tenant_isolation ON pipeline_review_assessments;
 CREATE POLICY trace_corpus_tenant_isolation ON pipeline_review_assessments
     USING (tenant_id = trace_current_tenant_id())
     WITH CHECK (tenant_id = trace_current_tenant_id());
 
 ALTER TABLE pipeline_index_invalidations ENABLE ROW LEVEL SECURITY;
 ALTER TABLE pipeline_index_invalidations FORCE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS trace_corpus_tenant_isolation ON pipeline_index_invalidations;
 CREATE POLICY trace_corpus_tenant_isolation ON pipeline_index_invalidations
     USING (tenant_id = trace_current_tenant_id())
     WITH CHECK (tenant_id = trace_current_tenant_id());

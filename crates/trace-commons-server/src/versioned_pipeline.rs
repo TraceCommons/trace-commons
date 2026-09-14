@@ -51,8 +51,8 @@ use crate::versioned_pipeline_credit::{
     PIPELINE_CREDIT_REASON, PIPELINE_SETTLEMENT_POLICY_VERSION,
     PIPELINE_TEST_CREDIT_CAP_MICROCREDITS, RecordingNearAdapter, credit_account_hash,
     disabled_near_call, issuer_approval_hash, microcredits_to_settled_i64,
-    pipeline_credit_event_id, pipeline_near_outbox_id, pipeline_settlement_batch_id,
-    settlement_batch_ref_hash, source_list_hash,
+    pipeline_credit_event_id, pipeline_ledger_source_key, pipeline_near_outbox_id,
+    pipeline_settlement_batch_id, settlement_batch_ref_hash, source_list_hash,
 };
 use crate::versioned_pipeline_index::{
     IsolatedPipelineIndex, PIPELINE_INDEX_ID, SealedIndexCommand, deterministic_pipeline_embedding,
@@ -75,6 +75,9 @@ pub const PIPELINE_REVIEW_ASSESSMENT_REQUIRED_LABEL: &str = "review_assessment_r
 pub const PIPELINE_ADMISSION_LIMIT_LABEL: &str = "admission_limit_exceeded";
 pub const PIPELINE_TOMBSTONE_LABEL: &str = "content_tombstoned";
 pub const PIPELINE_INVALIDATION_FAILED_LABEL: &str = "index_invalidation_failed";
+pub const PIPELINE_CONTAINED_LABEL: &str = "pipeline_contained";
+pub const PIPELINE_NOT_ACTIVE_LABEL: &str = "pipeline_not_active";
+pub const LEGACY_RECEIPT_OWNED_LABEL: &str = "legacy_receipt_owned";
 pub const PIPELINE_SCORE_DEPENDENCY_LABEL: &str =
     crate::versioned_pipeline_compat::PIPELINE_SCORE_DEPENDENCY_LABEL;
 const DEFAULT_LEASE_SECONDS: i64 = 30;
@@ -341,6 +344,10 @@ pub enum PipelineReceiptResult {
     Created(PipelineRunRecord),
     Replayed(PipelineRunRecord),
     ContentConflict,
+    LegacyOwned {
+        submission_id: Uuid,
+        request_content_hash: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -1644,9 +1651,10 @@ impl PgPipelineStore {
                 "INSERT INTO trace_credit_ledger (
                     tenant_id, credit_event_id, submission_id, trace_id, credit_account_ref,
                     event_type, points_delta, reason, external_ref, actor_principal_ref,
-                    actor_role, settlement_state, pipeline_run_id, score_outcome_id
+                    actor_role, settlement_state, pipeline_run_id, score_outcome_id,
+                    ledger_source_key
                  ) VALUES (
-                    $1,$2,$3,$4,$5,'accepted',$6,$7,$8,$9,'pipeline_worker','pending',$10,$11
+                    $1,$2,$3,$4,$5,'accepted',$6,$7,$8,$9,'pipeline_worker','pending',$10,$11,$12
                  )
                  ON CONFLICT (tenant_id, credit_event_id) DO NOTHING",
                 &[
@@ -1661,6 +1669,7 @@ impl PgPipelineStore {
                     &account_ref,
                     &run.run_id,
                     &outcome_id,
+                    &pipeline_ledger_source_key(&run.tenant_id, &run.request_idempotency_key),
                 ],
             )
             .await?;
@@ -2582,6 +2591,22 @@ async fn insert_receipt_records(
             "receipt artifact staging record is missing".to_string(),
         ));
     }
+    tx.execute(
+        "INSERT INTO pipeline_receipt_ownership (
+            tenant_id, request_idempotency_key, request_content_hash, owner,
+            submission_id, run_id, ledger_source_key
+         ) VALUES ($1,$2,$3,'pipeline',$4,$5,$6)
+         ON CONFLICT (tenant_id, request_idempotency_key) DO NOTHING",
+        &[
+            &run.tenant_id,
+            &run.request_idempotency_key,
+            &run.request_content_hash,
+            &run.submission_id,
+            &run.run_id,
+            &pipeline_ledger_source_key(&run.tenant_id, &run.request_idempotency_key),
+        ],
+    )
+    .await?;
     Ok(())
 }
 
@@ -4034,6 +4059,30 @@ impl PipelineService {
             &[&receipt_lock],
         )
         .await?;
+        if let Some(owned) = tx
+            .query_opt(
+                "SELECT owner, request_content_hash, submission_id
+                   FROM pipeline_receipt_ownership
+                  WHERE tenant_id = $1 AND request_idempotency_key = $2",
+                &[&tenant_id, &request_idempotency_key_hash],
+            )
+            .await?
+        {
+            let owner: String = owned.get("owner");
+            let owned_hash: String = owned.get("request_content_hash");
+            let submission_id: Uuid = owned.get("submission_id");
+            if owned_hash != request_content_hash {
+                tx.commit().await?;
+                return Ok(PipelineReceiptResult::ContentConflict);
+            }
+            if owner == "legacy" {
+                tx.commit().await?;
+                return Ok(PipelineReceiptResult::LegacyOwned {
+                    submission_id,
+                    request_content_hash: owned_hash,
+                });
+            }
+        }
         if let Some(row) = tx
             .query_opt(
                 "SELECT * FROM pipeline_runs
@@ -4064,14 +4113,44 @@ impl PipelineService {
             tx.commit().await?;
             return Ok(PipelineReceiptResult::ContentConflict);
         }
-        let bundle_id: String = tx
+        let routing_state: Option<String> = tx
             .query_opt(
-                "SELECT bundle_id FROM pipeline_active_bundles WHERE tenant_id = $1",
+                "SELECT routing_state FROM pipeline_tenant_routing WHERE tenant_id = $1",
                 &[&tenant_id],
             )
             .await?
-            .ok_or_else(|| anyhow::anyhow!(PIPELINE_BUNDLE_MISSING_LABEL))?
-            .get("bundle_id");
+            .map(|row| row.get("routing_state"));
+        match routing_state.as_deref() {
+            Some("contained") => {
+                tx.commit().await?;
+                anyhow::bail!(PIPELINE_CONTAINED_LABEL);
+            }
+            Some("legacy") => {
+                tx.commit().await?;
+                anyhow::bail!(PIPELINE_NOT_ACTIVE_LABEL);
+            }
+            Some("pipeline") | None => {}
+            Some(other) => anyhow::bail!("pipeline routing state invalid: {other}"),
+        }
+        let bundle_id: String = tx
+            .query_opt(
+                "SELECT COALESCE(
+                    (
+                        SELECT selected_bundle_id
+                          FROM pipeline_tenant_routing
+                         WHERE tenant_id = $1 AND routing_state = 'pipeline'
+                    ),
+                    (
+                        SELECT bundle_id
+                          FROM pipeline_active_bundles
+                         WHERE tenant_id = $1
+                    )
+                 ) AS bundle_id",
+                &[&tenant_id],
+            )
+            .await?
+            .and_then(|row| row.get::<_, Option<String>>("bundle_id"))
+            .ok_or_else(|| anyhow::anyhow!(PIPELINE_BUNDLE_MISSING_LABEL))?;
         let package = load_bundle_from_transaction(&tx, tenant_id, &bundle_id)
             .await?
             .ok_or_else(|| anyhow::anyhow!(PIPELINE_BUNDLE_MISSING_LABEL))?;

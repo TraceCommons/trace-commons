@@ -165,12 +165,14 @@ CREATE TRIGGER pipeline_export_snapshot_items_reject_delete
 
 ALTER TABLE pipeline_export_snapshots ENABLE ROW LEVEL SECURITY;
 ALTER TABLE pipeline_export_snapshots FORCE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS trace_corpus_tenant_isolation ON pipeline_export_snapshots;
 CREATE POLICY trace_corpus_tenant_isolation ON pipeline_export_snapshots
     USING (tenant_id = trace_current_tenant_id())
     WITH CHECK (tenant_id = trace_current_tenant_id());
 
 ALTER TABLE pipeline_export_snapshot_items ENABLE ROW LEVEL SECURITY;
 ALTER TABLE pipeline_export_snapshot_items FORCE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS trace_corpus_tenant_isolation ON pipeline_export_snapshot_items;
 CREATE POLICY trace_corpus_tenant_isolation ON pipeline_export_snapshot_items
     USING (tenant_id = trace_current_tenant_id())
     WITH CHECK (tenant_id = trace_current_tenant_id());

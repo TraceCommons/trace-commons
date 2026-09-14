@@ -243,8 +243,8 @@ def validate(inventory: dict[str, object]) -> None:
 def validate_contract_manifest() -> None:
     path = ROOT / "docs/redesign/contract-test-manifest.json"
     manifest = json.loads(path.read_text())
-    if manifest.get("updated_for_phase") != 7:
-        raise ValueError("contract manifest is not updated for Phase 7")
+    if manifest.get("updated_for_phase") != 8:
+        raise ValueError("contract manifest is not updated for Phase 8")
     allowed_statuses = set(manifest.get("status_values", []))
     seen_contracts: set[str] = set()
     for group in manifest.get("contract_groups", []):

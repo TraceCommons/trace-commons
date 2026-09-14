@@ -55,6 +55,7 @@ CREATE TRIGGER pipeline_bundle_qualifications_reject_delete
 
 ALTER TABLE pipeline_bundle_qualifications ENABLE ROW LEVEL SECURITY;
 ALTER TABLE pipeline_bundle_qualifications FORCE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS trace_corpus_tenant_isolation ON pipeline_bundle_qualifications;
 CREATE POLICY trace_corpus_tenant_isolation ON pipeline_bundle_qualifications
     USING (tenant_id = trace_current_tenant_id())
     WITH CHECK (tenant_id = trace_current_tenant_id());

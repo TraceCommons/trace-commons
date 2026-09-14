@@ -768,6 +768,11 @@ impl PipelineProductStore {
                         "phase_outcomes",
                         "pipeline_bundle_packages",
                         "pipeline_bundle_qualifications",
+                        "pipeline_tenant_routing",
+                        "pipeline_activation_events",
+                        "pipeline_receipt_ownership",
+                        "pipeline_legacy_owned_work",
+                        "pipeline_legacy_writer_status",
                     ],
                     &vec![
                         "phase_outcomes_reject_update",
