@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use trace_commons_protocol::mission_evaluation::MISSION_EVALUATION_TOTAL_REQUESTS;
@@ -149,9 +149,7 @@ impl MissionAttemptStore {
                 attempt: stored.attempt.clone(),
             });
         }
-        if journal.attempts.len() >= MAX_ATTEMPTS {
-            return Err(MissionAttemptError::StoreFull);
-        }
+        evict_for_one_slot(&mut journal)?;
         let attempt_id = mint_attempt_id(&journal)?;
         let now = unix_seconds()?;
         let attempt = MissionAttempt {
@@ -180,7 +178,7 @@ impl MissionAttemptStore {
     pub fn get(&self, scope: &MissionAttemptScope, attempt_id: Uuid) -> Result<MissionAttempt> {
         validate_scope(scope)?;
         validate_uuid(attempt_id)?;
-        let Some((_lock, journal)) = self.existing_locked()? else {
+        let Some((_lock, journal)) = self.existing_locked(LockMode::Shared)? else {
             return Err(MissionAttemptError::NotFound);
         };
         find_attempt(&journal, scope, attempt_id)
@@ -191,7 +189,7 @@ impl MissionAttemptStore {
     /// Lists content-free attempt summaries from one scope.
     pub fn list(&self, scope: &MissionAttemptScope) -> Result<Vec<MissionAttemptSummary>> {
         validate_scope(scope)?;
-        let Some((_lock, journal)) = self.existing_locked()? else {
+        let Some((_lock, journal)) = self.existing_locked(LockMode::Shared)? else {
             return Ok(Vec::new());
         };
         let mut summaries = journal
@@ -334,7 +332,7 @@ impl MissionAttemptStore {
 
     /// Startup-only recovery; the caller must already own the daemon exclusively.
     pub fn recover_interrupted(&self) -> Result<usize> {
-        let Some((lock, mut journal)) = self.existing_locked()? else {
+        let Some((lock, mut journal)) = self.existing_locked(LockMode::Exclusive)? else {
             return Ok(0);
         };
         let now = unix_seconds()?;
@@ -383,7 +381,10 @@ impl MissionAttemptStore {
         Ok(result)
     }
 
-    fn existing_locked(&self) -> Result<Option<(JournalLock, MissionAttemptJournal)>> {
+    fn existing_locked(
+        &self,
+        mode: LockMode,
+    ) -> Result<Option<(JournalLock, MissionAttemptJournal)>> {
         match fs::symlink_metadata(&self.dir) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(_) => return Err(MissionAttemptError::StoreUnavailable),
@@ -399,15 +400,24 @@ impl MissionAttemptStore {
             Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
                 Err(MissionAttemptError::StoreInvalid)
             }
-            Ok(_) => self.locked(false).map(Some),
+            Ok(_) => self.locked_as(false, mode).map(Some),
         }
     }
 
     fn locked_existing(&self) -> Result<(JournalLock, MissionAttemptJournal)> {
-        self.existing_locked()?.ok_or(MissionAttemptError::NotFound)
+        self.existing_locked(LockMode::Exclusive)?
+            .ok_or(MissionAttemptError::NotFound)
     }
 
     fn locked(&self, create: bool) -> Result<(JournalLock, MissionAttemptJournal)> {
+        self.locked_as(create, LockMode::Exclusive)
+    }
+
+    fn locked_as(
+        &self,
+        create: bool,
+        mode: LockMode,
+    ) -> Result<(JournalLock, MissionAttemptJournal)> {
         reject_leaf_symlink(&self.dir)?;
         if create {
             create_private_dir(&self.dir)?;
@@ -433,9 +443,7 @@ impl MissionAttemptStore {
             .open(&lock_path)
             .map_err(|_| MissionAttemptError::StoreUnavailable)?;
         require_regular_private_file(&lock_file)?;
-        lock_file
-            .try_lock()
-            .map_err(|_| MissionAttemptError::StoreBusy)?;
+        acquire(&lock_file, mode)?;
         let lock = JournalLock {
             file: lock_file,
             dir: dir.clone(),
@@ -502,6 +510,63 @@ impl MissionAttemptStore {
             .map_err(|_| MissionAttemptError::StoreWriteFailed)?;
         Ok(())
     }
+}
+
+/// How a journal operation holds the lock file.
+///
+/// Reads take a shared lock so a UI listing attempts cannot exclude another
+/// reader, and writes retry a bounded number of times instead of surfacing
+/// `StoreBusy` on the first collision. Before this, `list()` from a UI could
+/// land on the observer write of a running evaluation and end a paid run with
+/// `PersistenceUnavailable`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LockMode {
+    Shared,
+    Exclusive,
+}
+
+const LOCK_ATTEMPTS: usize = 64;
+const LOCK_RETRY_DELAY: Duration = Duration::from_millis(4);
+
+fn acquire(file: &File, mode: LockMode) -> Result<()> {
+    for attempt in 0..LOCK_ATTEMPTS {
+        let taken = match mode {
+            LockMode::Shared => file.try_lock_shared().is_ok(),
+            LockMode::Exclusive => file.try_lock().is_ok(),
+        };
+        if taken {
+            return Ok(());
+        }
+        if attempt + 1 < LOCK_ATTEMPTS {
+            std::thread::sleep(LOCK_RETRY_DELAY);
+        }
+    }
+    Err(MissionAttemptError::StoreBusy)
+}
+
+/// Free one journal slot by discarding the oldest terminal attempts.
+///
+/// In-progress attempts are never discarded: their trials are the only record
+/// of inference the contributor has already paid for. A journal whose every
+/// slot holds a live attempt therefore still refuses with `StoreFull`, and
+/// leaves the stored bytes untouched because the caller returns before saving.
+/// Without this the 128th lifetime attempt wedged the store permanently and
+/// only deleting the file by hand restored it.
+fn evict_for_one_slot(journal: &mut MissionAttemptJournal) -> Result<()> {
+    while journal.attempts.len() >= MAX_ATTEMPTS {
+        let oldest = journal
+            .attempts
+            .iter()
+            .enumerate()
+            .filter(|(_, stored)| stored.attempt.status.is_terminal())
+            // `min_by_key` keeps the first minimum, so attempts created within
+            // the same second are evicted in the order they were recorded.
+            .min_by_key(|(_, stored)| stored.attempt.created_at_unix_seconds)
+            .map(|(index, _)| index)
+            .ok_or(MissionAttemptError::StoreFull)?;
+        journal.attempts.remove(oldest);
+    }
+    Ok(())
 }
 
 fn find_attempt<'a>(
@@ -847,9 +912,19 @@ fn create_private_dir(path: &Path) -> Result<()> {
     }
     #[cfg(not(unix))]
     fs::create_dir_all(path).map_err(|_| MissionAttemptError::StoreUnavailable)?;
+    #[cfg(windows)]
+    windows_private_dir::apply_owner_only_dacl(path)?;
     Ok(())
 }
 
+/// Refuse a journal directory any other local account can read.
+///
+/// On Unix that is the 0700 mode bit. Windows has no equivalent bit, so the
+/// directory carries a protected DACL naming exactly one trustee, built the
+/// same way the daemon named pipe's descriptor is. Before this, the control
+/// simply did not exist on Windows while the journal held raw model
+/// completions, and every other platform's `RequiresPrivateDirectory` refusal
+/// was unreachable there.
 fn require_private_dir(_path: &Path) -> Result<()> {
     #[cfg(unix)]
     {
@@ -864,7 +939,195 @@ fn require_private_dir(_path: &Path) -> Result<()> {
             return Err(MissionAttemptError::RequiresPrivateDirectory);
         }
     }
+    #[cfg(windows)]
+    windows_private_dir::require_owner_only_dacl(_path)?;
     Ok(())
+}
+
+#[cfg(windows)]
+mod windows_private_dir {
+    //! The Windows half of the journal's private-directory control.
+    //!
+    //! The descriptor is `D:P(A;OICI;FA;;;<user sid>)`, the file-object twin of
+    //! the daemon pipe's `D:P(A;;GA;;;<sid>)`: `P` protects it so no
+    //! inheritable entry from an ancestor can widen access afterwards, and
+    //! `OICI` makes the single allow entry inherit to the journal and lock
+    //! files created inside. There is deliberately no Administrators entry --
+    //! an administrator can already take ownership, so one would grant nothing
+    //! while making the intent harder to read.
+    //!
+    //! Verification compares the directory's DACL bytes against the bytes of a
+    //! freshly built expected DACL rather than re-rendering SDDL, so a widened
+    //! or reordered ACL cannot round-trip to the same string and pass.
+
+    use std::ffi::c_void;
+    use std::os::windows::ffi::OsStrExt;
+    use std::path::Path;
+
+    use windows_sys::Win32::Foundation::{ERROR_SUCCESS, LocalFree};
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertStringSecurityDescriptorToSecurityDescriptorW, GetNamedSecurityInfoW,
+        SDDL_REVISION_1, SE_FILE_OBJECT, SetNamedSecurityInfoW,
+    };
+    use windows_sys::Win32::Security::{
+        ACE_HEADER, ACL, DACL_SECURITY_INFORMATION, GetAce, GetSecurityDescriptorControl,
+        GetSecurityDescriptorDacl, PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
+        SE_DACL_PROTECTED,
+    };
+
+    use super::{MissionAttemptError, Result};
+
+    /// Releases a descriptor allocated by Win32 on drop.
+    struct OwnedDescriptor(PSECURITY_DESCRIPTOR);
+
+    impl Drop for OwnedDescriptor {
+        fn drop(&mut self) {
+            if !self.0.is_null() {
+                // SAFETY: both producers below document `LocalFree` as the
+                // release function, and this is the only place it is called.
+                unsafe { LocalFree(self.0.cast::<c_void>()) };
+            }
+        }
+    }
+
+    fn refusal() -> MissionAttemptError {
+        MissionAttemptError::RequiresPrivateDirectory
+    }
+
+    fn wide(path: &Path) -> Vec<u16> {
+        path.as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect()
+    }
+
+    fn owner_only_descriptor() -> Result<OwnedDescriptor> {
+        let sid = crate::daemon::win_pipe::current_user_sid_string().map_err(|_| refusal())?;
+        let sddl = format!("D:P(A;OICI;FA;;;{sid})");
+        let text: Vec<u16> = sddl.encode_utf16().chain(std::iter::once(0)).collect();
+        let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+        // SAFETY: `text` is a NUL-terminated wide string that outlives the
+        // call, `descriptor` is a valid out-pointer, and a null size
+        // out-pointer is permitted.
+        let converted = unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                text.as_ptr(),
+                SDDL_REVISION_1,
+                &mut descriptor,
+                std::ptr::null_mut(),
+            )
+        };
+        if converted == 0 || descriptor.is_null() {
+            return Err(refusal());
+        }
+        Ok(OwnedDescriptor(descriptor))
+    }
+
+    fn dacl_of(descriptor: PSECURITY_DESCRIPTOR) -> Result<*mut ACL> {
+        let mut present = 0;
+        let mut defaulted = 0;
+        let mut dacl: *mut ACL = std::ptr::null_mut();
+        // SAFETY: `descriptor` is a live descriptor and all three out-pointers
+        // address writable storage of the required types.
+        let read = unsafe {
+            GetSecurityDescriptorDacl(descriptor, &mut present, &mut dacl, &mut defaulted)
+        };
+        if read == 0 || present == 0 || dacl.is_null() {
+            // A descriptor with no DACL grants everyone everything.
+            return Err(refusal());
+        }
+        Ok(dacl)
+    }
+
+    /// The bytes of the single entry a compliant DACL carries.
+    ///
+    /// Compared entry by entry rather than over the whole ACL: `AclSize` is the
+    /// allocated size, so a padded copy of the identical ACL would not match
+    /// byte for byte and the control would refuse a directory that is in fact
+    /// private.
+    fn sole_ace_bytes(acl: *const ACL) -> Result<Vec<u8>> {
+        // SAFETY: `acl` points at a well-formed ACL header.
+        if unsafe { (*acl).AceCount } != 1 {
+            // More than one trustee, or none at all.
+            return Err(refusal());
+        }
+        let mut entry: *mut c_void = std::ptr::null_mut();
+        // SAFETY: index 0 exists because the count above is one, and `entry` is
+        // a valid out-pointer.
+        let read = unsafe { GetAce(acl, 0, &mut entry) };
+        if read == 0 || entry.is_null() {
+            return Err(refusal());
+        }
+        // SAFETY: every ACE begins with an ACE_HEADER recording its own size.
+        let size = usize::from(unsafe { (*entry.cast::<ACE_HEADER>()).AceSize });
+        // SAFETY: the entry occupies `size` contiguous bytes, as its own header
+        // records.
+        Ok(unsafe { std::slice::from_raw_parts(entry.cast::<u8>(), size) }.to_vec())
+    }
+
+    pub(super) fn apply_owner_only_dacl(path: &Path) -> Result<()> {
+        let descriptor = owner_only_descriptor()?;
+        let dacl = dacl_of(descriptor.0)?;
+        let path = wide(path);
+        // SAFETY: `path` is a NUL-terminated wide string and `dacl` points into
+        // `descriptor`, which outlives this synchronous call.
+        let status = unsafe {
+            SetNamedSecurityInfoW(
+                path.as_ptr(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                dacl,
+                std::ptr::null(),
+            )
+        };
+        if status != ERROR_SUCCESS {
+            return Err(refusal());
+        }
+        Ok(())
+    }
+
+    pub(super) fn require_owner_only_dacl(path: &Path) -> Result<()> {
+        let expected = owner_only_descriptor()?;
+        let expected_entry = sole_ace_bytes(dacl_of(expected.0)?)?;
+
+        let wide_path = wide(path);
+        let mut dacl: *mut ACL = std::ptr::null_mut();
+        let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+        // SAFETY: `wide_path` is a NUL-terminated wide string that outlives the
+        // call and both out-pointers address writable storage.
+        let status = unsafe {
+            GetNamedSecurityInfoW(
+                wide_path.as_ptr(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut dacl,
+                std::ptr::null_mut(),
+                &mut descriptor,
+            )
+        };
+        let owned = OwnedDescriptor(descriptor);
+        if status != ERROR_SUCCESS || owned.0.is_null() || dacl.is_null() {
+            return Err(refusal());
+        }
+
+        let mut control = 0u16;
+        let mut revision = 0u32;
+        // SAFETY: `owned.0` is a live descriptor and both out-pointers address
+        // writable storage of the required types.
+        let read = unsafe { GetSecurityDescriptorControl(owned.0, &mut control, &mut revision) };
+        if read == 0 || control & SE_DACL_PROTECTED == 0 {
+            // An unprotected DACL can be widened by an inherited entry.
+            return Err(refusal());
+        }
+        if sole_ace_bytes(dacl)? != expected_entry {
+            return Err(refusal());
+        }
+        Ok(())
+    }
 }
 
 fn require_regular_private_file(file: &File) -> Result<()> {
