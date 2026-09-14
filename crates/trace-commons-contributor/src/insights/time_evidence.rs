@@ -404,15 +404,16 @@ mod tests {
 
     #[test]
     fn no_valid_timestamp_does_not_infer_one() {
-        // The production trajectory adapter currently rejects these defects.
-        // This fixture pins the evidence contract independently; callers must
-        // still prevalidate a source and must not weaken that adapter.
+        // Codex, not Trajectory: the trajectory adapter bails on a missing or
+        // unparseable timestamp, so through `analyze_file` these two counters
+        // can only ever be zero for that format. The Codex adapter parses
+        // timestamps leniently, so this is the reachable fixture.
         let bytes = jsonl(&[
-            json!({"role":"meta","source":"test"}),
-            json!({"role":"user","content":"x"}),
-            json!({"role":"assistant","content":"y","timestamp":"bad"}),
+            json!({"type":"session_meta","payload":{}}),
+            json!({"type":"response_item","payload":{}}),
+            json!({"type":"response_item","timestamp":"bad","payload":{}}),
         ]);
-        let evidence = extract_recorded_time_evidence(SourceFormat::Trajectory, &bytes).unwrap();
+        let evidence = extract_recorded_time_evidence(SourceFormat::Codex, &bytes).unwrap();
         assert_eq!(
             (evidence.missing_timestamps, evidence.invalid_timestamps),
             (1, 1)
