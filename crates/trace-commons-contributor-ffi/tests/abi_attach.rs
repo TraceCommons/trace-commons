@@ -102,7 +102,7 @@ fn attaching_reaches_the_daemon_that_holds_the_lock() {
 
     let response = call(attached, "status", "{}");
     assert!(
-        response.get("error").map_or(true, |e| e.is_null()),
+        response.get("error").is_none_or(|e| e.is_null()),
         "attached status returned an error frame: {response}"
     );
     assert!(

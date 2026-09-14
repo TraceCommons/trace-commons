@@ -93,6 +93,58 @@ final class DaemonStartupTests: XCTestCase {
         XCTAssertFalse(model.isStartingDaemon)
     }
 
+    /// A daemon already running for this state directory must leave the shell
+    /// running against it, not reporting that the watcher is not running.
+    ///
+    /// This is the reported defect: the C ABI answers `already-running`,
+    /// which `trace_commons.h` documents as "not an error to repair: the
+    /// daemon the contributor wants is already up", and the shell rendered
+    /// it as "The watcher isn't running."
+    @MainActor
+    func testAnAlreadyRunningDaemonIsAttachedToRatherThanReportedAsAbsent() async throws {
+        let directory = try directory()
+        // Somebody else's daemon: a separate handle this model does not own,
+        // holding the lock for the whole test.
+        let incumbent = try TCDaemon(configDir: directory.path, settingsJSON: settings)
+        defer { incumbent.shutdown() }
+
+        let model = AppModel()
+        defer { model.shutdown() }
+        let settled = expectation(description: "Startup settled against the running daemon")
+        model.startDaemon(at: directory.path, settingsJSON: settings) { state in
+            XCTAssertEqual(
+                state, .running,
+                "a running daemon was reported as a refusal"
+            )
+            settled.fulfill()
+        }
+        await fulfillment(of: [settled], timeout: 10)
+        XCTAssertTrue(
+            model.isAttachedDaemon,
+            "the shell claims to own a daemon another process is running"
+        )
+        XCTAssertEqual(model.startup, .running)
+    }
+
+    /// The label the ABI documents must reach the caller as its own case, so
+    /// a host can route it. Flattening it into `startFailed` is what produced
+    /// the wrong sentence.
+    @MainActor
+    func testAlreadyRunningSurfacesAsItsOwnErrorCase() async throws {
+        let directory = try directory()
+        let incumbent = try TCDaemon(configDir: directory.path, settingsJSON: settings)
+        defer { incumbent.shutdown() }
+
+        XCTAssertThrowsError(
+            try TCDaemon(configDir: directory.path, settingsJSON: settings)
+        ) { error in
+            XCTAssertEqual(
+                error as? TCDaemon.TCError, .alreadyRunning,
+                "expected .alreadyRunning, got \(error)"
+            )
+        }
+    }
+
     @MainActor
     func testShutdownRetiresLateSuccessfulStartupWithoutPublishingIt() async throws {
         let directory = try directory()

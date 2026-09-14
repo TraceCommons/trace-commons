@@ -5,6 +5,7 @@
 
 pub mod account_auth;
 pub(crate) mod antigravity;
+pub mod attach_copy;
 pub mod brand;
 pub mod commands;
 pub mod compute;

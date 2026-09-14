@@ -26,7 +26,28 @@ final class DaemonStartup {
 
     init(
         construct: @escaping Construct = { directory, settings in
-            try TCDaemon(configDir: directory, settingsJSON: settings)
+            do {
+                return try TCDaemon(configDir: directory, settingsJSON: settings)
+            } catch TCDaemon.TCError.alreadyRunning {
+                // Another process holds this state directory's lock -- a
+                // previous instance of this app that has not exited, or a
+                // `trace-commons-contributor daemon` under a service
+                // manager. `trace_commons.h` calls that label "not an error
+                // to repair: the daemon the contributor wants is already
+                // up", so the shell attaches to it instead of announcing
+                // that the watcher is not running while it is running.
+                //
+                // Here rather than in AppModel deliberately: this closure
+                // already runs off the UI thread, and attaching opens a
+                // socket and waits on the first reply.
+                //
+                // `settings` is deliberately dropped on this path. They were
+                // already persisted by the failed start attempt, and the
+                // running daemon owns its own settings; pushing them over
+                // the socket would let a second window overwrite what the
+                // daemon is actually using.
+                return try TCDaemon(attachingTo: directory)
+            }
         },
         shutdown: @escaping Shutdown = { daemon in daemon.shutdown() }
     ) {

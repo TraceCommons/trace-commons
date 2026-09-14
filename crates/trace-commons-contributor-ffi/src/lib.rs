@@ -2762,6 +2762,23 @@ pub const TC_PRIVATE_INFERENCE_TONE_CLEAR: i32 = 22;
 pub const TC_PRIVATE_INFERENCE_TONE_ATTENTION: i32 = 23;
 pub const TC_PRIVATE_INFERENCE_TONE_REFUSED: i32 = 24;
 
+/// Every fixed word for a watcher another process is already running, as
+/// one owned JSON object. Free it with [`tc_string_free`].
+///
+/// This is the surface a host renders after `tc_daemon_start` answers
+/// `already-running` and `tc_daemon_attach` succeeds: the banner saying the
+/// window is driving somebody else's watcher, plus a sentence for each fixed
+/// start-failure label the ABI names. Needs no handle because it describes
+/// the build. Returns NULL only on a caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_attach_copy() -> *mut c_char {
+    guarded_string_no_err(|| {
+        let copy = trace_commons_contributor::attach_copy::attach_copy();
+        let json = serde_json::to_string(&copy).unwrap_or_else(|_| "{}".to_string());
+        Ok(to_owned_cstring(&json))
+    })
+}
+
 /// Every fixed word on the private-inference offer and settings surface, in
 /// one call.
 ///
