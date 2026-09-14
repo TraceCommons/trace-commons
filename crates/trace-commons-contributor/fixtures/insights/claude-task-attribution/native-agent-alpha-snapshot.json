@@ -124,7 +124,8 @@
         "record_index": 3,
         "kind": "claude_assistant_message"
       }
-    ]
+    ],
+    "contract": "claude_assistant_message_v3"
   },
   "outcome_links": [],
   "time_evidence": null,

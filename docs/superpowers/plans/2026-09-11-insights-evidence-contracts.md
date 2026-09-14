@@ -19,9 +19,17 @@ its model answer remains unavailable. Session metadata and assistant messages
 do not declare a model under this version. Trajectory imports and previously
 saved version 1 observations keep their existing meaning. Reads and unrelated
 mutations do not reinterpret version 1 evidence; an explicit reimport writes
-version 2. Store version 6 is unchanged. Older clients that only validate nested
-model-observation version 1 may refuse a snapshot after that reimport, and no
+version 2. A nested model-observation version above 1 requires store version 11,
+and the store's own version advances with it. An older client therefore refuses
+the whole store once with `insights_store_version_unsupported`, rather than
+accepting the store and then rejecting individual snapshots at read time. No
 automatic downgrade is provided.
+
+Rust is the single validator of this contract. Each saved observation carries a
+`contract` verdict that Rust recomputes on every deserialization and never
+reads from the wire, and the native shells consume that verdict instead of
+re-deriving counters, ordering, declaration kinds or label charset. A verdict a
+shell does not know is a contract newer than that shell, and fails closed there.
 
 `outcomes::inspect_git_commit(repository, object_id)` inspects an exact canonical
 lowercase 40- or 64-hex commit ID in an explicitly selected repository. It records

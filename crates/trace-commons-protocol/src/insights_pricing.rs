@@ -252,10 +252,15 @@ pub fn calculate_estimated_cost(
 
     let mut exact_numerator = 0u128;
     let mut breakdown = Vec::with_capacity(input.counts.len());
-    for (count, rate) in input.counts.iter().zip(&entry.rates) {
-        if count.category != rate.category {
-            return Err(PricingError::InvalidTable);
-        }
+    // Rates are matched by category, never by position. `validate_entry` and
+    // `validate_input` both pin their vectors to `required_categories()`, so a
+    // reordering on either side must still meet the same rate.
+    for count in &input.counts {
+        let rate = entry
+            .rates
+            .iter()
+            .find(|rate| rate.category == count.category)
+            .ok_or(PricingError::InvalidTable)?;
         let category_numerator = u128::from(count.tokens)
             .checked_mul(u128::from(rate.usd_nanos_per_million_tokens))
             .ok_or(PricingError::ArithmeticOverflow)?;

@@ -24,7 +24,8 @@ public sealed class InsightEvidenceTests
            "missing_declarations":1,"invalid_declarations":1,"omitted_declarations":1,"model_labels_omitted":false,
            "mixed_declared_models":true,"declared_models":["model-a","model-b"],"declarations":[
              {"model":"model-a","record_index":1,"kind":"codex_session_metadata"},
-             {"model":"model-b","record_index":2,"kind":"codex_turn_context"}]}
+             {"model":"model-b","record_index":2,"kind":"codex_turn_context"}],
+           "contract":"legacy_declared_metadata_v1"}
           """);
         snapshot["outcome_links"] = JsonNode.Parse("""
           [{"id":"git-link","source_digest":"source-digest","linked_at":"2026-09-11T10:00:00Z","provenance":"user_linked",
@@ -94,9 +95,10 @@ public sealed class InsightEvidenceTests
         Assert.Equal(0UL, report.Failed);
         Assert.Null(report.CommitId);
         Assert.Equal("imported_report", report.Provenance);
-        var leaked = InsightEvidence.Decode(Json(Fixture().Replace(
-            "codex_session_metadata", "claude_assistant_message", StringComparison.Ordinal)));
-        Assert.False(leaked.ModelObservations!.IsSupported());
+        Assert.True(current.ModelObservations.IsSupported());
+        var refused = InsightEvidence.Decode(Json(Fixture().Replace(
+            "\"contract\":\"legacy_declared_metadata_v1\"", "\"contract\":\"unsupported\"", StringComparison.Ordinal)));
+        Assert.False(refused.ModelObservations!.IsSupported());
     }
     [Fact]
     public void ClaudeAttributionIsAdditiveAndSourceSpecific()
@@ -113,57 +115,26 @@ public sealed class InsightEvidenceTests
         Assert.True(current.ClaudeTaskAttribution!.IsSupported("claude_code"));
         Assert.False(current.ClaudeTaskAttribution.IsSupported("codex"));
     }
-    [Fact]
-    public void CodexTurnContextSchemaAcceptsKnownAbsenceAndRejectsForgedCoverage()
+    /// <summary>Rust is the single validator of the coverage contract. This shell
+    /// renders the verdicts it knows and refuses every other, including one from a
+    /// newer build; it deliberately no longer re-derives the invariant itself.</summary>
+    [Theory]
+    [InlineData("legacy_declared_metadata_v1", true)]
+    [InlineData("codex_turn_context_v2", true)]
+    [InlineData("claude_assistant_message_v3", true)]
+    [InlineData("unsupported", false)]
+    [InlineData("codex_turn_context_v4", false)]
+    public void OnlyContractVerdictsThisShellRendersAreSupported(string contract, bool supported)
     {
-        const string valid = """
+        string json = """
           {"schema_version":2,"scope":"declared_metadata_only","source_format":"codex","source_digest":"source-digest",
            "coordinates":"jsonl_physical_lines_one_based","record_count":2,"candidate_records":0,"valid_declarations":0,
            "missing_declarations":0,"invalid_declarations":0,"omitted_declarations":0,"model_labels_omitted":false,
-           "mixed_declared_models":false,"declared_models":[],"declarations":[]}
-          """;
-        var supported = JsonSerializer.Deserialize<DeclaredModelObservations>(valid,
+           "mixed_declared_models":false,"declared_models":[],"declarations":[],"contract":"PLACEHOLDER"}
+          """.Replace("PLACEHOLDER", contract, StringComparison.Ordinal);
+        var observations = JsonSerializer.Deserialize<DeclaredModelObservations>(json,
             new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower })!;
-        Assert.True(supported.IsSupported());
-        foreach (string malformed in new[] {
-            valid.Replace("\"candidate_records\":0", "\"candidate_records\":1", StringComparison.Ordinal),
-            valid.Replace("\"source_format\":\"codex\"", "\"source_format\":\"trajectory\"", StringComparison.Ordinal),
-            valid.Replace("\"declarations\":[]", "\"declarations\":[{\"model\":\"x\",\"record_index\":1,\"kind\":\"codex_session_metadata\"}]", StringComparison.Ordinal)
-        })
-        {
-            var rejected = JsonSerializer.Deserialize<DeclaredModelObservations>(malformed,
-                new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower })!;
-            Assert.False(rejected.IsSupported());
-        }
-    }
-    [Fact]
-    public void ClaudeAssistantSchemaAcceptsRepeatedDeclarationsAndRejectsWrongKinds()
-    {
-        const string valid = """
-          {"schema_version":3,"scope":"declared_metadata_only","source_format":"claude_code","source_digest":"source-digest",
-           "coordinates":"jsonl_physical_lines_one_based","record_count":3,"candidate_records":3,"valid_declarations":2,
-           "missing_declarations":1,"invalid_declarations":0,"omitted_declarations":0,"model_labels_omitted":false,
-           "mixed_declared_models":false,"declared_models":["claude-a"],"declarations":[
-             {"model":"claude-a","record_index":1,"kind":"claude_assistant_message"},
-             {"model":"claude-a","record_index":2,"kind":"claude_assistant_message"}]}
-          """;
-        var supported = JsonSerializer.Deserialize<DeclaredModelObservations>(valid,
-            new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower })!;
-        Assert.True(supported.IsSupported());
-        var crossSchema = JsonSerializer.Deserialize<DeclaredModelObservations>(
-            valid.Replace("\"schema_version\":3", "\"schema_version\":1", StringComparison.Ordinal),
-            new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower })!;
-        Assert.False(crossSchema.IsSupported());
-        foreach (string malformed in new[] {
-            valid.Replace("\"source_format\":\"claude_code\"", "\"source_format\":\"codex\"", StringComparison.Ordinal),
-            valid.Replace("claude_assistant_message", "codex_turn_context", StringComparison.Ordinal),
-            valid.Replace("\"candidate_records\":3", "\"candidate_records\":2", StringComparison.Ordinal)
-        })
-        {
-            var rejected = JsonSerializer.Deserialize<DeclaredModelObservations>(malformed,
-                new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower })!;
-            Assert.False(rejected.IsSupported());
-        }
+        Assert.Equal(supported, observations.IsSupported());
     }
     [Fact]
     public async Task RenderKeepsDeclarationsAndImportedReportsSeparateFromVerifiedOutcomes()
@@ -211,7 +182,8 @@ public sealed class InsightEvidenceTests
           {"schema_version":2,"scope":"declared_metadata_only","source_format":"codex","source_digest":"source-digest",
            "coordinates":"jsonl_physical_lines_one_based","record_count":2,"candidate_records":0,"valid_declarations":0,
            "missing_declarations":0,"invalid_declarations":0,"omitted_declarations":0,"model_labels_omitted":false,
-           "mixed_declared_models":false,"declared_models":[],"declarations":[]}
+           "mixed_declared_models":false,"declared_models":[],"declarations":[],
+           "contract":"codex_turn_context_v2"}
           """);
         var service = new Service { Snapshot = snapshot.ToJsonString() };
         using var model = new InsightsViewModel(service);

@@ -6,6 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use trace_commons_protocol::insights_pricing::{BillableTokenCategory, PricingAccounting};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -32,18 +33,6 @@ pub enum NativeTokenCounts {
     },
 }
 
-/// Native accounting categories before any model attribution or price lookup.
-/// This is not evidence that a provider billed these tokens. In particular,
-/// Claude cache creation still needs its cache-duration pricing context.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TokenAccountingCategory {
-    UncachedInput,
-    CachedInput,
-    CacheReadInput,
-    CacheCreationInput,
-    Output,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[error("insights_usage_accounting_invalid")]
 pub struct InvalidTokenAccounting;
@@ -66,14 +55,28 @@ impl NativeTokenCounts {
         Ok(())
     }
 
+    /// The pricing accounting family these native counters belong to. A
+    /// provider billed nothing by virtue of this mapping.
+    pub const fn pricing_accounting(&self) -> PricingAccounting {
+        match self {
+            Self::Codex { .. } => PricingAccounting::Codex,
+            Self::ClaudeCode { .. } => PricingAccounting::ClaudeCode,
+        }
+    }
+
     /// Return disjoint native categories in a stable order. Codex cache and
     /// reasoning counts are subsets; Claude cache categories are independent.
     /// No price, model, timestamp, session completeness, or billed-cost claim
     /// follows from successful decomposition.
+    ///
+    /// These are the priceable categories themselves, not a parallel local
+    /// enum: pairing a count with its rate is a type match, never a position.
+    /// The order always equals `pricing_accounting().required_categories()`,
+    /// which `accounting_components_are_the_priceable_categories` pins.
     pub fn accounting_components(
         &self,
-    ) -> std::result::Result<Vec<(TokenAccountingCategory, u64)>, InvalidTokenAccounting> {
-        use TokenAccountingCategory::*;
+    ) -> std::result::Result<Vec<(BillableTokenCategory, u64)>, InvalidTokenAccounting> {
+        use BillableTokenCategory::*;
         self.validate_accounting()?;
         match *self {
             Self::Codex {
@@ -351,9 +354,53 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// The decomposition and the pricing rate vector are one enum, so a count
+    /// meets its rate by category. Reordering either side moves this pin.
+    #[test]
+    fn accounting_components_are_the_priceable_categories() {
+        use BillableTokenCategory::*;
+        for (counts, accounting, expected) in [
+            (
+                NativeTokenCounts::Codex {
+                    input: 0,
+                    cached_input: 0,
+                    output: 0,
+                    reasoning_output: 0,
+                    total: 0,
+                },
+                PricingAccounting::Codex,
+                vec![UncachedInput, CachedInput, Output],
+            ),
+            (
+                NativeTokenCounts::ClaudeCode {
+                    input: 0,
+                    cache_read_input: 0,
+                    cache_creation_input: 0,
+                    output: 0,
+                },
+                PricingAccounting::ClaudeCode,
+                vec![UncachedInput, CacheReadInput, CacheCreationInput, Output],
+            ),
+        ] {
+            assert_eq!(counts.pricing_accounting(), accounting);
+            let produced: Vec<_> = counts
+                .accounting_components()
+                .unwrap()
+                .into_iter()
+                .map(|(category, _)| category)
+                .collect();
+            assert_eq!(produced, expected, "pinned decomposition order");
+            assert_eq!(
+                produced,
+                accounting.required_categories(),
+                "decomposition must equal the rate vector the calculator requires"
+            );
+        }
+    }
+
     #[test]
     fn codex_accounting_never_adds_subset_counters_again() {
-        use TokenAccountingCategory::*;
+        use BillableTokenCategory::*;
         let counts = NativeTokenCounts::Codex {
             input: 100,
             cached_input: 80,
@@ -395,7 +442,7 @@ mod tests {
 
     #[test]
     fn claude_accounting_keeps_independent_cache_categories() {
-        use TokenAccountingCategory::*;
+        use BillableTokenCategory::*;
         let counts = NativeTokenCounts::ClaudeCode {
             input: 3,
             cache_read_input: 100,

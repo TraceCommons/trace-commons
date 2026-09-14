@@ -110,6 +110,10 @@ fn versions_one_through_five_remain_read_only_and_do_not_invent_usage() {
         if version < 3 {
             report.remove("model_observations");
             report.remove("outcome_links");
+        } else {
+            // A store this old never carried a post-legacy nested model schema;
+            // the schema and the store version advance together.
+            report["model_observations"]["schema_version"] = 1.into();
         }
         if version == 1 {
             report.remove("manual_annotation");

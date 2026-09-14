@@ -39,7 +39,10 @@ use trace_commons_protocol::insights::{
 };
 
 const MAX_SOURCE_BYTES: u64 = 16 * 1024 * 1024;
-const STORE_VERSION: u32 = 10;
+// Advanced to 11 for model-observation schemas 2 and 3. A nested schema bump
+// without one here lets an older client accept the store and then reject
+// individual snapshots, with no diagnosable event and no downgrade path.
+const STORE_VERSION: u32 = 11;
 const MAX_OUTCOME_LINKS: usize = 128;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -493,6 +496,14 @@ impl LocalInsightStore {
                 bail!("insights_store_invalid");
             }
             if index.version < 10 && insight.claude_task_attribution.is_some() {
+                bail!("insights_store_invalid");
+            }
+            if index.version < models::MODEL_OBSERVATIONS_STORE_VERSION_FLOOR
+                && insight
+                    .model_observations
+                    .as_ref()
+                    .is_some_and(models::ModelObservations::requires_store_version_floor)
+            {
                 bail!("insights_store_invalid");
             }
             if let Some(usage) = &insight.usage_evidence {
@@ -1110,10 +1121,22 @@ mod tests {
 
     #[test]
     fn shared_native_claude_snapshot_matches_the_rust_evidence_contract() {
-        let insight: LocalInsight = serde_json::from_slice(include_bytes!(
+        const SHARED: &[u8] = include_bytes!(
             "../fixtures/insights/claude-task-attribution/native-agent-alpha-snapshot.json"
-        ))
-        .unwrap();
+        );
+        let insight: LocalInsight = serde_json::from_slice(SHARED).unwrap();
+        // The native shells read this verdict instead of re-deriving it, so the
+        // shared fixture's stored value must be the one Rust recomputes.
+        let raw: serde_json::Value = serde_json::from_slice(SHARED).unwrap();
+        let observations = insight.model_observations.as_ref().unwrap();
+        assert_eq!(
+            raw["model_observations"]["contract"],
+            serde_json::to_value(observations.contract).unwrap()
+        );
+        assert_eq!(
+            observations.contract,
+            models::ModelCoverageContract::ClaudeAssistantMessageV3
+        );
         assert_eq!(insight.source_format, SourceFormat::ClaudeCode);
         assert!(insight.task_attribution.is_none());
         let attribution = insight.claude_task_attribution.as_ref().unwrap();
