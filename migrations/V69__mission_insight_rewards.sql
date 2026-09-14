@@ -71,7 +71,9 @@ CREATE TABLE trace_reward_reservations (
     terminal_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT pg_catalog.clock_timestamp(),
     PRIMARY KEY (tenant_id, reservation_id),
-    UNIQUE (tenant_id, work_hash),
+    -- The work digest is held only by a live or awarded reservation; see the
+    -- partial unique index below. A cancelled, rejected or invalidated
+    -- reservation releases it, so mistyped work can be reserved again.
     UNIQUE (tenant_id, evidence_hash),
     FOREIGN KEY (tenant_id, program_id)
         REFERENCES trace_reward_programs(tenant_id, program_id) ON DELETE RESTRICT,
@@ -143,6 +145,13 @@ CREATE TABLE trace_reward_invalidations (
         REFERENCES trace_reward_decisions(tenant_id, decision_id) ON DELETE RESTRICT
 );
 
+-- Exactly the state set trace_reward_reserve refuses a duplicate work digest
+-- against. Keep the two in step: a state outside this set must be reservable
+-- again, and a state inside it must be refused by the function before the
+-- index can raise a unique violation.
+CREATE UNIQUE INDEX trace_reward_reservations_live_work_idx
+    ON trace_reward_reservations(tenant_id, work_hash)
+    WHERE state IN ('reserved', 'submitted', 'awarded');
 CREATE INDEX trace_reward_reservations_program_state_idx
     ON trace_reward_reservations(tenant_id, program_id, state, expires_at);
 CREATE INDEX trace_reward_reservations_participant_idx
@@ -486,8 +495,12 @@ BEGIN
         );
     END IF;
 
+    -- Mirrors trace_reward_reservations_live_work_idx. A cancelled, rejected or
+    -- invalidated reservation no longer holds the work digest; an unexpired or
+    -- awarded one still does.
     IF EXISTS(SELECT 1 FROM public.trace_reward_reservations
-        WHERE tenant_id = p_tenant AND work_hash = p_work_hash) THEN
+        WHERE tenant_id = p_tenant AND work_hash = p_work_hash
+          AND state IN ('reserved', 'submitted', 'awarded')) THEN
         RAISE EXCEPTION USING MESSAGE = 'reward_work_duplicate';
     END IF;
     SELECT * INTO v_program FROM public.trace_reward_programs

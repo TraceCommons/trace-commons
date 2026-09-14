@@ -137,7 +137,7 @@ trace-commons-reward-operator --tenant pilot-tenant cancel \
   --decision 00000000-0000-0000-0000-000000000302
 ```
 
-Reservations expire at the earlier of the terms TTL and program close. A timely submission remains held during review. Rejection and cancellation release the hold. Invalidation blocks a later submission and releases a pending submitted hold; an existing award stays recorded and counted, with invalidation visible in history. No command changes terms, reopens a terminal decision, refunds an accepted award, or redeems units.
+Reservations expire at the earlier of the terms TTL and program close. A timely submission remains held during review. Rejection and cancellation release the hold and the reserved work digest, so the same work can be reserved again. A reservation that expired unsubmitted releases its capacity immediately but keeps its work digest until it is cancelled; cancel it to reserve that work again. Invalidation blocks a later submission and releases a pending submitted hold; an existing award stays recorded and counted, with invalidation visible in history. No command changes terms, reopens a terminal decision, refunds an accepted award, or redeems units.
 
 Participants request consent withdrawal through the published operator contact; an authorized operator invalidates the affected evidence before acceptance. There is no participant-facing withdrawal command or automatic consent-revocation feed.
 
@@ -145,7 +145,7 @@ Appeals use the published human contact, and the ledger preserves the original d
 
 ## Retries and incidents
 
-Repeat only the exact request with the same identifier after an interruption. Changed payloads for an existing program, reservation, or decision return `reward_payload_conflict`. Work and evidence hashes are unique across programs within the tenant, including after rejection or invalidation. Preserve the CLI's safe `reward_*` label and the retained evidence record in the incident ticket; do not attach connection strings or raw evidence.
+Repeat only the exact request with the same identifier after an interruption. Changed payloads for an existing program, reservation, or decision return `reward_payload_conflict`. Evidence hashes are unique across programs within the tenant, including after rejection or invalidation. A work hash is held only by a reserved, submitted or awarded reservation, so an awarded work is never reservable again while cancelled, rejected and invalidated work is. Preserve the CLI's safe `reward_*` label and the retained evidence record in the incident ticket; do not attach connection strings or raw evidence.
 
 Inspect semantic duplicates and cross-tenant reuse manually. The ledger compares exact digests within a tenant and provides no global duplicate registry.
 
