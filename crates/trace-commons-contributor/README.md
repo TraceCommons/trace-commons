@@ -129,6 +129,14 @@ monitored for changes to the original files: reimport to refresh, or use `delete
 to remove the saved result and its references. Deletion leaves the original
 transcript intact.
 
+The store directory is restricted to the account that created it, and that
+restriction is checked on every open rather than only at creation. On Unix it
+is mode 0700, and a directory reachable by group or other is refused. On
+Windows it is a protected owner-only DACL, reapplied on each open so a
+directory an older build left widened cannot stay that way; if it cannot be
+applied the store is refused rather than opened without the control. Both
+refusals report `insights_store_requires_private_directory`.
+
 If a saved entry cannot be read -- a hand-edited or externally written index, an
 entry written by a newer schema, or an episode whose membership no longer binds
 its snapshots -- that entry alone is withheld. The rest of the store stays fully

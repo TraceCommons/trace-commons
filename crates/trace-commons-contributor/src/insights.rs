@@ -11,6 +11,8 @@ pub mod service;
 pub mod summary;
 pub mod time_evidence;
 pub mod usage;
+#[cfg(windows)]
+mod win_store_acl;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
@@ -531,8 +533,21 @@ impl LocalInsightStore {
                 bail!(InsightsStoreError::PrivateDirectoryRequired);
             }
         }
-        #[cfg(not(unix))]
-        fs::create_dir_all(dir).map_err(|_| anyhow!(InsightsStoreError::Unavailable))?;
+        #[cfg(windows)]
+        {
+            fs::create_dir_all(dir).map_err(|_| anyhow!(InsightsStoreError::Unavailable))?;
+            // Windows has no mode bits, so the equivalent of the 0700 above is
+            // an owner-only protected DACL. It is applied on every open, not
+            // only at creation, so a directory an older build or another tool
+            // left widened cannot stay that way. Failing to apply it refuses
+            // the store rather than proceeding without the control.
+            win_store_acl::restrict_to_current_user(dir)?;
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = dir;
+            bail!(InsightsStoreError::PrivateDirectoryRequired);
+        }
         reject_leaf_symlink(dir)?;
         let dir = dir
             .canonicalize()
