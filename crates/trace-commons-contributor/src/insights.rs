@@ -486,7 +486,47 @@ fn file_identity(path: &Path) -> Option<String> {
     ))
 }
 
-#[cfg(not(unix))]
+/// Windows has no inode. The equivalent identity is the volume serial number
+/// with the file index, which is what `GetFileInformationByHandle` reports and
+/// what a rename within a volume preserves. `std::os::windows::fs::MetadataExt`
+/// exposes the same two values, but both are unstable behind `windows_by_handle`
+/// and this repo builds on stable, so the call is made directly.
+///
+/// Absent rather than wrong is the safe answer here: a filesystem that keeps no
+/// file index reports zero, and treating zero as an identity would make every
+/// such file identical to every other.
+#[cfg(windows)]
+fn file_identity(path: &Path) -> Option<String> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+    };
+    // FILE_FLAG_OPEN_REPARSE_POINT, as in `bounded_read`: the identity must be
+    // the selected file's own and never that of something it points at.
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(0x00200000)
+        .open(path)
+        .ok()?;
+    // SAFETY: the structure is plain integers, so a zeroed value is valid, and
+    // the handle stays live for the duration of the call.
+    let mut information: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    let read = unsafe { GetFileInformationByHandle(file.as_raw_handle() as _, &mut information) };
+    if read == 0 {
+        return None;
+    }
+    let index =
+        (u64::from(information.nFileIndexHigh) << 32) | u64::from(information.nFileIndexLow);
+    if index == 0 {
+        return None;
+    }
+    Some(digest(
+        format!("{}:{}", information.dwVolumeSerialNumber, index).as_bytes(),
+    ))
+}
+
+#[cfg(not(any(unix, windows)))]
 fn file_identity(_path: &Path) -> Option<String> {
     None
 }
