@@ -359,20 +359,18 @@ impl Alias {
 
 /// The file the operating system resolved, independent of the name it was
 /// reached through. A rename preserves it; a copy does not.
+#[cfg(unix)]
 fn file_identity(path: &Path) -> Option<String> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        let metadata = fs::symlink_metadata(path).ok()?;
-        return Some(digest(
-            format!("{}:{}", metadata.dev(), metadata.ino()).as_bytes(),
-        ));
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = path;
-        None
-    }
+    use std::os::unix::fs::MetadataExt;
+    let metadata = fs::symlink_metadata(path).ok()?;
+    Some(digest(
+        format!("{}:{}", metadata.dev(), metadata.ino()).as_bytes(),
+    ))
+}
+
+#[cfg(not(unix))]
+fn file_identity(_path: &Path) -> Option<String> {
+    None
 }
 
 /// Entries withheld from every read because they failed load-time validation.
