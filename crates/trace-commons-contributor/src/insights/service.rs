@@ -622,6 +622,38 @@ fn response_json(response: &LocalInsightsResponse) -> Result<String> {
 mod tests {
     use super::*;
 
+    /// `ui_copy()` keys for these four enums are derived from their
+    /// snake_case wire form by naming convention only, with nothing linking
+    /// the two: renaming or adding a variant leaves a shell indexing a
+    /// missing key. Iterate every variant and require its key to exist.
+    #[test]
+    fn ui_copy_has_a_key_for_every_summary_and_model_variant() {
+        use super::super::models::{DeclarationKind, RecordCoordinates};
+        use super::super::summary::{CoverageUnit, SummaryLimitation};
+
+        let copy = ui_copy();
+        for value in SummaryLimitation::ALL {
+            let wire = serde_json::to_value(value).unwrap();
+            let key = format!("summary_limitation_{}", wire.as_str().unwrap());
+            assert!(copy.contains_key(&key), "missing ui_copy key {key}");
+        }
+        for value in CoverageUnit::ALL {
+            let wire = serde_json::to_value(value).unwrap();
+            let key = format!("summary_unit_{}", wire.as_str().unwrap());
+            assert!(copy.contains_key(&key), "missing ui_copy key {key}");
+        }
+        for value in DeclarationKind::ALL {
+            let wire = serde_json::to_value(value).unwrap();
+            let key = format!("model_kind_{}", wire.as_str().unwrap());
+            assert!(copy.contains_key(&key), "missing ui_copy key {key}");
+        }
+        for value in RecordCoordinates::ALL {
+            let wire = serde_json::to_value(value).unwrap();
+            let key = format!("model_coordinates_{}", wire.as_str().unwrap());
+            assert!(copy.contains_key(&key), "missing ui_copy key {key}");
+        }
+    }
+
     #[test]
     fn episode_error_whitelist_is_typed_and_never_forwards_context_or_impostors() {
         let errors: Vec<anyhow::Error> = vec![

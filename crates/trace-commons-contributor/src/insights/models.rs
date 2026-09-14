@@ -56,6 +56,15 @@ pub enum RecordCoordinates {
     TrajectoryArrayIndexesZeroBased,
 }
 
+impl RecordCoordinates {
+    /// Every variant. A new variant must be added here or the
+    /// exhaustive-match test in `models::tests` fails to compile.
+    pub const ALL: [RecordCoordinates; 2] = [
+        RecordCoordinates::JsonlPhysicalLinesOneBased,
+        RecordCoordinates::TrajectoryArrayIndexesZeroBased,
+    ];
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ModelDeclaration {
@@ -71,6 +80,17 @@ pub enum DeclarationKind {
     CodexTurnContext,
     CodexAssistantMessage,
     TrajectoryMetadata,
+}
+
+impl DeclarationKind {
+    /// Every variant. A new variant must be added here or the
+    /// exhaustive-match test in `models::tests` fails to compile.
+    pub const ALL: [DeclarationKind; 4] = [
+        DeclarationKind::CodexSessionMetadata,
+        DeclarationKind::CodexTurnContext,
+        DeclarationKind::CodexAssistantMessage,
+        DeclarationKind::TrajectoryMetadata,
+    ];
 }
 
 fn safe_label(value: &str) -> bool {
@@ -338,6 +358,40 @@ fn observe_record(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// Adding a `DeclarationKind` variant without updating this match is a
+    /// compile error, and adding it here without also listing it in `ALL`
+    /// fails this assertion. Both must move together.
+    #[test]
+    fn declaration_kind_all_covers_every_variant_exhaustively() {
+        fn ordinal(value: DeclarationKind) -> usize {
+            match value {
+                DeclarationKind::CodexSessionMetadata => 0,
+                DeclarationKind::CodexTurnContext => 1,
+                DeclarationKind::CodexAssistantMessage => 2,
+                DeclarationKind::TrajectoryMetadata => 3,
+            }
+        }
+        assert_eq!(DeclarationKind::ALL.len(), 4);
+        for (index, value) in DeclarationKind::ALL.iter().enumerate() {
+            assert_eq!(ordinal(*value), index);
+        }
+    }
+
+    /// Same guarantee as above, for `RecordCoordinates`.
+    #[test]
+    fn record_coordinates_all_covers_every_variant_exhaustively() {
+        fn ordinal(value: RecordCoordinates) -> usize {
+            match value {
+                RecordCoordinates::JsonlPhysicalLinesOneBased => 0,
+                RecordCoordinates::TrajectoryArrayIndexesZeroBased => 1,
+            }
+        }
+        assert_eq!(RecordCoordinates::ALL.len(), 2);
+        for (index, value) in RecordCoordinates::ALL.iter().enumerate() {
+            assert_eq!(ordinal(*value), index);
+        }
+    }
 
     fn codex(rows: Vec<Value>) -> Vec<u8> {
         rows.into_iter()
