@@ -519,6 +519,10 @@ pub struct Report {
     pub generated_at: String,
     pub corpus_sha256: String,
     pub manifest_sha256: String,
+    #[serde(default)]
+    pub corpus_version: String,
+    #[serde(default)]
+    pub input_digest: String,
     pub candidates: Vec<CandidateResult>,
     pub winner_id: Option<String>,
     pub decision_rule_version: u32,
@@ -551,6 +555,12 @@ pub fn render_markdown(report: &Report) -> String {
     out.push_str(&format!("# Bake-off report ({})\n\n", report.generated_at));
     out.push_str(&format!("- corpus: {}\n", report.corpus_sha256));
     out.push_str(&format!("- manifest: {}\n", report.manifest_sha256));
+    if !report.corpus_version.is_empty() {
+        out.push_str(&format!("- corpus version: {}\n", report.corpus_version));
+    }
+    if !report.input_digest.is_empty() {
+        out.push_str(&format!("- input digest: {}\n", report.input_digest));
+    }
     out.push_str(&format!(
         "- decision-rule version: {}\n",
         report.decision_rule_version

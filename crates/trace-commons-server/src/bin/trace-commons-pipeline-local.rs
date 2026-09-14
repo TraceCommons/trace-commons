@@ -42,6 +42,7 @@ use trace_commons_server::versioned_pipeline_product::{
     PIPELINE_EXPORT_ITEM_MAX, PipelineContributorStatus, PipelineExportSnapshot,
     PipelineProductStore, sha256_prefixed as product_sha256_prefixed,
 };
+use trace_commons_server::versioned_pipeline_qualification::ProductionDependencyProfile;
 use uuid::Uuid;
 
 #[derive(Debug, Parser)]
@@ -164,6 +165,12 @@ type HttpResult<T> = Result<T, HttpError>;
 #[derive(Debug, Deserialize)]
 struct WorkerQuery {
     stop_before: Option<PhaseArg>,
+    #[serde(default = "default_worker_limit")]
+    limit: u16,
+}
+
+const fn default_worker_limit() -> u16 {
+    1
 }
 
 #[derive(Debug, Deserialize)]
@@ -194,6 +201,15 @@ const fn default_export_limit() -> usize {
 #[derive(Debug, Serialize)]
 struct ScoreAttestationResponse {
     attestation: String,
+}
+
+#[derive(Debug, Serialize)]
+struct PipelineReadinessResponse {
+    live: bool,
+    database: bool,
+    package_integrity: bool,
+    production_eligible: bool,
+    safe_blockers: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -360,6 +376,7 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
     let app = Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .route("/health", get(|| async { "ok" }))
+        .route("/ready", get(readiness_handler))
         .route("/v1/pipeline/submissions", post(submit_handler))
         .route("/v1/traces", post(submit_handler))
         .route("/v1/traces/{submission_id}", delete(withdraw_handler))
@@ -397,6 +414,14 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
             get(lifecycle_summary_handler),
         )
         .route(
+            "/v1/admin/pipeline-operational-summary",
+            get(operational_summary_handler),
+        )
+        .route(
+            "/v1/admin/pipeline-runs/{run_id}/traceability",
+            get(forensic_trace_handler),
+        )
+        .route(
             "/v1/workers/pipeline-index-invalidation/{run_id}",
             post(index_invalidation_handler),
         )
@@ -419,6 +444,33 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
     );
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+async fn readiness_handler(
+    State(state): State<Arc<HttpState>>,
+) -> (StatusCode, Json<PipelineReadinessResponse>) {
+    let database = state.backend.readiness_probe().await.is_ok();
+    let package_integrity = state.pipeline.default_package_hash().is_ok();
+    let mut safe_blockers = ProductionDependencyProfile::local_test().blockers();
+    if !database {
+        safe_blockers.push("database_unavailable".to_string());
+    }
+    if !package_integrity {
+        safe_blockers.push("bundle_package_invalid".to_string());
+    }
+    let response = PipelineReadinessResponse {
+        live: true,
+        database,
+        package_integrity,
+        production_eligible: safe_blockers.is_empty(),
+        safe_blockers,
+    };
+    let status = if database {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    (status, Json(response))
 }
 
 async fn submit_handler(
@@ -640,6 +692,44 @@ async fn lifecycle_summary_handler(
     Ok(Json(summary))
 }
 
+async fn operational_summary_handler(
+    State(state): State<Arc<HttpState>>,
+    headers: HeaderMap,
+) -> HttpResult<Json<trace_commons_server::versioned_pipeline_product::PipelineOperationalSummary>>
+{
+    let auth = authenticate(&state, &headers, LocalRole::Operator)?;
+    state
+        .product
+        .operational_summary(&auth.tenant_id)
+        .await
+        .map(Json)
+        .map_err(|_| HttpError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            label: "operational_summary_unavailable",
+        })
+}
+
+async fn forensic_trace_handler(
+    State(state): State<Arc<HttpState>>,
+    headers: HeaderMap,
+    AxumPath(run_id): AxumPath<Uuid>,
+) -> HttpResult<Json<trace_commons_server::versioned_pipeline_product::PipelineForensicTrace>> {
+    let auth = authenticate(&state, &headers, LocalRole::Operator)?;
+    state
+        .product
+        .forensic_trace(&auth.tenant_id, run_id)
+        .await
+        .map_err(|_| HttpError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            label: "traceability_unavailable",
+        })?
+        .map(Json)
+        .ok_or(HttpError {
+            status: StatusCode::NOT_FOUND,
+            label: "pipeline_run_not_found",
+        })
+}
+
 async fn index_invalidation_handler(
     State(state): State<Arc<HttpState>>,
     headers: HeaderMap,
@@ -667,6 +757,12 @@ async fn worker_handler(
     Query(query): Query<WorkerQuery>,
 ) -> HttpResult<Json<Option<PipelineInspection>>> {
     let auth = authenticate(&state, &headers, LocalRole::Worker)?;
+    if query.limit != 1 {
+        return Err(HttpError {
+            status: StatusCode::BAD_REQUEST,
+            label: "worker_limit_invalid",
+        });
+    }
     let processed = state
         .pipeline
         .process_one(&auth.tenant_id, query.stop_before.map(Into::into))

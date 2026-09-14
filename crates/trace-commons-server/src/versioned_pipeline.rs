@@ -529,6 +529,45 @@ impl PgPipelineStore {
         Ok(package)
     }
 
+    pub async fn list_rebuildable_index_runs(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<PipelineRunRecord>, DatabaseError> {
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
+        let rows = tx
+            .query(
+                "SELECT p.*
+                   FROM pipeline_runs p
+                   JOIN trace_submissions s
+                     ON s.tenant_id = p.tenant_id
+                    AND s.submission_id = p.submission_id
+                   JOIN trace_derived_records d
+                     ON d.tenant_id = p.tenant_id
+                    AND d.derived_id = p.approved_revision_id
+                    AND d.status = 'current'
+                   LEFT JOIN trace_withdrawals w
+                     ON w.tenant_id = p.tenant_id
+                    AND w.submission_id = p.submission_id
+                  WHERE p.tenant_id = $1
+                    AND p.state = 'complete'
+                    AND p.index_membership = 'included'
+                    AND p.index_write_state = 'complete'
+                    AND p.index_command_ref IS NOT NULL
+                    AND p.index_command_hash IS NOT NULL
+                    AND s.status = 'accepted'
+                    AND s.revoked_at IS NULL
+                    AND s.purged_at IS NULL
+                    AND (s.expires_at IS NULL OR s.expires_at > NOW())
+                    AND w.submission_id IS NULL
+                  ORDER BY p.created_at, p.run_id",
+                &[&tenant_id],
+            )
+            .await?;
+        tx.commit().await?;
+        rows.iter().map(pipeline_run_from_row).collect()
+    }
+
     pub async fn policy_is_runnable(
         &self,
         tenant_id: &str,
@@ -3305,12 +3344,19 @@ impl MinimalPolicyBundle {
     pub fn build_compatibility_with_runtime(
         runtime: &CompatibilityScoreRuntime,
     ) -> anyhow::Result<Self> {
+        Self::build_compatibility_candidate(runtime, CompatibilityBundleConfig::local_reference())
+    }
+
+    pub fn build_compatibility_candidate(
+        runtime: &CompatibilityScoreRuntime,
+        compatibility: CompatibilityBundleConfig,
+    ) -> anyhow::Result<Self> {
         let configuration = serde_json::to_vec(&PipelineBundleConfig {
             score_microcredits: 0,
             include_index: true,
             tenant_admission_limit: default_tenant_admission_limit(),
             principal_admission_limit: default_principal_admission_limit(),
-            compatibility: Some(CompatibilityBundleConfig::local_reference()),
+            compatibility: Some(compatibility),
         })?;
         Self::build_from_configuration(configuration, Some(runtime))
     }
@@ -3328,6 +3374,11 @@ impl MinimalPolicyBundle {
                 .ok()
                 .and_then(|config| config.compatibility)
                 .is_some();
+        let projection_ids = serde_json::from_slice::<PipelineBundleConfig>(&configuration)
+            .ok()
+            .and_then(|config| config.compatibility)
+            .map(|config| vec![config.projection_id])
+            .unwrap_or_default();
         let specifications = [
             (
                 "admission",
@@ -3373,7 +3424,7 @@ impl MinimalPolicyBundle {
             configuration_hash: config_hash.clone(),
             data_artifact_hashes: Vec::new(),
             projection_ids: if compatibility && matches!(name, "score" | "settle") {
-                vec!["pipeline-test-projection-v1".to_string()]
+                projection_ids.clone()
             } else {
                 Vec::new()
             },
@@ -3503,6 +3554,14 @@ pub struct PipelineSubmitReceipt {
 pub struct PipelineInspection {
     pub run: PipelineRunRecord,
     pub outcomes: Vec<PhaseOutcomeRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PipelineIndexRebuildReport {
+    pub command_count: usize,
+    pub entry_count: usize,
+    pub unchanged_entry_count: usize,
+    pub command_set_hash: String,
 }
 
 pub struct PipelineService {
@@ -3652,6 +3711,13 @@ impl PipelineService {
         &self.default_bundle.package.bundle_id
     }
 
+    pub fn default_package_hash(&self) -> anyhow::Result<String> {
+        self.default_bundle
+            .package
+            .package_hash()
+            .map_err(anyhow::Error::from)
+    }
+
     pub fn index(&self) -> Arc<IsolatedPipelineIndex> {
         self.index.clone()
     }
@@ -3693,6 +3759,46 @@ impl PipelineService {
 
     pub async fn active_bundle_id(&self, tenant_id: &str) -> anyhow::Result<Option<String>> {
         Ok(self.store.active_bundle_id(tenant_id).await?)
+    }
+
+    pub async fn rebuild_index_from_authoritative_commands(
+        &self,
+        tenant_id: &str,
+        writer: Arc<dyn VectorIndexWriter>,
+    ) -> anyhow::Result<PipelineIndexRebuildReport> {
+        let runs = self.store.list_rebuildable_index_runs(tenant_id).await?;
+        let mut command_hashes = Vec::with_capacity(runs.len());
+        let mut entry_count = 0usize;
+        let mut unchanged_entry_count = 0usize;
+        for run in runs {
+            let command = self.load_sealed_command(&run).await?;
+            let expected_hash = run
+                .index_command_hash
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("sealed command hash is missing"))?;
+            anyhow::ensure!(
+                command.command_hash()? == expected_hash,
+                "sealed command hash mismatch"
+            );
+            command_hashes.push(expected_hash.to_string());
+            for (key, embedding, content_hash) in command.entry_keys(tenant_id) {
+                match writer.upsert(&key, &embedding, &content_hash) {
+                    Ok(trace_commons_gate_api::IndexUpsertResult::Inserted) => {}
+                    Ok(trace_commons_gate_api::IndexUpsertResult::Unchanged) => {
+                        unchanged_entry_count += 1;
+                    }
+                    Err(error) => return Err(anyhow::anyhow!("index rebuild failed: {error}")),
+                }
+                entry_count += 1;
+            }
+        }
+        let command_set_hash = sha256_prefixed(serde_json::to_vec(&command_hashes)?.as_slice());
+        Ok(PipelineIndexRebuildReport {
+            command_count: command_hashes.len(),
+            entry_count,
+            unchanged_entry_count,
+            command_set_hash,
+        })
     }
 
     pub async fn intervene_policy(

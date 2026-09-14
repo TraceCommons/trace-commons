@@ -27,6 +27,7 @@ the link.
 | Publishing the public `tracecommons.ai` leaderboard | [`./tracecommons-ai-community-site.md`](./tracecommons-ai-community-site.md) |
 | Setting gate floors or calibrating thresholds | [`./calibration.md`](./calibration.md) |
 | Validating a deployment before promoting | [`./smoke-test.md`](./smoke-test.md) |
+| Qualifying the versioned pipeline candidate | [`../redesign/phase-7.md`](../redesign/phase-7.md) |
 | Running the model bake-off | [`./calibration.md`](./calibration.md) (Phase 0) + [`./agent-traces-bakeoff-run.md`](./agent-traces-bakeoff-run.md) |
 | Handling an A2.6 bake-off result | [`./a26-bakeoff-result-handler.md`](./a26-bakeoff-result-handler.md) |
 | Calibrating the perplexity floor after A2.6 Outcome 1 | [`./a27-perplexity-floor-calibration.md`](./a27-perplexity-floor-calibration.md) |
@@ -120,6 +121,8 @@ Every runbook in this directory, with a one-line description.
 - [`./pilot-contributor-onboarding.md`](./pilot-contributor-onboarding.md) —
   contributor-facing setup flow for invite code, workload JWT, Ironclaw
   opt-in, profile handle registration, and leaderboard expectations.
+- [Phase 7 qualification](../redesign/phase-7.md) — package trust, deployment
+  inventory, restore evidence, and promotion-gate procedure.
 - [`./smoke-test.md`](./smoke-test.md) — post-deploy validation checklist
   that exercises every required drill plus a fixture gate evaluation.
 - [`./tracecommons-ai-community-site.md`](./tracecommons-ai-community-site.md) —

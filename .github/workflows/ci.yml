@@ -164,6 +164,112 @@ jobs:
       # workspace untested by default.
       - run: cargo test --workspace
 
+  phase7-interface-inventory:
+    name: phase7 interface inventory
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - name: Classify deployment interfaces
+        run: python3 scripts/operator/phase7-inventory.py --check
+
+  phase7-postgres-qualification:
+    name: phase7 PostgreSQL qualification
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_PASSWORD: phase7-ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://postgres:phase7-ci@127.0.0.1:5432/postgres
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-phase7-postgres-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-phase7-postgres-
+      - name: Run versioned pipeline PostgreSQL suite
+        run: cargo test -p trace-commons-server --test versioned_pipeline_pg
+
+  phase7-adapter-qualification:
+    name: phase7 adapter qualification
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-phase7-adapters-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-phase7-adapters-
+      - name: Run adapter idempotency and capability suites
+        run: |
+          cargo test -p trace-commons-server --lib versioned_pipeline_index
+          cargo test -p trace-commons-server --lib versioned_pipeline_credit
+          cargo test -p trace-commons-server --lib versioned_pipeline_compat
+
+  phase7-black-box-qualification:
+    name: phase7 black-box qualification
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-phase7-black-box-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-phase7-black-box-
+      - name: Run compatibility corpus through HTTP and workers
+        run: scripts/operator/run-compatibility-pipeline-corpus.sh
+
+  phase7-corpus-and-restore:
+    name: phase7 corpus and restore
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-phase7-corpus-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-phase7-corpus-
+      - name: Run Phase 7 qualification
+        run: bash scripts/operator/run-phase7-qualification.sh
+
   pilot-bootstrap-smoke:
     name: pilot-bootstrap smoke
     runs-on: ubuntu-latest

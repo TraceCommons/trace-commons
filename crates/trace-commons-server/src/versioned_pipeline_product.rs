@@ -4,6 +4,7 @@
 //! response is derived from the run, immutable outcomes, credit ledger,
 //! settlement batch, and payout state at read time.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
@@ -116,6 +117,60 @@ pub struct PipelineLifecycleSummary {
     pub terminal_index_invalidation_failures: u64,
     pub active_export_snapshots: u64,
     pub invalidated_export_snapshots: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PipelineWorkSummary {
+    pub phase: String,
+    pub state: String,
+    pub count: u64,
+    pub oldest_age_seconds: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PipelineOperationalSummary {
+    pub generated_at: DateTime<Utc>,
+    pub work: Vec<PipelineWorkSummary>,
+    pub suspended_policy_count: u64,
+    pub retryable_error_count: u64,
+    pub terminal_error_count: u64,
+    pub pending_index_command_count: u64,
+    pub failed_index_command_count: u64,
+    pub held_credit_count: u64,
+    pub delayed_credit_count: u64,
+    pub near_outbox_by_state: BTreeMap<String, u64>,
+    pub pending_invalidation_count: u64,
+    pub failed_invalidation_count: u64,
+    pub incomplete_export_count: u64,
+    pub tenant_isolation_control_passed: bool,
+    pub audit_immutability_control_passed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PipelinePhaseTrace {
+    pub phase: String,
+    pub outcome_id: Uuid,
+    pub outcome_schema_id: String,
+    pub outcome_schema_version: u32,
+    pub decision_hash: String,
+    pub evidence_hash: String,
+    pub evaluation_hash: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PipelineForensicTrace {
+    pub run_id: Uuid,
+    pub submission_id: Uuid,
+    pub bundle_id: String,
+    pub phases: Vec<PipelinePhaseTrace>,
+    pub index_command_hash: Option<String>,
+    pub index_write_state: String,
+    pub score_outcome_id: Option<Uuid>,
+    pub credit_event_id: Option<Uuid>,
+    pub settlement_batch_id: Option<Uuid>,
+    pub payout_state: String,
+    pub intervention_evidence_hashes: Vec<String>,
+    pub index_invalidation_state: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -637,6 +692,236 @@ impl PipelineProductStore {
             invalidated_export_snapshots: count_from_row(&row, "invalidated_exports")?,
         })
     }
+
+    pub async fn operational_summary(
+        &self,
+        tenant_id: &str,
+    ) -> Result<PipelineOperationalSummary, DatabaseError> {
+        let generated_at = Utc::now();
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
+        let work_rows = tx
+            .query(
+                "SELECT next_phase, state, COUNT(*) AS item_count,
+                        GREATEST(
+                            0,
+                            EXTRACT(EPOCH FROM (NOW() - MIN(phase_started_at)))::bigint
+                        ) AS oldest_age_seconds
+                   FROM pipeline_runs
+                  WHERE tenant_id = $1
+                  GROUP BY next_phase, state
+                  ORDER BY next_phase, state",
+                &[&tenant_id],
+            )
+            .await?;
+        let summary = tx
+            .query_one(
+                "SELECT
+                    (SELECT COUNT(*) FROM pipeline_bundle_policy_status
+                      WHERE tenant_id = $1 AND operational_status = 'suspended')
+                        AS suspended_policies,
+                    (SELECT COUNT(*) FROM pipeline_runs
+                      WHERE tenant_id = $1 AND state = 'retry') AS retryable_errors,
+                    (SELECT COUNT(*) FROM pipeline_runs
+                      WHERE tenant_id = $1 AND state = 'failed') AS terminal_errors,
+                    (SELECT COUNT(*) FROM pipeline_runs
+                      WHERE tenant_id = $1 AND index_write_state = 'pending')
+                        AS pending_index,
+                    (SELECT COUNT(*) FROM pipeline_runs
+                      WHERE tenant_id = $1 AND index_write_state = 'failed')
+                        AS failed_index,
+                    (SELECT COUNT(*) FROM pipeline_runs
+                      WHERE tenant_id = $1 AND credit_write_state = 'held')
+                        AS held_credit,
+                    (SELECT COUNT(*) FROM pipeline_runs
+                      WHERE tenant_id = $1 AND credit_write_state = 'pending')
+                        AS delayed_credit,
+                    (SELECT COUNT(*) FROM pipeline_index_invalidations
+                      WHERE tenant_id = $1 AND state = 'pending')
+                        AS pending_invalidation,
+                    (SELECT COUNT(*) FROM pipeline_index_invalidations
+                      WHERE tenant_id = $1 AND state = 'failed')
+                        AS failed_invalidation,
+                    (SELECT COUNT(*) FROM pipeline_export_snapshots
+                      WHERE tenant_id = $1 AND state = 'ready')
+                        AS incomplete_exports,
+                    (
+                        SELECT COUNT(*) = 0
+                          FROM pg_class c
+                          JOIN pg_namespace n ON n.oid = c.relnamespace
+                         WHERE n.nspname = current_schema()
+                           AND c.relname = ANY($2)
+                           AND (NOT c.relrowsecurity OR NOT c.relforcerowsecurity)
+                    ) AS tenant_isolation_passed,
+                    (
+                        SELECT COUNT(*) = 2
+                          FROM pg_trigger t
+                          JOIN pg_class c ON c.oid = t.tgrelid
+                         WHERE c.relname = 'phase_outcomes'
+                           AND NOT t.tgisinternal
+                           AND t.tgname = ANY($3)
+                    ) AS audit_immutability_passed",
+                &[
+                    &tenant_id,
+                    &vec![
+                        "pipeline_runs",
+                        "phase_outcomes",
+                        "pipeline_bundle_packages",
+                        "pipeline_bundle_qualifications",
+                    ],
+                    &vec![
+                        "phase_outcomes_reject_update",
+                        "phase_outcomes_reject_delete",
+                    ],
+                ],
+            )
+            .await?;
+        let near_rows = tx
+            .query(
+                "SELECT status, COUNT(*) AS item_count
+                   FROM trace_near_credit_outbox
+                  WHERE tenant_id = $1
+                  GROUP BY status
+                  ORDER BY status",
+                &[&tenant_id],
+            )
+            .await?;
+        tx.commit().await?;
+        let work = work_rows
+            .iter()
+            .map(|row| {
+                Ok(PipelineWorkSummary {
+                    phase: row.get("next_phase"),
+                    state: row.get("state"),
+                    count: count_from_row(row, "item_count")?,
+                    oldest_age_seconds: u64::try_from(row.get::<_, i64>("oldest_age_seconds"))
+                        .map_err(|_| {
+                            DatabaseError::Serialization(
+                                "pipeline work age is outside the supported range".to_string(),
+                            )
+                        })?,
+                })
+            })
+            .collect::<Result<Vec<_>, DatabaseError>>()?;
+        let near_outbox_by_state = near_rows
+            .iter()
+            .map(|row| {
+                Ok((
+                    row.get::<_, String>("status"),
+                    count_from_row(row, "item_count")?,
+                ))
+            })
+            .collect::<Result<BTreeMap<_, _>, DatabaseError>>()?;
+        Ok(PipelineOperationalSummary {
+            generated_at,
+            work,
+            suspended_policy_count: count_from_row(&summary, "suspended_policies")?,
+            retryable_error_count: count_from_row(&summary, "retryable_errors")?,
+            terminal_error_count: count_from_row(&summary, "terminal_errors")?,
+            pending_index_command_count: count_from_row(&summary, "pending_index")?,
+            failed_index_command_count: count_from_row(&summary, "failed_index")?,
+            held_credit_count: count_from_row(&summary, "held_credit")?,
+            delayed_credit_count: count_from_row(&summary, "delayed_credit")?,
+            near_outbox_by_state,
+            pending_invalidation_count: count_from_row(&summary, "pending_invalidation")?,
+            failed_invalidation_count: count_from_row(&summary, "failed_invalidation")?,
+            incomplete_export_count: count_from_row(&summary, "incomplete_exports")?,
+            tenant_isolation_control_passed: summary.get("tenant_isolation_passed"),
+            audit_immutability_control_passed: summary.get("audit_immutability_passed"),
+        })
+    }
+
+    pub async fn forensic_trace(
+        &self,
+        tenant_id: &str,
+        run_id: Uuid,
+    ) -> Result<Option<PipelineForensicTrace>, DatabaseError> {
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
+        let Some(run) = tx
+            .query_opt(
+                "SELECT run_id, submission_id, bundle_id, index_command_hash,
+                        index_write_state, credit_event_id, settlement_batch_id,
+                        payout_state, index_invalidation_state
+                   FROM pipeline_runs
+                  WHERE tenant_id = $1 AND run_id = $2",
+                &[&tenant_id, &run_id],
+            )
+            .await?
+        else {
+            tx.commit().await?;
+            return Ok(None);
+        };
+        let phase_rows = tx
+            .query(
+                "SELECT phase, outcome_id, outcome_schema_id,
+                        outcome_schema_version, decision, evidence, evaluation
+                   FROM phase_outcomes
+                  WHERE tenant_id = $1 AND run_id = $2
+                  ORDER BY CASE phase
+                    WHEN 'admission' THEN 1 WHEN 'review' THEN 2
+                    WHEN 'score' THEN 3 WHEN 'settle' THEN 4 END",
+                &[&tenant_id, &run_id],
+            )
+            .await?;
+        let intervention_rows = tx
+            .query(
+                "SELECT i.evidence_hash
+                   FROM pipeline_policy_interventions i
+                  WHERE i.tenant_id = $1 AND i.bundle_id = $2
+                  ORDER BY i.recorded_at, i.intervention_id",
+                &[&tenant_id, &run.get::<_, String>("bundle_id")],
+            )
+            .await?;
+        tx.commit().await?;
+        let phases = phase_rows
+            .iter()
+            .map(|row| {
+                let version =
+                    u32::try_from(row.get::<_, i32>("outcome_schema_version")).map_err(|_| {
+                        DatabaseError::Serialization(
+                            "outcome schema version is outside the supported range".to_string(),
+                        )
+                    })?;
+                Ok(PipelinePhaseTrace {
+                    phase: row.get("phase"),
+                    outcome_id: row.get("outcome_id"),
+                    outcome_schema_id: row.get("outcome_schema_id"),
+                    outcome_schema_version: version,
+                    decision_hash: json_hash(row.get("decision"))?,
+                    evidence_hash: json_hash(row.get("evidence"))?,
+                    evaluation_hash: json_hash(row.get("evaluation"))?,
+                })
+            })
+            .collect::<Result<Vec<_>, DatabaseError>>()?;
+        let score_outcome_id = phases
+            .iter()
+            .find(|phase| phase.phase == "score")
+            .map(|phase| phase.outcome_id);
+        Ok(Some(PipelineForensicTrace {
+            run_id: run.get("run_id"),
+            submission_id: run.get("submission_id"),
+            bundle_id: run.get("bundle_id"),
+            phases,
+            index_command_hash: run.get("index_command_hash"),
+            index_write_state: run.get("index_write_state"),
+            score_outcome_id,
+            credit_event_id: run.get("credit_event_id"),
+            settlement_batch_id: run.get("settlement_batch_id"),
+            payout_state: run.get("payout_state"),
+            intervention_evidence_hashes: intervention_rows
+                .iter()
+                .map(|row| row.get("evidence_hash"))
+                .collect(),
+            index_invalidation_state: run.get("index_invalidation_state"),
+        }))
+    }
+}
+
+fn json_hash(value: serde_json::Value) -> Result<String, DatabaseError> {
+    serde_json::to_vec(&value)
+        .map(|bytes| sha256_prefixed(&bytes))
+        .map_err(|_| DatabaseError::Serialization("operational record is malformed".to_string()))
 }
 
 fn status_from_row(row: &Row) -> Result<PipelineContributorStatus, DatabaseError> {

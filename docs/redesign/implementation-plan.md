@@ -4,7 +4,7 @@
 > Then add recovery, index and credit operations, and production policies in
 > small steps that reviewers can check.
 
-- **Status:** Phase 6 implemented
+- **Status:** Phase 7 implemented
 - **Date:** 2026-09-14
 - **Architecture:** [proposal.md](./proposal.md)
 - **Final acceptance:** [system-behavioral-contracts.md](./system-behavioral-contracts.md)

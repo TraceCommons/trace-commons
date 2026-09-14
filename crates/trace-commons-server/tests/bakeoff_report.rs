@@ -140,6 +140,8 @@ fn fixture_report() -> bakeoff_report::Report {
         generated_at: "2026-05-13T12:00:00Z".into(),
         corpus_sha256: "sha256:abc".into(),
         manifest_sha256: "sha256:def".into(),
+        corpus_version: "trace_commons.agent_traces_bakeoff_corpus.v1".into(),
+        input_digest: "sha256:input".into(),
         candidates: vec![result("x", 0.9, 0.1, 0.5, 1000.0, 1e-7)],
         winner_id: Some("x".into()),
         decision_rule_version: 3,

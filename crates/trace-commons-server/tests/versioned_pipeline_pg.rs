@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
+use base64::Engine;
 use chrono::{Duration, Utc};
+use ring::signature::{Ed25519KeyPair, KeyPair};
 use secrecy::SecretString;
 use trace_commons_gate_api::pipeline::{Phase, ReasonCode, ReviewDecision, ReviewRecommendation};
 use trace_commons_gate_api::{IndexEntryKey, IndexWriteError, VectorIndexWriter};
@@ -24,6 +26,9 @@ use trace_commons_server::versioned_pipeline::{
     PgPipelineStore, PipelineCrashPoint, PipelineReceiptResult, PipelineRunState, PipelineService,
     StoredPhaseResult,
 };
+use trace_commons_server::versioned_pipeline_compat::{
+    CompatibilityBundleConfig, CompatibilityScoreRuntime,
+};
 use trace_commons_server::versioned_pipeline_credit::RecordingNearAdapter;
 use trace_commons_server::versioned_pipeline_index::{
     IndexFault, IsolatedPipelineIndex, PIPELINE_EMBEDDER_MODEL_ID, PIPELINE_INDEX_ID,
@@ -31,6 +36,12 @@ use trace_commons_server::versioned_pipeline_index::{
 };
 use trace_commons_server::versioned_pipeline_product::{
     PipelineCreditStatus, PipelineProcessingStatus, PipelineProductStore, sha256_prefixed,
+};
+use trace_commons_server::versioned_pipeline_qualification::{
+    BundlePackageSignature, BundlePackageTrustStore, BundleQualificationMetadata, DrillEvidence,
+    DrillStatus, PACKAGE_QUALIFICATION_MISSING_LABEL, PACKAGE_SIGNATURE_ALGORITHM,
+    PipelineQualificationStore, ProductionDependencyProfile, REQUIRED_PHASE_SEVEN_DRILLS,
+    SignedBundlePackage, TrustedBundleKey, evaluate_promotion,
 };
 use uuid::Uuid;
 
@@ -2665,4 +2676,267 @@ async fn phase_six_index_invalidation_retries_and_exposes_terminal_failure() {
         .await
         .unwrap();
     assert_eq!(summary.terminal_index_invalidation_failures, 1);
+}
+
+#[tokio::test]
+async fn phase_seven_signed_package_qualification_gates_activation() {
+    let Some(backend) = backend().await else {
+        return;
+    };
+    let tenant = format!("pipeline-phase7-package-{}", Uuid::new_v4());
+    let runtime = CompatibilityScoreRuntime::reference(IsolatedPipelineIndex::new());
+    let mut config = CompatibilityBundleConfig::local_reference();
+    config.scorer_model_id = "near-ai-qwen-qualified-v1".to_string();
+    config.embedder_model_id = "production-embedder-v1".to_string();
+    config.projection_id = "trace-commons-production-projection-v1".to_string();
+    config.index_id = "trace-commons-production-index-v1".to_string();
+    let package = MinimalPolicyBundle::build_compatibility_candidate(&runtime, config)
+        .unwrap()
+        .package;
+    let random = ring::rand::SystemRandom::new();
+    let pkcs8 = Ed25519KeyPair::generate_pkcs8(&random).unwrap();
+    let key_pair = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
+    let package_hash = package.package_hash().unwrap();
+    let signed = SignedBundlePackage {
+        package,
+        signature: BundlePackageSignature {
+            algorithm: PACKAGE_SIGNATURE_ALGORITHM.to_string(),
+            key_id: "phase7-release-key".to_string(),
+            package_hash: package_hash.clone(),
+            signature_base64url: base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .encode(key_pair.sign(package_hash.as_bytes()).as_ref()),
+        },
+    };
+    let trust = BundlePackageTrustStore::new([TrustedBundleKey {
+        key_id: signed.signature.key_id.clone(),
+        public_key_base64url: base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(key_pair.public_key().as_ref()),
+    }])
+    .unwrap();
+    let metadata = BundleQualificationMetadata {
+        corpus_digest: sha256_prefixed(b"phase7-corpus"),
+        input_digest: sha256_prefixed(b"phase7-input"),
+        configuration_digest: sha256_prefixed(b"phase7-configuration"),
+        code_revision_hash: sha256_prefixed(b"phase7-code"),
+        evidence_hash: sha256_prefixed(b"phase7-evidence"),
+    };
+    let qualification = PipelineQualificationStore::new(backend.clone());
+    qualification
+        .qualify_bundle(
+            &tenant,
+            &signed,
+            &trust,
+            &metadata,
+            &ProductionDependencyProfile::production(),
+        )
+        .await
+        .unwrap();
+    let now = Utc::now();
+    let evidence = REQUIRED_PHASE_SEVEN_DRILLS
+        .iter()
+        .map(|drill_id| DrillEvidence {
+            drill_id: (*drill_id).to_string(),
+            status: DrillStatus::Pass,
+            safe_blockers: Vec::new(),
+            observed_at: now,
+            maximum_age_seconds: 3_600,
+            evidence_hash: sha256_prefixed(drill_id.as_bytes()),
+        })
+        .collect::<Vec<_>>();
+    let blocked_promotion = evaluate_promotion(&evidence[..1], now).unwrap();
+    let production_dependencies = ProductionDependencyProfile::production();
+    assert!(
+        qualification
+            .activate_qualified_bundle(
+                &tenant,
+                &signed.package.bundle_id,
+                &blocked_promotion,
+                &metadata.code_revision_hash,
+                &production_dependencies,
+            )
+            .await
+            .is_err()
+    );
+    let promotion = evaluate_promotion(&evidence, now).unwrap();
+    assert!(
+        qualification
+            .activate_qualified_bundle(
+                &tenant,
+                &signed.package.bundle_id,
+                &promotion,
+                &metadata.code_revision_hash,
+                &ProductionDependencyProfile::local_test(),
+            )
+            .await
+            .is_err()
+    );
+    let different_code_revision = sha256_prefixed(b"different-code-revision");
+    assert!(
+        qualification
+            .activate_qualified_bundle(
+                &tenant,
+                &signed.package.bundle_id,
+                &promotion,
+                &different_code_revision,
+                &production_dependencies,
+            )
+            .await
+            .is_err()
+    );
+    qualification
+        .activate_qualified_bundle(
+            &tenant,
+            &signed.package.bundle_id,
+            &promotion,
+            &metadata.code_revision_hash,
+            &production_dependencies,
+        )
+        .await
+        .unwrap();
+    let packages = PgPipelineStore::new(backend.clone());
+    assert_eq!(
+        packages.active_bundle_id(&tenant).await.unwrap().as_deref(),
+        Some(signed.package.bundle_id.as_str())
+    );
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = client.transaction().await.unwrap();
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&tenant],
+    )
+    .await
+    .unwrap();
+    let replacement_evidence = sha256_prefixed(b"replacement-evidence");
+    let mutation = tx
+        .execute(
+            "UPDATE pipeline_bundle_qualifications
+                SET evidence_hash = $3
+              WHERE tenant_id = $1 AND bundle_id = $2",
+            &[&tenant, &signed.package.bundle_id, &replacement_evidence],
+        )
+        .await;
+    assert!(mutation.is_err());
+    tx.rollback().await.unwrap();
+
+    let unqualified_tenant = format!("pipeline-phase7-unqualified-{}", Uuid::new_v4());
+    packages
+        .register_bundle(&unqualified_tenant, &signed.package)
+        .await
+        .unwrap();
+    let error = qualification
+        .activate_qualified_bundle(
+            &unqualified_tenant,
+            &signed.package.bundle_id,
+            &promotion,
+            &metadata.code_revision_hash,
+            &production_dependencies,
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains(PACKAGE_QUALIFICATION_MISSING_LABEL)
+    );
+}
+
+#[tokio::test]
+async fn phase_seven_index_rebuild_uses_commands_without_creating_credit_or_outcomes() {
+    let Some(backend) = backend().await else {
+        return;
+    };
+    let tenant = format!("pipeline-phase7-rebuild-{}", Uuid::new_v4());
+    let (_root, service) = service(backend, None);
+    activate_operations(
+        &service,
+        &tenant,
+        PIPELINE_FIXED_POSITIVE_MICROCREDITS,
+        true,
+    )
+    .await;
+    let bytes = envelope_bytes(Uuid::new_v4(), "phase7-rebuild").await;
+    let PipelineReceiptResult::Created(created) = service
+        .submit(
+            &tenant,
+            "principal_sha256:rebuild",
+            "phase7-rebuild",
+            &bytes,
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("receipt must create a run");
+    };
+    finish_run(&service, &tenant, created.run_id).await;
+    let before = service
+        .inspect(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let rebuilt = IsolatedPipelineIndex::new();
+    let first = service
+        .rebuild_index_from_authoritative_commands(&tenant, rebuilt.clone())
+        .await
+        .unwrap();
+    assert_eq!(first.command_count, 1);
+    assert!(first.entry_count > 0);
+    assert_eq!(first.unchanged_entry_count, 0);
+    let second = service
+        .rebuild_index_from_authoritative_commands(&tenant, rebuilt)
+        .await
+        .unwrap();
+    assert_eq!(second.command_set_hash, first.command_set_hash);
+    assert_eq!(second.unchanged_entry_count, second.entry_count);
+    let after = service
+        .inspect(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(after.outcomes, before.outcomes);
+    assert_eq!(after.run.credit_event_id, before.run.credit_event_id);
+    assert_eq!(
+        after.run.settlement_batch_id,
+        before.run.settlement_batch_id
+    );
+}
+
+#[tokio::test]
+async fn phase_seven_operational_summary_and_traceability_are_hash_only() {
+    let Some(backend) = backend().await else {
+        return;
+    };
+    let tenant = format!("pipeline-phase7-operations-{}", Uuid::new_v4());
+    let (_root, service) = service(backend.clone(), None);
+    activate_operations(&service, &tenant, 0, true).await;
+    let bytes = envelope_bytes(Uuid::new_v4(), "ghp_PHASE7_SECRET_MUST_NOT_APPEAR").await;
+    let PipelineReceiptResult::Created(created) = service
+        .submit(
+            &tenant,
+            "principal_sha256:operations",
+            "phase7-operations",
+            &bytes,
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("receipt must create a run");
+    };
+    finish_run(&service, &tenant, created.run_id).await;
+    let product = PipelineProductStore::new(backend);
+    let summary = product.operational_summary(&tenant).await.unwrap();
+    assert!(summary.tenant_isolation_control_passed);
+    assert!(summary.audit_immutability_control_passed);
+    let trace = product
+        .forensic_trace(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(trace.phases.len(), 4);
+    assert!(trace.phases.iter().all(|phase| {
+        phase.decision_hash.starts_with("sha256:")
+            && phase.evidence_hash.starts_with("sha256:")
+            && phase.evaluation_hash.starts_with("sha256:")
+    }));
+    let output = serde_json::to_string(&(summary, trace)).unwrap();
+    assert!(!output.contains("ghp_PHASE7_SECRET_MUST_NOT_APPEAR"));
 }

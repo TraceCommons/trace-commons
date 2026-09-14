@@ -67,9 +67,7 @@ withdrawal, and terminal invalidation errors.
 
 ## Current limits
 
-This path is a staging candidate. Production package trust, complete route
-inventory, restore tests, and operational drills are Phase 7 work.
+This path is a staging candidate. Phase 7 adds package trust, the deployment
+inventory, restore tests, and promotion evidence.
 
-The target production configuration cannot use static bearer tokens or HS256
-bridge authentication. Phase 7 proves this restriction against deployable
-components.
+See [phase-7.md](./phase-7.md).

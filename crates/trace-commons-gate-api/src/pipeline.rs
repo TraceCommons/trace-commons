@@ -241,6 +241,35 @@ pub struct BundlePackage {
 }
 
 impl BundlePackage {
+    /// Canonical package bytes used by an external package signature.
+    ///
+    /// The manifest already binds every policy input by content hash. The
+    /// package encoding adds a domain separator, the bundle identifier, the
+    /// canonical manifest, and the sorted artifact hashes. Artifact bytes are
+    /// validated before encoding, so signing this value binds the complete
+    /// package without depending on a JSON serializer.
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>, ContractError> {
+        self.validate()?;
+        let mut bytes = b"trace-commons-bundle-package\0".to_vec();
+        encode_string(&mut bytes, &self.bundle_id)?;
+        let manifest = self.manifest.canonical_bytes()?;
+        let manifest_len =
+            u32::try_from(manifest.len()).map_err(|_| ContractError::ManifestFieldTooLarge)?;
+        bytes.extend_from_slice(&manifest_len.to_be_bytes());
+        bytes.extend_from_slice(&manifest);
+        let artifact_count = u32::try_from(self.artifacts.len())
+            .map_err(|_| ContractError::ManifestFieldTooLarge)?;
+        bytes.extend_from_slice(&artifact_count.to_be_bytes());
+        for hash in self.artifacts.keys() {
+            encode_string(&mut bytes, hash)?;
+        }
+        Ok(bytes)
+    }
+
+    pub fn package_hash(&self) -> Result<String, ContractError> {
+        Ok(sha256_prefixed(&self.canonical_bytes()?))
+    }
+
     pub fn validate(&self) -> Result<(), ContractError> {
         if self.bundle_id != self.manifest.bundle_id()? {
             return Err(ContractError::BundleIdMismatch);
@@ -687,6 +716,9 @@ mod tests {
             artifacts,
         };
         package.validate().unwrap();
+        let canonical = package.canonical_bytes().unwrap();
+        assert!(canonical.starts_with(b"trace-commons-bundle-package\0"));
+        assert_eq!(package.package_hash().unwrap().len(), 71);
 
         let mut altered = package.clone();
         altered.artifacts.values_mut().next().unwrap().push(0);

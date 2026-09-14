@@ -193,6 +193,7 @@ const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "pipeline_index_invalidations",
     "pipeline_export_snapshots",
     "pipeline_export_snapshot_items",
+    "pipeline_bundle_qualifications",
 ];
 
 const TRACE_COMMONS_RLS_POLICY_EXPRESSION_VARIANTS: &[&str] = &[
@@ -360,6 +361,17 @@ impl PgBackend {
 
     pub(crate) fn trace_pool(&self) -> Pool {
         self.pool.clone()
+    }
+
+    pub async fn readiness_probe(&self) -> Result<(), DatabaseError> {
+        self.pool
+            .get()
+            .await
+            .map_err(DatabaseError::from)?
+            .simple_query("SELECT 1")
+            .await
+            .map_err(DatabaseError::from)?;
+        Ok(())
     }
 
     #[doc(hidden)]
@@ -1933,6 +1945,26 @@ impl Database for PgBackend {
                 .execute(
                     "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
                     &[&51_i32, &"versioned_pipeline_product_integration"],
+                )
+                .await?;
+        }
+        let already_applied = client
+            .query_opt(
+                "SELECT 1 FROM _trace_commons_migrations WHERE version = $1",
+                &[&52_i32],
+            )
+            .await?
+            .is_some();
+        if !already_applied {
+            client
+                .batch_execute(include_str!(
+                    "../../../../migrations/V52__versioned_pipeline_qualification.sql"
+                ))
+                .await?;
+            client
+                .execute(
+                    "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
+                    &[&52_i32, &"versioned_pipeline_qualification"],
                 )
                 .await?;
         }
@@ -5244,6 +5276,7 @@ mod tests {
             include_str!("../../../../migrations/V43__trace_withdrawal.sql"),
             include_str!("../../../../migrations/V47__versioned_pipeline.sql"),
             include_str!("../../../../migrations/V48__versioned_pipeline_durability.sql"),
+            include_str!("../../../../migrations/V52__versioned_pipeline_qualification.sql"),
         ];
         let force_rls_migrations = [
             include_str!("../../../../migrations/V6__trace_force_rls.sql"),

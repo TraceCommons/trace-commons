@@ -203,7 +203,7 @@ fn cuda_hardware_guard(
 
 #[cfg(test)]
 mod cuda_guard_tests {
-    use super::{HAS_CUDA, HardwareTier, cuda_hardware_guard};
+    use super::{HAS_CUDA, HardwareTier, bakeoff_input_digest, cuda_hardware_guard};
 
     #[test]
     fn refuses_h100_without_cuda_feature() {
@@ -250,6 +250,16 @@ mod cuda_guard_tests {
         assert_eq!(result, Some("BakeoffCudaHardwareRequiresCudaFeature"));
         #[cfg(feature = "local-gpu-models-cuda")]
         assert_eq!(result, None);
+    }
+
+    #[test]
+    fn versioned_bakeoff_input_digest_binds_each_input() {
+        let first = bakeoff_input_digest(&["corpus-v1", "manifest-a", "rule-v3"]);
+        let replay = bakeoff_input_digest(&["corpus-v1", "manifest-a", "rule-v3"]);
+        let changed = bakeoff_input_digest(&["corpus-v1", "manifest-b", "rule-v3"]);
+        assert_eq!(first, replay);
+        assert_ne!(first, changed);
+        assert_eq!(first.len(), 71);
     }
 }
 
@@ -668,6 +678,23 @@ async fn run_bakeoff(args: BakeOffArgs) -> anyhow::Result<()> {
 
     let device_kind: run_candidate_eval::DeviceKind = args.hardware.into();
     let total = manifest.candidates.len();
+    let corpus_version = "trace_commons.agent_traces_bakeoff_corpus.v1".to_string();
+    let input_digest = bakeoff_input_digest(&[
+        &corpus_sha,
+        &manifest_sha,
+        &format!("decision-rule-v{}", bakeoff_report::DECISION_RULE_VERSION),
+        match args.scorer {
+            ScorerSelection::Perplexity => "perplexity",
+            ScorerSelection::TokenRarity => "token-rarity",
+            ScorerSelection::Both => "both",
+        },
+        match args.scorer_backend {
+            ScorerBackend::Local => "local",
+            ScorerBackend::NearAi => "near-ai",
+        },
+        &args.token_rarity_k.to_string(),
+        &args.determinism_repeat_runs.to_string(),
+    ]);
     tracing::info!(
         candidate_count = total,
         corpus_sha256 = %corpus_sha,
@@ -687,6 +714,8 @@ async fn run_bakeoff(args: BakeOffArgs) -> anyhow::Result<()> {
             generated_at: chrono::Utc::now().to_rfc3339(),
             corpus_sha256: corpus_sha.clone(),
             manifest_sha256: manifest_sha.clone(),
+            corpus_version: corpus_version.clone(),
+            input_digest: input_digest.clone(),
             candidates: results.to_vec(),
             winner_id: None,
             decision_rule_version: bakeoff_report::DECISION_RULE_VERSION,
@@ -992,6 +1021,8 @@ async fn run_bakeoff(args: BakeOffArgs) -> anyhow::Result<()> {
         generated_at: chrono::Utc::now().to_rfc3339(),
         corpus_sha256: corpus_sha,
         manifest_sha256: manifest_sha,
+        corpus_version,
+        input_digest,
         candidates: results,
         winner_id,
         decision_rule_version: bakeoff_report::DECISION_RULE_VERSION,
@@ -1009,6 +1040,17 @@ async fn run_bakeoff(args: BakeOffArgs) -> anyhow::Result<()> {
         "bakeoff_complete"
     );
     Ok(())
+}
+
+fn bakeoff_input_digest(fields: &[&str]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hash = Sha256::new();
+    hash.update(b"trace-commons-bakeoff-input\0");
+    for field in fields {
+        hash.update((field.len() as u64).to_be_bytes());
+        hash.update(field.as_bytes());
+    }
+    format!("sha256:{:x}", hash.finalize())
 }
 
 /// Stable hash of an `anyhow::Error` so warn lines don't carry raw error
