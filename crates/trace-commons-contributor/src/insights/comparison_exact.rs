@@ -615,11 +615,15 @@ mod evidence_digest_tests {
                 if path.is_dir() {
                     stack.push(path);
                 } else if path != manifest_path {
+                    // The manifest lists paths with forward slashes; normalize the
+                    // walked path so the comparison holds on Windows too.
                     present.push(
                         path.strip_prefix(&tree)
                             .unwrap()
-                            .to_string_lossy()
-                            .into_owned(),
+                            .components()
+                            .map(|component| component.as_os_str().to_string_lossy())
+                            .collect::<Vec<_>>()
+                            .join("/"),
                     );
                 }
             }
