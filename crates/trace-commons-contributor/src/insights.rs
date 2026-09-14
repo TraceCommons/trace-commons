@@ -602,11 +602,15 @@ impl LocalInsightStore {
         Ok(index.reports.into_values().collect())
     }
 
+    /// A read. It must not mutate the index, even transiently: `remove` on a
+    /// throwaway copy only happens not to persist today, and would start
+    /// deleting snapshots the moment the lock plumbing saved on drop.
     pub fn explain(&self, id: &str) -> Result<LocalInsight> {
-        let (_lock, mut index) = self.locked()?;
+        let (_lock, index) = self.locked()?;
         index
             .reports
-            .remove(id)
+            .get(id)
+            .cloned()
             .ok_or_else(|| anyhow!("insights_not_found"))
     }
 

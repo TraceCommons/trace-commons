@@ -494,8 +494,14 @@ fn execute_inner(request: LocalInsightsRequest) -> Result<LocalInsightsResponse>
             summary: Box::new(super::summary::read_saved(request.store_dir.as_deref())?),
         },
         LocalInsightsOperation::Copy {} => LocalInsightsResponse::Copy { copy: ui_copy() },
+        // A read must not materialize an absent store. `open` creates the
+        // directory, so `explain` resolves it only when it already exists.
         LocalInsightsOperation::Explain { id } => LocalInsightsResponse::Explain {
-            insight: Box::new(store()?.explain(&id)?),
+            insight: Box::new(
+                existing_store(request.store_dir.as_deref())?
+                    .ok_or_else(|| anyhow!("insights_not_found"))?
+                    .explain(&id)?,
+            ),
         },
         LocalInsightsOperation::Delete { id } => {
             let result = store()?.delete_with_effects(&id)?;
@@ -964,6 +970,35 @@ mod tests {
         std::os::unix::fs::symlink(temp.path().join("absent-target"), &link).unwrap();
         assert!(list_saved(Some(&link)).is_err());
         assert!(!temp.path().join("absent-target").exists());
+    }
+
+    #[test]
+    fn explain_reads_without_creating_a_store_or_rewriting_its_index() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = temp.path().join("insights");
+        let absent = execute(LocalInsightsRequest {
+            store_dir: Some(store.clone()),
+            operation: LocalInsightsOperation::Explain { id: "a".repeat(64) },
+        });
+        assert_eq!(absent.unwrap_err().to_string(), "insights_not_found");
+        assert!(!store.exists());
+        assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 0);
+
+        let file = temp.path().join("session.jsonl");
+        std::fs::write(&file, b"{\"role\":\"meta\",\"source\":\"fixture\"}\n{\"role\":\"user\",\"timestamp\":\"2026-01-01T00:00:00Z\",\"content\":\"body\"}\n").unwrap();
+        let saved = super::super::LocalInsightStore::open(&store)
+            .unwrap()
+            .import(super::SourceFormat::Trajectory, &file)
+            .unwrap();
+        let before = std::fs::read(store.join("index.json")).unwrap();
+        execute(LocalInsightsRequest {
+            store_dir: Some(store.clone()),
+            operation: LocalInsightsOperation::Explain {
+                id: saved.id.clone(),
+            },
+        })
+        .unwrap();
+        assert_eq!(std::fs::read(store.join("index.json")).unwrap(), before);
     }
 
     #[test]

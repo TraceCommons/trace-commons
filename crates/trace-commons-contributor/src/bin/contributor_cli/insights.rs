@@ -275,7 +275,16 @@ pub(super) fn run(args: &InsightsArgs, json: bool) -> Result<()> {
             }
             println!("{}", serde_json::to_string_pretty(&summary)?);
         }
-        InsightsCommand::Explain { id } => render(&store(args)?.explain(id)?, json)?,
+        InsightsCommand::Explain { id } => {
+            let LocalInsightsResponse::Explain { insight } = execute(LocalInsightsRequest {
+                store_dir: args.store_dir.clone(),
+                operation: LocalInsightsOperation::Explain { id: id.clone() },
+            })?
+            else {
+                anyhow::bail!("insights-explain-response-invalid");
+            };
+            render(&insight, json)?;
+        }
         InsightsCommand::Delete { id } => {
             let LocalInsightsResponse::Delete {
                 deleted,
