@@ -177,6 +177,19 @@ public sealed class MissionDraftTests
     }
 
     [Fact]
+    public void CopyRejectsAnUnexpectedExtraKeyInsteadOfSilentlyIgnoringIt()
+    {
+        // The shared vocabulary is checked for exact-set equality, not just
+        // presence of the required keys, so a key added on the Rust side
+        // without a matching decision here fails loudly instead of being
+        // silently dropped.
+        var map = MissionDraftDecoding.RequiredCopyKeys.ToDictionary(key => key, key => key, StringComparer.Ordinal);
+        map["a_new_shared_key_nobody_reviewed"] = "surprise";
+        Assert.Throws<InvalidOperationException>(
+            () => MissionDraftDecoding.Copy(Json(JsonSerializer.Serialize(new { type = "copy", copy = map }))));
+    }
+
+    [Fact]
     public async Task NamedCopyPropertiesPopulateAndNotifyCompiledBindings()
     {
         var service = new Service();

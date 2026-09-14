@@ -160,6 +160,23 @@ pub fn state_copy(value: CardState) -> (&'static str, &'static str) {
     }
 }
 
+/// Copy for the card-selection limit errors raised by `CardStoreError`. These
+/// are read-limit errors on a card request, distinct from episode-creation
+/// limits, and must not be confused with them by native shells.
+pub fn card_snapshot_limit_copy() -> (&'static str, &'static str) {
+    (
+        "card_snapshot_limit",
+        "Select 1024 or fewer saved snapshots for cards.",
+    )
+}
+
+pub fn card_episode_limit_copy() -> (&'static str, &'static str) {
+    (
+        "card_episode_limit",
+        "Select 256 or fewer episode groups for cards.",
+    )
+}
+
 pub fn ui_copy() -> BTreeMap<String, String> {
     let mut copy = BTreeMap::new();
     copy.insert("card_title".into(), "Questions about saved evidence".into());
@@ -260,6 +277,9 @@ pub fn ui_copy() -> BTreeMap<String, String> {
         "card_more_models".into(),
         "Some model labels or declaration references were omitted by limits.".into(),
     );
+    for (key, text) in [card_snapshot_limit_copy(), card_episode_limit_copy()] {
+        copy.insert(key.into(), text.into());
+    }
     copy
 }
 
@@ -334,6 +354,22 @@ fn render_value(row: &CardRow) -> Result<String, CardValidationError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn card_selection_limit_copy_is_specific_to_card_reads_and_not_episode_creation() {
+        let copy = ui_copy();
+        assert_eq!(
+            copy.get("card_snapshot_limit").map(String::as_str),
+            Some("Select 1024 or fewer saved snapshots for cards.")
+        );
+        assert_eq!(
+            copy.get("card_episode_limit").map(String::as_str),
+            Some("Select 256 or fewer episode groups for cards.")
+        );
+        // These must not read like the unrelated episode-creation limits.
+        assert!(!copy["card_snapshot_limit"].contains("64"));
+        assert!(!copy["card_episode_limit"].to_lowercase().contains("delete"));
+    }
 
     #[test]
     fn empty_selection_renders_all_questions_and_rejects_forged_counts() {

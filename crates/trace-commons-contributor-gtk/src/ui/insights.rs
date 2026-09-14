@@ -8,6 +8,7 @@ use std::{
     rc::Rc,
 };
 use trace_commons_contributor::insights::card_presentation::question_copy;
+use trace_commons_contributor::insights::card_store::CardStoreError;
 use trace_commons_contributor::insights::service::{
     self, LocalInsightsOperation as Op, LocalInsightsRequest, LocalInsightsResponse as Response,
 };
@@ -872,7 +873,7 @@ impl InsightsView {
         let (tx, rx) = async_channel::bounded(1);
         let store_dir = self.store_dir.clone();
         std::thread::spawn(move || {
-            let response = std::panic::catch_unwind(|| {
+            let result = match std::panic::catch_unwind(|| {
                 service::execute(LocalInsightsRequest {
                     store_dir,
                     operation: Op::QuestionCards {
@@ -881,14 +882,16 @@ impl InsightsView {
                         episode_ids,
                     },
                 })
-            })
-            .ok()
-            .and_then(Result::ok);
-            let _ = tx.send_blocking(response);
+            }) {
+                Ok(Ok(response)) => Ok(response),
+                Ok(Err(error)) => Err(card_error_copy_key(&error)),
+                Err(_) => Err("summary_unavailable"),
+            };
+            let _ = tx.send_blocking(result);
         });
         let weak = Rc::downgrade(self);
         gtk::glib::spawn_future_local(async move {
-            let response = rx.recv().await.ok().flatten();
+            let response = rx.recv().await.ok();
             let Some(view) = weak.upgrade() else { return };
             if !view.flight.borrow_mut().finish()
                 || !accept_card_completion(
@@ -901,10 +904,15 @@ impl InsightsView {
                 return;
             }
             match response {
-                Some(Response::QuestionCards { result, text }) => {
+                Some(Ok(Response::QuestionCards { result, text })) => {
                     view.present_cards(&result, &text);
                     view.card_state.set(CardPanelState::Presented);
                     view.card_status.set_text(copy("refreshed"));
+                }
+                Some(Err(key)) => {
+                    view.card_state.set(CardPanelState::Failed);
+                    view.card_result.set_text("");
+                    view.card_status.set_text(copy(key));
                 }
                 _ => {
                     view.card_state.set(CardPanelState::Failed);
@@ -1898,6 +1906,16 @@ fn episode_error_copy_key(error: &anyhow::Error) -> &'static str {
         return "episode_response_too_large";
     }
     "episode_detail_unavailable"
+}
+fn card_error_copy_key(error: &anyhow::Error) -> &'static str {
+    if let Some(error) = error.downcast_ref::<CardStoreError>() {
+        return match error {
+            CardStoreError::SnapshotLimit => "card_snapshot_limit",
+            CardStoreError::EpisodeLimit => "card_episode_limit",
+            _ => "summary_unavailable",
+        };
+    }
+    "summary_unavailable"
 }
 fn episode_failure_status(committed: Option<&str>, error: &str) -> String {
     committed
