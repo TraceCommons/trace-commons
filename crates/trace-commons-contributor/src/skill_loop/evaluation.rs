@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{Semaphore, watch};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
 use tokio::task::JoinSet;
 use trace_commons_protocol::mission_evaluation::{
     MISSION_EVALUATION_MAX_CONCURRENCY, MISSION_EVALUATION_OUTPUT_TOKEN_LIMIT,
@@ -438,6 +438,7 @@ async fn run_evaluation(
             if cancellation_requested(&cancellation) {
                 return Err(abort_drain_error(
                     &mut jobs,
+                    &semaphore,
                     client.model(),
                     observer,
                     &mut trials,
@@ -452,24 +453,26 @@ async fn run_evaluation(
             let job_cancellation = cancellation.clone();
             jobs.spawn(async move {
                 if cancellation_requested(&job_cancellation) {
-                    return Err(SkillEvaluationError::Cancelled);
+                    return (None, Err(SkillEvaluationError::Cancelled));
                 }
-                let _held = permit
-                    .acquire_owned()
-                    .await
-                    .map_err(|_| SkillEvaluationError::Internal)?;
+                let Ok(held) = permit.acquire_owned().await else {
+                    // A closed gate means the run is already dead.
+                    return (None, Err(SkillEvaluationError::Internal));
+                };
                 if cancellation_requested(&job_cancellation) {
-                    return Err(SkillEvaluationError::Cancelled);
+                    return (Some(held), Err(SkillEvaluationError::Cancelled));
                 }
-                let completion = client
+                let outcome = client
                     .complete_applicability(fixture, arm, &skill_name, &skill_description)
-                    .await?;
-                Ok::<_, SkillEvaluationError>(score_applicability(fixture, arm, completion))
+                    .await
+                    .map(|completion| score_applicability(fixture, arm, completion));
+                (Some(held), outcome)
             });
         }
     }
     collect_job_results(
         &mut jobs,
+        &semaphore,
         client.model(),
         observer,
         &mut cancellation,
@@ -483,6 +486,7 @@ async fn run_evaluation(
             if cancellation_requested(&cancellation) {
                 return Err(abort_drain_error(
                     &mut jobs,
+                    &semaphore,
                     client.model(),
                     observer,
                     &mut trials,
@@ -497,25 +501,27 @@ async fn run_evaluation(
             let job_cancellation = cancellation.clone();
             jobs.spawn(async move {
                 if cancellation_requested(&job_cancellation) {
-                    return Err(SkillEvaluationError::Cancelled);
+                    return (None, Err(SkillEvaluationError::Cancelled));
                 }
-                let _held = permit
-                    .acquire_owned()
-                    .await
-                    .map_err(|_| SkillEvaluationError::Internal)?;
+                let Ok(held) = permit.acquire_owned().await else {
+                    // A closed gate means the run is already dead.
+                    return (None, Err(SkillEvaluationError::Internal));
+                };
                 if cancellation_requested(&job_cancellation) {
-                    return Err(SkillEvaluationError::Cancelled);
+                    return (Some(held), Err(SkillEvaluationError::Cancelled));
                 }
-                let completion = client
+                let outcome = client
                     .complete(fixture, arm, &skill_name, &skill_md)
-                    .await?;
-                Ok::<_, SkillEvaluationError>(score_completion(fixture, arm, completion))
+                    .await
+                    .map(|completion| score_completion(fixture, arm, completion));
+                (Some(held), outcome)
             });
         }
     }
 
     collect_job_results(
         &mut jobs,
+        &semaphore,
         client.model(),
         observer,
         &mut cancellation,
@@ -628,8 +634,23 @@ async fn run_evaluation(
     Ok(report)
 }
 
+/// One finished job: the concurrency permit it held, kept alive so the
+/// collector -- not the job -- decides when the next request may start, plus
+/// the trial or the refusal.
+///
+/// Returning the permit is what makes the abort guarantee structural. When a
+/// job dropped its own permit on return, a sibling parked on `acquire_owned()`
+/// was woken and issued one more paid request before the collector had even
+/// looked at the result that killed the run. Handing the permit back means no
+/// slot is recycled until the collector has accepted the result.
+type JobOutcome = (
+    Option<OwnedSemaphorePermit>,
+    Result<SkillTrialResult, SkillEvaluationError>,
+);
+
 async fn collect_job_results(
-    jobs: &mut JoinSet<Result<SkillTrialResult, SkillEvaluationError>>,
+    jobs: &mut JoinSet<JobOutcome>,
+    semaphore: &Semaphore,
     expected_model: &str,
     observer: &dyn SkillEvaluationObserver,
     cancellation: &mut watch::Receiver<bool>,
@@ -643,6 +664,7 @@ async fn collect_job_results(
                 return Err(
                     abort_drain_error(
                         jobs,
+                        semaphore,
                         expected_model,
                         observer,
                         trials,
@@ -655,18 +677,22 @@ async fn collect_job_results(
         let Some(joined) = joined else {
             break;
         };
-        let trial = match joined {
-            Ok(Ok(trial)) => trial,
-            Ok(Err(error)) => {
-                return Err(abort_drain_error(jobs, expected_model, observer, trials, error).await);
-            }
-            Err(_) => {
+        // Held for the rest of this iteration. Dropping it any earlier is what
+        // let a queued sibling issue a request after the run was already dead.
+        let (_permit, outcome) = match joined {
+            Ok(outcome) => outcome,
+            Err(_) => (None, Err(SkillEvaluationError::Internal)),
+        };
+        let trial = match outcome {
+            Ok(trial) => trial,
+            Err(error) => {
                 return Err(abort_drain_error(
                     jobs,
+                    semaphore,
                     expected_model,
                     observer,
                     trials,
-                    SkillEvaluationError::Internal,
+                    error,
                 )
                 .await);
             }
@@ -674,6 +700,7 @@ async fn collect_job_results(
         if trial.served_model != expected_model {
             return Err(abort_drain_error(
                 jobs,
+                semaphore,
                 expected_model,
                 observer,
                 trials,
@@ -684,6 +711,7 @@ async fn collect_job_results(
         if observer.trial_completed(&trial).await.is_err() {
             return Err(abort_drain_error(
                 jobs,
+                semaphore,
                 expected_model,
                 observer,
                 trials,
@@ -697,12 +725,20 @@ async fn collect_job_results(
 }
 
 async fn abort_drain_error(
-    jobs: &mut JoinSet<Result<SkillTrialResult, SkillEvaluationError>>,
+    jobs: &mut JoinSet<JobOutcome>,
+    semaphore: &Semaphore,
     expected_model: &str,
     observer: &dyn SkillEvaluationObserver,
     trials: &mut Vec<SkillTrialResult>,
     primary: SkillEvaluationError,
 ) -> SkillEvaluationError {
+    // Close the gate before aborting. `abort_all` only queues cancellation, and
+    // the drain below awaits, which hands the scheduler a chance to wake a
+    // sibling parked on `acquire_owned()` and let it issue one more paid
+    // request. A closed semaphore makes every pending and future acquisition
+    // fail, so no request can start once the run is known dead -- the
+    // structural equivalent of the in-job cancellation check.
+    semaphore.close();
     jobs.abort_all();
     // Durable evidence loss outranks the provider or cancellation failure that
     // initiated the drain, so callers never mistake an incomplete journal for
@@ -715,14 +751,14 @@ async fn abort_drain_error(
 }
 
 async fn drain_job_results(
-    jobs: &mut JoinSet<Result<SkillTrialResult, SkillEvaluationError>>,
+    jobs: &mut JoinSet<JobOutcome>,
     expected_model: &str,
     observer: &dyn SkillEvaluationObserver,
     trials: &mut Vec<SkillTrialResult>,
 ) -> bool {
     let mut persistence_failed = false;
     while let Some(joined) = jobs.join_next().await {
-        let Ok(Ok(trial)) = joined else {
+        let Ok((_permit, Ok(trial))) = joined else {
             continue;
         };
         if trial.served_model != expected_model {

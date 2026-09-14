@@ -26,8 +26,8 @@ use crate::skill_loop::evaluation::mission::{
 };
 use crate::skill_loop::evaluation::transport::NearAiEvaluationClient;
 use crate::skill_loop::evaluation::{
-    EvaluationArm, EvaluationUsage, SkillEvaluationError, SkillEvaluationReport, SkillTrialResult,
-    abort_drain_error,
+    EVALUATION_CONCURRENCY, EvaluationArm, EvaluationUsage, SkillEvaluationError,
+    SkillEvaluationReport, SkillTrialResult, abort_drain_error,
 };
 use crate::skill_loop::sha256;
 
@@ -383,15 +383,17 @@ async fn drained_persistence_failure_overrides_a_distinct_provider_error() {
     let (completed, completion_observed) = tokio::sync::oneshot::channel();
     jobs.spawn(async move {
         let _ = completed.send(());
-        Ok::<_, SkillEvaluationError>(trial)
+        (None, Ok::<SkillTrialResult, SkillEvaluationError>(trial))
     });
     completion_observed
         .await
         .expect("controlled job reached its ready return");
 
     let mut trials = Vec::new();
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(EVALUATION_CONCURRENCY));
     let result = abort_drain_error(
         &mut jobs,
+        &semaphore,
         MODEL,
         &observer,
         &mut trials,
@@ -401,6 +403,13 @@ async fn drained_persistence_failure_overrides_a_distinct_provider_error() {
 
     assert_eq!(result, SkillEvaluationError::PersistenceUnavailable);
     assert!(trials.is_empty());
+    // The gate closes before the abort, so nothing parked on a permit can slip
+    // one more paid request in while the drain awaits.
+    assert!(semaphore.is_closed());
+    assert!(
+        semaphore.clone().acquire_owned().await.is_err(),
+        "no queued sibling can take a permit once the run is aborted"
+    );
 }
 
 #[tokio::test]
