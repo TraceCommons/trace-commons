@@ -7,6 +7,8 @@ mod boundaries;
 mod deadlines;
 #[path = "mission_rewards_pg/deployment.rs"]
 mod deployment;
+#[path = "mission_rewards_pg/grants.rs"]
+mod grants;
 #[path = "mission_rewards_pg/fixture.rs"]
 mod fixture;
 #[path = "mission_rewards_pg/operator_cli.rs"]
@@ -768,19 +770,30 @@ async fn reward_capacity_races_and_expiry_are_consistent() {
             .await,
         RewardError::EvidenceDuplicate,
     );
-    assert_refusal(
-        issuer_db
-            .reward_reserve(
-                tenant,
-                terminal,
-                Uuid::new_v4(),
-                &digest("work-replay-participant"),
-                &digest("submitted-hold-work"),
-                &digest("work-replay-consent"),
-            )
-            .await,
-        RewardError::WorkDuplicate,
-    );
+    // A rejected reservation releases its work digest as well as its capacity,
+    // so the same work can be reserved again -- in a program that still has a
+    // slot, since `terminal` is a one-slot program already holding
+    // `after_rejection`.
+    let replay_program = create_program(
+        issuer_db,
+        tenant,
+        RewardActivityKind::MissionCompletion,
+        1,
+        1,
+        1,
+    )
+    .await;
+    issuer_db
+        .reward_reserve(
+            tenant,
+            replay_program,
+            Uuid::new_v4(),
+            &digest("work-replay-participant"),
+            &digest("submitted-hold-work"),
+            &digest("work-replay-consent"),
+        )
+        .await
+        .expect("rejection releases the work digest");
 
     issuer_db
         .reward_invalidate(tenant, &submitted_evidence, Uuid::new_v4())

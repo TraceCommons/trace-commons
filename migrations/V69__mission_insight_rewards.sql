@@ -71,7 +71,9 @@ CREATE TABLE trace_reward_reservations (
     terminal_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT pg_catalog.clock_timestamp(),
     PRIMARY KEY (tenant_id, reservation_id),
-    UNIQUE (tenant_id, work_hash),
+    -- The work digest is held only by a live or awarded reservation; see the
+    -- partial unique index below. A cancelled, rejected or invalidated
+    -- reservation releases it, so mistyped work can be reserved again.
     UNIQUE (tenant_id, evidence_hash),
     FOREIGN KEY (tenant_id, program_id)
         REFERENCES trace_reward_programs(tenant_id, program_id) ON DELETE RESTRICT,
@@ -143,6 +145,13 @@ CREATE TABLE trace_reward_invalidations (
         REFERENCES trace_reward_decisions(tenant_id, decision_id) ON DELETE RESTRICT
 );
 
+-- Exactly the state set trace_reward_reserve refuses a duplicate work digest
+-- against. Keep the two in step: a state outside this set must be reservable
+-- again, and a state inside it must be refused by the function before the
+-- index can raise a unique violation.
+CREATE UNIQUE INDEX trace_reward_reservations_live_work_idx
+    ON trace_reward_reservations(tenant_id, work_hash)
+    WHERE state IN ('reserved', 'submitted', 'awarded');
 CREATE INDEX trace_reward_reservations_program_state_idx
     ON trace_reward_reservations(tenant_id, program_id, state, expires_at);
 CREATE INDEX trace_reward_reservations_participant_idx
@@ -255,7 +264,8 @@ $$;
 CREATE FUNCTION trace_reward_terms_valid(p_terms JSONB)
 RETURNS BOOLEAN
 LANGUAGE plpgsql
-IMMUTABLE
+-- STABLE, not IMMUTABLE: the closes_at cast reads the session TimeZone.
+STABLE
 SET search_path = pg_catalog
 AS $$
 DECLARE
@@ -291,6 +301,19 @@ BEGIN
         OR pg_catalog.jsonb_typeof(p_terms->'closes_at') <> 'string' THEN
         RETURN FALSE;
     END IF;
+
+    -- jsonb preserves the written form of a number, so 1 and 1.0 are distinct
+    -- terms objects with distinct terms_hash values and a replay of one against
+    -- the other conflicts. Admit only the integer spelling, so a given set of
+    -- terms has exactly one digest.
+    FOREACH v_key IN ARRAY ARRAY[
+        'schema_version', 'award_units', 'capacity_units',
+        'participant_cap_units', 'reservation_ttl_seconds'
+    ] LOOP
+        IF p_terms->>v_key !~ '^(0|[1-9][0-9]{0,18})$' THEN
+            RETURN FALSE;
+        END IF;
+    END LOOP;
 
     FOREACH v_key IN ARRAY ARRAY[
         'definition_hash', 'rubric_hash', 'evaluator_policy_hash',
@@ -486,8 +509,12 @@ BEGIN
         );
     END IF;
 
+    -- Mirrors trace_reward_reservations_live_work_idx. A cancelled, rejected or
+    -- invalidated reservation no longer holds the work digest; an unexpired or
+    -- awarded one still does.
     IF EXISTS(SELECT 1 FROM public.trace_reward_reservations
-        WHERE tenant_id = p_tenant AND work_hash = p_work_hash) THEN
+        WHERE tenant_id = p_tenant AND work_hash = p_work_hash
+          AND state IN ('reserved', 'submitted', 'awarded')) THEN
         RAISE EXCEPTION USING MESSAGE = 'reward_work_duplicate';
     END IF;
     SELECT * INTO v_program FROM public.trace_reward_programs
