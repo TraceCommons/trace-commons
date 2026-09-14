@@ -5,6 +5,8 @@
 mod admission;
 #[path = "trace_commons_ingest_internal/public_run.rs"]
 mod public_run;
+#[path = "trace_commons_ingest_internal/rewards.rs"]
+mod rewards;
 #[path = "trace_commons_ingest_internal/token_bundles.rs"]
 mod token_bundles;
 
@@ -7474,6 +7476,7 @@ fn community_routes() -> Router<Arc<AppState>> {
 /// response. `from_fn_with_state` binds the shared `AppState` the middleware needs
 /// to resolve + rotate.
 fn authenticated_account_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
+    let reward_routes = rewards::account_routes(state.clone());
     Router::new()
         .route("/v1/account/traces", get(account_traces_list_handler))
         .route(
@@ -7563,6 +7566,7 @@ fn authenticated_account_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
             state,
             account_auth_middleware,
         ))
+        .merge(reward_routes)
 }
 
 fn community_cors_layer() -> CorsLayer {
@@ -7595,6 +7599,12 @@ fn community_cors_origins() -> Vec<HeaderValue> {
 
 fn app(state: Arc<AppState>) -> Router {
     Router::new()
+        .route("/v1/reward-offers/{program_id}", get(rewards::offer))
+        .route("/v1/missions", get(rewards::mission_catalog))
+        .route(
+            "/v1/missions/{mission_id}",
+            get(rewards::mission_publication),
+        )
         .route("/v1/token-bundles/query", post(token_bundles::query))
         .route(
             "/v1/research/token-bundles/query",

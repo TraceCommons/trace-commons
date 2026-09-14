@@ -7,8 +7,14 @@ use std::collections::HashSet;
 
 #[path = "postgres_account_onboarding.rs"]
 mod account_onboarding;
+#[path = "postgres_mission_catalog.rs"]
+mod mission_catalog;
 #[path = "postgres_public_run.rs"]
 mod public_run;
+#[path = "postgres_reward_participant.rs"]
+mod reward_participant;
+#[cfg(test)]
+mod reward_upgrade_tests;
 
 use async_trait::async_trait;
 use deadpool_postgres::Pool;
@@ -209,6 +215,18 @@ pub const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "trace_account_merge_proposals",
     "trace_community_withdrawal_evictions",
     "trace_public_runs",
+    "trace_reward_operators",
+    "trace_reward_programs",
+    "trace_reward_reservations",
+    "trace_reward_decisions",
+    "trace_reward_awards",
+    "trace_reward_invalidations",
+    "trace_reward_offers",
+    "trace_reward_offer_controls",
+    "trace_reward_participant_logins",
+    "trace_reward_principals",
+    "trace_reward_principal_accounts",
+    "trace_reward_participant_reservations",
 ];
 
 const TRACE_COMMONS_RLS_POLICY_EXPRESSION_VARIANTS: &[&str] = &[
@@ -1292,10 +1310,93 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "token_rescrub_revocation",
         include_str!("../../../../migrations/V68__token_rescrub_revocation.sql"),
     ),
+    (
+        69,
+        "mission_insight_rewards",
+        include_str!("../../../../migrations/V69__mission_insight_rewards.sql"),
+    ),
+    (
+        70,
+        "reward_history_pagination",
+        include_str!("../../../../migrations/V70__reward_history_pagination.sql"),
+    ),
+    (
+        71,
+        "reward_participant_access",
+        include_str!("../../../../migrations/V71__reward_participant_access.sql"),
+    ),
+    (
+        72,
+        "published_mission_packages",
+        include_str!("../../../../migrations/V72__published_mission_packages.sql"),
+    ),
 ];
 
 #[async_trait]
 impl Database for PgBackend {
+    async fn get_reward_offer(
+        &self,
+        program: Uuid,
+    ) -> Result<crate::reward_participant::RewardOffer, crate::mission_rewards::RewardError> {
+        self.participant_reward_offer(program).await
+    }
+
+    async fn get_mission_publication(
+        &self,
+        mission: Uuid,
+    ) -> Result<
+        trace_commons_protocol::mission_catalog::MissionPublication,
+        crate::mission_rewards::RewardError,
+    > {
+        self.public_mission_get(mission).await
+    }
+
+    async fn list_mission_catalog(
+        &self,
+        query: &trace_commons_protocol::mission_catalog::MissionCatalogQuery,
+    ) -> Result<
+        trace_commons_protocol::mission_catalog::MissionCatalogPage,
+        crate::mission_rewards::RewardError,
+    > {
+        self.public_mission_list(query).await
+    }
+
+    async fn reserve_reward_offer(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        program: Uuid,
+        request: &crate::reward_participant::RewardReservationRequest,
+    ) -> Result<crate::reward_participant::RewardReservation, crate::mission_rewards::RewardError>
+    {
+        self.participant_reward_reserve(tenant, account, program, request)
+            .await
+    }
+
+    async fn get_reward_reservation(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        reservation: Uuid,
+    ) -> Result<crate::reward_participant::RewardReservation, crate::mission_rewards::RewardError>
+    {
+        self.participant_reward_reservation(tenant, account, reservation)
+            .await
+    }
+
+    async fn get_reward_history(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        query: &crate::reward_participant::RewardHistoryQuery,
+    ) -> Result<
+        crate::reward_participant::RewardParticipantHistory,
+        crate::mission_rewards::RewardError,
+    > {
+        self.participant_reward_history(tenant, account, query)
+            .await
+    }
+
     async fn admission_runtime_ready(&self) -> Result<bool, DatabaseError> {
         self.check_admission_runtime().await
     }
@@ -4314,6 +4415,15 @@ impl Database for PgBackend {
         let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
 
+        // Reward reservations use the same tenant lock. Acquire it before any
+        // proposal/account row locks so a merge cannot race identity allocation.
+        tx.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended($1, 691))",
+            &[&tenant_id],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+
         // Load + consume the proposal atomically. The conditional UPDATE
         // re-validates OWNERSHIP (surviving_account_id = A, the auth-derived
         // caller), single-use (consumed_at IS NULL), and freshness (expires_at >
@@ -4367,6 +4477,24 @@ impl Database for PgBackend {
         if closed_at.is_some() {
             return Ok(None);
         }
+
+        // The reward hook re-reads the proposal and admits it only when its
+        // `xmin` is this transaction's id, which is how it knows the consuming
+        // UPDATE above is its own. That holds only while the consume runs in
+        // the transaction proper: wrapping it in a SAVEPOINT, or moving it
+        // inside a plpgsql EXCEPTION block, stamps `xmin` with a
+        // subtransaction id and the hook refuses every merge.
+        tx.execute(
+            "SELECT public.trace_reward_accounts_merge($1, $2, $3, $4)",
+            &[
+                &tenant_id,
+                &surviving_account_id,
+                &absorbed_account_id,
+                &proposal_id,
+            ],
+        )
+        .await
+        .map_err(reward_merge_refusal)?;
 
         // Move B's ACTIVE principal links onto A. PK-column UPDATE; collision-free
         // because (tenant_id, principal_ref) is UNIQUE and a principal has at most
@@ -5059,6 +5187,25 @@ impl Database for PgBackend {
             })
             .collect())
     }
+}
+
+/// The reward hook refuses a merge that would put one payout identity over a
+/// program's participant cap, or leave it holding two reservations in one work
+/// namespace -- exactly the states `trace_reward_participant_reserve` refuses.
+/// Surface those two as the named control so the refusal is legible; every
+/// other driver error stays opaque.
+fn reward_merge_refusal(error: tokio_postgres::Error) -> DatabaseError {
+    const NAMED: [&str; 2] = [
+        "reward_merge_participant_cap",
+        "reward_merge_work_duplicate",
+    ];
+    if let Some(db) = error.as_db_error()
+        && db.code().code() == "P0001"
+        && let Some(label) = NAMED.iter().find(|label| **label == db.message())
+    {
+        return DatabaseError::Constraint((*label).to_string());
+    }
+    DatabaseError::Postgres(error)
 }
 
 fn device_key_record_from_row(row: Row) -> crate::db::DeviceKeyRecord {
@@ -6377,6 +6524,7 @@ mod tests {
     #[test]
     fn trace_commons_rls_registry_matches_migration_policy_coverage() {
         let central_policy_migrations = [
+            include_str!("../../../../migrations/V71__reward_participant_access.sql"),
             include_str!("../../../../migrations/V18__trace_central_rls_tenant_predicate.sql"),
             include_str!("../../../../migrations/V21__trace_near_credit_account_outbox.sql"),
             include_str!("../../../../migrations/V26__trace_contributor_profiles.sql"),
@@ -6391,8 +6539,10 @@ mod tests {
             include_str!("../../../../migrations/V58__near_account_provisioning.sql"),
             include_str!("../../../../migrations/V65__token_distribution_bundles.sql"),
             include_str!("../../../../migrations/V64__trace_public_runs.sql"),
+            include_str!("../../../../migrations/V69__mission_insight_rewards.sql"),
         ];
         let force_rls_migrations = [
+            include_str!("../../../../migrations/V71__reward_participant_access.sql"),
             include_str!("../../../../migrations/V6__trace_force_rls.sql"),
             include_str!("../../../../migrations/V11__trace_ranking_worker_runs.sql"),
             include_str!("../../../../migrations/V14__trace_ranking_preference_labels.sql"),
@@ -6411,6 +6561,7 @@ mod tests {
             include_str!("../../../../migrations/V58__near_account_provisioning.sql"),
             include_str!("../../../../migrations/V65__token_distribution_bundles.sql"),
             include_str!("../../../../migrations/V64__trace_public_runs.sql"),
+            include_str!("../../../../migrations/V69__mission_insight_rewards.sql"),
         ];
 
         for table in TRACE_COMMONS_RLS_TABLES {
