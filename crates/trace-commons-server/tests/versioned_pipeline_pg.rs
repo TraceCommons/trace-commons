@@ -2,11 +2,11 @@ use std::sync::Arc;
 
 use chrono::{Duration, Utc};
 use secrecy::SecretString;
-use trace_commons_gate_api::pipeline::{Phase, ReviewDecision, ReviewInput};
+use trace_commons_gate_api::pipeline::{Phase, ReasonCode, ReviewDecision, ReviewRecommendation};
 use trace_commons_gate_api::{IndexEntryKey, IndexWriteError, VectorIndexWriter};
 use trace_commons_protocol::trace_contribution::{
     DeterministicTraceRedactor, RawTraceCaptureTurn, RawTraceContribution,
-    RecordedTraceContributionOptions, TraceRedactor,
+    RecordedTraceContributionOptions, ResidualPiiRisk, TraceRedactor,
 };
 use trace_commons_server::config::DatabaseConfig;
 use trace_commons_server::db::{Database, postgres::PgBackend};
@@ -52,6 +52,14 @@ async fn backend() -> Option<Arc<PgBackend>> {
 }
 
 async fn envelope_bytes(submission_id: Uuid, secret: &str) -> Vec<u8> {
+    envelope_bytes_with_risk(submission_id, secret, ResidualPiiRisk::Low).await
+}
+
+async fn envelope_bytes_with_risk(
+    submission_id: Uuid,
+    secret: &str,
+    privacy_risk: ResidualPiiRisk,
+) -> Vec<u8> {
     let now = Utc::now();
     let raw = RawTraceContribution::from_capture_turns(
         &[RawTraceCaptureTurn {
@@ -73,6 +81,7 @@ async fn envelope_bytes(submission_id: Uuid, secret: &str) -> Vec<u8> {
         .await
         .unwrap();
     envelope.submission_id = submission_id;
+    envelope.privacy.residual_pii_risk = privacy_risk;
     serde_json::to_vec(&envelope).unwrap()
 }
 
@@ -396,7 +405,7 @@ async fn concurrent_receipts_and_workers_commit_one_logical_result() {
     };
     let tenant = format!("pipeline-concurrent-{}", Uuid::new_v4());
     let bytes = envelope_bytes(Uuid::new_v4(), "fixture-secret-not-present").await;
-    let (_root, service) = service(backend, None);
+    let (_root, service) = service(backend.clone(), None);
     let service = Arc::new(service);
     let (left, right) = tokio::join!(
         service.submit(&tenant, "principal_sha256:test", "concurrent-key", &bytes),
@@ -464,41 +473,28 @@ async fn stale_lease_cannot_commit_and_retry_exhaustion_is_visible() {
         .unwrap()
         .unwrap();
     assert_ne!(stale.lease_token, current.lease_token);
-    let bundle = MinimalPolicyBundle::build().unwrap();
-    let review = bundle
-        .review
-        .execute(&ReviewInput {
-            run_id: current.run_id,
-            trace_id: current.trace_id,
-            source_content_hash: current.request_content_hash.clone(),
-            source_artifact: bytes,
+    let outcome = StoredPhaseResult {
+        phase: Phase::Review,
+        decision: serde_json::to_value(ReviewDecision::Rejected {
+            reason: ReasonCode::new("lease_test_rejection").unwrap(),
         })
-        .await
-        .unwrap();
-    let ReviewDecision::Approved {
-        registry_revision_id,
-    } = review.decision
-    else {
-        panic!("minimal review must approve");
+        .unwrap(),
+        evidence: serde_json::json!({
+            "source_content_hash": current.request_content_hash,
+            "result_content_hash": current.request_content_hash,
+            "content_changed": false,
+        }),
+        evaluation: serde_json::json!({
+            "rule_id": "lease_test_rejection_v1",
+        }),
     };
-    let outcome = StoredPhaseResult::from_result(Phase::Review, &review).unwrap();
     store
-        .commit_phase(
-            &current,
-            outcome.clone(),
-            Some(Phase::Score),
-            Some(registry_revision_id),
-        )
+        .commit_phase(&current, outcome.clone(), None, None)
         .await
         .unwrap();
     assert!(
         store
-            .commit_phase(
-                &stale,
-                outcome,
-                Some(Phase::Score),
-                Some(registry_revision_id)
-            )
+            .commit_phase(&stale, outcome, None, None)
             .await
             .is_err()
     );
@@ -1644,4 +1640,600 @@ async fn near_payout_states_do_not_change_settle_outcome() {
     );
     assert_eq!(replayed.run.payout_state, "confirmed");
     assert_eq!(near.requests().len(), 1);
+}
+
+#[tokio::test]
+async fn phase_four_admission_review_and_quarantine_are_policy_driven() {
+    let Some(backend) = backend().await else {
+        return;
+    };
+    let tenant = format!("pipeline-phase4-review-{}", Uuid::new_v4());
+    let principal =
+        "principal_sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let reviewer_a =
+        "reviewer_sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let reviewer_b =
+        "reviewer_sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+    let (_root, service) = service(backend.clone(), None);
+
+    let medium =
+        envelope_bytes_with_risk(Uuid::new_v4(), "medium-risk", ResidualPiiRisk::Medium).await;
+    let PipelineReceiptResult::Created(quarantined) = service
+        .submit(&tenant, principal, "medium", &medium)
+        .await
+        .unwrap()
+    else {
+        panic!("medium risk must create a quarantined run");
+    };
+    assert_eq!(quarantined.admission_decision, "quarantine");
+    assert_eq!(quarantined.next_phase, Some(Phase::Review));
+
+    let blocked = service
+        .process_run(&tenant, quarantined.run_id, None)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        blocked.last_error_label.as_deref(),
+        Some("review_assessment_required")
+    );
+    assert_eq!(blocked.attempt_count, quarantined.attempt_count);
+
+    let claim = service
+        .claim_review(
+            &tenant,
+            quarantined.run_id,
+            reviewer_a,
+            Duration::minutes(5),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        service
+            .claim_review(
+                &tenant,
+                quarantined.run_id,
+                reviewer_b,
+                Duration::minutes(5),
+            )
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        service
+            .record_review_assessment(
+                &claim,
+                ReviewRecommendation::Approve,
+                ReasonCode::new("privacy_resolved").unwrap(),
+                Vec::new(),
+            )
+            .await
+            .is_err()
+    );
+    service
+        .record_review_assessment(
+            &claim,
+            ReviewRecommendation::Approve,
+            ReasonCode::new("privacy_resolved").unwrap(),
+            vec![ReasonCode::new("privacy_review_required").unwrap()],
+        )
+        .await
+        .unwrap();
+    finish_run(&service, &tenant, quarantined.run_id).await;
+    let approved = service
+        .inspect(&tenant, quarantined.run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(approved.outcomes.len(), 4);
+    assert!(approved.run.transformed_object_ref_id.is_some());
+    let review = approved
+        .outcomes
+        .iter()
+        .find(|outcome| outcome.phase == Phase::Review)
+        .unwrap();
+    assert!(review.evidence["human_assessment_hash"].is_string());
+    assert!(review.evidence["transformed_artifact_hash"].is_string());
+
+    let rejected_bytes =
+        envelope_bytes_with_risk(Uuid::new_v4(), "review-reject", ResidualPiiRisk::Medium).await;
+    let PipelineReceiptResult::Created(rejected) = service
+        .submit(&tenant, principal, "review-reject", &rejected_bytes)
+        .await
+        .unwrap()
+    else {
+        panic!("review rejection fixture must create a run");
+    };
+    let claim = service
+        .claim_review(&tenant, rejected.run_id, reviewer_a, Duration::minutes(5))
+        .await
+        .unwrap()
+        .unwrap();
+    service
+        .record_review_assessment(
+            &claim,
+            ReviewRecommendation::Reject,
+            ReasonCode::new("review_privacy_rejected").unwrap(),
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+    finish_run(&service, &tenant, rejected.run_id).await;
+    let rejected = service
+        .inspect(&tenant, rejected.run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(rejected.outcomes.len(), 2);
+    assert!(rejected.run.approved_revision_id.is_none());
+
+    let high = envelope_bytes_with_risk(Uuid::new_v4(), "high-risk", ResidualPiiRisk::High).await;
+    let PipelineReceiptResult::Created(high) = service
+        .submit(&tenant, principal, "high", &high)
+        .await
+        .unwrap()
+    else {
+        panic!("high risk must create a terminal Admission run");
+    };
+    assert_eq!(high.state, PipelineRunState::Complete);
+    assert_eq!(high.admission_decision, "reject");
+    assert_eq!(
+        service
+            .inspect(&tenant, high.run_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .outcomes
+            .len(),
+        1
+    );
+    let content_reads = backend
+        .list_trace_audit_events(&tenant)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|event| event.reason.as_deref() == Some("pipeline_review_content_read"))
+        .count();
+    assert_eq!(content_reads, 2);
+}
+
+#[tokio::test]
+async fn phase_four_policy_suspension_preserves_attempts_bundle_and_audit() {
+    let Some(backend) = backend().await else {
+        return;
+    };
+    let tenant = format!("pipeline-phase4-suspend-{}", Uuid::new_v4());
+    let principal =
+        "principal_sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let operator =
+        "operator_sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+    let bytes = envelope_bytes(Uuid::new_v4(), "suspend").await;
+    let (_root, service) = service(backend, None);
+    let PipelineReceiptResult::Created(created) = service
+        .submit(&tenant, principal, "suspend", &bytes)
+        .await
+        .unwrap()
+    else {
+        panic!("receipt must create a run");
+    };
+    let after_review = service
+        .process_run(&tenant, created.run_id, None)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(after_review.next_phase, Some(Phase::Score));
+    let attempts_before = after_review.attempt_count;
+    service
+        .intervene_policy(
+            &tenant,
+            &created.bundle_id,
+            Phase::Score,
+            "suspend",
+            operator,
+            "score_dependency_pause",
+        )
+        .await
+        .unwrap();
+    let blocked = service
+        .process_run(&tenant, created.run_id, None)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(blocked.attempt_count, attempts_before);
+    assert_eq!(blocked.bundle_id, created.bundle_id);
+    assert_eq!(
+        blocked.last_error_label.as_deref(),
+        Some("bound_policy_suspended")
+    );
+    service
+        .intervene_policy(
+            &tenant,
+            &created.bundle_id,
+            Phase::Score,
+            "resume",
+            operator,
+            "score_dependency_restored",
+        )
+        .await
+        .unwrap();
+    let interventions = service
+        .list_policy_interventions(&tenant, &created.bundle_id)
+        .await
+        .unwrap();
+    assert_eq!(interventions.len(), 2);
+    assert!(
+        interventions
+            .iter()
+            .all(|record| record.evidence_hash.starts_with("sha256:"))
+    );
+    finish_run(&service, &tenant, created.run_id).await;
+    let complete = service
+        .inspect(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(complete.run.bundle_id, created.bundle_id);
+    assert_eq!(complete.outcomes.len(), 4);
+    let outcome_bytes = serde_json::to_vec(&complete.outcomes).unwrap();
+    service
+        .intervene_policy(
+            &tenant,
+            &created.bundle_id,
+            Phase::Review,
+            "terminate",
+            operator,
+            "review_policy_retired",
+        )
+        .await
+        .unwrap();
+    assert!(
+        service
+            .intervene_policy(
+                &tenant,
+                &created.bundle_id,
+                Phase::Review,
+                "resume",
+                operator,
+                "invalid_resume",
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        serde_json::to_vec(
+            &service
+                .inspect(&tenant, created.run_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .outcomes
+        )
+        .unwrap(),
+        outcome_bytes
+    );
+}
+
+#[tokio::test]
+async fn phase_four_settle_suspension_blocks_near_dispatch() {
+    let Some(backend) = backend().await else {
+        return;
+    };
+    let tenant = format!("pipeline-phase4-payout-guard-{}", Uuid::new_v4());
+    let principal =
+        "principal_sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let operator =
+        "operator_sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+    let root = tempfile::tempdir().unwrap();
+    let near = Arc::new(RecordingNearAdapter::new());
+    let service = PipelineService::new_with_ops(
+        backend,
+        artifact_store(&root),
+        None,
+        Some(PipelineCrashPoint::AfterSettleCommit),
+        IsolatedPipelineIndex::new(),
+        near.clone(),
+    )
+    .unwrap();
+    service.set_payout_enabled(true);
+    let bundle =
+        MinimalPolicyBundle::build_operations(PIPELINE_FIXED_POSITIVE_MICROCREDITS, false).unwrap();
+    service
+        .register_bundle(&tenant, &bundle.package)
+        .await
+        .unwrap();
+    service
+        .activate_bundle(&tenant, &bundle.package.bundle_id)
+        .await
+        .unwrap();
+    let bytes = envelope_bytes(Uuid::new_v4(), "payout-guard").await;
+    let PipelineReceiptResult::Created(created) = service
+        .submit(&tenant, principal, "payout-guard", &bytes)
+        .await
+        .unwrap()
+    else {
+        panic!("receipt must create a run");
+    };
+    service
+        .process_run(&tenant, created.run_id, None)
+        .await
+        .unwrap();
+    service
+        .process_run(&tenant, created.run_id, None)
+        .await
+        .unwrap();
+    assert!(
+        service
+            .process_run(&tenant, created.run_id, None)
+            .await
+            .is_err()
+    );
+    let complete = service
+        .inspect(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(complete.run.state, PipelineRunState::Complete);
+    assert_eq!(complete.run.payout_state, "pending");
+    service
+        .intervene_policy(
+            &tenant,
+            &created.bundle_id,
+            Phase::Settle,
+            "suspend",
+            operator,
+            "payout_pause",
+        )
+        .await
+        .unwrap();
+    let blocked = service
+        .process_payout(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(blocked.payout_state, "pending");
+    assert!(near.requests().is_empty());
+    service
+        .intervene_policy(
+            &tenant,
+            &created.bundle_id,
+            Phase::Settle,
+            "resume",
+            operator,
+            "payout_resume",
+        )
+        .await
+        .unwrap();
+    service
+        .process_payout(&tenant, created.run_id)
+        .await
+        .unwrap();
+    assert_eq!(near.requests().len(), 1);
+}
+
+#[tokio::test]
+async fn phase_four_withdrawal_excludes_index_but_preserves_committed_credit() {
+    let Some(backend) = backend().await else {
+        return;
+    };
+    let tenant = format!("pipeline-phase4-withdraw-{}", Uuid::new_v4());
+    let principal =
+        "principal_sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let bytes = envelope_bytes(Uuid::new_v4(), "withdraw-before-settle").await;
+    let root = tempfile::tempdir().unwrap();
+    let service = PipelineService::new(backend.clone(), artifact_store(&root), None).unwrap();
+    let bundle =
+        MinimalPolicyBundle::build_operations(PIPELINE_FIXED_POSITIVE_MICROCREDITS, true).unwrap();
+    service
+        .register_bundle(&tenant, &bundle.package)
+        .await
+        .unwrap();
+    service
+        .activate_bundle(&tenant, &bundle.package.bundle_id)
+        .await
+        .unwrap();
+    let PipelineReceiptResult::Created(created) = service
+        .submit(&tenant, principal, "withdraw-before-settle", &bytes)
+        .await
+        .unwrap()
+    else {
+        panic!("receipt must create a run");
+    };
+    service
+        .process_run(&tenant, created.run_id, None)
+        .await
+        .unwrap();
+    let after_score = service
+        .process_run(&tenant, created.run_id, None)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(after_score.next_phase, Some(Phase::Settle));
+    assert!(after_score.credit_event_id.is_some());
+
+    service
+        .withdraw_submission(&tenant, created.submission_id, principal)
+        .await
+        .unwrap();
+    finish_run(&service, &tenant, created.run_id).await;
+    let complete = service
+        .inspect(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(complete.run.index_membership, "excluded");
+    let settle = complete
+        .outcomes
+        .iter()
+        .find(|outcome| outcome.phase == Phase::Settle)
+        .unwrap();
+    assert_eq!(
+        settle.decision["credit_microcredits_finalized"],
+        PIPELINE_FIXED_POSITIVE_MICROCREDITS
+    );
+    assert_eq!(settle.evidence["guard_reason"], "submission_inoperable");
+    let events = backend.list_trace_credit_events(&tenant).await.unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        events[0].settlement_state,
+        TraceCreditSettlementState::Final
+    );
+    assert!(
+        service
+            .submit(&tenant, principal, "withdrawn-retry", &bytes)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("content_tombstoned")
+    );
+}
+
+#[tokio::test]
+async fn phase_four_admission_limit_is_global_and_replay_counts_once() {
+    let Some(backend) = backend().await else {
+        return;
+    };
+    let tenant = format!("pipeline-phase4-limit-{}", Uuid::new_v4());
+    let principal =
+        "principal_sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let root_a = tempfile::tempdir().unwrap();
+    let root_b = tempfile::tempdir().unwrap();
+    let service_a = PipelineService::new(backend.clone(), artifact_store(&root_a), None).unwrap();
+    let service_b = PipelineService::new(backend.clone(), artifact_store(&root_b), None).unwrap();
+    let bundle = MinimalPolicyBundle::build_with_limits(0, false, 1, 1).unwrap();
+    service_a
+        .register_bundle(&tenant, &bundle.package)
+        .await
+        .unwrap();
+    service_a
+        .activate_bundle(&tenant, &bundle.package.bundle_id)
+        .await
+        .unwrap();
+    let bytes_a = envelope_bytes(Uuid::new_v4(), "quota-a").await;
+    let bytes_b = envelope_bytes(Uuid::new_v4(), "quota-b").await;
+    let (first, second) = tokio::join!(
+        service_a.submit(&tenant, principal, "quota-a", &bytes_a),
+        service_b.submit(&tenant, principal, "quota-b", &bytes_b)
+    );
+    let PipelineReceiptResult::Created(first) = first.unwrap() else {
+        panic!("first concurrent receipt must create");
+    };
+    let PipelineReceiptResult::Created(second) = second.unwrap() else {
+        panic!("second concurrent receipt must create");
+    };
+    let decisions = [&first.admission_decision, &second.admission_decision];
+    assert_eq!(
+        decisions
+            .iter()
+            .filter(|decision| decision.as_str() == "admit")
+            .count(),
+        1
+    );
+    assert_eq!(
+        decisions
+            .iter()
+            .filter(|decision| decision.as_str() == "reject")
+            .count(),
+        1
+    );
+    let (admitted, admitted_bytes, admitted_key) = if first.admission_decision == "admit" {
+        (&first, &bytes_a, "quota-a")
+    } else {
+        (&second, &bytes_b, "quota-b")
+    };
+    let replay = service_a
+        .submit(&tenant, principal, admitted_key, admitted_bytes)
+        .await
+        .unwrap();
+    let PipelineReceiptResult::Replayed(replay) = replay else {
+        panic!("accepted receipt must replay");
+    };
+    assert_eq!(replay.run_id, admitted.run_id);
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = client.transaction().await.unwrap();
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&tenant],
+    )
+    .await
+    .unwrap();
+    let usage: i64 = tx
+        .query_one(
+            "SELECT COUNT(*)::BIGINT FROM pipeline_admission_usage WHERE tenant_id = $1",
+            &[&tenant],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    tx.commit().await.unwrap();
+    assert_eq!(usage, 1);
+}
+
+#[tokio::test]
+async fn phase_four_withdrawal_queues_completed_index_invalidation() {
+    let Some(backend) = backend().await else {
+        return;
+    };
+    let tenant = format!("pipeline-phase4-invalidate-{}", Uuid::new_v4());
+    let principal =
+        "principal_sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let root = tempfile::tempdir().unwrap();
+    let index = IsolatedPipelineIndex::new();
+    let service = PipelineService::new_with_ops(
+        backend,
+        artifact_store(&root),
+        None,
+        None,
+        index.clone(),
+        Arc::new(RecordingNearAdapter::new()),
+    )
+    .unwrap();
+    let bundle =
+        MinimalPolicyBundle::build_operations(PIPELINE_FIXED_POSITIVE_MICROCREDITS, true).unwrap();
+    service
+        .register_bundle(&tenant, &bundle.package)
+        .await
+        .unwrap();
+    service
+        .activate_bundle(&tenant, &bundle.package.bundle_id)
+        .await
+        .unwrap();
+    let bytes = envelope_bytes(Uuid::new_v4(), "invalidate").await;
+    let PipelineReceiptResult::Created(created) = service
+        .submit(&tenant, principal, "invalidate", &bytes)
+        .await
+        .unwrap()
+    else {
+        panic!("receipt must create a run");
+    };
+    finish_run(&service, &tenant, created.run_id).await;
+    let complete = service
+        .inspect(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let revision = complete.run.approved_revision_id.unwrap();
+    assert!(index.contains_revision(&tenant, PIPELINE_INDEX_ID, revision));
+    service
+        .withdraw_submission(&tenant, created.submission_id, principal)
+        .await
+        .unwrap();
+    let pending = service
+        .inspect(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(pending.run.index_invalidation_state, "pending");
+    service
+        .process_index_invalidation(&tenant, created.run_id)
+        .await
+        .unwrap();
+    let invalidated = service
+        .inspect(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(invalidated.run.index_invalidation_state, "complete");
+    assert!(!index.contains_revision(&tenant, PIPELINE_INDEX_ID, revision));
 }

@@ -320,6 +320,20 @@ pub struct AdmissionEvidence {
     pub request_content_hash: String,
     pub schema_valid: bool,
     pub authority_valid: bool,
+    #[serde(default)]
+    pub contribution_path_valid: bool,
+    #[serde(default)]
+    pub grant_valid: bool,
+    #[serde(default)]
+    pub consent_valid: bool,
+    #[serde(default)]
+    pub allowed_uses_valid: bool,
+    #[serde(default)]
+    pub quota_counted: bool,
+    #[serde(default)]
+    pub detector_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub privacy_risk: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -332,6 +346,12 @@ pub struct ReviewEvidence {
     pub source_content_hash: String,
     pub result_content_hash: String,
     pub content_changed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transformed_artifact_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub human_assessment_hash: Option<String>,
+    #[serde(default)]
+    pub resolved_quarantine_reasons: Vec<ReasonCode>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -380,6 +400,10 @@ pub struct SettleEvidence {
     pub credit_progress: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub index_progress: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub submission_operable: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guard_reason: Option<ReasonCode>,
 }
 
 impl SettleEvidence {
@@ -390,6 +414,8 @@ impl SettleEvidence {
             index_command_hash: None,
             credit_progress: None,
             index_progress: None,
+            submission_operable: None,
+            guard_reason: None,
         }
     }
 }
@@ -414,6 +440,29 @@ pub struct AdmissionInput {
     pub schema_version: String,
     pub authenticated: bool,
     pub authority_valid: bool,
+    pub contribution_path_valid: bool,
+    pub grant_valid: bool,
+    pub consent_valid: bool,
+    pub allowed_uses_valid: bool,
+    pub tombstoned: bool,
+    pub quota_available: bool,
+    pub privacy_risk: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewRecommendation {
+    Approve,
+    Reject,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HumanReviewAssessment {
+    pub assessment_id: Uuid,
+    pub recommendation: ReviewRecommendation,
+    pub reason: ReasonCode,
+    pub resolved_quarantine_reasons: Vec<ReasonCode>,
+    pub evidence_hash: String,
 }
 
 #[derive(Debug, Clone)]
@@ -422,6 +471,8 @@ pub struct ReviewInput {
     pub trace_id: Uuid,
     pub source_content_hash: String,
     pub source_artifact: Vec<u8>,
+    pub admission: AdmissionDecision,
+    pub human_assessment: Option<HumanReviewAssessment>,
 }
 
 #[derive(Debug, Clone)]

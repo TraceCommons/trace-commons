@@ -186,6 +186,11 @@ const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "pipeline_active_bundles",
     "pipeline_bundle_policy_status",
     "pipeline_receipt_artifacts",
+    "pipeline_policy_interventions",
+    "pipeline_admission_usage",
+    "pipeline_review_claims",
+    "pipeline_review_assessments",
+    "pipeline_index_invalidations",
 ];
 
 const TRACE_COMMONS_RLS_POLICY_EXPRESSION_VARIANTS: &[&str] = &[
@@ -1886,6 +1891,26 @@ impl Database for PgBackend {
                 .execute(
                     "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
                     &[&49_i32, &"versioned_pipeline_index_credit"],
+                )
+                .await?;
+        }
+        let already_applied = client
+            .query_opt(
+                "SELECT 1 FROM _trace_commons_migrations WHERE version = $1",
+                &[&50_i32],
+            )
+            .await?
+            .is_some();
+        if !already_applied {
+            client
+                .batch_execute(include_str!(
+                    "../../../../migrations/V50__versioned_pipeline_authority_privacy.sql"
+                ))
+                .await?;
+            client
+                .execute(
+                    "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
+                    &[&50_i32, &"versioned_pipeline_authority_privacy"],
                 )
                 .await?;
         }

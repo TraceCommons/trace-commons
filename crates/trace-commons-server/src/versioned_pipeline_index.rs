@@ -84,6 +84,19 @@ impl IsolatedPipelineIndex {
             },
         )
     }
+
+    pub fn invalidate_revision(&self, tenant_id: &str, index_id: &str, revision_id: Uuid) -> bool {
+        let mut state = self.state.lock().expect("index mutex");
+        let before = state.entries.len();
+        state
+            .entries
+            .retain(|(stored_tenant, stored_index, _), entry| {
+                stored_tenant != tenant_id
+                    || stored_index != index_id
+                    || entry.revision_id != revision_id
+            });
+        state.entries.len() != before
+    }
 }
 
 fn dot(left: &[f32], right: &[f32]) -> f32 {

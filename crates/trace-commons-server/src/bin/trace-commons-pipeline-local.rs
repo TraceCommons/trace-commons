@@ -17,10 +17,10 @@ use clap::{Parser, Subcommand};
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use trace_commons_gate_api::pipeline::{Microcredits, Phase};
+use trace_commons_gate_api::pipeline::{Microcredits, Phase, ReasonCode, ReviewRecommendation};
 use trace_commons_protocol::trace_contribution::{
     DeterministicTraceRedactor, RawTraceCaptureTurn, RawTraceContribution,
-    RecordedTraceContributionOptions, TraceRedactor,
+    RecordedTraceContributionOptions, ResidualPiiRisk, TraceRedactor,
 };
 use trace_commons_server::config::DatabaseConfig;
 use trace_commons_server::db::Database;
@@ -31,8 +31,8 @@ use trace_commons_server::trace_artifact_store::{
 };
 use trace_commons_server::trace_corpus_storage::TraceCorpusStore;
 use trace_commons_server::versioned_pipeline::{
-    PhaseOutcomeRecord, PipelineInspection, PipelineReceiptResult, PipelineRunState,
-    PipelineService, PipelineSubmitReceipt,
+    PhaseOutcomeRecord, PipelineInspection, PipelineReceiptResult, PipelineReviewClaim,
+    PipelineRunState, PipelineService, PipelineSubmitReceipt,
 };
 use uuid::Uuid;
 
@@ -94,13 +94,15 @@ struct CorpusArgs {
     submit_token: String,
     #[arg(long, env = "TRACE_COMMONS_PIPELINE_CORPUS_WORKER_TOKEN")]
     worker_token: String,
+    #[arg(long, env = "TRACE_COMMONS_PIPELINE_CORPUS_REVIEWER_TOKEN")]
+    reviewer_token: String,
     #[arg(long, env = "TRACE_COMMONS_PIPELINE_CORPUS_INSPECT_TOKEN")]
     inspect_token: String,
     #[arg(long, default_value = "docs/redesign/fixtures/minimal-corpus-v1.json")]
     fixtures: PathBuf,
-    #[arg(long, default_value = ".local/pipeline-report-v2.json")]
+    #[arg(long, default_value = ".local/pipeline-report-v4.json")]
     json_report: PathBuf,
-    #[arg(long, default_value = ".local/pipeline-report-v2.md")]
+    #[arg(long, default_value = ".local/pipeline-report-v4.md")]
     markdown_report: PathBuf,
     #[arg(long, default_value_t = 30)]
     timeout_seconds: u64,
@@ -109,6 +111,7 @@ struct CorpusArgs {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LocalRole {
     Contributor,
+    Reviewer,
     Worker,
     Operator,
 }
@@ -150,6 +153,14 @@ struct WorkerQuery {
 }
 
 #[derive(Debug, Deserialize)]
+struct ReviewAssessmentRequest {
+    lease_token: Uuid,
+    recommendation: ReviewRecommendation,
+    reason_code: String,
+    resolved_quarantine_reasons: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct CorpusFile {
     schema: String,
     fixtures: Vec<CorpusFixture>,
@@ -163,6 +174,26 @@ struct CorpusFixture {
     created_at: DateTime<Utc>,
     input: String,
     secret_probe: String,
+    #[serde(default = "default_privacy_risk")]
+    privacy_risk: String,
+    #[serde(default = "default_admission_decision")]
+    expected_admission_decision: String,
+    #[serde(default = "default_outcome_count")]
+    expected_outcome_count: usize,
+    #[serde(default)]
+    review_recommendation: Option<ReviewRecommendation>,
+}
+
+fn default_privacy_risk() -> String {
+    "low".to_string()
+}
+
+fn default_admission_decision() -> String {
+    "admit".to_string()
+}
+
+const fn default_outcome_count() -> usize {
+    4
 }
 
 #[derive(Debug, Serialize)]
@@ -173,7 +204,6 @@ struct CorpusReport {
     bundle_id: String,
     configuration_identities: BTreeMap<&'static str, &'static str>,
     expected_fixture_count: usize,
-    expected_outcomes_per_fixture: usize,
     completed_fixture_count: usize,
     failure_count: usize,
     duration_ms: u128,
@@ -188,6 +218,9 @@ struct FixtureReport {
     submission_id: Uuid,
     state: PipelineRunState,
     phase_count: usize,
+    admission_decision: String,
+    expected_admission_decision: String,
+    expected_outcome_count: usize,
     phases: Vec<PhaseReport>,
     approved_revision_id: Option<Uuid>,
     index_membership: String,
@@ -275,6 +308,14 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
         .route("/v1/pipeline/submissions", post(submit_handler))
         .route("/v1/pipeline/worker", post(worker_handler))
         .route("/v1/pipeline/runs/{run_id}", get(inspect_handler))
+        .route(
+            "/v1/pipeline/runs/{run_id}/review-claim",
+            post(review_claim_handler),
+        )
+        .route(
+            "/v1/pipeline/runs/{run_id}/review-assessment",
+            post(review_assessment_handler),
+        )
         .with_state(state);
     let listener = tokio::net::TcpListener::bind(args.bind).await?;
     tracing::info!(
@@ -382,6 +423,74 @@ async fn inspect_handler(
     Ok(Json(inspection))
 }
 
+async fn review_claim_handler(
+    State(state): State<Arc<HttpState>>,
+    headers: HeaderMap,
+    AxumPath(run_id): AxumPath<Uuid>,
+) -> HttpResult<Json<PipelineReviewClaim>> {
+    let auth = authenticate(&state, &headers, LocalRole::Reviewer)?;
+    state
+        .pipeline
+        .claim_review(
+            &auth.tenant_id,
+            run_id,
+            &auth.principal_ref,
+            chrono::Duration::minutes(5),
+        )
+        .await
+        .map_err(|_| HttpError {
+            status: StatusCode::CONFLICT,
+            label: "review_claim_failed",
+        })?
+        .map(Json)
+        .ok_or(HttpError {
+            status: StatusCode::CONFLICT,
+            label: "review_claim_unavailable",
+        })
+}
+
+async fn review_assessment_handler(
+    State(state): State<Arc<HttpState>>,
+    headers: HeaderMap,
+    AxumPath(run_id): AxumPath<Uuid>,
+    Json(body): Json<ReviewAssessmentRequest>,
+) -> HttpResult<StatusCode> {
+    let auth = authenticate(&state, &headers, LocalRole::Reviewer)?;
+    let reason = ReasonCode::new(body.reason_code).map_err(|_| HttpError {
+        status: StatusCode::BAD_REQUEST,
+        label: "review_reason_invalid",
+    })?;
+    let resolved = body
+        .resolved_quarantine_reasons
+        .into_iter()
+        .map(ReasonCode::new)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| HttpError {
+            status: StatusCode::BAD_REQUEST,
+            label: "review_reason_invalid",
+        })?;
+    state
+        .pipeline
+        .record_review_assessment(
+            &PipelineReviewClaim {
+                tenant_id: auth.tenant_id,
+                run_id,
+                reviewer_principal_ref: auth.principal_ref,
+                lease_token: body.lease_token,
+                lease_expires_at: Utc::now(),
+            },
+            body.recommendation,
+            reason,
+            resolved,
+        )
+        .await
+        .map_err(|_| HttpError {
+            status: StatusCode::CONFLICT,
+            label: "review_assessment_failed",
+        })?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 fn authenticate(
     state: &HttpState,
     headers: &HeaderMap,
@@ -422,6 +531,7 @@ fn parse_tokens(value: &str) -> anyhow::Result<BTreeMap<String, LocalAuth>> {
         );
         let role = match fields[3] {
             "contributor" => LocalRole::Contributor,
+            "reviewer" => LocalRole::Reviewer,
             "worker" => LocalRole::Worker,
             "operator" => LocalRole::Operator,
             _ => anyhow::bail!("unknown pipeline token role"),
@@ -451,15 +561,20 @@ fn parse_tokens(value: &str) -> anyhow::Result<BTreeMap<String, LocalAuth>> {
 }
 
 fn is_safe_principal_ref(value: &str) -> bool {
-    ["principal_sha256:", "worker_sha256:", "operator_sha256:"]
-        .iter()
-        .find_map(|prefix| value.strip_prefix(prefix))
-        .is_some_and(|hash| {
-            hash.len() == 64
-                && hash
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
-        })
+    [
+        "principal_sha256:",
+        "reviewer_sha256:",
+        "worker_sha256:",
+        "operator_sha256:",
+    ]
+    .iter()
+    .find_map(|prefix| value.strip_prefix(prefix))
+    .is_some_and(|hash| {
+        hash.len() == 64
+            && hash
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    })
 }
 
 fn receipt(
@@ -525,6 +640,20 @@ async fn run_corpus(args: CorpusArgs) -> anyhow::Result<()> {
             &changed_request,
         )
         .await?;
+        if let Some(recommendation) = fixture.review_recommendation {
+            let claim =
+                claim_review_http(&client, &args.base_url, &args.reviewer_token, first.run_id)
+                    .await?;
+            submit_review_assessment_http(
+                &client,
+                &args.base_url,
+                &args.reviewer_token,
+                first.run_id,
+                &claim,
+                recommendation,
+            )
+            .await?;
+        }
         let deadline = Instant::now() + Duration::from_secs(args.timeout_seconds);
         let inspection = loop {
             let current =
@@ -550,13 +679,14 @@ async fn run_corpus(args: CorpusArgs) -> anyhow::Result<()> {
         .iter()
         .filter(|report| {
             report.state != PipelineRunState::Complete
-                || report.phase_count != 4
+                || report.phase_count != report.expected_outcome_count
+                || report.admission_decision != report.expected_admission_decision
                 || !report.replay_same_run
                 || !report.changed_content_refused
         })
         .count();
     let report = CorpusReport {
-        schema: "trace_commons.pipeline_corpus_report.v2",
+        schema: "trace_commons.pipeline_corpus_report.v3",
         corpus_digest,
         code_revision: trace_commons_build_info::COMMIT,
         bundle_id: bundle_id.unwrap_or_default(),
@@ -566,7 +696,6 @@ async fn run_corpus(args: CorpusArgs) -> anyhow::Result<()> {
             ("external_payout", "disabled"),
         ]),
         expected_fixture_count: corpus.fixtures.len(),
-        expected_outcomes_per_fixture: 4,
         completed_fixture_count: reports
             .iter()
             .filter(|report| report.state == PipelineRunState::Complete)
@@ -621,7 +750,13 @@ async fn build_request_bytes(fixture: &CorpusFixture) -> anyhow::Result<Vec<u8>>
         );
     }
     let redactor = DeterministicTraceRedactor::try_default()?;
-    let envelope = redactor.redact_trace(raw).await?;
+    let mut envelope = redactor.redact_trace(raw).await?;
+    envelope.privacy.residual_pii_risk = match fixture.privacy_risk.as_str() {
+        "low" => ResidualPiiRisk::Low,
+        "medium" => ResidualPiiRisk::Medium,
+        "high" => ResidualPiiRisk::High,
+        _ => anyhow::bail!("fixture privacy risk is invalid"),
+    };
     Ok(serde_json::to_vec(&envelope)?)
 }
 
@@ -661,6 +796,63 @@ async fn run_worker_http(
     anyhow::ensure!(
         response.status().is_success(),
         "worker returned {}",
+        response.status()
+    );
+    Ok(())
+}
+
+async fn claim_review_http(
+    client: &reqwest::Client,
+    base_url: &str,
+    token: &str,
+    run_id: Uuid,
+) -> anyhow::Result<PipelineReviewClaim> {
+    let response = client
+        .post(format!("{base_url}/v1/pipeline/runs/{run_id}/review-claim"))
+        .bearer_auth(token)
+        .send()
+        .await?;
+    anyhow::ensure!(
+        response.status().is_success(),
+        "review claim returned {}",
+        response.status()
+    );
+    Ok(response.json().await?)
+}
+
+async fn submit_review_assessment_http(
+    client: &reqwest::Client,
+    base_url: &str,
+    token: &str,
+    run_id: Uuid,
+    claim: &PipelineReviewClaim,
+    recommendation: ReviewRecommendation,
+) -> anyhow::Result<()> {
+    let approve = recommendation == ReviewRecommendation::Approve;
+    let response = client
+        .post(format!(
+            "{base_url}/v1/pipeline/runs/{run_id}/review-assessment"
+        ))
+        .bearer_auth(token)
+        .json(&serde_json::json!({
+            "lease_token": claim.lease_token,
+            "recommendation": recommendation,
+            "reason_code": if approve {
+                "privacy_resolved"
+            } else {
+                "review_privacy_rejected"
+            },
+            "resolved_quarantine_reasons": if approve {
+                vec!["privacy_review_required"]
+            } else {
+                Vec::<&str>::new()
+            },
+        }))
+        .send()
+        .await?;
+    anyhow::ensure!(
+        response.status().is_success(),
+        "review assessment returned {}",
         response.status()
     );
     Ok(())
@@ -709,6 +901,23 @@ fn fixture_report(
     replay_same_run: bool,
     changed_content_refused: bool,
 ) -> anyhow::Result<FixtureReport> {
+    let admission_decision = inspection
+        .outcomes
+        .iter()
+        .find(|outcome| outcome.phase == Phase::Admission)
+        .and_then(|outcome| {
+            if outcome.decision.as_str() == Some("Admit") {
+                Some("admit")
+            } else if outcome.decision.get("Quarantine").is_some() {
+                Some("quarantine")
+            } else if outcome.decision.get("Reject").is_some() {
+                Some("reject")
+            } else {
+                None
+            }
+        })
+        .unwrap_or("unknown")
+        .to_string();
     let score_microcredits =
         outcome_microcredits(&inspection.outcomes, Phase::Score, "credit_microcredits");
     let finalized_microcredits = outcome_microcredits(
@@ -731,6 +940,9 @@ fn fixture_report(
         submission_id: inspection.run.submission_id,
         state: inspection.run.state,
         phase_count: phases.len(),
+        admission_decision,
+        expected_admission_decision: fixture.expected_admission_decision.clone(),
+        expected_outcome_count: fixture.expected_outcome_count,
         phases,
         approved_revision_id: inspection.run.approved_revision_id,
         index_membership: inspection.run.index_membership.clone(),
@@ -784,8 +996,9 @@ fn markdown_report(report: &CorpusReport) -> String {
     );
     for fixture in &report.fixtures {
         output.push_str(&format!(
-            "- `{}`: state `{:?}`, {} outcomes, {} attempts, {} ms in phase, score {} microcredits, index `{}` (`{}`), credit `{}`, payout `{}`\n",
+            "- `{}`: Admission `{}`, state `{:?}`, {} outcomes, {} attempts, {} ms in phase, score {} microcredits, index `{}` (`{}`), credit `{}`, payout `{}`\n",
             fixture.label,
+            fixture.admission_decision,
             fixture.state,
             fixture.phase_count,
             fixture.attempt_count,
