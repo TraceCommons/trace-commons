@@ -585,11 +585,35 @@ async fn blocked_reservation_preserves_query_capacity_scenario(fixture: &RewardH
     .expect("public read retains database capacity")
     .unwrap();
     assert_eq!(public.status(), reqwest::StatusCode::OK);
+    // An authenticated read takes only `pg_advisory_xact_lock_shared`, so it
+    // must be ADMITTED while a reservation is in flight rather than refused in
+    // process. It still waits on the writer's exclusive lock inside PostgreSQL;
+    // what changed is that it reaches the database at all. Sharing the write
+    // path's slot of one made a single reservation return 429 to every other
+    // participant's history and status read for the whole tenant, so the proof
+    // is a second ungranted advisory waiter, not a wall-clock deadline.
+    let reading = tokio::spawn(
+        fixture
+            .client
+            .get(format!("{}/v1/account/rewards", fixture.base))
+            .header(COOKIE.as_str(), fixture.cookie_header())
+            .send(),
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let waiting: i64 = tx.query_one("SELECT count(*) FROM pg_locks WHERE locktype='advisory' AND NOT granted AND database=(SELECT oid FROM pg_database WHERE datname=current_database())", &[]).await.unwrap().get(0);
+            if waiting >= 2 { break; }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }).await.expect("the authenticated read is admitted and reaches its database lock");
     tx.rollback().await.unwrap();
     assert_eq!(
         pending.await.unwrap().unwrap().status(),
         reqwest::StatusCode::OK
     );
+    let history = reading.await.unwrap().unwrap();
+    assert_eq!(history.status(), reqwest::StatusCode::OK);
+    assert_safe_reqwest_headers(history.headers());
 }
 
 struct RewardTestBackends {
