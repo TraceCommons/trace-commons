@@ -1800,7 +1800,18 @@ char*       tc_call(tc_handle*, const char* method, const char* params_json);
  * insights_episode_invalid, insights_episode_member_limit,
  * insights_episode_duplicate_member, insights_episode_limit_exceeded,
  * insights_episode_revision_overflow, and insights_response_too_large.
+ * Fixed typed store errors include insights_not_found,
+ * insights_evidence_link_not_found, insights_store_busy (another window or
+ * client holds the store; retry), insights_store_invalid (that entry cannot be
+ * read; repair removes exactly what is withheld), insights_store_symlink_refused,
+ * insights_store_requires_private_directory, and insights_store_unavailable.
  * Unexpected execution errors remain insights-operation-failed.
+ * A list response carries quarantined identifiers when the store is
+ * withholding an unreadable entry; the operation repair removes exactly those.
+ * store_dir and the analyze file are chosen by the caller, so this entry point
+ * is for in-process callers only. Reaching it from any IPC transport without
+ * an authorization gate and a store-directory allow-list would hand the caller
+ * a digest oracle for any readable file and a directory-write primitive.
  * Returns owned JSON tagged by type, or NULL plus owned fixed-label *err.
  * Free result/error with tc_string_free. err may be NULL; otherwise writable
  * and cleared on success. Request buffers must remain valid until return. */

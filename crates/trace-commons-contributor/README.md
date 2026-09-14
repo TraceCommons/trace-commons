@@ -116,15 +116,43 @@ trace-commons-contributor insights --store-dir ./private-insights list
 trace-commons-contributor --json insights --store-dir ./private-insights summary
 trace-commons-contributor insights --store-dir ./private-insights explain INSIGHT_ID
 trace-commons-contributor insights --store-dir ./private-insights delete INSIGHT_ID
+trace-commons-contributor insights --store-dir ./private-insights repair
 ```
 
 Without `--store-dir`, saved insights use `trace-commons/insights` under the OS
 local data directory, independently of contributor enrollment configuration.
 The store contains derived observations and hashed references, without transcript
-bodies or original paths. Reimporting the same file replaces its prior snapshot;
-identical copies share a result. Saved snapshots are not monitored for changes to
-the original files: reimport to refresh, or use `delete` to remove the saved result
-and its references. Deletion leaves the original transcript intact.
+bodies or original paths. Reimporting the same file replaces its prior snapshot,
+including after the file has been renamed; identical copies share a result, and a
+second copy keeps the snapshot it was imported as. Saved snapshots are not
+monitored for changes to the original files: reimport to refresh, or use `delete`
+to remove the saved result and its references. Deletion leaves the original
+transcript intact.
+
+The store directory is restricted to the account that created it, and that
+restriction is checked on every open rather than only at creation. On Unix it
+is mode 0700, and a directory reachable by group or other is refused. On
+Windows it is a protected owner-only DACL, reapplied on each open so a
+directory an older build left widened cannot stay that way; if it cannot be
+applied the store is refused rather than opened without the control. Both
+refusals report `insights_store_requires_private_directory`.
+
+If a saved entry cannot be read -- a hand-edited or externally written index, an
+entry written by a newer schema, or an episode whose membership no longer binds
+its snapshots -- that entry alone is withheld. The rest of the store stays fully
+operable: `list`, `explain`, `summary`, `annotate`, `delete` and every episode
+read keep working on the entries that do read. `list` names what it is
+withholding, `explain` on such an identifier reports `insights_store_invalid`,
+and `delete` still removes it.
+
+```bash
+trace-commons-contributor insights --store-dir ./private-insights repair
+```
+
+`repair` removes exactly the withheld entries, the episode groups that lose a
+member with them, and any stored address that no longer names anything, and
+reports each identifier it removed. It reads no source file and removes no
+original file. Editing or deleting `index.json` by hand is never required.
 
 `summary` reads the current derived history without reopening source files. It
 counts saved sessions, user-reported categories/outcomes, and observed metrics.

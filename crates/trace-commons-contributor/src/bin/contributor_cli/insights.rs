@@ -7,8 +7,8 @@ use trace_commons_contributor::insights::service::{
 };
 use trace_commons_contributor::insights::usage::UsageSource;
 use trace_commons_contributor::insights::{
-    LocalInsight, LocalInsightStore, MutationEffects, SourceFormat, TaskCategory, TaskOutcome,
-    service::open_store,
+    LocalInsight, LocalInsightStore, MutationEffects, QuarantineReport, SourceFormat, TaskCategory,
+    TaskOutcome, service::open_store,
 };
 use trace_commons_protocol::insights::MetricId;
 
@@ -74,6 +74,8 @@ enum InsightsCommand {
     },
     /// List previously saved local insights
     List,
+    /// Remove saved entries this store cannot read; leaves original files intact
+    Repair,
     /// Summarize current saved session snapshots and separate user-reported assessments
     Summary,
     /// Show the measurements and evidence references for a saved insight
@@ -242,9 +244,16 @@ pub(super) fn run(args: &InsightsArgs, json: bool) -> Result<()> {
             }
         }
         InsightsCommand::List => {
-            let insights = trace_commons_contributor::insights::service::list_saved(
-                args.store_dir.as_deref(),
-            )?;
+            let LocalInsightsResponse::List {
+                insights,
+                quarantined,
+            } = execute(LocalInsightsRequest {
+                store_dir: args.store_dir.clone(),
+                operation: LocalInsightsOperation::List {},
+            })?
+            else {
+                anyhow::bail!("insights-list-response-invalid");
+            };
             if json {
                 println!("{}", serde_json::to_string_pretty(&insights)?);
             } else if insights.is_empty() {
@@ -252,6 +261,37 @@ pub(super) fn run(args: &InsightsArgs, json: bool) -> Result<()> {
             } else {
                 for insight in insights {
                     render(&insight, false)?;
+                }
+            }
+            render_quarantine(&quarantined, json);
+        }
+        InsightsCommand::Repair => {
+            let LocalInsightsResponse::Repair { repaired } = execute(LocalInsightsRequest {
+                store_dir: args.store_dir.clone(),
+                operation: LocalInsightsOperation::Repair {},
+            })?
+            else {
+                anyhow::bail!("insights-repair-response-invalid");
+            };
+            if json {
+                println!("{}", serde_json::to_string_pretty(&repaired)?);
+            } else if repaired.quarantined.is_empty()
+                && repaired.invalidated_episode_ids.is_empty()
+                && repaired.removed_aliases == 0
+            {
+                println!("Nothing to repair. Every saved entry in this store reads.");
+            } else {
+                println!(
+                    "Removed saved entries this store could not read. Original files are intact."
+                );
+                for id in &repaired.quarantined.snapshot_ids {
+                    println!("  removed snapshot {id}");
+                }
+                for id in &repaired.quarantined.episode_ids {
+                    println!("  removed episode {id}");
+                }
+                for id in &repaired.invalidated_episode_ids {
+                    println!("  removed episode {id} because a member snapshot went with it");
                 }
             }
         }
@@ -275,7 +315,16 @@ pub(super) fn run(args: &InsightsArgs, json: bool) -> Result<()> {
             }
             println!("{}", serde_json::to_string_pretty(&summary)?);
         }
-        InsightsCommand::Explain { id } => render(&store(args)?.explain(id)?, json)?,
+        InsightsCommand::Explain { id } => {
+            let LocalInsightsResponse::Explain { insight } = execute(LocalInsightsRequest {
+                store_dir: args.store_dir.clone(),
+                operation: LocalInsightsOperation::Explain { id: id.clone() },
+            })?
+            else {
+                anyhow::bail!("insights-explain-response-invalid");
+            };
+            render(&insight, json)?;
+        }
         InsightsCommand::Delete { id } => {
             let LocalInsightsResponse::Delete {
                 deleted,
@@ -374,6 +423,21 @@ pub(super) fn run(args: &InsightsArgs, json: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn render_quarantine(quarantined: &QuarantineReport, json: bool) {
+    if quarantined.is_empty() || json {
+        return;
+    }
+    println!(
+        "Some saved entries in this store could not be read and are not shown. Run `insights repair` to remove them; your original files are not touched."
+    );
+    for id in &quarantined.snapshot_ids {
+        println!("  unreadable snapshot {id}");
+    }
+    for id in &quarantined.episode_ids {
+        println!("  unreadable episode {id}");
+    }
 }
 
 fn render_mutation_effects(effects: &MutationEffects) {

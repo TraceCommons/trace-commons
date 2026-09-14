@@ -1,15 +1,28 @@
 //! Account-free local Insights entry point shared by native shells and CLI.
+//!
+//! # In-process only
+//!
+//! A request carries a caller-chosen `store_dir` and a caller-chosen source
+//! `file`. In process that is not an escalation: the caller already runs as
+//! the user. Reached from an IPC transport it would be something else --
+//! `analyze` returns the SHA-256 of the exact bytes of any path the daemon
+//! user can read, `open` is a recursive private-directory create at any path,
+//! and any sufficiently private directory is adopted as a store, `~/.ssh`
+//! among them. No daemon method forwards here today, and none may without an
+//! authorization gate and an allow-list of store directories first. The same
+//! constraint is stated in both copies of the C header.
 use std::{io::Write, path::PathBuf};
 
 use anyhow::{Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 
+use super::InsightsStoreError;
 use super::episode_store::EpisodeStoreError;
 use super::episodes::{EpisodeDetail, EpisodeListEntry, EpisodeValidationError, LocalEpisode};
 use super::usage::{UsageSource, UsageSummary, extract_usage};
 use super::{
-    LocalInsight, LocalInsightStore, MutationEffects, SourceFormat, TaskCategory, TaskOutcome,
-    analyze_file,
+    LocalInsight, LocalInsightStore, MutationEffects, QuarantineReport, RepairReport, SourceFormat,
+    TaskCategory, TaskOutcome, analyze_file,
 };
 
 /// Bound request bytes before parsing or reading caller-owned FFI memory.
@@ -49,6 +62,13 @@ pub fn ui_copy() -> std::collections::BTreeMap<String, String> {
         ("episode_missing_members", "One or more selected snapshots are no longer saved. Refresh the selection."),
         ("episode_invalid", "The episode data or selection could not be read. Refresh before trying again."),
         ("episode_response_too_large", "This episode has too much evidence to display at once. Inspect its snapshots separately."),
+        ("store_not_found", "That saved result is no longer in this store. Refresh the list."),
+        ("store_evidence_link_not_found", "That evidence link is not on this saved result. It may already have been removed."),
+        ("store_busy", "Another window or client is writing to this store. Try again in a moment."),
+        ("store_invalid", "That saved entry could not be read and is not shown. Repair the store to remove it; your original files are not touched."),
+        ("store_symlink_refused", "The Insights location is a link rather than a directory, so it was refused. Choose a real directory."),
+        ("store_requires_private_directory", "The Insights directory is reachable by other accounts on this machine, so it was refused. Restrict it to you, or choose another directory."),
+        ("store_unavailable", "The Insights directory could not be opened. Check that it exists and that you can write to it."),
         ("episode_selection_empty", "Select at least one saved snapshot to create an episode."),
         ("episode_create_success", "Episode created from the selected saved snapshots."),
         ("episode_open", "Inspect episode"),
@@ -256,6 +276,8 @@ pub enum LocalInsightsOperation {
         save: bool,
     },
     List {},
+    /// Remove exactly the entries the store is withholding as unreadable.
+    Repair {},
     Copy {},
     Summary {},
     Explain {
@@ -322,6 +344,13 @@ pub enum LocalInsightsResponse {
     },
     List {
         insights: Vec<LocalInsight>,
+        /// Identifiers the store is withholding as unreadable. Additive: an
+        /// operable store omits it entirely.
+        #[serde(default, skip_serializing_if = "QuarantineReport::is_empty")]
+        quarantined: QuarantineReport,
+    },
+    Repair {
+        repaired: Box<RepairReport>,
     },
     Summary {
         summary: Box<super::summary::SavedInsightsSummary>,
@@ -487,15 +516,32 @@ fn execute_inner(request: LocalInsightsRequest) -> Result<LocalInsightsResponse>
                 mutation_effects,
             }
         }
-        LocalInsightsOperation::List {} => LocalInsightsResponse::List {
-            insights: list_saved(request.store_dir.as_deref())?,
+        LocalInsightsOperation::List {} => {
+            let (insights, quarantined) = match existing_store(request.store_dir.as_deref())? {
+                Some(store) => (store.list()?, store.quarantine()?),
+                None => (Vec::new(), QuarantineReport::default()),
+            };
+            LocalInsightsResponse::List {
+                insights,
+                quarantined,
+            }
+        }
+        // A repair is a write, so it resolves the store the way writes do.
+        LocalInsightsOperation::Repair {} => LocalInsightsResponse::Repair {
+            repaired: Box::new(store()?.repair()?),
         },
         LocalInsightsOperation::Summary {} => LocalInsightsResponse::Summary {
             summary: Box::new(super::summary::read_saved(request.store_dir.as_deref())?),
         },
         LocalInsightsOperation::Copy {} => LocalInsightsResponse::Copy { copy: ui_copy() },
+        // A read must not materialize an absent store. `open` creates the
+        // directory, so `explain` resolves it only when it already exists.
         LocalInsightsOperation::Explain { id } => LocalInsightsResponse::Explain {
-            insight: Box::new(store()?.explain(&id)?),
+            insight: Box::new(
+                existing_store(request.store_dir.as_deref())?
+                    .ok_or_else(|| anyhow!(InsightsStoreError::NotFound))?
+                    .explain(&id)?,
+            ),
         },
         LocalInsightsOperation::Delete { id } => {
             let result = store()?.delete_with_effects(&id)?;
@@ -581,6 +627,14 @@ fn public_error(error: anyhow::Error) -> anyhow::Error {
             EpisodeStoreError::Full => "insights_episode_limit_exceeded",
             EpisodeStoreError::RevisionOverflow => "insights_episode_revision_overflow",
         });
+    }
+    if let Some(error) = error.downcast_ref::<InsightsStoreError>() {
+        // Every one of these is a fixed label with no path, identifier, or
+        // parser detail in it, which is exactly the precondition the forwarding
+        // guard documents. Flattening them bought no privacy and cost every
+        // native shell the difference between "retry" and "your store is
+        // damaged".
+        return anyhow!(*error);
     }
     if error.downcast_ref::<ResponseTooLarge>().is_some() {
         return anyhow!(ResponseTooLarge);
@@ -934,7 +988,7 @@ mod tests {
             LocalInsightsResponse::Delete { deleted: true, .. }
         ));
         assert!(
-            matches!(call(LocalInsightsOperation::List {}), LocalInsightsResponse::List { insights } if insights.is_empty())
+            matches!(call(LocalInsightsOperation::List {}), LocalInsightsResponse::List { insights, .. } if insights.is_empty())
         );
         assert!(file.exists());
     }
@@ -996,6 +1050,35 @@ mod tests {
         std::os::unix::fs::symlink(temp.path().join("absent-target"), &link).unwrap();
         assert!(list_saved(Some(&link)).is_err());
         assert!(!temp.path().join("absent-target").exists());
+    }
+
+    #[test]
+    fn explain_reads_without_creating_a_store_or_rewriting_its_index() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = temp.path().join("insights");
+        let absent = execute(LocalInsightsRequest {
+            store_dir: Some(store.clone()),
+            operation: LocalInsightsOperation::Explain { id: "a".repeat(64) },
+        });
+        assert_eq!(absent.unwrap_err().to_string(), "insights_not_found");
+        assert!(!store.exists());
+        assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 0);
+
+        let file = temp.path().join("session.jsonl");
+        std::fs::write(&file, b"{\"role\":\"meta\",\"source\":\"fixture\"}\n{\"role\":\"user\",\"timestamp\":\"2026-01-01T00:00:00Z\",\"content\":\"body\"}\n").unwrap();
+        let saved = super::super::LocalInsightStore::open(&store)
+            .unwrap()
+            .import(super::SourceFormat::Trajectory, &file)
+            .unwrap();
+        let before = std::fs::read(store.join("index.json")).unwrap();
+        execute(LocalInsightsRequest {
+            store_dir: Some(store.clone()),
+            operation: LocalInsightsOperation::Explain {
+                id: saved.id.clone(),
+            },
+        })
+        .unwrap();
+        assert_eq!(std::fs::read(store.join("index.json")).unwrap(), before);
     }
 
     #[test]
