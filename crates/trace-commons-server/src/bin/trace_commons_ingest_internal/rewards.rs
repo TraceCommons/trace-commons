@@ -83,7 +83,11 @@ fn refusal(error: RewardError) -> RewardHttpError {
         RewardError::Unauthorized => StatusCode::UNAUTHORIZED,
         RewardError::RequestInvalid => StatusCode::BAD_REQUEST,
         RewardError::NotFound => StatusCode::NOT_FOUND,
-        RewardError::StoreUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+        // A missing control, not a client fault: the deployment never provisioned
+        // the participant database login.
+        RewardError::ParticipantUnprovisioned | RewardError::StoreUnavailable => {
+            StatusCode::SERVICE_UNAVAILABLE
+        }
         _ => StatusCode::CONFLICT,
     };
     RewardHttpError::new(status, error.label())
@@ -293,6 +297,18 @@ pub(crate) async fn history(
 #[cfg(test)]
 mod limiter_tests {
     use super::*;
+
+    #[test]
+    fn unprovisioned_participant_login_refuses_as_a_missing_control() {
+        let missing_control = refusal(RewardError::ParticipantUnprovisioned);
+        assert_eq!(missing_control.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(missing_control.label, "reward_participant_unprovisioned");
+        assert_eq!(
+            refusal(RewardError::Unauthorized).status,
+            StatusCode::UNAUTHORIZED,
+            "a credential failure stays a credential failure"
+        );
+    }
 
     #[test]
     fn public_reads_reserve_only_one_of_two_reward_database_slots() {

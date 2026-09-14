@@ -356,8 +356,14 @@ BEGIN
       INTO v_super, v_bypass
       FROM pg_catalog.pg_roles role
      WHERE role.rolname = session_user;
-    IF NOT FOUND OR v_super OR v_bypass
-        OR NOT pg_catalog.pg_has_role(
+    IF NOT FOUND OR v_super OR v_bypass THEN
+        RAISE EXCEPTION USING MESSAGE = 'reward_unauthorized';
+    END IF;
+    -- The remaining two causes are configuration, not credentials: a deployment
+    -- that never ran the DBA provisioning step. Refusing them as
+    -- reward_unauthorized renders as 401 and is indistinguishable from a bad
+    -- credential, so name the missing control and let it render as 503.
+    IF NOT pg_catalog.pg_has_role(
             session_user, 'trace_reward_participant_runtime', 'member'
         )
         OR NOT EXISTS (
@@ -365,7 +371,7 @@ BEGIN
              WHERE login.tenant_id = p_tenant
                AND login.login_role = session_user::NAME
         ) THEN
-        RAISE EXCEPTION USING MESSAGE = 'reward_unauthorized';
+        RAISE EXCEPTION USING MESSAGE = 'reward_participant_unprovisioned';
     END IF;
 END;
 $$;
@@ -695,7 +701,8 @@ CREATE FUNCTION public.trace_reward_participant_reservation_projection(
 )
 RETURNS JSONB
 LANGUAGE SQL
-STABLE
+-- Not STABLE: clock_timestamp() below decides the expired state.
+VOLATILE
 SET search_path = pg_catalog
 AS $$
     SELECT pg_catalog.jsonb_build_object(

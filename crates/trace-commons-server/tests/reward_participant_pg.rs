@@ -1162,3 +1162,63 @@ async fn participant_merge_refuses_duplicate_work_namespace() {
     );
     assert!(f.proposal_consumed_at(proposal).await.is_none());
 }
+
+/// A deployment that never ran the DBA provisioning step -- no membership in
+/// `trace_reward_participant_runtime`, or no `trace_reward_participant_logins`
+/// row -- refused every authenticated participant request as
+/// `reward_unauthorized`, which the HTTP layer renders as 401. That is
+/// indistinguishable from a genuine credential failure. Both configuration
+/// causes now refuse with their own missing-control name.
+#[tokio::test]
+#[ignore = "requires isolated TRACE_COMMONS_REWARDS_PG_TEST_URL"]
+async fn unprovisioned_participant_login_is_a_named_missing_control() {
+    let f = ParticipantFixture::new().await;
+    let offer = f.offer("A task needing a provisioned login.", 21, 7).await;
+    f.reserve(0, &offer).await;
+    f.ledger
+        .admin
+        .execute(
+            "DELETE FROM trace_reward_participant_logins WHERE tenant_id=$1 AND login_role=$2::name",
+            &[&f.ledger.tenant, &f.login],
+        )
+        .await
+        .expect("revoke participant tenant login mapping");
+    assert_eq!(
+        f.runtime
+            .get_reward_history(
+                &f.ledger.tenant,
+                f.accounts[0],
+                &RewardHistoryQuery {
+                    limit: 20,
+                    before: None
+                }
+            )
+            .await
+            .unwrap_err(),
+        RewardError::ParticipantUnprovisioned,
+        "a missing login row is a configuration fault, not a credential failure"
+    );
+    // The other configuration cause -- a login with no
+    // trace_reward_participant_runtime membership -- cannot be observed from
+    // here: EXECUTE on these functions is granted to that role alone, so
+    // revoking it fails at the driver with a permission error that stays
+    // deliberately opaque. The membership arm of the check is defence in depth
+    // against a caller that already holds EXECUTE some other way.
+    f.ledger
+        .admin
+        .execute(
+            "INSERT INTO trace_reward_participant_logins(tenant_id,login_role) VALUES($1,$2::name)",
+            &[&f.ledger.tenant, &f.login],
+        )
+        .await
+        .expect("restore participant tenant login mapping");
+    // A credential-level failure keeps its 401-mapped label.
+    assert_eq!(
+        f.runtime
+            .get_reward_reservation(&f.ledger.tenant, Uuid::new_v4(), Uuid::new_v4())
+            .await
+            .unwrap_err(),
+        RewardError::Unauthorized,
+        "an unknown account stays a credential failure"
+    );
+}

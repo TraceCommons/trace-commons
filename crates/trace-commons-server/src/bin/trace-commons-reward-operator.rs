@@ -437,6 +437,9 @@ impl std::error::Error for CliError {}
 fn operation_next_action(error: RewardError) -> &'static str {
     match error {
         RewardError::Unauthorized => "verify the database login has the required tenant grant",
+        RewardError::ParticipantUnprovisioned => {
+            "provision the participant database login before retrying"
+        }
         RewardError::RequestInvalid => "correct the command inputs and retry",
         RewardError::NotFound => "verify the tenant and resource identifier",
         RewardError::PayloadConflict => "retry with the original request payload",
