@@ -217,11 +217,12 @@ final class ComparisonTaskBridgeTests: XCTestCase {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
-        let source = root.appendingPathComponent("source.json")
-        try Data("[{\"role\":\"meta\",\"source\":\"fixture\",\"model\":\"fixture\"},{\"role\":\"user\",\"timestamp\":\"2026-09-12T00:00:00Z\",\"content\":\"refactor task\"}]".utf8).write(to: source)
+        let source = root.appendingPathComponent("source.jsonl")
+        try Data(contentsOf: Self.fixtureURL(
+            "codex-task-attribution/codex-release-0.154.0-alpha-direct.jsonl")).write(to: source)
         let store = root.appendingPathComponent("store").path
         let saved = try TCInsights.call(.init(storeDirectory: store,
-            operation: .init("analyze", source: "trajectory", file: source.path, save: true)))
+            operation: .init("analyze", source: "codex", file: source.path, save: true)))
         let snapshotID = try XCTUnwrap(saved.insight?.id)
         let episodeResponse = try TCInsights.call(.init(storeDirectory: store,
             operation: .init("episode_create", snapshotIDs: [snapshotID])))
@@ -239,21 +240,34 @@ final class ComparisonTaskBridgeTests: XCTestCase {
         XCTAssertEqual(pending.task?.outcome?.value, .pending)
         let context = ComparisonTaskContextInput(
             projectID: "20c18c96-6093-49f5-bb6f-6092ef0630b9", taskDate: "2026-09-12",
-            language: .known("swift"),
-            configuration: .init(harnessID: .known("codex"), harnessVersion: .unknown,
-                                 reasoningEffort: .high, toolPolicyID: .unknown,
-                                 toolPolicyVersion: .unknown, promptTemplateDigest: .unknown))
+            language: .known("rust"),
+            configuration: .init(harnessID: .known("codex"), harnessVersion: .known("0.154.0"),
+                                 reasoningEffort: .medium, toolPolicyID: .known("direct-v1"),
+                                 toolPolicyVersion: .known("1"),
+                                 promptTemplateDigest: .known(String(repeating: "33", count: 32))))
         let contextual = try TCInsights.call(.init(storeDirectory: store,
             operation: .init("comparison_task_set_context", id: created.id,
                              expectedRevision: try XCTUnwrap(pending.task?.revision), context: context)))
+        let assessed = try TCInsights.call(.init(storeDirectory: store,
+            operation: .init("comparison_task_set_outcome", id: created.id, outcome: "accepted",
+                             expectedRevision: try XCTUnwrap(contextual.task?.revision))))
         let confirmed = try TCInsights.call(.init(storeDirectory: store,
             operation: .init("comparison_task_reconfirm", id: created.id,
-                             expectedRevision: try XCTUnwrap(contextual.task?.revision),
-                             displayedMaterialDigest: try XCTUnwrap(contextual.task?.material_digest))))
+                             expectedRevision: try XCTUnwrap(assessed.task?.revision),
+                             displayedMaterialDigest: try XCTUnwrap(assessed.task?.material_digest))))
+        let qualification = try XCTUnwrap(TCInsights.call(.init(storeDirectory: store,
+            operation: .init("comparison_task_explain", id: created.id))).comparisonTaskDetail?
+            .source_qualification)
+        XCTAssertEqual(qualification.declared_model_cohort, "model-alpha")
+        XCTAssertEqual(qualification.rule, .codexRustV0_154_0TaskRecordsV1)
+        // Derive the cutoff from the task's own recorded time. A literal here
+        // sat before every clock-recorded `material_recorded_at`, so the old
+        // test asserted shape on a result that included nothing.
         let input = ComparisonSpecificationDraftInput(
-            evidenceCutoff: "2026-09-12T00:00:00Z", cohortLabels: ["fixture-model", "other-model"],
+            evidenceCutoff: try XCTUnwrap(confirmed.task?.updated_at),
+            cohortLabels: ["model-alpha", "model-beta"],
             dateStart: "2026-09-12", dateEnd: "2026-09-12",
-            stratum: .init(projectID: context.project_id, language: "swift",
+            stratum: .init(projectID: context.project_id, language: "rust",
                            configurationFingerprint: try XCTUnwrap(confirmed.task?.context?.configuration_fingerprint)))
         let preview = try TCInsights.call(.init(storeDirectory: store,
             operation: .init("comparison_preview_spec", input: input)))
@@ -268,6 +282,12 @@ final class ComparisonTaskBridgeTests: XCTestCase {
             operation: .init("comparison_explain_result", specificationID: savedSpec.id,
                              auditDigest: evaluated.audit_digest))).comparisonResult)
         XCTAssertEqual(explainedResult.audit_digest, evaluated.audit_digest)
+        XCTAssertEqual(evaluated.included_task_ids, [created.id],
+                       "excluded: \(evaluated.excluded_tasks.map { $0.reasons })")
+        XCTAssertEqual(evaluated.cohorts.map(\.cohort_label), ["model-alpha", "model-beta"])
+        XCTAssertEqual(evaluated.cohorts.map(\.included_tasks), [1, 0])
+        XCTAssertEqual(evaluated.cohorts[0].outcomes.accepted, 1)
+        XCTAssertEqual(evaluated.cohorts[0].outcomes.assessed, 1)
         let listed = try TCInsights.call(.init(storeDirectory: store,
             operation: .init("comparison_task_list")))
         XCTAssertEqual(listed.tasks?.map(\.id), [created.id])
@@ -281,12 +301,15 @@ final class ComparisonTaskBridgeTests: XCTestCase {
     private static func decode(_ object: [String: Any]) throws -> InsightsResponse {
         try JSONDecoder().decode(InsightsResponse.self, from: JSONSerialization.data(withJSONObject: object))
     }
-    private static func qualifiedObject() throws -> [String: Any] {
+    static func fixtureURL(_ relative: String) -> URL {
         let testFile = URL(fileURLWithPath: #filePath)
         let root = testFile.deletingLastPathComponent().deletingLastPathComponent()
             .deletingLastPathComponent().deletingLastPathComponent()
-        let fixture = root.appendingPathComponent(
-            "crates/trace-commons-contributor/fixtures/insights/comparison-estimator/schema2-qualified/preview-response.json")
+        return root.appendingPathComponent("crates/trace-commons-contributor/fixtures/insights/")
+            .appendingPathComponent(relative)
+    }
+    private static func qualifiedObject() throws -> [String: Any] {
+        let fixture = fixtureURL("comparison-estimator/schema2-qualified/preview-response.json")
         return try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: fixture)) as? [String: Any])
     }
 
