@@ -29,6 +29,9 @@ use trace_commons_server::versioned_pipeline_index::{
     IndexFault, IsolatedPipelineIndex, PIPELINE_EMBEDDER_MODEL_ID, PIPELINE_INDEX_ID,
     PIPELINE_PROJECTION_ID,
 };
+use trace_commons_server::versioned_pipeline_product::{
+    PipelineCreditStatus, PipelineProcessingStatus, PipelineProductStore, sha256_prefixed,
+};
 use uuid::Uuid;
 
 static MIGRATION_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -2431,4 +2434,235 @@ async fn phase_five_score_dependency_failure_retries_without_credit() {
             .any(|outcome| outcome.phase == Phase::Score)
     );
     assert_eq!(complete.run.bundle_id, review.run.bundle_id);
+}
+
+#[tokio::test]
+async fn phase_six_contributor_status_derives_processing_credit_and_payout() {
+    let Some(backend) = backend().await else {
+        return;
+    };
+    let tenant = format!("pipeline-phase6-status-{}", Uuid::new_v4());
+    let principal = "principal_sha256:status";
+    let (_root, service) = service(backend.clone(), None);
+    activate_operations(
+        &service,
+        &tenant,
+        PIPELINE_FIXED_POSITIVE_MICROCREDITS,
+        false,
+    )
+    .await;
+    let bytes = envelope_bytes(Uuid::new_v4(), "phase6-status").await;
+    let PipelineReceiptResult::Created(created) = service
+        .submit(&tenant, principal, "phase6-status", &bytes)
+        .await
+        .unwrap()
+    else {
+        panic!("receipt must create a run");
+    };
+    let product = PipelineProductStore::new(backend);
+    let pending = product
+        .contributor_statuses(&tenant, principal, &[created.submission_id])
+        .await
+        .unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].processing, PipelineProcessingStatus::Pending);
+    assert_eq!(pending[0].credit, PipelineCreditStatus::Unscored);
+    assert_eq!(pending[0].payout, None);
+    assert!(
+        product
+            .contributor_statuses(
+                &tenant,
+                "principal_sha256:unrelated",
+                &[created.submission_id]
+            )
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    finish_run(&service, &tenant, created.run_id).await;
+    let complete = product
+        .contributor_statuses(&tenant, principal, &[created.submission_id])
+        .await
+        .unwrap();
+    assert_eq!(complete[0].processing, PipelineProcessingStatus::Complete);
+    assert_eq!(complete[0].credit, PipelineCreditStatus::Finalized);
+    assert_eq!(
+        complete[0].score_microcredits,
+        Some(PIPELINE_FIXED_POSITIVE_MICROCREDITS)
+    );
+    assert_eq!(complete[0].payout.as_deref(), Some("disabled"));
+    assert_eq!(complete[0].bundle_id, created.bundle_id);
+    assert!(complete[0].score_outcome_id.is_some());
+
+    let attestation = product
+        .own_score_attestation_entries(&tenant, principal)
+        .await
+        .unwrap();
+    assert_eq!(attestation.len(), 1);
+    assert_eq!(attestation[0].bundle_id, created.bundle_id);
+    assert_eq!(
+        attestation[0].credit_microcredits,
+        PIPELINE_FIXED_POSITIVE_MICROCREDITS
+    );
+}
+
+#[tokio::test]
+async fn phase_six_export_snapshot_is_immutable_and_withdrawal_invalidates_it() {
+    let Some(backend) = backend().await else {
+        return;
+    };
+    let tenant = format!("pipeline-phase6-export-{}", Uuid::new_v4());
+    let principal = "principal_sha256:exportsource";
+    let exporter = "exporter_sha256:customer";
+    let (_root, service) = service(backend.clone(), None);
+    activate_operations(&service, &tenant, 0, true).await;
+    let bytes = envelope_bytes(Uuid::new_v4(), "phase6-export").await;
+    let PipelineReceiptResult::Created(created) = service
+        .submit(&tenant, principal, "phase6-export", &bytes)
+        .await
+        .unwrap()
+    else {
+        panic!("receipt must create a run");
+    };
+    finish_run(&service, &tenant, created.run_id).await;
+    let product = PipelineProductStore::new(backend.clone());
+    let request_key = sha256_prefixed(b"phase6-export-request");
+    let purpose_hash = sha256_prefixed(b"compatibility-export");
+    let snapshot = product
+        .create_export_snapshot(
+            &tenant,
+            exporter,
+            &request_key,
+            "evaluation",
+            &purpose_hash,
+            10,
+        )
+        .await
+        .unwrap();
+    assert_eq!(snapshot.items.len(), 1);
+    assert_eq!(snapshot.items[0].submission_id, created.submission_id);
+    assert_eq!(snapshot.items[0].bundle_id, created.bundle_id);
+    assert_eq!(
+        snapshot.items[0].authorized_view_schema_id,
+        "trace_commons.authorized_trace_view.v1"
+    );
+    let replay = product
+        .create_export_snapshot(
+            &tenant,
+            exporter,
+            &request_key,
+            "evaluation",
+            &purpose_hash,
+            10,
+        )
+        .await
+        .unwrap();
+    assert_eq!(replay.snapshot_id, snapshot.snapshot_id);
+    assert!(
+        product
+            .create_export_snapshot(
+                &tenant,
+                exporter,
+                &request_key,
+                "evaluation",
+                &sha256_prefixed(b"different-purpose"),
+                10,
+            )
+            .await
+            .is_err()
+    );
+    let completed = product
+        .complete_export_snapshot(&tenant, exporter, snapshot.snapshot_id)
+        .await
+        .unwrap();
+    assert_eq!(completed.state, "complete");
+    assert_eq!(completed.export_manifest_id, Some(snapshot.snapshot_id));
+
+    let withdrawal = service
+        .withdraw_submission(&tenant, created.submission_id, principal)
+        .await
+        .unwrap();
+    assert_eq!(withdrawal.distribution_reach, "commons_distributed");
+    let summary = product.lifecycle_summary(&tenant).await.unwrap();
+    assert_eq!(summary.invalidated_export_snapshots, 1);
+    let next = product
+        .create_export_snapshot(
+            &tenant,
+            exporter,
+            &sha256_prefixed(b"phase6-export-after-withdrawal"),
+            "evaluation",
+            &purpose_hash,
+            10,
+        )
+        .await
+        .unwrap();
+    assert!(next.items.is_empty());
+    assert!(
+        !service.index().contains_revision(
+            &tenant,
+            PIPELINE_INDEX_ID,
+            completed.items[0].registry_revision_id
+        ) || service
+            .inspect(&tenant, created.run_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .run
+            .index_invalidation_state
+            == "pending"
+    );
+    let propagation = backend
+        .list_trace_revocation_propagation_items(&tenant, created.submission_id)
+        .await
+        .unwrap();
+    assert!(
+        propagation
+            .iter()
+            .any(|item| item.action
+                == trace_commons_server::trace_corpus_storage::TraceRevocationPropagationAction::DeleteObjectPayload)
+    );
+}
+
+#[tokio::test]
+async fn phase_six_index_invalidation_retries_and_exposes_terminal_failure() {
+    let Some(backend) = backend().await else {
+        return;
+    };
+    let tenant = format!("pipeline-phase6-invalidation-{}", Uuid::new_v4());
+    let principal = "principal_sha256:invalidation";
+    let (_root, service) = service(backend.clone(), None);
+    activate_operations(&service, &tenant, 0, true).await;
+    let bytes = envelope_bytes(Uuid::new_v4(), "phase6-invalidation").await;
+    let PipelineReceiptResult::Created(created) = service
+        .submit(&tenant, principal, "phase6-invalidation", &bytes)
+        .await
+        .unwrap()
+    else {
+        panic!("receipt must create a run");
+    };
+    finish_run(&service, &tenant, created.run_id).await;
+    service
+        .withdraw_submission(&tenant, created.submission_id, principal)
+        .await
+        .unwrap();
+    for _ in 0..5 {
+        service.index().set_fault(IndexFault::FailInvalidation);
+        service
+            .process_index_invalidation(&tenant, created.run_id)
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+    }
+    let failed = service
+        .inspect(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(failed.run.index_invalidation_state, "failed");
+    let summary = PipelineProductStore::new(backend)
+        .lifecycle_summary(&tenant)
+        .await
+        .unwrap();
+    assert_eq!(summary.terminal_index_invalidation_failures, 1);
 }

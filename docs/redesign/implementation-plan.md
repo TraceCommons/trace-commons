@@ -4,7 +4,7 @@
 > Then add recovery, index and credit operations, and production policies in
 > small steps that reviewers can check.
 
-- **Status:** Phase 5 implemented
+- **Status:** Phase 6 implemented
 - **Date:** 2026-09-14
 - **Architecture:** [proposal.md](./proposal.md)
 - **Final acceptance:** [system-behavioral-contracts.md](./system-behavioral-contracts.md)
@@ -455,6 +455,9 @@ compatibility transitions are stable.
 **Outcome:** All supported user and worker interfaces work with new runs and
 retained legacy records. The new implementation does not require legacy
 policy columns as its authoritative records.
+
+**Implementation:** The staging product path is documented in
+[phase-6.md](./phase-6.md).
 
 ### Ordered review steps
 

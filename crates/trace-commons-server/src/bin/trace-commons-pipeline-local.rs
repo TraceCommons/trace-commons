@@ -10,7 +10,7 @@ use axum::body::Bytes;
 use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
@@ -30,9 +30,17 @@ use trace_commons_server::trace_artifact_store::{
     LocalEncryptedTraceArtifactStore, TraceArtifactStore,
 };
 use trace_commons_server::trace_corpus_storage::TraceCorpusStore;
+use trace_commons_server::trace_score_attestation::{
+    ATTESTATION_SIGNING_KEY_UNCONFIGURED, AttestationConfig, AttestationSigningState,
+    sign_versioned_score_attestation,
+};
 use trace_commons_server::versioned_pipeline::{
     PhaseOutcomeRecord, PipelineInspection, PipelineReceiptResult, PipelineReviewClaim,
     PipelineRunState, PipelineService, PipelineSubmitReceipt,
+};
+use trace_commons_server::versioned_pipeline_product::{
+    PIPELINE_EXPORT_ITEM_MAX, PipelineContributorStatus, PipelineExportSnapshot,
+    PipelineProductStore, sha256_prefixed as product_sha256_prefixed,
 };
 use uuid::Uuid;
 
@@ -116,6 +124,8 @@ enum LocalRole {
     Reviewer,
     Worker,
     Operator,
+    Exporter,
+    LifecycleWorker,
 }
 
 #[derive(Debug, Clone)]
@@ -128,6 +138,8 @@ struct LocalAuth {
 struct HttpState {
     pipeline: Arc<PipelineService>,
     backend: Arc<PgBackend>,
+    product: PipelineProductStore,
+    attestation_signing: Option<AttestationSigningState>,
     tokens: BTreeMap<String, LocalAuth>,
 }
 
@@ -160,6 +172,28 @@ struct ReviewAssessmentRequest {
     recommendation: ReviewRecommendation,
     reason_code: String,
     resolved_quarantine_reasons: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SubmissionStatusRequest {
+    submission_ids: Vec<Uuid>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ExportSnapshotRequest {
+    allowed_use: String,
+    purpose: String,
+    #[serde(default = "default_export_limit")]
+    limit: usize,
+}
+
+const fn default_export_limit() -> usize {
+    PIPELINE_EXPORT_ITEM_MAX
+}
+
+#[derive(Debug, Serialize)]
+struct ScoreAttestationResponse {
+    attestation: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -233,6 +267,10 @@ struct FixtureReport {
     index_write_state: String,
     credit_write_state: String,
     payout_state: String,
+    public_processing_state:
+        trace_commons_server::versioned_pipeline_product::PipelineProcessingStatus,
+    public_credit_state: trace_commons_server::versioned_pipeline_product::PipelineCreditStatus,
+    public_payout_state: Option<String>,
     replay_same_run: bool,
     changed_content_refused: bool,
     failure_label: Option<String>,
@@ -307,15 +345,61 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
             args.fail_phase.map(Into::into),
         )?
     });
+    let attestation_signing = AttestationConfig::from_env()?
+        .as_ref()
+        .map(AttestationSigningState::build)
+        .transpose()?;
     let bundle_id = pipeline.bundle_id().to_string();
     let state = Arc::new(HttpState {
         pipeline,
+        product: PipelineProductStore::new(backend.clone()),
         backend,
+        attestation_signing,
         tokens,
     });
     let app = Router::new()
         .route("/healthz", get(|| async { "ok" }))
+        .route("/health", get(|| async { "ok" }))
         .route("/v1/pipeline/submissions", post(submit_handler))
+        .route("/v1/traces", post(submit_handler))
+        .route("/v1/traces/{submission_id}", delete(withdraw_handler))
+        .route(
+            "/v1/account/traces/{submission_id}/withdraw",
+            post(withdraw_handler),
+        )
+        .route(
+            "/v1/contributors/me/submission-status",
+            post(submission_status_handler),
+        )
+        .route(
+            "/v1/contributors/me/credit",
+            get(contributor_credit_handler),
+        )
+        .route(
+            "/v1/contributors/me/credit-events",
+            get(contributor_credit_events_handler),
+        )
+        .route(
+            "/v1/contributors/me/score-attestation",
+            get(score_attestation_handler),
+        )
+        .route(
+            "/.well-known/trace-commons-attestation-keyset.json",
+            get(attestation_keyset_handler),
+        )
+        .route("/v1/exports", post(create_export_snapshot_handler))
+        .route(
+            "/v1/exports/{snapshot_id}/complete",
+            post(complete_export_snapshot_handler),
+        )
+        .route(
+            "/v1/admin/pipeline-lifecycle-summary",
+            get(lifecycle_summary_handler),
+        )
+        .route(
+            "/v1/workers/pipeline-index-invalidation/{run_id}",
+            post(index_invalidation_handler),
+        )
         .route("/v1/pipeline/worker", post(worker_handler))
         .route("/v1/pipeline/runs/{run_id}", get(inspect_handler))
         .route(
@@ -366,6 +450,215 @@ async fn submit_handler(
             label: "idempotency_content_conflict",
         }),
     }
+}
+
+async fn withdraw_handler(
+    State(state): State<Arc<HttpState>>,
+    headers: HeaderMap,
+    AxumPath(submission_id): AxumPath<Uuid>,
+) -> HttpResult<Json<trace_commons_server::trace_corpus_storage::TraceWithdrawalRecord>> {
+    let auth = authenticate(&state, &headers, LocalRole::Contributor)?;
+    let withdrawal = state
+        .pipeline
+        .withdraw_submission(&auth.tenant_id, submission_id, &auth.principal_ref)
+        .await
+        .map_err(|_| HttpError {
+            status: StatusCode::NOT_FOUND,
+            label: "submission_not_found",
+        })?;
+    Ok(Json(withdrawal))
+}
+
+async fn submission_status_handler(
+    State(state): State<Arc<HttpState>>,
+    headers: HeaderMap,
+    Json(body): Json<SubmissionStatusRequest>,
+) -> HttpResult<
+    Json<Vec<trace_commons_server::versioned_pipeline_product::PipelineContributorStatus>>,
+> {
+    let auth = authenticate(&state, &headers, LocalRole::Contributor)?;
+    if body.submission_ids.len()
+        > trace_commons_server::versioned_pipeline_product::PIPELINE_STATUS_BATCH_MAX
+    {
+        return Err(HttpError {
+            status: StatusCode::PAYLOAD_TOO_LARGE,
+            label: "submission_status_batch_too_large",
+        });
+    }
+    let statuses = state
+        .product
+        .contributor_statuses(&auth.tenant_id, &auth.principal_ref, &body.submission_ids)
+        .await
+        .map_err(|_| HttpError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            label: "submission_status_unavailable",
+        })?;
+    Ok(Json(statuses))
+}
+
+async fn contributor_credit_handler(
+    State(state): State<Arc<HttpState>>,
+    headers: HeaderMap,
+) -> HttpResult<Json<trace_commons_server::versioned_pipeline_product::PipelineContributorCredit>> {
+    let auth = authenticate(&state, &headers, LocalRole::Contributor)?;
+    let credit = state
+        .product
+        .contributor_credit(&auth.tenant_id, &auth.principal_ref)
+        .await
+        .map_err(|_| HttpError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            label: "contributor_credit_unavailable",
+        })?;
+    Ok(Json(credit))
+}
+
+async fn contributor_credit_events_handler(
+    State(state): State<Arc<HttpState>>,
+    headers: HeaderMap,
+) -> HttpResult<
+    Json<Vec<trace_commons_server::versioned_pipeline_product::PipelineContributorStatus>>,
+> {
+    let auth = authenticate(&state, &headers, LocalRole::Contributor)?;
+    let statuses = state
+        .product
+        .own_contributor_statuses(&auth.tenant_id, &auth.principal_ref)
+        .await
+        .map_err(|_| HttpError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            label: "contributor_credit_events_unavailable",
+        })?
+        .into_iter()
+        .filter(|status| status.score_outcome_id.is_some())
+        .collect();
+    Ok(Json(statuses))
+}
+
+async fn score_attestation_handler(
+    State(state): State<Arc<HttpState>>,
+    headers: HeaderMap,
+) -> HttpResult<Json<ScoreAttestationResponse>> {
+    let auth = authenticate(&state, &headers, LocalRole::Contributor)?;
+    let signer = state.attestation_signing.as_ref().ok_or(HttpError {
+        status: StatusCode::SERVICE_UNAVAILABLE,
+        label: ATTESTATION_SIGNING_KEY_UNCONFIGURED,
+    })?;
+    let entries = state
+        .product
+        .own_score_attestation_entries(&auth.tenant_id, &auth.principal_ref)
+        .await
+        .map_err(|_| HttpError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            label: "score_attestation_unavailable",
+        })?;
+    let attestation = sign_versioned_score_attestation(
+        signer,
+        &auth.tenant_id,
+        &auth.principal_ref,
+        entries,
+        Utc::now(),
+    )
+    .map_err(|_| HttpError {
+        status: StatusCode::INTERNAL_SERVER_ERROR,
+        label: "score_attestation_signing_failed",
+    })?;
+    Ok(Json(ScoreAttestationResponse { attestation }))
+}
+
+async fn attestation_keyset_handler(
+    State(state): State<Arc<HttpState>>,
+) -> HttpResult<Json<serde_json::Value>> {
+    let signer = state.attestation_signing.as_ref().ok_or(HttpError {
+        status: StatusCode::SERVICE_UNAVAILABLE,
+        label: ATTESTATION_SIGNING_KEY_UNCONFIGURED,
+    })?;
+    Ok(Json(signer.keyset_json()))
+}
+
+async fn create_export_snapshot_handler(
+    State(state): State<Arc<HttpState>>,
+    headers: HeaderMap,
+    Json(body): Json<ExportSnapshotRequest>,
+) -> HttpResult<Json<PipelineExportSnapshot>> {
+    let auth = authenticate(&state, &headers, LocalRole::Exporter)?;
+    let idempotency_key = headers
+        .get("idempotency-key")
+        .and_then(|value| value.to_str().ok())
+        .ok_or(HttpError {
+            status: StatusCode::BAD_REQUEST,
+            label: "idempotency_key_required",
+        })?;
+    let request_key_hash = product_sha256_prefixed(idempotency_key.as_bytes());
+    let purpose_hash = product_sha256_prefixed(body.purpose.as_bytes());
+    let snapshot = state
+        .product
+        .create_export_snapshot(
+            &auth.tenant_id,
+            &auth.principal_ref,
+            &request_key_hash,
+            &body.allowed_use,
+            &purpose_hash,
+            body.limit,
+        )
+        .await
+        .map_err(|_| HttpError {
+            status: StatusCode::BAD_REQUEST,
+            label: "export_snapshot_failed",
+        })?;
+    Ok(Json(snapshot))
+}
+
+async fn complete_export_snapshot_handler(
+    State(state): State<Arc<HttpState>>,
+    headers: HeaderMap,
+    AxumPath(snapshot_id): AxumPath<Uuid>,
+) -> HttpResult<Json<PipelineExportSnapshot>> {
+    let auth = authenticate(&state, &headers, LocalRole::Exporter)?;
+    let snapshot = state
+        .product
+        .complete_export_snapshot(&auth.tenant_id, &auth.principal_ref, snapshot_id)
+        .await
+        .map_err(|_| HttpError {
+            status: StatusCode::NOT_FOUND,
+            label: "export_snapshot_not_found",
+        })?;
+    Ok(Json(snapshot))
+}
+
+async fn lifecycle_summary_handler(
+    State(state): State<Arc<HttpState>>,
+    headers: HeaderMap,
+) -> HttpResult<Json<trace_commons_server::versioned_pipeline_product::PipelineLifecycleSummary>> {
+    let auth = authenticate(&state, &headers, LocalRole::Operator)?;
+    let summary = state
+        .product
+        .lifecycle_summary(&auth.tenant_id)
+        .await
+        .map_err(|_| HttpError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            label: "lifecycle_summary_unavailable",
+        })?;
+    Ok(Json(summary))
+}
+
+async fn index_invalidation_handler(
+    State(state): State<Arc<HttpState>>,
+    headers: HeaderMap,
+    AxumPath(run_id): AxumPath<Uuid>,
+) -> HttpResult<Json<trace_commons_server::versioned_pipeline::PipelineRunRecord>> {
+    let auth = authenticate(&state, &headers, LocalRole::LifecycleWorker)?;
+    let run = state
+        .pipeline
+        .process_index_invalidation(&auth.tenant_id, run_id)
+        .await
+        .map_err(|_| HttpError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            label: "index_invalidation_failed",
+        })?
+        .ok_or(HttpError {
+            status: StatusCode::NOT_FOUND,
+            label: "pipeline_run_not_found",
+        })?;
+    Ok(Json(run))
 }
 
 async fn worker_handler(
@@ -544,6 +837,8 @@ fn parse_tokens(value: &str) -> anyhow::Result<BTreeMap<String, LocalAuth>> {
             "reviewer" => LocalRole::Reviewer,
             "worker" => LocalRole::Worker,
             "operator" => LocalRole::Operator,
+            "exporter" => LocalRole::Exporter,
+            "lifecycle_worker" => LocalRole::LifecycleWorker,
             _ => anyhow::bail!("unknown pipeline token role"),
         };
         anyhow::ensure!(
@@ -576,6 +871,8 @@ fn is_safe_principal_ref(value: &str) -> bool {
         "reviewer_sha256:",
         "worker_sha256:",
         "operator_sha256:",
+        "exporter_sha256:",
+        "lifecycle_worker_sha256:",
     ]
     .iter()
     .find_map(|prefix| value.strip_prefix(prefix))
@@ -678,9 +975,17 @@ async fn run_corpus(args: CorpusArgs) -> anyhow::Result<()> {
             run_worker_http(&client, &args.base_url, &args.worker_token).await?;
             tokio::time::sleep(Duration::from_millis(25)).await;
         };
+        let public_status = submission_status_http(
+            &client,
+            &args.base_url,
+            &args.submit_token,
+            first.submission_id,
+        )
+        .await?;
         reports.push(fixture_report(
             fixture,
             inspection,
+            public_status,
             replay.run_id == first.run_id,
             changed_content_refused,
         )?);
@@ -688,15 +993,21 @@ async fn run_corpus(args: CorpusArgs) -> anyhow::Result<()> {
     let failure_count = reports
         .iter()
         .filter(|report| {
+            let expected_public_processing = if report.expected_outcome_count < 4 {
+                trace_commons_server::versioned_pipeline_product::PipelineProcessingStatus::Rejected
+            } else {
+                trace_commons_server::versioned_pipeline_product::PipelineProcessingStatus::Complete
+            };
             report.state != PipelineRunState::Complete
                 || report.phase_count != report.expected_outcome_count
                 || report.admission_decision != report.expected_admission_decision
+                || report.public_processing_state != expected_public_processing
                 || !report.replay_same_run
                 || !report.changed_content_refused
         })
         .count();
     let report = CorpusReport {
-        schema: "trace_commons.pipeline_corpus_report.v3",
+        schema: "trace_commons.pipeline_corpus_report.v4",
         corpus_digest,
         code_revision: trace_commons_build_info::COMMIT,
         bundle_id: bundle_id.unwrap_or_default(),
@@ -905,9 +1216,35 @@ async fn inspect_http(
     Ok(response.json().await?)
 }
 
+async fn submission_status_http(
+    client: &reqwest::Client,
+    base_url: &str,
+    token: &str,
+    submission_id: Uuid,
+) -> anyhow::Result<PipelineContributorStatus> {
+    let response = client
+        .post(format!("{base_url}/v1/contributors/me/submission-status"))
+        .bearer_auth(token)
+        .json(&serde_json::json!({"submission_ids": [submission_id]}))
+        .send()
+        .await?;
+    anyhow::ensure!(
+        response.status().is_success(),
+        "public submission status returned {}",
+        response.status()
+    );
+    let mut statuses = response.json::<Vec<PipelineContributorStatus>>().await?;
+    anyhow::ensure!(
+        statuses.len() == 1,
+        "public submission status omitted an owned run"
+    );
+    Ok(statuses.remove(0))
+}
+
 fn fixture_report(
     fixture: &CorpusFixture,
     inspection: PipelineInspection,
+    public_status: PipelineContributorStatus,
     replay_same_run: bool,
     changed_content_refused: bool,
 ) -> anyhow::Result<FixtureReport> {
@@ -963,6 +1300,9 @@ fn fixture_report(
         index_write_state: inspection.run.index_write_state.clone(),
         credit_write_state: inspection.run.credit_write_state.clone(),
         payout_state: inspection.run.payout_state.clone(),
+        public_processing_state: public_status.processing,
+        public_credit_state: public_status.credit,
+        public_payout_state: public_status.payout,
         replay_same_run,
         changed_content_refused,
         failure_label: inspection.run.last_error_label,
@@ -1006,7 +1346,7 @@ fn markdown_report(report: &CorpusReport) -> String {
     );
     for fixture in &report.fixtures {
         output.push_str(&format!(
-            "- `{}`: Admission `{}`, state `{:?}`, {} outcomes, {} attempts, {} ms in phase, score {} microcredits, index `{}` (`{}`), credit `{}`, payout `{}`\n",
+            "- `{}`: Admission `{}`, state `{:?}`, {} outcomes, {} attempts, {} ms in phase, score {} microcredits, index `{}` (`{}`), credit `{}`, payout `{}`, public processing `{:?}`, public credit `{:?}`, public payout `{}`\n",
             fixture.label,
             fixture.admission_decision,
             fixture.state,
@@ -1017,7 +1357,10 @@ fn markdown_report(report: &CorpusReport) -> String {
             fixture.index_membership,
             fixture.index_write_state,
             fixture.credit_write_state,
-            fixture.payout_state
+            fixture.payout_state,
+            fixture.public_processing_state,
+            fixture.public_credit_state,
+            fixture.public_payout_state.as_deref().unwrap_or("none"),
         ));
     }
     output
@@ -1051,5 +1394,26 @@ mod tests {
             ))
             .is_ok()
         );
+    }
+
+    #[test]
+    fn worker_reviewer_export_and_lifecycle_roles_are_distinct() {
+        let tokens = parse_tokens(&format!(
+            "review,tenant,reviewer_sha256:{},reviewer;\
+             worker,tenant,worker_sha256:{},worker;\
+             export,tenant,exporter_sha256:{},exporter;\
+             lifecycle,tenant,lifecycle_worker_sha256:{},lifecycle_worker",
+            "a".repeat(64),
+            "b".repeat(64),
+            "c".repeat(64),
+            "d".repeat(64),
+        ))
+        .unwrap();
+        assert_eq!(tokens["review"].role, LocalRole::Reviewer);
+        assert_eq!(tokens["worker"].role, LocalRole::Worker);
+        assert_eq!(tokens["export"].role, LocalRole::Exporter);
+        assert_eq!(tokens["lifecycle"].role, LocalRole::LifecycleWorker);
+        assert_ne!(tokens["review"].role, tokens["worker"].role);
+        assert_ne!(tokens["export"].role, tokens["lifecycle"].role);
     }
 }

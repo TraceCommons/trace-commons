@@ -25,8 +25,10 @@ use uuid::Uuid;
 use crate::trace_upload_claim_issuer::{
     optional_env, validate_eddsa_private_key_pem, validate_eddsa_public_key_pem,
 };
+use crate::versioned_pipeline_product::PipelineScoreAttestationEntry;
 
 pub const SCORE_ATTESTATION_SCHEMA_VERSION: &str = "trace_commons.score_attestation.v1";
+pub const VERSIONED_SCORE_ATTESTATION_SCHEMA_VERSION: &str = "trace_commons.score_attestation.v2";
 
 pub const TRACE_COMMONS_INGEST_ATTESTATION_SIGNING_KEY_PEM_ENV: &str =
     "TRACE_COMMONS_INGEST_ATTESTATION_SIGNING_KEY_PEM";
@@ -178,6 +180,17 @@ pub struct ScoreAttestationClaims {
     pub nonce: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VersionedScoreAttestationClaims {
+    pub schema_version: String,
+    pub tenant_id: String,
+    pub auth_principal_ref: String,
+    pub submissions: Vec<PipelineScoreAttestationEntry>,
+    pub issued_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    pub nonce: String,
+}
+
 /// Sign a score attestation for `(tenant_id, auth_principal_ref)` as of
 /// `now`. Both identity fields MUST be resolved by the caller from the
 /// authenticated request context only — this function has no way to enforce
@@ -210,6 +223,31 @@ pub fn sign_score_attestation(
     header.kid = Some(state.kid.clone());
     jsonwebtoken::encode(&header, &claims, &state.signing_key)
         .context("failed to sign score attestation")
+}
+
+pub fn sign_versioned_score_attestation(
+    state: &AttestationSigningState,
+    tenant_id: &str,
+    auth_principal_ref: &str,
+    submissions: Vec<PipelineScoreAttestationEntry>,
+    now: DateTime<Utc>,
+) -> anyhow::Result<String> {
+    let expires_at = now
+        .checked_add_signed(Duration::seconds(state.ttl_seconds))
+        .context("attestation ttl_seconds overflow")?;
+    let claims = VersionedScoreAttestationClaims {
+        schema_version: VERSIONED_SCORE_ATTESTATION_SCHEMA_VERSION.to_string(),
+        tenant_id: tenant_id.to_string(),
+        auth_principal_ref: auth_principal_ref.to_string(),
+        submissions,
+        issued_at: now,
+        expires_at,
+        nonce: Uuid::new_v4().to_string(),
+    };
+    let mut header = Header::new(Algorithm::EdDSA);
+    header.kid = Some(state.kid.clone());
+    jsonwebtoken::encode(&header, &claims, &state.signing_key)
+        .context("failed to sign versioned score attestation")
 }
 
 #[cfg(test)]
@@ -329,6 +367,56 @@ mod tests {
         let keyset = state.keyset_json();
         assert_eq!(keyset["keys"][0]["kid"], "attestation-key-1");
         assert_eq!(keyset["keys"][0]["public_key_pem"], keypair.public_key_pem);
+    }
+
+    #[test]
+    fn versioned_attestation_binds_bundle_outcome_and_schema() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_env();
+        let keypair = generate_test_keypair();
+        let state = AttestationSigningState::build(&AttestationConfig {
+            signing_private_key_pem: keypair.private_key_pem.clone(),
+            signing_public_key_pem: keypair.public_key_pem.clone(),
+            signing_kid: "attestation-key-v2".to_string(),
+            ttl_seconds: 3600,
+        })
+        .unwrap();
+        let entry = PipelineScoreAttestationEntry {
+            submission_id: Uuid::new_v4(),
+            run_id: Uuid::new_v4(),
+            score_outcome_id: Uuid::new_v4(),
+            bundle_id: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .to_string(),
+            outcome_schema_id: "trace_commons.pipeline_outcome".to_string(),
+            outcome_schema_version: 1,
+            credit_microcredits: 42,
+            decision: serde_json::json!({"credit_microcredits": 42}),
+        };
+        let token = sign_versioned_score_attestation(
+            &state,
+            "tenant-a",
+            "principal_sha256:test",
+            vec![entry.clone()],
+            Utc::now(),
+        )
+        .unwrap();
+        let decoding_key =
+            DecodingKey::from_ed_pem(keypair.public_key_pem.as_bytes()).expect("decoding key");
+        let mut validation = Validation::new(Algorithm::EdDSA);
+        validation.validate_exp = false;
+        validation.required_spec_claims.clear();
+        let decoded = jsonwebtoken::decode::<VersionedScoreAttestationClaims>(
+            &token,
+            &decoding_key,
+            &validation,
+        )
+        .unwrap();
+        assert_eq!(
+            decoded.claims.schema_version,
+            VERSIONED_SCORE_ATTESTATION_SCHEMA_VERSION
+        );
+        assert_eq!(decoded.claims.submissions, vec![entry]);
+        clear_env();
     }
 
     #[test]

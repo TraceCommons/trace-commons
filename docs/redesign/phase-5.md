@@ -57,4 +57,5 @@ This path remains local and test only. The local bundle uses the reference
 scorer with zero gate floors. A staging bundle must include deployed floors
 in the bundle configuration.
 
-Phase 6 connects contributor, customer, and operator product interfaces.
+Phase 6 connects contributor, customer, and operator product interfaces. See
+[phase-6.md](./phase-6.md).

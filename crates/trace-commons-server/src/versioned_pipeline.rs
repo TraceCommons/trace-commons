@@ -38,7 +38,9 @@ use crate::trace_corpus_storage::{
     TraceAuditAction, TraceAuditEventWrite, TraceAuditSafeMetadata, TraceCorpusStatus,
     TraceCorpusStore, TraceCreditHoldReason, TraceCreditSettlementBatchStatus,
     TraceCreditSettlementNearStatus, TraceCreditSettlementState, TraceObjectArtifactKind,
-    TraceObjectRefWrite, TraceSubmissionWrite, TraceWithdrawalRecord,
+    TraceObjectRefWrite, TraceRevocationPropagationAction, TraceRevocationPropagationItemStatus,
+    TraceRevocationPropagationItemWrite, TraceRevocationPropagationTarget, TraceSubmissionWrite,
+    TraceWithdrawalRecord,
 };
 use crate::versioned_pipeline_compat::{
     COMPATIBILITY_SCORE_CODE, COMPATIBILITY_SCORE_IMPLEMENTATION, COMPATIBILITY_SETTLE_CODE,
@@ -72,6 +74,7 @@ pub const PIPELINE_SUBMISSION_INOPERABLE_LABEL: &str = "submission_inoperable";
 pub const PIPELINE_REVIEW_ASSESSMENT_REQUIRED_LABEL: &str = "review_assessment_required";
 pub const PIPELINE_ADMISSION_LIMIT_LABEL: &str = "admission_limit_exceeded";
 pub const PIPELINE_TOMBSTONE_LABEL: &str = "content_tombstoned";
+pub const PIPELINE_INVALIDATION_FAILED_LABEL: &str = "index_invalidation_failed";
 pub const PIPELINE_SCORE_DEPENDENCY_LABEL: &str =
     crate::versioned_pipeline_compat::PIPELINE_SCORE_DEPENDENCY_LABEL;
 const DEFAULT_LEASE_SECONDS: i64 = 30;
@@ -122,7 +125,7 @@ impl PipelineRunState {
         }
     }
 
-    fn from_db(value: &str) -> Result<Self, DatabaseError> {
+    pub(crate) fn from_db(value: &str) -> Result<Self, DatabaseError> {
         match value {
             "pending" => Ok(Self::Pending),
             "leased" => Ok(Self::Leased),
@@ -146,7 +149,7 @@ fn phase_as_db(phase: Option<Phase>) -> &'static str {
     }
 }
 
-fn phase_from_db(value: &str) -> Result<Option<Phase>, DatabaseError> {
+pub(crate) fn phase_from_db(value: &str) -> Result<Option<Phase>, DatabaseError> {
     match value {
         "admission" => Ok(Some(Phase::Admission)),
         "review" => Ok(Some(Phase::Review)),
@@ -1944,7 +1947,8 @@ impl PgPipelineStore {
         let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
         let submission = tx
             .query_opt(
-                "SELECT status, auth_principal_ref
+                "SELECT status, auth_principal_ref, trace_id, redaction_hash,
+                        canonical_summary_hash
                  FROM trace_submissions
                  WHERE tenant_id = $1 AND submission_id = $2",
                 &[&tenant_id, &submission_id],
@@ -1972,7 +1976,8 @@ impl PgPipelineStore {
             .await?;
         let submission = tx
             .query_one(
-                "SELECT status, auth_principal_ref
+                "SELECT status, auth_principal_ref, trace_id, redaction_hash,
+                        canonical_summary_hash
                  FROM trace_submissions
                  WHERE tenant_id = $1 AND submission_id = $2
                  FOR UPDATE",
@@ -1986,12 +1991,64 @@ impl PgPipelineStore {
             });
         }
         let prior_status: String = submission.get("status");
+        let trace_id: Uuid = submission.get("trace_id");
+        let redaction_hash: String = submission.get("redaction_hash");
+        let canonical_summary_hash: Option<String> = submission.get("canonical_summary_hash");
+        let has_managed_export = tx
+            .query_one(
+                "SELECT EXISTS (
+                    SELECT 1
+                      FROM trace_export_manifest_items
+                     WHERE tenant_id = $1 AND submission_id = $2
+                       AND source_invalidated_at IS NULL
+                 ) AS present",
+                &[&tenant_id, &submission_id],
+            )
+            .await?
+            .get::<_, bool>("present");
+        let distribution_reach = if has_managed_export {
+            "commons_distributed"
+        } else if run_row
+            .as_ref()
+            .and_then(|row| row.get::<_, Option<Uuid>>("approved_revision_id"))
+            .is_some()
+        {
+            "commons_not_distributed"
+        } else {
+            "not_distributed"
+        };
         tx.execute(
             "INSERT INTO trace_withdrawals (
                 tenant_id, submission_id, withdrawn_at, prior_status, distribution_reach
-             ) VALUES ($1,$2,NOW(),$3,'not_distributed')
+             ) VALUES ($1,$2,NOW(),$3,$4)
              ON CONFLICT (tenant_id, submission_id) DO NOTHING",
-            &[&tenant_id, &submission_id, &prior_status],
+            &[
+                &tenant_id,
+                &submission_id,
+                &prior_status,
+                &distribution_reach,
+            ],
+        )
+        .await?;
+        let tombstone_id = Uuid::new_v5(
+            &Uuid::NAMESPACE_URL,
+            format!("pipeline-withdrawal:{tenant_id}:{submission_id}").as_bytes(),
+        );
+        tx.execute(
+            "INSERT INTO trace_tombstones (
+                tenant_id, tombstone_id, submission_id, trace_id, redaction_hash,
+                canonical_summary_hash, reason, effective_at, created_by_principal_ref
+             ) VALUES ($1,$2,$3,$4,$5,$6,'withdrawn',NOW(),$7)
+             ON CONFLICT (tenant_id, submission_id) DO NOTHING",
+            &[
+                &tenant_id,
+                &tombstone_id,
+                &submission_id,
+                &trace_id,
+                &redaction_hash,
+                &canonical_summary_hash,
+                &actor_principal_ref,
+            ],
         )
         .await?;
         tx.execute(
@@ -1999,9 +2056,73 @@ impl PgPipelineStore {
              SET status = 'revoked',
                  withdrawn_at = COALESCE(withdrawn_at, NOW()),
                  revoked_at = COALESCE(revoked_at, NOW()),
-                 purged_at = COALESCE(purged_at, NOW()),
                  updated_at = NOW()
              WHERE tenant_id = $1 AND submission_id = $2",
+            &[&tenant_id, &submission_id],
+        )
+        .await?;
+        tx.execute(
+            "UPDATE trace_object_refs
+                SET invalidated_at = COALESCE(invalidated_at, NOW()), updated_at = NOW()
+              WHERE tenant_id = $1 AND submission_id = $2 AND invalidated_at IS NULL",
+            &[&tenant_id, &submission_id],
+        )
+        .await?;
+        tx.execute(
+            "UPDATE trace_derived_records
+                SET status = 'revoked', updated_at = NOW()
+              WHERE tenant_id = $1 AND submission_id = $2 AND status <> 'revoked'",
+            &[&tenant_id, &submission_id],
+        )
+        .await?;
+        tx.execute(
+            "UPDATE trace_vector_entries
+                SET status = 'invalidated',
+                    invalidated_at = COALESCE(invalidated_at, NOW()), updated_at = NOW()
+              WHERE tenant_id = $1 AND submission_id = $2
+                AND status <> 'invalidated' AND deleted_at IS NULL",
+            &[&tenant_id, &submission_id],
+        )
+        .await?;
+        tx.execute(
+            "UPDATE trace_export_manifest_items
+                SET source_invalidated_at = COALESCE(source_invalidated_at, NOW()),
+                    source_invalidation_reason = 'revoked', updated_at = NOW()
+              WHERE tenant_id = $1 AND submission_id = $2
+                AND source_invalidated_at IS NULL",
+            &[&tenant_id, &submission_id],
+        )
+        .await?;
+        tx.execute(
+            "UPDATE trace_export_manifests
+                SET invalidated_at = COALESCE(invalidated_at, NOW()), updated_at = NOW()
+              WHERE tenant_id = $1 AND $2 = ANY(source_submission_ids)
+                AND invalidated_at IS NULL AND deleted_at IS NULL",
+            &[&tenant_id, &submission_id],
+        )
+        .await?;
+        tx.execute(
+            "UPDATE pipeline_export_snapshot_items
+                SET invalidated_at = COALESCE(invalidated_at, NOW()),
+                    invalidation_reason = 'withdrawn'
+              WHERE tenant_id = $1 AND submission_id = $2
+                AND invalidated_at IS NULL",
+            &[&tenant_id, &submission_id],
+        )
+        .await?;
+        tx.execute(
+            "UPDATE pipeline_export_snapshots snapshot
+                SET state = 'invalidated',
+                    invalidated_at = COALESCE(snapshot.invalidated_at, NOW())
+              WHERE snapshot.tenant_id = $1
+                AND snapshot.state <> 'invalidated'
+                AND EXISTS (
+                    SELECT 1
+                      FROM pipeline_export_snapshot_items item
+                     WHERE item.tenant_id = snapshot.tenant_id
+                       AND item.snapshot_id = snapshot.snapshot_id
+                       AND item.submission_id = $2
+                )",
             &[&tenant_id, &submission_id],
         )
         .await?;
@@ -2093,7 +2214,8 @@ impl PgPipelineStore {
         let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
         tx.execute(
             "UPDATE pipeline_index_invalidations
-             SET state = 'complete', completed_at = COALESCE(completed_at, NOW())
+             SET state = 'complete', completed_at = COALESCE(completed_at, NOW()),
+                 last_error_label = NULL
              WHERE tenant_id = $1 AND run_id = $2",
             &[&tenant_id, &run_id],
         )
@@ -2105,6 +2227,83 @@ impl PgPipelineStore {
                  WHERE tenant_id = $1 AND run_id = $2
                  RETURNING *",
                 &[&tenant_id, &run_id],
+            )
+            .await?;
+        let run = pipeline_run_from_row(&row)?;
+        tx.commit().await?;
+        Ok(run)
+    }
+
+    pub async fn claim_index_invalidation(
+        &self,
+        tenant_id: &str,
+        run_id: Uuid,
+    ) -> Result<Option<PipelineRunRecord>, DatabaseError> {
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
+        let claimed = tx
+            .execute(
+                "UPDATE pipeline_index_invalidations
+                    SET attempt_count = attempt_count + 1
+                  WHERE tenant_id = $1 AND run_id = $2
+                    AND state = 'pending'
+                    AND next_attempt_at <= NOW()
+                    AND attempt_count < max_attempts",
+                &[&tenant_id, &run_id],
+            )
+            .await?;
+        let run = if claimed == 1 {
+            tx.query_opt(
+                "SELECT * FROM pipeline_runs WHERE tenant_id = $1 AND run_id = $2",
+                &[&tenant_id, &run_id],
+            )
+            .await?
+            .as_ref()
+            .map(pipeline_run_from_row)
+            .transpose()?
+        } else {
+            None
+        };
+        tx.commit().await?;
+        Ok(run)
+    }
+
+    pub async fn fail_index_invalidation(
+        &self,
+        tenant_id: &str,
+        run_id: Uuid,
+    ) -> Result<PipelineRunRecord, DatabaseError> {
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
+        let row = tx
+            .query_one(
+                "UPDATE pipeline_index_invalidations
+                    SET state = CASE
+                            WHEN attempt_count >= max_attempts THEN 'failed'
+                            ELSE 'pending'
+                        END,
+                        last_error_label = $3,
+                        next_attempt_at = CASE
+                            WHEN attempt_count >= max_attempts THEN next_attempt_at
+                            ELSE NOW() + INTERVAL '50 milliseconds'
+                        END
+                  WHERE tenant_id = $1 AND run_id = $2
+                  RETURNING state",
+                &[&tenant_id, &run_id, &PIPELINE_INVALIDATION_FAILED_LABEL],
+            )
+            .await?;
+        let terminal = row.get::<_, String>("state") == "failed";
+        let row = tx
+            .query_one(
+                "UPDATE pipeline_runs
+                    SET index_invalidation_state = $3, updated_at = NOW()
+                  WHERE tenant_id = $1 AND run_id = $2
+                  RETURNING *",
+                &[
+                    &tenant_id,
+                    &run_id,
+                    &(if terminal { "failed" } else { "pending" }),
+                ],
             )
             .await?;
         let run = pipeline_run_from_row(&row)?;
@@ -3565,6 +3764,70 @@ impl PipelineService {
             .store
             .withdraw_submission(tenant_id, submission_id, actor_principal_ref)
             .await?;
+        for object_ref in self
+            .backend
+            .list_trace_object_refs(tenant_id, submission_id)
+            .await?
+            .into_iter()
+            .filter(|object_ref| object_ref.deleted_at.is_none())
+        {
+            let idempotency_key = sha256_prefixed(
+                format!(
+                    "pipeline-withdrawal-object-delete:v1:{tenant_id}:{submission_id}:{}",
+                    object_ref.object_ref_id
+                )
+                .as_bytes(),
+            );
+            self.backend
+                .upsert_trace_revocation_propagation_item(TraceRevocationPropagationItemWrite {
+                    tenant_id: tenant_id.to_string(),
+                    propagation_item_id: Uuid::new_v5(
+                        &Uuid::NAMESPACE_URL,
+                        idempotency_key.as_bytes(),
+                    ),
+                    source_submission_id: submission_id,
+                    target: TraceRevocationPropagationTarget::ObjectRef {
+                        object_ref_id: object_ref.object_ref_id,
+                    },
+                    action: TraceRevocationPropagationAction::DeleteObjectPayload,
+                    status: TraceRevocationPropagationItemStatus::Pending,
+                    idempotency_key,
+                    reason: "withdrawn pipeline object payload deletion".to_string(),
+                    attempt_count: 0,
+                    last_error: None,
+                    next_attempt_at: None,
+                    completed_at: None,
+                    evidence_hash: None,
+                    metadata: BTreeMap::from([(
+                        "source".to_string(),
+                        "versioned_pipeline".to_string(),
+                    )]),
+                })
+                .await?;
+        }
+        let reason_hash = sha256_prefixed(b"pipeline_withdrawal");
+        self.backend
+            .append_trace_audit_event(TraceAuditEventWrite {
+                audit_event_id: Uuid::new_v5(
+                    &Uuid::NAMESPACE_URL,
+                    format!("pipeline-withdrawal-audit:{tenant_id}:{submission_id}").as_bytes(),
+                ),
+                tenant_id: tenant_id.to_string(),
+                actor_principal_ref: actor_principal_ref.to_string(),
+                actor_role: "contributor".to_string(),
+                action: TraceAuditAction::Revoke,
+                reason: Some("pipeline_withdrawal".to_string()),
+                request_id: None,
+                submission_id: Some(submission_id),
+                object_ref_id: None,
+                export_manifest_id: None,
+                decision_inputs_hash: Some(reason_hash.clone()),
+                previous_event_hash: None,
+                event_hash: None,
+                canonical_event_json: None,
+                metadata: TraceAuditSafeMetadata::Revocation { reason_hash },
+            })
+            .await?;
         Ok(withdrawal)
     }
 
@@ -3579,11 +3842,27 @@ impl PipelineService {
         if run.index_invalidation_state != "pending" {
             return Ok(Some(run));
         }
+        let Some(run) = self
+            .store
+            .claim_index_invalidation(tenant_id, run_id)
+            .await?
+        else {
+            return Ok(Some(run));
+        };
         let revision_id = run
             .approved_revision_id
             .ok_or_else(|| anyhow::anyhow!("invalidation revision is missing"))?;
-        self.index
-            .invalidate_revision(tenant_id, PIPELINE_INDEX_ID, revision_id);
+        if self
+            .index
+            .try_invalidate_revision(tenant_id, PIPELINE_INDEX_ID, revision_id)
+            .is_err()
+        {
+            return Ok(Some(
+                self.store
+                    .fail_index_invalidation(tenant_id, run_id)
+                    .await?,
+            ));
+        }
         Ok(Some(
             self.store
                 .complete_index_invalidation(tenant_id, run_id)

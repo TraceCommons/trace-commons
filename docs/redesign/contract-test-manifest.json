@@ -1,6 +1,6 @@
 {
   "schema": "trace_commons.contract_test_manifest.v1",
-  "updated_for_phase": 5,
+  "updated_for_phase": 6,
   "status_values": ["planned", "partial", "passing", "deferred"],
   "contract_groups": [
     {
@@ -35,15 +35,15 @@
       "contract_ids": ["AUTH-001", "AUTH-002", "AUTH-003", "AUTH-004", "AUTH-005"],
       "boundary": "public and worker authentication",
       "implementation_phase": 6,
-      "evidence_status": "planned",
-      "test_ids": []
+      "evidence_status": "partial",
+      "test_ids": ["trace_upload_claim_issuer", "e2e_enroll_and_submit", "account_merge_pg", "trace_commons_ingest_internal::device_key_claims_honor_grant_scope_ceiling", "versioned_pipeline_pg::phase_six_contributor_status_derives_processing_credit_and_payout"]
     },
     {
       "contract_ids": ["SUB-001", "SUB-002"],
       "boundary": "submission protocol validation",
       "implementation_phase": 6,
       "evidence_status": "partial",
-      "test_ids": ["minimal_pipeline_corpus"]
+      "test_ids": ["minimal_pipeline_corpus", "local_redaction_audit", "daemon_upload_pass_guards", "e2e_enroll_and_submit"]
     },
     {
       "contract_ids": ["SUB-003", "SUB-004"],
@@ -122,7 +122,7 @@
       "boundary": "contributor and operator status",
       "implementation_phase": 6,
       "evidence_status": "partial",
-      "test_ids": ["minimal_pipeline_corpus", "versioned_pipeline_pg::four_index_and_credit_combinations_complete"]
+      "test_ids": ["minimal_pipeline_corpus", "versioned_pipeline_pg::four_index_and_credit_combinations_complete", "versioned_pipeline_pg::phase_six_contributor_status_derives_processing_credit_and_payout", "trace_score_attestation::versioned_attestation_binds_bundle_outcome_and_schema"]
     },
     {
       "contract_ids": ["CRD-001", "CRD-002", "CRD-003", "CRD-004", "CRD-005"],
@@ -136,21 +136,21 @@
       "boundary": "withdrawal, retention, and invalidation",
       "implementation_phase": 6,
       "evidence_status": "partial",
-      "test_ids": ["versioned_pipeline_pg::phase_four_withdrawal_excludes_index_but_preserves_committed_credit", "versioned_pipeline_pg::phase_four_withdrawal_queues_completed_index_invalidation"]
+      "test_ids": ["versioned_pipeline_pg::phase_four_withdrawal_excludes_index_but_preserves_committed_credit", "versioned_pipeline_pg::phase_four_withdrawal_queues_completed_index_invalidation", "versioned_pipeline_pg::phase_six_export_snapshot_is_immutable_and_withdrawal_invalidates_it", "versioned_pipeline_pg::phase_six_index_invalidation_retries_and_exposes_terminal_failure"]
     },
     {
       "contract_ids": ["EXP-001", "EXP-002", "EXP-003", "EXP-004"],
       "boundary": "exports and derived artifacts",
       "implementation_phase": 6,
-      "evidence_status": "planned",
-      "test_ids": []
+      "evidence_status": "partial",
+      "test_ids": ["versioned_pipeline_pg::phase_six_export_snapshot_is_immutable_and_withdrawal_invalidates_it"]
     },
     {
       "contract_ids": ["COM-001", "COM-002"],
       "boundary": "optional community interfaces",
       "implementation_phase": 6,
-      "evidence_status": "planned",
-      "test_ids": []
+      "evidence_status": "passing",
+      "test_ids": ["trace_commons_ingest_internal::community_routes_return_not_found_when_disabled", "trace_commons_ingest_internal::community_profile_withdrawal_invalidates_served_snapshots"]
     },
     {
       "contract_ids": ["OPS-001", "OPS-002", "OPS-003", "OPS-004", "OPS-005", "OPS-006"],
@@ -170,8 +170,8 @@
       "contract_ids": ["CMP-001", "CMP-002"],
       "boundary": "public compatibility and prohibited dependencies",
       "implementation_phase": 6,
-      "evidence_status": "planned",
-      "test_ids": []
+      "evidence_status": "partial",
+      "test_ids": ["minimal_pipeline_corpus", "versioned_pipeline_pg::phase_six_contributor_status_derives_processing_credit_and_payout", "versioned_pipeline_pg::phase_six_export_snapshot_is_immutable_and_withdrawal_invalidates_it"]
     },
     {
       "contract_ids": ["CMP-003", "CMP-004"],
@@ -182,7 +182,7 @@
     }
   ],
   "scenarios": [
-    {"scenario_id": "SCN-001", "implementation_phase": 6, "evidence_status": "partial", "test_ids": ["minimal_pipeline_corpus"]},
+    {"scenario_id": "SCN-001", "implementation_phase": 6, "evidence_status": "partial", "test_ids": ["minimal_pipeline_corpus", "e2e_enroll_and_submit", "versioned_pipeline_pg::phase_six_contributor_status_derives_processing_credit_and_payout"]},
     {"scenario_id": "SCN-002", "implementation_phase": 3, "evidence_status": "partial", "test_ids": ["versioned_pipeline_pg::crash_boundaries_six_through_eleven_converge_after_restart"]},
     {"scenario_id": "SCN-003", "implementation_phase": 4, "evidence_status": "passing", "test_ids": ["versioned_pipeline_pg::phase_four_admission_review_and_quarantine_are_policy_driven", "minimal_pipeline_corpus"]},
     {"scenario_id": "SCN-004", "implementation_phase": 4, "evidence_status": "passing", "test_ids": ["versioned_pipeline_pg::phase_four_admission_review_and_quarantine_are_policy_driven", "minimal_pipeline_corpus"]},
@@ -191,11 +191,11 @@
     {"scenario_id": "SCN-007", "implementation_phase": 2, "evidence_status": "passing", "test_ids": ["versioned_pipeline_pg::bound_bundle_survives_activation_and_rollback", "versioned_pipeline_pg::activation_after_resolution_does_not_rebind_the_receipt"]},
     {"scenario_id": "SCN-008", "implementation_phase": 4, "evidence_status": "passing", "test_ids": ["versioned_pipeline_pg::phase_four_policy_suspension_preserves_attempts_bundle_and_audit", "versioned_pipeline_pg::phase_four_settle_suspension_blocks_near_dispatch"]},
     {"scenario_id": "SCN-009", "implementation_phase": 4, "evidence_status": "passing", "test_ids": ["versioned_pipeline_pg::phase_four_withdrawal_excludes_index_but_preserves_committed_credit"]},
-    {"scenario_id": "SCN-010", "implementation_phase": 6, "evidence_status": "planned", "test_ids": []},
+    {"scenario_id": "SCN-010", "implementation_phase": 6, "evidence_status": "partial", "test_ids": ["versioned_pipeline_pg::phase_six_export_snapshot_is_immutable_and_withdrawal_invalidates_it", "versioned_pipeline_pg::phase_six_index_invalidation_retries_and_exposes_terminal_failure"]},
     {"scenario_id": "SCN-011", "implementation_phase": 3, "evidence_status": "partial", "test_ids": ["versioned_pipeline_pg::near_payout_states_do_not_change_settle_outcome"]},
     {"scenario_id": "SCN-012", "implementation_phase": 7, "evidence_status": "partial", "test_ids": ["contract_test_manifest"]},
     {"scenario_id": "SCN-013", "implementation_phase": 7, "evidence_status": "partial", "test_ids": ["contract_test_manifest"]},
-    {"scenario_id": "SCN-014", "implementation_phase": 6, "evidence_status": "planned", "test_ids": []},
+    {"scenario_id": "SCN-014", "implementation_phase": 6, "evidence_status": "partial", "test_ids": ["versioned_pipeline_pg::phase_six_export_snapshot_is_immutable_and_withdrawal_invalidates_it"]},
     {"scenario_id": "SCN-015", "implementation_phase": 7, "evidence_status": "planned", "test_ids": []}
   ]
 }

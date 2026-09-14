@@ -4,10 +4,11 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 PORT="${TRACE_COMMONS_PIPELINE_PORT:-3919}"
 PG_PORT="${TRACE_COMMONS_PIPELINE_PG_PORT:-55440}"
+REPORT_VERSION="${TRACE_COMMONS_PIPELINE_REPORT_VERSION:-5}"
 CONTAINER="trace-commons-pipeline-phase5-$$"
 ARTIFACT_ROOT="${ROOT}/.local/pipeline-phase5-artifacts"
-JSON_REPORT="${ROOT}/.local/pipeline-report-v5.json"
-MARKDOWN_REPORT="${ROOT}/.local/pipeline-report-v5.md"
+JSON_REPORT="${ROOT}/.local/pipeline-report-v${REPORT_VERSION}.json"
+MARKDOWN_REPORT="${ROOT}/.local/pipeline-report-v${REPORT_VERSION}.md"
 SERVER_LOG="${ROOT}/.local/pipeline-phase5-server.log"
 MIGRATION_LOG="${ROOT}/.local/pipeline-phase5-migration.log"
 SERVER_PID=""
@@ -59,7 +60,7 @@ cd "${ROOT}"
 cargo build -p trace-commons-server --bin trace-commons-pipeline-local
 
 export TRACE_COMMONS_PIPELINE_MASTER_KEY="phase-5-local-master-key-material-32-bytes"
-export TRACE_COMMONS_PIPELINE_TOKENS="contributor-token,tenant-phase5,principal_sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,contributor;reviewer-token,tenant-phase5,reviewer_sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee,reviewer;worker-token,tenant-phase5,worker_sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb,worker;operator-token,tenant-phase5,operator_sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc,operator;other-operator-token,tenant-other,operator_sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd,operator"
+export TRACE_COMMONS_PIPELINE_TOKENS="contributor-token,tenant-phase5,principal_sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,contributor;reviewer-token,tenant-phase5,reviewer_sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee,reviewer;worker-token,tenant-phase5,worker_sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb,worker;operator-token,tenant-phase5,operator_sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc,operator;exporter-token,tenant-phase5,exporter_sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff,exporter;lifecycle-token,tenant-phase5,lifecycle_worker_sha256:9999999999999999999999999999999999999999999999999999999999999999,lifecycle_worker;other-operator-token,tenant-other,operator_sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd,operator"
 
 "${ROOT}/target/debug/trace-commons-pipeline-local" serve \
   --database-url "postgres://postgres:phase5-admin@127.0.0.1:${PG_PORT}/postgres" \
