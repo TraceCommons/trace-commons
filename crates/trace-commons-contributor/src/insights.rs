@@ -841,6 +841,7 @@ impl LocalInsightStore {
                     .insert(id, serde_json::to_value(&specification)?);
             }
         }
+        comparison_spec_store::validate_index_comparison_qualification(&index)?;
         // Legacy snapshots remain readable; the next mutation persists v12.
         index.version = STORE_VERSION;
         Ok((lock, index))

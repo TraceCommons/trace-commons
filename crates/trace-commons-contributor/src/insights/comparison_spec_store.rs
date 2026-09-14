@@ -34,13 +34,25 @@ fn validate_index_comparison_specification(
     specification: &ComparisonSpecificationV1,
 ) -> Result<()> {
     specification.validate()?;
-    // A saved specification may only claim an estimator the frozen protocol
-    // admits for saved specifications. Production never writes one; a
-    // hand-edited store can, and that is the only way any shell has ever
-    // reached the schema-2 coverage copy.
-    specification.validate_saved_estimator_qualification()?;
     if id != specification.id {
         return Err(ComparisonSpecificationError::StoreInvalid.into());
+    }
+    Ok(())
+}
+
+/// A saved specification may only claim an estimator the frozen protocol
+/// admits for saved specifications. Production never writes one; a hand-edited
+/// store can, and that is the only way any shell has ever reached the schema-2
+/// coverage copy.
+///
+/// Deliberately not part of the quarantine predicate above. A specification
+/// that claims a qualification it was never granted is readable and
+/// well-formed; withholding it silently would answer "no such specification"
+/// where the operator needs the refusal named. Every read of the store stops
+/// on it.
+pub(super) fn validate_index_comparison_qualification(index: &Index) -> Result<()> {
+    for specification in index.comparison_specifications.values() {
+        specification.validate_saved_estimator_qualification()?;
     }
     Ok(())
 }
