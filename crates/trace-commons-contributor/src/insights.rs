@@ -25,7 +25,7 @@ use trace_commons_protocol::insights::{
 };
 
 const MAX_SOURCE_BYTES: u64 = 16 * 1024 * 1024;
-const STORE_VERSION: u32 = 5;
+const STORE_VERSION: u32 = 6;
 const MAX_OUTCOME_LINKS: usize = 128;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -281,6 +281,50 @@ pub struct SnapshotMutation<T> {
     pub mutation_effects: MutationEffects,
 }
 
+/// Entries withheld from every read because they failed load-time validation.
+/// Identifiers only: a quarantined entry's content is never surfaced.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct QuarantineReport {
+    pub snapshot_ids: Vec<String>,
+    pub episode_ids: Vec<String>,
+}
+
+impl QuarantineReport {
+    pub fn is_empty(&self) -> bool {
+        self.snapshot_ids.is_empty() && self.episode_ids.is_empty()
+    }
+}
+
+/// What `repair` removed. Original files are never touched.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RepairReport {
+    pub quarantined: QuarantineReport,
+    pub invalidated_episode_ids: Vec<String>,
+    pub removed_aliases: usize,
+}
+
+/// Entries moved aside at load, kept exactly as they were written. They stay
+/// on disk, so `delete` and `repair` can still remove them and an unrelated
+/// mutation cannot drop them silently. They are held as raw values because an
+/// entry can fail at the schema, before it has a type at all.
+#[derive(Debug, Default)]
+struct Quarantine {
+    reports: BTreeMap<String, serde_json::Value>,
+    episodes: BTreeMap<String, serde_json::Value>,
+    dangling_aliases: usize,
+}
+
+impl Quarantine {
+    fn report(&self) -> QuarantineReport {
+        QuarantineReport {
+            snapshot_ids: self.reports.keys().cloned().collect(),
+            episode_ids: self.episodes.keys().cloned().collect(),
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 struct Index {
     version: u32,
@@ -289,6 +333,72 @@ struct Index {
     reports: BTreeMap<String, LocalInsight>,
     #[serde(default)]
     episodes: BTreeMap<String, episodes::LocalEpisode>,
+    /// Populated at load, never persisted as its own field: the entries it
+    /// holds are written back alongside the live ones.
+    #[serde(skip)]
+    quarantine: Quarantine,
+}
+
+/// An entry on its way back to disk: either one this store read, or one it
+/// withheld and is preserving verbatim.
+#[derive(Serialize)]
+#[serde(untagged)]
+enum Stored<'a, T: Serialize> {
+    Live(&'a T),
+    Quarantined(&'a serde_json::Value),
+}
+
+fn stored<'a, T: Serialize>(
+    live: &'a BTreeMap<String, T>,
+    quarantined: &'a BTreeMap<String, serde_json::Value>,
+) -> BTreeMap<&'a String, Stored<'a, T>> {
+    live.iter()
+        .map(|(id, value)| (id, Stored::Live(value)))
+        .chain(
+            quarantined
+                .iter()
+                .map(|(id, value)| (id, Stored::Quarantined(value))),
+        )
+        .collect()
+}
+
+/// The persisted shape. Quarantined entries rejoin their live siblings here so
+/// that saving an unrelated mutation cannot delete an entry the user has not
+/// chosen to remove.
+#[derive(Serialize)]
+struct PersistedIndex<'a> {
+    version: u32,
+    aliases: &'a BTreeMap<String, String>,
+    reports: BTreeMap<&'a String, Stored<'a, LocalInsight>>,
+    episodes: BTreeMap<&'a String, Stored<'a, episodes::LocalEpisode>>,
+}
+
+impl<'a> From<&'a Index> for PersistedIndex<'a> {
+    fn from(index: &'a Index) -> Self {
+        Self {
+            version: index.version,
+            aliases: &index.aliases,
+            reports: stored(&index.reports, &index.quarantine.reports),
+            episodes: stored(&index.episodes, &index.quarantine.episodes),
+        }
+    }
+}
+
+/// The index as it is read: every entry still a value, so one entry that does
+/// not fit its schema cannot take the whole file with it.
+#[derive(Deserialize)]
+struct RawIndex {
+    version: u32,
+    aliases: BTreeMap<String, String>,
+    reports: BTreeMap<String, serde_json::Value>,
+    #[serde(default)]
+    episodes: BTreeMap<String, serde_json::Value>,
+}
+
+impl Index {
+    fn quarantine_holds_episode(&self, id: &str) -> bool {
+        self.quarantine.episodes.contains_key(id)
+    }
 }
 
 /// Dedicated local directory, independent of the enrollment/config store.
@@ -368,13 +478,13 @@ impl LocalInsightStore {
         let lock = StoreLock { file: lock };
         let path = self.dir.join("index.json");
         reject_symlinks(&path)?;
-        let mut index = match fs::symlink_metadata(&path) {
+        let raw = match fs::symlink_metadata(&path) {
             Ok(_) => {
                 let bytes = bounded_read(&path)?;
-                serde_json::from_slice::<Index>(&bytes)
+                serde_json::from_slice::<RawIndex>(&bytes)
                     .map_err(|_| anyhow!("insights_store_invalid"))?
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Index {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => RawIndex {
                 version: STORE_VERSION,
                 aliases: BTreeMap::new(),
                 reports: BTreeMap::new(),
@@ -382,85 +492,67 @@ impl LocalInsightStore {
             },
             Err(_) => bail!("insights_store_unreadable"),
         };
-        if !(1..=STORE_VERSION).contains(&index.version) {
+        if !(1..=STORE_VERSION).contains(&raw.version) {
             bail!("insights_store_version_unsupported");
         }
-        for (id, insight) in &index.reports {
-            if id != &insight.id || insight.report.provider != ProviderManifest::first_party() {
-                bail!("insights_store_invalid");
-            }
-            let evidence = &insight.report.evidence;
-            if evidence.len() != 1
-                || evidence[0].id != *id
-                || snapshot_identity(insight.source_format, &evidence[0].source_digest) != *id
-                || insight.estimated_cost_usd.is_some()
-                || insight.task_category.is_some()
-                || insight.cost_unavailable_reason != "adapter_usage_unavailable"
-            {
-                bail!("insights_store_invalid");
-            }
-            if let Some(annotation) = &insight.manual_annotation
-                && (index.version == 1 || annotation.source_digest != evidence[0].source_digest)
-            {
-                bail!("insights_store_invalid");
-            }
-            insight
-                .report
-                .validate_for(&ProviderManifest::first_party(), evidence)?;
-            validate_local_metrics(insight)?;
-            if index.version < 3
-                && (insight.model_observations.is_some() || !insight.outcome_links.is_empty())
-            {
-                bail!("insights_store_invalid");
-            }
-            if index.version < 5 && insight.time_evidence.is_some() {
-                bail!("insights_store_invalid");
-            }
-            if let Some(time_evidence) = &insight.time_evidence {
-                time_evidence.validate()?;
-                if time_evidence.source_digest != evidence[0].source_digest
-                    || time_evidence.source_format != insight.source_format
-                {
-                    bail!("insights_store_invalid");
+        // One unreadable entry must not take the store with it. Both the
+        // schema and the invariants are checked per entry: a failing snapshot
+        // or episode is moved aside, named, and withheld from every read,
+        // while the rest stay fully operable and `delete` and `repair` can
+        // still remove the one that failed.
+        let mut index = Index {
+            version: raw.version,
+            aliases: raw.aliases,
+            reports: BTreeMap::new(),
+            episodes: BTreeMap::new(),
+            quarantine: Quarantine::default(),
+        };
+        for (id, value) in raw.reports {
+            match serde_json::from_value::<LocalInsight>(value.clone()) {
+                Ok(insight) if validate_stored_report(index.version, &id, &insight).is_ok() => {
+                    index.reports.insert(id, insight);
                 }
-            }
-            if let Some(models) = &insight.model_observations {
-                models.validate()?;
-                if models.source_digest != evidence[0].source_digest
-                    || models.source_format != insight.source_format
-                {
-                    bail!("insights_store_invalid");
-                }
-            }
-            if insight.outcome_links.len() > MAX_OUTCOME_LINKS {
-                bail!("insights_store_invalid");
-            }
-            let mut link_ids = BTreeSet::new();
-            for link in &insight.outcome_links {
-                link.evidence.validate()?;
-                if link.source_digest != evidence[0].source_digest
-                    || link.id != link.evidence.identity_digest()?
-                    || !link_ids.insert(&link.id)
-                {
-                    bail!("insights_store_invalid");
+                _ => {
+                    index.quarantine.reports.insert(id, value);
                 }
             }
         }
-        if index
-            .aliases
-            .values()
-            .any(|id| !index.reports.contains_key(id))
-        {
-            bail!("insights_store_invalid");
+        // An alias naming an entry that is gone is index-level damage rather
+        // than a user entry; drop it here and let `repair` persist the removal.
+        let live = index
+            .reports
+            .keys()
+            .chain(index.quarantine.reports.keys())
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let before = index.aliases.len();
+        index.aliases.retain(|_, id| live.contains(id));
+        index.quarantine.dangling_aliases = before - index.aliases.len();
+        for (id, value) in raw.episodes {
+            match serde_json::from_value::<episodes::LocalEpisode>(value.clone()) {
+                Ok(episode) => {
+                    index.episodes.insert(id, episode);
+                }
+                Err(_) => {
+                    index.quarantine.episodes.insert(id, value);
+                }
+            }
         }
-        episode_store::validate_index_episodes(&index)?;
-        // Legacy snapshots remain readable; the next mutation persists v5.
+        for id in episode_store::invalid_index_episodes(&index) {
+            if let Some(episode) = index.episodes.remove(&id) {
+                index
+                    .quarantine
+                    .episodes
+                    .insert(id, serde_json::to_value(&episode)?);
+            }
+        }
+        // Legacy snapshots remain readable; the next mutation persists v6.
         index.version = STORE_VERSION;
         Ok((lock, index))
     }
 
     fn save(&self, index: &Index) -> Result<()> {
-        let bytes = serde_json::to_vec(index)?;
+        let bytes = serde_json::to_vec(&PersistedIndex::from(index))?;
         if bytes.len() as u64 > MAX_SOURCE_BYTES {
             bail!("insights_store_full");
         }
@@ -554,7 +646,7 @@ impl LocalInsightStore {
         id: &str,
         evidence: outcomes::OutcomeEvidence,
     ) -> Result<LocalInsight> {
-        evidence.validate()?;
+        evidence.validate_fresh()?;
         let evidence_id = evidence.identity_digest()?;
         let (_lock, mut index) = self.locked()?;
         let insight = index
@@ -613,11 +705,39 @@ impl LocalInsightStore {
     /// deleting snapshots the moment the lock plumbing saved on drop.
     pub fn explain(&self, id: &str) -> Result<LocalInsight> {
         let (_lock, index) = self.locked()?;
+        if index.quarantine.reports.contains_key(id) {
+            bail!("insights_store_invalid");
+        }
         index
             .reports
             .get(id)
             .cloned()
             .ok_or_else(|| anyhow!("insights_not_found"))
+    }
+
+    /// Identifiers of the entries this store is withholding, if any.
+    pub fn quarantine(&self) -> Result<QuarantineReport> {
+        let (_lock, index) = self.locked()?;
+        Ok(index.quarantine.report())
+    }
+
+    /// Remove exactly the entries that failed validation, and the addresses
+    /// that no longer name anything. Nothing else is touched, and no original
+    /// file is read or removed.
+    pub fn repair(&self) -> Result<RepairReport> {
+        let (_lock, mut index) = self.locked()?;
+        let quarantined = index.quarantine.report();
+        let removed_aliases = index.quarantine.dangling_aliases;
+        index.quarantine.reports.clear();
+        index.quarantine.episodes.clear();
+        index.aliases.retain(|_, id| index.reports.contains_key(id));
+        let effects = episode_store::invalidate_missing_members(&mut index);
+        self.save(&index)?;
+        Ok(RepairReport {
+            quarantined,
+            invalidated_episode_ids: effects.invalidated_episode_ids,
+            removed_aliases,
+        })
     }
 
     /// Removes the derived report and all imported aliases. Does not delete the
@@ -628,7 +748,8 @@ impl LocalInsightStore {
 
     pub fn delete_with_effects(&self, id: &str) -> Result<SnapshotMutation<bool>> {
         let (_lock, mut index) = self.locked()?;
-        let removed = index.reports.remove(id).is_some();
+        let removed =
+            index.reports.remove(id).is_some() | index.quarantine.reports.remove(id).is_some();
         let mutation_effects = episode_store::invalidate_missing_members(&mut index);
         if removed {
             index.aliases.retain(|_, value| value != id);
@@ -639,6 +760,73 @@ impl LocalInsightStore {
             mutation_effects,
         })
     }
+}
+
+/// Everything a stored snapshot must satisfy to be readable. Structural only:
+/// nothing here consults the wall clock, so a correct entry cannot become
+/// invalid between two reads.
+fn validate_stored_report(version: u32, id: &str, insight: &LocalInsight) -> Result<()> {
+    if id != insight.id || insight.report.provider != ProviderManifest::first_party() {
+        bail!("insights_store_invalid");
+    }
+    let evidence = &insight.report.evidence;
+    let Some(reference) = evidence.first() else {
+        bail!("insights_store_invalid");
+    };
+    if evidence.len() != 1
+        || reference.id != *id
+        || snapshot_identity(insight.source_format, &reference.source_digest) != *id
+        || insight.estimated_cost_usd.is_some()
+        || insight.task_category.is_some()
+        || insight.cost_unavailable_reason != "adapter_usage_unavailable"
+    {
+        bail!("insights_store_invalid");
+    }
+    if let Some(annotation) = &insight.manual_annotation
+        && (version == 1 || annotation.source_digest != reference.source_digest)
+    {
+        bail!("insights_store_invalid");
+    }
+    insight
+        .report
+        .validate_for(&ProviderManifest::first_party(), evidence)?;
+    validate_local_metrics(insight)?;
+    if version < 3 && (insight.model_observations.is_some() || !insight.outcome_links.is_empty()) {
+        bail!("insights_store_invalid");
+    }
+    if version < 5 && insight.time_evidence.is_some() {
+        bail!("insights_store_invalid");
+    }
+    if let Some(time_evidence) = &insight.time_evidence {
+        time_evidence.validate()?;
+        if time_evidence.source_digest != reference.source_digest
+            || time_evidence.source_format != insight.source_format
+        {
+            bail!("insights_store_invalid");
+        }
+    }
+    if let Some(models) = &insight.model_observations {
+        models.validate()?;
+        if models.source_digest != reference.source_digest
+            || models.source_format != insight.source_format
+        {
+            bail!("insights_store_invalid");
+        }
+    }
+    if insight.outcome_links.len() > MAX_OUTCOME_LINKS {
+        bail!("insights_store_invalid");
+    }
+    let mut link_ids = BTreeSet::new();
+    for link in &insight.outcome_links {
+        link.evidence.validate()?;
+        if link.source_digest != reference.source_digest
+            || link.id != link.evidence.identity_digest()?
+            || !link_ids.insert(&link.id)
+        {
+            bail!("insights_store_invalid");
+        }
+    }
+    Ok(())
 }
 
 // A cache is not an authentication boundary, but must not silently upgrade
@@ -716,6 +904,34 @@ fn reject_symlinks(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// A corrupted entry must cost the caller that entry and nothing else: the
+/// store still reads, the entry is withheld, and it is named so the user can
+/// remove it.
+#[cfg(test)]
+fn assert_quarantined(store: &LocalInsightStore, id: &str, context: &str) {
+    let listed = store
+        .list()
+        .unwrap_or_else(|error| panic!("{context}: one bad entry failed the whole store: {error}"));
+    assert!(
+        !listed.iter().any(|insight| insight.id == id),
+        "{context}: a quarantined entry was listed"
+    );
+    assert!(
+        store
+            .quarantine()
+            .unwrap()
+            .snapshot_ids
+            .iter()
+            .any(|held| held == id),
+        "{context}: the entry was accepted instead of quarantined"
+    );
+    assert_eq!(
+        store.explain(id).unwrap_err().to_string(),
+        "insights_store_invalid",
+        "{context}: explain must name the entry as unreadable"
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -742,6 +958,78 @@ mod tests {
             .expect("a completed store operation must not leave a lock in an inherited descriptor");
         contender.unlock().unwrap();
         drop(inherited);
+    }
+
+    #[test]
+    fn one_unreadable_snapshot_leaves_every_other_operation_working() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let a = root.join("a.jsonl");
+        let b = root.join("b.jsonl");
+        trajectory(&a, "first");
+        trajectory(&b, "second");
+        let store = LocalInsightStore::open(&root.join("insights")).unwrap();
+        let good = store.import(SourceFormat::Trajectory, &a).unwrap();
+        let bad = store.import(SourceFormat::Trajectory, &b).unwrap();
+        let path = store.dir.join("index.json");
+        let mut index: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        // A schema the current build cannot read at all, not merely an
+        // invariant it fails: the entry has no type before it has a verdict.
+        index["reports"][&bad.id]["boundary"] = "unknown_future_boundary".into();
+        fs::write(&path, serde_json::to_vec(&index).unwrap()).unwrap();
+
+        assert_quarantined(&store, &bad.id, "an unreadable snapshot schema");
+        let listed = store.list().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, good.id);
+        assert_eq!(store.explain(&good.id).unwrap().id, good.id);
+        assert!(
+            store
+                .annotate(&good.id, TaskCategory::Docs, TaskOutcome::Unknown)
+                .is_ok()
+        );
+        // Saving an unrelated mutation must not silently drop the entry the
+        // user has not chosen to remove.
+        assert_eq!(
+            store.quarantine().unwrap().snapshot_ids,
+            vec![bad.id.clone()]
+        );
+        assert!(store.delete(&bad.id).unwrap());
+        assert!(store.quarantine().unwrap().is_empty());
+        assert_eq!(store.list().unwrap().len(), 1);
+        assert!(a.exists() && b.exists());
+    }
+
+    #[test]
+    fn repair_removes_only_what_the_store_is_withholding() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let a = root.join("a.jsonl");
+        let b = root.join("b.jsonl");
+        trajectory(&a, "first");
+        trajectory(&b, "second");
+        let store = LocalInsightStore::open(&root.join("insights")).unwrap();
+        let good = store.import(SourceFormat::Trajectory, &a).unwrap();
+        let bad = store.import(SourceFormat::Trajectory, &b).unwrap();
+        let path = store.dir.join("index.json");
+        let mut index: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        index["reports"][&bad.id]["cost_unavailable_reason"] = "invented".into();
+        index["aliases"]["0".repeat(64)] = "f".repeat(64).into();
+        fs::write(&path, serde_json::to_vec(&index).unwrap()).unwrap();
+
+        let repaired = store.repair().unwrap();
+        assert_eq!(repaired.quarantined.snapshot_ids, vec![bad.id.clone()]);
+        assert!(repaired.quarantined.episode_ids.is_empty());
+        assert_eq!(repaired.removed_aliases, 1);
+        assert!(store.quarantine().unwrap().is_empty());
+        let listed = store.list().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, good.id);
+        // Repair is idempotent, and never reaches an original file.
+        assert_eq!(store.repair().unwrap(), RepairReport::default());
+        assert!(a.exists() && b.exists());
     }
 
     #[test]
@@ -973,12 +1261,16 @@ mod tests {
             let mut corrupted = original.clone();
             corrupted["reports"][&insight.id]["manual_annotation"][field] = invalid.into();
             fs::write(&path, serde_json::to_vec(&corrupted).unwrap()).unwrap();
-            assert!(store.list().is_err(), "accepted invalid {field}");
+            assert_quarantined(&store, &insight.id, field);
         }
         let mut corrupted = original;
         corrupted["version"] = 1.into();
         fs::write(&path, serde_json::to_vec(&corrupted).unwrap()).unwrap();
-        assert!(store.list().is_err());
+        assert_quarantined(&store, &insight.id, "an annotation under the v1 schema");
+        // The entry the user cannot read is still the entry the user can remove.
+        assert!(store.delete(&insight.id).unwrap());
+        assert!(store.quarantine().unwrap().is_empty());
+        assert!(store.list().unwrap().is_empty());
     }
 
     #[test]
@@ -1089,8 +1381,9 @@ mod tests {
             .report
             .metrics
             .clear();
+        let cleared = index.reports.keys().next().unwrap().clone();
         fs::write(&path, serde_json::to_vec(&index).unwrap()).unwrap();
-        assert!(store.list().is_err());
+        assert_quarantined(&store, &cleared, "a snapshot with no metrics");
         let mut index: Index = serde_json::from_slice(&original).unwrap();
         let tokens = index
             .reports
@@ -1108,7 +1401,7 @@ mod tests {
             total: 1,
         };
         fs::write(&path, serde_json::to_vec(&index).unwrap()).unwrap();
-        assert!(store.list().is_err());
+        assert_quarantined(&store, &cleared, "a fabricated token measurement");
     }
 }
 

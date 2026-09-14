@@ -116,6 +116,7 @@ trace-commons-contributor insights --store-dir ./private-insights list
 trace-commons-contributor --json insights --store-dir ./private-insights summary
 trace-commons-contributor insights --store-dir ./private-insights explain INSIGHT_ID
 trace-commons-contributor insights --store-dir ./private-insights delete INSIGHT_ID
+trace-commons-contributor insights --store-dir ./private-insights repair
 ```
 
 Without `--store-dir`, saved insights use `trace-commons/insights` under the OS
@@ -125,6 +126,23 @@ bodies or original paths. Reimporting the same file replaces its prior snapshot;
 identical copies share a result. Saved snapshots are not monitored for changes to
 the original files: reimport to refresh, or use `delete` to remove the saved result
 and its references. Deletion leaves the original transcript intact.
+
+If a saved entry cannot be read -- a hand-edited or externally written index, an
+entry written by a newer schema, or an episode whose membership no longer binds
+its snapshots -- that entry alone is withheld. The rest of the store stays fully
+operable: `list`, `explain`, `summary`, `annotate`, `delete` and every episode
+read keep working on the entries that do read. `list` names what it is
+withholding, `explain` on such an identifier reports `insights_store_invalid`,
+and `delete` still removes it.
+
+```bash
+trace-commons-contributor insights --store-dir ./private-insights repair
+```
+
+`repair` removes exactly the withheld entries, the episode groups that lose a
+member with them, and any stored address that no longer names anything, and
+reports each identifier it removed. It reads no source file and removes no
+original file. Editing or deleting `index.json` by hand is never required.
 
 `summary` reads the current derived history without reopening source files. It
 counts saved sessions, user-reported categories/outcomes, and observed metrics.

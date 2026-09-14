@@ -8,8 +8,8 @@ use super::episode_store::EpisodeStoreError;
 use super::episodes::{EpisodeDetail, EpisodeListEntry, EpisodeValidationError, LocalEpisode};
 use super::usage::{UsageSource, UsageSummary, extract_usage};
 use super::{
-    LocalInsight, LocalInsightStore, MutationEffects, SourceFormat, TaskCategory, TaskOutcome,
-    analyze_file,
+    LocalInsight, LocalInsightStore, MutationEffects, QuarantineReport, RepairReport, SourceFormat,
+    TaskCategory, TaskOutcome, analyze_file,
 };
 
 /// Bound request bytes before parsing or reading caller-owned FFI memory.
@@ -256,6 +256,8 @@ pub enum LocalInsightsOperation {
         save: bool,
     },
     List {},
+    /// Remove exactly the entries the store is withholding as unreadable.
+    Repair {},
     Copy {},
     Summary {},
     Explain {
@@ -322,6 +324,13 @@ pub enum LocalInsightsResponse {
     },
     List {
         insights: Vec<LocalInsight>,
+        /// Identifiers the store is withholding as unreadable. Additive: an
+        /// operable store omits it entirely.
+        #[serde(default, skip_serializing_if = "QuarantineReport::is_empty")]
+        quarantined: QuarantineReport,
+    },
+    Repair {
+        repaired: Box<RepairReport>,
     },
     Summary {
         summary: Box<super::summary::SavedInsightsSummary>,
@@ -487,8 +496,19 @@ fn execute_inner(request: LocalInsightsRequest) -> Result<LocalInsightsResponse>
                 mutation_effects,
             }
         }
-        LocalInsightsOperation::List {} => LocalInsightsResponse::List {
-            insights: list_saved(request.store_dir.as_deref())?,
+        LocalInsightsOperation::List {} => {
+            let (insights, quarantined) = match existing_store(request.store_dir.as_deref())? {
+                Some(store) => (store.list()?, store.quarantine()?),
+                None => (Vec::new(), QuarantineReport::default()),
+            };
+            LocalInsightsResponse::List {
+                insights,
+                quarantined,
+            }
+        }
+        // A repair is a write, so it resolves the store the way writes do.
+        LocalInsightsOperation::Repair {} => LocalInsightsResponse::Repair {
+            repaired: Box::new(store()?.repair()?),
         },
         LocalInsightsOperation::Summary {} => LocalInsightsResponse::Summary {
             summary: Box::new(super::summary::read_saved(request.store_dir.as_deref())?),
@@ -908,7 +928,7 @@ mod tests {
             LocalInsightsResponse::Delete { deleted: true, .. }
         ));
         assert!(
-            matches!(call(LocalInsightsOperation::List {}), LocalInsightsResponse::List { insights } if insights.is_empty())
+            matches!(call(LocalInsightsOperation::List {}), LocalInsightsResponse::List { insights, .. } if insights.is_empty())
         );
         assert!(file.exists());
     }

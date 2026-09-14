@@ -35,24 +35,30 @@ impl fmt::Display for EpisodeStoreError {
 }
 impl std::error::Error for EpisodeStoreError {}
 
-pub(super) fn validate_index_episodes(index: &Index) -> Result<()> {
-    if (index.version < 4 && !index.episodes.is_empty()) || index.episodes.len() > MAX_EPISODES {
+/// Identifiers of the episodes this index cannot read. One unreadable group
+/// is withheld on its own; it never costs the caller the snapshot store.
+pub(super) fn invalid_index_episodes(index: &Index) -> Vec<String> {
+    let over_cap = index.version < 4 || index.episodes.len() > MAX_EPISODES;
+    index
+        .episodes
+        .iter()
+        .filter(|(id, episode)| over_cap || validate_index_episode(index, id, episode).is_err())
+        .map(|(id, _)| id.clone())
+        .collect()
+}
+
+fn validate_index_episode(index: &Index, id: &str, episode: &LocalEpisode) -> Result<()> {
+    episode.validate()?;
+    if id != episode.id
+        || episode.members.iter().any(|member| {
+            index
+                .reports
+                .get(&member.snapshot_id)
+                .and_then(|snapshot| snapshot.report.evidence.first())
+                .is_none_or(|evidence| evidence.source_digest != member.source_digest)
+        })
+    {
         bail!("insights_store_invalid");
-    }
-    for (id, episode) in &index.episodes {
-        episode.validate()?;
-        if id != &episode.id
-            || episode.members.iter().any(|member| {
-                index
-                    .reports
-                    .get(&member.snapshot_id)
-                    .is_none_or(|snapshot| {
-                        snapshot.report.evidence[0].source_digest != member.source_digest
-                    })
-            })
-        {
-            bail!("insights_store_invalid");
-        }
     }
     Ok(())
 }
@@ -80,10 +86,11 @@ fn resolve_members(index: &Index, ids: &[String]) -> Result<Vec<EpisodeMember>> 
             let snapshot = index
                 .reports
                 .get(id)
+                .and_then(|snapshot| snapshot.report.evidence.first())
                 .ok_or(EpisodeStoreError::MissingMembers)?;
             Ok(EpisodeMember {
                 snapshot_id: id.clone(),
-                source_digest: snapshot.report.evidence[0].source_digest.clone(),
+                source_digest: snapshot.source_digest.clone(),
             })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -95,6 +102,9 @@ fn checked_episode<'a>(
     expected_revision: u64,
 ) -> Result<&'a mut LocalEpisode> {
     validate_episode_id(id)?;
+    if index.quarantine_holds_episode(id) {
+        bail!("insights_store_invalid");
+    }
     let episode = index
         .episodes
         .get_mut(id)
@@ -200,12 +210,21 @@ impl LocalInsightStore {
     pub fn episode_explain(&self, id: &str) -> Result<EpisodeDetail> {
         validate_episode_id(id)?;
         let (_lock, index) = self.locked()?;
+        if index.quarantine_holds_episode(id) {
+            bail!("insights_store_invalid");
+        }
         let episode = index.episodes.get(id).ok_or(EpisodeStoreError::NotFound)?;
         let members = episode
             .members
             .iter()
-            .map(|member| index.reports[&member.snapshot_id].clone())
-            .collect();
+            .map(|member| {
+                index
+                    .reports
+                    .get(&member.snapshot_id)
+                    .cloned()
+                    .ok_or_else(|| anyhow::anyhow!(EpisodeStoreError::MissingMembers))
+            })
+            .collect::<Result<Vec<_>>>()?;
         Ok(EpisodeDetail {
             episode: episode.clone(),
             members,
@@ -308,6 +327,31 @@ mod tests {
     use super::*;
     use std::fs;
     use std::path::Path;
+
+    /// One unreadable group must not cost the caller the snapshot store.
+    fn assert_episode_quarantined(store: &LocalInsightStore, id: &str, context: &str) {
+        let listed = store.episode_list().unwrap_or_else(|error| {
+            panic!("{context}: one bad episode failed the whole store: {error}")
+        });
+        assert!(
+            !listed.iter().any(|entry| entry.episode.id == id),
+            "{context}: a quarantined episode was listed"
+        );
+        assert!(
+            store
+                .quarantine()
+                .unwrap()
+                .episode_ids
+                .iter()
+                .any(|held| held == id),
+            "{context}: the episode was accepted instead of quarantined"
+        );
+        assert_eq!(
+            store.episode_explain(id).unwrap_err().to_string(),
+            "insights_store_invalid",
+            "{context}: explain must name the group as unreadable"
+        );
+    }
 
     fn source(path: &Path, content: &str) {
         fs::write(
@@ -528,7 +572,7 @@ mod tests {
             assert_eq!(bytes(&store), before);
             store.episode_create(&ids[..1]).unwrap();
             let migrated: serde_json::Value = serde_json::from_slice(&bytes(&store)).unwrap();
-            assert_eq!(migrated["version"], 5);
+            assert_eq!(migrated["version"], crate::insights::STORE_VERSION);
             assert_eq!(migrated["episodes"].as_object().unwrap().len(), 1);
         }
         let valid: serde_json::Value = serde_json::from_slice(&bytes(&store)).unwrap();
@@ -543,16 +587,19 @@ mod tests {
         for report in corrupt["reports"].as_object_mut().unwrap().values_mut() {
             report.as_object_mut().unwrap().remove("time_evidence");
         }
+        // An episode the store cannot read costs the caller that group only.
+        // The snapshots it named, and every other group, stay readable.
         write_index(&store, &corrupt);
-        assert!(store.episode_list().is_err());
+        assert_episode_quarantined(&store, id, "an episode under the v3 schema");
         let mut corrupt = valid.clone();
         corrupt["episodes"][id]["members"][0]["source_digest"] = "f".repeat(64).into();
         write_index(&store, &corrupt);
-        assert!(store.list().is_err());
-        let mut corrupt = valid;
+        assert_episode_quarantined(&store, id, "a member binding that no longer holds");
+        assert_eq!(store.list().unwrap().len(), ids.len());
+        let mut corrupt = valid.clone();
         corrupt["reports"].as_object_mut().unwrap().remove(&ids[0]);
         write_index(&store, &corrupt);
-        assert!(store.episode_list().is_err());
+        assert_episode_quarantined(&store, id, "a member snapshot that is gone");
     }
 
     #[test]

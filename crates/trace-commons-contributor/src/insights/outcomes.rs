@@ -69,6 +69,12 @@ impl OutcomeEvidence {
             Self::TestReport(evidence) => evidence.validate(),
         }
     }
+    pub fn validate_fresh(&self) -> Result<()> {
+        match self {
+            Self::GitCommit(evidence) => evidence.validate_fresh(),
+            Self::TestReport(evidence) => evidence.validate_fresh(),
+        }
+    }
     pub fn identity_digest(&self) -> Result<String> {
         match self {
             Self::GitCommit(evidence) => evidence.identity_digest(),
@@ -88,9 +94,24 @@ fn hex_id(value: &str, length: usize) -> bool {
 fn object_id(value: &str) -> bool {
     hex_id(value, 40) || hex_id(value, 64)
 }
+/// Structural only: pre-epoch is impossible for a recorded observation and
+/// stays false forever. The future bound is deliberately not here -- see
+/// `fresh_timestamp`.
 fn timestamp(value: DateTime<Utc>) -> Result<()> {
-    // Permit five minutes of clock skew; reject pre-epoch and implausible future records.
-    if value.timestamp() < 0 || value > Utc::now() + chrono::Duration::minutes(5) {
+    if value.timestamp() < 0 {
+        bail!("insights-outcome-timestamp-invalid");
+    }
+    Ok(())
+}
+
+/// The wall-clock bound, applied where a value is first recorded. It cannot be
+/// a load-time check: a value written while the machine's clock was skewed
+/// forward would otherwise make the entry unreadable once the clock is
+/// corrected, and a persisted entry is a structural fact while the clock is not.
+fn fresh_timestamp(value: DateTime<Utc>) -> Result<()> {
+    timestamp(value)?;
+    // Permit five minutes of clock skew; reject implausible future records.
+    if value > Utc::now() + chrono::Duration::minutes(5) {
         bail!("insights-outcome-timestamp-invalid");
     }
     Ok(())
@@ -109,6 +130,12 @@ impl GitCommitEvidence {
             bail!("insights-git-evidence-invalid");
         }
         timestamp(self.inspected_at)
+    }
+    /// Structural validation plus the wall-clock bound, for a value being
+    /// recorded now rather than read back.
+    pub fn validate_fresh(&self) -> Result<()> {
+        self.validate()?;
+        fresh_timestamp(self.inspected_at)
     }
     pub fn identity_digest(&self) -> Result<String> {
         self.validate()?;
@@ -146,6 +173,13 @@ impl TestReportEvidence {
             bail!("insights-outcome-timestamp-invalid");
         }
         Ok(())
+    }
+    /// Structural validation plus the wall-clock bound, for a value being
+    /// recorded now rather than read back.
+    pub fn validate_fresh(&self) -> Result<()> {
+        self.validate()?;
+        fresh_timestamp(self.observed_at)?;
+        fresh_timestamp(self.imported_at)
     }
     pub fn identity_digest(&self) -> Result<String> {
         self.validate()?;
@@ -185,7 +219,7 @@ pub fn parse_test_report(bytes: &[u8]) -> Result<TestReportEvidence> {
         imported_at: Utc::now(),
         provenance: TestEvidenceProvenance::ImportedReport,
     };
-    evidence.validate()?;
+    evidence.validate_fresh()?;
     Ok(evidence)
 }
 pub fn import_test_report(path: &Path) -> Result<TestReportEvidence> {
@@ -371,7 +405,7 @@ pub fn inspect_git_commit(repo: &Path, requested_id: &str) -> Result<GitCommitEv
         inspected_at: Utc::now(),
         provenance: GitEvidenceProvenance::InspectedLocalObject,
     };
-    evidence.validate()?;
+    evidence.validate_fresh()?;
     Ok(evidence)
 }
 
