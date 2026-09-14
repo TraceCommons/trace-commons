@@ -11,6 +11,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use super::SourceFormat;
+use crate::source::{codex, trajectory};
 
 pub const MAX_EXTREMUM_EVENT_REFS: usize = 16;
 const MAX_SOURCE_BYTES: usize = 16 * 1024 * 1024;
@@ -217,15 +218,14 @@ fn observe_codex_records<'a>(
             .get("type")
             .and_then(Value::as_str)
             .ok_or_else(invalid)?;
-        match kind {
-            "session_meta" => {
-                if saw_session_meta {
-                    return Err(invalid());
-                }
-                saw_session_meta = true;
+        if kind == "session_meta" {
+            if saw_session_meta {
+                return Err(invalid());
             }
-            "turn_context" => {}
-            _ => observe_timestamp(result, index, object.get("timestamp")),
+            saw_session_meta = true;
+        } else if codex::is_event_record_kind(kind) {
+            // Eligibility is the adapter's rule, never a second copy here.
+            observe_timestamp(result, index, object.get("timestamp"));
         }
     }
     if !saw_session_meta {
@@ -249,10 +249,8 @@ fn observe_trajectory_records<'a>(
             .get("role")
             .and_then(Value::as_str)
             .ok_or_else(invalid)?;
-        if !matches!(
-            role,
-            "user" | "assistant" | "reasoning" | "tool" | "system" | "observation"
-        ) {
+        // Eligibility is the adapter's rule, never a second copy here.
+        if !trajectory::is_event_record_role(role) {
             return Err(invalid());
         }
         observe_timestamp(result, index, record.get("timestamp"));
@@ -406,21 +404,50 @@ mod tests {
 
     #[test]
     fn no_valid_timestamp_does_not_infer_one() {
-        // The production trajectory adapter currently rejects these defects.
-        // This fixture pins the evidence contract independently; callers must
-        // still prevalidate a source and must not weaken that adapter.
+        // Codex, not Trajectory: the trajectory adapter bails on a missing or
+        // unparseable timestamp, so through `analyze_file` these two counters
+        // can only ever be zero for that format. The Codex adapter parses
+        // timestamps leniently, so this is the reachable fixture.
         let bytes = jsonl(&[
-            json!({"role":"meta","source":"test"}),
-            json!({"role":"user","content":"x"}),
-            json!({"role":"assistant","content":"y","timestamp":"bad"}),
+            json!({"type":"session_meta","payload":{}}),
+            json!({"type":"response_item","payload":{}}),
+            json!({"type":"response_item","timestamp":"bad","payload":{}}),
         ]);
-        let evidence = extract_recorded_time_evidence(SourceFormat::Trajectory, &bytes).unwrap();
+        let evidence = extract_recorded_time_evidence(SourceFormat::Codex, &bytes).unwrap();
         assert_eq!(
             (evidence.missing_timestamps, evidence.invalid_timestamps),
             (1, 1)
         );
         assert!(evidence.earliest.is_none());
         assert!(evidence.latest.is_none());
+    }
+
+    #[test]
+    fn trajectory_roles_the_adapter_accepts_are_eligible_for_time_evidence() {
+        // Every content role the adapter accepts. `tool` is omitted only
+        // because it additionally requires a preceding tool call; it is
+        // covered by the end-to-end fixtures. A role added to the adapter but
+        // not to this module used to refuse the whole import; both now read
+        // the same predicate, so that divergence cannot be reintroduced.
+        for role in ["user", "assistant", "reasoning", "system", "observation"] {
+            let bytes = jsonl(&[
+                json!({"role":"meta","source":"test"}),
+                json!({
+                    "role": role,
+                    "content": "x",
+                    "timestamp": "2026-09-11T00:00:00Z"
+                }),
+            ]);
+            crate::source::trajectory::parse_trajectory(&bytes)
+                .unwrap_or_else(|error| panic!("adapter refused role {role}: {error}"));
+            let evidence = extract_recorded_time_evidence(SourceFormat::Trajectory, &bytes)
+                .unwrap_or_else(|error| panic!("time evidence refused role {role}: {error}"));
+            assert_eq!(
+                (evidence.total_eligible_records, evidence.valid_timestamps),
+                (1, 1),
+                "role {role}"
+            );
+        }
     }
 
     #[test]
