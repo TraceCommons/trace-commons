@@ -281,6 +281,60 @@ pub struct SnapshotMutation<T> {
     pub mutation_effects: MutationEffects,
 }
 
+/// What a saved snapshot was last imported from. The canonical path is kept
+/// only as a digest, so the address cannot be read back out of the index.
+/// `identity` is the same file as the operating system knows it, which is what
+/// survives a rename; on platforms without a stable file identity it is absent
+/// and the rename case degrades to the address alone.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AliasEntry {
+    report_id: String,
+    #[serde(default)]
+    identity: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+enum Alias {
+    Current(AliasEntry),
+    /// Stores written before v6 recorded the report id alone.
+    Legacy(String),
+}
+
+impl Alias {
+    fn report_id(&self) -> &str {
+        match self {
+            Self::Current(entry) => &entry.report_id,
+            Self::Legacy(id) => id,
+        }
+    }
+    fn identity(&self) -> Option<&str> {
+        match self {
+            Self::Current(entry) => entry.identity.as_deref(),
+            Self::Legacy(_) => None,
+        }
+    }
+}
+
+/// The file the operating system resolved, independent of the name it was
+/// reached through. A rename preserves it; a copy does not.
+fn file_identity(path: &Path) -> Option<String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = fs::symlink_metadata(path).ok()?;
+        return Some(digest(
+            format!("{}:{}", metadata.dev(), metadata.ino()).as_bytes(),
+        ));
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        None
+    }
+}
+
 /// Entries withheld from every read because they failed load-time validation.
 /// Identifiers only: a quarantined entry's content is never surfaced.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -329,7 +383,7 @@ impl Quarantine {
 struct Index {
     version: u32,
     /// Canonical path hashes only; never source paths or bodies.
-    aliases: BTreeMap<String, String>,
+    aliases: BTreeMap<String, Alias>,
     reports: BTreeMap<String, LocalInsight>,
     #[serde(default)]
     episodes: BTreeMap<String, episodes::LocalEpisode>,
@@ -368,7 +422,7 @@ fn stored<'a, T: Serialize>(
 #[derive(Serialize)]
 struct PersistedIndex<'a> {
     version: u32,
-    aliases: &'a BTreeMap<String, String>,
+    aliases: &'a BTreeMap<String, Alias>,
     reports: BTreeMap<&'a String, Stored<'a, LocalInsight>>,
     episodes: BTreeMap<&'a String, Stored<'a, episodes::LocalEpisode>>,
 }
@@ -389,7 +443,7 @@ impl<'a> From<&'a Index> for PersistedIndex<'a> {
 #[derive(Deserialize)]
 struct RawIndex {
     version: u32,
-    aliases: BTreeMap<String, String>,
+    aliases: BTreeMap<String, Alias>,
     reports: BTreeMap<String, serde_json::Value>,
     #[serde(default)]
     episodes: BTreeMap<String, serde_json::Value>,
@@ -526,7 +580,9 @@ impl LocalInsightStore {
             .cloned()
             .collect::<BTreeSet<_>>();
         let before = index.aliases.len();
-        index.aliases.retain(|_, id| live.contains(id));
+        index
+            .aliases
+            .retain(|_, alias| live.contains(alias.report_id()));
         index.quarantine.dangling_aliases = before - index.aliases.len();
         for (id, value) in raw.episodes {
             match serde_json::from_value::<episodes::LocalEpisode>(value.clone()) {
@@ -589,9 +645,28 @@ impl LocalInsightStore {
             insight.manual_annotation = previous.manual_annotation.clone();
             insight.outcome_links = previous.outcome_links.clone();
         }
-        index.aliases.insert(alias, insight.id.clone());
+        let identity = file_identity(&canonical);
+        index.aliases.insert(
+            alias.clone(),
+            Alias::Current(AliasEntry {
+                report_id: insight.id.clone(),
+                identity: identity.clone(),
+            }),
+        );
+        // A rename leaves the old address pointing at the snapshot it had then,
+        // which would keep a superseded snapshot alive forever under a name the
+        // user no longer has. The file is the same file, so drop that address.
+        if let Some(identity) = identity.as_deref() {
+            index
+                .aliases
+                .retain(|key, entry| key == &alias || entry.identity() != Some(identity));
+        }
         index.reports.insert(insight.id.clone(), insight.clone());
-        let referenced = index.aliases.values().cloned().collect::<BTreeSet<_>>();
+        let referenced = index
+            .aliases
+            .values()
+            .map(|alias| alias.report_id().to_owned())
+            .collect::<BTreeSet<_>>();
         index.reports.retain(|id, _| referenced.contains(id));
         let mutation_effects = episode_store::invalidate_missing_members(&mut index);
         self.save(&index)?;
@@ -730,7 +805,9 @@ impl LocalInsightStore {
         let removed_aliases = index.quarantine.dangling_aliases;
         index.quarantine.reports.clear();
         index.quarantine.episodes.clear();
-        index.aliases.retain(|_, id| index.reports.contains_key(id));
+        index
+            .aliases
+            .retain(|_, alias| index.reports.contains_key(alias.report_id()));
         let effects = episode_store::invalidate_missing_members(&mut index);
         self.save(&index)?;
         Ok(RepairReport {
@@ -752,7 +829,7 @@ impl LocalInsightStore {
             index.reports.remove(id).is_some() | index.quarantine.reports.remove(id).is_some();
         let mutation_effects = episode_store::invalidate_missing_members(&mut index);
         if removed {
-            index.aliases.retain(|_, value| value != id);
+            index.aliases.retain(|_, alias| alias.report_id() != id);
             self.save(&index)?;
         }
         Ok(SnapshotMutation {
@@ -1016,7 +1093,8 @@ mod tests {
         let mut index: serde_json::Value =
             serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         index["reports"][&bad.id]["cost_unavailable_reason"] = "invented".into();
-        index["aliases"]["0".repeat(64)] = "f".repeat(64).into();
+        index["aliases"]["0".repeat(64)] =
+            serde_json::json!({"report_id": "f".repeat(64), "identity": null});
         fs::write(&path, serde_json::to_vec(&index).unwrap()).unwrap();
 
         let repaired = store.repair().unwrap();
@@ -1030,6 +1108,50 @@ mod tests {
         // Repair is idempotent, and never reaches an original file.
         assert_eq!(store.repair().unwrap(), RepairReport::default());
         assert!(a.exists() && b.exists());
+    }
+
+    #[test]
+    fn a_renamed_source_does_not_keep_its_superseded_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let before = root.join("before.jsonl");
+        let after = root.join("after.jsonl");
+        trajectory(&before, "first");
+        let store = LocalInsightStore::open(&root.join("insights")).unwrap();
+        let first = store.import(SourceFormat::Trajectory, &before).unwrap();
+        fs::rename(&before, &after).unwrap();
+        // The same file, edited and reimported under its new name. The address
+        // it used to have must not keep the superseded snapshot alive.
+        trajectory(&after, "second");
+        let second = store.import(SourceFormat::Trajectory, &after).unwrap();
+        assert_ne!(first.id, second.id);
+        let listed = store.list().unwrap();
+        assert_eq!(listed.len(), 1, "a superseded snapshot outlived its source");
+        assert_eq!(listed[0].id, second.id);
+    }
+
+    #[test]
+    fn a_second_copy_still_keeps_the_snapshot_it_was_imported_as() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let a = root.join("a.jsonl");
+        let b = root.join("b.jsonl");
+        trajectory(&a, "first");
+        fs::copy(&a, &b).unwrap();
+        let store = LocalInsightStore::open(&root.join("insights")).unwrap();
+        let first = store.import(SourceFormat::Trajectory, &a).unwrap();
+        store.import(SourceFormat::Trajectory, &b).unwrap();
+        // A distinct file that still holds the old content is not a rename.
+        trajectory(&a, "second");
+        let second = store.import(SourceFormat::Trajectory, &a).unwrap();
+        let ids = store
+            .list()
+            .unwrap()
+            .into_iter()
+            .map(|insight| insight.id)
+            .collect::<BTreeSet<_>>();
+        assert!(ids.contains(&first.id) && ids.contains(&second.id));
+        assert_eq!(ids.len(), 2);
     }
 
     #[test]

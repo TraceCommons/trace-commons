@@ -122,10 +122,12 @@ trace-commons-contributor insights --store-dir ./private-insights repair
 Without `--store-dir`, saved insights use `trace-commons/insights` under the OS
 local data directory, independently of contributor enrollment configuration.
 The store contains derived observations and hashed references, without transcript
-bodies or original paths. Reimporting the same file replaces its prior snapshot;
-identical copies share a result. Saved snapshots are not monitored for changes to
-the original files: reimport to refresh, or use `delete` to remove the saved result
-and its references. Deletion leaves the original transcript intact.
+bodies or original paths. Reimporting the same file replaces its prior snapshot,
+including after the file has been renamed; identical copies share a result, and a
+second copy keeps the snapshot it was imported as. Saved snapshots are not
+monitored for changes to the original files: reimport to refresh, or use `delete`
+to remove the saved result and its references. Deletion leaves the original
+transcript intact.
 
 If a saved entry cannot be read -- a hand-edited or externally written index, an
 entry written by a newer schema, or an episode whose membership no longer binds
