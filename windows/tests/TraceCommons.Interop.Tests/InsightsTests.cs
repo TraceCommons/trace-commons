@@ -233,4 +233,25 @@ public sealed class InsightsTests
         Assert.Contains("if (ViewModel.NeedsSessionRoots)", source);
         Assert.Contains("await ShowSessionRootsAsync();", source);
     }
+
+    [Fact]
+    public void NonRootsStartFailureNavigatesToQueueSoStatusTextIsVisible()
+    {
+        var path = Path.Combine(AppContext.BaseDirectory, "shell-source", "TraceCommons.App", "MainWindow.xaml.cs.txt");
+        string source = File.ReadAllText(path);
+        int start = source.IndexOf("private async Task<bool> StartContributionsAsync()", StringComparison.Ordinal);
+        int end = source.IndexOf("private async Task ContinueStartupAsync()", start, StringComparison.Ordinal);
+        string method = source[start..end];
+        int rootsCheck = method.IndexOf("if (ViewModel.NeedsSessionRoots)", StringComparison.Ordinal);
+        int rootsBranchEnd = method.IndexOf("return false;", rootsCheck, StringComparison.Ordinal);
+        string afterRootsBranch = method[rootsBranchEnd..];
+        // The session-roots-undeclared branch must remain unchanged: it
+        // shows the roots screen, not Queue.
+        Assert.DoesNotContain("ViewModel.ShowQueue()", method[..rootsBranchEnd]);
+        // Any other start failure (for example "another instance may already
+        // be running") must navigate to Queue so ViewModel.StatusText, which
+        // is only rendered in the Queue pane's header chip, reaches the
+        // contributor regardless of which pane the click came from.
+        Assert.Contains("ViewModel.ShowQueue();", afterRootsBranch);
+    }
 }
