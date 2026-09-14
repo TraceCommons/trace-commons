@@ -132,8 +132,14 @@ mod tests {
         assert!(result.exact_estimation.is_some());
     }
 
+    /// A saved specification claiming the exact-categorical estimator can only
+    /// come from a hand-edited store: `comparison_save_spec` always writes
+    /// `NotYetCalibrated`. The frozen protocol sets
+    /// `qualified_for_saved_specifications: false`, so the store refuses the
+    /// edit by name instead of letting a shell render a simultaneous-coverage
+    /// claim behind it.
     #[test]
-    fn qualified_saved_spec_evaluates_through_tc_insights_call() {
+    fn hand_granted_qualified_specification_is_refused_across_the_ffi() {
         let temp = tempfile::tempdir().unwrap();
         let store = temp.path().join("insights");
         let saved = json_call(
@@ -153,6 +159,11 @@ mod tests {
         )
         .unwrap();
         let old_id = saved["specification"]["id"].as_str().unwrap();
+        assert_eq!(
+            saved["specification"]["estimator_state"],
+            serde_json::json!("not_yet_calibrated"),
+            "production must never save a qualified estimator state"
+        );
         let fixture: serde_json::Value = serde_json::from_slice(include_bytes!(
             "../../trace-commons-contributor/fixtures/insights/comparison-estimator/schema2-qualified/preview-response.json"
         ))
@@ -169,21 +180,26 @@ mod tests {
         index["comparison_specifications"][&qualified_id] = qualified;
         std::fs::write(&path, serde_json::to_vec(&index).unwrap()).unwrap();
 
-        let response = json_call(
-            &store,
-            serde_json::json!({"type":"comparison_evaluate","id":qualified_id}),
-        )
-        .unwrap();
-        assert_eq!(response["type"], "comparison_result");
-        assert_eq!(response["result"]["schema_version"], 2);
         assert_eq!(
-            response["result"]["exact_estimation"]["evaluation"]["status"],
-            "suppressed_below_minimum_cohort_support"
+            json_call(
+                &store,
+                serde_json::json!({"type":"comparison_evaluate","id":qualified_id}),
+            )
+            .unwrap_err(),
+            "insights-comparison-estimator-not-qualified"
+        );
+        // The refusal is a property of the store, not of one operation: a
+        // plain list of the same store must not succeed either.
+        assert_eq!(
+            json_call(&store, serde_json::json!({"type":"comparison_list_specs"})).unwrap_err(),
+            "insights-comparison-estimator-not-qualified"
         );
     }
 
+    /// The captured schema-10 store is a record of what the evaluator produces,
+    /// not a grant. Reading it through the ABI must hit the same refusal.
     #[test]
-    fn qualified_supported_store_crosses_tc_insights_call_with_exact_components() {
+    fn captured_qualified_store_is_refused_across_the_ffi() {
         let temp = tempfile::tempdir().unwrap();
         let store = temp.path().join("insights");
         std::fs::create_dir(&store).unwrap();
@@ -199,38 +215,16 @@ mod tests {
             ),
         )
         .unwrap();
-        let response = json_call(
-            &store,
-            serde_json::json!({
-                "type":"comparison_evaluate",
-                "id":"0e86d56a-8117-4daa-b18f-8f4f8210c457"
-            }),
-        )
-        .unwrap();
-        let result = &response["result"];
-        assert_eq!(result["schema_version"], 2);
-        assert_eq!(result["included_task_ids"].as_array().unwrap().len(), 4);
         assert_eq!(
-            result["exact_estimation"]["evaluation"]["status"],
-            "supported"
-        );
-        assert_eq!(
-            result["exact_estimation"]["evaluation"]["first_components"]
-                .as_array()
-                .unwrap()
-                .len()
-                + result["exact_estimation"]["evaluation"]["second_components"]
-                    .as_array()
-                    .unwrap()
-                    .len(),
-            6
-        );
-        assert_eq!(
-            result["exact_estimation"]["evaluation"]["contrasts"]
-                .as_array()
-                .unwrap()
-                .len(),
-            3
+            json_call(
+                &store,
+                serde_json::json!({
+                    "type":"comparison_evaluate",
+                    "id":"0e86d56a-8117-4daa-b18f-8f4f8210c457"
+                }),
+            )
+            .unwrap_err(),
+            "insights-comparison-estimator-not-qualified"
         );
     }
 

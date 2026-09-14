@@ -13,8 +13,13 @@ final class InsightsStoreRoutingIntegrationTests: XCTestCase {
         XCTAssertNotEqual(Self.normalizedOCR("Outcome is assessed."), "outcome is unassessed.")
     }
 
+    /// The captured schema-10 store claims the exact-categorical estimator, and
+    /// the frozen protocol sets `qualified_for_saved_specifications: false`.
+    /// The store refuses it by name, so the shell must surface an error and an
+    /// empty list rather than a simultaneous-coverage screen the user granted
+    /// themselves by editing a local file.
     @MainActor
-    func testActualSupportedSchemaTwoResultFlowsThroughRoutedModel() async throws {
+    func testActualQualifiedClaimingStoreIsRefusedByRoutedModel() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let store = root.appendingPathComponent("supported-store")
         try FileManager.default.createDirectory(at: store, withIntermediateDirectories: true,
@@ -27,30 +32,20 @@ final class InsightsStoreRoutingIntegrationTests: XCTestCase {
         try FileManager.default.copyItem(at: fixture, to: store.appendingPathComponent("index.json"))
 
         let router = InsightsServiceRouter(selection: .custom(store.path))
+        do {
+            _ = try await router.call(.init(operation: .init("comparison_list_specs")))
+            XCTFail("the store must refuse a specification claiming an unqualified estimator")
+        } catch {
+            XCTAssertEqual(error as? InsightsError,
+                           .service("insights-comparison-estimator-not-qualified"), "\(error)")
+        }
+
         let model = ComparisonSpecificationsModel(service: { try await router.call($0) })
         model.open(); try await settle(model)
-        let specification = try XCTUnwrap(model.specifications.first)
-        XCTAssertEqual(specification.id, "0e86d56a-8117-4daa-b18f-8f4f8210c457")
-        guard case .qualifiedExactCategoricalV1 = specification.estimator_state else {
-            return XCTFail("Expected the fixture's qualified exact estimator state")
-        }
-        model.select(specification.id); try await settle(model)
-        model.evaluate(); try await settle(model)
-
-        let result = try XCTUnwrap(model.result)
-        try result.validateStructure(expectedSpecification: try XCTUnwrap(model.selected))
-        XCTAssertEqual(result.schema_version, 2)
-        XCTAssertEqual(result.included_task_ids.count, 4)
-        XCTAssertEqual(result.cohorts.map(\.included_tasks), [2, 2])
-        let exact = try XCTUnwrap(result.exact_estimation)
-        XCTAssertEqual(exact.cohort_labels, result.cohorts.map(\.cohort_label))
-        XCTAssertEqual(exact.assessed_estimation_input_digest.count, 64)
-        XCTAssertEqual(exact.output_digest.count, 64)
-        guard case .supported(let first, let second, let contrasts) = exact.evaluation else {
-            return XCTFail("Expected supported exact intervals")
-        }
-        XCTAssertEqual(first.count + second.count, 6)
-        XCTAssertEqual(contrasts.count, 3)
+        XCTAssertTrue(model.specifications.isEmpty)
+        XCTAssertNil(model.selected)
+        XCTAssertNil(model.result)
+        XCTAssertEqual(model.error, "comparison_specification_error")
     }
 
     @MainActor

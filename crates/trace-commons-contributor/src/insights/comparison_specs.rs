@@ -9,7 +9,8 @@ use sha2::{Digest, Sha256};
 
 use super::TaskCategory;
 use super::comparison_exact::{
-    EXACT_CANDIDATE_METHOD, EXACT_CANDIDATE_PROTOCOL_SHA256, ExactCandidateCounts,
+    EXACT_CANDIDATE_METHOD, EXACT_CANDIDATE_PROTOCOL_SHA256,
+    EXACT_CANDIDATE_QUALIFIED_FOR_SAVED_SPECIFICATIONS, ExactCandidateCounts,
     evaluate_exact_candidate_counts,
 };
 pub use super::comparison_exact::{
@@ -33,6 +34,7 @@ pub enum ComparisonSpecificationError {
     NotFound,
     ResultStale,
     NoSavedTasks,
+    EstimatorNotQualified,
 }
 
 impl std::fmt::Display for ComparisonSpecificationError {
@@ -45,6 +47,7 @@ impl std::fmt::Display for ComparisonSpecificationError {
             Self::NotFound => "insights-comparison-specification-not-found",
             Self::ResultStale => "insights-comparison-result-stale",
             Self::NoSavedTasks => "insights-comparison-no-saved-tasks",
+            Self::EstimatorNotQualified => "insights-comparison-estimator-not-qualified",
         })
     }
 }
@@ -739,6 +742,31 @@ impl ComparisonSpecificationV1 {
             evidence.validate(self.evidence_cutoff)?;
         }
         self.stratum.validate()
+    }
+
+    /// Refuse a stored specification that claims an estimator the frozen
+    /// protocol does not admit for saved specifications.
+    ///
+    /// Nothing in production creates such a specification: `create` always
+    /// writes `NotYetCalibrated`. A user can still write one into `index.json`
+    /// by hand, and before this check the store accepted it and the shells
+    /// then rendered a simultaneous-coverage claim for a method whose own
+    /// frozen protocol sets `qualified_for_saved_specifications: false`. The
+    /// refusal is named rather than silent so a store that carries one is
+    /// diagnosable, and it lifts on its own once the protocol is re-frozen
+    /// with the grant.
+    pub fn validate_saved_estimator_qualification(&self) -> Result<()> {
+        match self.estimator_state {
+            EstimatorSpecificationState::NotYetCalibrated => Ok(()),
+            EstimatorSpecificationState::QualifiedExactCategoricalV1 { .. }
+                if EXACT_CANDIDATE_QUALIFIED_FOR_SAVED_SPECIFICATIONS =>
+            {
+                Ok(())
+            }
+            EstimatorSpecificationState::QualifiedExactCategoricalV1 { .. } => {
+                Err(ComparisonSpecificationError::EstimatorNotQualified.into())
+            }
+        }
     }
 
     pub fn validate(&self) -> Result<()> {
