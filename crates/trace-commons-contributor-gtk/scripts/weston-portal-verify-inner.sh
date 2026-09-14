@@ -27,6 +27,27 @@ insights_frame() {
     grep -qi 'Choose file' <<< "$1"
 }
 
+# `cargo test <filter> -- --exact --ignored` exits 0 when the filter matches
+# zero tests, which is exactly what happens if the named test is renamed or
+# deleted -- a gate built on the exit code alone stays green while testing
+# nothing. Capture the output and require an explicit "N passed" with N >= 1
+# on top of a zero exit code.
+run_ignored_test() {
+  local description="$1"
+  shift
+  local output
+  output=$("$@" 2>&1)
+  local rc=$?
+  echo "$output"
+  if [ "$rc" -ne 0 ]; then
+    fail "$description (test exited non-zero)"
+    return
+  fi
+  if ! grep -qE 'test result: ok\. [1-9][0-9]* passed' <<< "$output"; then
+    fail "$description (filter matched zero tests; cargo test exits 0 for an empty match)"
+  fi
+}
+
 # --- XDG_RUNTIME_DIR: weston's socket and the portal both want one --------
 
 if [ -z "${XDG_RUNTIME_DIR:-}" ] || [ ! -d "$XDG_RUNTIME_DIR" ]; then
@@ -126,18 +147,16 @@ else
 
   # Mission drafts must be reachable without starting Contributions, and
   # inspection/quit failures must preserve the live local view.
-  if ! WAYLAND_DISPLAY="$WAYLAND_SOCKET" GDK_BACKEND=wayland GSETTINGS_BACKEND=memory \
-      cargo test --locked --manifest-path "$GTK_MANIFEST" --lib \
-      ui::insights::tests::local_first_window_exposes_insights_and_mission_drafts_without_a_worker \
-      -- --exact --ignored --test-threads=1; then
-    fail "local-first mission draft navigation required contributor startup"
-  fi
-  if ! WAYLAND_DISPLAY="$WAYLAND_SOCKET" GDK_BACKEND=wayland GSETTINGS_BACKEND=memory \
-      cargo test --locked --manifest-path "$GTK_MANIFEST" --lib \
-      ui::mission_drafts::tests::account_free_view_imports_shows_and_deletes_plain_text_draft \
-      -- --exact --ignored --test-threads=1; then
-    fail "mission draft lifecycle, failed inspection or declined close failed"
-  fi
+  WAYLAND_DISPLAY="$WAYLAND_SOCKET" GDK_BACKEND=wayland GSETTINGS_BACKEND=memory \
+    run_ignored_test "local-first mission draft navigation required contributor startup" \
+    cargo test --locked --manifest-path "$GTK_MANIFEST" --lib \
+    ui::insights::tests::local_first_window_exposes_insights_and_mission_drafts_without_a_worker \
+    -- --exact --ignored --test-threads=1
+  WAYLAND_DISPLAY="$WAYLAND_SOCKET" GDK_BACKEND=wayland GSETTINGS_BACKEND=memory \
+    run_ignored_test "mission draft lifecycle, failed inspection or declined close failed" \
+    cargo test --locked --manifest-path "$GTK_MANIFEST" --lib \
+    ui::mission_drafts::tests::account_free_view_imports_shows_and_deletes_plain_text_draft \
+    -- --exact --ignored --test-threads=1
 
   # --- axis 2: a real portal daemon ------------------------------------------
   if ! WAYLAND_DISPLAY="$WAYLAND_SOCKET" GDK_BACKEND=wayland GSETTINGS_BACKEND=memory \
