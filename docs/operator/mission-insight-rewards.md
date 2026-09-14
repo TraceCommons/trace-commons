@@ -62,7 +62,7 @@ export TRACE_COMMONS_REWARDS_DATABASE_URL='postgresql://reward_issuer@127.0.0.1:
 
 The existing PostgreSQL adapter uses `NoTls`. The CLI therefore accepts only loopback IP addresses or Unix sockets, including when `hostaddr` overrides a host. Remote operators must connect through a protected local tunnel. The `DATABASE_SSLMODE` field does not enable TLS in this adapter.
 
-The terms file is JSON, must be 16 KiB or smaller, and rejects unknown fields. Use only positive integer units, with `award_units <= participant_cap_units <= capacity_units`; do not use floating point. This is a structurally valid example. Replace every digest, identifier, unit amount, and closing time with the actual published inputs before creating a program.
+The terms file is JSON, must be 16 KiB or smaller, and rejects unknown fields. Use only positive integer units, with `award_units <= participant_cap_units <= capacity_units`. Every numeric field must be written as an integer: `1.0` is refused with `reward_request_invalid`, because two spellings of one number would digest to two different `terms_hash` values. This is a structurally valid example. Replace every digest, identifier, unit amount, and closing time with the actual published inputs before creating a program.
 
 ```json
 {

@@ -9,6 +9,7 @@ use uuid::Uuid;
 
 use crate::fixture::{
     RewardPgFixture, assert_refusal, award_submission, create_program, digest, reserve_and_submit,
+    terms,
 };
 
 #[tokio::test]
@@ -411,5 +412,80 @@ async fn only_live_and_awarded_reservations_hold_their_work_digest() {
             .len(),
         9,
         "every reservation that succeeded is still recorded"
+    );
+}
+
+fn refusal_label(error: &tokio_postgres::Error) -> String {
+    error
+        .as_db_error()
+        .expect("a refusal is a database error")
+        .message()
+        .to_owned()
+}
+
+// jsonb keeps the written form of a number, so `1` and `1.0` are two terms
+// objects with two terms_hash values, and replaying one against the other
+// conflicts. The validator admits only the integer spelling, which is what
+// makes a given set of terms have exactly one digest.
+#[tokio::test]
+#[ignore = "requires PostgreSQL 16+ at isolated TRACE_COMMONS_REWARDS_PG_TEST_URL"]
+async fn reward_terms_admit_one_spelling_of_each_integer() {
+    let fixture = RewardPgFixture::new().await;
+    let runtime = fixture.runtime().await;
+    let integer_terms = serde_json::to_value(terms(RewardActivityKind::MissionCompletion, 1, 4, 4))
+        .expect("serialize integer terms");
+    let mut decimal_terms = integer_terms.clone();
+    decimal_terms["award_units"] = json!(1.0);
+    assert_eq!(
+        decimal_terms["award_units"].to_string(),
+        "1.0",
+        "the decimal spelling must survive serialization"
+    );
+
+    let program = Uuid::new_v4();
+    let refusal = runtime
+        .query_one(
+            "SELECT public.trace_reward_program_create($1, $2, $3)",
+            &[&fixture.tenant, &program, &decimal_terms],
+        )
+        .await
+        .expect_err("a decimal spelling must be refused");
+    assert_eq!(
+        refusal_label(&refusal),
+        "reward_request_invalid",
+        "refusal must carry the safe label"
+    );
+
+    let created = runtime
+        .query_one(
+            "SELECT public.trace_reward_program_create($1, $2, $3)",
+            &[&fixture.tenant, &program, &integer_terms],
+        )
+        .await
+        .expect("the integer spelling creates the program")
+        .get::<_, Value>(0);
+    let replayed = runtime
+        .query_one(
+            "SELECT public.trace_reward_program_create($1, $2, $3)",
+            &[&fixture.tenant, &program, &integer_terms],
+        )
+        .await
+        .expect("exact replay")
+        .get::<_, Value>(0);
+    assert_eq!(
+        created["terms_hash"], replayed["terms_hash"],
+        "one spelling digests to one terms_hash"
+    );
+    let conflict = runtime
+        .query_one(
+            "SELECT public.trace_reward_program_create($1, $2, $3)",
+            &[&fixture.tenant, &program, &decimal_terms],
+        )
+        .await
+        .expect_err("the decimal spelling cannot reach the replay comparison");
+    assert_eq!(
+        refusal_label(&conflict),
+        "reward_request_invalid",
+        "a second spelling is refused before it can conflict"
     );
 }

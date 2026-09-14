@@ -264,7 +264,8 @@ $$;
 CREATE FUNCTION trace_reward_terms_valid(p_terms JSONB)
 RETURNS BOOLEAN
 LANGUAGE plpgsql
-IMMUTABLE
+-- STABLE, not IMMUTABLE: the closes_at cast reads the session TimeZone.
+STABLE
 SET search_path = pg_catalog
 AS $$
 DECLARE
@@ -300,6 +301,19 @@ BEGIN
         OR pg_catalog.jsonb_typeof(p_terms->'closes_at') <> 'string' THEN
         RETURN FALSE;
     END IF;
+
+    -- jsonb preserves the written form of a number, so 1 and 1.0 are distinct
+    -- terms objects with distinct terms_hash values and a replay of one against
+    -- the other conflicts. Admit only the integer spelling, so a given set of
+    -- terms has exactly one digest.
+    FOREACH v_key IN ARRAY ARRAY[
+        'schema_version', 'award_units', 'capacity_units',
+        'participant_cap_units', 'reservation_ttl_seconds'
+    ] LOOP
+        IF p_terms->>v_key !~ '^(0|[1-9][0-9]{0,18})$' THEN
+            RETURN FALSE;
+        END IF;
+    END LOOP;
 
     FOREACH v_key IN ARRAY ARRAY[
         'definition_hash', 'rubric_hash', 'evaluator_policy_hash',
