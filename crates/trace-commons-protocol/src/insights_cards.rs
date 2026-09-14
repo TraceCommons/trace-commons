@@ -691,7 +691,7 @@ fn expected_episode_card(request: &InsightCardRequest) -> Result<InsightCard, Ca
         }
     }
     let assessed = accepted + partial + rejected + unknown;
-    let unassessed = eligible - assessed;
+    let unassessed = checked_sub(eligible, assessed)?;
     let overlap = request.episode_overlap()?;
     let overlapping = overlap.values().filter(|ids| !ids.is_empty()).count() as u64;
     let distinct = request
@@ -912,6 +912,10 @@ fn coverage(unit: CoverageUnit, observed: u64, eligible: u64) -> CardCoverage {
 }
 fn checked_add(left: u64, right: u64) -> Result<u64, CardValidationError> {
     left.checked_add(right)
+        .ok_or(CardValidationError::InvalidInput)
+}
+fn checked_sub(left: u64, right: u64) -> Result<u64, CardValidationError> {
+    left.checked_sub(right)
         .ok_or(CardValidationError::InvalidInput)
 }
 fn timestamp_millis(value: Option<DateTime<Utc>>) -> Result<Option<i64>, CardValidationError> {
@@ -1655,6 +1659,14 @@ mod tests {
             }],
             episodes: vec![],
         }
+    }
+    #[test]
+    fn checked_sub_rejects_underflow_instead_of_panicking() {
+        // `expected_episode_card` computes `eligible - assessed`; a future
+        // regression that lets assessed exceed eligible must return a typed
+        // error, not panic on the arithmetic.
+        assert_eq!(checked_sub(5, 3).unwrap(), 2);
+        assert_eq!(checked_sub(3, 5), Err(CardValidationError::InvalidInput));
     }
     #[test]
     fn every_deterministic_value_and_coverage_is_bound_to_selected_facts() {

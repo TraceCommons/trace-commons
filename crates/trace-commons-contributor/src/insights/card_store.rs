@@ -198,8 +198,14 @@ fn is_digest(value: &str) -> bool {
 
 fn snapshot_input(insight: &LocalInsight) -> Result<SnapshotCardInput> {
     let models = model_input(insight.model_observations.as_ref());
+    let evidence = insight
+        .report
+        .evidence
+        .first()
+        .ok_or_else(|| anyhow!("insights_store_invalid"))?
+        .clone();
     Ok(SnapshotCardInput {
-        evidence: insight.report.evidence[0].clone(),
+        evidence,
         source_format: source_format(insight.source_format),
         normalized_events: metric_fact(insight, MetricId::Events)?,
         tool_calls: metric_fact(insight, MetricId::ToolCalls)?,
@@ -386,6 +392,27 @@ mod tests {
             })
             .collect();
         (root, store, ids)
+    }
+
+    #[test]
+    fn snapshot_input_rejects_saved_data_with_no_evidence_instead_of_indexing_into_it() {
+        // `report.evidence` is always written with exactly one entry today,
+        // so this cannot be reached through the store's normal import path.
+        // Build an otherwise-valid `LocalInsight` and clear its evidence
+        // directly to exercise the invariant-violation case a future
+        // regression could reintroduce.
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("model-a");
+        source(&path, "model-a", "2026-09-11T00:00:00Z");
+        let mut insight = super::super::analyze_file(SourceFormat::Trajectory, &path).unwrap();
+        assert!(
+            !insight.report.evidence.is_empty(),
+            "fixture must start with evidence to prove the fix, not an already-empty vec"
+        );
+        insight.report.evidence.clear();
+
+        let error = snapshot_input(&insight).unwrap_err();
+        assert_eq!(error.to_string(), "insights_store_invalid");
     }
 
     #[test]
