@@ -341,7 +341,19 @@ public sealed partial class MainWindow : Window
                 await ShowSessionRootsAsync();
                 return false;
             }
-            return !_closed && _host.IsRunning;
+            bool started = !_closed && _host.IsRunning;
+            if (!started && !_closed)
+            {
+                // A start failure that is not "session roots undeclared" --
+                // for example ViewModel.StatusText's "another instance may
+                // already be running" -- must still reach the contributor.
+                // Before Insights became the default landing pane, Queue was
+                // already on screen and its header chip showed that message;
+                // navigate there now so a click from any pane still surfaces
+                // it instead of doing nothing.
+                ViewModel.ShowQueue();
+            }
+            return started;
         }
         finally { _contributionStartupBusy = false; }
     }
