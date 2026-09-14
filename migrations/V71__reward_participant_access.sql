@@ -132,18 +132,18 @@ CREATE INDEX trace_reward_participant_reservations_work_idx
         tenant_id, participant_hash, work_namespace_hash
     );
 
-ALTER TABLE public.trace_reward_offers ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.trace_reward_offers FORCE ROW LEVEL SECURITY;
-ALTER TABLE public.trace_reward_offer_controls ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.trace_reward_offer_controls FORCE ROW LEVEL SECURITY;
-ALTER TABLE public.trace_reward_participant_logins ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.trace_reward_participant_logins FORCE ROW LEVEL SECURITY;
-ALTER TABLE public.trace_reward_principals ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.trace_reward_principals FORCE ROW LEVEL SECURITY;
-ALTER TABLE public.trace_reward_principal_accounts ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.trace_reward_principal_accounts FORCE ROW LEVEL SECURITY;
-ALTER TABLE public.trace_reward_participant_reservations ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.trace_reward_participant_reservations FORCE ROW LEVEL SECURITY;
+ALTER TABLE trace_reward_offers ENABLE ROW LEVEL SECURITY;
+ALTER TABLE trace_reward_offers FORCE ROW LEVEL SECURITY;
+ALTER TABLE trace_reward_offer_controls ENABLE ROW LEVEL SECURITY;
+ALTER TABLE trace_reward_offer_controls FORCE ROW LEVEL SECURITY;
+ALTER TABLE trace_reward_participant_logins ENABLE ROW LEVEL SECURITY;
+ALTER TABLE trace_reward_participant_logins FORCE ROW LEVEL SECURITY;
+ALTER TABLE trace_reward_principals ENABLE ROW LEVEL SECURITY;
+ALTER TABLE trace_reward_principals FORCE ROW LEVEL SECURITY;
+ALTER TABLE trace_reward_principal_accounts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE trace_reward_principal_accounts FORCE ROW LEVEL SECURITY;
+ALTER TABLE trace_reward_participant_reservations ENABLE ROW LEVEL SECURITY;
+ALTER TABLE trace_reward_participant_reservations FORCE ROW LEVEL SECURITY;
 
 CREATE POLICY trace_reward_operator_tenant_access ON public.trace_reward_offers
     TO trace_reward_guard
@@ -154,28 +154,33 @@ CREATE POLICY trace_reward_operator_tenant_access ON public.trace_reward_offer_c
     USING (tenant_id = public.trace_current_tenant_id())
     WITH CHECK (tenant_id = public.trace_current_tenant_id());
 
-CREATE POLICY trace_corpus_tenant_isolation ON public.trace_reward_offers
+DROP POLICY IF EXISTS trace_corpus_tenant_isolation ON trace_reward_offers;
+CREATE POLICY trace_corpus_tenant_isolation ON trace_reward_offers
     TO trace_reward_participant_guard
     USING (tenant_id = public.trace_current_tenant_id())
     WITH CHECK (tenant_id = public.trace_current_tenant_id());
-CREATE POLICY trace_corpus_tenant_isolation ON public.trace_reward_offer_controls
+DROP POLICY IF EXISTS trace_corpus_tenant_isolation ON trace_reward_offer_controls;
+CREATE POLICY trace_corpus_tenant_isolation ON trace_reward_offer_controls
     TO trace_reward_participant_guard
     USING (tenant_id = public.trace_current_tenant_id())
     WITH CHECK (tenant_id = public.trace_current_tenant_id());
-CREATE POLICY trace_corpus_tenant_isolation ON public.trace_reward_participant_logins
+DROP POLICY IF EXISTS trace_corpus_tenant_isolation ON trace_reward_participant_logins;
+CREATE POLICY trace_corpus_tenant_isolation ON trace_reward_participant_logins
     TO trace_reward_participant_guard
     USING (tenant_id = public.trace_current_tenant_id())
     WITH CHECK (tenant_id = public.trace_current_tenant_id());
-CREATE POLICY trace_corpus_tenant_isolation ON public.trace_reward_principals
+DROP POLICY IF EXISTS trace_corpus_tenant_isolation ON trace_reward_principals;
+CREATE POLICY trace_corpus_tenant_isolation ON trace_reward_principals
     TO trace_reward_participant_guard
     USING (tenant_id = public.trace_current_tenant_id())
     WITH CHECK (tenant_id = public.trace_current_tenant_id());
-CREATE POLICY trace_corpus_tenant_isolation ON public.trace_reward_principal_accounts
+DROP POLICY IF EXISTS trace_corpus_tenant_isolation ON trace_reward_principal_accounts;
+CREATE POLICY trace_corpus_tenant_isolation ON trace_reward_principal_accounts
     TO trace_reward_participant_guard
     USING (tenant_id = public.trace_current_tenant_id())
     WITH CHECK (tenant_id = public.trace_current_tenant_id());
-CREATE POLICY trace_corpus_tenant_isolation
-    ON public.trace_reward_participant_reservations
+DROP POLICY IF EXISTS trace_corpus_tenant_isolation ON trace_reward_participant_reservations;
+CREATE POLICY trace_corpus_tenant_isolation ON trace_reward_participant_reservations
     TO trace_reward_participant_guard
     USING (tenant_id = public.trace_current_tenant_id())
     WITH CHECK (tenant_id = public.trace_current_tenant_id());

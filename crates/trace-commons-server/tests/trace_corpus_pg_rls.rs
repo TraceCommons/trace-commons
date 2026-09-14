@@ -1547,7 +1547,9 @@ fn force_rls_migration_covers_every_trace_rls_table() {
     sql.push_str(include_str!(
         "../../../migrations/V69__mission_insight_rewards.sql"
     ));
-    sql.push_str(&participant_migration_for_rls_assertions());
+    sql.push_str(include_str!(
+        "../../../migrations/V71__reward_participant_access.sql"
+    ));
     // `trace_pii_backstop` carries the same tenant-isolation policy but is not
     // in `TRACE_COMMONS_RLS_TABLES`, so assert it here rather than lose the
     // coverage the hand-maintained table list used to provide.
@@ -1561,16 +1563,6 @@ fn force_rls_migration_covers_every_trace_rls_table() {
             "FORCE RLS migration must include {statement}"
         );
     }
-}
-
-// V71 qualifies table names and wraps policy statements. Preserve the actual
-// SQL assertions while accepting those formatting choices.
-fn participant_migration_for_rls_assertions() -> String {
-    include_str!("../../../migrations/V71__reward_participant_access.sql")
-        .replace("public.", "")
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 #[test]
@@ -1642,7 +1634,9 @@ fn central_rls_tenant_predicate_migration_covers_every_trace_rls_table() {
         "../../../migrations/V69__mission_insight_rewards.sql"
     ));
     assert!(sql.contains("CREATE OR REPLACE FUNCTION trace_current_tenant_id()"));
-    sql.push_str(&participant_migration_for_rls_assertions());
+    sql.push_str(include_str!(
+        "../../../migrations/V71__reward_participant_access.sql"
+    ));
     assert!(sql.contains("RETURNS TEXT"));
     assert!(sql.contains("current_setting('trace_commons.trace_tenant_id', true)"));
     for table in expected_trace_rls_tables()
@@ -1652,7 +1646,7 @@ fn central_rls_tenant_predicate_migration_covers_every_trace_rls_table() {
         assert!(
             sql.contains(&format!(
                 "DROP POLICY IF EXISTS trace_corpus_tenant_isolation ON {table};"
-            )) || sql.contains(&format!("CREATE TABLE {table} (")),
+            )),
             "central tenant predicate migration must drop stale policy on {table}"
         );
         assert!(

@@ -6498,16 +6498,8 @@ mod tests {
 
     #[test]
     fn trace_commons_rls_registry_matches_migration_policy_coverage() {
-        // The participant migration qualifies SQL names and wraps long policy
-        // statements. Normalize those forms without relaxing the RLS contract.
-        let participant_migration =
-            include_str!("../../../../migrations/V71__reward_participant_access.sql")
-                .replace("public.", "")
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ");
         let central_policy_migrations = [
-            participant_migration.as_str(),
+            include_str!("../../../../migrations/V71__reward_participant_access.sql"),
             include_str!("../../../../migrations/V18__trace_central_rls_tenant_predicate.sql"),
             include_str!("../../../../migrations/V21__trace_near_credit_account_outbox.sql"),
             include_str!("../../../../migrations/V26__trace_contributor_profiles.sql"),
@@ -6525,7 +6517,7 @@ mod tests {
             include_str!("../../../../migrations/V69__mission_insight_rewards.sql"),
         ];
         let force_rls_migrations = [
-            participant_migration.as_str(),
+            include_str!("../../../../migrations/V71__reward_participant_access.sql"),
             include_str!("../../../../migrations/V6__trace_force_rls.sql"),
             include_str!("../../../../migrations/V11__trace_ranking_worker_runs.sql"),
             include_str!("../../../../migrations/V14__trace_ranking_preference_labels.sql"),
@@ -6552,7 +6544,7 @@ mod tests {
                 central_policy_migrations.iter().any(|migration| {
                     migration.contains(&format!(
                         "DROP POLICY IF EXISTS trace_corpus_tenant_isolation ON {table};"
-                    )) || migration.contains(&format!("CREATE TABLE {table} ("))
+                    ))
                 }),
                 "{table} is missing from the central RLS policy migration cleanup"
             );
