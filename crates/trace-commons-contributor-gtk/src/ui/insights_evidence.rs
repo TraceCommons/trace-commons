@@ -179,7 +179,7 @@ mod tests {
     use trace_commons_contributor::insights::{
         OutcomeLinkProvenance, SourceFormat,
         claude_task_attribution::ClaudeTaskUnavailableReason,
-        models::{ModelDeclaration, ModelObservationScope},
+        models::{ModelCoverageContract, ModelDeclaration, ModelObservationScope},
         outcomes::{
             GitCommitEvidence, GitEvidenceProvenance, TestEvidenceProvenance, TestReportEvidence,
         },
@@ -242,6 +242,7 @@ mod tests {
                     kind: DeclarationKind::ClaudeAssistantMessage,
                 },
             ],
+            contract: ModelCoverageContract::ClaudeAssistantMessageV3,
         };
 
         observation.validate().unwrap();
@@ -280,6 +281,7 @@ mod tests {
                 record_index: 4,
                 kind: DeclarationKind::CodexTurnContext,
             }],
+            contract: ModelCoverageContract::LegacyDeclaredMetadataV1,
         };
         let text = render_models(Some(&observation));
         for key in [

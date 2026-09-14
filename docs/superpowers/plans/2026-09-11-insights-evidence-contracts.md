@@ -25,6 +25,12 @@ the whole store once with `insights_store_version_unsupported`, rather than
 accepting the store and then rejecting individual snapshots at read time. No
 automatic downgrade is provided.
 
+Rust is the single validator of this contract. Each saved observation carries a
+`contract` verdict that Rust recomputes on every deserialization and never
+reads from the wire, and the native shells consume that verdict instead of
+re-deriving counters, ordering, declaration kinds or label charset. A verdict a
+shell does not know is a contract newer than that shell, and fails closed there.
+
 `outcomes::inspect_git_commit(repository, object_id)` inspects an exact canonical
 lowercase 40- or 64-hex commit ID in an explicitly selected repository. It records
 only repository-path digest, object/tree/parent identifiers, inspection time,

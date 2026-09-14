@@ -33,7 +33,7 @@ final class InsightEvidenceBridgeTests: XCTestCase {
     }
     func testMixedDeclarationsAndMissingnessRemainTyped() throws {
         let json = """
-        {"schema_version":1,"scope":"declared_metadata_only","source_format":"codex","source_digest":"abc","coordinates":"jsonl_physical_lines_one_based","record_count":8,"candidate_records":5,"valid_declarations":2,"missing_declarations":2,"invalid_declarations":1,"omitted_declarations":0,"model_labels_omitted":false,"mixed_declared_models":true,"declared_models":["fixture-a","fixture-b"],"declarations":[{"model":"fixture-a","record_index":1,"kind":"codex_session_metadata"},{"model":"fixture-b","record_index":8,"kind":"codex_turn_context"}]}
+        {"schema_version":1,"scope":"declared_metadata_only","source_format":"codex","source_digest":"abc","coordinates":"jsonl_physical_lines_one_based","record_count":8,"candidate_records":5,"valid_declarations":2,"missing_declarations":2,"invalid_declarations":1,"omitted_declarations":0,"model_labels_omitted":false,"mixed_declared_models":true,"declared_models":["fixture-a","fixture-b"],"declarations":[{"model":"fixture-a","record_index":1,"kind":"codex_session_metadata"},{"model":"fixture-b","record_index":8,"kind":"codex_turn_context"}],"contract":"legacy_declared_metadata_v1"}
         """
         let value = try JSONDecoder().decode(InsightModelObservations.self, from: Data(json.utf8))
         XCTAssertTrue(value.mixed_declared_models)
@@ -43,61 +43,32 @@ final class InsightEvidenceBridgeTests: XCTestCase {
         XCTAssertEqual(value.invalid_declarations, 1)
         XCTAssertThrowsError(try JSONDecoder().decode(InsightModelObservations.self,
             from: Data(json.replacingOccurrences(of: "declared_metadata_only", with: "verified_identity").utf8)))
-        var snapshot = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(legacy.utf8)) as? [String: Any])
-        var observations = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
-        observations["schema_version"] = 4
-        snapshot["model_observations"] = observations
-        let unsupported = try JSONDecoder().decode(LocalInsight.self, from: JSONSerialization.data(withJSONObject: snapshot))
-        XCTAssertThrowsError(try unsupported.validateSupportedEvidence())
-        observations["schema_version"] = 1
-        observations["declarations"] = [["model": "fixture-a", "record_index": 1, "kind": "claude_assistant_message"]]
-        observations["declared_models"] = ["fixture-a"]
-        observations["valid_declarations"] = 1
-        observations["missing_declarations"] = 4
-        observations["invalid_declarations"] = 0
-        observations["mixed_declared_models"] = false
-        snapshot["model_observations"] = observations
-        let crossSchemaKind = try JSONDecoder().decode(LocalInsight.self, from: JSONSerialization.data(withJSONObject: snapshot))
-        XCTAssertThrowsError(try crossSchemaKind.validateSupportedEvidence())
     }
-    func testCodexTurnContextSchemaAcceptsKnownAbsenceAndRejectsForgedCoverage() throws {
-        let valid = """
-        {"schema_version":2,"scope":"declared_metadata_only","source_format":"codex","source_digest":"abc","coordinates":"jsonl_physical_lines_one_based","record_count":2,"candidate_records":0,"valid_declarations":0,"missing_declarations":0,"invalid_declarations":0,"omitted_declarations":0,"model_labels_omitted":false,"mixed_declared_models":false,"declared_models":[],"declarations":[]}
+
+    /// Rust is the single validator of the coverage contract. This shell renders
+    /// the verdicts it knows, refuses the one Rust rejected, and fails to decode
+    /// a verdict from a newer build rather than guessing what it means. It
+    /// deliberately no longer re-derives counters, ordering, kinds or labels.
+    func testTheShellConsumesRustsCoverageVerdictInsteadOfRederivingIt() throws {
+        let body = """
+        {"schema_version":2,"scope":"declared_metadata_only","source_format":"codex","source_digest":"abc","coordinates":"jsonl_physical_lines_one_based","record_count":2,"candidate_records":0,"valid_declarations":0,"missing_declarations":0,"invalid_declarations":0,"omitted_declarations":0,"model_labels_omitted":false,"mixed_declared_models":false,"declared_models":[],"declarations":[],"contract":"CONTRACT"}
         """
         var snapshot = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(legacy.utf8)) as? [String: Any])
-        snapshot["model_observations"] = try JSONSerialization.jsonObject(with: Data(valid.utf8))
-        let supported = try JSONDecoder().decode(LocalInsight.self, from: JSONSerialization.data(withJSONObject: snapshot))
-        try supported.validateSupportedEvidence()
-        for replacement in [
-            valid.replacingOccurrences(of: "\"candidate_records\":0", with: "\"candidate_records\":1"),
-            valid.replacingOccurrences(of: "\"source_format\":\"codex\"", with: "\"source_format\":\"trajectory\""),
-            valid.replacingOccurrences(of: "\"declarations\":[]", with: "\"declarations\":[{\"model\":\"x\",\"record_index\":1,\"kind\":\"codex_session_metadata\"}]")
-        ] {
-            snapshot["model_observations"] = try JSONSerialization.jsonObject(with: Data(replacement.utf8))
-            let malformed = try JSONDecoder().decode(LocalInsight.self, from: JSONSerialization.data(withJSONObject: snapshot))
-            XCTAssertThrowsError(try malformed.validateSupportedEvidence())
+        for accepted in ["legacy_declared_metadata_v1", "codex_turn_context_v2", "claude_assistant_message_v3"] {
+            let text = body.replacingOccurrences(of: "CONTRACT", with: accepted)
+            snapshot["model_observations"] = try JSONSerialization.jsonObject(with: Data(text.utf8))
+            let value = try JSONDecoder().decode(LocalInsight.self, from: JSONSerialization.data(withJSONObject: snapshot))
+            try value.validateSupportedEvidence()
         }
-    }
-    func testClaudeAssistantSchemaAcceptsRepeatedDeclarationsAndRejectsWrongKinds() throws {
-        let valid = """
-        {"schema_version":3,"scope":"declared_metadata_only","source_format":"claude_code","source_digest":"abc","coordinates":"jsonl_physical_lines_one_based","record_count":3,"candidate_records":3,"valid_declarations":2,"missing_declarations":1,"invalid_declarations":0,"omitted_declarations":0,"model_labels_omitted":false,"mixed_declared_models":false,"declared_models":["claude-a"],"declarations":[{"model":"claude-a","record_index":1,"kind":"claude_assistant_message"},{"model":"claude-a","record_index":2,"kind":"claude_assistant_message"}]}
-        """
-        var snapshot = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(legacy.utf8)) as? [String: Any])
-        snapshot["model_observations"] = try JSONSerialization.jsonObject(with: Data(valid.utf8))
-        let supported = try JSONDecoder().decode(LocalInsight.self, from: JSONSerialization.data(withJSONObject: snapshot))
-        try supported.validateSupportedEvidence()
-        snapshot["model_observations"] = try JSONSerialization.jsonObject(with: Data(valid.replacingOccurrences(of: "\"schema_version\":3", with: "\"schema_version\":1").utf8))
-        let crossSchemaSource = try JSONDecoder().decode(LocalInsight.self, from: JSONSerialization.data(withJSONObject: snapshot))
-        XCTAssertThrowsError(try crossSchemaSource.validateSupportedEvidence())
-        for replacement in [
-            valid.replacingOccurrences(of: "\"source_format\":\"claude_code\"", with: "\"source_format\":\"codex\""),
-            valid.replacingOccurrences(of: "claude_assistant_message", with: "codex_turn_context"),
-            valid.replacingOccurrences(of: "\"candidate_records\":3", with: "\"candidate_records\":2")
-        ] {
-            snapshot["model_observations"] = try JSONSerialization.jsonObject(with: Data(replacement.utf8))
-            let malformed = try JSONDecoder().decode(LocalInsight.self, from: JSONSerialization.data(withJSONObject: snapshot))
-            XCTAssertThrowsError(try malformed.validateSupportedEvidence())
-        }
+        let refused = body.replacingOccurrences(of: "CONTRACT", with: "unsupported")
+        snapshot["model_observations"] = try JSONSerialization.jsonObject(with: Data(refused.utf8))
+        let rejected = try JSONDecoder().decode(LocalInsight.self, from: JSONSerialization.data(withJSONObject: snapshot))
+        XCTAssertThrowsError(try rejected.validateSupportedEvidence())
+
+        let newer = body.replacingOccurrences(of: "CONTRACT", with: "codex_turn_context_v4")
+        snapshot["model_observations"] = try JSONSerialization.jsonObject(with: Data(newer.utf8))
+        XCTAssertThrowsError(try JSONDecoder().decode(
+            LocalInsight.self, from: JSONSerialization.data(withJSONObject: snapshot)))
     }
     func testLinkRequestPreservesExplicitInputsAndSnapshotID() throws {
         let request = InsightsRequest(operation: .init("link_git", id: "snapshot", repository: "/selected/repo", commit: String(repeating: "a", count: 40)))

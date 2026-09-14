@@ -231,7 +231,8 @@ final class ComparisonSpecificationsModelTests: XCTestCase {
                     "valid_declarations": 1, "missing_declarations": 0, "invalid_declarations": 0,
                     "omitted_declarations": 0, "model_labels_omitted": false, "mixed_declared_models": false,
                     "declared_models": [label], "declarations": [["model": label, "record_index": 1,
-                                                                   "kind": "codex_session_metadata"]]]]
+                                                                   "kind": "codex_session_metadata"]],
+                    "contract": "codex_turn_context_v2"]]
             return try JSONDecoder().decode(LocalInsight.self, from: JSONSerialization.data(withJSONObject: json))
         }
     }

@@ -1121,10 +1121,22 @@ mod tests {
 
     #[test]
     fn shared_native_claude_snapshot_matches_the_rust_evidence_contract() {
-        let insight: LocalInsight = serde_json::from_slice(include_bytes!(
+        const SHARED: &[u8] = include_bytes!(
             "../fixtures/insights/claude-task-attribution/native-agent-alpha-snapshot.json"
-        ))
-        .unwrap();
+        );
+        let insight: LocalInsight = serde_json::from_slice(SHARED).unwrap();
+        // The native shells read this verdict instead of re-deriving it, so the
+        // shared fixture's stored value must be the one Rust recomputes.
+        let raw: serde_json::Value = serde_json::from_slice(SHARED).unwrap();
+        let observations = insight.model_observations.as_ref().unwrap();
+        assert_eq!(
+            raw["model_observations"]["contract"],
+            serde_json::to_value(observations.contract).unwrap()
+        );
+        assert_eq!(
+            observations.contract,
+            models::ModelCoverageContract::ClaudeAssistantMessageV3
+        );
         assert_eq!(insight.source_format, SourceFormat::ClaudeCode);
         assert!(insight.task_attribution.is_none());
         let attribution = insight.claude_task_attribution.as_ref().unwrap();
