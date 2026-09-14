@@ -638,6 +638,28 @@ char*       tc_routing_last_checked(const char* when);
  */
 char*       tc_private_inference_copy(void);
 
+/* Every fixed word for a watcher another process is already running, as one
+ * owned JSON object. Free it with tc_string_free.
+ *
+ * This is the surface a host renders after tc_daemon_start answers
+ * "already-running" and tc_daemon_attach succeeds: the banner saying this
+ * window is driving somebody else's watcher, plus one sentence per fixed
+ * start-failure label. Keys:
+ *
+ *   attached_title, attached_detail,
+ *   already_running, no_daemon_listening,
+ *   state_directory_not_writable, settings_unreadable, ipc_bind_failed
+ *
+ * There is deliberately NO sentence for "roots-not-declared" (it has its own
+ * screen) or for "daemon-start-failed" (opaque by construction). A host that
+ * meets a label with no sentence here must treat it as daemon-start-failed
+ * rather than display it.
+ *
+ * Needs no handle because it describes the build. Returns NULL only on a
+ * caught panic.
+ */
+char*       tc_attach_copy(void);
+
 /* Every fixed word on owned session detail and reviewed publication, as one
  * OWNED JSON object; free it with tc_string_free. Needs no handle because it
  * describes the build. NULL only on a caught panic.

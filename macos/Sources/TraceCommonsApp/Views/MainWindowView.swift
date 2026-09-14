@@ -1,4 +1,5 @@
 import SwiftUI
+import TCBridge
 import TCShellCore
 
 struct MainWindowView: View {
@@ -82,7 +83,15 @@ struct MainWindowView: View {
     }
 
     var body: some View {
-        shell
+        // Above the whole shell rather than inside one destination: the two
+        // things an attached handle cannot do (stop the watcher, open a
+        // body) are reached from more than one screen, so a notice pinned to
+        // one of them would be missing wherever the contributor actually
+        // hit the limit.
+        VStack(spacing: 0) {
+            if model.isAttachedDaemon { AttachedDaemonNotice() }
+            shell
+        }
     }
 
     /// Only trace destinations pass through enrollment and session-root gates.
@@ -709,6 +718,28 @@ enum MacGlyphs: Equatable {
         path.move(to: CGPoint(x: 8, y: 6.6))
         path.addLine(to: CGPoint(x: 8, y: 9.6))
         path.addEllipse(in: CGRect(x: 7.5, y: 11.2, width: 1, height: 1))
+    }
+}
+
+/// Said when this shell is driving a watcher that belongs to another
+/// process.
+///
+/// Drawn rather than left silent because two of this window's controls stop
+/// working and a contributor who is not told meets them as dead buttons:
+/// the watcher cannot be stopped from here, and a trace's redacted body
+/// cannot be opened -- the socket carries the summary only, so showing one
+/// where a body was asked for would be a content promise the attached path
+/// cannot keep.
+struct AttachedDaemonNotice: View {
+    var body: some View {
+        // Both sentences come from `attach_copy` across the ABI. Drawing
+        // nothing when it cannot answer is deliberate: a banner with no
+        // words is worse than no banner, and the controls it warns about
+        // still refuse with their own reasons.
+        if let copy = TCAttach.copy() {
+            NativeFlowNotice(message: copy.attachedDetail, glyph: "", tone: "neutral")
+                .accessibilityLabel(Text(copy.attachedTitle))
+        }
     }
 }
 

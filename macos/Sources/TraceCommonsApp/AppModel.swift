@@ -866,6 +866,14 @@ final class AppModel: ObservableObject {
     /// it.
     private(set) var configDirectory: String = ""
 
+    /// Whether the watcher this shell is driving belongs to another
+    /// process.
+    ///
+    /// Worth surfacing rather than hiding: an attached daemon cannot be
+    /// stopped from here and cannot open a redacted body preview, and a
+    /// contributor who is not told that meets it as a dead control.
+    var isAttachedDaemon: Bool { daemon?.isAttached ?? false }
+
     var traceNavigationReady: Bool {
         guard case .running = startup else { return false }
         return status.loggedIn && isOnboardingComplete
