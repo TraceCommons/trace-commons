@@ -156,7 +156,9 @@ final class ComparisonTaskBridgeTests: XCTestCase {
                      "comparison_task_open_current_episode", "comparison_task_open_frozen_snapshot",
                      "comparison_specification_preview", "comparison_specification_save",
                      "comparison_specification_evaluate", "comparison_specification_explain_result",
-                     "comparison_specification_committed_reload_failed"]
+                     "comparison_specification_committed_reload_failed",
+                     "comparison_cohort_declared_not_verified",
+                     "comparison_cohort_declaration_notice"]
         XCTAssertTrue(fixed.allSatisfy { copy[$0]?.isEmpty == false })
         XCTAssertTrue(ComparisonReasoningEffort.allCases.allSatisfy {
             copy["comparison_task_reasoning_\($0.rawValue)"]?.isEmpty == false
