@@ -11,6 +11,20 @@ use trace_commons_protocol::insights::{
     ProviderManifest,
 };
 
+/// Every metric this seam requires a result to carry. A result missing one, or
+/// carrying one twice, is refused here rather than two layers later in the
+/// store, so the boundary that documents the contract is the one that enforces
+/// it. The store keeps its own independent check as defense in depth.
+const REQUIRED_METRICS: [MetricId; 7] = [
+    MetricId::Sessions,
+    MetricId::Events,
+    MetricId::InputTokens,
+    MetricId::OutputTokens,
+    MetricId::ToolCalls,
+    MetricId::ToolFailures,
+    MetricId::KnownOutcomes,
+];
+
 use crate::source::{SessionEvent, SessionEventKind};
 
 pub const PROVIDER_REQUEST_VERSION: u32 = 1;
@@ -89,6 +103,8 @@ pub enum ProviderError {
     InvalidResult,
     #[error("insights-provider-purpose-unsupported")]
     UnsupportedPurpose,
+    #[error("insights-provider-result-incomplete")]
+    IncompleteResult,
 }
 
 /// Only trusted implementations explicitly selected by the host may run here.
@@ -175,6 +191,18 @@ fn dispatch_projected(
         .map_err(|_| ProviderError::InvalidResult)?;
     if result.evidence != envelope.evidence {
         return Err(ProviderError::InvalidResult);
+    }
+    if result.metrics.len() != REQUIRED_METRICS.len()
+        || REQUIRED_METRICS.iter().any(|id| {
+            result
+                .metrics
+                .iter()
+                .filter(|metric| metric.id == *id)
+                .count()
+                != 1
+        })
+    {
+        return Err(ProviderError::IncompleteResult);
     }
     Ok(result)
 }
@@ -287,6 +315,7 @@ mod tests {
         fail: bool,
         forge_evidence: bool,
         decline_purpose: bool,
+        drop_metric: bool,
     }
     impl LocalInsightProvider for TestProvider {
         fn manifest(&self) -> ProviderManifest {
@@ -309,6 +338,11 @@ mod tests {
             if self.forge_evidence {
                 result.evidence[0].source_digest = "b".repeat(64);
             }
+            if self.drop_metric {
+                result
+                    .metrics
+                    .retain(|metric| metric.id != MetricId::ToolFailures);
+            }
             Ok(result)
         }
     }
@@ -321,6 +355,7 @@ mod tests {
             fail: false,
             forge_evidence: false,
             decline_purpose: false,
+            drop_metric: false,
         }
     }
 
@@ -341,6 +376,35 @@ mod tests {
         assert_eq!(provider.calls.get(), 0, "refused before the provider runs");
         provider.decline_purpose = false;
         assert!(dispatch_projected(&provider, &request, &events()).is_ok());
+    }
+
+    #[test]
+    fn a_partial_metric_set_is_refused_at_the_seam_not_at_the_store() {
+        let mut provider = test_provider();
+        let mut request = request();
+        request.provider = provider.manifest();
+        let first_party_request = ProviderRequest::first_party(request.evidence.clone());
+        provider.drop_metric = true;
+        assert_eq!(
+            dispatch_projected(&provider, &request, &events()),
+            Err(ProviderError::IncompleteResult)
+        );
+        assert_eq!(
+            ProviderError::IncompleteResult.to_string(),
+            "insights-provider-result-incomplete"
+        );
+        assert_eq!(
+            provider.calls.get(),
+            1,
+            "the result, not the request, failed"
+        );
+        assert_eq!(
+            dispatch_projected(&FirstPartyProvider, &first_party_request, &events())
+                .unwrap()
+                .metrics
+                .len(),
+            REQUIRED_METRICS.len()
+        );
     }
 
     #[test]
