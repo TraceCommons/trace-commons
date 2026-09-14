@@ -1,4 +1,4 @@
-//! Local/test HTTP runner and corpus client for versioned pipeline Phase 1.
+//! Local/test HTTP runner and corpus client for versioned pipeline Phase 2.
 
 use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr};
@@ -38,7 +38,7 @@ use uuid::Uuid;
 
 #[derive(Debug, Parser)]
 #[command(name = "trace-commons-pipeline-local")]
-#[command(about = "Local/test-only Phase 1 pipeline")]
+#[command(about = "Local/test-only Phase 2 pipeline")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -98,9 +98,9 @@ struct CorpusArgs {
     inspect_token: String,
     #[arg(long, default_value = "docs/redesign/fixtures/minimal-corpus-v1.json")]
     fixtures: PathBuf,
-    #[arg(long, default_value = ".local/pipeline-report-v1.json")]
+    #[arg(long, default_value = ".local/pipeline-report-v2.json")]
     json_report: PathBuf,
-    #[arg(long, default_value = ".local/pipeline-report-v1.md")]
+    #[arg(long, default_value = ".local/pipeline-report-v2.md")]
     markdown_report: PathBuf,
     #[arg(long, default_value_t = 30)]
     timeout_seconds: u64,
@@ -197,6 +197,10 @@ struct FixtureReport {
     replay_same_run: bool,
     changed_content_refused: bool,
     failure_label: Option<String>,
+    attempt_count: u32,
+    max_attempts: u32,
+    next_attempt_at: DateTime<Utc>,
+    time_in_phase_ms: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -233,7 +237,7 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
     );
     anyhow::ensure!(
         !matches!(args.fail_phase, Some(PhaseArg::Admission)),
-        "Phase 1 failure injection supports asynchronous phases only"
+        "pipeline failure injection supports asynchronous phases only"
     );
     let master_key = std::env::var("TRACE_COMMONS_PIPELINE_MASTER_KEY")
         .map_err(|_| anyhow::anyhow!("TRACE_COMMONS_PIPELINE_MASTER_KEY is required"))?;
@@ -548,7 +552,7 @@ async fn run_corpus(args: CorpusArgs) -> anyhow::Result<()> {
         })
         .count();
     let report = CorpusReport {
-        schema: "trace_commons.pipeline_corpus_report.v1",
+        schema: "trace_commons.pipeline_corpus_report.v2",
         corpus_digest,
         code_revision: trace_commons_build_info::COMMIT,
         bundle_id: bundle_id.unwrap_or_default(),
@@ -732,6 +736,12 @@ fn fixture_report(
         replay_same_run,
         changed_content_refused,
         failure_label: inspection.run.last_error_label,
+        attempt_count: inspection.run.attempt_count,
+        max_attempts: inspection.run.max_attempts,
+        next_attempt_at: inspection.run.next_attempt_at,
+        time_in_phase_ms: (Utc::now() - inspection.run.phase_started_at)
+            .num_milliseconds()
+            .max(0),
     })
 }
 
@@ -766,10 +776,12 @@ fn markdown_report(report: &CorpusReport) -> String {
     );
     for fixture in &report.fixtures {
         output.push_str(&format!(
-            "- `{}`: state `{:?}`, {} outcomes, score {} microcredits, index `{}`\n",
+            "- `{}`: state `{:?}`, {} outcomes, {} attempts, {} ms in phase, score {} microcredits, index `{}`\n",
             fixture.label,
             fixture.state,
             fixture.phase_count,
+            fixture.attempt_count,
+            fixture.time_in_phase_ms,
             fixture.score_microcredits.unwrap_or(0),
             fixture.index_membership
         ));

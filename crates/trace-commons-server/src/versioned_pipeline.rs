@@ -1,14 +1,15 @@
-//! Isolated Phase 1 implementation of the versioned four-phase pipeline.
+//! Isolated Phase 2 implementation of the versioned four-phase pipeline.
 //!
-//! This module is local/test-only until later phases add fenced leases,
-//! production policies, and operation recovery.
+//! This module is local/test-only until later phases add production policies
+//! and index and credit operation recovery.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
 use base64::Engine as _;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use deadpool_postgres::Transaction;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -16,10 +17,10 @@ use tokio_postgres::Row;
 use trace_commons_gate_api::pipeline::{
     AdmissionDecision, AdmissionEvaluation, AdmissionEvidence, AdmissionInput, AdmissionPolicy,
     BUNDLE_MANIFEST_FORMAT_VERSION, BundleManifest, BundlePackage, IndexMembershipDecision,
-    Microcredits, Phase, PhaseResult, PolicyError, PolicyRef, ReviewDecision, ReviewEvaluation,
-    ReviewEvidence, ReviewInput, ReviewPolicy, SchemaRef, ScoreDecision, ScoreEvaluation,
-    ScoreEvidence, ScoreInput, ScorePolicy, SettleDecision, SettleEvaluation, SettleEvidence,
-    SettleInput, SettlePolicy,
+    Microcredits, PIPELINE_OUTCOME_SCHEMA_ID, PIPELINE_OUTCOME_SCHEMA_VERSION, Phase, PhaseResult,
+    PolicyError, PolicyRef, ReviewDecision, ReviewEvaluation, ReviewEvidence, ReviewInput,
+    ReviewPolicy, SchemaRef, ScoreDecision, ScoreEvaluation, ScoreEvidence, ScoreInput,
+    ScorePolicy, SettleDecision, SettleEvaluation, SettleEvidence, SettleInput, SettlePolicy,
 };
 use uuid::Uuid;
 
@@ -36,6 +37,22 @@ use trace_commons_protocol::trace_contribution::TraceContributionEnvelope;
 
 pub const MINIMAL_PIPELINE_BUNDLE_LABEL: &str = "minimal-local-v1";
 pub const PIPELINE_OPERATIONAL_ERROR_LABEL: &str = "minimal_policy_failed";
+pub const PIPELINE_ATTEMPTS_EXHAUSTED_LABEL: &str = "attempts_exhausted";
+pub const PIPELINE_BUNDLE_MISSING_LABEL: &str = "bundle_package_missing";
+pub const PIPELINE_BUNDLE_INVALID_LABEL: &str = "bundle_package_invalid";
+pub const PIPELINE_POLICY_NOT_RUNNABLE_LABEL: &str = "bundle_policy_not_runnable";
+const DEFAULT_LEASE_SECONDS: i64 = 30;
+const DEFAULT_RETRY_MILLISECONDS: i64 = 50;
+const INJECTED_PIPELINE_CRASH: &str = "injected_pipeline_crash";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PipelineCrashPoint {
+    AfterArtifactStorage,
+    AfterAdmissionWork,
+    AfterReviewWork,
+    AfterReviewCommit,
+    AfterScoreWork,
+}
 
 fn sha256_prefixed(bytes: &[u8]) -> String {
     format!("sha256:{:x}", Sha256::digest(bytes))
@@ -46,6 +63,7 @@ fn sha256_prefixed(bytes: &[u8]) -> String {
 pub enum PipelineRunState {
     Pending,
     Leased,
+    Retry,
     Complete,
     Failed,
 }
@@ -55,6 +73,7 @@ impl PipelineRunState {
         match self {
             Self::Pending => "pending",
             Self::Leased => "leased",
+            Self::Retry => "retry",
             Self::Complete => "complete",
             Self::Failed => "failed",
         }
@@ -64,6 +83,7 @@ impl PipelineRunState {
         match value {
             "pending" => Ok(Self::Pending),
             "leased" => Ok(Self::Leased),
+            "retry" => Ok(Self::Retry),
             "complete" => Ok(Self::Complete),
             "failed" => Ok(Self::Failed),
             _ => Err(DatabaseError::Serialization(
@@ -110,6 +130,12 @@ pub struct PipelineRunRecord {
     pub approved_revision_id: Option<Uuid>,
     pub next_phase: Option<Phase>,
     pub state: PipelineRunState,
+    pub lease_token: Option<Uuid>,
+    pub lease_expires_at: Option<DateTime<Utc>>,
+    pub attempt_count: u32,
+    pub max_attempts: u32,
+    pub next_attempt_at: DateTime<Utc>,
+    pub phase_started_at: DateTime<Utc>,
     pub last_error_label: Option<String>,
     pub index_membership: String,
     pub created_at: DateTime<Utc>,
@@ -142,6 +168,27 @@ pub struct NewPipelineRun {
     pub request_idempotency_key: String,
     pub request_content_hash: String,
     pub source_object_ref_id: Uuid,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PipelineReceiptArtifactRecord {
+    #[serde(skip_serializing, default)]
+    pub tenant_id: String,
+    pub run_id: Uuid,
+    pub request_idempotency_key: String,
+    pub request_content_hash: String,
+    pub object_key: Option<String>,
+    pub ciphertext_sha256: Option<String>,
+    pub cleanup_after: DateTime<Utc>,
+    pub staged_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PipelineLeaseClaim {
+    pub tenant_id: String,
+    pub run_id: Uuid,
+    pub lease_token: Uuid,
+    pub lease_expires_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -204,69 +251,225 @@ impl PgPipelineStore {
         Ok(tx)
     }
 
-    pub async fn commit_admission(
+    pub async fn register_bundle(
         &self,
-        run: NewPipelineRun,
-        outcome: StoredPhaseResult,
-        next_phase: Option<Phase>,
-    ) -> Result<PipelineReceiptResult, DatabaseError> {
-        debug_assert_eq!(outcome.phase, Phase::Admission);
+        tenant_id: &str,
+        package: &BundlePackage,
+    ) -> Result<(), DatabaseError> {
+        package
+            .validate()
+            .map_err(|_| DatabaseError::Serialization(PIPELINE_BUNDLE_INVALID_LABEL.to_string()))?;
+        let package_json = serde_json::to_value(package)
+            .map_err(|_| DatabaseError::Serialization(PIPELINE_BUNDLE_INVALID_LABEL.to_string()))?;
+        let format_version = i32::try_from(package.manifest.format_version)
+            .map_err(|_| DatabaseError::Serialization(PIPELINE_BUNDLE_INVALID_LABEL.to_string()))?;
         let mut client = self.backend.trace_pool().get().await?;
-        let tx = Self::tenant_transaction(&mut client, &run.tenant_id).await?;
-        if let Some(row) = tx
-            .query_opt(
-                "SELECT * FROM pipeline_runs
-                 WHERE tenant_id = $1 AND request_idempotency_key = $2
-                 FOR UPDATE",
-                &[&run.tenant_id, &run.request_idempotency_key],
-            )
-            .await?
-        {
-            let existing = pipeline_run_from_row(&row)?;
-            tx.commit().await?;
-            return if existing.request_content_hash == run.request_content_hash {
-                Ok(PipelineReceiptResult::Replayed(existing))
-            } else {
-                Ok(PipelineReceiptResult::ContentConflict)
-            };
-        }
+        let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
         tx.execute(
-            "INSERT INTO pipeline_runs (
-                tenant_id, run_id, submission_id, trace_id, bundle_id,
-                request_idempotency_key, request_content_hash, source_object_ref_id,
-                next_phase, state
-             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'pending')",
+            "INSERT INTO trace_tenants (tenant_id) VALUES ($1)
+             ON CONFLICT (tenant_id) DO NOTHING",
+            &[&tenant_id],
+        )
+        .await?;
+        tx.execute(
+            "INSERT INTO pipeline_bundle_packages (
+                tenant_id, bundle_id, manifest_format_version, package
+             ) VALUES ($1,$2,$3,$4)
+             ON CONFLICT (tenant_id, bundle_id) DO NOTHING",
             &[
-                &run.tenant_id,
-                &run.run_id,
-                &run.submission_id,
-                &run.trace_id,
-                &run.bundle_id,
-                &run.request_idempotency_key,
-                &run.request_content_hash,
-                &run.source_object_ref_id,
-                &phase_as_db(next_phase),
+                &tenant_id,
+                &package.bundle_id,
+                &format_version,
+                &package_json,
             ],
         )
         .await?;
-        insert_outcome(
-            &tx,
-            &run.tenant_id,
-            run.run_id,
-            run.trace_id,
-            &run.bundle_id,
-            outcome,
-        )
-        .await?;
-        let row = tx
+        let stored: serde_json::Value = tx
             .query_one(
-                "SELECT * FROM pipeline_runs WHERE tenant_id = $1 AND run_id = $2",
-                &[&run.tenant_id, &run.run_id],
+                "SELECT package FROM pipeline_bundle_packages
+                 WHERE tenant_id = $1 AND bundle_id = $2",
+                &[&tenant_id, &package.bundle_id],
+            )
+            .await?
+            .get("package");
+        if stored != package_json {
+            return Err(DatabaseError::Constraint(
+                "bundle identifier already has different package bytes".to_string(),
+            ));
+        }
+        for phase in [Phase::Admission, Phase::Review, Phase::Score, Phase::Settle] {
+            tx.execute(
+                "INSERT INTO pipeline_bundle_policy_status (
+                    tenant_id, bundle_id, phase, runnable
+                 ) VALUES ($1,$2,$3,TRUE)
+                 ON CONFLICT (tenant_id, bundle_id, phase) DO NOTHING",
+                &[&tenant_id, &package.bundle_id, &phase_as_db(Some(phase))],
             )
             .await?;
-        let created = pipeline_run_from_row(&row)?;
+        }
         tx.commit().await?;
-        Ok(PipelineReceiptResult::Created(created))
+        Ok(())
+    }
+
+    pub async fn activate_bundle(
+        &self,
+        tenant_id: &str,
+        bundle_id: &str,
+    ) -> Result<(), DatabaseError> {
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
+        let row_count = tx
+            .execute(
+                "INSERT INTO pipeline_active_bundles (tenant_id, bundle_id)
+                 SELECT $1, bundle_id
+                 FROM pipeline_bundle_packages
+                 WHERE tenant_id = $1 AND bundle_id = $2
+                 ON CONFLICT (tenant_id) DO UPDATE
+                 SET bundle_id = EXCLUDED.bundle_id, selected_at = NOW()",
+                &[&tenant_id, &bundle_id],
+            )
+            .await?;
+        if row_count != 1 {
+            return Err(DatabaseError::NotFound {
+                entity: "pipeline_bundle".to_string(),
+                id: bundle_id.to_string(),
+            });
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn activate_bundle_if_none(
+        &self,
+        tenant_id: &str,
+        bundle_id: &str,
+    ) -> Result<(), DatabaseError> {
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
+        tx.execute(
+            "INSERT INTO pipeline_active_bundles (tenant_id, bundle_id)
+             SELECT $1, bundle_id
+             FROM pipeline_bundle_packages
+             WHERE tenant_id = $1 AND bundle_id = $2
+             ON CONFLICT (tenant_id) DO NOTHING",
+            &[&tenant_id, &bundle_id],
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn active_bundle_id(&self, tenant_id: &str) -> Result<Option<String>, DatabaseError> {
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
+        let row = tx
+            .query_opt(
+                "SELECT bundle_id FROM pipeline_active_bundles WHERE tenant_id = $1",
+                &[&tenant_id],
+            )
+            .await?;
+        tx.commit().await?;
+        Ok(row.map(|row| row.get("bundle_id")))
+    }
+
+    pub async fn load_bundle(
+        &self,
+        tenant_id: &str,
+        bundle_id: &str,
+    ) -> Result<Option<BundlePackage>, DatabaseError> {
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
+        let package = load_bundle_from_transaction(&tx, tenant_id, bundle_id).await?;
+        tx.commit().await?;
+        Ok(package)
+    }
+
+    pub async fn policy_is_runnable(
+        &self,
+        tenant_id: &str,
+        bundle_id: &str,
+        phase: Phase,
+    ) -> Result<bool, DatabaseError> {
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
+        let runnable = tx
+            .query_opt(
+                "SELECT runnable FROM pipeline_bundle_policy_status
+                 WHERE tenant_id = $1 AND bundle_id = $2 AND phase = $3",
+                &[&tenant_id, &bundle_id, &phase_as_db(Some(phase))],
+            )
+            .await?
+            .map(|row| row.get("runnable"))
+            .unwrap_or(false);
+        tx.commit().await?;
+        Ok(runnable)
+    }
+
+    pub async fn stage_receipt_artifact(
+        &self,
+        run: &NewPipelineRun,
+        receipt: Option<&EncryptedTraceArtifactReceipt>,
+    ) -> Result<(), DatabaseError> {
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, &run.tenant_id).await?;
+        let object_key = receipt.map(|value| value.object_key.as_str());
+        let ciphertext_sha256 = receipt.map(|value| value.ciphertext_sha256.as_str());
+        tx.execute(
+            "INSERT INTO pipeline_receipt_artifacts (
+                tenant_id, run_id, request_idempotency_key, request_content_hash,
+                object_key, ciphertext_sha256
+             ) VALUES ($1,$2,$3,$4,$5,$6)
+             ON CONFLICT (tenant_id, run_id) DO UPDATE
+             SET object_key = COALESCE(EXCLUDED.object_key, pipeline_receipt_artifacts.object_key),
+                 ciphertext_sha256 = COALESCE(
+                    EXCLUDED.ciphertext_sha256,
+                    pipeline_receipt_artifacts.ciphertext_sha256
+                 )",
+            &[
+                &run.tenant_id,
+                &run.run_id,
+                &run.request_idempotency_key,
+                &run.request_content_hash,
+                &object_key,
+                &ciphertext_sha256,
+            ],
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn list_cleanup_orphans(
+        &self,
+        tenant_id: &str,
+        before: DateTime<Utc>,
+    ) -> Result<Vec<PipelineReceiptArtifactRecord>, DatabaseError> {
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
+        let rows = tx
+            .query(
+                "SELECT tenant_id, run_id, request_idempotency_key, request_content_hash,
+                        object_key, ciphertext_sha256, cleanup_after, staged_at
+                 FROM pipeline_receipt_artifacts
+                 WHERE tenant_id = $1 AND state = 'staged' AND cleanup_after <= $2
+                 ORDER BY staged_at ASC",
+                &[&tenant_id, &before],
+            )
+            .await?;
+        tx.commit().await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| PipelineReceiptArtifactRecord {
+                tenant_id: row.get("tenant_id"),
+                run_id: row.get("run_id"),
+                request_idempotency_key: row.get("request_idempotency_key"),
+                request_content_hash: row.get("request_content_hash"),
+                object_key: row.get("object_key"),
+                ciphertext_sha256: row.get("ciphertext_sha256"),
+                cleanup_after: row.get("cleanup_after"),
+                staged_at: row.get("staged_at"),
+            })
+            .collect())
     }
 
     pub async fn get_run(
@@ -332,56 +535,115 @@ impl PgPipelineStore {
         &self,
         tenant_id: &str,
     ) -> Result<Option<PipelineRunRecord>, DatabaseError> {
+        self.claim_next_with_lease(tenant_id, Duration::seconds(DEFAULT_LEASE_SECONDS))
+            .await
+    }
+
+    pub async fn claim_next_with_lease(
+        &self,
+        tenant_id: &str,
+        lease_duration: Duration,
+    ) -> Result<Option<PipelineRunRecord>, DatabaseError> {
+        if lease_duration <= Duration::zero() || lease_duration > Duration::minutes(5) {
+            return Err(DatabaseError::Constraint(
+                "pipeline lease duration is invalid".to_string(),
+            ));
+        }
         let mut client = self.backend.trace_pool().get().await?;
         let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
-        let acquired: bool = tx
-            .query_one(
-                "SELECT pg_try_advisory_xact_lock(hashtext('pipeline-phase1:' || $1))",
-                &[&tenant_id],
-            )
-            .await?
-            .get(0);
-        if !acquired {
-            tx.commit().await?;
-            return Ok(None);
-        }
+        tx.execute(
+            "UPDATE pipeline_runs
+             SET state = 'failed', lease_token = NULL, lease_expires_at = NULL,
+                 last_error_label = $2, updated_at = NOW()
+             WHERE tenant_id = $1
+               AND state = 'leased'
+               AND lease_expires_at <= NOW()
+               AND attempt_count >= max_attempts",
+            &[&tenant_id, &PIPELINE_ATTEMPTS_EXHAUSTED_LABEL],
+        )
+        .await?;
+        let lease_token = Uuid::new_v4();
+        let lease_milliseconds = lease_duration.num_milliseconds();
         let row = tx
             .query_opt(
                 "WITH candidate AS (
                     SELECT run_id FROM pipeline_runs
                     WHERE tenant_id = $1
-                      AND state = 'pending'
                       AND next_phase <> 'none'
-                      AND NOT EXISTS (
-                          SELECT 1 FROM pipeline_runs
-                          WHERE tenant_id = $1 AND state = 'leased'
+                      AND attempt_count < max_attempts
+                      AND (
+                          (state IN ('pending', 'retry') AND next_attempt_at <= NOW())
+                          OR (state = 'leased' AND lease_expires_at <= NOW())
                       )
-                    ORDER BY created_at ASC, run_id ASC
+                    ORDER BY next_attempt_at ASC, created_at ASC, run_id ASC
                     FOR UPDATE SKIP LOCKED
                     LIMIT 1
                  )
                  UPDATE pipeline_runs p
-                 SET state = 'leased', updated_at = NOW()
+                 SET state = 'leased',
+                     lease_token = $2,
+                     lease_expires_at = NOW() + ($3::bigint * INTERVAL '1 millisecond'),
+                     attempt_count = p.attempt_count + 1,
+                     last_error_label = NULL,
+                     updated_at = NOW()
                  FROM candidate
                  WHERE p.tenant_id = $1 AND p.run_id = candidate.run_id
                  RETURNING p.*",
-                &[&tenant_id],
+                &[&tenant_id, &lease_token, &lease_milliseconds],
             )
             .await?;
         tx.commit().await?;
         row.as_ref().map(pipeline_run_from_row).transpose()
     }
 
+    pub async fn claim_next_cross_tenant(
+        &self,
+        lease_duration: Duration,
+    ) -> Result<Option<PipelineLeaseClaim>, DatabaseError> {
+        if lease_duration <= Duration::zero() || lease_duration > Duration::minutes(5) {
+            return Err(DatabaseError::Constraint(
+                "pipeline lease duration is invalid".to_string(),
+            ));
+        }
+        let lease_seconds = i32::try_from(lease_duration.num_seconds())
+            .map_err(|_| DatabaseError::Constraint("pipeline lease duration is invalid".into()))?;
+        let lease_token = Uuid::new_v4();
+        let client = self.backend.trace_pool().get().await?;
+        let row = client
+            .query_opt(
+                "SELECT tenant_id, run_id, lease_token, lease_expires_at
+                 FROM claim_pipeline_run($1, $2)",
+                &[&lease_token, &lease_seconds],
+            )
+            .await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        Ok(Some(PipelineLeaseClaim {
+            tenant_id: row.get("tenant_id"),
+            run_id: row.get("run_id"),
+            lease_token: row.get("lease_token"),
+            lease_expires_at: row.get("lease_expires_at"),
+        }))
+    }
+
     pub async fn release_claim(&self, run: &PipelineRunRecord) -> Result<(), DatabaseError> {
+        let lease_token = required_lease_token(run)?;
         let mut client = self.backend.trace_pool().get().await?;
         let tx = Self::tenant_transaction(&mut client, &run.tenant_id).await?;
-        tx.execute(
-            "UPDATE pipeline_runs
-             SET state = 'pending', updated_at = NOW()
-             WHERE tenant_id = $1 AND run_id = $2 AND state = 'leased'",
-            &[&run.tenant_id, &run.run_id],
-        )
-        .await?;
+        let updated = tx
+            .execute(
+                "UPDATE pipeline_runs
+             SET state = 'pending', lease_token = NULL, lease_expires_at = NULL,
+                 attempt_count = GREATEST(attempt_count - 1, 0), updated_at = NOW()
+             WHERE tenant_id = $1 AND run_id = $2 AND state = 'leased'
+               AND lease_token = $3 AND lease_expires_at > NOW()",
+                &[&run.tenant_id, &run.run_id, &lease_token],
+            )
+            .await?;
+        if updated != 1 {
+            return Err(stale_lease_error());
+        }
         tx.commit().await?;
         Ok(())
     }
@@ -398,6 +660,7 @@ impl PgPipelineStore {
                 "phase does not match run transition".to_string(),
             ));
         }
+        let lease_token = required_lease_token(run)?;
         let mut client = self.backend.trace_pool().get().await?;
         let tx = Self::tenant_transaction(&mut client, &run.tenant_id).await?;
         let current = tx
@@ -413,10 +676,14 @@ impl PgPipelineStore {
                 id: run.run_id.to_string(),
             })?;
         let current = pipeline_run_from_row(&current)?;
-        if current.state != PipelineRunState::Leased || current.next_phase != Some(outcome.phase) {
-            return Err(DatabaseError::Constraint(
-                "pipeline run is not leased for this phase".to_string(),
-            ));
+        if current.state != PipelineRunState::Leased
+            || current.next_phase != Some(outcome.phase)
+            || current.lease_token != Some(lease_token)
+            || current
+                .lease_expires_at
+                .is_none_or(|expires_at| expires_at <= Utc::now())
+        {
+            return Err(stale_lease_error());
         }
         if outcome.phase == Phase::Review {
             let revision_id = approved_revision_id.ok_or_else(|| {
@@ -469,8 +736,10 @@ impl PgPipelineStore {
                 "UPDATE pipeline_runs
                  SET next_phase = $3, state = $4,
                      approved_revision_id = COALESCE($5, approved_revision_id),
-                     index_membership = $6, updated_at = NOW()
+                     index_membership = $6, lease_token = NULL, lease_expires_at = NULL,
+                     next_attempt_at = NOW(), phase_started_at = NOW(), updated_at = NOW()
                  WHERE tenant_id = $1 AND run_id = $2
+                   AND lease_token = $7 AND lease_expires_at > NOW()
                  RETURNING *",
                 &[
                     &run.tenant_id,
@@ -479,6 +748,7 @@ impl PgPipelineStore {
                     &state.as_db(),
                     &approved_revision_id,
                     &index_membership,
+                    &lease_token,
                 ],
             )
             .await?;
@@ -492,17 +762,72 @@ impl PgPipelineStore {
         run: &PipelineRunRecord,
         error_label: &str,
     ) -> Result<(), DatabaseError> {
+        let lease_token = required_lease_token(run)?;
         let mut client = self.backend.trace_pool().get().await?;
         let tx = Self::tenant_transaction(&mut client, &run.tenant_id).await?;
-        tx.execute(
-            "UPDATE pipeline_runs
-             SET state = 'failed', last_error_label = $3, updated_at = NOW()
-             WHERE tenant_id = $1 AND run_id = $2 AND state = 'leased'",
-            &[&run.tenant_id, &run.run_id, &error_label],
-        )
-        .await?;
+        let updated = tx
+            .execute(
+                "UPDATE pipeline_runs
+             SET state = 'failed', lease_token = NULL, lease_expires_at = NULL,
+                 last_error_label = $3, updated_at = NOW()
+             WHERE tenant_id = $1 AND run_id = $2 AND state = 'leased'
+               AND lease_token = $4 AND lease_expires_at > NOW()",
+                &[&run.tenant_id, &run.run_id, &error_label, &lease_token],
+            )
+            .await?;
+        if updated != 1 {
+            return Err(stale_lease_error());
+        }
         tx.commit().await?;
         Ok(())
+    }
+
+    pub async fn mark_retry(
+        &self,
+        run: &PipelineRunRecord,
+        error_label: &str,
+    ) -> Result<PipelineRunRecord, DatabaseError> {
+        let lease_token = required_lease_token(run)?;
+        let exponent = run.attempt_count.saturating_sub(1).min(9);
+        let multiplier = 1_i64 << exponent;
+        let delay_milliseconds = DEFAULT_RETRY_MILLISECONDS.saturating_mul(multiplier);
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, &run.tenant_id).await?;
+        let row = tx
+            .query_opt(
+                "UPDATE pipeline_runs
+                 SET state = CASE
+                         WHEN attempt_count >= max_attempts THEN 'failed'
+                         ELSE 'retry'
+                     END,
+                     lease_token = NULL,
+                     lease_expires_at = NULL,
+                     next_attempt_at = CASE
+                         WHEN attempt_count >= max_attempts THEN next_attempt_at
+                         ELSE NOW() + ($5::bigint * INTERVAL '1 millisecond')
+                     END,
+                     last_error_label = CASE
+                         WHEN attempt_count >= max_attempts THEN $4
+                         ELSE $3
+                     END,
+                     updated_at = NOW()
+                 WHERE tenant_id = $1 AND run_id = $2 AND state = 'leased'
+                   AND lease_token = $6 AND lease_expires_at > NOW()
+                 RETURNING *",
+                &[
+                    &run.tenant_id,
+                    &run.run_id,
+                    &error_label,
+                    &PIPELINE_ATTEMPTS_EXHAUSTED_LABEL,
+                    &delay_milliseconds,
+                    &lease_token,
+                ],
+            )
+            .await?
+            .ok_or_else(stale_lease_error)?;
+        let updated = pipeline_run_from_row(&row)?;
+        tx.commit().await?;
+        Ok(updated)
     }
 }
 
@@ -538,7 +863,179 @@ async fn insert_outcome(
     Ok(())
 }
 
+async fn insert_receipt_records(
+    tx: &Transaction<'_>,
+    run: &NewPipelineRun,
+    submission: &TraceSubmissionWrite,
+    object_ref: &TraceObjectRefWrite,
+    outcome: StoredPhaseResult,
+) -> Result<(), DatabaseError> {
+    let consent_scopes = serde_json::to_value(&submission.consent_scopes).map_err(|_| {
+        DatabaseError::Serialization("trace consent scopes encode failed".to_string())
+    })?;
+    let allowed_uses = serde_json::to_value(&submission.allowed_uses).map_err(|_| {
+        DatabaseError::Serialization("trace allowed uses encode failed".to_string())
+    })?;
+    let redaction_counts = serde_json::to_value(&submission.redaction_counts).map_err(|_| {
+        DatabaseError::Serialization("trace redaction counts encode failed".to_string())
+    })?;
+    let inserted = tx
+        .execute(
+            "INSERT INTO trace_submissions (
+                tenant_id, submission_id, trace_id, auth_principal_ref, contributor_pseudonym,
+                submitted_tenant_scope_ref, schema_version, consent_policy_version,
+                consent_scopes, allowed_uses, retention_policy_id, status, privacy_risk,
+                redaction_pipeline_version, redaction_hash, redaction_counts,
+                canonical_summary_hash, submission_score, credit_points_pending,
+                credit_points_final, expires_at
+             ) VALUES (
+                $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'received',$12,$13,$14,$15,
+                $16,$17,$18,$19,$20
+             )
+             ON CONFLICT (tenant_id, submission_id) DO NOTHING",
+            &[
+                &submission.tenant_id,
+                &submission.submission_id,
+                &submission.trace_id,
+                &submission.auth_principal_ref,
+                &submission.contributor_pseudonym,
+                &submission.submitted_tenant_scope_ref,
+                &submission.schema_version,
+                &submission.consent_policy_version,
+                &consent_scopes,
+                &allowed_uses,
+                &submission.retention_policy_id,
+                &submission.privacy_risk,
+                &submission.redaction_pipeline_version,
+                &submission.redaction_hash,
+                &redaction_counts,
+                &submission.canonical_summary_hash,
+                &submission.submission_score,
+                &submission.credit_points_pending,
+                &submission.credit_points_final,
+                &submission.expires_at,
+            ],
+        )
+        .await?;
+    if inserted != 1 {
+        return Err(DatabaseError::Constraint(
+            "submission identity is already bound to another receipt".to_string(),
+        ));
+    }
+    tx.execute(
+        "INSERT INTO trace_object_refs (
+            tenant_id, submission_id, object_ref_id, artifact_kind, object_store,
+            object_key, content_sha256, encryption_key_ref, size_bytes, compression,
+            created_by_job_id
+         ) VALUES ($1,$2,$3,'submitted_envelope',$4,$5,$6,$7,$8,$9,$10)",
+        &[
+            &object_ref.tenant_id,
+            &object_ref.submission_id,
+            &object_ref.object_ref_id,
+            &object_ref.object_store,
+            &object_ref.object_key,
+            &object_ref.content_sha256,
+            &object_ref.encryption_key_ref,
+            &object_ref.size_bytes,
+            &object_ref.compression,
+            &object_ref.created_by_job_id,
+        ],
+    )
+    .await?;
+    tx.execute(
+        "INSERT INTO pipeline_runs (
+            tenant_id, run_id, submission_id, trace_id, bundle_id,
+            request_idempotency_key, request_content_hash, source_object_ref_id,
+            next_phase, state
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'review','pending')",
+        &[
+            &run.tenant_id,
+            &run.run_id,
+            &run.submission_id,
+            &run.trace_id,
+            &run.bundle_id,
+            &run.request_idempotency_key,
+            &run.request_content_hash,
+            &run.source_object_ref_id,
+        ],
+    )
+    .await?;
+    insert_outcome(
+        tx,
+        &run.tenant_id,
+        run.run_id,
+        run.trace_id,
+        &run.bundle_id,
+        outcome,
+    )
+    .await?;
+    let committed = tx
+        .execute(
+            "UPDATE pipeline_receipt_artifacts
+             SET state = 'committed', committed_at = NOW()
+             WHERE tenant_id = $1 AND run_id = $2
+               AND request_idempotency_key = $3
+               AND request_content_hash = $4
+               AND object_key = $5
+               AND ciphertext_sha256 = $6
+               AND state = 'staged'",
+            &[
+                &run.tenant_id,
+                &run.run_id,
+                &run.request_idempotency_key,
+                &run.request_content_hash,
+                &object_ref.object_key,
+                &object_ref.content_sha256.strip_prefix("sha256:"),
+            ],
+        )
+        .await?;
+    if committed != 1 {
+        return Err(DatabaseError::Constraint(
+            "receipt artifact staging record is missing".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+async fn load_bundle_from_transaction(
+    tx: &Transaction<'_>,
+    tenant_id: &str,
+    bundle_id: &str,
+) -> Result<Option<BundlePackage>, DatabaseError> {
+    let row = tx
+        .query_opt(
+            "SELECT package FROM pipeline_bundle_packages
+             WHERE tenant_id = $1 AND bundle_id = $2",
+            &[&tenant_id, &bundle_id],
+        )
+        .await?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let package = serde_json::from_value::<BundlePackage>(row.get("package"))
+        .map_err(|_| DatabaseError::Serialization(PIPELINE_BUNDLE_INVALID_LABEL.to_string()))?;
+    package
+        .validate()
+        .map_err(|_| DatabaseError::Serialization(PIPELINE_BUNDLE_INVALID_LABEL.to_string()))?;
+    if package.bundle_id != bundle_id {
+        return Err(DatabaseError::Serialization(
+            PIPELINE_BUNDLE_INVALID_LABEL.to_string(),
+        ));
+    }
+    Ok(Some(package))
+}
+
+fn required_lease_token(run: &PipelineRunRecord) -> Result<Uuid, DatabaseError> {
+    run.lease_token.ok_or_else(stale_lease_error)
+}
+
+fn stale_lease_error() -> DatabaseError {
+    DatabaseError::Constraint("pipeline lease is stale".to_string())
+}
+
 fn pipeline_run_from_row(row: &Row) -> Result<PipelineRunRecord, DatabaseError> {
+    let attempt_count: i32 = row.get("attempt_count");
+    let max_attempts: i32 = row.get("max_attempts");
     Ok(PipelineRunRecord {
         tenant_id: row.get("tenant_id"),
         run_id: row.get("run_id"),
@@ -551,6 +1048,16 @@ fn pipeline_run_from_row(row: &Row) -> Result<PipelineRunRecord, DatabaseError> 
         approved_revision_id: row.get("approved_revision_id"),
         next_phase: phase_from_db(row.get("next_phase"))?,
         state: PipelineRunState::from_db(row.get("state"))?,
+        lease_token: row.get("lease_token"),
+        lease_expires_at: row.get("lease_expires_at"),
+        attempt_count: u32::try_from(attempt_count).map_err(|_| {
+            DatabaseError::Serialization("invalid pipeline attempt count".to_string())
+        })?,
+        max_attempts: u32::try_from(max_attempts).map_err(|_| {
+            DatabaseError::Serialization("invalid pipeline maximum attempts".to_string())
+        })?,
+        next_attempt_at: row.get("next_attempt_at"),
+        phase_started_at: row.get("phase_started_at"),
         last_error_label: row.get("last_error_label"),
         index_membership: row.get("index_membership"),
         created_at: row.get("created_at"),
@@ -560,26 +1067,75 @@ fn pipeline_run_from_row(row: &Row) -> Result<PipelineRunRecord, DatabaseError> 
 
 fn phase_outcome_from_row(row: &Row) -> Result<PhaseOutcomeRecord, DatabaseError> {
     let version: i32 = row.get("outcome_schema_version");
+    let schema_id: String = row.get("outcome_schema_id");
+    let version = u32::try_from(version)
+        .map_err(|_| DatabaseError::Serialization("invalid outcome schema version".to_string()))?;
+    if schema_id != PIPELINE_OUTCOME_SCHEMA_ID || version != PIPELINE_OUTCOME_SCHEMA_VERSION {
+        return Err(DatabaseError::Serialization(
+            "unsupported required pipeline outcome schema".to_string(),
+        ));
+    }
+    let phase = phase_from_db(row.get("phase"))?
+        .ok_or_else(|| DatabaseError::Serialization("outcome phase cannot be none".to_string()))?;
+    let decision = row.get("decision");
+    let evidence = row.get("evidence");
+    let evaluation = row.get("evaluation");
+    validate_outcome_payload(phase, &decision, &evidence, &evaluation)?;
     Ok(PhaseOutcomeRecord {
         tenant_id: row.get("tenant_id"),
         outcome_id: row.get("outcome_id"),
         run_id: row.get("run_id"),
         trace_id: row.get("trace_id"),
-        phase: phase_from_db(row.get("phase"))?.ok_or_else(|| {
-            DatabaseError::Serialization("outcome phase cannot be none".to_string())
-        })?,
+        phase,
         bundle_id: row.get("bundle_id"),
         outcome_schema: SchemaRef {
-            id: row.get("outcome_schema_id"),
-            version: u32::try_from(version).map_err(|_| {
-                DatabaseError::Serialization("invalid outcome schema version".to_string())
-            })?,
+            id: schema_id,
+            version,
         },
-        decision: row.get("decision"),
-        evidence: row.get("evidence"),
-        evaluation: row.get("evaluation"),
+        decision,
+        evidence,
+        evaluation,
         recorded_at: row.get("recorded_at"),
     })
+}
+
+fn validate_outcome_payload(
+    phase: Phase,
+    decision: &serde_json::Value,
+    evidence: &serde_json::Value,
+    evaluation: &serde_json::Value,
+) -> Result<(), DatabaseError> {
+    fn decode<T: serde::de::DeserializeOwned>(
+        value: &serde_json::Value,
+    ) -> Result<T, DatabaseError> {
+        serde_json::from_value(value.clone()).map_err(|_| {
+            DatabaseError::Serialization("malformed pipeline outcome payload".to_string())
+        })
+    }
+
+    match phase {
+        Phase::Admission => {
+            let _: AdmissionDecision = decode(decision)?;
+            let _: AdmissionEvidence = decode(evidence)?;
+            let _: AdmissionEvaluation = decode(evaluation)?;
+        }
+        Phase::Review => {
+            let _: ReviewDecision = decode(decision)?;
+            let _: ReviewEvidence = decode(evidence)?;
+            let _: ReviewEvaluation = decode(evaluation)?;
+        }
+        Phase::Score => {
+            let _: ScoreDecision = decode(decision)?;
+            let _: ScoreEvidence = decode(evidence)?;
+            let _: ScoreEvaluation = decode(evaluation)?;
+        }
+        Phase::Settle => {
+            let _: SettleDecision = decode(decision)?;
+            let _: SettleEvidence = decode(evidence)?;
+            let _: SettleEvaluation = decode(evaluation)?;
+        }
+    }
+    Ok(())
 }
 
 pub struct MinimalAdmissionPolicy;
@@ -709,13 +1265,21 @@ pub struct MinimalPolicyBundle {
 
 impl MinimalPolicyBundle {
     pub fn build() -> anyhow::Result<Self> {
+        Self::build_variant("minimal-local-test-only-v1")
+    }
+
+    pub fn build_variant(configuration_label: &str) -> anyhow::Result<Self> {
         let specifications = [
             ("admission", b"minimal-admission-policy-v1".as_slice()),
             ("review", b"minimal-review-policy-v1".as_slice()),
             ("score", b"minimal-score-policy-v1".as_slice()),
             ("settle", b"minimal-settle-policy-v1".as_slice()),
         ];
-        let configuration = b"minimal-local-test-only-v1".as_slice();
+        anyhow::ensure!(
+            !configuration_label.trim().is_empty(),
+            "minimal bundle configuration label cannot be empty"
+        );
+        let configuration = configuration_label.as_bytes();
         let config_hash = sha256_prefixed(configuration);
         let policy_ref = |(name, bytes): (&str, &[u8])| PolicyRef {
             policy_id: format!("trace_commons.{name}.minimal"),
@@ -743,6 +1307,27 @@ impl MinimalPolicyBundle {
             artifacts,
         };
         package.validate()?;
+        Self::from_package(package)
+    }
+
+    fn from_package(package: BundlePackage) -> anyhow::Result<Self> {
+        package.validate()?;
+        let implementations = [
+            &package.manifest.admission.implementation_id,
+            &package.manifest.review.implementation_id,
+            &package.manifest.score.implementation_id,
+            &package.manifest.settle.implementation_id,
+        ];
+        anyhow::ensure!(
+            implementations
+                == [
+                    "trace_commons.admission.minimal.v1",
+                    "trace_commons.review.minimal.v1",
+                    "trace_commons.score.minimal.v1",
+                    "trace_commons.settle.minimal.v1",
+                ],
+            "bundle policy implementation is unavailable"
+        );
         Ok(Self {
             package,
             admission: Arc::new(MinimalAdmissionPolicy),
@@ -774,8 +1359,10 @@ pub struct PipelineService {
     backend: Arc<PgBackend>,
     store: PgPipelineStore,
     artifact_store: Arc<dyn TraceArtifactStore>,
-    bundle: MinimalPolicyBundle,
+    default_bundle: MinimalPolicyBundle,
     fail_phase: Option<Phase>,
+    crash_point: Option<PipelineCrashPoint>,
+    crash_pending: AtomicBool,
 }
 
 impl PipelineService {
@@ -784,19 +1371,73 @@ impl PipelineService {
         artifact_store: Arc<dyn TraceArtifactStore>,
         fail_phase: Option<Phase>,
     ) -> anyhow::Result<Self> {
+        Self::new_with_crash_point(backend, artifact_store, fail_phase, None)
+    }
+
+    pub fn new_with_crash_point(
+        backend: Arc<PgBackend>,
+        artifact_store: Arc<dyn TraceArtifactStore>,
+        fail_phase: Option<Phase>,
+        crash_point: Option<PipelineCrashPoint>,
+    ) -> anyhow::Result<Self> {
         let bundle = MinimalPolicyBundle::build()?;
         bundle.package.validate()?;
         Ok(Self {
             store: PgPipelineStore::new(backend.clone()),
             backend,
             artifact_store,
-            bundle,
+            default_bundle: bundle,
             fail_phase,
+            crash_point,
+            crash_pending: AtomicBool::new(crash_point.is_some()),
         })
     }
 
     pub fn bundle_id(&self) -> &str {
-        &self.bundle.package.bundle_id
+        &self.default_bundle.package.bundle_id
+    }
+
+    pub async fn register_bundle(
+        &self,
+        tenant_id: &str,
+        package: &BundlePackage,
+    ) -> anyhow::Result<()> {
+        self.store.register_bundle(tenant_id, package).await?;
+        Ok(())
+    }
+
+    pub async fn activate_bundle(&self, tenant_id: &str, bundle_id: &str) -> anyhow::Result<()> {
+        self.store.activate_bundle(tenant_id, bundle_id).await?;
+        Ok(())
+    }
+
+    pub async fn active_bundle_id(&self, tenant_id: &str) -> anyhow::Result<Option<String>> {
+        Ok(self.store.active_bundle_id(tenant_id).await?)
+    }
+
+    pub async fn list_cleanup_orphans(
+        &self,
+        tenant_id: &str,
+        before: DateTime<Utc>,
+    ) -> anyhow::Result<Vec<PipelineReceiptArtifactRecord>> {
+        Ok(self.store.list_cleanup_orphans(tenant_id, before).await?)
+    }
+
+    async fn ensure_default_bundle(&self, tenant_id: &str) -> anyhow::Result<()> {
+        self.store
+            .register_bundle(tenant_id, &self.default_bundle.package)
+            .await?;
+        self.store
+            .activate_bundle_if_none(tenant_id, self.bundle_id())
+            .await?;
+        Ok(())
+    }
+
+    fn inject_crash(&self, point: PipelineCrashPoint) -> anyhow::Result<()> {
+        if self.crash_point == Some(point) && self.crash_pending.swap(false, Ordering::SeqCst) {
+            anyhow::bail!(INJECTED_PIPELINE_CRASH);
+        }
+        Ok(())
     }
 
     pub async fn submit(
@@ -812,20 +1453,9 @@ impl PipelineService {
         );
         let request_content_hash = sha256_prefixed(request_bytes);
         let request_idempotency_key_hash = sha256_prefixed(request_idempotency_key.as_bytes());
-        if let Some(existing) = self
-            .store
-            .get_run_by_request_key(tenant_id, &request_idempotency_key_hash)
-            .await?
-        {
-            return if existing.request_content_hash == request_content_hash {
-                Ok(PipelineReceiptResult::Replayed(existing))
-            } else {
-                Ok(PipelineReceiptResult::ContentConflict)
-            };
-        }
-
         let envelope: TraceContributionEnvelope = serde_json::from_slice(request_bytes)
             .map_err(|_| anyhow::anyhow!("invalid envelope"))?;
+        self.ensure_default_bundle(tenant_id).await?;
         let run_id = Uuid::new_v5(
             &Uuid::NAMESPACE_URL,
             format!("tracecommons:pipeline-run:{tenant_id}:{request_idempotency_key}").as_bytes(),
@@ -834,6 +1464,80 @@ impl PipelineService {
             &Uuid::NAMESPACE_URL,
             format!("tracecommons:pipeline-source-object:{run_id}").as_bytes(),
         );
+
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = PgPipelineStore::tenant_transaction(&mut client, tenant_id).await?;
+        let receipt_lock = format!("pipeline-receipt:{tenant_id}:{request_idempotency_key_hash}");
+        tx.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+            &[&receipt_lock],
+        )
+        .await?;
+        if let Some(row) = tx
+            .query_opt(
+                "SELECT * FROM pipeline_runs
+                 WHERE tenant_id = $1 AND request_idempotency_key = $2",
+                &[&tenant_id, &request_idempotency_key_hash],
+            )
+            .await?
+        {
+            let existing = pipeline_run_from_row(&row)?;
+            tx.commit().await?;
+            return if existing.request_content_hash == request_content_hash {
+                Ok(PipelineReceiptResult::Replayed(existing))
+            } else {
+                Ok(PipelineReceiptResult::ContentConflict)
+            };
+        }
+        if let Some(staged_hash) = tx
+            .query_opt(
+                "SELECT request_content_hash
+                 FROM pipeline_receipt_artifacts
+                 WHERE tenant_id = $1 AND request_idempotency_key = $2",
+                &[&tenant_id, &request_idempotency_key_hash],
+            )
+            .await?
+            .map(|row| row.get::<_, String>("request_content_hash"))
+            && staged_hash != request_content_hash
+        {
+            tx.commit().await?;
+            return Ok(PipelineReceiptResult::ContentConflict);
+        }
+        let bundle_id: String = tx
+            .query_opt(
+                "SELECT bundle_id FROM pipeline_active_bundles WHERE tenant_id = $1",
+                &[&tenant_id],
+            )
+            .await?
+            .ok_or_else(|| anyhow::anyhow!(PIPELINE_BUNDLE_MISSING_LABEL))?
+            .get("bundle_id");
+        let package = load_bundle_from_transaction(&tx, tenant_id, &bundle_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!(PIPELINE_BUNDLE_MISSING_LABEL))?;
+        let runnable = tx
+            .query_opt(
+                "SELECT runnable FROM pipeline_bundle_policy_status
+                 WHERE tenant_id = $1 AND bundle_id = $2 AND phase = 'admission'",
+                &[&tenant_id, &bundle_id],
+            )
+            .await?
+            .map(|row| row.get::<_, bool>("runnable"))
+            .unwrap_or(false);
+        anyhow::ensure!(runnable, "bound policy is not runnable");
+        let bundle = MinimalPolicyBundle::from_package(package)
+            .map_err(|_| anyhow::anyhow!(PIPELINE_BUNDLE_INVALID_LABEL))?;
+        let run = NewPipelineRun {
+            tenant_id: tenant_id.to_string(),
+            run_id,
+            submission_id: envelope.submission_id,
+            trace_id: envelope.trace_id,
+            bundle_id,
+            request_idempotency_key: request_idempotency_key_hash,
+            request_content_hash: request_content_hash.clone(),
+            source_object_ref_id: object_ref_id,
+        };
+        self.store.stage_receipt_artifact(&run, None).await?;
+
         let tenant_storage_ref = tenant_storage_ref(tenant_id);
         let wrapper = serde_json::to_vec(&serde_json::json!({
             "schema": "trace_commons.pipeline_source_bytes.v1",
@@ -845,79 +1549,71 @@ impl PipelineService {
             &run_id.to_string(),
             &wrapper,
         )?;
-
-        self.backend
-            .upsert_trace_submission(TraceSubmissionWrite {
-                tenant_id: tenant_id.to_string(),
-                submission_id: envelope.submission_id,
-                trace_id: envelope.trace_id,
-                auth_principal_ref: actor_principal_ref.to_string(),
-                contributor_pseudonym: envelope.contributor.pseudonymous_contributor_id.clone(),
-                submitted_tenant_scope_ref: None,
-                schema_version: envelope.schema_version.clone(),
-                consent_policy_version: envelope.consent.policy_version.clone(),
-                consent_scopes: enum_strings(&envelope.consent.scopes)?,
-                allowed_uses: enum_strings(&envelope.trace_card.allowed_uses)?,
-                retention_policy_id: envelope.trace_card.retention_policy.clone(),
-                status: TraceCorpusStatus::Received,
-                privacy_risk: enum_string(&envelope.privacy.residual_pii_risk)?,
-                redaction_pipeline_version: envelope.privacy.redaction_pipeline_version.clone(),
-                redaction_counts: envelope.privacy.redaction_counts.clone(),
-                redaction_hash: envelope.privacy.redaction_hash.clone(),
-                canonical_summary_hash: None,
-                submission_score: None,
-                credit_points_pending: None,
-                credit_points_final: None,
-                expires_at: None,
-            })
+        self.store
+            .stage_receipt_artifact(&run, Some(&artifact_receipt))
             .await?;
-        self.backend
-            .append_trace_object_ref(TraceObjectRefWrite {
-                object_ref_id,
-                tenant_id: tenant_id.to_string(),
-                submission_id: envelope.submission_id,
-                artifact_kind: TraceObjectArtifactKind::SubmittedEnvelope,
-                object_store: "pipeline_local_encrypted".to_string(),
-                object_key: artifact_receipt.object_key,
-                content_sha256: format!("sha256:{}", artifact_receipt.ciphertext_sha256),
-                encryption_key_ref: format!("tenant:{tenant_storage_ref}"),
-                size_bytes: i64::try_from(request_bytes.len()).unwrap_or(i64::MAX),
-                compression: None,
-                created_by_job_id: None,
-            })
-            .await?;
+        self.inject_crash(PipelineCrashPoint::AfterArtifactStorage)?;
 
-        let admission = self
-            .bundle
+        let admission = bundle
             .admission
             .execute(&AdmissionInput {
                 run_id,
                 trace_id: envelope.trace_id,
                 request_content_hash: request_content_hash.clone(),
-                schema_version: envelope.schema_version,
+                schema_version: envelope.schema_version.clone(),
                 authenticated: true,
                 authority_valid: true,
             })
             .await
             .map_err(|error| anyhow::anyhow!(error.label().to_string()))?;
+        self.inject_crash(PipelineCrashPoint::AfterAdmissionWork)?;
         let stored = StoredPhaseResult::from_result(Phase::Admission, &admission)?;
-        self.store
-            .commit_admission(
-                NewPipelineRun {
-                    tenant_id: tenant_id.to_string(),
-                    run_id,
-                    submission_id: envelope.submission_id,
-                    trace_id: envelope.trace_id,
-                    bundle_id: self.bundle.package.bundle_id.clone(),
-                    request_idempotency_key: request_idempotency_key_hash,
-                    request_content_hash,
-                    source_object_ref_id: object_ref_id,
-                },
-                stored,
-                Some(Phase::Review),
+        let submission = TraceSubmissionWrite {
+            tenant_id: tenant_id.to_string(),
+            submission_id: envelope.submission_id,
+            trace_id: envelope.trace_id,
+            auth_principal_ref: actor_principal_ref.to_string(),
+            contributor_pseudonym: envelope.contributor.pseudonymous_contributor_id,
+            submitted_tenant_scope_ref: None,
+            schema_version: envelope.schema_version,
+            consent_policy_version: envelope.consent.policy_version,
+            consent_scopes: enum_strings(&envelope.consent.scopes)?,
+            allowed_uses: enum_strings(&envelope.trace_card.allowed_uses)?,
+            retention_policy_id: envelope.trace_card.retention_policy,
+            status: TraceCorpusStatus::Received,
+            privacy_risk: enum_string(&envelope.privacy.residual_pii_risk)?,
+            redaction_pipeline_version: envelope.privacy.redaction_pipeline_version,
+            redaction_counts: envelope.privacy.redaction_counts,
+            redaction_hash: envelope.privacy.redaction_hash,
+            canonical_summary_hash: None,
+            submission_score: None,
+            credit_points_pending: None,
+            credit_points_final: None,
+            expires_at: None,
+        };
+        let object_ref = TraceObjectRefWrite {
+            object_ref_id,
+            tenant_id: tenant_id.to_string(),
+            submission_id: envelope.submission_id,
+            artifact_kind: TraceObjectArtifactKind::SubmittedEnvelope,
+            object_store: "pipeline_local_encrypted".to_string(),
+            object_key: artifact_receipt.object_key,
+            content_sha256: format!("sha256:{}", artifact_receipt.ciphertext_sha256),
+            encryption_key_ref: format!("tenant:{tenant_storage_ref}"),
+            size_bytes: i64::try_from(request_bytes.len()).unwrap_or(i64::MAX),
+            compression: None,
+            created_by_job_id: None,
+        };
+        insert_receipt_records(&tx, &run, &submission, &object_ref, stored).await?;
+        let row = tx
+            .query_one(
+                "SELECT * FROM pipeline_runs WHERE tenant_id = $1 AND run_id = $2",
+                &[&tenant_id, &run_id],
             )
-            .await
-            .map_err(Into::into)
+            .await?;
+        let created = pipeline_run_from_row(&row)?;
+        tx.commit().await?;
+        Ok(PipelineReceiptResult::Created(created))
     }
 
     pub async fn inspect(
@@ -954,16 +1650,62 @@ impl PipelineService {
                 .await
                 .map_err(Into::into);
         }
-        let result = self.process_claimed(&run).await;
-        if result.is_err() {
-            self.store
-                .mark_failed(&run, PIPELINE_OPERATIONAL_ERROR_LABEL)
-                .await?;
+        let phase = run
+            .next_phase
+            .ok_or_else(|| anyhow::anyhow!("claimed run has no phase"))?;
+        let bundle = match self.load_bound_bundle(&run, phase).await {
+            Ok(bundle) => bundle,
+            Err(label) if label == PIPELINE_POLICY_NOT_RUNNABLE_LABEL => {
+                return Ok(Some(self.store.mark_retry(&run, &label).await?));
+            }
+            Err(label) => {
+                self.store.mark_failed(&run, &label).await?;
+                return self
+                    .store
+                    .get_run(tenant_id, run.run_id)
+                    .await
+                    .map_err(Into::into);
+            }
+        };
+        match self.process_claimed(&run, &bundle).await {
+            Ok(updated) => Ok(Some(updated)),
+            Err(error) if error.to_string() == INJECTED_PIPELINE_CRASH => Err(error),
+            Err(_) => Ok(Some(
+                self.store
+                    .mark_retry(&run, PIPELINE_OPERATIONAL_ERROR_LABEL)
+                    .await?,
+            )),
         }
-        result.map(Some)
     }
 
-    async fn process_claimed(&self, run: &PipelineRunRecord) -> anyhow::Result<PipelineRunRecord> {
+    async fn load_bound_bundle(
+        &self,
+        run: &PipelineRunRecord,
+        phase: Phase,
+    ) -> Result<MinimalPolicyBundle, String> {
+        let package = self
+            .store
+            .load_bundle(&run.tenant_id, &run.bundle_id)
+            .await
+            .map_err(|_| PIPELINE_BUNDLE_INVALID_LABEL.to_string())?
+            .ok_or_else(|| PIPELINE_BUNDLE_MISSING_LABEL.to_string())?;
+        let runnable = self
+            .store
+            .policy_is_runnable(&run.tenant_id, &run.bundle_id, phase)
+            .await
+            .map_err(|_| PIPELINE_BUNDLE_INVALID_LABEL.to_string())?;
+        if !runnable {
+            return Err(PIPELINE_POLICY_NOT_RUNNABLE_LABEL.to_string());
+        }
+        MinimalPolicyBundle::from_package(package)
+            .map_err(|_| PIPELINE_BUNDLE_INVALID_LABEL.to_string())
+    }
+
+    async fn process_claimed(
+        &self,
+        run: &PipelineRunRecord,
+        bundle: &MinimalPolicyBundle,
+    ) -> anyhow::Result<PipelineRunRecord> {
         let phase = run
             .next_phase
             .ok_or_else(|| anyhow::anyhow!("claimed run has no phase"))?;
@@ -971,8 +1713,7 @@ impl PipelineService {
             Phase::Admission => anyhow::bail!("Admission cannot run asynchronously"),
             Phase::Review => {
                 let source_artifact = self.load_source_bytes(run).await?;
-                let result = self
-                    .bundle
+                let result = bundle
                     .review
                     .execute(&ReviewInput {
                         run_id: run.run_id,
@@ -981,6 +1722,7 @@ impl PipelineService {
                         source_artifact,
                     })
                     .await?;
+                self.inject_crash(PipelineCrashPoint::AfterReviewWork)?;
                 let revision_id = match result.decision {
                     ReviewDecision::Approved {
                         registry_revision_id,
@@ -988,7 +1730,8 @@ impl PipelineService {
                     ReviewDecision::Rejected { .. } => None,
                 };
                 let next = revision_id.map(|_| Phase::Score);
-                self.store
+                let updated = self
+                    .store
                     .commit_phase(
                         run,
                         StoredPhaseResult::from_result(Phase::Review, &result)?,
@@ -996,14 +1739,15 @@ impl PipelineService {
                         revision_id,
                     )
                     .await
-                    .map_err(Into::into)
+                    .map_err(anyhow::Error::from)?;
+                self.inject_crash(PipelineCrashPoint::AfterReviewCommit)?;
+                Ok(updated)
             }
             Phase::Score => {
                 let revision_id = run
                     .approved_revision_id
                     .ok_or_else(|| anyhow::anyhow!("approved revision is missing"))?;
-                let result = self
-                    .bundle
+                let result = bundle
                     .score
                     .execute(&ScoreInput {
                         run_id: run.run_id,
@@ -1012,6 +1756,7 @@ impl PipelineService {
                         source_content_hash: run.request_content_hash.clone(),
                     })
                     .await?;
+                self.inject_crash(PipelineCrashPoint::AfterScoreWork)?;
                 self.store
                     .commit_phase(
                         run,
@@ -1035,8 +1780,7 @@ impl PipelineService {
                     .ok_or_else(|| anyhow::anyhow!("Score outcome is missing"))?;
                 let score = serde_json::from_value::<ScoreDecision>(score_outcome.decision)
                     .map_err(|_| anyhow::anyhow!("Score outcome is malformed"))?;
-                let result = self
-                    .bundle
+                let result = bundle
                     .settle
                     .execute(&SettleInput {
                         run_id: run.run_id,
@@ -1113,10 +1857,29 @@ fn enum_strings<T: Serialize>(values: &[T]) -> anyhow::Result<Vec<String>> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn typed_outcome_reader_rejects_malformed_required_payloads() {
+        for phase in [Phase::Admission, Phase::Review, Phase::Score, Phase::Settle] {
+            assert!(
+                validate_outcome_payload(
+                    phase,
+                    &serde_json::json!({}),
+                    &serde_json::json!({}),
+                    &serde_json::json!({})
+                )
+                .is_err()
+            );
+        }
+    }
+
     #[tokio::test]
     async fn minimal_policies_produce_explicit_zero_credit_completion() {
         let bundle = MinimalPolicyBundle::build().unwrap();
         bundle.package.validate().unwrap();
+        assert_eq!(
+            bundle.package.bundle_id,
+            "sha256:bc448580ee3d883fea4955ffbc68c5a64c14c9c4e048d5861f50c31c50eb0a32"
+        );
         let bytes = br#"{"schema_version":"ironclaw.trace_contribution.v1"}"#.to_vec();
         let hash = sha256_prefixed(&bytes);
         let run_id = Uuid::new_v4();

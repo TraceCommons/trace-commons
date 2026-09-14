@@ -182,6 +182,10 @@ const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "trace_account_merge_proposals",
     "pipeline_runs",
     "phase_outcomes",
+    "pipeline_bundle_packages",
+    "pipeline_active_bundles",
+    "pipeline_bundle_policy_status",
+    "pipeline_receipt_artifacts",
 ];
 
 const TRACE_COMMONS_RLS_POLICY_EXPRESSION_VARIANTS: &[&str] = &[
@@ -1842,6 +1846,26 @@ impl Database for PgBackend {
                 .execute(
                     "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
                     &[&47_i32, &"versioned_pipeline"],
+                )
+                .await?;
+        }
+        let already_applied = client
+            .query_opt(
+                "SELECT 1 FROM _trace_commons_migrations WHERE version = $1",
+                &[&48_i32],
+            )
+            .await?
+            .is_some();
+        if !already_applied {
+            client
+                .batch_execute(include_str!(
+                    "../../../../migrations/V48__versioned_pipeline_durability.sql"
+                ))
+                .await?;
+            client
+                .execute(
+                    "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
+                    &[&48_i32, &"versioned_pipeline_durability"],
                 )
                 .await?;
         }
@@ -5151,6 +5175,8 @@ mod tests {
             include_str!("../../../../migrations/V33__near_identities.sql"),
             include_str!("../../../../migrations/V34__account_consolidation.sql"),
             include_str!("../../../../migrations/V43__trace_withdrawal.sql"),
+            include_str!("../../../../migrations/V47__versioned_pipeline.sql"),
+            include_str!("../../../../migrations/V48__versioned_pipeline_durability.sql"),
         ];
         let force_rls_migrations = [
             include_str!("../../../../migrations/V6__trace_force_rls.sql"),
@@ -5167,6 +5193,8 @@ mod tests {
             include_str!("../../../../migrations/V33__near_identities.sql"),
             include_str!("../../../../migrations/V34__account_consolidation.sql"),
             include_str!("../../../../migrations/V43__trace_withdrawal.sql"),
+            include_str!("../../../../migrations/V47__versioned_pipeline.sql"),
+            include_str!("../../../../migrations/V48__versioned_pipeline_durability.sql"),
         ];
 
         for table in TRACE_COMMONS_RLS_TABLES {

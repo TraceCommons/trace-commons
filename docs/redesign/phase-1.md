@@ -72,3 +72,5 @@ fenced lease, retry delay, positive credit, index write, production privacy
 policy, or production bundle distribution. A claimed policy failure records a
 safe operational label and no outcome for the failed phase. Phase 2 adds
 concurrent workers, recovery, retained bundle loading, and lease fencing.
+
+See [phase-2.md](./phase-2.md) for the current local pipeline.

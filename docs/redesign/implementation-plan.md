@@ -4,7 +4,7 @@
 > Then add recovery, index and credit operations, and production policies in
 > small steps that reviewers can check.
 
-- **Status:** Proposed implementation sequence
+- **Status:** Phase 2 implemented
 - **Date:** 2026-09-11
 - **Architecture:** [proposal.md](./proposal.md)
 - **Final acceptance:** [system-behavioral-contracts.md](./system-behavioral-contracts.md)
@@ -187,6 +187,9 @@ not prove full compliance with any contract group.
 
 **Outcome:** The minimal corpus produces the same logical results after
 retries, concurrent work, activation changes, and process restarts.
+
+**Implementation:** The local and test path is documented in
+[phase-2.md](./phase-2.md).
 
 ### Ordered review steps
 

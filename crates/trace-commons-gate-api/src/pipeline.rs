@@ -533,5 +533,57 @@ mod tests {
         let mut altered = package.clone();
         altered.artifacts.values_mut().next().unwrap().push(0);
         assert_eq!(altered.validate(), Err(ContractError::ArtifactHashMismatch));
+
+        let mut missing = package;
+        missing.artifacts.pop_first();
+        assert_eq!(missing.validate(), Err(ContractError::ArtifactSetMismatch));
+    }
+
+    #[test]
+    fn every_immutable_policy_input_changes_bundle_identity() {
+        let mut base = BundleManifest {
+            format_version: BUNDLE_MANIFEST_FORMAT_VERSION,
+            admission: policy("admission", b"admission", b"configuration"),
+            review: policy("review", b"review", b"configuration"),
+            score: policy("score", b"score", b"configuration"),
+            settle: policy("settle", b"settle", b"configuration"),
+        };
+        let base_id = base.bundle_id().unwrap();
+
+        let mut changed = base.clone();
+        changed.admission.code_artifact_hash = hash(b"changed-code");
+        assert_ne!(changed.bundle_id().unwrap(), base_id);
+
+        let mut changed = base.clone();
+        changed.review.configuration_hash = hash(b"changed-configuration");
+        assert_ne!(changed.bundle_id().unwrap(), base_id);
+
+        let mut changed = base.clone();
+        changed
+            .score
+            .data_artifact_hashes
+            .push(hash(b"changed-data"));
+        assert_ne!(changed.bundle_id().unwrap(), base_id);
+
+        let mut changed = base.clone();
+        changed
+            .settle
+            .projection_ids
+            .push("changed-projection".to_string());
+        assert_ne!(changed.bundle_id().unwrap(), base_id);
+
+        let mut changed = base.clone();
+        changed.admission.policy_id = "changed-policy".to_string();
+        assert_ne!(changed.bundle_id().unwrap(), base_id);
+
+        let mut changed = base.clone();
+        changed.review.implementation_id = "changed-implementation".to_string();
+        assert_ne!(changed.bundle_id().unwrap(), base_id);
+
+        base.format_version += 1;
+        assert_eq!(
+            base.bundle_id(),
+            Err(ContractError::UnsupportedManifestVersion)
+        );
     }
 }
