@@ -20,8 +20,9 @@ use trace_commons_server::trace_corpus_storage::{
     TraceCreditSettlementState,
 };
 use trace_commons_server::versioned_pipeline::{
-    MinimalPolicyBundle, PIPELINE_FIXED_POSITIVE_MICROCREDITS, PgPipelineStore, PipelineCrashPoint,
-    PipelineReceiptResult, PipelineRunState, PipelineService, StoredPhaseResult,
+    MinimalPolicyBundle, PIPELINE_FIXED_POSITIVE_MICROCREDITS, PIPELINE_SCORE_DEPENDENCY_LABEL,
+    PgPipelineStore, PipelineCrashPoint, PipelineReceiptResult, PipelineRunState, PipelineService,
+    StoredPhaseResult,
 };
 use trace_commons_server::versioned_pipeline_credit::RecordingNearAdapter;
 use trace_commons_server::versioned_pipeline_index::{
@@ -2236,4 +2237,198 @@ async fn phase_four_withdrawal_queues_completed_index_invalidation() {
         .unwrap();
     assert_eq!(invalidated.run.index_invalidation_state, "complete");
     assert!(!index.contains_revision(&tenant, PIPELINE_INDEX_ID, revision));
+}
+
+async fn activate_compatibility(service: &PipelineService, tenant: &str) {
+    let bundle = MinimalPolicyBundle::build_compatibility().unwrap();
+    service
+        .register_bundle(tenant, &bundle.package)
+        .await
+        .unwrap();
+    service
+        .activate_bundle(tenant, &bundle.package.bundle_id)
+        .await
+        .unwrap();
+}
+
+async fn process_until_phase(
+    service: &PipelineService,
+    tenant: &str,
+    run_id: Uuid,
+    stop_before: Phase,
+) {
+    for _ in 0..24 {
+        let inspection = service.inspect(tenant, run_id).await.unwrap().unwrap();
+        if inspection.run.next_phase == Some(stop_before)
+            || inspection.run.state == PipelineRunState::Complete
+            || inspection.run.state == PipelineRunState::Failed
+        {
+            return;
+        }
+        if inspection.run.next_attempt_at > Utc::now() {
+            let wait = (inspection.run.next_attempt_at - Utc::now())
+                .to_std()
+                .unwrap_or_else(|_| std::time::Duration::from_millis(5));
+            tokio::time::sleep(wait + std::time::Duration::from_millis(10)).await;
+        }
+        service
+            .process_run(tenant, run_id, Some(stop_before))
+            .await
+            .unwrap();
+    }
+    panic!("pipeline run did not reach {stop_before:?}");
+}
+
+#[tokio::test]
+async fn phase_five_score_does_not_write_and_settle_ignores_later_index_mutation() {
+    let Some(backend) = backend().await else {
+        return;
+    };
+    let tenant = format!("pipeline-phase5-score-{}", Uuid::new_v4());
+    let principal = "principal_sha256:test";
+    let root = tempfile::tempdir().unwrap();
+    let index = IsolatedPipelineIndex::new();
+    let service = PipelineService::new_with_ops(
+        backend,
+        artifact_store(&root),
+        None,
+        None,
+        index.clone(),
+        Arc::new(RecordingNearAdapter::new()),
+    )
+    .unwrap();
+    activate_compatibility(&service, &tenant).await;
+    let bytes = envelope_bytes(Uuid::new_v4(), "compat-score").await;
+    let PipelineReceiptResult::Created(created) = service
+        .submit(&tenant, principal, "compat-score", &bytes)
+        .await
+        .unwrap()
+    else {
+        panic!("receipt must create a run");
+    };
+    process_until_phase(&service, &tenant, created.run_id, Phase::Settle).await;
+    let after_score = service
+        .inspect(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(after_score.run.next_phase, Some(Phase::Settle));
+    assert_eq!(index.writer_calls(), 0);
+    assert_eq!(index.entry_count(&tenant, PIPELINE_INDEX_ID), 0);
+    let score_outcome = after_score
+        .outcomes
+        .iter()
+        .find(|outcome| outcome.phase == Phase::Score)
+        .expect("Score outcome must exist before Settle");
+    let include_eligible = score_outcome.evidence["include_eligible"]
+        .as_bool()
+        .unwrap_or(false);
+    let decoy = IndexEntryKey {
+        tenant_id: tenant.clone(),
+        index_id: PIPELINE_INDEX_ID.to_string(),
+        revision_id: Uuid::from_u128(99),
+        projection_id: PIPELINE_PROJECTION_ID.to_string(),
+        model_id: PIPELINE_EMBEDDER_MODEL_ID.to_string(),
+        chunk: 0,
+    };
+    index
+        .upsert(
+            &decoy,
+            &[1.0, 0.0],
+            "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        )
+        .unwrap();
+    let writes_after_mutation = index.writer_calls();
+    finish_run(&service, &tenant, created.run_id).await;
+    let complete = service
+        .inspect(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(complete.run.state, PipelineRunState::Complete);
+    assert_eq!(
+        complete.run.index_membership,
+        if include_eligible {
+            "included"
+        } else {
+            "excluded"
+        }
+    );
+    assert_eq!(service.settle_evaluations(), 1);
+    assert!(index.writer_calls() >= writes_after_mutation);
+}
+
+#[tokio::test]
+async fn phase_five_score_dependency_failure_retries_without_credit() {
+    let Some(backend) = backend().await else {
+        return;
+    };
+    let tenant = format!("pipeline-phase5-fail-{}", Uuid::new_v4());
+    let principal = "principal_sha256:test";
+    let (_root, service) = service(backend, None);
+    activate_compatibility(&service, &tenant).await;
+    let bytes = envelope_bytes(Uuid::new_v4(), "compat-fail").await;
+    let PipelineReceiptResult::Created(created) = service
+        .submit(&tenant, principal, "compat-fail", &bytes)
+        .await
+        .unwrap()
+    else {
+        panic!("receipt must create a run");
+    };
+    process_until_phase(&service, &tenant, created.run_id, Phase::Score).await;
+    let review = service
+        .inspect(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let review_outcome = review
+        .outcomes
+        .iter()
+        .find(|outcome| outcome.phase == Phase::Review)
+        .cloned()
+        .expect("Review must complete before Score");
+    service.set_score_dependency_failure(true);
+    service
+        .process_run(&tenant, created.run_id, None)
+        .await
+        .unwrap();
+    let failed = service
+        .inspect(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        failed.run.last_error_label.as_deref(),
+        Some(PIPELINE_SCORE_DEPENDENCY_LABEL)
+    );
+    assert!(
+        !failed
+            .outcomes
+            .iter()
+            .any(|outcome| outcome.phase == Phase::Score)
+    );
+    assert!(failed.run.credit_event_id.is_none());
+    assert_eq!(
+        failed
+            .outcomes
+            .iter()
+            .find(|outcome| outcome.phase == Phase::Review)
+            .map(|outcome| outcome.outcome_id),
+        Some(review_outcome.outcome_id)
+    );
+    service.set_score_dependency_failure(false);
+    finish_run(&service, &tenant, created.run_id).await;
+    let complete = service
+        .inspect(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(complete.run.state, PipelineRunState::Complete);
+    assert!(
+        complete
+            .outcomes
+            .iter()
+            .any(|outcome| outcome.phase == Phase::Score)
+    );
+    assert_eq!(complete.run.bundle_id, review.run.bundle_id);
 }

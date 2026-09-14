@@ -359,17 +359,61 @@ pub struct ReviewEvaluation {
     pub rule_id: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ScoreEvidence {
     pub fixed_credit_microcredits: Microcredits,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub embedding_artifact_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedding_object_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub index_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub index_snapshot_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub index_snapshot_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scorer_model_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedder_model_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub projection_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub perplexity_micros: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tail_fraction_micros: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub novelty_score_micros: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peak_perplexity_micros: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peak_novelty_micros: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quality_passed: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub novelty_passed: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nearest_neighbor_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index_cardinality: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coverage_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chunk_count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chunks_capped: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub include_eligible: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credit_quality_micros: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credit_quality_version: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub neighbor_artifact_hash: Option<String>,
+    #[serde(skip)]
+    pub pending_embeddings: Vec<Vec<f32>>,
+    #[serde(skip)]
+    pub pending_neighbor_bytes: Option<Vec<u8>>,
 }
 
 impl ScoreEvidence {
@@ -377,9 +421,31 @@ impl ScoreEvidence {
         Self {
             fixed_credit_microcredits,
             embedding_artifact_hash: None,
+            embedding_object_key: None,
             index_id: None,
             index_snapshot_id: None,
             index_snapshot_hash: None,
+            scorer_model_id: None,
+            embedder_model_id: None,
+            projection_id: None,
+            perplexity_micros: None,
+            tail_fraction_micros: None,
+            novelty_score_micros: None,
+            peak_perplexity_micros: None,
+            peak_novelty_micros: None,
+            quality_passed: None,
+            novelty_passed: None,
+            nearest_neighbor_hash: None,
+            index_cardinality: None,
+            coverage_tokens: None,
+            chunk_count: None,
+            chunks_capped: None,
+            include_eligible: None,
+            credit_quality_micros: None,
+            credit_quality_version: None,
+            neighbor_artifact_hash: None,
+            pending_embeddings: Vec::new(),
+            pending_neighbor_bytes: None,
         }
     }
 }
@@ -481,6 +547,8 @@ pub struct ScoreInput {
     pub trace_id: Uuid,
     pub registry_revision_id: Uuid,
     pub source_content_hash: String,
+    pub tenant_id: String,
+    pub reviewed_artifact: Vec<u8>,
 }
 
 #[derive(Debug, Clone)]
@@ -490,6 +558,7 @@ pub struct SettleInput {
     pub registry_revision_id: Uuid,
     pub source_content_hash: String,
     pub score: ScoreDecision,
+    pub score_evidence: ScoreEvidence,
 }
 
 #[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]

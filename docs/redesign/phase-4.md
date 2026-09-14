@@ -58,5 +58,5 @@ This path remains local and test only. The Score amount stays fixed.
 The production quarantine age and remediation policy remain open. This local
 path requires a leased assessment and has no production activation.
 
-Phase 5 adds the production compatibility Score policy. It also compares the
-new pipeline with the approved baseline.
+Phase 5 adds the production compatibility Score policy. See
+[phase-5.md](./phase-5.md).

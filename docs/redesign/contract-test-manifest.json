@@ -1,6 +1,6 @@
 {
   "schema": "trace_commons.contract_test_manifest.v1",
-  "updated_for_phase": 4,
+  "updated_for_phase": 5,
   "status_values": ["planned", "partial", "passing", "deferred"],
   "contract_groups": [
     {
@@ -77,9 +77,9 @@
     {
       "contract_ids": ["SCR-001", "SCR-002", "SCR-003", "SCR-004"],
       "boundary": "score policy, capabilities, units, and credit event",
-      "implementation_phase": 3,
+      "implementation_phase": 5,
       "evidence_status": "partial",
-      "test_ids": ["pipeline::checked_microcredit_conversion_is_exact", "minimal_policies_produce_explicit_zero_credit_completion", "versioned_pipeline_pg::four_index_and_credit_combinations_complete", "versioned_pipeline_index::reader_excludes_the_queried_revision"]
+      "test_ids": ["pipeline::checked_microcredit_conversion_is_exact", "minimal_policies_produce_explicit_zero_credit_completion", "versioned_pipeline_pg::four_index_and_credit_combinations_complete", "versioned_pipeline_index::reader_excludes_the_queried_revision", "versioned_pipeline_compat::compatibility_score_queries_reader_without_writes", "versioned_pipeline_compat::write_detector_records_settle_side_upserts_only", "versioned_pipeline_pg::phase_five_score_does_not_write_and_settle_ignores_later_index_mutation"]
     },
     {
       "contract_ids": ["SCR-005"],
@@ -162,9 +162,9 @@
     {
       "contract_ids": ["LAB-001", "LAB-002", "LAB-003"],
       "boundary": "corpus, test levels, and lab separation",
-      "implementation_phase": 7,
+      "implementation_phase": 5,
       "evidence_status": "partial",
-      "test_ids": ["minimal_pipeline_corpus", "versioned_pipeline_pg"]
+      "test_ids": ["minimal_pipeline_corpus", "versioned_pipeline_pg", "versioned_pipeline_compat::legacy_mapping_keeps_inserts_out_of_score", "versioned_pipeline_compat::shadow_score_does_not_write_the_active_index"]
     },
     {
       "contract_ids": ["CMP-001", "CMP-002"],
@@ -186,7 +186,7 @@
     {"scenario_id": "SCN-002", "implementation_phase": 3, "evidence_status": "partial", "test_ids": ["versioned_pipeline_pg::crash_boundaries_six_through_eleven_converge_after_restart"]},
     {"scenario_id": "SCN-003", "implementation_phase": 4, "evidence_status": "passing", "test_ids": ["versioned_pipeline_pg::phase_four_admission_review_and_quarantine_are_policy_driven", "minimal_pipeline_corpus"]},
     {"scenario_id": "SCN-004", "implementation_phase": 4, "evidence_status": "passing", "test_ids": ["versioned_pipeline_pg::phase_four_admission_review_and_quarantine_are_policy_driven", "minimal_pipeline_corpus"]},
-    {"scenario_id": "SCN-005", "implementation_phase": 5, "evidence_status": "partial", "test_ids": ["versioned_pipeline_pg::policy_failure_records_an_error_without_a_decision"]},
+    {"scenario_id": "SCN-005", "implementation_phase": 5, "evidence_status": "passing", "test_ids": ["versioned_pipeline_compat::score_dependency_failure_is_operational", "versioned_pipeline_pg::phase_five_score_dependency_failure_retries_without_credit"]},
     {"scenario_id": "SCN-006", "implementation_phase": 3, "evidence_status": "partial", "test_ids": ["versioned_pipeline_pg::crash_boundaries_six_through_eleven_converge_after_restart"]},
     {"scenario_id": "SCN-007", "implementation_phase": 2, "evidence_status": "passing", "test_ids": ["versioned_pipeline_pg::bound_bundle_survives_activation_and_rollback", "versioned_pipeline_pg::activation_after_resolution_does_not_rebind_the_receipt"]},
     {"scenario_id": "SCN-008", "implementation_phase": 4, "evidence_status": "passing", "test_ids": ["versioned_pipeline_pg::phase_four_policy_suspension_preserves_attempts_bundle_and_audit", "versioned_pipeline_pg::phase_four_settle_suspension_blocks_near_dispatch"]},

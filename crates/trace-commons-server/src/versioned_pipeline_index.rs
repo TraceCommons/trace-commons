@@ -200,6 +200,55 @@ impl VectorIndexWriter for IsolatedPipelineIndex {
     }
 }
 
+/// Writer wrapper that records upserts. Score receives only the reader trait.
+pub struct WriteDetectingIndex {
+    inner: Arc<IsolatedPipelineIndex>,
+    writes: AtomicUsize,
+}
+
+impl WriteDetectingIndex {
+    pub fn wrap(inner: Arc<IsolatedPipelineIndex>) -> Arc<Self> {
+        Arc::new(Self {
+            inner,
+            writes: AtomicUsize::new(0),
+        })
+    }
+
+    pub fn writes(&self) -> usize {
+        self.writes.load(Ordering::SeqCst)
+    }
+}
+
+impl VectorIndexReader for WriteDetectingIndex {
+    fn snapshot(&self, tenant_id: &str, index_id: &str) -> anyhow::Result<IndexSnapshot> {
+        self.inner.snapshot(tenant_id, index_id)
+    }
+
+    fn nearest(
+        &self,
+        tenant_id: &str,
+        index_id: &str,
+        embedding: &[f32],
+        k: usize,
+        exclude_revision: Option<Uuid>,
+    ) -> anyhow::Result<Vec<NearestNeighbor>> {
+        self.inner
+            .nearest(tenant_id, index_id, embedding, k, exclude_revision)
+    }
+}
+
+impl VectorIndexWriter for WriteDetectingIndex {
+    fn upsert(
+        &self,
+        key: &IndexEntryKey,
+        embedding: &[f32],
+        content_hash: &str,
+    ) -> Result<IndexUpsertResult, IndexWriteError> {
+        self.writes.fetch_add(1, Ordering::SeqCst);
+        self.inner.upsert(key, embedding, content_hash)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SealedIndexCommand {
     pub schema: String,
@@ -223,9 +272,21 @@ impl SealedIndexCommand {
         content_hash: String,
         embedding: Vec<f32>,
     ) -> anyhow::Result<Self> {
+        Self::include_chunks(revision_id, content_hash, vec![embedding])
+    }
+
+    pub fn include_chunks(
+        revision_id: Uuid,
+        content_hash: String,
+        embeddings: Vec<Vec<f32>>,
+    ) -> anyhow::Result<Self> {
         anyhow::ensure!(
             content_hash.starts_with("sha256:") && content_hash.len() == 71,
             "index command content hash is malformed"
+        );
+        anyhow::ensure!(
+            !embeddings.is_empty(),
+            "index command needs at least one embedding"
         );
         Ok(Self {
             schema: PIPELINE_INDEX_COMMAND_SCHEMA.to_string(),
@@ -233,11 +294,15 @@ impl SealedIndexCommand {
             revision_id,
             projection_id: PIPELINE_PROJECTION_ID.to_string(),
             model_id: PIPELINE_EMBEDDER_MODEL_ID.to_string(),
-            entries: vec![SealedIndexEntry {
-                chunk: 0,
-                content_hash,
-                embedding,
-            }],
+            entries: embeddings
+                .into_iter()
+                .enumerate()
+                .map(|(chunk, embedding)| SealedIndexEntry {
+                    chunk: chunk as u32,
+                    content_hash: content_hash.clone(),
+                    embedding,
+                })
+                .collect(),
         })
     }
 

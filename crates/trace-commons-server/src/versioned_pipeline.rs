@@ -1,6 +1,7 @@
-//! Isolated Phase 4 implementation of the versioned four-phase pipeline.
+//! Isolated Phase 5 implementation of the versioned four-phase pipeline.
 //!
-//! Admission and Review enforce authority and privacy. Score remains fixed.
+//! Admission and Review keep the Phase 4 authority and privacy policies.
+//! Score can use a compatibility policy that queries a read-only index.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -22,7 +23,10 @@ use trace_commons_gate_api::pipeline::{
     ReviewRecommendation, SchemaRef, ScoreDecision, ScoreEvaluation, ScoreEvidence, ScoreInput,
     ScorePolicy, SettleDecision, SettleEvaluation, SettleEvidence, SettleInput, SettlePolicy,
 };
-use trace_commons_gate_api::{IndexWriteError, VectorIndexReader, VectorIndexWriter};
+use trace_commons_gate_api::{
+    Embedder, IndexWriteError, PerplexityScorer, ReferenceEmbedder, VectorIndexReader,
+    VectorIndexWriter,
+};
 use uuid::Uuid;
 
 use crate::db::postgres::PgBackend;
@@ -35,6 +39,11 @@ use crate::trace_corpus_storage::{
     TraceCorpusStore, TraceCreditHoldReason, TraceCreditSettlementBatchStatus,
     TraceCreditSettlementNearStatus, TraceCreditSettlementState, TraceObjectArtifactKind,
     TraceObjectRefWrite, TraceSubmissionWrite, TraceWithdrawalRecord,
+};
+use crate::versioned_pipeline_compat::{
+    COMPATIBILITY_SCORE_CODE, COMPATIBILITY_SCORE_IMPLEMENTATION, COMPATIBILITY_SETTLE_CODE,
+    COMPATIBILITY_SETTLE_IMPLEMENTATION, CompatibilityBundleConfig, CompatibilityScorePolicy,
+    CompatibilityScoreRuntime, CompatibilitySettlePolicy, TogglePerplexityScorer,
 };
 use crate::versioned_pipeline_credit::{
     PIPELINE_CREDIT_REASON, PIPELINE_SETTLEMENT_POLICY_VERSION,
@@ -63,6 +72,8 @@ pub const PIPELINE_SUBMISSION_INOPERABLE_LABEL: &str = "submission_inoperable";
 pub const PIPELINE_REVIEW_ASSESSMENT_REQUIRED_LABEL: &str = "review_assessment_required";
 pub const PIPELINE_ADMISSION_LIMIT_LABEL: &str = "admission_limit_exceeded";
 pub const PIPELINE_TOMBSTONE_LABEL: &str = "content_tombstoned";
+pub const PIPELINE_SCORE_DEPENDENCY_LABEL: &str =
+    crate::versioned_pipeline_compat::PIPELINE_SCORE_DEPENDENCY_LABEL;
 const DEFAULT_LEASE_SECONDS: i64 = 30;
 const DEFAULT_RETRY_MILLISECONDS: i64 = 50;
 const PIPELINE_INDEX_ADAPTER_TIMEOUT_SECONDS: u64 = 5;
@@ -86,7 +97,7 @@ pub enum PipelineCrashPoint {
     AfterNearSubmit,
 }
 
-fn sha256_prefixed(bytes: &[u8]) -> String {
+pub(crate) fn sha256_prefixed(bytes: &[u8]) -> String {
     format!("sha256:{:x}", Sha256::digest(bytes))
 }
 
@@ -210,6 +221,8 @@ pub struct PipelineBundleConfig {
     pub tenant_admission_limit: u32,
     #[serde(default = "default_principal_admission_limit")]
     pub principal_admission_limit: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compatibility: Option<CompatibilityBundleConfig>,
 }
 
 const fn default_tenant_admission_limit() -> u32 {
@@ -227,6 +240,7 @@ impl PipelineBundleConfig {
             include_index: false,
             tenant_admission_limit: default_tenant_admission_limit(),
             principal_admission_limit: default_principal_admission_limit(),
+            compatibility: None,
         }
     }
 }
@@ -3052,7 +3066,7 @@ impl MinimalPolicyBundle {
             include_index,
             ..PipelineBundleConfig::minimal()
         })?;
-        Self::build_from_configuration(configuration)
+        Self::build_from_configuration(configuration, None)
     }
 
     pub fn build_with_limits(
@@ -3065,12 +3079,16 @@ impl MinimalPolicyBundle {
             tenant_admission_limit > 0 && principal_admission_limit > 0,
             "admission limits must be positive"
         );
-        Self::build_from_configuration(serde_json::to_vec(&PipelineBundleConfig {
-            score_microcredits,
-            include_index,
-            tenant_admission_limit,
-            principal_admission_limit,
-        })?)
+        Self::build_from_configuration(
+            serde_json::to_vec(&PipelineBundleConfig {
+                score_microcredits,
+                include_index,
+                tenant_admission_limit,
+                principal_admission_limit,
+                compatibility: None,
+            })?,
+            None,
+        )
     }
 
     pub fn build_variant(configuration_label: &str) -> anyhow::Result<Self> {
@@ -3078,39 +3096,88 @@ impl MinimalPolicyBundle {
             !configuration_label.trim().is_empty(),
             "minimal bundle configuration label cannot be empty"
         );
-        Self::build_from_configuration(configuration_label.as_bytes().to_vec())
+        Self::build_from_configuration(configuration_label.as_bytes().to_vec(), None)
     }
 
-    fn build_from_configuration(configuration: Vec<u8>) -> anyhow::Result<Self> {
+    pub fn build_compatibility() -> anyhow::Result<Self> {
+        Self::build_compatibility_with_runtime(&CompatibilityScoreRuntime::reference_unbound())
+    }
+
+    pub fn build_compatibility_with_runtime(
+        runtime: &CompatibilityScoreRuntime,
+    ) -> anyhow::Result<Self> {
+        let configuration = serde_json::to_vec(&PipelineBundleConfig {
+            score_microcredits: 0,
+            include_index: true,
+            tenant_admission_limit: default_tenant_admission_limit(),
+            principal_admission_limit: default_principal_admission_limit(),
+            compatibility: Some(CompatibilityBundleConfig::local_reference()),
+        })?;
+        Self::build_from_configuration(configuration, Some(runtime))
+    }
+
+    fn build_from_configuration(
+        configuration: Vec<u8>,
+        runtime: Option<&CompatibilityScoreRuntime>,
+    ) -> anyhow::Result<Self> {
         anyhow::ensure!(
             !configuration.is_empty(),
             "minimal bundle configuration cannot be empty"
         );
+        let compatibility = runtime.is_some()
+            || serde_json::from_slice::<PipelineBundleConfig>(&configuration)
+                .ok()
+                .and_then(|config| config.compatibility)
+                .is_some();
         let specifications = [
             (
                 "admission",
                 b"authority-privacy-admission-policy-v1".as_slice(),
             ),
             ("review", b"authority-privacy-review-policy-v1".as_slice()),
-            ("score", b"minimal-score-policy-v1".as_slice()),
-            ("settle", b"minimal-settle-policy-v1".as_slice()),
+            (
+                "score",
+                if compatibility {
+                    COMPATIBILITY_SCORE_CODE
+                } else {
+                    b"minimal-score-policy-v1".as_slice()
+                },
+            ),
+            (
+                "settle",
+                if compatibility {
+                    COMPATIBILITY_SETTLE_CODE
+                } else {
+                    b"minimal-settle-policy-v1".as_slice()
+                },
+            ),
         ];
         let config_hash = sha256_prefixed(&configuration);
         let policy_ref = |(name, bytes): (&str, &[u8])| PolicyRef {
             policy_id: if matches!(name, "admission" | "review") {
                 format!("trace_commons.{name}.authority_privacy")
+            } else if compatibility && matches!(name, "score" | "settle") {
+                format!("trace_commons.{name}.compatibility")
             } else {
                 format!("trace_commons.{name}.minimal")
             },
             implementation_id: if matches!(name, "admission" | "review") {
                 format!("trace_commons.{name}.authority_privacy.v1")
+            } else if compatibility && name == "score" {
+                COMPATIBILITY_SCORE_IMPLEMENTATION.to_string()
+            } else if compatibility && name == "settle" {
+                COMPATIBILITY_SETTLE_IMPLEMENTATION.to_string()
             } else {
                 format!("trace_commons.{name}.minimal.v1")
             },
             code_artifact_hash: sha256_prefixed(bytes),
             configuration_hash: config_hash.clone(),
             data_artifact_hashes: Vec::new(),
-            projection_ids: Vec::new(),
+            projection_ids: if compatibility && matches!(name, "score" | "settle") {
+                vec!["pipeline-test-projection-v1".to_string()]
+            } else {
+                Vec::new()
+            },
         };
         let manifest = BundleManifest {
             format_version: BUNDLE_MANIFEST_FORMAT_VERSION,
@@ -3130,10 +3197,13 @@ impl MinimalPolicyBundle {
             artifacts,
         };
         package.validate()?;
-        Self::from_package(package)
+        Self::from_package_with_runtime(package, runtime)
     }
 
-    fn from_package(package: BundlePackage) -> anyhow::Result<Self> {
+    fn from_package_with_runtime(
+        package: BundlePackage,
+        runtime: Option<&CompatibilityScoreRuntime>,
+    ) -> anyhow::Result<Self> {
         package.validate()?;
         anyhow::ensure!(
             matches!(
@@ -3143,8 +3213,13 @@ impl MinimalPolicyBundle {
             ) && matches!(
                 package.manifest.review.implementation_id.as_str(),
                 "trace_commons.review.minimal.v1" | "trace_commons.review.authority_privacy.v1"
-            ) && package.manifest.score.implementation_id == "trace_commons.score.minimal.v1"
-                && package.manifest.settle.implementation_id == "trace_commons.settle.minimal.v1",
+            ) && matches!(
+                package.manifest.score.implementation_id.as_str(),
+                "trace_commons.score.minimal.v1" | COMPATIBILITY_SCORE_IMPLEMENTATION
+            ) && matches!(
+                package.manifest.settle.implementation_id.as_str(),
+                "trace_commons.settle.minimal.v1" | COMPATIBILITY_SETTLE_IMPLEMENTATION
+            ),
             "bundle policy implementation is unavailable"
         );
         let legacy_admission =
@@ -3152,14 +3227,34 @@ impl MinimalPolicyBundle {
         let legacy_review =
             package.manifest.review.implementation_id == "trace_commons.review.minimal.v1";
         let config = parse_bundle_config(&package)?;
-        let score: Arc<dyn ScorePolicy> = if config.score_microcredits == 0 {
+        let compatibility_score =
+            package.manifest.score.implementation_id == COMPATIBILITY_SCORE_IMPLEMENTATION;
+        let compatibility_settle =
+            package.manifest.settle.implementation_id == COMPATIBILITY_SETTLE_IMPLEMENTATION;
+        let score: Arc<dyn ScorePolicy> = if compatibility_score {
+            let runtime = match runtime {
+                Some(runtime) => runtime,
+                None => {
+                    return Err(anyhow::anyhow!(
+                        "bundle policy implementation is unavailable"
+                    ));
+                }
+            };
+            let score_config = config
+                .compatibility
+                .clone()
+                .unwrap_or_else(CompatibilityBundleConfig::local_reference);
+            Arc::new(CompatibilityScorePolicy::new(runtime, score_config))
+        } else if config.score_microcredits == 0 {
             Arc::new(MinimalScorePolicy)
         } else {
             Arc::new(FixedScorePolicy {
                 credit_microcredits: Microcredits::from_raw(config.score_microcredits),
             })
         };
-        let settle: Arc<dyn SettlePolicy> = if config.include_index {
+        let settle: Arc<dyn SettlePolicy> = if compatibility_settle {
+            Arc::new(CompatibilitySettlePolicy)
+        } else if config.include_index {
             Arc::new(FixedSettlePolicy { include: true })
         } else {
             Arc::new(MinimalSettlePolicy)
@@ -3225,6 +3320,9 @@ pub struct PipelineService {
     credit_cap_microcredits: u64,
     score_evaluations: AtomicUsize,
     settle_evaluations: AtomicUsize,
+    scorer: Arc<dyn PerplexityScorer>,
+    embedder: Arc<dyn Embedder>,
+    score_fail: Arc<AtomicBool>,
 }
 
 impl PipelineService {
@@ -3260,7 +3358,34 @@ impl PipelineService {
         index: Arc<IsolatedPipelineIndex>,
         near: Arc<RecordingNearAdapter>,
     ) -> anyhow::Result<Self> {
-        let bundle = MinimalPolicyBundle::build()?;
+        Self::new_with_ops_and_bundle(
+            backend,
+            artifact_store,
+            fail_phase,
+            crash_point,
+            index,
+            near,
+            None,
+        )
+    }
+
+    pub fn new_with_ops_and_bundle(
+        backend: Arc<PgBackend>,
+        artifact_store: Arc<dyn TraceArtifactStore>,
+        fail_phase: Option<Phase>,
+        crash_point: Option<PipelineCrashPoint>,
+        index: Arc<IsolatedPipelineIndex>,
+        near: Arc<RecordingNearAdapter>,
+        default_bundle: Option<MinimalPolicyBundle>,
+    ) -> anyhow::Result<Self> {
+        let score_fail = Arc::new(AtomicBool::new(false));
+        let scorer: Arc<dyn PerplexityScorer> =
+            Arc::new(TogglePerplexityScorer::new(score_fail.clone()));
+        let embedder: Arc<dyn Embedder> = Arc::new(ReferenceEmbedder::new());
+        let bundle = match default_bundle {
+            Some(bundle) => bundle,
+            None => MinimalPolicyBundle::build()?,
+        };
         bundle.package.validate()?;
         Ok(Self {
             store: PgPipelineStore::new(backend.clone()),
@@ -3276,7 +3401,52 @@ impl PipelineService {
             credit_cap_microcredits: PIPELINE_TEST_CREDIT_CAP_MICROCREDITS,
             score_evaluations: AtomicUsize::new(0),
             settle_evaluations: AtomicUsize::new(0),
+            scorer,
+            embedder,
+            score_fail,
         })
+    }
+
+    pub fn new_compatibility(
+        backend: Arc<PgBackend>,
+        artifact_store: Arc<dyn TraceArtifactStore>,
+    ) -> anyhow::Result<Self> {
+        let index = IsolatedPipelineIndex::new();
+        let score_fail = Arc::new(AtomicBool::new(false));
+        let scorer: Arc<dyn PerplexityScorer> =
+            Arc::new(TogglePerplexityScorer::new(score_fail.clone()));
+        let embedder: Arc<dyn Embedder> = Arc::new(ReferenceEmbedder::new());
+        let runtime = CompatibilityScoreRuntime {
+            scorer: scorer.clone(),
+            embedder: embedder.clone(),
+            index: index.clone(),
+        };
+        let bundle = MinimalPolicyBundle::build_compatibility_with_runtime(&runtime)?;
+        let mut service = Self::new_with_ops_and_bundle(
+            backend,
+            artifact_store,
+            None,
+            None,
+            index,
+            Arc::new(RecordingNearAdapter::new()),
+            Some(bundle),
+        )?;
+        service.scorer = scorer;
+        service.embedder = embedder;
+        service.score_fail = score_fail;
+        Ok(service)
+    }
+
+    fn score_runtime(&self) -> CompatibilityScoreRuntime {
+        CompatibilityScoreRuntime {
+            scorer: self.scorer.clone(),
+            embedder: self.embedder.clone(),
+            index: self.index.clone(),
+        }
+    }
+
+    pub fn set_score_dependency_failure(&self, fail: bool) {
+        self.score_fail.store(fail, Ordering::SeqCst);
     }
 
     pub fn bundle_id(&self) -> &str {
@@ -3538,8 +3708,9 @@ impl PipelineService {
                 PIPELINE_POLICY_TERMINATED_LABEL
             }
         );
-        let bundle = MinimalPolicyBundle::from_package(package)
-            .map_err(|_| anyhow::anyhow!(PIPELINE_BUNDLE_INVALID_LABEL))?;
+        let bundle =
+            MinimalPolicyBundle::from_package_with_runtime(package, Some(&self.score_runtime()))
+                .map_err(|_| anyhow::anyhow!(PIPELINE_BUNDLE_INVALID_LABEL))?;
         let config = parse_bundle_config(&bundle.package)?;
         tx.execute(
             "SELECT pg_advisory_xact_lock(hashtextextended($1, 0)),
@@ -3833,6 +4004,11 @@ impl PipelineService {
                     .await
                     .map_err(Into::into)
             }
+            Err(error) if error.to_string().contains(PIPELINE_SCORE_DEPENDENCY_LABEL) => Ok(Some(
+                self.store
+                    .mark_retry(&run, PIPELINE_SCORE_DEPENDENCY_LABEL)
+                    .await?,
+            )),
             Err(_) => Ok(Some(
                 self.store
                     .mark_retry(&run, PIPELINE_OPERATIONAL_ERROR_LABEL)
@@ -3867,7 +4043,7 @@ impl PipelineService {
                 return Err(PIPELINE_POLICY_TERMINATED_LABEL.to_string());
             }
         }
-        MinimalPolicyBundle::from_package(package)
+        MinimalPolicyBundle::from_package_with_runtime(package, Some(&self.score_runtime()))
             .map_err(|_| PIPELINE_BUNDLE_INVALID_LABEL.to_string())
     }
 
@@ -4015,17 +4191,57 @@ impl PipelineService {
             .approved_revision_id
             .ok_or_else(|| anyhow::anyhow!("approved revision is missing"))?;
         self.score_evaluations.fetch_add(1, Ordering::SeqCst);
+        let reviewed_artifact = self.load_reviewed_bytes(run).await?;
         let mut result = bundle
             .score
             .execute(&ScoreInput {
                 run_id: run.run_id,
                 trace_id: run.trace_id,
                 registry_revision_id: revision_id,
-                source_content_hash: run.request_content_hash.clone(),
+                source_content_hash: run
+                    .transformed_content_hash
+                    .clone()
+                    .unwrap_or_else(|| run.request_content_hash.clone()),
+                tenant_id: run.tenant_id.clone(),
+                reviewed_artifact,
             })
             .await?;
         let config = parse_bundle_config(&bundle.package)?;
-        if config.include_index {
+        if !result.evidence.pending_embeddings.is_empty()
+            || result.evidence.pending_neighbor_bytes.is_some()
+        {
+            let wrapper = serde_json::to_vec(&serde_json::json!({
+                "schema": "trace_commons.pipeline_score_embedding.v1",
+                "model_id": result.evidence.embedder_model_id,
+                "projection_id": result.evidence.projection_id,
+                "embeddings": result.evidence.pending_embeddings,
+                "embedding": result.evidence.pending_embeddings.first(),
+            }))?;
+            let receipt = self.artifact_store.put_serialized_json(
+                &tenant_storage_ref(&run.tenant_id),
+                TraceArtifactKind::VectorPayload,
+                &format!("pipeline-score-embedding-{}", run.run_id),
+                &wrapper,
+            )?;
+            result.evidence.embedding_artifact_hash =
+                Some(format!("sha256:{}", receipt.ciphertext_sha256));
+            result.evidence.embedding_object_key = Some(receipt.object_key);
+            result.evidence.pending_embeddings.clear();
+            if let Some(neighbors) = result.evidence.pending_neighbor_bytes.take() {
+                let neighbor_wrapper = serde_json::json!({
+                    "schema": "trace_commons.pipeline_score_neighbors.v1",
+                    "neighbors_base64": base64::engine::general_purpose::STANDARD.encode(&neighbors),
+                });
+                let neighbor_receipt = self.artifact_store.put_serialized_json(
+                    &tenant_storage_ref(&run.tenant_id),
+                    TraceArtifactKind::VectorPayload,
+                    &format!("pipeline-score-neighbors-{}", run.run_id),
+                    &serde_json::to_vec(&neighbor_wrapper)?,
+                )?;
+                result.evidence.neighbor_artifact_hash =
+                    Some(format!("sha256:{}", neighbor_receipt.ciphertext_sha256));
+            }
+        } else if config.include_index {
             let embedding = deterministic_pipeline_embedding(&run.request_content_hash);
             let wrapper = serde_json::to_vec(&serde_json::json!({
                 "schema": "trace_commons.pipeline_score_embedding.v1",
@@ -4039,6 +4255,7 @@ impl PipelineService {
             )?;
             result.evidence.embedding_artifact_hash =
                 Some(format!("sha256:{}", receipt.ciphertext_sha256));
+            result.evidence.embedding_object_key = Some(receipt.object_key);
             let snapshot = self.index.snapshot(&run.tenant_id, PIPELINE_INDEX_ID)?;
             result.evidence.index_id = Some(PIPELINE_INDEX_ID.to_string());
             result.evidence.index_snapshot_id = Some(snapshot.snapshot_id);
@@ -4112,15 +4329,16 @@ impl PipelineService {
                         registry_revision_id: revision_id,
                         source_content_hash: run.request_content_hash.clone(),
                         score: score.clone(),
+                        score_evidence: score_evidence.clone(),
                     })
                     .await?;
                 match membership.decision.index_membership {
                     IndexMembershipDecision::Include { .. } => {
-                        let embedding = self.load_score_embedding(&run, &score_evidence).await?;
-                        let command = SealedIndexCommand::include(
+                        let embeddings = self.load_score_embeddings(&run, &score_evidence).await?;
+                        let command = SealedIndexCommand::include_chunks(
                             revision_id,
                             run.request_content_hash.clone(),
-                            embedding,
+                            embeddings,
                         )?;
                         let bytes = command.canonical_bytes()?;
                         let command_hash = command.command_hash()?;
@@ -4690,28 +4908,114 @@ impl PipelineService {
         Ok(command)
     }
 
-    async fn load_score_embedding(
+    async fn load_score_embeddings(
         &self,
         run: &PipelineRunRecord,
         evidence: &ScoreEvidence,
-    ) -> anyhow::Result<Vec<f32>> {
-        if let Some(hash) = evidence.embedding_artifact_hash.as_deref() {
+    ) -> anyhow::Result<Vec<Vec<f32>>> {
+        if let (Some(object_key), Some(hash)) = (
+            evidence.embedding_object_key.as_deref(),
+            evidence.embedding_artifact_hash.as_deref(),
+        ) {
             let expected = hash
                 .strip_prefix("sha256:")
                 .ok_or_else(|| anyhow::anyhow!("embedding hash is malformed"))?;
-            let object_id = format!("pipeline-score-embedding-{}", run.run_id);
-            // Object keys are store-assigned; recover by hashing the known payload.
-            let embedding = deterministic_pipeline_embedding(&run.request_content_hash);
-            let wrapper = serde_json::json!({
-                "schema": "trace_commons.pipeline_score_embedding.v1",
-                "embedding": embedding,
-            });
-            let _ = expected;
-            let _ = object_id;
-            let _ = wrapper;
-            return Ok(embedding);
+            let wrapper = self.artifact_store.read_json_by_object_key(
+                &tenant_storage_ref(&run.tenant_id),
+                TraceArtifactKind::VectorPayload,
+                object_key,
+                expected,
+            )?;
+            if let Some(embeddings) = wrapper
+                .get("embeddings")
+                .and_then(|value| serde_json::from_value::<Vec<Vec<f32>>>(value.clone()).ok())
+            {
+                if !embeddings.is_empty() {
+                    return Ok(embeddings);
+                }
+            }
+            if let Some(embedding) = wrapper
+                .get("embedding")
+                .and_then(|value| serde_json::from_value::<Vec<f32>>(value.clone()).ok())
+            {
+                if !embedding.is_empty() {
+                    return Ok(vec![embedding]);
+                }
+            }
         }
-        Ok(deterministic_pipeline_embedding(&run.request_content_hash))
+        Ok(vec![deterministic_pipeline_embedding(
+            &run.request_content_hash,
+        )])
+    }
+
+    async fn load_reviewed_bytes(&self, run: &PipelineRunRecord) -> anyhow::Result<Vec<u8>> {
+        let object_ref_id = run
+            .transformed_object_ref_id
+            .unwrap_or(run.source_object_ref_id);
+        let object_ref = self
+            .backend
+            .list_trace_object_refs(&run.tenant_id, run.submission_id)
+            .await?
+            .into_iter()
+            .find(|object_ref| object_ref.object_ref_id == object_ref_id)
+            .ok_or_else(|| anyhow::anyhow!("reviewed artifact reference is missing"))?;
+        self.backend
+            .append_trace_audit_event(TraceAuditEventWrite {
+                audit_event_id: Uuid::new_v4(),
+                tenant_id: run.tenant_id.clone(),
+                actor_principal_ref: "pipeline_worker".to_string(),
+                actor_role: "score_worker".to_string(),
+                action: TraceAuditAction::Read,
+                reason: Some("pipeline_score_content_read".to_string()),
+                request_id: None,
+                submission_id: Some(run.submission_id),
+                object_ref_id: Some(object_ref.object_ref_id),
+                export_manifest_id: None,
+                decision_inputs_hash: Some(
+                    run.transformed_content_hash
+                        .clone()
+                        .unwrap_or_else(|| run.request_content_hash.clone()),
+                ),
+                previous_event_hash: None,
+                event_hash: None,
+                canonical_event_json: None,
+                metadata: TraceAuditSafeMetadata::TraceContentRead {
+                    surface: "versioned_pipeline_score".to_string(),
+                    purpose_hash: Some(sha256_prefixed(b"pipeline_score_policy")),
+                },
+            })
+            .await?;
+        let receipt = EncryptedTraceArtifactReceipt {
+            tenant_storage_ref: tenant_storage_ref(&run.tenant_id),
+            artifact_kind: TraceArtifactKind::ContributionEnvelope,
+            object_key: object_ref.object_key,
+            ciphertext_sha256: object_ref
+                .content_sha256
+                .strip_prefix("sha256:")
+                .ok_or_else(|| anyhow::anyhow!("reviewed artifact hash is malformed"))?
+                .to_string(),
+            encrypted_at: object_ref.created_at,
+        };
+        let wrapper = self
+            .artifact_store
+            .read_json(&receipt.tenant_storage_ref, &receipt)?;
+        let encoded = wrapper
+            .get("request_bytes_base64")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("reviewed artifact payload is malformed"))?;
+        let bytes = base64::engine::general_purpose::STANDARD.decode(encoded)?;
+        if let Some(expected) = run.transformed_content_hash.as_deref() {
+            anyhow::ensure!(
+                sha256_prefixed(&bytes) == expected,
+                "reviewed artifact content hash mismatch"
+            );
+        } else {
+            anyhow::ensure!(
+                sha256_prefixed(&bytes) == run.request_content_hash,
+                "source artifact content hash mismatch"
+            );
+        }
+        Ok(bytes)
     }
 
     async fn load_source_bytes(&self, run: &PipelineRunRecord) -> anyhow::Result<Vec<u8>> {
@@ -4843,7 +5147,7 @@ mod tests {
                 run_id,
                 trace_id,
                 source_content_hash: hash.clone(),
-                source_artifact: bytes,
+                source_artifact: bytes.clone(),
                 admission: AdmissionDecision::Admit,
                 human_assessment: None,
             })
@@ -4862,6 +5166,8 @@ mod tests {
                 trace_id,
                 registry_revision_id,
                 source_content_hash: hash.clone(),
+                tenant_id: "tenant-test".to_string(),
+                reviewed_artifact: bytes,
             })
             .await
             .unwrap();
@@ -4873,6 +5179,7 @@ mod tests {
                 registry_revision_id,
                 source_content_hash: hash,
                 score: score.decision,
+                score_evidence: score.evidence,
             })
             .await
             .unwrap();
@@ -4977,5 +5284,83 @@ mod tests {
             )
             .unwrap();
         assert!(neighbors.is_empty());
+    }
+
+    #[tokio::test]
+    async fn compatibility_bundle_binds_score_and_settle_identities() {
+        let bundle = MinimalPolicyBundle::build_compatibility().unwrap();
+        bundle.package.validate().unwrap();
+        assert_eq!(
+            bundle.package.manifest.score.implementation_id,
+            crate::versioned_pipeline_compat::COMPATIBILITY_SCORE_IMPLEMENTATION
+        );
+        assert_eq!(
+            bundle.package.manifest.settle.implementation_id,
+            crate::versioned_pipeline_compat::COMPATIBILITY_SETTLE_IMPLEMENTATION
+        );
+        assert!(
+            bundle
+                .package
+                .manifest
+                .score
+                .projection_ids
+                .contains(&crate::versioned_pipeline_index::PIPELINE_PROJECTION_ID.to_string())
+        );
+        let bytes = br#"{"schema_version":"ironclaw.trace_contribution.v1","events":[]}"#.to_vec();
+        let hash = sha256_prefixed(&bytes);
+        let run_id = Uuid::new_v4();
+        let trace_id = Uuid::new_v4();
+        let review = bundle
+            .review
+            .execute(&ReviewInput {
+                run_id,
+                trace_id,
+                source_content_hash: hash.clone(),
+                source_artifact: bytes.clone(),
+                admission: AdmissionDecision::Admit,
+                human_assessment: None,
+            })
+            .await
+            .unwrap();
+        let ReviewDecision::Approved {
+            registry_revision_id,
+        } = review.decision
+        else {
+            panic!("compatibility review must approve");
+        };
+        let score = bundle
+            .score
+            .execute(&ScoreInput {
+                run_id,
+                trace_id,
+                registry_revision_id,
+                source_content_hash: hash.clone(),
+                tenant_id: "tenant-compat".to_string(),
+                reviewed_artifact: bytes,
+            })
+            .await
+            .unwrap();
+        assert!(score.evidence.quality_passed.is_some());
+        assert!(score.evidence.index_cardinality.is_some());
+        assert_eq!(
+            score.evaluation.rule_id,
+            crate::versioned_pipeline_compat::COMPATIBILITY_SCORE_RULE
+        );
+        let settle = bundle
+            .settle
+            .execute(&SettleInput {
+                run_id,
+                trace_id,
+                registry_revision_id,
+                source_content_hash: hash,
+                score: score.decision,
+                score_evidence: score.evidence,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            settle.evaluation.rule_id,
+            crate::versioned_pipeline_compat::COMPATIBILITY_SETTLE_RULE
+        );
     }
 }

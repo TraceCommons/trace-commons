@@ -4,7 +4,7 @@
 > Then add recovery, index and credit operations, and production policies in
 > small steps that reviewers can check.
 
-- **Status:** Phase 3 implemented
+- **Status:** Phase 5 implemented
 - **Date:** 2026-09-14
 - **Architecture:** [proposal.md](./proposal.md)
 - **Final acceptance:** [system-behavioral-contracts.md](./system-behavioral-contracts.md)
@@ -388,6 +388,10 @@ all implemented content and operation paths must obey their guards.
 
 **Outcome:** A bundle matches the approved current review, scoring, index,
 and settlement results through the new phase boundaries.
+
+**Implementation:** The isolated local/test path is documented in
+[phase-5.md](./phase-5.md). The comparison mapping is
+[compatibility-mapping.md](./compatibility-mapping.md).
 
 ### Ordered review steps
 

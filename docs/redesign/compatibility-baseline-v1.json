@@ -1,0 +1,72 @@
+{
+  "schema": "trace_commons.compatibility_baseline.v1",
+  "scope": "local_versioned_pipeline_compatibility_bundle",
+  "mapping": "docs/redesign/compatibility-mapping.md",
+  "corpus": {
+    "path": "docs/redesign/fixtures/minimal-corpus-v1.json",
+    "order": "file_sequence",
+    "initial_index": "empty"
+  },
+  "configuration_identities": {
+    "scorer_model_id": "reference_perplexity.v1",
+    "embedder_model_id": "reference_embedder.v1",
+    "projection_id": "pipeline-test-projection-v1",
+    "index_id": "pipeline-test-index-v1",
+    "credit_quality_version": 2,
+    "gate_floors": "local_zero_uncalibrated_reference",
+    "external_payout": false
+  },
+  "legacy_to_new": {
+    "perplexity_passed": "score_evidence.quality_passed",
+    "novelty_passed": "score_evidence.novelty_passed",
+    "inserted_chunk_entries_nonempty": "settle_include",
+    "inserted_chunk_entries_empty": "settle_exclude",
+    "evaluate_insert": "forbidden_in_score",
+    "q_micros": "score_decision.credit_microcredits",
+    "anomaly_withheld": "zero_credit_and_exclude"
+  },
+  "required_behavior_changes": [
+    "score_does_not_write_index",
+    "deterministic_index_keys",
+    "membership_from_committed_score_evidence",
+    "review_unchanged_after_score_failure"
+  ],
+  "expected_fixture_classes": {
+    "clean_tool_plan": {
+      "admission": "admit",
+      "review": "approved",
+      "score": "completed",
+      "settle": "completed"
+    },
+    "locally_redacted_secret": {
+      "admission": "admit",
+      "review": "approved",
+      "score": "completed",
+      "settle": "completed"
+    },
+    "privacy_quarantine_approved": {
+      "admission": "quarantine",
+      "review": "approved",
+      "score": "completed",
+      "settle": "completed"
+    },
+    "privacy_quarantine_rejected": {
+      "admission": "quarantine",
+      "review": "rejected",
+      "score": "skipped",
+      "settle": "skipped"
+    },
+    "privacy_risk_rejected": {
+      "admission": "reject",
+      "review": "skipped",
+      "score": "skipped",
+      "settle": "skipped"
+    }
+  },
+  "limitations": [
+    "Local compatibility uses the reference scorer and embedder.",
+    "Gate floors are zero because that scorer is not a production model.",
+    "Historical production behavior does not need deterministic replay.",
+    "Stored evidence must still explain each Score and Settle decision."
+  ]
+}

@@ -61,6 +61,8 @@ struct ServeArgs {
     #[arg(long)]
     allow_minimal_policies: bool,
     #[arg(long)]
+    compatibility_policies: bool,
+    #[arg(long)]
     skip_migrations: bool,
     #[arg(long)]
     fail_phase: Option<PhaseArg>,
@@ -292,11 +294,19 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
             args.artifact_root,
             SecretsCrypto::new(SecretString::from(master_key))?,
         ));
-    let pipeline = Arc::new(PipelineService::new(
-        backend.clone(),
-        artifact_store,
-        args.fail_phase.map(Into::into),
-    )?);
+    let pipeline = Arc::new(if args.compatibility_policies {
+        anyhow::ensure!(
+            args.fail_phase.is_none(),
+            "compatibility policies do not support --fail-phase"
+        );
+        PipelineService::new_compatibility(backend.clone(), artifact_store)?
+    } else {
+        PipelineService::new(
+            backend.clone(),
+            artifact_store,
+            args.fail_phase.map(Into::into),
+        )?
+    });
     let bundle_id = pipeline.bundle_id().to_string();
     let state = Arc::new(HttpState {
         pipeline,
