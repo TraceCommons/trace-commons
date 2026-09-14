@@ -20,4 +20,7 @@ pub use perplexity::{
     ChunkPerplexity, PerplexityResult, PerplexityScorer, TokenRarityResult, TokenRarityScorer,
 };
 pub use reference::{ReferenceEmbedder, ReferencePerplexityScorer};
-pub use vector_index::{NearestNeighbor, VectorIndex};
+pub use vector_index::{
+    IndexEntryKey, IndexSnapshot, IndexUpsertResult, IndexWriteError, NearestNeighbor, VectorIndex,
+    VectorIndexReader, VectorIndexWriter,
+};

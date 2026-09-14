@@ -342,6 +342,26 @@ pub struct ReviewEvaluation {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ScoreEvidence {
     pub fixed_credit_microcredits: Microcredits,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedding_artifact_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index_snapshot_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index_snapshot_hash: Option<String>,
+}
+
+impl ScoreEvidence {
+    pub fn fixed(fixed_credit_microcredits: Microcredits) -> Self {
+        Self {
+            fixed_credit_microcredits,
+            embedding_artifact_hash: None,
+            index_id: None,
+            index_snapshot_id: None,
+            index_snapshot_hash: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -354,6 +374,24 @@ pub struct ScoreEvaluation {
 pub struct SettleEvidence {
     pub index_operation_required: bool,
     pub credit_operation_required: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index_command_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credit_progress: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index_progress: Option<String>,
+}
+
+impl SettleEvidence {
+    pub fn operations(index_operation_required: bool, credit_operation_required: bool) -> Self {
+        Self {
+            index_operation_required,
+            credit_operation_required,
+            index_command_hash: None,
+            credit_progress: None,
+            index_progress: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

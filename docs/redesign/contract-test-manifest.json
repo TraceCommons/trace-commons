@@ -1,6 +1,6 @@
 {
   "schema": "trace_commons.contract_test_manifest.v1",
-  "updated_for_phase": 2,
+  "updated_for_phase": 3,
   "status_values": ["planned", "partial", "passing", "deferred"],
   "contract_groups": [
     {
@@ -77,9 +77,9 @@
     {
       "contract_ids": ["SCR-001", "SCR-002", "SCR-003", "SCR-004"],
       "boundary": "score policy, capabilities, units, and credit event",
-      "implementation_phase": 5,
+      "implementation_phase": 3,
       "evidence_status": "partial",
-      "test_ids": ["pipeline::checked_microcredit_conversion_is_exact", "minimal_policies_produce_explicit_zero_credit_completion"]
+      "test_ids": ["pipeline::checked_microcredit_conversion_is_exact", "minimal_policies_produce_explicit_zero_credit_completion", "versioned_pipeline_pg::four_index_and_credit_combinations_complete", "versioned_pipeline_index::reader_excludes_the_queried_revision"]
     },
     {
       "contract_ids": ["SCR-005"],
@@ -94,14 +94,14 @@
       "boundary": "index and credit settlement operations",
       "implementation_phase": 3,
       "evidence_status": "partial",
-      "test_ids": ["minimal_policies_produce_explicit_zero_credit_completion"]
+      "test_ids": ["minimal_policies_produce_explicit_zero_credit_completion", "versioned_pipeline_pg::four_index_and_credit_combinations_complete", "versioned_pipeline_pg::hold_and_index_failure_recover_independently", "versioned_pipeline_pg::compatible_runs_finalize_in_one_batch", "versioned_pipeline_pg::lost_index_response_and_stale_lease_reuse_sealed_command", "versioned_pipeline_pg::near_payout_states_do_not_change_settle_outcome", "versioned_pipeline_index::writer_refuses_equal_key_with_different_content"]
     },
     {
       "contract_ids": ["RUN-001", "RUN-002", "RUN-003", "RUN-004"],
       "boundary": "run state, uniqueness, leases, and crash recovery",
       "implementation_phase": 3,
       "evidence_status": "partial",
-      "test_ids": ["versioned_pipeline_pg::concurrent_receipts_and_workers_commit_one_logical_result", "versioned_pipeline_pg::stale_lease_cannot_commit_and_retry_exhaustion_is_visible", "versioned_pipeline_pg::crash_boundaries_one_through_five_converge_after_restart", "versioned_pipeline_pg::bound_bundle_survives_activation_and_rollback", "versioned_pipeline_pg::activation_after_resolution_does_not_rebind_the_receipt"]
+      "test_ids": ["versioned_pipeline_pg::concurrent_receipts_and_workers_commit_one_logical_result", "versioned_pipeline_pg::stale_lease_cannot_commit_and_retry_exhaustion_is_visible", "versioned_pipeline_pg::crash_boundaries_one_through_five_converge_after_restart", "versioned_pipeline_pg::crash_boundaries_six_through_eleven_converge_after_restart", "versioned_pipeline_pg::bound_bundle_survives_activation_and_rollback", "versioned_pipeline_pg::activation_after_resolution_does_not_rebind_the_receipt"]
     },
     {
       "contract_ids": ["RUN-005"],
@@ -122,14 +122,14 @@
       "boundary": "contributor and operator status",
       "implementation_phase": 6,
       "evidence_status": "partial",
-      "test_ids": ["minimal_pipeline_corpus"]
+      "test_ids": ["minimal_pipeline_corpus", "versioned_pipeline_pg::four_index_and_credit_combinations_complete"]
     },
     {
       "contract_ids": ["CRD-001", "CRD-002", "CRD-003", "CRD-004", "CRD-005"],
       "boundary": "ledger, approvals, holds, caps, and no clawback",
-      "implementation_phase": 4,
-      "evidence_status": "planned",
-      "test_ids": []
+      "implementation_phase": 3,
+      "evidence_status": "partial",
+      "test_ids": ["versioned_pipeline_pg::four_index_and_credit_combinations_complete", "versioned_pipeline_pg::hold_and_index_failure_recover_independently", "versioned_pipeline_pg::compatible_runs_finalize_in_one_batch"]
     },
     {
       "contract_ids": ["LIF-001", "LIF-002", "LIF-003"],
@@ -183,16 +183,16 @@
   ],
   "scenarios": [
     {"scenario_id": "SCN-001", "implementation_phase": 6, "evidence_status": "partial", "test_ids": ["minimal_pipeline_corpus"]},
-    {"scenario_id": "SCN-002", "implementation_phase": 3, "evidence_status": "planned", "test_ids": []},
+    {"scenario_id": "SCN-002", "implementation_phase": 3, "evidence_status": "partial", "test_ids": ["versioned_pipeline_pg::crash_boundaries_six_through_eleven_converge_after_restart"]},
     {"scenario_id": "SCN-003", "implementation_phase": 4, "evidence_status": "planned", "test_ids": []},
     {"scenario_id": "SCN-004", "implementation_phase": 4, "evidence_status": "planned", "test_ids": []},
     {"scenario_id": "SCN-005", "implementation_phase": 5, "evidence_status": "partial", "test_ids": ["versioned_pipeline_pg::policy_failure_records_an_error_without_a_decision"]},
-    {"scenario_id": "SCN-006", "implementation_phase": 3, "evidence_status": "planned", "test_ids": []},
+    {"scenario_id": "SCN-006", "implementation_phase": 3, "evidence_status": "partial", "test_ids": ["versioned_pipeline_pg::crash_boundaries_six_through_eleven_converge_after_restart"]},
     {"scenario_id": "SCN-007", "implementation_phase": 2, "evidence_status": "passing", "test_ids": ["versioned_pipeline_pg::bound_bundle_survives_activation_and_rollback", "versioned_pipeline_pg::activation_after_resolution_does_not_rebind_the_receipt"]},
     {"scenario_id": "SCN-008", "implementation_phase": 4, "evidence_status": "planned", "test_ids": []},
     {"scenario_id": "SCN-009", "implementation_phase": 4, "evidence_status": "planned", "test_ids": []},
     {"scenario_id": "SCN-010", "implementation_phase": 6, "evidence_status": "planned", "test_ids": []},
-    {"scenario_id": "SCN-011", "implementation_phase": 3, "evidence_status": "planned", "test_ids": []},
+    {"scenario_id": "SCN-011", "implementation_phase": 3, "evidence_status": "partial", "test_ids": ["versioned_pipeline_pg::near_payout_states_do_not_change_settle_outcome"]},
     {"scenario_id": "SCN-012", "implementation_phase": 7, "evidence_status": "partial", "test_ids": ["contract_test_manifest"]},
     {"scenario_id": "SCN-013", "implementation_phase": 7, "evidence_status": "partial", "test_ids": ["contract_test_manifest"]},
     {"scenario_id": "SCN-014", "implementation_phase": 6, "evidence_status": "planned", "test_ids": []},

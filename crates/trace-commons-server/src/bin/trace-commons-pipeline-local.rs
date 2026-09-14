@@ -1,4 +1,4 @@
-//! Local/test HTTP runner and corpus client for versioned pipeline Phase 2.
+//! Local/test HTTP runner and corpus client for the versioned pipeline.
 
 use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr};
@@ -38,7 +38,7 @@ use uuid::Uuid;
 
 #[derive(Debug, Parser)]
 #[command(name = "trace-commons-pipeline-local")]
-#[command(about = "Local/test-only Phase 2 pipeline")]
+#[command(about = "Local/test-only versioned pipeline")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -194,6 +194,10 @@ struct FixtureReport {
     score_microcredits: Option<u64>,
     finalized_microcredits: Option<u64>,
     batch_hash: Option<String>,
+    index_command_hash: Option<String>,
+    index_write_state: String,
+    credit_write_state: String,
+    payout_state: String,
     replay_same_run: bool,
     changed_content_refused: bool,
     failure_label: Option<String>,
@@ -729,10 +733,14 @@ fn fixture_report(
         phase_count: phases.len(),
         phases,
         approved_revision_id: inspection.run.approved_revision_id,
-        index_membership: inspection.run.index_membership,
+        index_membership: inspection.run.index_membership.clone(),
         score_microcredits,
         finalized_microcredits,
         batch_hash,
+        index_command_hash: inspection.run.index_command_hash.clone(),
+        index_write_state: inspection.run.index_write_state.clone(),
+        credit_write_state: inspection.run.credit_write_state.clone(),
+        payout_state: inspection.run.payout_state.clone(),
         replay_same_run,
         changed_content_refused,
         failure_label: inspection.run.last_error_label,
@@ -776,14 +784,17 @@ fn markdown_report(report: &CorpusReport) -> String {
     );
     for fixture in &report.fixtures {
         output.push_str(&format!(
-            "- `{}`: state `{:?}`, {} outcomes, {} attempts, {} ms in phase, score {} microcredits, index `{}`\n",
+            "- `{}`: state `{:?}`, {} outcomes, {} attempts, {} ms in phase, score {} microcredits, index `{}` (`{}`), credit `{}`, payout `{}`\n",
             fixture.label,
             fixture.state,
             fixture.phase_count,
             fixture.attempt_count,
             fixture.time_in_phase_ms,
             fixture.score_microcredits.unwrap_or(0),
-            fixture.index_membership
+            fixture.index_membership,
+            fixture.index_write_state,
+            fixture.credit_write_state,
+            fixture.payout_state
         ));
     }
     output

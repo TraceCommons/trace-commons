@@ -3,6 +3,7 @@ use std::sync::Arc;
 use chrono::{Duration, Utc};
 use secrecy::SecretString;
 use trace_commons_gate_api::pipeline::{Phase, ReviewDecision, ReviewInput};
+use trace_commons_gate_api::{IndexEntryKey, IndexWriteError, VectorIndexWriter};
 use trace_commons_protocol::trace_contribution::{
     DeterministicTraceRedactor, RawTraceCaptureTurn, RawTraceContribution,
     RecordedTraceContributionOptions, TraceRedactor,
@@ -14,10 +15,18 @@ use trace_commons_server::trace_artifact_store::{
     EncryptedTraceArtifact, EncryptedTraceArtifactReceipt, LocalEncryptedTraceArtifactStore,
     TraceArtifactKind, TraceArtifactStore,
 };
-use trace_commons_server::trace_corpus_storage::{TraceCorpusStatus, TraceCorpusStore};
+use trace_commons_server::trace_corpus_storage::{
+    TraceCorpusStatus, TraceCorpusStore, TraceCreditSettlementNearStatus,
+    TraceCreditSettlementState,
+};
 use trace_commons_server::versioned_pipeline::{
-    MinimalPolicyBundle, PgPipelineStore, PipelineCrashPoint, PipelineReceiptResult,
-    PipelineRunState, PipelineService, StoredPhaseResult,
+    MinimalPolicyBundle, PIPELINE_FIXED_POSITIVE_MICROCREDITS, PgPipelineStore, PipelineCrashPoint,
+    PipelineReceiptResult, PipelineRunState, PipelineService, StoredPhaseResult,
+};
+use trace_commons_server::versioned_pipeline_credit::RecordingNearAdapter;
+use trace_commons_server::versioned_pipeline_index::{
+    IndexFault, IsolatedPipelineIndex, PIPELINE_EMBEDDER_MODEL_ID, PIPELINE_INDEX_ID,
+    PIPELINE_PROJECTION_ID,
 };
 use uuid::Uuid;
 
@@ -174,12 +183,22 @@ async fn expire_leases(backend: &PgBackend, tenant_id: &str) {
 }
 
 async fn finish_run(service: &PipelineService, tenant_id: &str, run_id: Uuid) {
-    for _ in 0..6 {
+    for _ in 0..24 {
         let inspection = service.inspect(tenant_id, run_id).await.unwrap().unwrap();
         if inspection.run.state == PipelineRunState::Complete {
+            service.process_payout(tenant_id, run_id).await.unwrap();
             return;
         }
-        service.process_one(tenant_id, None).await.unwrap();
+        if inspection.run.state == PipelineRunState::Failed {
+            panic!("pipeline run failed: {:?}", inspection.run.last_error_label);
+        }
+        if inspection.run.next_attempt_at > Utc::now() {
+            let wait = (inspection.run.next_attempt_at - Utc::now())
+                .to_std()
+                .unwrap_or_else(|_| std::time::Duration::from_millis(5));
+            tokio::time::sleep(wait + std::time::Duration::from_millis(10)).await;
+        }
+        service.process_run(tenant_id, run_id, None).await.unwrap();
     }
     panic!("pipeline run did not complete");
 }
@@ -342,6 +361,10 @@ async fn phase_one_pipeline_is_idempotent_tenant_scoped_and_complete() {
         .unwrap();
     assert_eq!(settle.decision["credit_microcredits_finalized"], 0);
     assert!(settle.decision["settlement_batch_ref_hash"].is_null());
+    assert_eq!(complete.run.credit_write_state, "none");
+    assert_eq!(complete.run.index_write_state, "none");
+    assert_eq!(complete.run.payout_state, "none");
+    assert!(complete.run.credit_event_id.is_none());
     assert!(!serde_json::to_string(&complete).unwrap().contains(secret));
 
     let mut client = backend.trace_pool_for_test().get().await.unwrap();
@@ -1006,4 +1029,619 @@ async fn policy_failure_records_an_error_without_a_decision() {
             .iter()
             .all(|outcome| outcome.phase != Phase::Score)
     );
+}
+
+async fn activate_operations(
+    service: &PipelineService,
+    tenant: &str,
+    score_microcredits: u64,
+    include_index: bool,
+) {
+    let bundle = MinimalPolicyBundle::build_operations(score_microcredits, include_index).unwrap();
+    service
+        .register_bundle(tenant, &bundle.package)
+        .await
+        .unwrap();
+    service
+        .activate_bundle(tenant, &bundle.package.bundle_id)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn four_index_and_credit_combinations_complete() {
+    let Some(backend) = backend().await else {
+        return;
+    };
+    let (_root, service) = service(backend.clone(), None);
+    let principal = "principal_sha256:test";
+    for (score, include, label) in [
+        (0, false, "zero-exclude"),
+        (0, true, "zero-include"),
+        (
+            PIPELINE_FIXED_POSITIVE_MICROCREDITS,
+            false,
+            "positive-exclude",
+        ),
+        (
+            PIPELINE_FIXED_POSITIVE_MICROCREDITS,
+            true,
+            "positive-include",
+        ),
+    ] {
+        let tenant = format!("pipeline-combo-{label}-{}", Uuid::new_v4());
+        activate_operations(&service, &tenant, score, include).await;
+        let bytes = envelope_bytes(Uuid::new_v4(), "fixture-secret-not-present").await;
+        let PipelineReceiptResult::Created(created) = service
+            .submit(&tenant, principal, label, &bytes)
+            .await
+            .unwrap()
+        else {
+            panic!("{label} must create a run");
+        };
+        finish_run(&service, &tenant, created.run_id).await;
+        let complete = service
+            .inspect(&tenant, created.run_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(complete.run.state, PipelineRunState::Complete);
+        assert_eq!(
+            complete.run.index_membership,
+            if include { "included" } else { "excluded" }
+        );
+        assert_eq!(
+            complete.run.index_write_state,
+            if include { "complete" } else { "none" }
+        );
+        let score_outcome = complete
+            .outcomes
+            .iter()
+            .find(|outcome| outcome.phase == Phase::Score)
+            .unwrap();
+        assert_eq!(score_outcome.decision["credit_microcredits"], score);
+        let settle = complete
+            .outcomes
+            .iter()
+            .find(|outcome| outcome.phase == Phase::Settle)
+            .unwrap();
+        if score == 0 {
+            assert!(complete.run.credit_event_id.is_none());
+            assert_eq!(complete.run.credit_write_state, "none");
+            assert_eq!(settle.decision["credit_microcredits_finalized"], 0);
+            assert!(settle.decision["settlement_batch_ref_hash"].is_null());
+        } else {
+            assert!(complete.run.credit_event_id.is_some());
+            assert_eq!(complete.run.credit_write_state, "complete");
+            assert_eq!(settle.decision["credit_microcredits_finalized"], score);
+            assert!(settle.decision["settlement_batch_ref_hash"].is_string());
+        }
+        assert_eq!(
+            service.index().contains_revision(
+                &tenant,
+                PIPELINE_INDEX_ID,
+                complete.run.approved_revision_id.unwrap()
+            ),
+            include
+        );
+        let report = serde_json::to_string(&complete).unwrap();
+        assert!(!report.contains(principal));
+        let events = backend.list_trace_credit_events(&tenant).await.unwrap();
+        if score == 0 {
+            assert!(events.is_empty());
+        } else {
+            assert_eq!(events.len(), 1);
+            assert_eq!(
+                events[0].settlement_state,
+                TraceCreditSettlementState::Final
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn compatible_runs_finalize_in_one_batch() {
+    let Some(backend) = backend().await else {
+        return;
+    };
+    let tenant = format!("pipeline-batch-{}", Uuid::new_v4());
+    let (_root, service) = service(backend.clone(), None);
+    activate_operations(
+        &service,
+        &tenant,
+        PIPELINE_FIXED_POSITIVE_MICROCREDITS,
+        false,
+    )
+    .await;
+    let mut run_ids = Vec::new();
+    for index in 0..3 {
+        let bytes = envelope_bytes(Uuid::new_v4(), "fixture-secret-not-present").await;
+        let PipelineReceiptResult::Created(created) = service
+            .submit(
+                &tenant,
+                "principal_sha256:test",
+                &format!("batch-key-{index}"),
+                &bytes,
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("batch receipt must create a run");
+        };
+        run_ids.push(created.run_id);
+        service
+            .process_run(&tenant, created.run_id, None)
+            .await
+            .unwrap();
+        service
+            .process_run(&tenant, created.run_id, None)
+            .await
+            .unwrap();
+    }
+    for run_id in &run_ids {
+        finish_run(&service, &tenant, *run_id).await;
+    }
+    let mut hashes = Vec::new();
+    for run_id in &run_ids {
+        let inspection = service.inspect(&tenant, *run_id).await.unwrap().unwrap();
+        hashes.push(
+            inspection
+                .outcomes
+                .iter()
+                .find(|outcome| outcome.phase == Phase::Settle)
+                .and_then(|outcome| {
+                    outcome.decision["settlement_batch_ref_hash"]
+                        .as_str()
+                        .map(str::to_string)
+                }),
+        );
+    }
+    assert!(hashes.iter().all(|hash| hash.is_some()));
+    // The first Settle call batches every pending event. Later runs reuse that batch.
+    assert_eq!(hashes[0], hashes[1]);
+    assert_eq!(hashes[1], hashes[2]);
+}
+
+#[tokio::test]
+async fn hold_and_index_failure_recover_independently() {
+    let Some(backend) = backend().await else {
+        return;
+    };
+    let tenant = format!("pipeline-hold-{}", Uuid::new_v4());
+    let root = tempfile::tempdir().unwrap();
+    let artifacts = artifact_store(&root);
+    let index = IsolatedPipelineIndex::new();
+    let service = PipelineService::new_with_ops(
+        backend.clone(),
+        artifacts,
+        None,
+        None,
+        index.clone(),
+        std::sync::Arc::new(RecordingNearAdapter::new()),
+    )
+    .unwrap();
+    activate_operations(
+        &service,
+        &tenant,
+        PIPELINE_FIXED_POSITIVE_MICROCREDITS,
+        true,
+    )
+    .await;
+    let bytes = envelope_bytes(Uuid::new_v4(), "fixture-secret-not-present").await;
+    let principal = "principal_sha256:test";
+    let PipelineReceiptResult::Created(created) = service
+        .submit(&tenant, principal, "hold-key", &bytes)
+        .await
+        .unwrap()
+    else {
+        panic!("receipt must create a run");
+    };
+    let hold_id = service.place_credit_hold(&tenant, principal).await.unwrap();
+    service
+        .process_run(&tenant, created.run_id, None)
+        .await
+        .unwrap();
+    service
+        .process_run(&tenant, created.run_id, None)
+        .await
+        .unwrap();
+    service
+        .process_run(&tenant, created.run_id, None)
+        .await
+        .unwrap();
+    let paused = service
+        .inspect(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_ne!(paused.run.state, PipelineRunState::Complete);
+    assert!(paused.run.credit_event_id.is_some());
+    assert_eq!(paused.run.credit_write_state, "held");
+    assert_eq!(paused.run.index_write_state, "complete");
+    assert_eq!(index.entry_count(&tenant, PIPELINE_INDEX_ID), 1);
+    assert!(
+        paused
+            .outcomes
+            .iter()
+            .all(|outcome| outcome.phase != Phase::Settle)
+    );
+    service
+        .release_credit_hold(&tenant, hold_id, principal)
+        .await
+        .unwrap();
+    finish_run(&service, &tenant, created.run_id).await;
+    let complete = service
+        .inspect(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(complete.run.state, PipelineRunState::Complete);
+    assert_eq!(complete.run.credit_write_state, "complete");
+    assert_eq!(complete.run.index_write_state, "complete");
+    assert_eq!(
+        backend
+            .list_trace_credit_events(&tenant)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(index.entry_count(&tenant, PIPELINE_INDEX_ID), 1);
+
+    let fail_bytes = envelope_bytes(Uuid::new_v4(), "fixture-secret-not-present").await;
+    let PipelineReceiptResult::Created(failed_index) = service
+        .submit(&tenant, principal, "index-fail-key", &fail_bytes)
+        .await
+        .unwrap()
+    else {
+        panic!("index-failure receipt must create a run");
+    };
+    service
+        .process_run(&tenant, failed_index.run_id, None)
+        .await
+        .unwrap();
+    service
+        .process_run(&tenant, failed_index.run_id, None)
+        .await
+        .unwrap();
+    index.set_fault(IndexFault::FailBeforeApply);
+    service
+        .process_run(&tenant, failed_index.run_id, None)
+        .await
+        .unwrap();
+    let interrupted = service
+        .inspect(&tenant, failed_index.run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(interrupted.run.credit_event_id.is_some());
+    assert_eq!(interrupted.run.credit_write_state, "complete");
+    assert_eq!(interrupted.run.index_write_state, "pending");
+    assert!(
+        interrupted
+            .outcomes
+            .iter()
+            .all(|outcome| outcome.phase != Phase::Settle)
+    );
+    assert_eq!(
+        backend
+            .list_trace_credit_events(&tenant)
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+    finish_run(&service, &tenant, failed_index.run_id).await;
+    let recovered = service
+        .inspect(&tenant, failed_index.run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(recovered.run.state, PipelineRunState::Complete);
+    assert_eq!(recovered.run.index_write_state, "complete");
+    assert_eq!(recovered.run.credit_write_state, "complete");
+    assert_eq!(index.entry_count(&tenant, PIPELINE_INDEX_ID), 2);
+}
+
+#[tokio::test]
+async fn crash_boundaries_six_through_eleven_converge_after_restart() {
+    let Some(backend) = backend().await else {
+        return;
+    };
+    for crash_point in [
+        PipelineCrashPoint::AfterScoreCommit,
+        PipelineCrashPoint::AfterIndexCommandStorage,
+        PipelineCrashPoint::AfterIndexApply,
+        PipelineCrashPoint::AfterInternalSettlement,
+        PipelineCrashPoint::AfterSettleCommit,
+        PipelineCrashPoint::AfterNearSubmit,
+    ] {
+        let tenant = format!("pipeline-crash-{:?}-{}", crash_point, Uuid::new_v4());
+        let bytes = envelope_bytes(Uuid::new_v4(), "fixture-secret-not-present").await;
+        let root = tempfile::tempdir().unwrap();
+        let artifacts = artifact_store(&root);
+        let index = IsolatedPipelineIndex::new();
+        let near = std::sync::Arc::new(RecordingNearAdapter::new());
+        let payout = matches!(
+            crash_point,
+            PipelineCrashPoint::AfterSettleCommit | PipelineCrashPoint::AfterNearSubmit
+        );
+        let crashing = PipelineService::new_with_ops(
+            backend.clone(),
+            artifacts.clone(),
+            None,
+            Some(crash_point),
+            index.clone(),
+            near.clone(),
+        )
+        .unwrap();
+        if payout {
+            crashing.set_payout_enabled(true);
+        }
+        activate_operations(
+            &crashing,
+            &tenant,
+            PIPELINE_FIXED_POSITIVE_MICROCREDITS,
+            true,
+        )
+        .await;
+        let PipelineReceiptResult::Created(created) = crashing
+            .submit(&tenant, "principal_sha256:test", "crash-ops-key", &bytes)
+            .await
+            .unwrap()
+        else {
+            panic!("receipt must commit before worker crash");
+        };
+        crashing.process_one(&tenant, None).await.unwrap();
+        if crash_point == PipelineCrashPoint::AfterScoreCommit {
+            assert!(crashing.process_one(&tenant, None).await.is_err());
+        } else {
+            crashing.process_one(&tenant, None).await.unwrap();
+            assert!(crashing.process_one(&tenant, None).await.is_err());
+        }
+        expire_leases(&backend, &tenant).await;
+        let restarted = PipelineService::new_with_ops(
+            backend.clone(),
+            artifacts,
+            None,
+            None,
+            index.clone(),
+            near.clone(),
+        )
+        .unwrap();
+        if payout {
+            restarted.set_payout_enabled(true);
+        }
+        activate_operations(
+            &restarted,
+            &tenant,
+            PIPELINE_FIXED_POSITIVE_MICROCREDITS,
+            true,
+        )
+        .await;
+        finish_run(&restarted, &tenant, created.run_id).await;
+        let complete = restarted
+            .inspect(&tenant, created.run_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(complete.outcomes.len(), 4);
+        assert_eq!(
+            backend
+                .list_trace_credit_events(&tenant)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(index.entry_count(&tenant, PIPELINE_INDEX_ID), 1);
+        if matches!(
+            crash_point,
+            PipelineCrashPoint::AfterIndexCommandStorage | PipelineCrashPoint::AfterIndexApply
+        ) {
+            assert_eq!(crashing.settle_evaluations(), 1);
+            assert_eq!(restarted.settle_evaluations(), 0);
+        }
+        if crash_point == PipelineCrashPoint::AfterScoreCommit {
+            assert_eq!(crashing.score_evaluations(), 1);
+            assert_eq!(restarted.score_evaluations(), 0);
+        }
+        if payout {
+            assert_eq!(near.requests().len(), 1);
+        }
+        let replayed = serde_json::to_vec(&complete.outcomes).unwrap();
+        let again = restarted
+            .inspect(&tenant, created.run_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(serde_json::to_vec(&again.outcomes).unwrap(), replayed);
+    }
+}
+
+#[tokio::test]
+async fn lost_index_response_and_stale_lease_reuse_sealed_command() {
+    let Some(backend) = backend().await else {
+        return;
+    };
+    let tenant = format!("pipeline-lost-{}", Uuid::new_v4());
+    let root = tempfile::tempdir().unwrap();
+    let artifacts = artifact_store(&root);
+    let index = IsolatedPipelineIndex::new();
+    let service = PipelineService::new_with_ops(
+        backend.clone(),
+        artifacts,
+        None,
+        None,
+        index.clone(),
+        std::sync::Arc::new(RecordingNearAdapter::new()),
+    )
+    .unwrap();
+    activate_operations(
+        &service,
+        &tenant,
+        PIPELINE_FIXED_POSITIVE_MICROCREDITS,
+        true,
+    )
+    .await;
+    let bytes = envelope_bytes(Uuid::new_v4(), "fixture-secret-not-present").await;
+    let PipelineReceiptResult::Created(created) = service
+        .submit(&tenant, "principal_sha256:test", "lost-key", &bytes)
+        .await
+        .unwrap()
+    else {
+        panic!("receipt must create a run");
+    };
+    service
+        .process_run(&tenant, created.run_id, None)
+        .await
+        .unwrap();
+    service
+        .process_run(&tenant, created.run_id, None)
+        .await
+        .unwrap();
+    index.set_fault(IndexFault::LostAfterApply);
+    service
+        .process_run(&tenant, created.run_id, None)
+        .await
+        .unwrap();
+    assert_eq!(index.entry_count(&tenant, PIPELINE_INDEX_ID), 1);
+    expire_leases(&backend, &tenant).await;
+    let writer_calls = index.writer_calls();
+    assert_eq!(service.settle_evaluations(), 1);
+    finish_run(&service, &tenant, created.run_id).await;
+    assert!(index.writer_calls() > writer_calls);
+    assert_eq!(index.entry_count(&tenant, PIPELINE_INDEX_ID), 1);
+    assert_eq!(service.settle_evaluations(), 1);
+    let complete = service
+        .inspect(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(complete.run.state, PipelineRunState::Complete);
+    assert!(complete.run.index_command_hash.is_some());
+
+    let conflict_key = IndexEntryKey {
+        tenant_id: tenant.clone(),
+        index_id: PIPELINE_INDEX_ID.to_string(),
+        revision_id: complete.run.approved_revision_id.unwrap(),
+        projection_id: PIPELINE_PROJECTION_ID.to_string(),
+        model_id: PIPELINE_EMBEDDER_MODEL_ID.to_string(),
+        chunk: 0,
+    };
+    assert_eq!(
+        index.upsert(
+            &conflict_key,
+            &[0.0; 4],
+            "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        ),
+        Err(IndexWriteError::ContentConflict)
+    );
+    assert_eq!(index.entry_count(&tenant, PIPELINE_INDEX_ID), 1);
+}
+
+#[tokio::test]
+async fn near_payout_states_do_not_change_settle_outcome() {
+    let Some(backend) = backend().await else {
+        return;
+    };
+    let tenant = format!("pipeline-near-{}", Uuid::new_v4());
+    let root = tempfile::tempdir().unwrap();
+    let artifacts = artifact_store(&root);
+    let near = std::sync::Arc::new(RecordingNearAdapter::new());
+    let service = PipelineService::new_with_ops(
+        backend.clone(),
+        artifacts,
+        None,
+        None,
+        IsolatedPipelineIndex::new(),
+        near.clone(),
+    )
+    .unwrap();
+    activate_operations(
+        &service,
+        &tenant,
+        PIPELINE_FIXED_POSITIVE_MICROCREDITS,
+        false,
+    )
+    .await;
+    let bytes = envelope_bytes(Uuid::new_v4(), "fixture-secret-not-present").await;
+    let PipelineReceiptResult::Created(created) = service
+        .submit(&tenant, "principal_sha256:test", "near-key", &bytes)
+        .await
+        .unwrap()
+    else {
+        panic!("receipt must create a run");
+    };
+    finish_run(&service, &tenant, created.run_id).await;
+    let before = service
+        .inspect(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(before.run.payout_state, "disabled");
+    let outcome_bytes = serde_json::to_vec(&before.outcomes).unwrap();
+    let disabled_items = backend
+        .list_trace_near_credit_outbox_items(&tenant)
+        .await
+        .unwrap();
+    assert_eq!(disabled_items.len(), 1);
+    assert_eq!(
+        disabled_items[0].status,
+        TraceCreditSettlementNearStatus::Disabled
+    );
+    service.set_payout_enabled(true);
+    near.fail_next();
+    service
+        .process_payout(&tenant, created.run_id)
+        .await
+        .unwrap();
+    let failed = service
+        .inspect(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(serde_json::to_vec(&failed.outcomes).unwrap(), outcome_bytes);
+    assert_eq!(failed.run.payout_state, "failed");
+    assert_eq!(
+        backend
+            .list_trace_near_credit_outbox_items(&tenant)
+            .await
+            .unwrap()[0]
+            .status,
+        TraceCreditSettlementNearStatus::Failed
+    );
+    service
+        .process_payout(&tenant, created.run_id)
+        .await
+        .unwrap();
+    let after = service
+        .inspect(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(serde_json::to_vec(&after.outcomes).unwrap(), outcome_bytes);
+    assert_eq!(after.run.payout_state, "confirmed");
+    let items = backend
+        .list_trace_near_credit_outbox_items(&tenant)
+        .await
+        .unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].status, TraceCreditSettlementNearStatus::Confirmed);
+    assert_eq!(near.requests().len(), 1);
+    service
+        .process_payout(&tenant, created.run_id)
+        .await
+        .unwrap();
+    let replayed = service
+        .inspect(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::to_vec(&replayed.outcomes).unwrap(),
+        outcome_bytes
+    );
+    assert_eq!(replayed.run.payout_state, "confirmed");
+    assert_eq!(near.requests().len(), 1);
 }

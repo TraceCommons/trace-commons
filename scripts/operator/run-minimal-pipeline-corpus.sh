@@ -2,16 +2,27 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-PORT="${TRACE_COMMONS_PIPELINE_PORT:-3917}"
+PORT="${TRACE_COMMONS_PIPELINE_PORT:-3918}"
 PG_PORT="${TRACE_COMMONS_PIPELINE_PG_PORT:-55439}"
-CONTAINER="trace-commons-pipeline-phase2-$$"
-ARTIFACT_ROOT="${ROOT}/.local/pipeline-phase2-artifacts"
-JSON_REPORT="${ROOT}/.local/pipeline-report-v2.json"
-MARKDOWN_REPORT="${ROOT}/.local/pipeline-report-v2.md"
-SERVER_LOG="${ROOT}/.local/pipeline-phase2-server.log"
-MIGRATION_LOG="${ROOT}/.local/pipeline-phase2-migration.log"
+CONTAINER="trace-commons-pipeline-phase3-$$"
+ARTIFACT_ROOT="${ROOT}/.local/pipeline-phase3-artifacts"
+JSON_REPORT="${ROOT}/.local/pipeline-report-v3.json"
+MARKDOWN_REPORT="${ROOT}/.local/pipeline-report-v3.md"
+SERVER_LOG="${ROOT}/.local/pipeline-phase3-server.log"
+MIGRATION_LOG="${ROOT}/.local/pipeline-phase3-migration.log"
 SERVER_PID=""
 MIGRATION_PID=""
+
+if command -v lsof >/dev/null 2>&1; then
+  if lsof -nP -iTCP:"${PORT}" -sTCP:LISTEN >/dev/null 2>&1; then
+    echo "pipeline corpus port ${PORT} is already in use" >&2
+    exit 1
+  fi
+  if lsof -nP -iTCP:"${PG_PORT}" -sTCP:LISTEN >/dev/null 2>&1; then
+    echo "pipeline corpus postgres port ${PG_PORT} is already in use" >&2
+    exit 1
+  fi
+fi
 
 cleanup() {
   if [[ -n "${SERVER_PID}" ]]; then
@@ -32,7 +43,7 @@ rm -f "${JSON_REPORT}" "${MARKDOWN_REPORT}" "${SERVER_LOG}" "${MIGRATION_LOG}"
 
 docker run --rm --detach \
   --name "${CONTAINER}" \
-  -e POSTGRES_PASSWORD=phase2-admin \
+  -e POSTGRES_PASSWORD=phase3-admin \
   -p "127.0.0.1:${PG_PORT}:5432" \
   postgres:17-alpine >/dev/null
 
@@ -47,29 +58,36 @@ docker exec "${CONTAINER}" pg_isready -U postgres >/dev/null
 cd "${ROOT}"
 cargo build -p trace-commons-server --bin trace-commons-pipeline-local
 
-export TRACE_COMMONS_PIPELINE_MASTER_KEY="phase-2-local-master-key-material-32-bytes"
-export TRACE_COMMONS_PIPELINE_TOKENS="contributor-token,tenant-phase2,principal_sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,contributor;worker-token,tenant-phase2,worker_sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb,worker;operator-token,tenant-phase2,operator_sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc,operator;other-operator-token,tenant-other,operator_sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd,operator"
+export TRACE_COMMONS_PIPELINE_MASTER_KEY="phase-3-local-master-key-material-32-bytes"
+export TRACE_COMMONS_PIPELINE_TOKENS="contributor-token,tenant-phase3,principal_sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,contributor;worker-token,tenant-phase3,worker_sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb,worker;operator-token,tenant-phase3,operator_sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc,operator;other-operator-token,tenant-other,operator_sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd,operator"
 
 "${ROOT}/target/debug/trace-commons-pipeline-local" serve \
-  --database-url "postgres://postgres:phase2-admin@127.0.0.1:${PG_PORT}/postgres" \
+  --database-url "postgres://postgres:phase3-admin@127.0.0.1:${PG_PORT}/postgres" \
   --bind "127.0.0.1:${PORT}" \
   --artifact-root "${ARTIFACT_ROOT}" \
   --allow-minimal-policies >"${MIGRATION_LOG}" 2>&1 &
 MIGRATION_PID=$!
 
 for _ in $(seq 1 120); do
-  if curl --fail --silent "http://127.0.0.1:${PORT}/healthz" >/dev/null 2>&1; then
+  if ! kill -0 "${MIGRATION_PID}" 2>/dev/null; then
+    echo "migration server exited before health checks" >&2
+    cat "${MIGRATION_LOG}" >&2 || true
+    exit 1
+  fi
+  if curl --fail --silent "http://127.0.0.1:${PORT}/healthz" >/dev/null 2>&1 \
+    && docker exec "${CONTAINER}" psql -U postgres -tAc "SELECT 1 FROM pg_roles WHERE rolname = 'pipeline_claimer'" 2>/dev/null | grep -q 1; then
     break
   fi
   sleep 0.25
 done
 curl --fail --silent "http://127.0.0.1:${PORT}/healthz" >/dev/null
+docker exec "${CONTAINER}" psql -U postgres -tAc "SELECT 1 FROM pg_roles WHERE rolname = 'pipeline_claimer'" | grep -q 1
 kill "${MIGRATION_PID}"
 wait "${MIGRATION_PID}" 2>/dev/null || true
 MIGRATION_PID=""
 
 docker exec "${CONTAINER}" psql -U postgres -v ON_ERROR_STOP=1 -c \
-  "CREATE ROLE pipeline_runtime LOGIN PASSWORD 'phase2-runtime' NOBYPASSRLS;
+  "CREATE ROLE pipeline_runtime LOGIN PASSWORD 'phase3-runtime' NOBYPASSRLS;
    GRANT pipeline_claimer TO pipeline_runtime;
    GRANT CONNECT ON DATABASE postgres TO pipeline_runtime;
    GRANT USAGE ON SCHEMA public TO pipeline_runtime;
@@ -78,7 +96,7 @@ docker exec "${CONTAINER}" psql -U postgres -v ON_ERROR_STOP=1 -c \
    GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO pipeline_runtime;" >/dev/null
 
 "${ROOT}/target/debug/trace-commons-pipeline-local" serve \
-  --database-url "postgres://pipeline_runtime:phase2-runtime@127.0.0.1:${PG_PORT}/postgres" \
+  --database-url "postgres://pipeline_runtime:phase3-runtime@127.0.0.1:${PG_PORT}/postgres" \
   --bind "127.0.0.1:${PORT}" \
   --artifact-root "${ARTIFACT_ROOT}" \
   --allow-minimal-policies \
@@ -86,6 +104,11 @@ docker exec "${CONTAINER}" psql -U postgres -v ON_ERROR_STOP=1 -c \
 SERVER_PID=$!
 
 for _ in $(seq 1 120); do
+  if ! kill -0 "${SERVER_PID}" 2>/dev/null; then
+    echo "runtime server exited before health checks" >&2
+    cat "${SERVER_LOG}" >&2 || true
+    exit 1
+  fi
   if curl --fail --silent "http://127.0.0.1:${PORT}/healthz" >/dev/null 2>&1; then
     break
   fi
@@ -108,7 +131,7 @@ STATUS="$(curl --silent --output /dev/null --write-out '%{http_code}' \
 [[ "${STATUS}" == "404" ]]
 
 SECRET='ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890'
-if rg --fixed-strings --quiet "${SECRET}" "${JSON_REPORT}" "${MARKDOWN_REPORT}" "${SERVER_LOG}"; then
+if grep -F -q "${SECRET}" "${JSON_REPORT}" "${MARKDOWN_REPORT}" "${SERVER_LOG}"; then
   echo "secret probe appeared in pipeline output" >&2
   exit 1
 fi

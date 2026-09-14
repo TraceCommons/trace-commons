@@ -57,5 +57,5 @@ run or outcome tables.
 
 This path remains local and test only. It uses the fixed zero-credit bundle.
 
-Phase 3 adds index commands and positive credit operations. Phase 4 adds
-production authority, privacy, and policy-status controls.
+Phase 3 adds index commands and positive credit operations. See
+[phase-3.md](./phase-3.md).

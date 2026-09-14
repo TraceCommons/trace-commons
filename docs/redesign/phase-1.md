@@ -23,7 +23,7 @@ reports:
 scripts/operator/run-minimal-pipeline-corpus.sh
 ```
 
-The command requires Docker, Cargo, curl, Python 3, and `rg`. It does not fetch
+The command requires Docker, Cargo, curl, Python 3, and grep. It does not fetch
 a corpus or model and does not enable external payout.
 
 Reports are written to:
@@ -73,4 +73,4 @@ policy, or production bundle distribution. A claimed policy failure records a
 safe operational label and no outcome for the failed phase. Phase 2 adds
 concurrent workers, recovery, retained bundle loading, and lease fencing.
 
-See [phase-2.md](./phase-2.md) for the current local pipeline.
+See [phase-3.md](./phase-3.md) for the current local pipeline.
