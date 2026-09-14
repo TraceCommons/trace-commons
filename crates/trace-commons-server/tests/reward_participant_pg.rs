@@ -995,3 +995,45 @@ async fn revoked_participant_login_rolls_back_entire_account_merge() {
             .is_some()
     );
 }
+
+/// The merge hook admits a proposal only when the consuming UPDATE ran in the
+/// current transaction. `xmin` is a 32-bit `xid`; `pg_current_xact_id()` is a
+/// 64-bit `xid8` carrying the wraparound epoch in its high word. Rendering both
+/// as text makes them equal only while the epoch is zero, so the shipped
+/// predicate would refuse every merge after the first wraparound. Casting the
+/// `xid8` down to `xid` discards exactly the epoch, which is what `xmin` already
+/// lacks, so the comparison holds in every epoch. The epoch cannot be advanced
+/// from a test, so this asserts the property on a synthesised epoch-1 value.
+#[tokio::test]
+#[ignore = "requires isolated TRACE_COMMONS_REWARDS_PG_TEST_URL"]
+async fn merge_freshness_check_is_transaction_id_epoch_independent() {
+    let f = RewardPgFixture::new().await;
+    // 4294967591 = (1 << 32) + 295: epoch 1, counter 295. A row written by that
+    // transaction stores xmin = 295.
+    let row = f
+        .admin
+        .query_one(
+            "SELECT '4294967591'::xid8::xid = '295'::xid AS matches_as_xid,
+                    '4294967591'::xid8::TEXT = '295'::xid::TEXT AS matches_as_text",
+            &[],
+        )
+        .await
+        .expect("evaluate both predicate shapes");
+    assert!(
+        row.get::<_, bool>("matches_as_xid"),
+        "the xid8 to xid cast must keep the freshness check epoch-independent"
+    );
+    assert!(
+        !row.get::<_, bool>("matches_as_text"),
+        "the text comparison stops matching once the epoch is non-zero"
+    );
+    let migration = include_str!("../../../migrations/V71__reward_participant_access.sql");
+    assert!(
+        migration.contains("proposal.xmin = pg_catalog.pg_current_xact_id()::xid"),
+        "the merge hook must compare transaction ids, not their renderings"
+    );
+    assert!(
+        !migration.contains("pg_current_xact_id()::TEXT"),
+        "no text rendering of a transaction id may gate the merge hook"
+    );
+}

@@ -4478,6 +4478,12 @@ impl Database for PgBackend {
             return Ok(None);
         }
 
+        // The reward hook re-reads the proposal and admits it only when its
+        // `xmin` is this transaction's id, which is how it knows the consuming
+        // UPDATE above is its own. That holds only while the consume runs in
+        // the transaction proper: wrapping it in a SAVEPOINT, or moving it
+        // inside a plpgsql EXCEPTION block, stamps `xmin` with a
+        // subtransaction id and the hook refuses every merge.
         tx.execute(
             "SELECT public.trace_reward_accounts_merge($1, $2, $3, $4)",
             &[

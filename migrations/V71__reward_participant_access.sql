@@ -1181,7 +1181,14 @@ BEGIN
            AND proposal.surviving_account_id = p_surviving_account
            AND proposal.absorbed_account_id = p_absorbed_account
            AND proposal.consumed_at IS NOT NULL
-           AND proposal.xmin::TEXT = pg_catalog.pg_current_xact_id()::TEXT
+           -- xmin is a 32-bit xid; pg_current_xact_id() is a 64-bit xid8 whose
+           -- high word is the wraparound epoch. Casting the xid8 down to xid
+           -- discards exactly that epoch, so this holds in every epoch;
+           -- comparing their text renderings only holds while the epoch is 0.
+           -- The consuming UPDATE must run in this transaction proper: inside
+           -- a SAVEPOINT or a plpgsql EXCEPTION block xmin is the
+           -- subtransaction id and this check refuses.
+           AND proposal.xmin = pg_catalog.pg_current_xact_id()::xid
            AND survivor.closed_at IS NULL
            AND absorbed.closed_at IS NULL
     ) THEN
