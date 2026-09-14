@@ -21,6 +21,11 @@ pub(super) fn validate_index_comparison_specifications(index: &Index) -> Result<
     }
     for (id, specification) in &index.comparison_specifications {
         specification.validate()?;
+        // A saved specification may only claim an estimator the frozen
+        // protocol admits for saved specifications. Production never writes
+        // one; a hand-edited store can, and that is the only way any shell has
+        // ever reached the schema-2 coverage copy.
+        specification.validate_saved_estimator_qualification()?;
         if id != &specification.id {
             return Err(ComparisonSpecificationError::StoreInvalid.into());
         }

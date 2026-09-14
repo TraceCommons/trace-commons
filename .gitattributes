@@ -26,6 +26,14 @@ crates/trace-commons-contributor/tests/fixtures/orchard_worker_ipc_v0.json -text
 # Preserve their exact bytes on Windows as well as Unix checkouts.
 crates/trace-commons-contributor/fixtures/insights/codex-task-attribution/* -text
 
+# The Claude agent-branch fixtures are loaded with `include_bytes!` at three
+# sites and their committed `source_digest` is pinned inside
+# native-agent-alpha-snapshot.json. An autocrlf checkout would rewrite the
+# input and the derived hash together, so the tests would still pass while
+# exercising bytes that were never committed, and the pinned snapshot digest
+# would stop matching.
+crates/trace-commons-contributor/fixtures/insights/claude-task-attribution/** -text
+
 # Preserve the pinned upstream SDK bytes, including its trailing whitespace.
 crates/trace-commons-contributor/src/daemon/nearai_credential/near_connect/near-connect-0.11.4.js -text whitespace=-blank-at-eol
 

@@ -43,7 +43,14 @@ public enum InsightsStoreSelection: Equatable, Sendable {
               !arguments[index + 1].hasPrefix("-") else { return .refused(.missingPath) }
         let supplied = arguments[index + 1]
         guard supplied.hasPrefix("/") else { return .refused(.relativePath) }
-        let path = URL(fileURLWithPath: supplied).standardizedFileURL.path
+        // Resolve before probing, not only lexically. `standardizedFileURL`
+        // rewrites `..` without consulting the filesystem, so a symlinked
+        // directory probed as itself would be displayed under the link while
+        // every read and write landed on the target, and a `..` that crosses a
+        // symlink would resolve to the wrong directory entirely. The path this
+        // returns is the path the store actually uses.
+        let path = URL(fileURLWithPath: supplied).resolvingSymlinksInPath()
+            .standardizedFileURL.path
         switch probe(path) {
         case .absent: return .refused(.pathMissing)
         case .file: return .refused(.notADirectory)

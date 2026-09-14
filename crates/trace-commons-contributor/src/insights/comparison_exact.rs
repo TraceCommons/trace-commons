@@ -8,6 +8,17 @@ pub(crate) const MAX_TASKS: usize = 256;
 pub const EXACT_CANDIDATE_METHOD: &str = "exact_binomial_components_bonferroni_v1";
 pub const EXACT_CANDIDATE_PROTOCOL_SHA256: &str =
     "d257605993aaa94220ce31144203c0c05a28ff6c33cc129d678f90a8986e26c8";
+/// `qualified_for_saved_specifications` as frozen in the candidate protocol
+/// pinned above.
+///
+/// The protocol is the admission rule for this method, and it does not yet
+/// grant the method to saved specifications. Until the rule is met and the
+/// fixture is re-frozen, a stored specification that claims the qualified
+/// estimator is claiming a grant no reviewed artifact makes, so the store
+/// refuses it rather than rendering a coverage statement behind it. The value
+/// is re-derived from the committed protocol bytes by
+/// `pinned_comparison_evidence_digests_match_the_committed_bytes`.
+pub const EXACT_CANDIDATE_QUALIFIED_FOR_SAVED_SPECIFICATIONS: bool = false;
 const EXACT_MAXIMUM_WIDTH_MILLIONTHS: i64 = 500_000;
 
 /// Candidate exact component interval on a fixed millionth grid.
@@ -476,4 +487,145 @@ impl PartialOrd for BigNat {
 
 fn invalid() -> anyhow::Error {
     anyhow::anyhow!("insights-comparison-estimator-invalid")
+}
+
+#[cfg(test)]
+mod evidence_digest_tests {
+    use std::path::{Path, PathBuf};
+
+    use sha2::{Digest, Sha256};
+
+    use super::EXACT_CANDIDATE_PROTOCOL_SHA256;
+
+    /// SHA-256 pinned in the raw artifact, the derived report, and
+    /// `CALIBRATION.md` for the frozen candidate protocol.
+    const PROTOCOL_SHA256: &str =
+        "d257605993aaa94220ce31144203c0c05a28ff6c33cc129d678f90a8986e26c8";
+    /// SHA-256 pinned in `CALIBRATION.md` and in the derived report's
+    /// `raw_artifact_sha256` for the immutable calibration output.
+    const RAW_ARTIFACT_SHA256: &str =
+        "68926edabd94d317c381640d712787077e7001d8357cf8f9128d577af8a01d70";
+    /// SHA-256 pinned in `CALIBRATION.md` for the derived report.
+    const DERIVED_REPORT_SHA256: &str =
+        "06da84afe0da9ecd949d4ef93470986f1c1843cbe39bcad51b3065202e0b9724";
+    /// SHA-256 pinned in `schema2-supported-store/README.md` for the captured
+    /// schema-10 store this crate's CLI, C ABI, and macOS tests read.
+    const SUPPORTED_STORE_SHA256: &str =
+        "c1bbb6b4e7b14a078971af78ad80324842cec7fd92657b2162b3e1c072e0c17b";
+
+    fn packet() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/insights/comparison-estimator")
+    }
+
+    fn digest_of(path: &Path) -> String {
+        let bytes = std::fs::read(path)
+            .unwrap_or_else(|error| panic!("{} is not readable: {error}", path.display()));
+        hex::encode(Sha256::digest(&bytes))
+    }
+
+    fn read_text(path: &Path) -> String {
+        String::from_utf8(std::fs::read(path).unwrap()).unwrap()
+    }
+
+    fn json_at(path: &Path) -> serde_json::Value {
+        serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+    }
+
+    /// Every SHA-256 written into prose, into a committed artifact field, or
+    /// into a production constant is recomputed here from the bytes it claims
+    /// to describe. Without this the pins are assertions about the tree that
+    /// nothing in CI can falsify: editing a fixture leaves the field-level
+    /// fixture tests green while the pins silently stop describing it.
+    #[test]
+    fn pinned_comparison_evidence_digests_match_the_committed_bytes() {
+        let packet = packet();
+        let protocol = packet.join("exact-component-candidate-v1.json");
+        let raw = packet.join("exact-component-calibration-raw-v1.json");
+        let report = packet.join("exact-component-calibration-report-v1.json");
+        let store = packet.join("schema2-supported-store/index.json");
+
+        // 1. The production constant embedded in every saved specification.
+        assert_eq!(EXACT_CANDIDATE_PROTOCOL_SHA256, PROTOCOL_SHA256);
+        assert_eq!(digest_of(&protocol), PROTOCOL_SHA256);
+
+        // 2. The immutable calibration output.
+        assert_eq!(digest_of(&raw), RAW_ARTIFACT_SHA256);
+
+        // 3. The derived report.
+        assert_eq!(digest_of(&report), DERIVED_REPORT_SHA256);
+
+        // 4. The captured schema-10 store.
+        assert_eq!(digest_of(&store), SUPPORTED_STORE_SHA256);
+
+        // The same digests as written into prose and into artifact fields.
+        let calibration = read_text(&packet.join("CALIBRATION.md"));
+        for pinned in [PROTOCOL_SHA256, RAW_ARTIFACT_SHA256, DERIVED_REPORT_SHA256] {
+            assert!(
+                calibration.contains(pinned),
+                "CALIBRATION.md no longer pins {pinned}"
+            );
+        }
+        assert!(
+            read_text(&packet.join("schema2-supported-store/README.md"))
+                .contains(SUPPORTED_STORE_SHA256)
+        );
+        for artifact in [&raw, &report] {
+            let value = json_at(artifact);
+            assert_eq!(value["frozen_protocol_fixture_sha256"], PROTOCOL_SHA256);
+            assert_eq!(value["qualified_for_saved_specifications"], false);
+        }
+        assert_eq!(json_at(&report)["raw_artifact_sha256"], RAW_ARTIFACT_SHA256);
+        assert_eq!(
+            json_at(&protocol)["qualified_for_saved_specifications"],
+            super::EXACT_CANDIDATE_QUALIFIED_FOR_SAVED_SPECIFICATIONS
+        );
+    }
+
+    /// The fifth pin is the runtime-observation manifest. `shasum -c` is not
+    /// available to a Rust test, and the manifest is the only description of
+    /// which files the measurement produced, so both halves are checked: every
+    /// listed digest against its file, and the listing against the directory.
+    #[test]
+    fn runtime_observation_manifest_covers_every_committed_measurement_file() {
+        let tree = packet().join("runtime-observations/apple-m4-max-2026-09-12");
+        let manifest_path = tree.join("SHA256SUMS");
+        let manifest = read_text(&manifest_path);
+
+        let mut listed = Vec::new();
+        for line in manifest.lines() {
+            let (pinned, relative) = line.split_once("  ").expect("two-space manifest separator");
+            let relative = relative.strip_prefix("./").unwrap_or(relative);
+            assert!(
+                !relative.contains("..") && !relative.starts_with('/'),
+                "manifest entry escapes the tree"
+            );
+            assert_eq!(
+                digest_of(&tree.join(relative)),
+                pinned,
+                "{relative} no longer matches its pinned digest"
+            );
+            listed.push(relative.to_owned());
+        }
+
+        let mut present = Vec::new();
+        let mut stack = vec![tree.clone()];
+        while let Some(directory) = stack.pop() {
+            for entry in std::fs::read_dir(&directory).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path != manifest_path {
+                    present.push(
+                        path.strip_prefix(&tree)
+                            .unwrap()
+                            .to_string_lossy()
+                            .into_owned(),
+                    );
+                }
+            }
+        }
+        listed.sort();
+        present.sort();
+        assert_eq!(listed, present, "manifest and tree disagree");
+    }
 }
