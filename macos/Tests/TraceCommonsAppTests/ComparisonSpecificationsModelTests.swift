@@ -280,7 +280,8 @@ final class ComparisonSpecificationsModelTests: XCTestCase {
                 "declarations": [["model": "model-mixed-a", "record_index": 1,
                                   "kind": "codex_session_metadata"],
                                  ["model": "model-mixed-b", "record_index": 2,
-                                  "kind": "codex_turn_context"]]]]
+                                  "kind": "codex_turn_context"]],
+                "contract": "codex_turn_context_v2"]]
         return try JSONDecoder().decode(LocalInsight.self,
                                         from: JSONSerialization.data(withJSONObject: json))
     }
