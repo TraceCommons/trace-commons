@@ -35,6 +35,25 @@ pub enum SourceFormat {
     Trajectory,
 }
 
+impl SourceFormat {
+    /// The persisted identity of this format, as it appears in the preimage of
+    /// every saved snapshot id. It is deliberately an explicit string rather
+    /// than `Debug` output: renaming a variant would otherwise change every id
+    /// the next release recomputes, and orphan every snapshot already saved.
+    pub fn stable_id(self) -> &'static str {
+        match self {
+            Self::Codex => "Codex",
+            Self::Trajectory => "Trajectory",
+        }
+    }
+}
+
+/// The preimage a saved snapshot's id is taken over. One definition, so the
+/// writer and the load-time re-check can never disagree about its shape.
+fn snapshot_identity(format: SourceFormat, source_digest: &str) -> String {
+    digest(format!("{}:{}", format.stable_id(), source_digest).as_bytes())
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum EpisodeBoundary {
@@ -226,7 +245,7 @@ pub fn analyze_file(format: SourceFormat, path: &Path) -> Result<LocalInsight> {
     if events.is_empty() {
         bail!("insights_no_normalized_events");
     }
-    let id = digest(format!("{format:?}:{source_digest}").as_bytes());
+    let id = snapshot_identity(format, &source_digest);
     let evidence = EvidenceRef {
         id: id.clone(),
         source_digest,
@@ -373,9 +392,7 @@ impl LocalInsightStore {
             let evidence = &insight.report.evidence;
             if evidence.len() != 1
                 || evidence[0].id != *id
-                || digest(
-                    format!("{:?}:{}", insight.source_format, evidence[0].source_digest).as_bytes(),
-                ) != *id
+                || snapshot_identity(insight.source_format, &evidence[0].source_digest) != *id
                 || insight.estimated_cost_usd.is_some()
                 || insight.task_category.is_some()
                 || insight.cost_unavailable_reason != "adapter_usage_unavailable"
@@ -715,6 +732,23 @@ mod tests {
             .expect("a completed store operation must not leave a lock in an inherited descriptor");
         contender.unlock().unwrap();
         drop(inherited);
+    }
+
+    #[test]
+    fn saved_snapshot_identity_is_pinned_and_never_taken_from_debug_output() {
+        // Renaming a `SourceFormat` variant must not move a stored id. These
+        // are the digests over the live preimage, independent of this code.
+        let source_digest = "a".repeat(64);
+        assert_eq!(SourceFormat::Codex.stable_id(), "Codex");
+        assert_eq!(SourceFormat::Trajectory.stable_id(), "Trajectory");
+        assert_eq!(
+            snapshot_identity(SourceFormat::Codex, &source_digest),
+            "6166afe59337481cc1dc9df90da004870d6c8ac8b5729c0cef675d8d0f6e51c1"
+        );
+        assert_eq!(
+            snapshot_identity(SourceFormat::Trajectory, &source_digest),
+            "cc98f6d04157a005973700695cd6e074214648b55cd6dec655e7753bded0334a"
+        );
     }
 
     fn trajectory(path: &Path, suffix: &str) {
