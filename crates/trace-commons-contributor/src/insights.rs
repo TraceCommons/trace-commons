@@ -1162,6 +1162,39 @@ mod tests {
     }
 
     #[test]
+    fn a_store_written_before_file_identity_still_reads_and_migrates() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let file = root.join("legacy.jsonl");
+        trajectory(&file, "first");
+        let store = LocalInsightStore::open(&root.join("insights")).unwrap();
+        let saved = store.import(SourceFormat::Trajectory, &file).unwrap();
+        let path = store.dir.join("index.json");
+        let mut index: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        // The shape a v5 store has on disk: an address maps to a bare id.
+        index["version"] = 5.into();
+        for alias in index["aliases"].as_object_mut().unwrap().values_mut() {
+            *alias = alias["report_id"].clone();
+        }
+        fs::write(&path, serde_json::to_vec(&index).unwrap()).unwrap();
+
+        assert_eq!(store.list().unwrap().len(), 1);
+        assert!(store.quarantine().unwrap().is_empty());
+        assert_eq!(store.explain(&saved.id).unwrap().id, saved.id);
+        // Reimporting migrates the address in place rather than duplicating it.
+        trajectory(&file, "second");
+        let second = store.import(SourceFormat::Trajectory, &file).unwrap();
+        let migrated: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(migrated["version"], STORE_VERSION);
+        assert_eq!(migrated["aliases"].as_object().unwrap().len(), 1);
+        let listed = store.list().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, second.id);
+    }
+
+    #[test]
     fn a_renamed_source_does_not_keep_its_superseded_snapshot() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().canonicalize().unwrap();
