@@ -59,15 +59,22 @@ final class ComparisonSpecificationsModel {
         if saveTask == nil { busy = false }
         selected = nil; result = nil; previewSpecification = nil; previewResult = nil; previewInput = nil
     }
+    /// Offer exactly the cohorts the Rust evaluator counts.
+    ///
+    /// The cohort comes from `source_qualification.declared_model_cohort` and
+    /// nothing else. A snapshot's `model_observations.declared_models` is the
+    /// set of every label observed, mixed-model sessions included, and those
+    /// are the sessions attribution refuses -- offering them let a user save an
+    /// immutable specification whose cohorts could never match. `snapshots`
+    /// stays in the signature for the refresh pipeline; it no longer feeds
+    /// cohort candidates.
     func updateSources(tasks: [ComparisonTaskDetail], snapshots: [LocalInsight]) {
-        let snapshotByID = Dictionary(uniqueKeysWithValues: snapshots.map { ($0.id, $0) })
         let grouped = Dictionary(grouping: tasks.compactMap { detail -> (ExactComparisonStratum, String, Set<String>, String, String)? in
             guard let context = detail.task.context, context.isComplete,
                   case .known(let language) = context.language else { return nil }
             let stratum = ExactComparisonStratum(projectID: context.project_id, language: language,
                 configurationFingerprint: context.configuration_fingerprint)
-            let ids = detail.task.episodes.flatMap(\.members).map(\.snapshot_id)
-            let labels = Set(ids.flatMap { snapshotByID[$0]?.model_observations?.declared_models ?? [] })
+            let labels = Set([detail.source_qualification?.declared_model_cohort].compactMap { $0 })
             let configuration = context.configuration
             let harness = Self.known(configuration.harness_id)
             let version = Self.known(configuration.harness_version)

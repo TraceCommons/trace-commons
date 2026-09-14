@@ -42,7 +42,7 @@ final class ComparisonSpecificationsModelTests: XCTestCase {
         let service = SpecificationFakeService()
         let model = ComparisonSpecificationsModel(service: { try await service.call($0) })
         model.open(); try await settle(model)
-        model.updateSources(tasks: [try Self.task()], snapshots: try Self.snapshots())
+        model.updateSources(tasks: try Self.tasks(), snapshots: try Self.snapshots())
         XCTAssertEqual(model.selectedOption?.cohortCandidates, ["model-a", "model-b"])
         model.setCohort("model-a", selected: true); model.setCohort("model-b", selected: true)
         model.preview(); try await settle(model); XCTAssertNotNil(model.previewResult)
@@ -72,7 +72,7 @@ final class ComparisonSpecificationsModelTests: XCTestCase {
     func testCloseReopenReconcilesDetachedCommittedSave() async throws {
         let service = SpecificationFakeService()
         let model = ComparisonSpecificationsModel(service: { try await service.call($0) })
-        model.open(); try await settle(model); model.updateSources(tasks: [try Self.task()], snapshots: try Self.snapshots())
+        model.open(); try await settle(model); model.updateSources(tasks: try Self.tasks(), snapshots: try Self.snapshots())
         model.setCohort("model-a", selected: true); model.setCohort("model-b", selected: true)
         model.preview(); try await settle(model); await service.holdSave(); model.save()
         try await Task.sleep(for: .milliseconds(20)); model.close(); model.open()
@@ -88,7 +88,7 @@ final class ComparisonSpecificationsModelTests: XCTestCase {
         let service = SpecificationFakeService()
         let model = ComparisonSpecificationsModel(service: { try await service.call($0) })
         model.open(); try await settle(model)
-        model.updateSources(tasks: [try Self.task()], snapshots: try Self.snapshots())
+        model.updateSources(tasks: try Self.tasks(), snapshots: try Self.snapshots())
         model.setCohort("model-a", selected: true); model.setCohort("model-b", selected: true)
         model.preview(); try await settle(model)
         await service.holdWrongNextGet(); model.save()
@@ -118,7 +118,7 @@ final class ComparisonSpecificationsModelTests: XCTestCase {
         let service = SpecificationFakeService()
         await service.malformedPreview()
         let model = ComparisonSpecificationsModel(service: { try await service.call($0) })
-        model.open(); try await settle(model); model.updateSources(tasks: [try Self.task()], snapshots: try Self.snapshots())
+        model.open(); try await settle(model); model.updateSources(tasks: try Self.tasks(), snapshots: try Self.snapshots())
         model.setCohort("model-a", selected: true); model.setCohort("model-b", selected: true)
         model.preview(); try await settle(model)
         XCTAssertFalse(model.busy); XCTAssertEqual(model.error, "comparison_specification_error")
@@ -137,13 +137,13 @@ final class ComparisonSpecificationsModelTests: XCTestCase {
         let service = SpecificationFakeService(seed: true)
         let model = ComparisonSpecificationsModel(service: { try await service.call($0) })
         model.open(); try await settle(model)
-        model.updateSources(tasks: [try Self.task(complete: false)], snapshots: try Self.snapshots())
+        model.updateSources(tasks: try Self.tasks(complete: false), snapshots: try Self.snapshots())
         XCTAssertTrue(model.options.isEmpty)
-        model.sourceEvidenceChanged(tasks: [try Self.task()], snapshots: try Self.snapshots())
+        model.sourceEvidenceChanged(tasks: try Self.tasks(), snapshots: try Self.snapshots())
         try await settle(model); XCTAssertEqual(model.options.count, 1)
         model.select(SpecificationFakeService.specID); try await settle(model); model.evaluate(); try await settle(model)
         let prior = await service.count("comparison_evaluate")
-        model.sourceEvidenceChanged(tasks: [try Self.task(revision: 2, outcomeRecordedAt: "2026-09-12T01:00:00Z")],
+        model.sourceEvidenceChanged(tasks: try Self.tasks(revision: 2, outcomeRecordedAt: "2026-09-12T01:00:00Z"),
                                     snapshots: try Self.snapshots())
         try await settle(model)
         let current = await service.count("comparison_evaluate")
@@ -154,7 +154,7 @@ final class ComparisonSpecificationsModelTests: XCTestCase {
     func testOldReconciliationFailureCannotOverwriteReopenedRead() async throws {
         let service = SpecificationFakeService()
         let model = ComparisonSpecificationsModel(service: { try await service.call($0) })
-        model.open(); try await settle(model); model.updateSources(tasks: [try Self.task()], snapshots: try Self.snapshots())
+        model.open(); try await settle(model); model.updateSources(tasks: try Self.tasks(), snapshots: try Self.snapshots())
         model.setCohort("model-a", selected: true); model.setCohort("model-b", selected: true)
         model.preview(); try await settle(model)
         await service.holdAndFailList(); model.save(); try await Task.sleep(for: .milliseconds(20))
@@ -172,7 +172,7 @@ final class ComparisonSpecificationsModelTests: XCTestCase {
         model.open(); try await settle(model); model.select(SpecificationFakeService.specID); try await settle(model)
         model.evaluate(); try await settle(model); XCTAssertNotNil(model.resultConfirmation())
         await service.failNextEvaluation()
-        model.sourceEvidenceChanged(tasks: [try Self.task(revision: 2, outcomeRecordedAt: "2026-09-12T02:00:00Z")],
+        model.sourceEvidenceChanged(tasks: try Self.tasks(revision: 2, outcomeRecordedAt: "2026-09-12T02:00:00Z"),
                                     snapshots: try Self.snapshots())
         XCTAssertNil(model.result); XCTAssertNil(model.resultConfirmation())
         try await settle(model)
@@ -184,13 +184,38 @@ final class ComparisonSpecificationsModelTests: XCTestCase {
     func testHeldPreviewCannotRepopulateAfterEvidenceInvalidation() async throws {
         let service = SpecificationFakeService()
         let model = ComparisonSpecificationsModel(service: { try await service.call($0) })
-        model.open(); try await settle(model); model.updateSources(tasks: [try Self.task()], snapshots: try Self.snapshots())
+        model.open(); try await settle(model); model.updateSources(tasks: try Self.tasks(), snapshots: try Self.snapshots())
         model.setCohort("model-a", selected: true); model.setCohort("model-b", selected: true)
         await service.holdPreview(); model.preview(); try await Task.sleep(for: .milliseconds(20))
-        model.sourceEvidenceChanged(tasks: [try Self.task(revision: 2)], snapshots: try Self.snapshots())
+        model.sourceEvidenceChanged(tasks: try Self.tasks(revision: 2), snapshots: try Self.snapshots())
         XCTAssertNil(model.previewSpecification); XCTAssertNil(model.previewResult)
         await service.releasePreview(); try await settle(model)
         XCTAssertNil(model.previewSpecification); XCTAssertNil(model.previewResult)
+    }
+
+    /// The picker must offer exactly the cohort set the Rust evaluator counts.
+    ///
+    /// A snapshot's `model_observations.declared_models` holds every label
+    /// observed, so a mixed-model session contributes two labels there while
+    /// attribution refuses it entirely and the evaluator counts none. Offering
+    /// the observed labels let a user save an immutable specification whose
+    /// cohorts could never match.
+    @MainActor
+    func testCohortPickerOffersOnlyTheCohortsTheEvaluatorCounts() async throws {
+        let service = SpecificationFakeService()
+        let model = ComparisonSpecificationsModel(service: { try await service.call($0) })
+        model.open(); try await settle(model)
+        let mixed = try Self.task(id: "22c18c96-6093-49f5-bb6f-6092ef0630b9", cohort: nil)
+        XCTAssertNil(mixed.source_qualification)
+        model.updateSources(tasks: try Self.tasks() + [mixed], snapshots: try Self.mixedSnapshots())
+        XCTAssertEqual(model.options.count, 1)
+        let candidates = try XCTUnwrap(model.selectedOption?.cohortCandidates)
+        XCTAssertEqual(candidates, ["model-a", "model-b"],
+                       "an unqualified, mixed-model task must contribute no cohort")
+        for observed in ["model-mixed-a", "model-mixed-b"] {
+            XCTAssertFalse(candidates.contains(observed),
+                           "an observed label the evaluator never counts must not be offered")
+        }
     }
 
     @MainActor private func settle(_ model: ComparisonSpecificationsModel) async throws {
@@ -198,9 +223,25 @@ final class ComparisonSpecificationsModelTests: XCTestCase {
         XCTFail("Specification model did not settle")
     }
 
+    /// Two tasks in one stratum, one per qualified cohort.
+    ///
+    /// The picker offers exactly the cohorts the evaluator counts, and a task
+    /// carries exactly one qualified cohort, so two cohorts need two tasks.
+    private static func tasks(complete: Bool = true, revision: UInt64 = 1,
+                             outcomeRecordedAt: String? = nil) throws -> [ComparisonTaskDetail] {
+        try [("20c18c96-6093-49f5-bb6f-6092ef0630b9", "model-a"),
+             ("21c18c96-6093-49f5-bb6f-6092ef0630b9", "model-b")].map { id, cohort in
+            try task(complete: complete, revision: revision,
+                     outcomeRecordedAt: outcomeRecordedAt, id: id, cohort: cohort)
+        }
+    }
+
     private static func task(complete: Bool = true, revision: UInt64 = 1,
-                             outcomeRecordedAt: String? = nil) throws -> ComparisonTaskDetail {
+                             outcomeRecordedAt: String? = nil,
+                             id: String = "20c18c96-6093-49f5-bb6f-6092ef0630b9",
+                             cohort: String? = "model-a") throws -> ComparisonTaskDetail {
         var task = SpecificationFixtures.task()
+        task["id"] = id
         task["revision"] = revision
         task["context"] = ["project_id": SpecificationFakeService.projectID, "category": "refactor",
             "task_date": "2026-09-12", "checkout_provenance": ["state": "unavailable"],
@@ -217,7 +258,31 @@ final class ComparisonSpecificationsModelTests: XCTestCase {
                 "material_digest": String(repeating: "a", count: 64), "recorded_at": outcomeRecordedAt]
         }
         return try JSONDecoder().decode(ComparisonTaskDetail.self,
-            from: JSONSerialization.data(withJSONObject: SpecificationFixtures.detail(task: task)))
+            from: JSONSerialization.data(withJSONObject:
+                SpecificationFixtures.detail(task: task, cohort: cohort)))
+    }
+    /// Snapshots whose observed labels are deliberately not the qualified
+    /// cohorts, including one mixed-model session.
+    private static func mixedSnapshots() throws -> [LocalInsight] {
+        try snapshots() + [mixedSnapshot()]
+    }
+    private static func mixedSnapshot() throws -> LocalInsight {
+        let json: [String: Any] = ["id": String(repeating: "e", count: 64),
+            "source_format": "codex", "boundary": "local", "analyzed_at": "2026-09-12T00:00:00Z",
+            "cost_unavailable_reason": "unknown", "report": ["schema_version": 1,
+                "provider": ["id": "local", "version": "1", "rubric_version": "1", "execution_mode": "local"],
+                "metrics": [], "evidence": []], "model_observations": ["schema_version": 2,
+                "scope": "declared_metadata_only", "source_format": "codex", "source_digest": "abc",
+                "coordinates": "jsonl_physical_lines_one_based", "record_count": 2, "candidate_records": 2,
+                "valid_declarations": 2, "missing_declarations": 0, "invalid_declarations": 0,
+                "omitted_declarations": 0, "model_labels_omitted": false, "mixed_declared_models": true,
+                "declared_models": ["model-mixed-a", "model-mixed-b"],
+                "declarations": [["model": "model-mixed-a", "record_index": 1,
+                                  "kind": "codex_session_metadata"],
+                                 ["model": "model-mixed-b", "record_index": 2,
+                                  "kind": "codex_turn_context"]]]]
+        return try JSONDecoder().decode(LocalInsight.self,
+                                        from: JSONSerialization.data(withJSONObject: json))
     }
     private static func snapshots() throws -> [LocalInsight] {
         try ["model-a", "model-b"].enumerated().map { index, label in
@@ -377,8 +442,12 @@ private enum SpecificationFixtures {
                                     "source_digest": String(repeating: "e", count: 64)]]]],
          "context": NSNull(), "outcome": NSNull(), "independence_confirmation": NSNull()]
     }
-    static func detail(task: [String: Any]) -> [String: Any] {
+    static func detail(task: [String: Any], cohort: String? = nil) -> [String: Any] {
         ["task": task, "stale_reasons": ["attribution_pending_qualification"],
+         "source_qualification": cohort.map { label in
+             ["rule": "codex_rust_v0_154_0_task_records_v1", "declared_model_cohort": label,
+              "material_revision": 1, "material_digest": String(repeating: "a", count: 64)]
+         } ?? NSNull(),
          "overlapping_task_ids": [], "resolved_at": "2026-09-12T00:00:00Z"]
     }
     static func specification() -> [String: Any] {
