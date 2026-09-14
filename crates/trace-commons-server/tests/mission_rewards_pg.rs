@@ -7,6 +7,8 @@ mod boundaries;
 mod deadlines;
 #[path = "mission_rewards_pg/deployment.rs"]
 mod deployment;
+#[path = "mission_rewards_pg/grants.rs"]
+mod grants;
 #[path = "mission_rewards_pg/fixture.rs"]
 mod fixture;
 #[path = "mission_rewards_pg/operator_cli.rs"]
