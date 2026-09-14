@@ -114,7 +114,7 @@ impl Drop for OwnedSecurityDescriptor {
 /// This is the identity the pipe is restricted to. Deriving it from the
 /// process token rather than from a username avoids every ambiguity around
 /// domain accounts, renamed accounts, and localised well-known group names.
-fn current_user_sid_string() -> Result<String> {
+pub(crate) fn current_user_sid_string() -> Result<String> {
     let mut token: HANDLE = std::ptr::null_mut();
     // SAFETY: `GetCurrentProcess` returns a pseudo-handle that needs no
     // closing, and `token` is a valid out-pointer.

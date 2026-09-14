@@ -906,3 +906,100 @@ fn content_cap_refusal_preserves_trials_and_reserved_headroom_persists_failure()
     let reopened = MissionAttemptStore::at(&root.path().join(MISSION_ATTEMPT_STORE_DIR));
     assert_eq!(reopened.get(&scope(), target.attempt_id).unwrap(), failed);
 }
+
+#[test]
+fn a_full_journal_evicts_the_oldest_terminal_attempt_and_keeps_running_ones() {
+    let (_root, store) = new_store();
+    let mut ids = Vec::new();
+    for _ in 0..MAX_ATTEMPTS {
+        ids.push(store.begin(&scope(), start()).unwrap().attempt.attempt_id);
+    }
+    // Only the two oldest reach a terminal state; the rest are still paying
+    // for inference and must survive.
+    for id in ids.iter().take(2) {
+        store
+            .finish(
+                &scope(),
+                *id,
+                MissionAttemptStatus::Failed,
+                "provider-refused",
+            )
+            .unwrap();
+    }
+
+    let admitted = store.begin(&scope(), start()).unwrap();
+    assert!(admitted.inserted, "the 129th attempt is admitted");
+    assert_eq!(
+        store.get(&scope(), ids[0]).unwrap_err().to_string(),
+        "mission-attempt-not-found",
+        "the oldest terminal attempt is the one evicted"
+    );
+    store
+        .get(&scope(), ids[1])
+        .expect("only the single slot that was needed is freed");
+    store
+        .get(&scope(), ids[2])
+        .expect("an in-progress attempt is never evicted");
+    assert_eq!(store.list(&scope()).unwrap().len(), MAX_ATTEMPTS);
+}
+
+#[test]
+fn listing_attempts_during_a_run_never_refuses_the_recording_writer() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    let (root, store) = new_store();
+    let begun = store.begin(&scope(), start()).unwrap().attempt;
+    drop(store);
+    let dir = root.path().join(MISSION_ATTEMPT_STORE_DIR);
+    let stop = Arc::new(AtomicBool::new(false));
+    let listings = Arc::new(AtomicUsize::new(0));
+
+    thread::scope(|thread_scope| {
+        let reader_dir = dir.clone();
+        let reader_stop = Arc::clone(&stop);
+        let listed = Arc::clone(&listings);
+        thread_scope.spawn(move || {
+            let reader = MissionAttemptStore::at(&reader_dir);
+            while !reader_stop.load(Ordering::Relaxed) {
+                // A UI polls; it does not spin. The reader's own admission is
+                // allowed to lose to a saturated writer, so the count below is
+                // what is asserted rather than every individual call. What must
+                // never happen is the reverse, which is the writer's `expect`.
+                if reader.list(&scope()).is_ok() {
+                    listed.fetch_add(1, Ordering::Relaxed);
+                }
+                thread::sleep(Duration::from_millis(1));
+            }
+        });
+        let writer = MissionAttemptStore::at(&dir);
+        let mut refusals = Vec::new();
+        for key in &begun.start.expected_trials {
+            if let Err(error) = writer.record_trial(&scope(), begun.attempt_id, trial(key, true)) {
+                refusals.push(error);
+            }
+        }
+        // Stop the reader before asserting. Panicking first would leave it
+        // spinning and the scope would never join.
+        stop.store(true, Ordering::Relaxed);
+        assert!(
+            refusals.is_empty(),
+            // A refusal here surfaces as PersistenceUnavailable and ends a paid
+            // run, so a UI read must never be able to cause one.
+            "a concurrent listing refused the recording writer: {refusals:?}"
+        );
+    });
+
+    let reopened = MissionAttemptStore::at(&dir);
+    assert_eq!(
+        reopened
+            .get(&scope(), begun.attempt_id)
+            .unwrap()
+            .trial_count,
+        EXPECTED_TRIALS
+    );
+    assert!(
+        listings.load(Ordering::Relaxed) > 0,
+        "the reader was admitted at least once while the run recorded"
+    );
+}
