@@ -164,9 +164,9 @@ fn corrupted_usage_or_usage_in_legacy_versions_fails_closed() {
         let mut corrupted = valid.clone();
         corrupted["reports"][&saved.id]["usage_evidence"][field] = value;
         fs::write(&index_path, serde_json::to_vec(&corrupted).unwrap()).unwrap();
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| store.list()));
-        assert!(result.is_ok());
-        assert!(result.unwrap().is_err(), "accepted invalid {field}");
+        // The snapshot is withheld, not the store: one unreadable entry must
+        // not cost the caller every other entry they saved.
+        super::assert_quarantined(&store, &saved.id, field);
     }
     for version in 1..=5 {
         let mut corrupted = valid.clone();
@@ -180,9 +180,10 @@ fn corrupted_usage_or_usage_in_legacy_versions_fails_closed() {
             report.remove("outcome_links");
         }
         fs::write(&index_path, serde_json::to_vec(&corrupted).unwrap()).unwrap();
-        assert!(
-            store.list().is_err(),
-            "legacy version {version} accepted usage evidence"
+        super::assert_quarantined(
+            &store,
+            &saved.id,
+            &format!("usage evidence in a version {version} store"),
         );
     }
 }

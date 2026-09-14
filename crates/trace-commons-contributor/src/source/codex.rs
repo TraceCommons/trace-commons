@@ -364,6 +364,14 @@ fn load_session(path: &Path) -> anyhow::Result<SessionTranscript> {
 }
 
 /// Parse an explicitly supplied immutable snapshot without reopening its source.
+/// The record types this adapter turns into session events. `session_meta`
+/// and `turn_context` carry session metadata only. This is the adapter's own
+/// eligibility rule and the only copy of it: anything that counts
+/// adapter-supported records must call this rather than keep a private list.
+pub(crate) fn is_event_record_kind(kind: &str) -> bool {
+    !matches!(kind, "session_meta" | "turn_context")
+}
+
 pub(crate) fn parse_session_bytes(bytes: &[u8]) -> anyhow::Result<SessionTranscript> {
     parse_session_reader(std::io::Cursor::new(bytes), Path::new(""))
 }
@@ -415,8 +423,11 @@ fn parse_session_reader(
         let record_type = record.get("type").and_then(|v| v.as_str()).unwrap_or("");
         let payload = record.get("payload");
 
-        match record_type {
-            "session_meta" => {
+        // The single eligibility gate: a metadata record contributes no event.
+        if !is_event_record_kind(record_type) {
+            // `is_event_record_kind` admits every other type as an event, so
+            // these two are the whole metadata set it excludes.
+            if record_type == "session_meta" {
                 if cwd.is_none() {
                     if let Some(c) = payload.and_then(|p| p.get("cwd")).and_then(|v| v.as_str()) {
                         cwd = Some(c.to_string());
@@ -430,17 +441,18 @@ fn parse_session_reader(
                         agent_version = Some(v.to_string());
                     }
                 }
-            }
-            "turn_context" => {
-                if model.is_none() {
-                    if let Some(m) = payload
-                        .and_then(|p| p.get("model"))
-                        .and_then(|v| v.as_str())
-                    {
-                        model = Some(m.to_string());
-                    }
+            } else if model.is_none() {
+                if let Some(m) = payload
+                    .and_then(|p| p.get("model"))
+                    .and_then(|v| v.as_str())
+                {
+                    model = Some(m.to_string());
                 }
             }
+            continue;
+        }
+
+        match record_type {
             "response_item" => {
                 map_response_item(payload, record_timestamp, &mut events);
             }

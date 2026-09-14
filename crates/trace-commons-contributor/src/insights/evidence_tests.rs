@@ -142,7 +142,7 @@ fn legacy_v2_stays_unknown_until_reimport_and_new_fields_are_digest_validated() 
             corrupt["reports"][&first.id][field][0]["source_digest"] = "0".repeat(64).into();
         }
         fs::write(&index_path, serde_json::to_vec(&corrupt).unwrap()).unwrap();
-        assert!(store.list().is_err());
+        assert_quarantined(&store, &first.id, field);
     }
     fs::write(&index_path, serde_json::to_vec(&valid).unwrap()).unwrap();
     store.delete(&first.id).unwrap();
@@ -224,10 +224,10 @@ fn a_post_legacy_model_schema_requires_the_store_version_floor() {
     let mut below = current.clone();
     below["version"] = (models::MODEL_OBSERVATIONS_STORE_VERSION_FLOOR - 1).into();
     fs::write(&index_path, serde_json::to_vec(&below).unwrap()).unwrap();
-    assert_eq!(
-        store.list().unwrap_err().to_string(),
-        "insights_store_invalid",
-        "schema 2 must not be readable below the floor"
+    super::assert_quarantined(
+        &store,
+        &saved.id,
+        "a schema 2 model observation below the floor",
     );
 
     let mut legacy = below.clone();
@@ -353,6 +353,43 @@ fn time_evidence_follows_exact_content_alias_and_deletion_lifecycle() {
     assert!(first_path.exists() && alias_path.exists());
 }
 
+/// The plan requires that RFC 3339 subsecond precision is not silently
+/// reduced. Nothing else in the suite persists a fractional second, so a
+/// serializer change that truncated to whole seconds would otherwise pass.
+#[test]
+fn subsecond_recorded_timestamps_survive_the_store_round_trip() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("subsecond.jsonl");
+    fs::write(
+        &path,
+        "{\"role\":\"meta\",\"source\":\"fixture\"}\n         {\"role\":\"user\",\"content\":\"PRIVATE\",\"timestamp\":\"2026-09-11T00:00:00.123456789Z\"}\n",
+    )
+    .unwrap();
+    let store = LocalInsightStore::open(&temp.path().join("store")).unwrap();
+    let imported = store.import(SourceFormat::Trajectory, &path).unwrap();
+    let extremum = imported
+        .time_evidence
+        .as_ref()
+        .unwrap()
+        .earliest
+        .clone()
+        .unwrap();
+    assert_eq!(
+        extremum.recorded_at.timestamp_subsec_nanos(),
+        123_456_789,
+        "extraction keeps every fractional digit"
+    );
+    let reloaded = LocalInsightStore::open(&temp.path().join("store"))
+        .unwrap()
+        .explain(&imported.id)
+        .unwrap();
+    assert_eq!(
+        reloaded.time_evidence.as_ref().unwrap().earliest,
+        Some(extremum),
+        "persistence keeps every fractional digit"
+    );
+}
+
 #[test]
 fn malformed_persisted_time_evidence_fails_closed_without_panicking() {
     let temp = tempfile::tempdir().unwrap();
@@ -372,8 +409,127 @@ fn malformed_persisted_time_evidence_fails_closed_without_panicking() {
         let mut corrupt = valid.clone();
         corrupt["reports"][&saved.id]["time_evidence"][field] = value;
         fs::write(&index_path, serde_json::to_vec(&corrupt).unwrap()).unwrap();
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| store.list()));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            assert_quarantined(&store, &saved.id, field)
+        }));
         assert!(result.is_ok(), "persisted {field} caused a panic");
-        assert!(result.unwrap().is_err(), "accepted malformed {field}");
     }
+}
+
+fn report_with(passed: u64) -> outcomes::OutcomeEvidence {
+    outcomes::OutcomeEvidence::TestReport(
+        outcomes::parse_test_report(
+            format!(
+                r#"{{"schema_version":1,"runner":"cargo-test","passed":{passed},"failed":0,
+                "skipped":0,"observed_at":"2026-09-11T00:00:00Z","commit_id":null}}"#
+            )
+            .as_bytes(),
+        )
+        .unwrap(),
+    )
+}
+
+#[test]
+fn unlinking_an_unknown_evidence_id_is_refused_and_leaves_the_index_untouched() {
+    let temp = tempfile::tempdir().unwrap();
+    let file = temp.path().join("source.jsonl");
+    source(&file, "PRIVATE-UNLINK");
+    let store = LocalInsightStore::open(&temp.path().join("store")).unwrap();
+    let saved = store.import(SourceFormat::Trajectory, &file).unwrap();
+    store.link_outcome(&saved.id, report()).unwrap();
+    let before = fs::read(store.dir.join("index.json")).unwrap();
+    let error = store
+        .unlink_outcome(&saved.id, &"f".repeat(64))
+        .unwrap_err()
+        .to_string();
+    assert_eq!(error, "insights_evidence_link_not_found");
+    assert_eq!(fs::read(store.dir.join("index.json")).unwrap(), before);
+    // The link that does exist still removes, exactly once.
+    let linked_id = store.explain(&saved.id).unwrap().outcome_links[0]
+        .id
+        .clone();
+    assert!(
+        store
+            .unlink_outcome(&saved.id, &linked_id)
+            .unwrap()
+            .outcome_links
+            .is_empty()
+    );
+    assert_eq!(
+        store
+            .unlink_outcome(&saved.id, &linked_id)
+            .unwrap_err()
+            .to_string(),
+        "insights_evidence_link_not_found"
+    );
+}
+
+#[test]
+fn the_outcome_link_bound_is_exact_and_refuses_the_next_association() {
+    let temp = tempfile::tempdir().unwrap();
+    let file = temp.path().join("source.jsonl");
+    source(&file, "PRIVATE-BOUND");
+    let store = LocalInsightStore::open(&temp.path().join("store")).unwrap();
+    let saved = store.import(SourceFormat::Trajectory, &file).unwrap();
+    for passed in 0..MAX_OUTCOME_LINKS as u64 {
+        store.link_outcome(&saved.id, report_with(passed)).unwrap();
+    }
+    assert_eq!(
+        store.explain(&saved.id).unwrap().outcome_links.len(),
+        MAX_OUTCOME_LINKS
+    );
+    assert_eq!(
+        store
+            .link_outcome(&saved.id, report_with(MAX_OUTCOME_LINKS as u64))
+            .unwrap_err()
+            .to_string(),
+        "insights_outcome_links_full"
+    );
+    // A repeated association inside the bound is still idempotent, not refused.
+    assert_eq!(
+        store
+            .link_outcome(&saved.id, report_with(0))
+            .unwrap()
+            .outcome_links
+            .len(),
+        MAX_OUTCOME_LINKS
+    );
+    assert_eq!(store.list().unwrap().len(), 1);
+}
+
+#[test]
+fn a_future_dated_link_stays_readable_once_the_clock_is_corrected() {
+    let temp = tempfile::tempdir().unwrap();
+    let file = temp.path().join("source.jsonl");
+    source(&file, "PRIVATE-CLOCK");
+    let store = LocalInsightStore::open(&temp.path().join("store")).unwrap();
+    let saved = store.import(SourceFormat::Trajectory, &file).unwrap();
+    store.link_outcome(&saved.id, report()).unwrap();
+    let index_path = store.dir.join("index.json");
+    let mut index: serde_json::Value =
+        serde_json::from_slice(&fs::read(&index_path).unwrap()).unwrap();
+    // Written while the machine's clock was a year fast. The entry itself is
+    // structurally intact; only the wall clock disagrees with it, and that
+    // disagreement must not make a saved snapshot unreadable.
+    let ahead = (chrono::Utc::now() + chrono::Duration::days(365)).to_rfc3339();
+    let link = &mut index["reports"][&saved.id]["outcome_links"][0];
+    link["linked_at"] = ahead.clone().into();
+    link["evidence"]["evidence"]["observed_at"] = ahead.clone().into();
+    link["evidence"]["evidence"]["imported_at"] = ahead.into();
+    fs::write(&index_path, serde_json::to_vec(&index).unwrap()).unwrap();
+    assert_eq!(store.list().unwrap().len(), 1);
+    assert!(store.quarantine().unwrap().is_empty());
+    assert_eq!(store.explain(&saved.id).unwrap().outcome_links.len(), 1);
+    // The bound still holds where it belongs: on a value being recorded now.
+    let mut ahead = match report() {
+        outcomes::OutcomeEvidence::TestReport(evidence) => evidence,
+        _ => unreachable!(),
+    };
+    ahead.observed_at = chrono::Utc::now() + chrono::Duration::days(365);
+    ahead.imported_at = ahead.observed_at;
+    assert!(
+        store
+            .link_outcome(&saved.id, outcomes::OutcomeEvidence::TestReport(ahead))
+            .is_err()
+    );
 }

@@ -11,6 +11,20 @@ use trace_commons_protocol::insights::{
     ProviderManifest,
 };
 
+/// Every metric this seam requires a result to carry. A result missing one, or
+/// carrying one twice, is refused here rather than two layers later in the
+/// store, so the boundary that documents the contract is the one that enforces
+/// it. The store keeps its own independent check as defense in depth.
+const REQUIRED_METRICS: [MetricId; 7] = [
+    MetricId::Sessions,
+    MetricId::Events,
+    MetricId::InputTokens,
+    MetricId::OutputTokens,
+    MetricId::ToolCalls,
+    MetricId::ToolFailures,
+    MetricId::KnownOutcomes,
+];
+
 use crate::source::{SessionEvent, SessionEventKind};
 
 pub const PROVIDER_REQUEST_VERSION: u32 = 1;
@@ -87,6 +101,10 @@ pub enum ProviderError {
     Unavailable,
     #[error("insights-provider-result-invalid")]
     InvalidResult,
+    #[error("insights-provider-purpose-unsupported")]
+    UnsupportedPurpose,
+    #[error("insights-provider-result-incomplete")]
+    IncompleteResult,
 }
 
 /// Only trusted implementations explicitly selected by the host may run here.
@@ -96,6 +114,11 @@ pub enum ProviderError {
 /// Remote evaluation requires a separate authorization and execution boundary.
 pub trait LocalInsightProvider {
     fn manifest(&self) -> ProviderManifest;
+    /// Whether this implementation serves the request's stated purpose.
+    /// Dispatch refuses a purpose an implementation does not claim, so a
+    /// purpose added later is not silently evaluated under an unrelated
+    /// rubric; an implementation that does not enumerate it fails closed.
+    fn supports_purpose(&self, purpose: AnalysisPurpose) -> bool;
     fn evaluate(
         &self,
         request: &ProviderRequest,
@@ -159,12 +182,27 @@ fn dispatch_projected(
     if provider.manifest() != request.provider {
         return Err(ProviderError::Incompatible);
     }
+    if !provider.supports_purpose(request.purpose) {
+        return Err(ProviderError::UnsupportedPurpose);
+    }
     let result = provider.evaluate(request, events)?;
     result
         .validate_for(&request.provider, std::slice::from_ref(&request.evidence))
         .map_err(|_| ProviderError::InvalidResult)?;
     if result.evidence != envelope.evidence {
         return Err(ProviderError::InvalidResult);
+    }
+    if result.metrics.len() != REQUIRED_METRICS.len()
+        || REQUIRED_METRICS.iter().any(|id| {
+            result
+                .metrics
+                .iter()
+                .filter(|metric| metric.id == *id)
+                .count()
+                != 1
+        })
+    {
+        return Err(ProviderError::IncompleteResult);
     }
     Ok(result)
 }
@@ -174,6 +212,14 @@ pub struct FirstPartyProvider;
 impl LocalInsightProvider for FirstPartyProvider {
     fn manifest(&self) -> ProviderManifest {
         ProviderManifest::first_party()
+    }
+
+    fn supports_purpose(&self, purpose: AnalysisPurpose) -> bool {
+        // Exhaustive on purpose: a new variant is a compile error here rather
+        // than a silent reuse of the descriptive-counts rubric.
+        match purpose {
+            AnalysisPurpose::PrivateDescriptive => true,
+        }
     }
 
     fn evaluate(
@@ -268,10 +314,15 @@ mod tests {
         calls: Cell<u32>,
         fail: bool,
         forge_evidence: bool,
+        decline_purpose: bool,
+        drop_metric: bool,
     }
     impl LocalInsightProvider for TestProvider {
         fn manifest(&self) -> ProviderManifest {
             self.manifest.clone()
+        }
+        fn supports_purpose(&self, _purpose: AnalysisPurpose) -> bool {
+            !self.decline_purpose
         }
         fn evaluate(
             &self,
@@ -287,6 +338,11 @@ mod tests {
             if self.forge_evidence {
                 result.evidence[0].source_digest = "b".repeat(64);
             }
+            if self.drop_metric {
+                result
+                    .metrics
+                    .retain(|metric| metric.id != MetricId::ToolFailures);
+            }
             Ok(result)
         }
     }
@@ -298,7 +354,57 @@ mod tests {
             calls: Cell::new(0),
             fail: false,
             forge_evidence: false,
+            decline_purpose: false,
+            drop_metric: false,
         }
+    }
+
+    #[test]
+    fn a_purpose_the_selected_provider_does_not_serve_is_refused_before_execution() {
+        let mut provider = test_provider();
+        let mut request = request();
+        request.provider = provider.manifest();
+        provider.decline_purpose = true;
+        assert_eq!(
+            dispatch_projected(&provider, &request, &events()),
+            Err(ProviderError::UnsupportedPurpose)
+        );
+        assert_eq!(
+            ProviderError::UnsupportedPurpose.to_string(),
+            "insights-provider-purpose-unsupported"
+        );
+        assert_eq!(provider.calls.get(), 0, "refused before the provider runs");
+        provider.decline_purpose = false;
+        assert!(dispatch_projected(&provider, &request, &events()).is_ok());
+    }
+
+    #[test]
+    fn a_partial_metric_set_is_refused_at_the_seam_not_at_the_store() {
+        let mut provider = test_provider();
+        let mut request = request();
+        request.provider = provider.manifest();
+        let first_party_request = ProviderRequest::first_party(request.evidence.clone());
+        provider.drop_metric = true;
+        assert_eq!(
+            dispatch_projected(&provider, &request, &events()),
+            Err(ProviderError::IncompleteResult)
+        );
+        assert_eq!(
+            ProviderError::IncompleteResult.to_string(),
+            "insights-provider-result-incomplete"
+        );
+        assert_eq!(
+            provider.calls.get(),
+            1,
+            "the result, not the request, failed"
+        );
+        assert_eq!(
+            dispatch_projected(&FirstPartyProvider, &first_party_request, &events())
+                .unwrap()
+                .metrics
+                .len(),
+            REQUIRED_METRICS.len()
+        );
     }
 
     #[test]

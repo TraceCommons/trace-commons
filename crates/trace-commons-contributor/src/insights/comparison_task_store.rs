@@ -37,17 +37,23 @@ impl fmt::Display for ComparisonTaskStoreError {
 }
 impl std::error::Error for ComparisonTaskStoreError {}
 
-pub(super) fn validate_index_comparison_tasks(index: &Index) -> Result<()> {
-    if (index.version < 7 && !index.comparison_tasks.is_empty())
-        || index.comparison_tasks.len() > MAX_COMPARISON_TASKS
-    {
-        bail!("insights_store_invalid");
-    }
-    for (id, task) in &index.comparison_tasks {
-        task.validate()?;
-        if id != &task.id {
-            bail!("insights_store_invalid");
-        }
+/// Identifiers of the comparison tasks this index cannot read. One unreadable
+/// task is withheld on its own; it never costs the caller the rest of the store.
+pub(super) fn invalid_index_comparison_tasks(index: &Index) -> Vec<String> {
+    let over_cap = (index.version < 7 && !index.comparison_tasks.is_empty())
+        || index.comparison_tasks.len() > MAX_COMPARISON_TASKS;
+    index
+        .comparison_tasks
+        .iter()
+        .filter(|(id, task)| over_cap || validate_index_comparison_task(id, task).is_err())
+        .map(|(id, _)| id.clone())
+        .collect()
+}
+
+fn validate_index_comparison_task(id: &str, task: &LocalComparisonTaskV1) -> Result<()> {
+    task.validate()?;
+    if id != task.id {
+        bail!(crate::insights::InsightsStoreError::Invalid);
     }
     Ok(())
 }
@@ -758,6 +764,48 @@ mod tests {
         store.import(SourceFormat::ClaudeCode, path).unwrap().id
     }
 
+    /// One comparison task the current build cannot read must cost the caller
+    /// that task and nothing else. Before the store withheld per entry, a
+    /// single unreadable task failed every read in the store.
+    #[test]
+    fn one_unreadable_comparison_task_is_withheld_without_wedging_the_store() {
+        let (_root, store, ids) = setup();
+        let first = store.episode_create(&ids[..1]).unwrap();
+        let second = store.episode_create(&ids[1..]).unwrap();
+        let good = store
+            .comparison_task_create(std::slice::from_ref(&first.id))
+            .unwrap();
+        let bad = store
+            .comparison_task_create(std::slice::from_ref(&second.id))
+            .unwrap();
+        let path = store.dir.join("index.json");
+        let mut index: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        // A schema this build cannot read at all, not merely an invariant it
+        // fails: the entry has no type before it has a verdict.
+        index["comparison_tasks"][&bad.id]["episodes"] = "not-a-binding-list".into();
+        fs::write(&path, serde_json::to_vec(&index).unwrap()).unwrap();
+
+        let listed = store.comparison_task_list().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].task.id, good.id);
+        assert_eq!(store.list().unwrap().len(), 2);
+        assert_eq!(store.episode_list().unwrap().len(), 2);
+        assert_eq!(
+            store.quarantine().unwrap().comparison_task_ids,
+            vec![bad.id.clone()]
+        );
+        assert!(store.comparison_task_explain(&bad.id).is_err());
+
+        let repaired = store.repair().unwrap();
+        assert_eq!(
+            repaired.quarantined.comparison_task_ids,
+            vec![bad.id.clone()]
+        );
+        assert!(store.quarantine().unwrap().is_empty());
+        assert_eq!(store.comparison_task_list().unwrap().len(), 1);
+    }
+
     #[test]
     fn claude_branches_qualify_but_shared_root_sessions_overlap() {
         let root = tempfile::tempdir().unwrap();
@@ -1278,7 +1326,15 @@ mod tests {
         let mut corrupt: serde_json::Value = serde_json::from_slice(&valid).unwrap();
         corrupt["comparison_tasks"][&task.id]["material_digest"] = "00".repeat(32).into();
         fs::write(&path, serde_json::to_vec(&corrupt).unwrap()).unwrap();
-        assert!(store.comparison_task_list().is_err());
+        // The unreadable task is withheld and named, not allowed to fail every
+        // read in the store.
+        assert!(store.comparison_task_list().unwrap().is_empty());
+        assert_eq!(
+            store.quarantine().unwrap().comparison_task_ids,
+            vec![task.id.clone()]
+        );
+        assert!(store.comparison_task_explain(&task.id).is_err());
+        assert_eq!(store.list().unwrap().len(), 2);
         let mut future: serde_json::Value = serde_json::from_slice(&valid).unwrap();
         future["version"] = (super::super::STORE_VERSION + 1).into();
         fs::write(&path, serde_json::to_vec(&future).unwrap()).unwrap();

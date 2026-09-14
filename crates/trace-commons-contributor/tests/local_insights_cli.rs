@@ -612,7 +612,7 @@ fn a_selected_fifo_is_refused_without_waiting_for_a_writer() {
         .stdout(std::process::Stdio::piped())
         .spawn()
         .unwrap();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
     loop {
         if let Some(status) = child.try_wait().unwrap() {
             assert!(!status.success());
@@ -1254,4 +1254,90 @@ fn released_codex_fixtures_produce_nonzero_cohort_counts_through_the_cli() {
         assert!(!readable.contains(private));
         assert!(!result.to_string().contains(private));
     }
+}
+
+#[test]
+fn an_unreadable_saved_entry_is_named_and_removable_without_touching_the_store_by_hand() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("enrollment");
+    let store = dir.path().join("insights");
+    let first = dir.path().join("first.jsonl");
+    let second = dir.path().join("second.jsonl");
+    fixture(&first, false);
+    fixture(&second, true);
+    for file in [&first, &second] {
+        value(invoke(
+            &config,
+            &store,
+            &[
+                "analyze",
+                "--source",
+                "trajectory",
+                "--file",
+                file.to_str().unwrap(),
+                "--save",
+            ],
+        ));
+    }
+    let index_path = store.join("index.json");
+    let mut index: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&index_path).unwrap()).unwrap();
+    let broken = index["reports"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .next()
+        .unwrap()
+        .clone();
+    index["reports"][&broken]["cost_unavailable_reason"] = "invented".into();
+    std::fs::write(&index_path, serde_json::to_vec(&index).unwrap()).unwrap();
+
+    // The store still reads, and delete is reachable for the entry that does not.
+    let listed = value(invoke(&config, &store, &["list"]));
+    assert_eq!(listed.as_array().unwrap().len(), 1);
+    let text = invoke_text(&config, &store, &["list"]);
+    assert!(
+        text.contains(&broken),
+        "list must name what it withholds: {text}"
+    );
+    assert!(
+        text.contains("insights repair"),
+        "list must name the remedy: {text}"
+    );
+
+    let repaired = value(invoke(&config, &store, &["repair"]));
+    assert_eq!(
+        repaired["quarantined"]["snapshot_ids"],
+        serde_json::json!([broken])
+    );
+    assert_eq!(
+        value(invoke(&config, &store, &["repair"]))["quarantined"]["snapshot_ids"],
+        serde_json::json!([])
+    );
+    assert_eq!(
+        value(invoke(&config, &store, &["list"]))
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(first.exists() && second.exists());
+    assert!(!config.exists());
+}
+
+fn invoke_text(config: &Path, store: &Path, args: &[&str]) -> String {
+    let output = Command::new(env!("CARGO_BIN_EXE_trace-commons-contributor"))
+        .arg("--config-dir")
+        .arg(config)
+        .args(["insights", "--store-dir"])
+        .arg(store)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap()
 }

@@ -13,22 +13,34 @@ use super::{Index, LocalInsightStore};
 
 const MAX_COMPARISON_SPECIFICATIONS: usize = 64;
 
-pub(super) fn validate_index_comparison_specifications(index: &Index) -> Result<()> {
-    if (index.version < 8 && !index.comparison_specifications.is_empty())
-        || index.comparison_specifications.len() > MAX_COMPARISON_SPECIFICATIONS
-    {
+/// Identifiers of the comparison specifications this index cannot read. One
+/// unreadable specification is withheld on its own; it never costs the caller
+/// the rest of the store.
+pub(super) fn invalid_index_comparison_specifications(index: &Index) -> Vec<String> {
+    let over_cap = (index.version < 8 && !index.comparison_specifications.is_empty())
+        || index.comparison_specifications.len() > MAX_COMPARISON_SPECIFICATIONS;
+    index
+        .comparison_specifications
+        .iter()
+        .filter(|(id, specification)| {
+            over_cap || validate_index_comparison_specification(id, specification).is_err()
+        })
+        .map(|(id, _)| id.clone())
+        .collect()
+}
+
+fn validate_index_comparison_specification(
+    id: &str,
+    specification: &ComparisonSpecificationV1,
+) -> Result<()> {
+    specification.validate()?;
+    // A saved specification may only claim an estimator the frozen protocol
+    // admits for saved specifications. Production never writes one; a
+    // hand-edited store can, and that is the only way any shell has ever
+    // reached the schema-2 coverage copy.
+    specification.validate_saved_estimator_qualification()?;
+    if id != specification.id {
         return Err(ComparisonSpecificationError::StoreInvalid.into());
-    }
-    for (id, specification) in &index.comparison_specifications {
-        specification.validate()?;
-        // A saved specification may only claim an estimator the frozen
-        // protocol admits for saved specifications. Production never writes
-        // one; a hand-edited store can, and that is the only way any shell has
-        // ever reached the schema-2 coverage copy.
-        specification.validate_saved_estimator_qualification()?;
-        if id != &specification.id {
-            return Err(ComparisonSpecificationError::StoreInvalid.into());
-        }
     }
     Ok(())
 }
@@ -322,11 +334,35 @@ mod tests {
         json["comparison_specifications"][&saved.id]["specification_digest"] =
             serde_json::json!("00".repeat(32));
         std::fs::write(&path, serde_json::to_vec(&json).unwrap()).unwrap();
-        assert!(store.comparison_specification_list().is_err());
+        // One unreadable specification is withheld and named; the rest of the
+        // store still reads, and repair removes exactly that entry.
+        assert!(store.comparison_specification_list().unwrap().is_empty());
+        assert_eq!(
+            store.quarantine().unwrap().comparison_specification_ids,
+            vec![saved.id.clone()]
+        );
+        assert!(store.comparison_specification_get(&saved.id).is_err());
+        assert_eq!(
+            store
+                .repair()
+                .unwrap()
+                .quarantined
+                .comparison_specification_ids,
+            vec![saved.id.clone()]
+        );
+        assert!(store.quarantine().unwrap().is_empty());
 
+        // A store from a newer build is a whole-store refusal, not a withheld
+        // entry: nothing here can repair it.
         json["version"] = serde_json::json!(super::super::STORE_VERSION + 1);
         std::fs::write(&path, serde_json::to_vec(&json).unwrap()).unwrap();
-        assert!(store.comparison_specification_list().is_err());
+        assert_eq!(
+            store
+                .comparison_specification_list()
+                .unwrap_err()
+                .to_string(),
+            "insights_store_version_unsupported"
+        );
     }
 
     #[test]

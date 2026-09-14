@@ -31,7 +31,7 @@ pub enum SummaryScope {
 }
 
 /// Machine-readable caveats travel with the result, including over native FFI.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SummaryLimitation {
     SelectedSavedSessionsAreNotVerifiedTasks,
@@ -42,12 +42,35 @@ pub enum SummaryLimitation {
     NoModelRankingsTimeSavingsOrCost,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+impl SummaryLimitation {
+    /// Every variant. A new variant must be added here or the
+    /// exhaustive-match test in `summary::tests` fails to compile.
+    pub const ALL: [SummaryLimitation; 6] = [
+        SummaryLimitation::SelectedSavedSessionsAreNotVerifiedTasks,
+        SummaryLimitation::AssessmentsAreUserReported,
+        SummaryLimitation::ObservedSumsRequireBothCoverages,
+        SummaryLimitation::AnalysisDatesAreNotActivityTime,
+        SummaryLimitation::SourceFormatsAreNotModelIdentity,
+        SummaryLimitation::NoModelRankingsTimeSavingsOrCost,
+    ];
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CoverageUnit {
     SessionSnapshots,
     NormalizedEvents,
     ToolResults,
+}
+
+impl CoverageUnit {
+    /// Every variant. A new variant must be added here or the
+    /// exhaustive-match test in `summary::tests` fails to compile.
+    pub const ALL: [CoverageUnit; 3] = [
+        CoverageUnit::SessionSnapshots,
+        CoverageUnit::NormalizedEvents,
+        CoverageUnit::ToolResults,
+    ];
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -126,48 +149,41 @@ fn summarize(mut snapshots: Vec<LocalInsight>) -> Result<SavedInsightsSummary> {
         .filter_map(|s| s.manual_annotation.as_ref().map(|a| (&s.id, a)))
         .collect();
     let assessed = count(annotations.len())?;
-    let categories = [
-        TaskCategory::Refactor,
-        TaskCategory::Tests,
-        TaskCategory::Docs,
-        TaskCategory::Debugging,
-        TaskCategory::Other,
-        TaskCategory::Unknown,
-    ]
-    .into_iter()
-    .map(|category| {
-        let ids: Vec<_> = annotations
-            .iter()
-            .filter(|(_, a)| a.category == category)
-            .map(|(id, _)| (*id).clone())
-            .collect();
-        Ok(CategoryCount {
-            category,
-            snapshots: count(ids.len())?,
-            evidence_snapshot_ids: ids,
+    let categories: Vec<CategoryCount> = TaskCategory::ALL
+        .into_iter()
+        .map(|category| {
+            let ids: Vec<_> = annotations
+                .iter()
+                .filter(|(_, a)| a.category == category)
+                .map(|(id, _)| (*id).clone())
+                .collect();
+            Ok(CategoryCount {
+                category,
+                snapshots: count(ids.len())?,
+                evidence_snapshot_ids: ids,
+            })
         })
-    })
-    .collect::<Result<_>>()?;
-    let outcomes = [
-        TaskOutcome::Accepted,
-        TaskOutcome::Partial,
-        TaskOutcome::Rejected,
-        TaskOutcome::Unknown,
-    ]
-    .into_iter()
-    .map(|outcome| {
-        let ids: Vec<_> = annotations
-            .iter()
-            .filter(|(_, a)| a.outcome == outcome)
-            .map(|(id, _)| (*id).clone())
-            .collect();
-        Ok(OutcomeCount {
-            outcome,
-            snapshots: count(ids.len())?,
-            evidence_snapshot_ids: ids,
+        .collect::<Result<_>>()?;
+    let outcomes: Vec<OutcomeCount> = TaskOutcome::ALL
+        .into_iter()
+        .map(|outcome| {
+            let ids: Vec<_> = annotations
+                .iter()
+                .filter(|(_, a)| a.outcome == outcome)
+                .map(|(id, _)| (*id).clone())
+                .collect();
+            Ok(OutcomeCount {
+                outcome,
+                snapshots: count(ids.len())?,
+                evidence_snapshot_ids: ids,
+            })
         })
-    })
-    .collect::<Result<_>>()?;
+        .collect::<Result<_>>()?;
+    if categories.iter().map(|c| c.snapshots).sum::<u64>() != assessed
+        || outcomes.iter().map(|o| o.snapshots).sum::<u64>() != assessed
+    {
+        return Err(anyhow!("insights-summary-category-outcome-mismatch"));
+    }
     let metrics = [
         MetricId::Sessions,
         MetricId::Events,
@@ -234,14 +250,7 @@ fn summarize(mut snapshots: Vec<LocalInsight>) -> Result<SavedInsightsSummary> {
     Ok(SavedInsightsSummary {
         schema_version: 1,
         scope: SummaryScope::AllSavedSelectedSessionSnapshots,
-        limitations: vec![
-            SummaryLimitation::SelectedSavedSessionsAreNotVerifiedTasks,
-            SummaryLimitation::AssessmentsAreUserReported,
-            SummaryLimitation::ObservedSumsRequireBothCoverages,
-            SummaryLimitation::AnalysisDatesAreNotActivityTime,
-            SummaryLimitation::SourceFormatsAreNotModelIdentity,
-            SummaryLimitation::NoModelRankingsTimeSavingsOrCost,
-        ],
+        limitations: SummaryLimitation::ALL.to_vec(),
         provider: ProviderManifest::first_party(),
         saved_snapshots: total,
         snapshot_analysis_range,
@@ -277,6 +286,77 @@ mod tests {
 
     fn metric(summary: &SavedInsightsSummary, id: MetricId) -> &MetricSummary {
         summary.metrics.iter().find(|m| m.id == id).unwrap()
+    }
+
+    /// Adding a `SummaryLimitation` variant without updating this match is a
+    /// compile error, and adding it here without also listing it in `ALL`
+    /// fails this assertion. Both must move together.
+    #[test]
+    fn summary_limitation_all_covers_every_variant_exhaustively() {
+        fn ordinal(value: SummaryLimitation) -> usize {
+            match value {
+                SummaryLimitation::SelectedSavedSessionsAreNotVerifiedTasks => 0,
+                SummaryLimitation::AssessmentsAreUserReported => 1,
+                SummaryLimitation::ObservedSumsRequireBothCoverages => 2,
+                SummaryLimitation::AnalysisDatesAreNotActivityTime => 3,
+                SummaryLimitation::SourceFormatsAreNotModelIdentity => 4,
+                SummaryLimitation::NoModelRankingsTimeSavingsOrCost => 5,
+            }
+        }
+        assert_eq!(SummaryLimitation::ALL.len(), 6);
+        for (index, value) in SummaryLimitation::ALL.iter().enumerate() {
+            assert_eq!(ordinal(*value), index);
+        }
+    }
+
+    /// Same guarantee as above, for `CoverageUnit`.
+    #[test]
+    fn coverage_unit_all_covers_every_variant_exhaustively() {
+        fn ordinal(value: CoverageUnit) -> usize {
+            match value {
+                CoverageUnit::SessionSnapshots => 0,
+                CoverageUnit::NormalizedEvents => 1,
+                CoverageUnit::ToolResults => 2,
+            }
+        }
+        assert_eq!(CoverageUnit::ALL.len(), 3);
+        for (index, value) in CoverageUnit::ALL.iter().enumerate() {
+            assert_eq!(ordinal(*value), index);
+        }
+    }
+
+    #[test]
+    fn category_and_outcome_rows_sum_to_assessed_snapshots() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("fixture.jsonl");
+        fixture(&file, "one");
+        let mut snapshot = analyze_file(SourceFormat::Trajectory, &file).unwrap();
+        snapshot.manual_annotation = Some(super::super::ManualAnnotation {
+            category: TaskCategory::Docs,
+            outcome: TaskOutcome::Accepted,
+            provenance: super::super::AnnotationProvenance::UserReported,
+            recorded_at: Utc::now(),
+            source_digest: snapshot.report.evidence[0].source_digest.clone(),
+        });
+        let summary = summarize(vec![snapshot]).unwrap();
+        assert_eq!(
+            summary
+                .user_reported
+                .categories
+                .iter()
+                .map(|c| c.snapshots)
+                .sum::<u64>(),
+            summary.user_reported.assessed_snapshots
+        );
+        assert_eq!(
+            summary
+                .user_reported
+                .outcomes
+                .iter()
+                .map(|o| o.snapshots)
+                .sum::<u64>(),
+            summary.user_reported.assessed_snapshots
+        );
     }
 
     #[test]

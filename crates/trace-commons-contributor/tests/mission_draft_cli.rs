@@ -38,6 +38,10 @@ fn source_instructions_cannot_grant_publication_authority() {
         .unwrap();
     assert!(!output.status.success());
     assert!(!String::from_utf8_lossy(&output.stdout).contains("DO_NOT_ECHO"));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("DO_NOT_ECHO"));
+    let mut combined = output.stdout.clone();
+    combined.extend_from_slice(&output.stderr);
+    assert!(!String::from_utf8_lossy(&combined).contains("DO_NOT_ECHO"));
 }
 
 #[test]
