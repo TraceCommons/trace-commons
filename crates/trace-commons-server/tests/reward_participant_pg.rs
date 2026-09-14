@@ -12,6 +12,7 @@ use trace_commons_server::reward_participant::RewardReservationState;
 use trace_commons_server::{
     config::{DatabaseConfig, SslMode},
     db::{Database, postgres::PgBackend},
+    error::DatabaseError,
     mission_rewards::{RewardActivityKind, RewardError, RewardProgramTerms},
     reward_participant::{
         RewardHistoryQuery, RewardOffer, RewardOfferManifest, RewardReservationRequest,
@@ -129,6 +130,38 @@ impl ParticipantFixture {
             ))
             .await
             .expect("grant existing account merge privileges");
+    }
+
+    /// How many distinct reward principals the given accounts resolve to. Two
+    /// means a merge left the alias groups apart.
+    async fn reward_principals(&self, accounts: [usize; 2]) -> i64 {
+        self.ledger
+            .admin
+            .query_one(
+                "SELECT count(DISTINCT reward_principal_id) FROM trace_reward_principal_accounts \
+                 WHERE tenant_id=$1 AND account_id IN ($2,$3)",
+                &[
+                    &self.ledger.tenant,
+                    &self.accounts[accounts[0]],
+                    &self.accounts[accounts[1]],
+                ],
+            )
+            .await
+            .expect("count reward principals")
+            .get(0)
+    }
+
+    async fn proposal_consumed_at(&self, proposal: Uuid) -> Option<chrono::DateTime<Utc>> {
+        self.ledger
+            .admin
+            .query_one(
+                "SELECT consumed_at FROM trace_account_merge_proposals \
+                 WHERE tenant_id=$1 AND proposal_id=$2",
+                &[&self.ledger.tenant, &proposal],
+            )
+            .await
+            .expect("read merge proposal")
+            .get(0)
     }
 
     async fn merge_proposal(&self, surviving: usize, absorbed: usize) -> Uuid {
@@ -791,11 +824,16 @@ async fn participant_duplicate_work_and_read_only_history_are_enforced() {
 #[ignore = "requires isolated TRACE_COMMONS_REWARDS_PG_TEST_URL"]
 async fn participant_merge_preserves_alias_history_and_duplicate_checks() {
     let f = ParticipantFixture::new().await;
+    // Distinct work namespaces and one reservation each, so the union violates
+    // neither the participant cap nor the lifetime duplicate-work check.
     let shared = f
         .offer("One task for independently controlled accounts.", 21, 7)
         .await;
+    let other = f
+        .offer("A second, unrelated task for the absorbed account.", 21, 7)
+        .await;
     let first = f.reserve(0, &shared).await;
-    let second = f.reserve(1, &shared).await;
+    let second = f.reserve(1, &other).await;
     f.grant_account_merge_privileges().await;
     let proposal = f.merge_proposal(0, 1).await;
     let runtime = f
@@ -862,7 +900,15 @@ async fn participant_merge_preserves_alias_history_and_duplicate_checks() {
             .await
             .unwrap()
             .capacity_used_units,
-        14
+        7
+    );
+    assert_eq!(
+        f.runtime
+            .get_reward_offer(other.program_id)
+            .await
+            .unwrap()
+            .capacity_used_units,
+        7
     );
     let later = f
         .offer("One task for independently controlled accounts.", 21, 7)
@@ -900,8 +946,11 @@ async fn participant_merge_preserves_alias_history_and_duplicate_checks() {
 async fn revoked_participant_login_rolls_back_entire_account_merge() {
     let f = ParticipantFixture::new().await;
     let shared = f.offer("Atomic merge rollback fixture.", 21, 7).await;
+    let other = f
+        .offer("Atomic merge rollback fixture, absorbed.", 21, 7)
+        .await;
     let first = f.reserve(0, &shared).await;
-    let second = f.reserve(1, &shared).await;
+    let second = f.reserve(1, &other).await;
     f.grant_account_merge_privileges().await;
     let proposal = f.merge_proposal(0, 1).await;
     f.ledger
@@ -958,15 +1007,17 @@ async fn revoked_participant_login_rolls_back_entire_account_merge() {
         reward_principals, 2,
         "failed merge must preserve separate reward aliases"
     );
-    assert_eq!(
-        f.runtime
-            .get_reward_offer(shared.program_id)
-            .await
-            .unwrap()
-            .capacity_used_units,
-        14,
-        "failed merge must not release or duplicate capacity"
-    );
+    for program in [shared.program_id, other.program_id] {
+        assert_eq!(
+            f.runtime
+                .get_reward_offer(program)
+                .await
+                .unwrap()
+                .capacity_used_units,
+            7,
+            "failed merge must not release or duplicate capacity"
+        );
+    }
     f.ledger
         .admin
         .execute(
@@ -1036,4 +1087,78 @@ async fn merge_freshness_check_is_transaction_id_epoch_independent() {
         !migration.contains("pg_current_xact_id()::TEXT"),
         "no text rendering of a transaction id may gate the merge hook"
     );
+}
+
+/// Joining two alias groups must not create state `trace_reward_participant_
+/// reserve` refuses. Two accounts each holding the per-participant maximum on
+/// one program would, merged, leave a single payout identity holding twice the
+/// advertised cap, so the merge is refused and nothing moves.
+#[tokio::test]
+#[ignore = "requires isolated TRACE_COMMONS_REWARDS_PG_TEST_URL"]
+async fn participant_merge_refuses_when_union_exceeds_participant_cap() {
+    let f = ParticipantFixture::new().await;
+    let shared = f.offer("One capped task, two accounts.", 21, 7).await;
+    f.reserve(0, &shared).await;
+    f.reserve(1, &shared).await;
+    f.grant_account_merge_privileges().await;
+    let proposal = f.merge_proposal(0, 1).await;
+    let refusal = f
+        .runtime
+        .execute_merge(&f.ledger.tenant, f.accounts[0], proposal)
+        .await
+        .expect_err("a merge over the participant cap must be refused");
+    assert!(
+        matches!(&refusal, DatabaseError::Constraint(label)
+            if label == "reward_merge_participant_cap"),
+        "expected the named cap refusal, got {refusal}"
+    );
+    assert_eq!(
+        f.reward_principals([0, 1]).await,
+        2,
+        "aliases must not join"
+    );
+    assert!(f.proposal_consumed_at(proposal).await.is_none());
+    assert_eq!(
+        f.runtime
+            .get_reward_offer(shared.program_id)
+            .await
+            .unwrap()
+            .capacity_used_units,
+        14,
+        "a refused merge must neither release nor duplicate capacity"
+    );
+}
+
+/// The same rule for the lifetime work-namespace check: two programs published
+/// from the same definition share a work namespace, so merging accounts that
+/// each hold one would leave one identity claiming that work twice. Neither
+/// account is over its cap, so this is the case the cap check alone misses.
+#[tokio::test]
+#[ignore = "requires isolated TRACE_COMMONS_REWARDS_PG_TEST_URL"]
+async fn participant_merge_refuses_duplicate_work_namespace() {
+    let f = ParticipantFixture::new().await;
+    let definition = "One definition, published twice.";
+    let first = f.offer(definition, 21, 7).await;
+    let second = f.offer(definition, 21, 7).await;
+    assert_ne!(first.program_id, second.program_id);
+    f.reserve(0, &first).await;
+    f.reserve(1, &second).await;
+    f.grant_account_merge_privileges().await;
+    let proposal = f.merge_proposal(0, 1).await;
+    let refusal = f
+        .runtime
+        .execute_merge(&f.ledger.tenant, f.accounts[0], proposal)
+        .await
+        .expect_err("a merge duplicating a work namespace must be refused");
+    assert!(
+        matches!(&refusal, DatabaseError::Constraint(label)
+            if label == "reward_merge_work_duplicate"),
+        "expected the named duplicate-work refusal, got {refusal}"
+    );
+    assert_eq!(
+        f.reward_principals([0, 1]).await,
+        2,
+        "aliases must not join"
+    );
+    assert!(f.proposal_consumed_at(proposal).await.is_none());
 }

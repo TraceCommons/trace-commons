@@ -4494,7 +4494,7 @@ impl Database for PgBackend {
             ],
         )
         .await
-        .map_err(DatabaseError::Postgres)?;
+        .map_err(reward_merge_refusal)?;
 
         // Move B's ACTIVE principal links onto A. PK-column UPDATE; collision-free
         // because (tenant_id, principal_ref) is UNIQUE and a principal has at most
@@ -5187,6 +5187,25 @@ impl Database for PgBackend {
             })
             .collect())
     }
+}
+
+/// The reward hook refuses a merge that would put one payout identity over a
+/// program's participant cap, or leave it holding two reservations in one work
+/// namespace -- exactly the states `trace_reward_participant_reserve` refuses.
+/// Surface those two as the named control so the refusal is legible; every
+/// other driver error stays opaque.
+fn reward_merge_refusal(error: tokio_postgres::Error) -> DatabaseError {
+    const NAMED: [&str; 2] = [
+        "reward_merge_participant_cap",
+        "reward_merge_work_duplicate",
+    ];
+    if let Some(db) = error.as_db_error()
+        && db.code().code() == "P0001"
+        && let Some(label) = NAMED.iter().find(|label| **label == db.message())
+    {
+        return DatabaseError::Constraint((*label).to_string());
+    }
+    DatabaseError::Postgres(error)
 }
 
 fn device_key_record_from_row(row: Row) -> crate::db::DeviceKeyRecord {

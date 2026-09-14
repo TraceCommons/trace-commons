@@ -1131,6 +1131,7 @@ AS $$
 DECLARE
     v_surviving_principal UUID;
     v_absorbed_principal UUID;
+    v_aliases TEXT[];
 BEGIN
     IF p_tenant IS NULL OR p_tenant = ''
         OR p_tenant IS DISTINCT FROM public.trace_current_tenant_id()
@@ -1193,6 +1194,50 @@ BEGIN
            AND absorbed.closed_at IS NULL
     ) THEN
         RAISE EXCEPTION USING MESSAGE = 'reward_unauthorized';
+    END IF;
+
+    -- Re-check, over the joined alias set, the two invariants
+    -- trace_reward_participant_reserve enforces when a reservation is created.
+    -- A merge that joined two groups without this could leave one payout
+    -- identity holding more than participant_cap_units on a program, or two
+    -- reservations in one work namespace. Refuse rather than create state the
+    -- reserve path forbids; the cap refusal clears on its own once the excess
+    -- reservations expire or reach a terminal state, the work-namespace one is
+    -- lifetime, matching the reserve check it mirrors.
+    SELECT pg_catalog.array_agg(binding.participant_hash)
+      INTO v_aliases
+      FROM public.trace_reward_principal_accounts binding
+     WHERE binding.tenant_id = p_tenant
+       AND (
+           binding.reward_principal_id = v_surviving_principal
+           OR binding.reward_principal_id = v_absorbed_principal
+       );
+    IF EXISTS (
+        SELECT 1
+          FROM public.trace_reward_programs program
+         WHERE program.tenant_id = p_tenant
+           AND EXISTS (
+               SELECT 1
+                 FROM public.trace_reward_reservations reservation
+                WHERE reservation.tenant_id = p_tenant
+                  AND reservation.program_id = program.program_id
+                  AND reservation.participant_hash = ANY(v_aliases)
+           )
+           AND public.trace_reward_capacity_used_for_aliases(
+                   p_tenant, program.program_id, v_aliases
+               ) > program.participant_cap_units::NUMERIC
+    ) THEN
+        RAISE EXCEPTION USING MESSAGE = 'reward_merge_participant_cap';
+    END IF;
+    IF EXISTS (
+        SELECT 1
+          FROM public.trace_reward_participant_reservations participant
+         WHERE participant.tenant_id = p_tenant
+           AND participant.participant_hash = ANY(v_aliases)
+         GROUP BY participant.work_namespace_hash
+        HAVING pg_catalog.count(*) > 1
+    ) THEN
+        RAISE EXCEPTION USING MESSAGE = 'reward_merge_work_duplicate';
     END IF;
 
     IF v_surviving_principal IS NULL THEN
