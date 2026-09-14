@@ -251,3 +251,84 @@ fn malformed_persisted_time_evidence_fails_closed_without_panicking() {
         assert!(result.unwrap().is_err(), "accepted malformed {field}");
     }
 }
+
+fn report_with(passed: u64) -> outcomes::OutcomeEvidence {
+    outcomes::OutcomeEvidence::TestReport(
+        outcomes::parse_test_report(
+            format!(
+                r#"{{"schema_version":1,"runner":"cargo-test","passed":{passed},"failed":0,
+                "skipped":0,"observed_at":"2026-09-11T00:00:00Z","commit_id":null}}"#
+            )
+            .as_bytes(),
+        )
+        .unwrap(),
+    )
+}
+
+#[test]
+fn unlinking_an_unknown_evidence_id_is_refused_and_leaves_the_index_untouched() {
+    let temp = tempfile::tempdir().unwrap();
+    let file = temp.path().join("source.jsonl");
+    source(&file, "PRIVATE-UNLINK");
+    let store = LocalInsightStore::open(&temp.path().join("store")).unwrap();
+    let saved = store.import(SourceFormat::Trajectory, &file).unwrap();
+    store.link_outcome(&saved.id, report()).unwrap();
+    let before = fs::read(store.dir.join("index.json")).unwrap();
+    let error = store
+        .unlink_outcome(&saved.id, &"f".repeat(64))
+        .unwrap_err()
+        .to_string();
+    assert_eq!(error, "insights_evidence_link_not_found");
+    assert_eq!(fs::read(store.dir.join("index.json")).unwrap(), before);
+    // The link that does exist still removes, exactly once.
+    let linked_id = store.explain(&saved.id).unwrap().outcome_links[0]
+        .id
+        .clone();
+    assert!(
+        store
+            .unlink_outcome(&saved.id, &linked_id)
+            .unwrap()
+            .outcome_links
+            .is_empty()
+    );
+    assert_eq!(
+        store
+            .unlink_outcome(&saved.id, &linked_id)
+            .unwrap_err()
+            .to_string(),
+        "insights_evidence_link_not_found"
+    );
+}
+
+#[test]
+fn the_outcome_link_bound_is_exact_and_refuses_the_next_association() {
+    let temp = tempfile::tempdir().unwrap();
+    let file = temp.path().join("source.jsonl");
+    source(&file, "PRIVATE-BOUND");
+    let store = LocalInsightStore::open(&temp.path().join("store")).unwrap();
+    let saved = store.import(SourceFormat::Trajectory, &file).unwrap();
+    for passed in 0..MAX_OUTCOME_LINKS as u64 {
+        store.link_outcome(&saved.id, report_with(passed)).unwrap();
+    }
+    assert_eq!(
+        store.explain(&saved.id).unwrap().outcome_links.len(),
+        MAX_OUTCOME_LINKS
+    );
+    assert_eq!(
+        store
+            .link_outcome(&saved.id, report_with(MAX_OUTCOME_LINKS as u64))
+            .unwrap_err()
+            .to_string(),
+        "insights_outcome_links_full"
+    );
+    // A repeated association inside the bound is still idempotent, not refused.
+    assert_eq!(
+        store
+            .link_outcome(&saved.id, report_with(0))
+            .unwrap()
+            .outcome_links
+            .len(),
+        MAX_OUTCOME_LINKS
+    );
+    assert_eq!(store.list().unwrap().len(), 1);
+}

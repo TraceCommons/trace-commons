@@ -585,13 +585,19 @@ impl LocalInsightStore {
     }
 
     /// Remove only the selected evidence association; original artifacts remain.
+    /// Removing nothing is not a removal: a mistyped identifier, or a link a
+    /// second window already removed, must not present as a completed removal.
     pub fn unlink_outcome(&self, id: &str, evidence_id: &str) -> Result<LocalInsight> {
         let (_lock, mut index) = self.locked()?;
         let insight = index
             .reports
             .get_mut(id)
             .ok_or_else(|| anyhow!("insights_not_found"))?;
+        let before = insight.outcome_links.len();
         insight.outcome_links.retain(|link| link.id != evidence_id);
+        if insight.outcome_links.len() == before {
+            bail!("insights_evidence_link_not_found");
+        }
         let result = insight.clone();
         self.save(&index)?;
         Ok(result)
