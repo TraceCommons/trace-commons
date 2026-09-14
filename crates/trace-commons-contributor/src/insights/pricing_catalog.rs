@@ -6,7 +6,8 @@
 use std::collections::BTreeSet;
 
 use trace_commons_protocol::insights_pricing::{
-    BillableTokenCount, PricingError, PricingTable, PricingUsageInput, calculate_estimated_cost,
+    BillableTokenCount, DeterministicCostEstimate, PricingError, PricingTable, PricingUsageInput,
+    calculate_estimated_cost,
 };
 
 const MAX_CATALOG_TABLES: usize = 256;
@@ -26,6 +27,11 @@ pub enum PricingCatalogError {
     MissingPrice,
     #[error("insights_pricing_window_unresolved")]
     UnresolvedWindow,
+    /// A saved estimate names a table this catalog release no longer carries,
+    /// or carries under a different release version. Recomputation refuses
+    /// rather than substituting another table's rates.
+    #[error("insights_pricing_catalog_stored_table_unavailable")]
+    StoredTableUnavailable,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,6 +79,12 @@ impl PricingCatalog {
     /// Choose the newest immutable table containing one rate entry that
     /// covers both inclusive observation endpoints and every exact accounting
     /// category. Caller-provided counts are not calculated here.
+    ///
+    /// This is the first-estimate path only. An estimate that was already
+    /// saved must be recomputed with [`Self::recompute_saved`], which reprices
+    /// through the table the estimate recorded. Routing a saved estimate here
+    /// would silently move its number when a later release also covers the
+    /// same historical window.
     pub fn select_newest_applicable(
         &self,
         input: &PricingUsageInput,
@@ -114,6 +126,31 @@ impl PricingCatalog {
             PricingCatalogError::UnresolvedWindow
         } else {
             PricingCatalogError::MissingPrice
+        })
+    }
+
+    /// Recompute an already-saved estimate against the exact immutable table
+    /// it recorded, so unchanged saved usage keeps its number across catalog
+    /// releases. `table_id` is a digest over the whole table body, so a match
+    /// is a match on the rates themselves; the release version must agree too.
+    /// A table this release no longer carries is unavailable, never replaced.
+    pub fn recompute_saved(
+        &self,
+        saved: &DeterministicCostEstimate,
+        input: &PricingUsageInput,
+    ) -> Result<DeterministicCostEstimate, PricingCatalogError> {
+        validate_query(input)?;
+        let table = self
+            .table(&saved.table_id)
+            .filter(|table| table.version == saved.table_version)
+            .ok_or(PricingCatalogError::StoredTableUnavailable)?;
+        calculate_estimated_cost(table, input).map_err(|error| match error {
+            PricingError::MissingPrice => PricingCatalogError::MissingPrice,
+            PricingError::UnresolvedWindow => PricingCatalogError::UnresolvedWindow,
+            PricingError::InvalidInput => PricingCatalogError::InvalidQuery,
+            PricingError::InvalidTable | PricingError::ArithmeticOverflow => {
+                PricingCatalogError::InvalidCatalog
+            }
         })
     }
 }
@@ -278,6 +315,62 @@ mod tests {
             PricingCatalog::from_tables(vec![valid, malformed]),
             Err(PricingCatalogError::InvalidCatalog)
         );
+    }
+
+    /// A later release that also covers the same window must not move a saved
+    /// number. Only a first estimate selects the newest applicable table.
+    #[test]
+    fn a_saved_estimate_reprices_through_its_stored_table_not_the_newest() {
+        let first = table(1, 0, None, 4_000_000_000);
+        let query = input(10, 20, 3);
+        let v1 = PricingCatalog::from_tables(vec![first.clone()]).unwrap();
+        let saved =
+            calculate_estimated_cost(v1.select_newest_applicable(&query).unwrap(), &query).unwrap();
+        assert_eq!(saved.table_id, first.table_id);
+        assert_eq!(saved.table_version, 1);
+        assert_eq!(saved.estimated_cost_usd_micros, 12);
+
+        let second = table(2, 0, None, 9_000_000_000);
+        let v2 = PricingCatalog::from_tables(vec![first.clone(), second.clone()]).unwrap();
+        assert_eq!(
+            v2.select_newest_applicable(&query).unwrap(),
+            &second,
+            "a fresh estimate takes the newest applicable release"
+        );
+        assert_eq!(
+            calculate_estimated_cost(&second, &query)
+                .unwrap()
+                .estimated_cost_usd_micros,
+            27,
+            "the newer release genuinely prices this usage differently"
+        );
+
+        let recomputed = v2.recompute_saved(&saved, &query).unwrap();
+        assert_eq!(recomputed, saved, "unchanged saved usage keeps its number");
+        assert_eq!(recomputed.table_id, first.table_id);
+        assert_eq!(recomputed.table_version, 1);
+    }
+
+    #[test]
+    fn a_stored_table_this_release_dropped_or_renumbered_is_unavailable() {
+        let first = table(1, 0, None, 4_000_000_000);
+        let query = input(10, 20, 3);
+        let saved = calculate_estimated_cost(&first, &query).unwrap();
+
+        let without = PricingCatalog::from_tables(vec![table(2, 0, None, 9_000_000_000)]).unwrap();
+        assert_eq!(
+            without.recompute_saved(&saved, &query),
+            Err(PricingCatalogError::StoredTableUnavailable)
+        );
+
+        let mut renumbered = saved.clone();
+        renumbered.table_version = 2;
+        let with = PricingCatalog::from_tables(vec![first]).unwrap();
+        assert_eq!(
+            with.recompute_saved(&renumbered, &query),
+            Err(PricingCatalogError::StoredTableUnavailable)
+        );
+        assert_eq!(with.recompute_saved(&saved, &query).unwrap(), saved);
     }
 
     #[test]
