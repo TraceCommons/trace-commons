@@ -435,7 +435,11 @@ impl Response {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+/// `Deserialize` as well as `Serialize` for the same reason [`Response`]
+/// carries both: the attached client in `daemon::attached` reads these
+/// frames back off the socket, and a second client-side definition of the
+/// push shape is one the two could drift apart on.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Event {
     pub event: String,
     pub data: serde_json::Value,

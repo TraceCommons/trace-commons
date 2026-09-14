@@ -23,6 +23,7 @@
 pub mod account_onboarding;
 pub mod admission_setup;
 pub mod approved_envelope;
+pub mod attached;
 pub mod attestation_mark;
 pub mod audit;
 pub mod client;
