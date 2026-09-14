@@ -227,6 +227,43 @@ fn time_evidence_follows_exact_content_alias_and_deletion_lifecycle() {
     assert!(first_path.exists() && alias_path.exists());
 }
 
+/// The plan requires that RFC 3339 subsecond precision is not silently
+/// reduced. Nothing else in the suite persists a fractional second, so a
+/// serializer change that truncated to whole seconds would otherwise pass.
+#[test]
+fn subsecond_recorded_timestamps_survive_the_store_round_trip() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("subsecond.jsonl");
+    fs::write(
+        &path,
+        "{\"role\":\"meta\",\"source\":\"fixture\"}\n         {\"role\":\"user\",\"content\":\"PRIVATE\",\"timestamp\":\"2026-09-11T00:00:00.123456789Z\"}\n",
+    )
+    .unwrap();
+    let store = LocalInsightStore::open(&temp.path().join("store")).unwrap();
+    let imported = store.import(SourceFormat::Trajectory, &path).unwrap();
+    let extremum = imported
+        .time_evidence
+        .as_ref()
+        .unwrap()
+        .earliest
+        .clone()
+        .unwrap();
+    assert_eq!(
+        extremum.recorded_at.timestamp_subsec_nanos(),
+        123_456_789,
+        "extraction keeps every fractional digit"
+    );
+    let reloaded = LocalInsightStore::open(&temp.path().join("store"))
+        .unwrap()
+        .explain(&imported.id)
+        .unwrap();
+    assert_eq!(
+        reloaded.time_evidence.as_ref().unwrap().earliest,
+        Some(extremum),
+        "persistence keeps every fractional digit"
+    );
+}
+
 #[test]
 fn malformed_persisted_time_evidence_fails_closed_without_panicking() {
     let temp = tempfile::tempdir().unwrap();
