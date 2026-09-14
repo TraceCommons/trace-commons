@@ -988,3 +988,268 @@ fn human_snapshot_delete_reports_lost_episode_groups() {
     assert!(text.contains(episode["episode"]["id"].as_str().unwrap()));
     assert!(file.exists() && !config.exists());
 }
+
+const RELEASE_ALPHA: &[u8] = include_bytes!(
+    "../fixtures/insights/codex-task-attribution/codex-release-0.154.0-alpha-direct.jsonl"
+);
+const RELEASE_BETA: &[u8] = include_bytes!(
+    "../fixtures/insights/codex-task-attribution/codex-release-0.154.0-beta-direct.jsonl"
+);
+
+/// Carry one released Codex fixture from import to a reviewed, qualified task.
+///
+/// Returns the task id and the task's `updated_at`, which is the latest
+/// recorded time on the task and therefore a cutoff derived from observed
+/// evidence rather than a literal.
+fn reviewed_released_codex_task(
+    config: &Path,
+    store: &Path,
+    bytes: &[u8],
+    file: &Path,
+    fingerprint: &str,
+) -> (String, String) {
+    std::fs::write(file, bytes).unwrap();
+    let snapshot = value(invoke(
+        config,
+        store,
+        &[
+            "analyze",
+            "--source",
+            "codex",
+            "--file",
+            file.to_str().unwrap(),
+            "--save",
+        ],
+    ));
+    let episode = value(invoke(
+        config,
+        store,
+        &[
+            "episode-create",
+            "--snapshot",
+            snapshot["id"].as_str().unwrap(),
+        ],
+    ));
+    let task = value(invoke(
+        config,
+        store,
+        &[
+            "comparison-task",
+            "create",
+            "--episode",
+            episode["episode"]["id"].as_str().unwrap(),
+        ],
+    ));
+    let id = task["task"]["id"].as_str().unwrap().to_owned();
+    let revision = task["task"]["revision"].to_string();
+    let contextual = value(invoke(
+        config,
+        store,
+        &[
+            "comparison-task",
+            "set-context",
+            &id,
+            "--expected-revision",
+            &revision,
+            "--project-id",
+            "20c18c96-6093-49f5-bb6f-6092ef0630b9",
+            "--task-date",
+            "2026-09-12",
+            "--language",
+            "rust",
+            "--harness-id",
+            "codex",
+            "--harness-version",
+            "0.154.0",
+            "--reasoning-effort",
+            "medium",
+            "--tool-policy-id",
+            "direct-v1",
+            "--tool-policy-version",
+            "1",
+            "--prompt-template-digest",
+            fingerprint,
+        ],
+    ));
+    let revision = contextual["task"]["revision"].to_string();
+    let assessed = value(invoke(
+        config,
+        store,
+        &[
+            "comparison-task",
+            "set-outcome",
+            &id,
+            "--expected-revision",
+            &revision,
+            "--outcome",
+            "accepted",
+        ],
+    ));
+    let revision = assessed["task"]["revision"].to_string();
+    let digest = assessed["task"]["material_digest"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let confirmed = value(invoke(
+        config,
+        store,
+        &[
+            "comparison-task",
+            "reconfirm",
+            &id,
+            "--expected-revision",
+            &revision,
+            "--material-digest",
+            &digest,
+        ],
+    ));
+    let updated_at = confirmed["task"]["updated_at"].as_str().unwrap().to_owned();
+    (id, updated_at)
+}
+
+/// The seam the milestone turns on: released fixture -> qualification ->
+/// non-zero cohort counts, and a duplicate export excluded after deletion.
+///
+/// Every other comparison test either stops at `source_qualification` being
+/// `Some` or builds facts by hand, so a regression in the mapping from a
+/// qualified source to a counted cohort left them all green.
+#[test]
+fn released_codex_fixtures_produce_nonzero_cohort_counts_through_the_cli() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("enrollment");
+    let store = dir.path().join("insights");
+    let fingerprint = "33".repeat(32);
+    let (alpha_id, _) = reviewed_released_codex_task(
+        &config,
+        &store,
+        RELEASE_ALPHA,
+        &dir.path().join("ALPHA_PRIVATE.jsonl"),
+        &fingerprint,
+    );
+    let (beta_id, cutoff) = reviewed_released_codex_task(
+        &config,
+        &store,
+        RELEASE_BETA,
+        &dir.path().join("BETA_PRIVATE.jsonl"),
+        &fingerprint,
+    );
+    let alpha_detail = value(invoke(
+        &config,
+        &store,
+        &["comparison-task", "explain", &alpha_id],
+    ));
+    assert_eq!(
+        alpha_detail["detail"]["source_qualification"]["declared_model_cohort"],
+        serde_json::json!("model-alpha")
+    );
+    let stratum_args = [
+        "--project-id",
+        "20c18c96-6093-49f5-bb6f-6092ef0630b9",
+        "--language",
+        "rust",
+        "--configuration-fingerprint",
+    ];
+    let context_fingerprint =
+        alpha_detail["detail"]["task"]["context"]["configuration_fingerprint"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+    let mut save_args = vec![
+        "comparison",
+        "save-spec",
+        "--evidence-cutoff",
+        cutoff.as_str(),
+        "--cohort",
+        "model-alpha",
+        "model-beta",
+        "--date-start",
+        "2026-09-12",
+        "--date-end",
+        "2026-09-12",
+    ];
+    save_args.extend(stratum_args);
+    save_args.push(context_fingerprint.as_str());
+    let saved = value(invoke(&config, &store, &save_args));
+    let specification_id = saved["specification"]["id"].as_str().unwrap().to_owned();
+    let result = value(invoke(
+        &config,
+        &store,
+        &["comparison", "evaluate", &specification_id],
+    ));
+    let mut included = result["result"]["included_task_ids"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|id| id.as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    included.sort();
+    let mut expected = vec![alpha_id.clone(), beta_id.clone()];
+    expected.sort();
+    assert_eq!(
+        included, expected,
+        "both reviewed released tasks must be included: {}",
+        result["result"]["excluded_tasks"]
+    );
+    let cohorts = result["result"]["cohorts"].as_array().unwrap();
+    assert_eq!(cohorts.len(), 2);
+    for (label, cohort) in [("model-alpha", &cohorts[0]), ("model-beta", &cohorts[1])] {
+        assert_eq!(cohort["cohort_label"], serde_json::json!(label));
+        assert_eq!(cohort["included_tasks"], serde_json::json!(1));
+        assert_eq!(cohort["outcomes"]["accepted"], serde_json::json!(1));
+        assert_eq!(cohort["outcomes"]["assessed"], serde_json::json!(1));
+    }
+    let text = Command::new(env!("CARGO_BIN_EXE_trace-commons-contributor"))
+        .arg("--config-dir")
+        .arg(&config)
+        .args(["insights", "--store-dir"])
+        .arg(&store)
+        .args(["comparison", "evaluate", &specification_id])
+        .output()
+        .unwrap();
+    assert!(
+        text.status.success(),
+        "{}",
+        String::from_utf8_lossy(&text.stderr)
+    );
+    let readable = String::from_utf8(text.stdout).unwrap();
+    assert!(readable.contains("model-alpha (declared, not verified): 1 included tasks"));
+    assert!(readable.contains("It is not verified"));
+
+    let duplicate = dir.path().join("ALPHA_REEXPORT_PRIVATE.jsonl");
+    let reexport = String::from_utf8(RELEASE_ALPHA.to_vec())
+        .unwrap()
+        .replace("synthetic-alpha-text", "synthetic-alpha-reexport");
+    let (duplicate_id, _) = reviewed_released_codex_task(
+        &config,
+        &store,
+        reexport.as_bytes(),
+        &duplicate,
+        &fingerprint,
+    );
+    let after_duplicate = value(invoke(
+        &config,
+        &store,
+        &["comparison", "evaluate", &specification_id],
+    ));
+    let overlapping = after_duplicate["result"]["excluded_tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|task| {
+            task["reasons"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("overlapping_task_evidence"))
+        })
+        .map(|task| task["task_id"].as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    assert!(
+        overlapping.contains(&alpha_id) && overlapping.contains(&duplicate_id),
+        "one Codex session re-exported with different bytes must not count twice: {}",
+        after_duplicate["result"]["excluded_tasks"]
+    );
+    for private in ["ALPHA_PRIVATE", "BETA_PRIVATE", "synthetic-alpha-text"] {
+        assert!(!readable.contains(private));
+        assert!(!result.to_string().contains(private));
+    }
+}
