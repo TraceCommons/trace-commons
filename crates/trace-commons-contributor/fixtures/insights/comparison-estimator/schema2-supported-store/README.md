@@ -1,6 +1,6 @@
 # Qualified exact comparison store fixture
 
-`index.json` is a synthetic schema-10 local Insights store used to exercise the
+`index.json` is a synthetic schema-11 local Insights store used to exercise the
 saved qualified-estimator path through the CLI and C ABI. It contains four
 user-confirmed refactor tasks built from the repository's minimal Claude agent
 branch fixture: two distinct root sessions per declared model cohort, complete
@@ -30,6 +30,6 @@ recomputed by production code, and serialized the store through the ordinary
 store encoder.
 
 The committed byte capture has SHA-256
-`c1bbb6b4e7b14a078971af78ad80324842cec7fd92657b2162b3e1c072e0c17b`.
+`5e02e354f4367b039848da06c2d1bef993ab2839b45a2102e02fdadc034d66cf`.
 The CLI and ABI tests validate the store on read and recompute the qualified
 result rather than accepting a cached result payload.

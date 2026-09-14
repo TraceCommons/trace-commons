@@ -509,9 +509,9 @@ mod evidence_digest_tests {
     const DERIVED_REPORT_SHA256: &str =
         "06da84afe0da9ecd949d4ef93470986f1c1843cbe39bcad51b3065202e0b9724";
     /// SHA-256 pinned in `schema2-supported-store/README.md` for the captured
-    /// schema-10 store this crate's CLI, C ABI, and macOS tests read.
+    /// schema-11 store this crate's CLI, C ABI, and macOS tests read.
     const SUPPORTED_STORE_SHA256: &str =
-        "c1bbb6b4e7b14a078971af78ad80324842cec7fd92657b2162b3e1c072e0c17b";
+        "5e02e354f4367b039848da06c2d1bef993ab2839b45a2102e02fdadc034d66cf";
 
     fn packet() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/insights/comparison-estimator")
@@ -554,7 +554,7 @@ mod evidence_digest_tests {
         // 3. The derived report.
         assert_eq!(digest_of(&report), DERIVED_REPORT_SHA256);
 
-        // 4. The captured schema-10 store.
+        // 4. The captured schema-11 store.
         assert_eq!(digest_of(&store), SUPPORTED_STORE_SHA256);
 
         // The same digests as written into prose and into artifact fields.
