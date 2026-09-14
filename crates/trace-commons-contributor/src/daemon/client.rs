@@ -116,6 +116,20 @@ pub(crate) fn connect_for_shutdown(store: &ConfigStore) -> Option<PlatformStream
     connect(store)
 }
 
+/// Connect to a running daemon for a persistent attached session.
+///
+/// Same `connect` as every other transport here, deliberately: the attached
+/// client in `daemon::attached` holds its connection open for the life of a
+/// window, and a second way of reaching the endpoint is a second set of
+/// platform quirks to keep in step.
+///
+/// Note the unix read timeout `connect` installs applies to this stream too.
+/// That is correct for request/response and wrong for a reader parked on the
+/// event stream, so `attached` clears it on its reader clone.
+pub(crate) fn connect_for_attach(store: &ConfigStore) -> Option<PlatformStream> {
+    connect(store)
+}
+
 /// The per-platform stream type: a unix socket, or a handle on a named pipe.
 #[cfg(unix)]
 pub(crate) type PlatformStream = std::os::unix::net::UnixStream;
