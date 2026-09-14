@@ -3128,7 +3128,12 @@ fn normalize_subject(raw: &str) -> Result<String, IssuerError> {
 
 pub(crate) fn validate_eddsa_private_key_pem(pem: &str) -> anyhow::Result<String> {
     let pem = pem.trim();
-    anyhow::ensure!(!pem.contains("RSA"), "RSA keys are not supported");
+    // Only inspect the PEM header line for the algorithm label, never the
+    // base64-encoded key body: a body is effectively random text and can
+    // contain the literal substring "RSA" by chance for a wholly valid
+    // Ed25519 key (roughly 1-in-a-few-hundred keys).
+    let header_line = pem.lines().next().unwrap_or("");
+    anyhow::ensure!(!header_line.contains("RSA"), "RSA keys are not supported");
     anyhow::ensure!(
         pem.starts_with("-----BEGIN PRIVATE KEY-----"),
         "EdDSA private key must be PKCS#8 PEM"
@@ -3139,7 +3144,10 @@ pub(crate) fn validate_eddsa_private_key_pem(pem: &str) -> anyhow::Result<String
 
 pub(crate) fn validate_eddsa_public_key_pem(pem: &str) -> anyhow::Result<String> {
     let pem = pem.trim();
-    anyhow::ensure!(!pem.contains("RSA"), "RSA keys are not supported");
+    // See validate_eddsa_private_key_pem: check only the header line, not the
+    // base64 body, for the algorithm label.
+    let header_line = pem.lines().next().unwrap_or("");
+    anyhow::ensure!(!header_line.contains("RSA"), "RSA keys are not supported");
     anyhow::ensure!(
         pem.starts_with("-----BEGIN PUBLIC KEY-----"),
         "EdDSA public key must be SPKI PEM"
@@ -6301,5 +6309,65 @@ mod tests {
             .expect("bob principal_ref");
 
         assert_ne!(p1, p2, "distinct subjects must yield distinct principals");
+    }
+
+    /// Generate real Ed25519 keypairs until one's base64 body happens to
+    /// contain the literal substring "RSA" (roughly 1-in-a-few-hundred keys),
+    /// so the validators must not reject it on that basis alone.
+    fn generate_ed25519_keypair_with_rsa_in_body() -> GeneratedUploadClaimKeypair {
+        for _ in 0..100_000 {
+            let keypair = generate_upload_claim_keypair().expect("keypair generates");
+            let private_body: String = keypair
+                .private_key_pem
+                .lines()
+                .filter(|line| !line.starts_with("-----"))
+                .collect();
+            let public_body: String = keypair
+                .public_key_pem
+                .lines()
+                .filter(|line| !line.starts_with("-----"))
+                .collect();
+            if private_body.contains("RSA") || public_body.contains("RSA") {
+                return keypair;
+            }
+        }
+        panic!("did not find an Ed25519 key with \"RSA\" in its base64 body after 100000 tries");
+    }
+
+    #[test]
+    fn validate_eddsa_private_key_pem_accepts_ed25519_key_with_rsa_in_body() {
+        let keypair = generate_ed25519_keypair_with_rsa_in_body();
+        let normalized = validate_eddsa_private_key_pem(&keypair.private_key_pem).expect(
+            "a valid Ed25519 PKCS#8 key must be accepted even if its base64 body contains \"RSA\"",
+        );
+        // Downstream acceptance: the normalized PEM still parses as a signing key.
+        EncodingKey::from_ed_pem(normalized.as_bytes()).expect("normalized key still parses");
+    }
+
+    #[test]
+    fn validate_eddsa_public_key_pem_accepts_ed25519_key_with_rsa_in_body() {
+        let keypair = generate_ed25519_keypair_with_rsa_in_body();
+        let normalized = validate_eddsa_public_key_pem(&keypair.public_key_pem).expect(
+            "a valid Ed25519 SPKI key must be accepted even if its base64 body contains \"RSA\"",
+        );
+        DecodingKey::from_ed_pem(normalized.as_bytes()).expect("normalized key still parses");
+    }
+
+    #[test]
+    fn validate_eddsa_private_key_pem_still_rejects_real_rsa_header() {
+        let rsa_pem =
+            "-----BEGIN RSA PRIVATE KEY-----\nMIIBOgIBAAJBAK\n-----END RSA PRIVATE KEY-----\n";
+        let err = validate_eddsa_private_key_pem(rsa_pem)
+            .expect_err("an actual RSA-headered key must still be rejected");
+        assert!(err.to_string().contains("RSA"));
+    }
+
+    #[test]
+    fn validate_eddsa_public_key_pem_still_rejects_real_rsa_header() {
+        let rsa_pem =
+            "-----BEGIN RSA PUBLIC KEY-----\nMIIBOgIBAAJBAK\n-----END RSA PUBLIC KEY-----\n";
+        let err = validate_eddsa_public_key_pem(rsa_pem)
+            .expect_err("an actual RSA-headered key must still be rejected");
+        assert!(err.to_string().contains("RSA"));
     }
 }

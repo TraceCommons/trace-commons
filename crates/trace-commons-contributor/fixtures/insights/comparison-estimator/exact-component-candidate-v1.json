@@ -1,0 +1,84 @@
+{
+  "schema_version": 1,
+  "candidate": "exact_binomial_components_bonferroni_v1",
+  "qualified_for_saved_specifications": false,
+  "interval_grid_denominator": 1000000,
+  "familywise_confidence_bps": 9500,
+  "component_count": 6,
+  "one_sided_tail_count": 12,
+  "one_sided_tail_probability": {
+    "numerator": 1,
+    "denominator": 240
+  },
+  "difference_interval": "second_lower_minus_first_upper__second_upper_minus_first_lower",
+  "minimum_product_support_per_cohort": 2,
+  "maximum_total_assessed_tasks": 256,
+  "maximum_interval_width_bps": 5000,
+  "decision_states": {
+    "empty_cohort": "estimand_unavailable",
+    "cohort_below_minimum_product_support": "below_minimum_support",
+    "interval_width_above_threshold": "insufficient_precision",
+    "interval_width_equal_to_threshold": "indeterminate_boundary",
+    "interval_endpoint_equal_to_zero": "indeterminate_boundary",
+    "interval_strictly_contains_zero": "uncertain_difference",
+    "interval_strictly_excludes_zero": "interval_excludes_zero_candidate"
+  },
+  "qualification_seed_domain": "trace-commons-exact-component-qualification-v1",
+  "qualification_protocol": {
+    "scenario_iteration_order": "null_then_nonnull__array_index_order__size_pair_index__removal_index__experiment_0_to_9999__cohort_0_then_1__draw_0_to_n_minus_1",
+    "outcome_seed_bytes": "domain_utf8__zero__family_u8__probability_index_u32be__size_index_u32be__removal_index_u32be__experiment_u32be__cohort_u8__draw_u16be__retry_u32be",
+    "removal_seed_bytes": "domain_utf8__zero__ascii_removal__family_u8__probability_index_u32be__size_index_u32be__removal_index_u32be__experiment_u32be__cohort_u8__draw_u16be__retry_u32be",
+    "prf": "sha256",
+    "uniform_sampling": "first_u64_be_with_rejection_to_largest_multiple_of_10000_below_2_pow_64__then_modulo_10000",
+    "categorical_sampling": "first cumulative probability_bps strictly_greater_than_uniform_bucket",
+    "assessed_removal": "independent_mcar_after_outcome_generation__remove_when_uniform_bucket_less_than_removal_bps",
+    "missingness_claim_limit": "mcar_fixture_only__no_mnar_generalization",
+    "per_setting_uncertainty": "two_sided_95_percent_clopper_pearson_for_binomial_failure_count__continuous_endpoints_rounded_outward_to_millionths",
+    "aggregation": "none_for_admission__each_frozen_setting_must_pass_its_own_upper_bound"
+  },
+  "null_probability_bps": [
+    [100, 1900, 8000],
+    [500, 1500, 8000],
+    [2000, 3000, 5000],
+    [3300, 3400, 3300],
+    [5000, 3000, 2000],
+    [8000, 1500, 500],
+    [9500, 400, 100],
+    [9900, 90, 10]
+  ],
+  "cohort_size_pairs": [[1, 255], [2, 2], [5, 20], [20, 5], [20, 20], [64, 128], [128, 64]],
+  "nonnull_probability_pairs_bps": [
+    [[2000, 3000, 5000], [3000, 3000, 4000]],
+    [[5000, 3000, 2000], [3000, 3000, 4000]],
+    [[100, 1900, 8000], [500, 1500, 8000]],
+    [[9500, 400, 100], [9900, 90, 10]]
+  ],
+  "assessed_only_removal_bps": [0, 1000, 5000],
+  "experiments_per_setting": 10000,
+  "required_reports": [
+    "per_setting_family_noncoverage_with_95_percent_binomial_interval",
+    "per_setting_nonnull_family_noncoverage_with_95_percent_binomial_interval",
+    "per_setting_zero_exclusion_rate_with_95_percent_binomial_interval",
+    "per_contrast_interval_width_quantiles",
+    "per_setting_product_suppression_rate",
+    "exhaustive_small_n_exact_component_coverage",
+    "worst_case_n_256_runtime_and_memory"
+  ],
+  "admission_rule": {
+    "maximum_each_null_and_nonnull_setting_family_noncoverage_upper_95_percent_bound_bps": 500,
+    "minimum_product_support_applies_before_interval_claim": true,
+    "maximum_interval_width_applies_before_zero_exclusion_claim": true,
+    "all_frozen_settings_must_complete": true
+  },
+  "limitations": [
+    "retrospective_descriptive_estimand_only",
+    "assessed_outcomes_only",
+    "missing_not_at_random_not_qualified",
+    "no_causal_or_serving_identity_claim",
+    "candidate_not_available_to_saved_specifications"
+  ],
+  "references": [
+    "Clopper and Pearson 1934, The Use of Confidence or Fiducial Limits Illustrated in the Case of the Binomial",
+    "Newcombe 1998, Interval estimation for the difference between independent proportions"
+  ]
+}

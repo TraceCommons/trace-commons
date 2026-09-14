@@ -134,6 +134,13 @@ public sealed partial class MainWindow : Window
         // every event hop targets.
         _host = new DaemonHost(Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread());
         ViewModel = new MainViewModel(_host, new AppUpdater(_host));
+        ViewModel.PropertyChanged += (_, change) =>
+        {
+            if (change.PropertyName == nameof(MainViewModel.ShowingInsights) && !ViewModel.ShowingInsights)
+                (InsightsPane.Content as InsightsView)?.Deactivate();
+            if (change.PropertyName == nameof(MainViewModel.ShowingMissionDrafts) && !ViewModel.ShowingMissionDrafts)
+                (MissionDraftsPane.Content as MissionDraftsView)?.Deactivate();
+        };
 
         // Found once the template is realized, not here: the ScrollViewer
         // inside a ListView's default template does not exist before Loaded.
@@ -303,30 +310,52 @@ public sealed partial class MainWindow : Window
     public MainViewModel ViewModel { get; }
 
     /// <summary>
-    /// Starts the daemon on first activation rather than in the constructor:
-    /// the window should be on screen before a multi-second first filesystem
-    /// scan begins, so a large session history looks like loading rather than
-    /// like a failure to launch.
+    /// Starts with local Insights. Contribution startup remains an explicit
+    /// action and retains the existing source declaration and enrollment gates.
     /// </summary>
-    private async void OnFirstActivated(object sender, WindowActivatedEventArgs args)
+    private void OnFirstActivated(object sender, WindowActivatedEventArgs args)
     {
         Activated -= OnFirstActivated;
-        await ViewModel.InitializeAsync();
-        _activationReady = ViewModel.NeedsSessionRoots;
-        OfferNextRedirectedInvite();
+        ShowInsightsPane();
+    }
 
-        // Everything below this point talks to a daemon. A start refused for
-        // undeclared session sources has none, so the roots screen goes first
-        // and the rest resumes once it has been answered. Onboarding in
-        // particular is entirely daemon IPC, so running it here would ask the
-        // contributor to enrol through a socket that is not there.
-        if (ViewModel.NeedsSessionRoots)
+    private bool _contributionStartupAttempted;
+    private bool _contributionStartupBusy;
+    private async Task<bool> StartContributionsAsync()
+    {
+        if (_contributionStartupBusy) return false;
+        _contributionStartupBusy = true;
+        try
         {
-            await ShowSessionRootsAsync();
-            return;
+            if (!_contributionStartupAttempted)
+            {
+                await ViewModel.InitializeAsync();
+                _contributionStartupAttempted = _host.IsRunning || ViewModel.NeedsSessionRoots;
+                if (_closed) return false;
+                _activationReady = ViewModel.NeedsSessionRoots;
+                OfferNextRedirectedInvite();
+                if (_host.IsRunning) await ContinueStartupAsync();
+            }
+            if (ViewModel.NeedsSessionRoots)
+            {
+                await ShowSessionRootsAsync();
+                return false;
+            }
+            bool started = !_closed && _host.IsRunning;
+            if (!started && !_closed)
+            {
+                // A start failure that is not "session roots undeclared" --
+                // for example ViewModel.StatusText's "another instance may
+                // already be running" -- must still reach the contributor.
+                // Before Insights became the default landing pane, Queue was
+                // already on screen and its header chip showed that message;
+                // navigate there now so a click from any pane still surfaces
+                // it instead of doing nothing.
+                ViewModel.ShowQueue();
+            }
+            return started;
         }
-
-        await ContinueStartupAsync();
+        finally { _contributionStartupBusy = false; }
     }
 
     /// <summary>
@@ -714,7 +743,10 @@ public sealed partial class MainWindow : Window
         await ViewModel.ResumeAsync();
     }
 
-    private void OnShowQueue(object sender, RoutedEventArgs e) => ViewModel.ShowQueue();
+    private async void OnShowQueue(object sender, RoutedEventArgs e)
+    {
+        if (await StartContributionsAsync()) ViewModel.ShowQueue();
+    }
 
     /// <summary>
     /// Switches to History, creating the view the first time and keeping it
@@ -732,8 +764,9 @@ public sealed partial class MainWindow : Window
     /// IPC calls as soon as it loads, and a contributor who never opens
     /// History should not pay for them at launch.
     /// </remarks>
-    private void OnShowHistory(object sender, RoutedEventArgs e)
+    private async void OnShowHistory(object sender, RoutedEventArgs e)
     {
+        if (!await StartContributionsAsync()) return;
         HistoryPane.Content ??= new HistoryView(_host);
         ViewModel.ShowHistory();
     }
@@ -908,8 +941,34 @@ public sealed partial class MainWindow : Window
     /// profile as soon as it loads, and a contributor who never opens
     /// Settings should not pay for that at launch.
     /// </remarks>
-    private void OnShowSettings(object sender, RoutedEventArgs e)
+    private void OnShowInsights(object sender, RoutedEventArgs e) => ShowInsightsPane();
+
+    private async void OnShowMissionDrafts(object sender, RoutedEventArgs e)
     {
+        if (MissionDraftsPane.Content is not MissionDraftsView)
+            MissionDraftsPane.Content = new MissionDraftsView(WinRT.Interop.WindowNative.GetWindowHandle(this));
+        ViewModel.ShowMissionDrafts();
+        await ((MissionDraftsView)MissionDraftsPane.Content).ActivateAsync();
+    }
+
+    private async void ShowInsightsPane()
+    {
+        if (InsightsPane.Content is not InsightsView)
+        {
+            var page = new InsightsView(WinRT.Interop.WindowNative.GetWindowHandle(this));
+            page.ContributionSetupRequested += async (_, _) =>
+            {
+                if (await StartContributionsAsync()) ViewModel.ShowQueue();
+            };
+            InsightsPane.Content = page;
+        }
+        ViewModel.ShowInsights();
+        await ((InsightsView)InsightsPane.Content).ActivateAsync();
+    }
+
+    private async void OnShowSettings(object sender, RoutedEventArgs e)
+    {
+        if (!await StartContributionsAsync()) return;
         ShowSettingsPane();
     }
 
@@ -941,8 +1000,9 @@ public sealed partial class MainWindow : Window
     ///
     /// Created lazily because it makes an IPC call as soon as it loads.
     /// </remarks>
-    private void OnShowPrivateInference(object sender, RoutedEventArgs e)
+    private async void OnShowPrivateInference(object sender, RoutedEventArgs e)
     {
+        if (!await StartContributionsAsync()) return;
         ShowPrivateInferencePane();
     }
 
@@ -956,36 +1016,46 @@ public sealed partial class MainWindow : Window
     // In-app only: these fire while this window has focus and take nothing
     // away from any other application. See the accelerators in the markup.
 
-    private void OnQueueAccelerator(
+    private void OnInsightsAccelerator(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
+    {
+        args.Handled = true;
+        ShowInsightsPane();
+    }
+
+    private async void OnQueueAccelerator(
         KeyboardAccelerator sender,
         KeyboardAcceleratorInvokedEventArgs args)
     {
         args.Handled = true;
+        if (!await StartContributionsAsync()) return;
         ViewModel.ShowQueue();
     }
 
-    private void OnHistoryAccelerator(
+    private async void OnHistoryAccelerator(
         KeyboardAccelerator sender,
         KeyboardAcceleratorInvokedEventArgs args)
     {
         args.Handled = true;
+        if (!await StartContributionsAsync()) return;
         HistoryPane.Content ??= new HistoryView(_host);
         ViewModel.ShowHistory();
     }
 
-    private void OnPrivateInferenceAccelerator(
+    private async void OnPrivateInferenceAccelerator(
         KeyboardAccelerator sender,
         KeyboardAcceleratorInvokedEventArgs args)
     {
         args.Handled = true;
+        if (!await StartContributionsAsync()) return;
         ShowPrivateInferencePane();
     }
 
-    private void OnSettingsAccelerator(
+    private async void OnSettingsAccelerator(
         KeyboardAccelerator sender,
         KeyboardAcceleratorInvokedEventArgs args)
     {
         args.Handled = true;
+        if (!await StartContributionsAsync()) return;
         ShowSettingsPane();
     }
 
@@ -1543,6 +1613,8 @@ public sealed partial class MainWindow : Window
     private async void OnClosed(object sender, WindowEventArgs args)
     {
         _closed = true;
+        (InsightsPane.Content as InsightsView)?.Dispose();
+        (MissionDraftsPane.Content as MissionDraftsView)?.Dispose();
         _activationReady = false;
         _redirectedInvite.Clear();
         // Before the daemon teardown, and synchronously: an icon left in the

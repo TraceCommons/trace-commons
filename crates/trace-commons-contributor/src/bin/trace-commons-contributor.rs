@@ -3,6 +3,11 @@ use std::path::PathBuf;
 use trace_commons_contributor::commands;
 use trace_commons_contributor::config::ConfigStore;
 
+#[path = "contributor_cli/insights.rs"]
+mod insights_cli;
+#[path = "contributor_cli/mission_draft.rs"]
+mod mission_draft_cli;
+
 #[derive(Parser)]
 #[command(
     name = "trace-commons-contributor",
@@ -25,6 +30,15 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Check a local mission proposal; does not fetch, execute, or publish
+    MissionDraft {
+        #[arg(long)]
+        file: PathBuf,
+    },
+    /// Manage explicitly imported local mission proposals; never fetches or publishes
+    MissionDrafts(mission_draft_cli::MissionDraftsArgs),
+    /// Analyze explicitly selected local sessions without enrollment or contribution
+    Insights(insights_cli::InsightsArgs),
     /// Locally redact and preview a versioned explicit import; never uploads or grants admission
     ImportPreview {
         /// User-selected local evidence-import-v1 JSON file (no URL retrieval)
@@ -355,11 +369,19 @@ enum DaemonAction {
     Uninstall,
 }
 
-#[tokio::main]
-async fn main() -> std::process::ExitCode {
+fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
     let json = cli.json;
-    match run(cli).await {
+    async_main(cli, json)
+}
+
+#[tokio::main]
+async fn async_main(cli: Cli, json: bool) -> std::process::ExitCode {
+    // `run` dispatches every command, including the larger async submission
+    // paths. Keep that combined future off the smaller Windows main-thread
+    // stack even when the selected command itself is synchronous.
+    let run_future = Box::pin(run(cli));
+    match run_future.await {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) => {
             if json
@@ -391,6 +413,23 @@ async fn main() -> std::process::ExitCode {
 }
 
 async fn run(cli: Cli) -> anyhow::Result<()> {
+    if let Command::MissionDraft { file } = &cli.command {
+        let review = trace_commons_contributor::mission_draft::review_file(file)?;
+        if cli.json {
+            println!("{}", serde_json::to_string_pretty(&review)?);
+        } else {
+            println!("Draft structure checked. Curator review is required.");
+            println!("Proposal SHA-256: {}", review.proposal_sha256);
+            println!("Source claims, reproducibility, evaluator, and budget remain unverified.");
+        }
+        return Ok(());
+    }
+    if let Command::MissionDrafts(args) = &cli.command {
+        return mission_draft_cli::run(args, cli.json);
+    }
+    if let Command::Insights(args) = &cli.command {
+        return insights_cli::run(args, cli.json);
+    }
     if let Command::ImportPreview { file, cwd } = &cli.command {
         let prepared = trace_commons_contributor::evidence_import::read_import(file)?;
         let preview = prepared.local_preview(cwd).await?;
@@ -456,7 +495,10 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             };
             commands::submit(&store, &sel).await
         }
-        Command::ImportPreview { .. } => {
+        Command::ImportPreview { .. }
+        | Command::Insights(_)
+        | Command::MissionDraft { .. }
+        | Command::MissionDrafts(_) => {
             anyhow::bail!("import-preview-dispatch-invalid")
         }
         Command::ImportAntigravity { project, all } => {

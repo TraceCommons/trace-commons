@@ -1078,6 +1078,53 @@ fn parse_session(bytes: &[u8]) -> ParsedSession {
     }
 }
 
+/// Normalize one explicitly selected Claude Code JSONL file for local
+/// descriptive analysis.
+///
+/// This deliberately does not discover or merge adjacent subagent files. The
+/// caller selected exactly these bytes, and Insights binds its evidence digest
+/// to those bytes. Malformed JSON fails closed instead of using the watcher's
+/// best-effort tolerance for a file that may still be growing.
+pub(crate) fn parse_selected_file_bytes(bytes: &[u8]) -> anyhow::Result<Vec<SessionEvent>> {
+    let text =
+        std::str::from_utf8(bytes).map_err(|_| anyhow::anyhow!("insights_invalid_claude_code"))?;
+    let mut records = Vec::new();
+    for line in text.lines().filter(|line| !line.trim().is_empty()) {
+        let value: Value = serde_json::from_str(line)
+            .map_err(|_| anyhow::anyhow!("insights_invalid_claude_code"))?;
+        if !value.is_object() || value.get("type").and_then(Value::as_str).is_none() {
+            anyhow::bail!("insights_invalid_claude_code");
+        }
+        records.push(value);
+    }
+
+    // Claude Code reuses a message id across records whose blocks are not
+    // cumulative: an earlier thinking, text, or tool-use block can be absent
+    // from a later record. Therefore an id alone proves no duplication. Drop
+    // only an exact repeated content snapshot under the same stable id; every
+    // distinct block sequence remains observable.
+    let mut seen_assistant_snapshots = std::collections::HashSet::new();
+    let mut normalized = Vec::new();
+    for record in &records {
+        let repeated_snapshot = if record.get("type").and_then(Value::as_str) == Some("assistant") {
+            record
+                .pointer("/message/id")
+                .and_then(Value::as_str)
+                .zip(record.pointer("/message/content"))
+                .is_some_and(|(id, content)| {
+                    !seen_assistant_snapshots.insert((id.to_owned(), content.clone()))
+                })
+        } else {
+            false
+        };
+        if !repeated_snapshot {
+            serde_json::to_writer(&mut normalized, record)?;
+            normalized.push(b'\n');
+        }
+    }
+    Ok(parse_session(&normalized).events)
+}
+
 fn map_user_record(
     record: &Value,
     timestamp: Option<chrono::DateTime<chrono::Utc>>,

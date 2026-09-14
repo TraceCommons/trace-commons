@@ -116,6 +116,7 @@
 #define TRACE_COMMONS_H
 
 #include <stdint.h>
+#include <stddef.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -1774,6 +1775,66 @@ void        tc_handle_free(tc_handle*);
  * tc_daemon_stop and then tc_handle_free to do that.
  */
 char*       tc_call(tc_handle*, const char* method, const char* params_json);
+
+/* Handle-free local Insights, available before enrollment. Synchronous local IO;
+ * schedule off the UI thread. Closing a window does not cancel started writes.
+ * request is borrowed readable UTF-8 bytes (no trailing NUL), at most 65536.
+ * Example: {"operation":{"type":"list"}}. Optional top-level store_dir selects
+ * a dedicated store; omitted uses the platform local-data Insights directory.
+ * Operations: analyze {source:codex|claude_code|trajectory,file,save:false}, list, summary,
+ * explain {id}, delete {id}, annotate {id,category,outcome}, clear_annotation {id},
+ * usage {source:codex|claude_code,file}, copy; each has a "type" discriminator.
+ * Explicit links: link_git {id,repository,commit}, link_test_report {id,file},
+ * unlink_evidence {id,evidence_id}. Links do not establish verified task success.
+ * copy returns shared UI vocabulary. list/summary create no state for an absent store.
+ * Question cards: question_cards {questions,snapshot_ids,episode_ids} returns
+ * a typed result plus shared rendered text. It is a read-only local operation;
+ * an empty selection creates no absent store. Questions are recorded_activity,
+ * episode_outcomes, observed_models, and estimated_cost.
+ * Episodes: episode_create {snapshot_ids}, episode_list, episode_explain {id}.
+ * Episode edits require {id,expected_revision}: episode_replace_members also
+ * takes snapshot_ids; episode_annotate takes category,outcome;
+ * episode_clear_assessment and episode_delete take no additional fields.
+ * Groups contain whole saved snapshots, not inferred independent tasks.
+ * Episode reads create no absent store and do not reread source files.
+ * Analyze/delete add mutation_effects.invalidated_episode_ids for lost groups.
+ * Responses are capped at 16 MiB; oversized results are never truncated.
+ * Fixed typed episode errors include insights_episode_revision_conflict
+ * (refresh and review), insights_episode_not_found, insights_episode_missing_members,
+ * insights_episode_invalid, insights_episode_member_limit,
+ * insights_episode_duplicate_member, insights_episode_limit_exceeded,
+ * insights_episode_revision_overflow, and insights_response_too_large.
+ * Fixed typed store errors include insights_not_found,
+ * insights_evidence_link_not_found, insights_store_busy (another window or
+ * client holds the store; retry), insights_store_invalid (that entry cannot be
+ * read; repair removes exactly what is withheld), insights_store_symlink_refused,
+ * insights_store_requires_private_directory, and insights_store_unavailable.
+ * Unexpected execution errors remain insights-operation-failed.
+ * A list response carries quarantined identifiers when the store is
+ * withholding an unreadable entry; the operation repair removes exactly those.
+ * store_dir and the analyze file are chosen by the caller, so this entry point
+ * is for in-process callers only. Reaching it from any IPC transport without
+ * an authorization gate and a store-directory allow-list would hand the caller
+ * a digest oracle for any readable file and a directory-write primitive.
+ * Returns owned JSON tagged by type, or NULL plus owned fixed-label *err.
+ * Free result/error with tc_string_free. err may be NULL; otherwise writable
+ * and cleared on success. Request buffers must remain valid until return. */
+char*       tc_insights_call(const uint8_t* request, size_t request_len, char** err);
+/* Stateless shared Insights UI vocabulary. Opens no store. Owned JSON string;
+ * free with tc_string_free. Returns NULL only after a caught panic. */
+char*       tc_insights_copy_json(void);
+
+/* Handle-free local mission draft inbox, available before enrollment.
+ * Synchronous local IO; schedule off the UI thread. Request is borrowed UTF-8
+ * JSON at most 65536 bytes. Optional store_dir selects a dedicated inbox.
+ * Operations: import {file}, list, show {id}, delete {id}, copy. Import/list
+ * return metadata and structural review only; the full bounded proposal is
+ * returned only by explicit show. Proposal strings and URLs are untrusted data
+ * and must never be executed or opened implicitly. No operation fetches sources,
+ * publishes, funds, runs, or authorizes a mission. Responses are owned JSON at
+ * most 1 MiB; errors are owned fixed labels. Free either with tc_string_free. */
+char*       tc_mission_drafts_call(const uint8_t* request, size_t request_len, char** err);
+
 
 /* Events. cb is invoked on a background thread with a JSON event frame
  * each time the daemon publishes one, until tc_unsubscribe is called with

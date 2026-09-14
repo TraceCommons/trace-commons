@@ -1,0 +1,213 @@
+<UserControl
+    x:Class="TraceCommons.App.Controls.InsightsView"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <ScrollViewer>
+        <StackPanel Padding="28" Spacing="12" MaxWidth="1000" HorizontalAlignment="Stretch">
+            <TextBlock Text="{Binding Title}" FontSize="28" />
+            <TextBlock Text="{Binding Intro}" TextWrapping="Wrap" />
+            <TextBlock Text="{Binding SnapshotNotice}" TextWrapping="Wrap" />
+            <StackPanel Orientation="Horizontal" Spacing="12">
+                <ComboBox x:Name="Source" Header="{Binding [source]}" SelectedIndex="0" IsEnabled="{Binding Idle}">
+                    <ComboBoxItem Content="{Binding [codex]}" Tag="codex" />
+                    <ComboBoxItem Content="{Binding [claude_code]}" Tag="claude_code" />
+                    <ComboBoxItem Content="{Binding [trajectory]}" Tag="trajectory" />
+                </ComboBox>
+                <Button Content="{Binding [choose_file]}" Click="OnChoose" IsEnabled="{Binding Idle}" VerticalAlignment="Bottom" />
+            </StackPanel>
+            <TextBlock x:Name="SelectedFile" Text="{Binding [no_file]}" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
+            <StackPanel Orientation="Horizontal" Spacing="12">
+                <Button Content="{Binding [analyze]}" Click="OnAnalyze" IsEnabled="{Binding Idle}" />
+                <Button Content="{Binding [save]}" Click="OnSave" IsEnabled="{Binding Idle}" />
+                <Button Content="{Binding [cancel]}" Click="OnCancel" IsEnabled="{Binding Busy}" />
+            </StackPanel>
+            <TextBlock Text="{Binding [save_notice]}" TextWrapping="Wrap" />
+            <TextBlock Text="{Binding CancellationNotice}" TextWrapping="Wrap" />
+            <TextBlock Text="{Binding Status}" TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite" />
+            <TextBlock Text="{Binding MutationNotice}" TextWrapping="Wrap" IsTextSelectionEnabled="True" AutomationProperties.LiveSetting="Polite" />
+            <TextBlock Text="{Binding [summary_title]}" FontSize="22" />
+            <TextBlock Text="{Binding SummaryStatus}" TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite" />
+            <TextBlock Text="{Binding SummaryDetails}" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
+            <Expander Header="{Binding [summary_title]}" IsExpanded="False" HorizontalAlignment="Stretch">
+                <ItemsControl ItemsSource="{Binding SummaryRows}" IsEnabled="{Binding Idle}">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <StackPanel Spacing="8" Padding="0,8">
+                                <TextBlock Text="{Binding Label}" FontSize="18" TextWrapping="Wrap" />
+                                <TextBlock Text="{Binding Details}" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
+                                <ItemsControl ItemsSource="{Binding Evidence}">
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate>
+                                            <Button Tag="{Binding Id}" Click="OnSummaryEvidence" HorizontalAlignment="Stretch" HorizontalContentAlignment="Left">
+                                                <TextBlock Text="{Binding Label}" TextWrapping="Wrap" />
+                                            </Button>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+                            </StackPanel>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+            </Expander>
+            <Button Content="{Binding [refresh]}" Click="OnRefresh" IsEnabled="{Binding Idle}" />
+            <ListView x:Name="SavedList" ItemsSource="{Binding Saved}" DisplayMemberPath="Label" MaxHeight="200" SelectionMode="Multiple" IsEnabled="{Binding Idle}" AutomationProperties.Name="{Binding [saved]}" />
+            <StackPanel Orientation="Horizontal" Spacing="12">
+                <Button Content="{Binding [explain]}" Click="OnExplain" IsEnabled="{Binding Idle}" />
+                <Button Content="{Binding [delete]}" Click="OnDelete" IsEnabled="{Binding HasSavedSelection}" />
+            </StackPanel>
+            <Expander Header="{Binding [card_title]}" HorizontalAlignment="Stretch">
+                <StackPanel Spacing="10">
+                    <TextBlock Text="{Binding [card_selection_notice]}" TextWrapping="Wrap" />
+                    <TextBlock Text="{Binding [card_choose_evidence]}" FontSize="18" TextWrapping="Wrap" />
+                    <TextBlock Text="{Binding [card_evidence]}" TextWrapping="Wrap" />
+                    <ListView x:Name="CardSavedList" ItemsSource="{Binding Saved}" DisplayMemberPath="Label"
+                              MaxHeight="160" SelectionMode="Multiple" IsEnabled="{Binding Idle}"
+                              AutomationProperties.Name="{Binding [card_evidence]}" />
+                    <TextBlock Text="{Binding [card_episodes]}" TextWrapping="Wrap" />
+                    <ListView x:Name="CardEpisodeList" ItemsSource="{Binding Episodes}" DisplayMemberPath="Label"
+                              MaxHeight="160" SelectionMode="Multiple" IsEnabled="{Binding Idle}"
+                              AutomationProperties.Name="{Binding [card_episodes]}" />
+                    <Button Content="{Binding [card_update]}" Click="OnLoadQuestionCards" IsEnabled="{Binding Idle}" />
+                    <TextBlock Text="{Binding CardStatus}" TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite" />
+                    <ItemsControl ItemsSource="{Binding QuestionCards}">
+                        <ItemsControl.ItemTemplate><DataTemplate>
+                            <Expander Header="{Binding Question}" HorizontalAlignment="Stretch">
+                                <StackPanel Spacing="6" Padding="0,6">
+                                    <TextBlock Text="{Binding State}" FontSize="18" />
+                                    <TextBlock Text="{Binding MetricVersion}" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
+                                    <ItemsControl ItemsSource="{Binding Rows}">
+                                        <ItemsControl.ItemTemplate><DataTemplate>
+                                            <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
+                                                <TextBlock Text="{Binding Label}" TextWrapping="Wrap" />
+                                                <TextBlock Grid.Column="1" Text="{Binding Value}" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
+                                            </Grid>
+                                        </DataTemplate></ItemsControl.ItemTemplate>
+                                    </ItemsControl>
+                                    <TextBlock Text="{Binding Coverage}" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
+                                    <TextBlock Text="{Binding Limitations}" TextWrapping="Wrap" />
+                                    <TextBlock Text="{Binding Omission}" TextWrapping="Wrap" />
+                                    <ItemsControl ItemsSource="{Binding Evidence}">
+                                        <ItemsControl.ItemTemplate><DataTemplate>
+                                            <Button Content="{Binding Label}" Tag="{Binding Id}" Click="OnCardEvidence"
+                                                    HorizontalAlignment="Stretch" HorizontalContentAlignment="Left" />
+                                        </DataTemplate></ItemsControl.ItemTemplate>
+                                    </ItemsControl>
+                                    <ItemsControl ItemsSource="{Binding Episodes}">
+                                        <ItemsControl.ItemTemplate><DataTemplate>
+                                            <Button Content="{Binding Label}" Tag="{Binding Id}" Click="OnCardEpisode"
+                                                    HorizontalAlignment="Stretch" HorizontalContentAlignment="Left" />
+                                        </DataTemplate></ItemsControl.ItemTemplate>
+                                    </ItemsControl>
+                                </StackPanel>
+                            </Expander>
+                        </DataTemplate></ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </StackPanel>
+            </Expander>
+            <Expander Header="{Binding [episode_title]}" HorizontalAlignment="Stretch">
+                <StackPanel Spacing="10">
+                    <TextBlock Text="{Binding [episode_scope]}" TextWrapping="Wrap" />
+                    <TextBlock Text="{Binding [episode_create_notice]}" TextWrapping="Wrap" />
+                    <Button Content="{Binding [episode_create]}" Click="OnCreateEpisode" IsEnabled="{Binding Idle}" />
+                    <TextBlock Text="{Binding EpisodeStatus}" TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite" />
+                    <ListView x:Name="EpisodeList" ItemsSource="{Binding Episodes}" DisplayMemberPath="Label" MaxHeight="180" SelectionMode="Single" IsEnabled="{Binding Idle}" AutomationProperties.Name="{Binding [episode_saved]}" />
+                    <Button Content="{Binding [episode_open]}" Click="OnOpenEpisode" IsEnabled="{Binding Idle}" />
+                    <TextBlock Text="{Binding [episode_overlap_notice]}" TextWrapping="Wrap" />
+                    <TextBlock x:Name="EpisodeDetail" Text="{Binding EpisodeDetails}" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
+                    <ItemsControl ItemsSource="{Binding EpisodeMembers}">
+                        <ItemsControl.ItemTemplate><DataTemplate>
+                            <Expander Header="{Binding Label}" HorizontalAlignment="Stretch">
+                                <StackPanel Spacing="6">
+                                    <TextBlock Text="{Binding Id}" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
+                                    <TextBlock Text="{Binding Details}" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
+                                </StackPanel>
+                            </Expander>
+                        </DataTemplate></ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                    <TextBlock Text="{Binding [episode_edit_members_notice]}" TextWrapping="Wrap" />
+                    <Button Content="{Binding [episode_save_members]}" Click="OnSaveEpisodeMembers" IsEnabled="{Binding HasEpisodeSelection}" />
+                    <TextBlock Text="{Binding [episode_assessment_notice]}" TextWrapping="Wrap" />
+                    <StackPanel Orientation="Horizontal" Spacing="12">
+                        <ComboBox IsEnabled="{Binding HasEpisodeSelection}" Header="{Binding [category]}" SelectedIndex="{Binding EpisodeCategoryIndex, Mode=TwoWay}">
+                            <ComboBoxItem Content="{Binding [category_refactor]}" /><ComboBoxItem Content="{Binding [category_tests]}" />
+                            <ComboBoxItem Content="{Binding [category_docs]}" /><ComboBoxItem Content="{Binding [category_debugging]}" />
+                            <ComboBoxItem Content="{Binding [category_other]}" /><ComboBoxItem Content="{Binding [category_unknown]}" />
+                        </ComboBox>
+                        <ComboBox IsEnabled="{Binding HasEpisodeSelection}" Header="{Binding [outcome]}" SelectedIndex="{Binding EpisodeOutcomeIndex, Mode=TwoWay}">
+                            <ComboBoxItem Content="{Binding [outcome_accepted]}" /><ComboBoxItem Content="{Binding [outcome_partial]}" />
+                            <ComboBoxItem Content="{Binding [outcome_rejected]}" /><ComboBoxItem Content="{Binding [outcome_unknown]}" />
+                        </ComboBox>
+                    </StackPanel>
+                    <StackPanel Orientation="Horizontal" Spacing="12">
+                        <Button Content="{Binding [episode_save_assessment]}" Click="OnSaveEpisodeAssessment" IsEnabled="{Binding HasEpisodeSelection}" />
+                        <Button Content="{Binding [episode_clear_assessment]}" Click="OnClearEpisodeAssessment" IsEnabled="{Binding HasEpisodeSelection}" />
+                        <Button Content="{Binding [episode_delete]}" Click="OnDeleteEpisode" IsEnabled="{Binding HasEpisodeSelection}" />
+                    </StackPanel>
+                </StackPanel>
+            </Expander>
+            <TextBlock Text="{Binding CoverageNotice}" TextWrapping="Wrap" />
+            <TextBlock Text="{Binding EvidenceNotice}" TextWrapping="Wrap" />
+            <TextBlock Text="{Binding [boundary_notice]}" TextWrapping="Wrap" />
+            <TextBlock x:Name="SnapshotDetail" Text="{Binding Details}" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
+            <Expander Header="{Binding [model_title]}" HorizontalAlignment="Stretch">
+                <StackPanel Spacing="8">
+                    <TextBlock Text="{Binding ModelDetails}" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
+                    <Expander Header="{Binding [model_references]}">
+                        <ItemsControl ItemsSource="{Binding ModelReferences}">
+                            <ItemsControl.ItemTemplate><DataTemplate>
+                                <TextBlock Text="{Binding Label}" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
+                            </DataTemplate></ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                    </Expander>
+                </StackPanel>
+            </Expander>
+            <Expander Header="{Binding [linked_evidence_title]}" HorizontalAlignment="Stretch">
+                <StackPanel Spacing="10">
+                    <TextBlock Text="{Binding [link_notice]}" TextWrapping="Wrap" />
+                    <TextBlock Text="{Binding EvidenceSelectionStatus}" TextWrapping="Wrap" />
+                    <TextBlock Text="{Binding OutcomeEvidenceStatus}" TextWrapping="Wrap" />
+                    <TextBlock Text="{Binding [link_git_notice]}" TextWrapping="Wrap" />
+                    <TextBox Header="{Binding [link_commit]}" Text="{Binding CommitId, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" IsEnabled="{Binding HasSavedSelection}" />
+                    <Button Content="{Binding [link_git]}" Click="OnLinkGit" IsEnabled="{Binding HasSavedSelection}" />
+                    <TextBlock Text="{Binding [link_test_notice]}" TextWrapping="Wrap" />
+                    <Expander Header="{Binding [choose_test_report]}">
+                        <TextBlock Text="{Binding [test_report_format]}" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
+                    </Expander>
+                    <Button Content="{Binding [link_test_report]}" Click="OnLinkTestReport" IsEnabled="{Binding HasSavedSelection}" />
+                    <ItemsControl ItemsSource="{Binding OutcomeEvidence}" IsEnabled="{Binding HasSavedSelection}">
+                        <ItemsControl.ItemTemplate><DataTemplate>
+                            <Expander Header="{Binding Label}" HorizontalAlignment="Stretch">
+                                <StackPanel Spacing="8">
+                                    <TextBlock Text="{Binding Details}" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
+                                    <Button Content="{Binding UnlinkLabel}" Tag="{Binding}" Click="OnUnlinkEvidence" />
+                                </StackPanel>
+                            </Expander>
+                        </DataTemplate></ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </StackPanel>
+            </Expander>
+            <TextBlock Text="{Binding AssessmentNotice}" TextWrapping="Wrap" />
+            <StackPanel Orientation="Horizontal" Spacing="12">
+                <ComboBox x:Name="Category" IsEnabled="{Binding HasSavedSelection}" Header="{Binding [category]}" SelectedIndex="{Binding CategoryIndex, Mode=TwoWay}">
+                    <ComboBoxItem Content="{Binding [category_refactor]}" Tag="refactor" />
+                    <ComboBoxItem Content="{Binding [category_tests]}" Tag="tests" />
+                    <ComboBoxItem Content="{Binding [category_docs]}" Tag="docs" />
+                    <ComboBoxItem Content="{Binding [category_debugging]}" Tag="debugging" />
+                    <ComboBoxItem Content="{Binding [category_other]}" Tag="other" />
+                    <ComboBoxItem Content="{Binding [category_unknown]}" Tag="unknown" />
+                </ComboBox>
+                <ComboBox x:Name="Outcome" IsEnabled="{Binding HasSavedSelection}" Header="{Binding [outcome]}" SelectedIndex="{Binding OutcomeIndex, Mode=TwoWay}">
+                    <ComboBoxItem Content="{Binding [outcome_accepted]}" Tag="accepted" />
+                    <ComboBoxItem Content="{Binding [outcome_partial]}" Tag="partial" />
+                    <ComboBoxItem Content="{Binding [outcome_rejected]}" Tag="rejected" />
+                    <ComboBoxItem Content="{Binding [outcome_unknown]}" Tag="unknown" />
+                </ComboBox>
+            </StackPanel>
+            <StackPanel Orientation="Horizontal" Spacing="12">
+                <Button Content="{Binding [save_assessment]}" Click="OnAnnotate" IsEnabled="{Binding HasSavedSelection}" />
+                <Button Content="{Binding [clear_assessment]}" Click="OnClear" IsEnabled="{Binding HasSavedSelection}" />
+            </StackPanel>
+            <Button Content="{Binding [contributions]}" Click="OnContributions" />
+        </StackPanel>
+    </ScrollViewer>
+</UserControl>

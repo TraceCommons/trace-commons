@@ -90,6 +90,181 @@ it.
    trace-commons-contributor submit --since 7d
    ```
 
+## Private local insights
+
+Analyze a selected Codex rollout or trajectory file without enrollment or upload:
+
+```bash
+trace-commons-contributor insights analyze --source codex --file session.jsonl
+trace-commons-contributor --json insights analyze --source trajectory --file trajectory.jsonl
+```
+
+Analysis reads only the selected file and does not save results unless `--save`
+is supplied. The first local provider reports session/event counts, tool calls,
+and explicitly reported tool failures with coverage. These adapters do not yet
+preserve enough usage for token or cost estimates; task outcomes and model
+comparisons remain unknown. A session is a provisional boundary, not a verified
+completed task. Evidence references identify the exact source snapshot by digest;
+event-level explanations remain follow-on work. Native snapshot views and their
+qualification are tracked in the [desktop story record](../../docs/superpowers/plans/2026-09-11-insights-desktop-stories.md).
+
+Save and manage derived observations in a dedicated local directory:
+
+```bash
+trace-commons-contributor insights --store-dir ./private-insights analyze --source codex --file session.jsonl --save
+trace-commons-contributor insights --store-dir ./private-insights list
+trace-commons-contributor --json insights --store-dir ./private-insights summary
+trace-commons-contributor insights --store-dir ./private-insights explain INSIGHT_ID
+trace-commons-contributor insights --store-dir ./private-insights delete INSIGHT_ID
+trace-commons-contributor insights --store-dir ./private-insights repair
+```
+
+Without `--store-dir`, saved insights use `trace-commons/insights` under the OS
+local data directory, independently of contributor enrollment configuration.
+The store contains derived observations and hashed references, without transcript
+bodies or original paths. Reimporting the same file replaces its prior snapshot,
+including after the file has been renamed; identical copies share a result, and a
+second copy keeps the snapshot it was imported as. Saved snapshots are not
+monitored for changes to the original files: reimport to refresh, or use `delete`
+to remove the saved result and its references. Deletion leaves the original
+transcript intact.
+
+The store directory is restricted to the account that created it, and that
+restriction is checked on every open rather than only at creation. On Unix it
+is mode 0700, and a directory reachable by group or other is refused. On
+Windows it is a protected owner-only DACL, reapplied on each open so a
+directory an older build left widened cannot stay that way; if it cannot be
+applied the store is refused rather than opened without the control. Both
+refusals report `insights_store_requires_private_directory`.
+
+If a saved entry cannot be read -- a hand-edited or externally written index, an
+entry written by a newer schema, or an episode whose membership no longer binds
+its snapshots -- that entry alone is withheld. The rest of the store stays fully
+operable: `list`, `explain`, `summary`, `annotate`, `delete` and every episode
+read keep working on the entries that do read. `list` names what it is
+withholding, `explain` on such an identifier reports `insights_store_invalid`,
+and `delete` still removes it.
+
+```bash
+trace-commons-contributor insights --store-dir ./private-insights repair
+```
+
+`repair` removes exactly the withheld entries, the episode groups that lose a
+member with them, and any stored address that no longer names anything, and
+reports each identifier it removed. It reads no source file and removes no
+original file. Editing or deleting `index.json` by hand is never required.
+
+`summary` reads the current derived history without reopening source files. It
+counts saved sessions, user-reported categories/outcomes, and observed metrics.
+Explicit `unknown` assessments stay separate from unassessed snapshots. Each
+metric retains available/missing snapshot counts and its original evidence
+coverage; a partial sum is not a complete activity total. No cost, time saved,
+model ranking, or verified task success is inferred. Empty history does not
+initialize the store.
+
+Record your own assessment of a saved snapshot:
+
+```bash
+trace-commons-contributor insights annotate INSIGHT_ID --category refactor --outcome accepted
+trace-commons-contributor insights clear-annotation INSIGHT_ID
+```
+
+Use the same `--store-dir` as the saved snapshot if you selected a custom store.
+Categories are `refactor`, `tests`, `docs`, `debugging`, `other`, or `unknown`;
+outcomes are `accepted`, `partial`, `rejected`, or `unknown`. Assessments carry
+user-reported provenance, a timestamp, and the source digest. They remain
+separate from verified outcome metrics and reset when the source content changes.
+
+New analyses retain bounded declared-model metadata with source-digest record
+references. Mixed declarations remain distinct from verified model attribution;
+missing declarations do not prove exclusive model use. Legacy snapshots require
+explicit reimport to populate these observations.
+
+Link evidence explicitly to a saved snapshot:
+
+```bash
+trace-commons-contributor insights link-git INSIGHT_ID --repository /chosen/repo --commit FULL_OBJECT_ID
+trace-commons-contributor insights link-test-report INSIGHT_ID --file /chosen/report.json
+trace-commons-contributor insights unlink-evidence INSIGHT_ID EVIDENCE_ID
+```
+
+Git inspection reads an exact local commit object. Test reports remain imported
+assertions; neither operation runs tests or proves accepted work. Repeated links
+deduplicate, and changed source bytes do not inherit old links. The
+[model and outcome evidence plan](../../docs/superpowers/plans/2026-09-11-insights-model-outcome-evidence.md)
+describes report schema, authority, limits, and store v3 migration.
+
+Group whole saved snapshots into an episode:
+
+```bash
+trace-commons-contributor insights episode-create --snapshot FIRST_INSIGHT_ID --snapshot SECOND_INSIGHT_ID
+trace-commons-contributor insights episode-list
+trace-commons-contributor --json insights episode-explain EPISODE_ID
+trace-commons-contributor insights episode-annotate EPISODE_ID --expected-revision 1 --category tests --outcome accepted
+trace-commons-contributor insights episode-replace-members EPISODE_ID --expected-revision 2 --snapshot FIRST_INSIGHT_ID
+trace-commons-contributor insights episode-delete EPISODE_ID --expected-revision 3
+```
+
+Use the same store directory as the saved snapshots. The revision numbers above
+illustrate consecutive edits; use the current revision returned by your own
+create, list, or explain command. A stale revision refuses the edit so you can
+refresh and review another client's changes. `episode-clear-assessment` takes the
+same episode ID and `--expected-revision` to clear only its assessment.
+
+These are groups you select, not detected task boundaries. Groups may overlap;
+list and explain identify shared members. An episode assessment is independent
+of its members' assessments and linked Git/test evidence. Changing membership
+clears that assessment. Snapshot summaries remain snapshot-scoped and do not
+count groups as independent tasks or rank their models.
+
+Deleting or replacing the final saved reference to any member removes the entire
+affected episode and its assessment. Mutation output identifies the removed
+groups; surviving snapshots and original files remain. Deleting only an episode
+preserves all its snapshots. Byte-identical reimports preserve groups, and reads
+resolve current member evidence without reopening original source files.
+
+The local store supports up to 256 episodes with 64 distinct members each.
+Episode mutations use store v4; older clients must be upgraded before sharing
+that store. Episode management is currently exposed through the CLI and shared
+service. Desktop snapshot mutations also display group-removal notices; native
+episode-management controls remain follow-on work. See the
+[episode implementation plan](../../docs/superpowers/plans/2026-09-11-insights-whole-snapshot-episodes.md)
+for lifecycle and qualification details.
+
+Inspect native usage separately from the saved descriptive report:
+
+```bash
+trace-commons-contributor --json insights usage --source codex --file rollout.jsonl
+trace-commons-contributor --json insights usage --source claude-code --file session.jsonl
+```
+
+This reads only the chosen file and saves nothing. Codex cumulative snapshots
+are not added together; Claude message snapshots are deduplicated by message ID.
+The output preserves each source's cache accounting and reports coverage and
+reasons for unavailable totals. Model labels are source declarations, not verified
+attribution. No price estimates, per-model rankings, or time-saved claims are made.
+
+Native shells can use the same local service through `tc_insights_call` without
+starting a daemon or enrolling. Desktop Insights implementations use this bridge
+on macOS and Windows, and the same service directly on GTK. See the
+[desktop story and qualification record](../../docs/superpowers/plans/2026-09-11-insights-desktop-stories.md)
+for launch behavior and outstanding platform release checks.
+
+## Local mission draft review
+
+```bash
+trace-commons-contributor --json mission-draft --file mission-draft.json
+```
+
+The [example draft](../trace-commons-protocol/tests/fixtures/mission-draft.json)
+shows the required proposal fields. Replace its placeholder source and artifact
+before seeking review. The command checks structure and limits, hashes the
+proposal, and returns `needs_curator_review`. It does not fetch sources, verify
+claims or artifact bytes, execute tasks, or publish missions. The review JSON is
+not an authorization token. See the
+[next-wave implementation record](../../docs/superpowers/plans/2026-09-11-local-insights-next-wave.md)
+for the native API and remaining work.
+
 ## Consent model
 
 - The instance's onboarding policy template sets a **ceiling**: it lists the

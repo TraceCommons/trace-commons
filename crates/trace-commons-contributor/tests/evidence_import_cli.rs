@@ -118,7 +118,16 @@ fn import_requires_explicit_redaction_context_before_opening_state() {
         .args(["import-preview", "--file", "unused-import.json"])
         .output()
         .unwrap();
-    assert!(!output.status.success());
-    assert!(String::from_utf8(output.stderr).unwrap().contains("--cwd"));
+    assert!(
+        !output.status.success(),
+        "missing --cwd unexpectedly succeeded: stdout={}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--cwd"),
+        "missing --cwd error was not reported (status={}): stderr={stderr}",
+        output.status
+    );
     assert!(!state.exists());
 }

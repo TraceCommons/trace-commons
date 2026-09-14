@@ -159,6 +159,9 @@ fn completion_file() -> Option<std::path::PathBuf> {
 /// enrolled at all, and walked to the end for *this* tenant -- are answers
 /// the daemon has to give first.
 pub fn present_if_needed(app: &Rc<App>, logged_in: bool, tenant_id: Option<&str>) {
+    if app.stack.visible_child_name().as_deref() == Some("insights") {
+        return;
+    }
     if logged_in && is_complete(tenant_id) {
         return;
     }
