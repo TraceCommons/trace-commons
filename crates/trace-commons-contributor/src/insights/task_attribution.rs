@@ -52,6 +52,10 @@ pub enum TaskAttributionUnavailableReason {
     MissingRequiredRecord,
     IdentityConflict,
     ForkOrDelegation,
+    /// A `session_meta` key this profile's pinned upstream revision does not
+    /// define. Any such key may be a resume or delegation marker, so it is
+    /// refused rather than ignored.
+    UnrecognizedSessionField,
     ModelConflict,
     ContextConflict,
     ConfigurationConflict,
@@ -445,6 +449,47 @@ fn text_blocks_match(payload: &Value, block_type: &str) -> bool {
         })
 }
 
+/// The `session_meta` keys the pinned upstream revision of each profile emits.
+///
+/// Unknown record *types* already fail closed. Unknown *fields* used to be
+/// ignored, which left the resume/fork gate as a two-name check
+/// (`parent_thread_id`, `forked_from_id`): a rollout that marked a resumed
+/// session under any other key read as an independent session, and the whole
+/// point of the gate is that a resumed session must not be counted twice.
+/// Each profile is bound to an exact upstream revision, so the legal key set
+/// is knowable; anything outside it is refused.
+fn known_session_meta_fields(profile: CodexTaskSourceProfile) -> &'static [&'static str] {
+    match profile {
+        CodexTaskSourceProfile::PinnedDirectWriterFixtureC4017a87 => &[
+            "base_instructions",
+            "cli_version",
+            "context_window",
+            "cwd",
+            "history_mode",
+            "id",
+            "model_provider",
+            "originator",
+            "runtime_workspace_roots",
+            "session_id",
+            "source",
+            "timestamp",
+        ],
+        CodexTaskSourceProfile::CodexRustV0_154_0TaskRecords => &[
+            "base_instructions",
+            "cli_version",
+            "context_window",
+            "cwd",
+            "history_mode",
+            "id",
+            "model_provider",
+            "originator",
+            "session_id",
+            "source",
+            "timestamp",
+        ],
+    }
+}
+
 fn parse_session(profile: CodexTaskSourceProfile, payload: &Value) -> Result<SessionFacts> {
     let profile_evidence = source_profile(profile);
     let identity = string_field(payload, "session_id")?;
@@ -748,6 +793,23 @@ pub fn classify_codex_task_attribution(
             1,
             None,
             TaskAttributionUnavailableReason::ForkOrDelegation,
+            Some(*first_index),
+        );
+    }
+    let known_fields = known_session_meta_fields(profile);
+    if first_payload
+        .as_object()
+        .ok_or_else(invalid)?
+        .keys()
+        .any(|key| !known_fields.contains(&key.as_str()))
+    {
+        return unavailable(
+            profile,
+            source_digest,
+            record_count,
+            1,
+            None,
+            TaskAttributionUnavailableReason::UnrecognizedSessionField,
             Some(*first_index),
         );
     }
@@ -1251,6 +1313,36 @@ mod tests {
             }
             Value::Array(items) => Value::Array(items.iter().map(reverse_key_order).collect()),
             other => other.clone(),
+        }
+    }
+
+    #[test]
+    fn an_unknown_session_meta_field_is_refused_rather_than_read_as_independent() {
+        for (profile, fixture) in [
+            (PROFILE, ALPHA),
+            (
+                CodexTaskSourceProfile::CodexRustV0_154_0TaskRecords,
+                RELEASE_ALPHA,
+            ),
+        ] {
+            let baseline = classify_codex_task_attribution(profile, fixture).unwrap();
+            assert!(
+                matches!(baseline.state, TaskAttributionState::Attributed { .. }),
+                "the unmodified fixture must attribute, or the case below proves nothing"
+            );
+            for marker in [
+                "resumed_from_thread_id",
+                "continued_session_id",
+                "rollout_parent",
+            ] {
+                let mut records = decode(fixture);
+                records[0]["payload"][marker] = json!("parent-session");
+                assert_eq!(
+                    unavailable_reason_for(profile, &encode(&records)),
+                    TaskAttributionUnavailableReason::UnrecognizedSessionField,
+                    "an unrecognized session_meta key must exclude the session"
+                );
+            }
         }
     }
 
