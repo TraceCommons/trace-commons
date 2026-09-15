@@ -1170,8 +1170,8 @@ pub const CREDENTIAL_OBTAINING: &str = "Finish signing in in your browser. This 
 /// refusal is a 400 with an empty body: there is nothing more specific to
 /// say that would be true, and a sentence that guessed would be carrying a
 /// guess into a contributor's head.
-pub const CREDENTIAL_FAILED: &str = "The sign-in did not finish, and nothing was kept here. Sign in again to \
-     try once more.";
+pub const CREDENTIAL_FAILED: &str = "The latest sign-in did not finish. Any credentials already kept here remain. \
+     Sign in again to try once more.";
 
 /// `cancelled`.
 ///

@@ -69,7 +69,7 @@ use crate::daemon::ipc::{DaemonShared, ERR_BAD_PARAMS, ERR_UNAVAILABLE, Request,
 pub const LABEL_CREDENTIAL_ABSENT: &str = "absent";
 /// A ceremony is in flight for this configuration directory.
 pub const LABEL_CREDENTIAL_OBTAINING: &str = "obtaining";
-/// The most recent ceremony ended without a key, and none is stored.
+/// The most recent ceremony failed; previously stored credentials may remain.
 pub const LABEL_CREDENTIAL_FAILED: &str = "failed";
 /// The most recent ceremony was stopped by the contributor.
 pub const LABEL_CREDENTIAL_CANCELLED: &str = "cancelled";
@@ -89,10 +89,9 @@ pub const LABEL_CREDENTIAL_CLEANUP_REQUIRED: &str = "cleanup_required";
 ///    already stored. Somebody with a browser tab open asked for this and is
 ///    waiting on it; a card saying "a key is kept here" while they wait
 ///    describes the past.
-/// 2. A stored key is `present`.
-/// 3. Otherwise the last attempt's ending is reported -- `failed` or
-///    `cancelled` -- because "nothing is stored" and "your attempt failed
-///    two minutes ago" are different things to be told.
+/// 2. A failed attempt is reported even if an older credential remains, so
+///    a failed re-sign-in is visible.
+/// 3. A stored key is `present`; otherwise a cancelled attempt is reported.
 /// 4. Otherwise `absent`.
 ///
 /// A finished ceremony whose key was later forgotten reads `absent`, which
@@ -101,8 +100,8 @@ pub const LABEL_CREDENTIAL_CLEANUP_REQUIRED: &str = "cleanup_required";
 fn state_from(attempt: Option<&str>, stored: bool) -> &'static str {
     match attempt {
         Some("starting" | "waiting_for_browser") => LABEL_CREDENTIAL_OBTAINING,
-        _ if stored => LABEL_CREDENTIAL_PRESENT,
         Some("failed") => LABEL_CREDENTIAL_FAILED,
+        _ if stored => LABEL_CREDENTIAL_PRESENT,
         Some("cancelled") => LABEL_CREDENTIAL_CANCELLED,
         _ => LABEL_CREDENTIAL_ABSENT,
     }
@@ -583,10 +582,9 @@ mod tests {
         // the question, and `complete` answers the wrong one.
         assert_eq!(state_from(Some("complete"), true), LABEL_CREDENTIAL_PRESENT);
         assert_eq!(state_from(Some("complete"), false), LABEL_CREDENTIAL_ABSENT);
-        // An ending is reported only when there is nothing to report
-        // instead. A stored key outranks a failure that came after it.
+        // A failed re-sign-in must remain visible even with an older key.
         assert_eq!(state_from(Some("failed"), false), LABEL_CREDENTIAL_FAILED);
-        assert_eq!(state_from(Some("failed"), true), LABEL_CREDENTIAL_PRESENT);
+        assert_eq!(state_from(Some("failed"), true), LABEL_CREDENTIAL_FAILED);
         assert_eq!(
             state_from(Some("cancelled"), false),
             LABEL_CREDENTIAL_CANCELLED

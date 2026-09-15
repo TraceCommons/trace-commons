@@ -188,22 +188,23 @@ impl BrowserSignIn {
         ))
     }
 
-    async fn receive(
-        self,
-        api: &CloudApi,
-    ) -> Result<(loopback::SessionTokens, Option<DateTime<Utc>>)> {
+    async fn finish<F, Fut>(self, api: &CloudApi, finish: F) -> Result<()>
+    where
+        F: FnOnce(loopback::SessionTokens, Option<DateTime<Utc>>) -> Fut,
+        Fut: std::future::Future<Output = Result<()>>,
+    {
         match self {
             Self::OAuth { listener, state } => {
                 let listener = tokio::net::TcpListener::from_std(listener)?;
-                let session = loopback::receive_session(listener, &state).await?;
-                Ok((session, None))
+                loopback::receive_session(listener, &state, |session| finish(session, None)).await
             }
             Self::Near(listener) => {
                 let authenticated = api.sign_in_near(listener.wait().await?).await?;
-                Ok((
+                finish(
                     authenticated.session,
                     Some(authenticated.refresh_token_expires_at),
-                ))
+                )
+                .await
             }
         }
     }
@@ -252,33 +253,39 @@ pub async fn begin(store: &ConfigStore, provider: &str) -> Result<serde_json::Va
     let task = ceremony_runtime()?.spawn(async move {
         let outcome = async {
             let api = CloudApi::live()?;
-            let (session, expires_at) =
-                tokio::time::timeout(BROWSER_TIMEOUT, sign_in.receive(&api))
+            let api_ref = &api;
+            let finished_id = &finished_id;
+            let finished_dir = &finished_dir;
+            tokio::time::timeout(
+                BROWSER_TIMEOUT,
+                sign_in.finish(&api, |session, expires_at| async move {
+                    // A fresh client, on this runtime: never a connection pool
+                    // attached to the reactor the caller may already have dropped.
+                    let minted = api_ref
+                        .mint_inference_key(&session, &key_name(finished_id))
+                        .await?;
+                    // The session is kept, not dropped. Inference does not need it --
+                    // the key above is non-expiring and self-sufficient -- but the
+                    // balance does: every management route on cloud-api is
+                    // session-only. What is retained is the refresh token alone, and
+                    // `NearAiSession` states what that is authority over.
+                    let persist_dir = finished_dir.to_path_buf();
+                    let persist_id = finished_id.to_string();
+                    tokio::task::spawn_blocking(move || {
+                        persist_attempt(
+                            &persist_dir,
+                            &persist_id,
+                            minted,
+                            session.refresh_token,
+                            expires_at,
+                        )
+                    })
                     .await
-                    .map_err(|_| anyhow!("near_ai_credential_expired"))??;
-            // A fresh client, on this runtime: never a connection pool
-            // attached to the reactor the caller may already have dropped.
-            let minted = api
-                .mint_inference_key(&session, &key_name(&finished_id))
-                .await?;
-            // The session is kept, not dropped. Inference does not need it --
-            // the key above is non-expiring and self-sufficient -- but the
-            // balance does: every management route on cloud-api is
-            // session-only. What is retained is the refresh token alone, and
-            // `NearAiSession` states what that is authority over.
-            let persist_dir = finished_dir.clone();
-            let persist_id = finished_id.clone();
-            tokio::task::spawn_blocking(move || {
-                persist_attempt(
-                    &persist_dir,
-                    &persist_id,
-                    minted,
-                    session.refresh_token,
-                    expires_at,
-                )
-            })
+                    .map_err(|_| anyhow!("near_ai_credential_unavailable"))?
+                }),
+            )
             .await
-            .map_err(|_| anyhow!("near_ai_credential_unavailable"))?
+            .map_err(|_| anyhow!("near_ai_credential_expired"))?
         }
         .await;
         let mut map = attempts().lock().expect("ceremony state lock");
