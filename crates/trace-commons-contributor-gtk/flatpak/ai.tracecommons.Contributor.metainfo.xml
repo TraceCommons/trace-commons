@@ -62,6 +62,11 @@
   </provides>
 
   <releases>
+    <release version="0.12.6" date="2026-09-15">
+      <description>
+        <p>Trace previews for Codex and Claude Code now skip known injected setup instructions and show the first task request. Traces containing only setup display “No task description found.” Full transcripts and redaction remain unchanged. Windows settings saves retry temporary file-replacement locks.</p>
+      </description>
+    </release>
     <release version="0.12.5" date="2026-09-15">
       <description>
         <p>Signing in to NEAR AI Cloud now keeps working after the browser closes. The retained session records the agent that created it, which the service requires on every refresh, so the account and balance screens no longer report an expired session minutes after a successful sign-in.</p>
