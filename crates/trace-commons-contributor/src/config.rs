@@ -984,6 +984,16 @@ fn durable_rename(source: &Path, destination: &Path) -> std::io::Result<()> {
     std::fs::rename(source, destination)
 }
 
+// Test-only hook so a test can observe (and act on) a retry attempt
+// deterministically instead of racing a fixed sleep against the retry
+// budget. Thread-local: `cargo test` runs each test on its own thread, so
+// setting this on the test's thread does not leak into other tests.
+#[cfg(all(windows, test))]
+thread_local! {
+    static RETRY_OBSERVER: std::cell::RefCell<Option<Box<dyn FnMut(u32)>>> =
+        std::cell::RefCell::new(None);
+}
+
 #[cfg(windows)]
 fn durable_rename(source: &Path, destination: &Path) -> std::io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
@@ -996,21 +1006,37 @@ fn durable_rename(source: &Path, destination: &Path) -> std::io::Result<()> {
         .encode_wide()
         .chain(Some(0))
         .collect();
-    // SAFETY: both paths are owned, NUL-terminated UTF-16 buffers, alive
-    // throughout this synchronous call. Write-through completes publication
-    // before an old OS credential may be retired.
-    let moved = unsafe {
-        MoveFileExW(
-            source.as_ptr(),
-            destination.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    };
-    if moved == 0 {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(())
+    // Windows readers and file scanners can briefly deny replacement. Retry
+    // only lock/access errors, preserving the old file and the same synced
+    // temporary file throughout. Permanent failures remain errors.
+    for attempt in 0..=10 {
+        // SAFETY: both paths are owned, NUL-terminated UTF-16 buffers, alive
+        // throughout this synchronous call. Write-through completes publication
+        // before an old OS credential may be retired.
+        let moved = unsafe {
+            MoveFileExW(
+                source.as_ptr(),
+                destination.as_ptr(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+        };
+        if moved != 0 {
+            return Ok(());
+        }
+        let error = std::io::Error::last_os_error();
+        // ERROR_ACCESS_DENIED, ERROR_SHARING_VIOLATION, ERROR_LOCK_VIOLATION.
+        if attempt == 10 || !matches!(error.raw_os_error(), Some(5 | 32 | 33)) {
+            return Err(error);
+        }
+        #[cfg(test)]
+        RETRY_OBSERVER.with(|observer| {
+            if let Some(on_retry) = observer.borrow_mut().as_mut() {
+                on_retry(attempt);
+            }
+        });
+        std::thread::sleep(std::time::Duration::from_millis(50));
     }
+    unreachable!("the last attempt returns")
 }
 
 #[cfg(test)]
@@ -1018,6 +1044,97 @@ mod tests {
     use super::*;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
+
+    #[cfg(windows)]
+    #[test]
+    fn atomic_config_write_waits_for_a_windows_reader_to_release_the_file() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
+
+        let (dir, store) = store();
+        let path = store.daemon_path("locked-config.json");
+        std::fs::write(&path, b"original").unwrap();
+        let reader = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .open(&path)
+            .unwrap();
+
+        // Deterministic handoff: release the reader the first time the
+        // retry loop actually observes the lock (attempt 0), instead of
+        // racing a fixed sleep against the retry budget. A prior version of
+        // this test slept 100ms on the releasing thread against a ~550ms
+        // retry budget, which is not a safe margin on a loaded CI runner.
+        let released = std::rc::Rc::new(std::cell::Cell::new(false));
+        let released_flag = released.clone();
+        let reader_cell = std::cell::RefCell::new(Some(reader));
+        RETRY_OBSERVER.with(|observer| {
+            *observer.borrow_mut() = Some(Box::new(move |_attempt| {
+                if reader_cell.borrow_mut().take().is_some() {
+                    released_flag.set(true);
+                }
+            }));
+        });
+
+        write_atomic_0600(dir.path(), &path, b"replacement").unwrap();
+        RETRY_OBSERVER.with(|observer| *observer.borrow_mut() = None);
+
+        assert!(
+            released.get(),
+            "the retry loop never observed the lock to release it"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"replacement");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn atomic_config_write_returns_non_transient_windows_errors_without_retrying() {
+        // Renaming a source that does not exist raises ERROR_FILE_NOT_FOUND
+        // (2), which is not one of the retried codes (5, 32, 33). The retry
+        // loop must fail on the first attempt rather than spending the full
+        // retry budget on a permanent error.
+        let dir = tempfile::tempdir().unwrap();
+        let missing_source = dir.path().join("does-not-exist.tmp");
+        let destination = dir.path().join("destination.json");
+
+        let retries = std::rc::Rc::new(std::cell::Cell::new(0u32));
+        let retries_seen = retries.clone();
+        RETRY_OBSERVER.with(|observer| {
+            *observer.borrow_mut() = Some(Box::new(move |_attempt| {
+                retries_seen.set(retries_seen.get() + 1);
+            }));
+        });
+
+        let result = durable_rename(&missing_source, &destination);
+        RETRY_OBSERVER.with(|observer| *observer.borrow_mut() = None);
+
+        assert!(result.is_err(), "renaming a missing source must fail");
+        assert_eq!(
+            retries.get(),
+            0,
+            "a non-transient Windows error must not enter the retry loop"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn atomic_config_write_preserves_old_bytes_when_a_windows_reader_stays_open() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
+
+        let (dir, store) = store();
+        let path = store.daemon_path("locked-config.json");
+        std::fs::write(&path, b"original").unwrap();
+        let _reader = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .open(&path)
+            .unwrap();
+        assert!(write_atomic_0600(dir.path(), &path, b"replacement").is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"original");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
 
     fn store() -> (tempfile::TempDir, ConfigStore) {
         let dir = tempfile::tempdir().unwrap();
