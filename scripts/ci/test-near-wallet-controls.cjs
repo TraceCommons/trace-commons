@@ -46,6 +46,8 @@ async function run(browser, item, script) {
   const page = await context.newPage();
   page.setDefaultTimeout(10000);
   const violations = [];
+  let releaseHotRequest;
+  const hotRequestReady = new Promise(resolve => { releaseHotRequest = resolve; });
   page.on("console", message => {
     if (message.text().includes("inline event handler")) violations.push(message.text());
   });
@@ -62,7 +64,10 @@ async function run(browser, item, script) {
       return route.fulfill({ contentType: "text/html", body: fixture.html });
     }
     if (url.href.includes("/api/v1/web/time")) return route.fulfill({ json: { ts: "1780000000000000000000000" } });
-    if (item.id === "hot-wallet" && url.href.includes("/request")) return route.fulfill({ json: {} });
+    if (item.id === "hot-wallet" && url.href.includes("/request")) {
+      await hotRequestReady;
+      return route.fulfill({ json: {} });
+    }
     if (item.id === "hot-wallet" && url.href.includes("/response")) return route.fulfill({ status: 404, body: "pending" });
     if (item.id === "near-mobile" && request.resourceType() === "fetch") return new Promise(() => {});
     if (request.resourceType() === "image") return route.fulfill({
@@ -83,6 +88,16 @@ async function run(browser, item, script) {
     const attributes = await controls.evaluateAll(elements => elements.map(element => element.getAttribute("onclick")));
     assert.equal(attributes.length, item.count);
     for (const body of attributes) assert(handlers.includes(body), "unreviewed adapter handler");
+    // HOT renders buttons before its request finishes and installs their
+    // handlers afterward. Hold that response until the controls exist, then
+    // wait for callable handlers rather than racing their initialization.
+    releaseHotRequest();
+    if (item.id === "hot-wallet") {
+      const frame = await (await page.locator("iframe").elementHandle()).contentFrame();
+      await frame.waitForFunction(names => names.every(name =>
+        typeof window.selector[name] === "function"),
+        item.mobile ? ["openMobile", "openTelegram"] : ["openExtension", "openTelegram"]);
+    }
     await controls.evaluateAll(elements => elements.forEach(element => element.click()));
     await page.waitForFunction(count => window.opened.length === count, item.count);
     assert.equal(violations.length, 0, "reviewed wallet action blocked");
@@ -96,7 +111,7 @@ async function run(browser, item, script) {
     });
     assert.equal(unreviewedRan, false, "unreviewed inline handler executed");
     console.log(`PASS ${item.id} ${item.mobile ? "mobile" : "desktop"}: reviewed controls work; arbitrary handler blocked`);
-  } finally { await context.close(); }
+  } finally { releaseHotRequest(); await context.close(); }
 }
 const deadline = setTimeout(() => { console.error("browser controls timed out"); process.exit(1); }, 60000);
 (async () => {
