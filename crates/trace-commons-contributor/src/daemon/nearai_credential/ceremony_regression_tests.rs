@@ -39,8 +39,13 @@ impl Fixture {
             .expect("save synthetic preference");
         // Seed the already-connected account, not the attempted publication.
         // Every publication under test below goes through persist_attempt.
-        persist(store.dir(), minted("previous"), refresh("previous"))
-            .expect("seed previous synthetic connection");
+        persist(
+            store.dir(),
+            minted("previous"),
+            refresh("previous"),
+            "Mozilla/5.0 Test".into(),
+        )
+        .expect("seed previous synthetic connection");
         Self {
             store,
             _directory: directory,
@@ -96,7 +101,14 @@ impl Fixture {
                 release_rx
                     .recv_timeout(DEADLINE)
                     .expect("release late publication");
-                persist_attempt(&directory, &attempt_id, key, session, None)
+                persist_attempt(
+                    &directory,
+                    &attempt_id,
+                    key,
+                    session,
+                    None,
+                    "Mozilla/5.0 Test".into(),
+                )
             });
             ready_rx
                 .recv_timeout(DEADLINE)
@@ -159,6 +171,7 @@ fn the_current_waiting_attempt_publishes_both_credentials_once() {
         minted("current"),
         refresh("current"),
         Some(expires_at),
+        "Mozilla/5.0 Test".into(),
     )
     .expect("the current waiting attempt must publish");
 
@@ -225,6 +238,7 @@ fn a_late_mint_cannot_replace_a_new_waiting_attempts_credentials() {
             minted("replacement"),
             refresh("replacement"),
             None,
+            "Mozilla/5.0 Test".into(),
         )
         .expect("publish replacement account");
         // Keep the new entry waiting: only its different ID can reject the old

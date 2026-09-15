@@ -51,6 +51,12 @@ struct SessionMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     refresh_token_expires_at: Option<DateTime<Utc>>,
     stored_at: DateTime<Utc>,
+    /// Not a secret -- it is the agent string the service echoes back in its
+    /// own session list -- so it rides with the metadata rather than the
+    /// keychain bundle. `default` keeps records written before it existed
+    /// readable; they refresh as empty and fail closed.
+    #[serde(default)]
+    user_agent: String,
 }
 
 impl StoredCloudCredentials {
@@ -109,6 +115,7 @@ impl StoredCloudCredentials {
                     refresh_token: refresh_token.to_owned(),
                     refresh_token_expires_at: metadata.refresh_token_expires_at,
                     stored_at: metadata.stored_at,
+                    user_agent: metadata.user_agent.clone(),
                 });
         Ok((inference, session))
     }
@@ -162,6 +169,7 @@ impl StoredCloudCredentials {
         let session = session.map(|value| SessionMetadata {
             refresh_token_expires_at: value.refresh_token_expires_at,
             stored_at: value.stored_at,
+            user_agent: value.user_agent.clone(),
         });
         Ok(Self {
             reference,
@@ -268,6 +276,7 @@ mod tests {
                 refresh_token: "synthetic-refresh-secret".into(),
                 refresh_token_expires_at: Some(time + chrono::Duration::hours(1)),
                 stored_at: time,
+                user_agent: "Mozilla/5.0 Test".into(),
             },
         )
     }

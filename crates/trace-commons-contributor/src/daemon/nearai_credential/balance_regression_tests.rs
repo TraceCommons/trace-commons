@@ -66,6 +66,7 @@ impl Fixture {
             refresh_token: format!("rt-synthetic-{label}"),
             refresh_token_expires_at: Some(now + chrono::Duration::hours(1)),
             stored_at: now,
+            user_agent: "Mozilla/5.0 Test".into(),
         });
         settings.near_ai_inference = Some(NearAiInferenceCredential {
             key: format!("sk-synthetic-{label}"),

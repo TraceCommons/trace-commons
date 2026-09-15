@@ -188,21 +188,30 @@ impl BrowserSignIn {
         ))
     }
 
+    /// The third argument is the agent that *created* the session, which the
+    /// service matches on every later refresh. The two arms differ on it and
+    /// that difference is the point: the OAuth redirect is completed by the
+    /// browser, so the browser's agent is what cloud-api recorded, while the
+    /// NEAR wallet sign-in is a request this client makes itself.
     async fn finish<F, Fut>(self, api: &CloudApi, finish: F) -> Result<()>
     where
-        F: FnOnce(loopback::SessionTokens, Option<DateTime<Utc>>) -> Fut,
+        F: FnOnce(loopback::SessionTokens, Option<DateTime<Utc>>, String) -> Fut,
         Fut: std::future::Future<Output = Result<()>>,
     {
         match self {
             Self::OAuth { listener, state } => {
                 let listener = tokio::net::TcpListener::from_std(listener)?;
-                loopback::receive_session(listener, &state, |session| finish(session, None)).await
+                loopback::receive_session(listener, &state, |session| {
+                    finish(session.tokens, None, session.user_agent)
+                })
+                .await
             }
             Self::Near(listener) => {
                 let authenticated = api.sign_in_near(listener.wait().await?).await?;
                 finish(
                     authenticated.session,
                     Some(authenticated.refresh_token_expires_at),
+                    crate::daemon::nearai_credential::api::USER_AGENT.to_string(),
                 )
                 .await
             }
@@ -258,7 +267,7 @@ pub async fn begin(store: &ConfigStore, provider: &str) -> Result<serde_json::Va
             let finished_dir = &finished_dir;
             tokio::time::timeout(
                 BROWSER_TIMEOUT,
-                sign_in.finish(&api, |session, expires_at| async move {
+                sign_in.finish(&api, |session, expires_at, user_agent| async move {
                     // A fresh client, on this runtime: never a connection pool
                     // attached to the reactor the caller may already have dropped.
                     let minted = api_ref
@@ -278,6 +287,7 @@ pub async fn begin(store: &ConfigStore, provider: &str) -> Result<serde_json::Va
                             minted,
                             session.refresh_token,
                             expires_at,
+                            user_agent,
                         )
                     })
                     .await
@@ -351,8 +361,9 @@ pub(crate) fn persist(
     dir: &std::path::Path,
     minted: super::api::MintedKey,
     refresh_token: String,
+    user_agent: String,
 ) -> Result<()> {
-    persist_checked(dir, minted, refresh_token, None, || Ok(()))
+    persist_checked(dir, minted, refresh_token, None, user_agent, || Ok(()))
 }
 
 fn persist_attempt(
@@ -361,8 +372,9 @@ fn persist_attempt(
     minted: crate::daemon::nearai_credential::api::MintedKey,
     refresh_token: String,
     expires_at: Option<DateTime<Utc>>,
+    user_agent: String,
 ) -> Result<()> {
-    persist_checked(dir, minted, refresh_token, expires_at, || {
+    persist_checked(dir, minted, refresh_token, expires_at, user_agent, || {
         let map = attempts()
             .lock()
             .map_err(|_| anyhow!("near_ai_credential_unavailable"))?;
@@ -380,6 +392,7 @@ fn persist_checked(
     minted: crate::daemon::nearai_credential::api::MintedKey,
     refresh_token: String,
     expires_at: Option<DateTime<Utc>>,
+    user_agent: String,
     accept: impl FnOnce() -> Result<()>,
 ) -> Result<()> {
     let store = ConfigStore::open(dir.to_path_buf())?;
@@ -396,6 +409,7 @@ fn persist_checked(
         refresh_token,
         refresh_token_expires_at: expires_at,
         stored_at: Utc::now(),
+        user_agent,
     });
 
     crate::daemon::cloud_credential_lifecycle::native(&store)?.replace(
@@ -552,7 +566,13 @@ mod tests {
         settings.max_uploads_per_day = 7;
         settings.save_for_test(&store).unwrap();
 
-        persist(dir.path(), minted(), "rt_session-secret".into()).unwrap();
+        persist(
+            dir.path(),
+            minted(),
+            "rt_session-secret".into(),
+            "Mozilla/5.0 Test".into(),
+        )
+        .unwrap();
         let stored = DaemonSettings::load_with_cloud_credentials(&store).unwrap();
         assert_eq!(stored.max_uploads_per_day, 7);
         let credential = stored.near_ai_inference.unwrap();

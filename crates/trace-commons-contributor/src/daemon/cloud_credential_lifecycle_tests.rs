@@ -224,6 +224,7 @@ fn credentials(account: &str) -> (NearAiInferenceCredential, NearAiSession) {
             refresh_token: format!("synthetic-refresh-{account}"),
             refresh_token_expires_at: Some(time + chrono::Duration::hours(1)),
             stored_at: time,
+            user_agent: "Mozilla/5.0 Test".into(),
         },
     )
 }

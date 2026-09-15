@@ -401,10 +401,15 @@ async fn wallet_login_accepts_response_at_limit_and_rejects_chunked_overflow_bef
 #[tokio::test]
 async fn session_exchange_rejects_chunked_overflow_before_eof_and_keeps_user_agent() {
     let mut server = Server::start(Reply::Unfinished(200, vec![b' '; RESPONSE_LIMIT + 1])).await;
-    let error = timeout(DEADLINE, server.api.refresh_session(REFRESH))
-        .await
-        .expect("session decoder buffered beyond the limit")
-        .expect_err("oversized response accepted");
+    let error = timeout(
+        DEADLINE,
+        server
+            .api
+            .refresh_session(REFRESH, crate::daemon::nearai_credential::api::USER_AGENT),
+    )
+    .await
+    .expect("session decoder buffered beyond the limit")
+    .expect_err("oversized response accepted");
     assert_eq!(error.to_string(), "near_ai_credential_unavailable");
     assert_redacted(&error);
     let request = server.only_request().await;

@@ -85,6 +85,7 @@ fn credentials(name: &str) -> DaemonSettings {
             refresh_token: format!("rt-synthetic-recovery-{name}"),
             refresh_token_expires_at: None,
             stored_at: now,
+            user_agent: "Mozilla/5.0 Test".into(),
         }),
         ..Default::default()
     }
@@ -328,6 +329,7 @@ async fn pending_os_read_cannot_delay_forget_withdrawing_proxy_authority() {
             workspace_id: "synthetic-workspace".into(),
         },
         "rt-synthetic-new-ceremony".into(),
+        "Mozilla/5.0 Test".into(),
     )
     .unwrap();
     let (entered, waiting) = tokio::sync::oneshot::channel();

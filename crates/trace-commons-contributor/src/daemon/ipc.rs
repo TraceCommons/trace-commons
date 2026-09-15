@@ -7607,6 +7607,7 @@ mod tests {
             refresh_token: "rt_super-secret-session".into(),
             refresh_token_expires_at: Some(chrono::Utc::now()),
             stored_at: chrono::Utc::now(),
+            user_agent: "Mozilla/5.0 Test".into(),
         });
         let r = handle_request(&s, &req("get_settings", serde_json::json!({})));
         let body = serde_json::to_string(&r.result.unwrap()).unwrap();
@@ -7691,6 +7692,7 @@ mod tests {
                 refresh_token: "rt_super-secret-session".into(),
                 refresh_token_expires_at: None,
                 stored_at: chrono::Utc::now(),
+                user_agent: "Mozilla/5.0 Test".into(),
             });
             settings.save_for_test(&s.store).unwrap();
         }
@@ -9086,6 +9088,7 @@ mod tests {
             // coupling includes the retained session reaching the running
             // daemon so balance and enrollment work without a restart.
             "refresh-token-for-the-reconcile-test".to_string(),
+            "Mozilla/5.0 Test".into(),
         )
         .unwrap();
 

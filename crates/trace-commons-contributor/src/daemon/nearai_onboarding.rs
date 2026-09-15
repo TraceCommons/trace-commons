@@ -503,6 +503,7 @@ mod tests {
             refresh_token: REFRESH.into(),
             refresh_token_expires_at: None,
             stored_at: Utc::now(),
+            user_agent: "Mozilla/5.0 Test".into(),
         });
         settings.save_for_test(&shared.store).unwrap();
         drop(settings);

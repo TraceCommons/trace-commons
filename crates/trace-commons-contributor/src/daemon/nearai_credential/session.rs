@@ -138,11 +138,17 @@ pub(crate) async fn exchange(
         }
         settings
     };
-    let refreshed = api.refresh_session(&expected.refresh_token).await?;
+    let refreshed = api
+        .refresh_session(&expected.refresh_token, &expected.user_agent)
+        .await?;
     let session = NearAiSession {
         refresh_token: refreshed.session.refresh_token,
         refresh_token_expires_at: Some(refreshed.refresh_token_expires_at),
         stored_at: Utc::now(),
+        // Rotation issues a new token against the same session, so the agent
+        // it is bound to does not change. Carrying the stored value forward
+        // is what keeps the second refresh working.
+        user_agent: expected.user_agent.clone(),
     };
     let store = shared.store.clone();
     let memory = Arc::clone(&shared.settings);
