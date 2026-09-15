@@ -169,6 +169,21 @@ pub struct NearAiSession {
     /// When this record was last written, which after a rotation is when the
     /// current token was issued rather than when the ceremony ran.
     pub stored_at: DateTime<Utc>,
+    /// The User-Agent of whoever created this session, which the service
+    /// matches -- normalized -- on every refresh.
+    ///
+    /// It is part of the credential, not a description of it. For the OAuth
+    /// providers the creator is the *browser* that completed the redirect, so
+    /// this is that browser's agent, reported by the bounce page. For the NEAR
+    /// wallet flow the creating request is this client's own, so it is
+    /// `api::USER_AGENT`. Presenting the wrong one is answered `401` with an
+    /// empty body and is indistinguishable from a spent token.
+    ///
+    /// Empty for a session stored before this field existed. Those cannot be
+    /// refreshed -- nothing recorded what would match -- and the ceremony has
+    /// to run once more.
+    #[serde(default)]
+    pub user_agent: String,
 }
 
 impl std::fmt::Debug for NearAiSession {

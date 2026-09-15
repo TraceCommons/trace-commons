@@ -36,6 +36,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 /// Where the service is told to send the browser. Bare -- no query, no
 /// fragment -- because `validate_frontend_callback` refuses either.
 pub const CALLBACK_PATH: &str = "/trace-commons/near-ai/callback";
+/// The service refuses a longer agent than this outright, so a deposit
+/// carrying one could never be refreshed and is refused at the door.
+const MAX_USER_AGENT_BYTES: usize = 512;
 /// Where the served page posts the fragment it read. This one is ours alone;
 /// the service never sees it, so it may carry a body.
 pub const DEPOSIT_PATH: &str = "/trace-commons/near-ai/deposit";
@@ -107,7 +110,8 @@ fn bounce_page(state: &str) -> Result<String> {
          var m = document.getElementById(\"m\");\n\
          var h = location.hash.slice(1);\n\
          location.hash = \"\";\n\
-         fetch(\"{DEPOSIT_PATH}\", {{ method: \"POST\", body: \"state={state}&\" + h }})\n\
+         var u = encodeURIComponent(navigator.userAgent);\n\
+         fetch(\"{DEPOSIT_PATH}\", {{ method: \"POST\", body: \"state={state}&ua=\" + u + \"&\" + h }})\n\
          .then(function (r) {{\n\
          m.textContent = r.ok\n\
          ? \"Signed in. Return to Trace Commons.\"\n\
@@ -116,6 +120,18 @@ fn bounce_page(state: &str) -> Result<String> {
          .catch(function () {{ m.textContent = \"Trace Commons could not finish sign-in. Return to the app and try again.\"; }});\n\
          </script>\n"
     ))
+}
+
+/// One completed browser sign-in: the tokens, and the agent that earned them.
+///
+/// The agent is carried because cloud-api binds a refresh token to the
+/// normalized User-Agent of the request that created the session, and for the
+/// OAuth providers that request is the browser's, not ours. Without it the
+/// stored session is refused on its first refresh and cannot be recovered by
+/// signing in again.
+pub struct BrowserSession {
+    pub tokens: SessionTokens,
+    pub user_agent: String,
 }
 
 /// Decode one deposit body into the session tokens it carries.
@@ -127,7 +143,7 @@ fn bounce_page(state: &str) -> Result<String> {
 /// platform this ships to. What it buys is that the port is ephemeral, the
 /// window is one ceremony long, and a blind poster is refused -- which is the
 /// same bar the enrollment ceremony's callback holds itself to.
-fn parse_deposit(body: &str, state: &str) -> Result<SessionTokens> {
+fn parse_deposit(body: &str, state: &str) -> Result<BrowserSession> {
     if body.len() > MAX_BODY_BYTES {
         bail!("near_ai_credential_callback_invalid")
     }
@@ -138,9 +154,14 @@ fn parse_deposit(body: &str, state: &str) -> Result<SessionTokens> {
     let mut seen_state = None;
     let mut access_token = None;
     let mut refresh_token = None;
+    let mut user_agent = None;
     for (key, value) in url.query_pairs() {
         let slot = match key.as_ref() {
             "state" => &mut seen_state,
+            // Ours, not the service's: the page reports `navigator.userAgent`
+            // so the refresh can present the agent the session was created
+            // with. A fragment never carries this name, so it cannot collide.
+            "ua" => &mut user_agent,
             // cloud-api names the access token `token` in the fragment and
             // the refresh token `refresh_token`. Not a typo, and not ours to
             // rename on the wire.
@@ -161,12 +182,23 @@ fn parse_deposit(body: &str, state: &str) -> Result<SessionTokens> {
         access_token.ok_or_else(|| anyhow!("near_ai_credential_callback_invalid"))?;
     let refresh_token =
         refresh_token.ok_or_else(|| anyhow!("near_ai_credential_callback_invalid"))?;
+    let user_agent = user_agent.unwrap_or_default();
     if access_token.is_empty() || refresh_token.is_empty() {
         bail!("near_ai_credential_callback_invalid")
     }
-    Ok(SessionTokens {
-        access_token,
-        refresh_token,
+    // A browser that reported no agent cannot be refreshed later, and the
+    // failure would land minutes afterwards on a screen that says nothing
+    // about sign-in. Refuse it here, where the contributor is still looking
+    // at the page that caused it.
+    if user_agent.trim().is_empty() || user_agent.len() > MAX_USER_AGENT_BYTES {
+        bail!("near_ai_credential_callback_invalid")
+    }
+    Ok(BrowserSession {
+        tokens: SessionTokens {
+            access_token,
+            refresh_token,
+        },
+        user_agent,
     })
 }
 
@@ -256,7 +288,7 @@ pub async fn receive_session<T, F, Fut>(
     finish: F,
 ) -> Result<T>
 where
-    F: FnOnce(SessionTokens) -> Fut,
+    F: FnOnce(BrowserSession) -> Fut,
     Fut: std::future::Future<Output = Result<T>>,
 {
     let page = bounce_page(state)?;
@@ -290,11 +322,11 @@ where
             continue;
         }
         match parse_deposit(&request.body, state) {
-            Ok(tokens) => {
+            Ok(session) => {
                 // Receiving tokens is not success: key minting and durable
                 // credential replacement must finish before the browser is told
                 // to return to a signed-in app. Never expose the service error.
-                let outcome = finish(tokens).await;
+                let outcome = finish(session).await;
                 let status = if outcome.is_ok() {
                     "200 OK"
                 } else {
@@ -354,21 +386,69 @@ mod tests {
 
     #[test]
     fn a_deposit_is_accepted_only_with_this_ceremonys_state() {
-        let tokens = parse_deposit("state=abc&token=jwt&refresh_token=rt_x", "abc").unwrap();
-        assert_eq!(tokens.access_token, "jwt");
-        assert_eq!(tokens.refresh_token, "rt_x");
+        let tokens = parse_deposit(
+            "state=abc&ua=Mozilla/5.0%20Test&token=jwt&refresh_token=rt_x",
+            "abc",
+        )
+        .unwrap();
+        assert_eq!(tokens.tokens.access_token, "jwt");
+        assert_eq!(tokens.tokens.refresh_token, "rt_x");
+        assert_eq!(tokens.user_agent, "Mozilla/5.0 Test");
         // A different ceremony's state, or none at all, is refused: this is
         // the whole of the local binding and it must not be optional.
-        assert!(parse_deposit("state=other&token=jwt&refresh_token=rt_x", "abc").is_err());
-        assert!(parse_deposit("token=jwt&refresh_token=rt_x", "abc").is_err());
+        assert!(
+            parse_deposit(
+                "state=other&ua=Mozilla/5.0%20Test&token=jwt&refresh_token=rt_x",
+                "abc"
+            )
+            .is_err()
+        );
+        assert!(
+            parse_deposit("ua=Mozilla/5.0%20Test&token=jwt&refresh_token=rt_x", "abc").is_err()
+        );
         // Half a credential is not a credential.
-        assert!(parse_deposit("state=abc&token=jwt", "abc").is_err());
-        assert!(parse_deposit("state=abc&refresh_token=rt_x", "abc").is_err());
-        assert!(parse_deposit("state=abc&token=&refresh_token=rt_x", "abc").is_err());
+        assert!(parse_deposit("state=abc&ua=Mozilla/5.0%20Test&token=jwt", "abc").is_err());
+        assert!(
+            parse_deposit("state=abc&ua=Mozilla/5.0%20Test&refresh_token=rt_x", "abc").is_err()
+        );
+        assert!(
+            parse_deposit(
+                "state=abc&ua=Mozilla/5.0%20Test&token=&refresh_token=rt_x",
+                "abc"
+            )
+            .is_err()
+        );
         // A repeated key is malformed, never last-one-wins: a page that
         // appended a second `state=` must not be able to overwrite the first.
-        assert!(parse_deposit("state=abc&state=abc&token=j&refresh_token=r", "abc").is_err());
-        assert!(parse_deposit("state=abc&token=j&token=j2&refresh_token=r", "abc").is_err());
+        assert!(
+            parse_deposit(
+                "state=abc&state=abc&ua=Mozilla/5.0%20Test&token=j&refresh_token=r",
+                "abc"
+            )
+            .is_err()
+        );
+        assert!(
+            parse_deposit(
+                "state=abc&ua=Mozilla/5.0%20Test&token=j&token=j2&refresh_token=r",
+                "abc"
+            )
+            .is_err()
+        );
+        // The agent is as load-bearing as the tokens: a deposit without one
+        // produces a session that cannot ever be refreshed, and the refusal
+        // has to land here rather than minutes later on an unrelated screen.
+        assert!(parse_deposit("state=abc&token=jwt&refresh_token=rt_x", "abc").is_err());
+        assert!(parse_deposit("state=abc&ua=&token=jwt&refresh_token=rt_x", "abc").is_err());
+        assert!(parse_deposit("state=abc&ua=%20%20&token=jwt&refresh_token=rt_x", "abc").is_err());
+        // And one the service would refuse outright is refused here instead.
+        let oversized = "x".repeat(MAX_USER_AGENT_BYTES + 1);
+        assert!(
+            parse_deposit(
+                &format!("state=abc&ua={oversized}&token=jwt&refresh_token=rt_x"),
+                "abc"
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -434,14 +514,15 @@ mod tests {
         assert_eq!(
             deposit(
                 address,
-                &format!("state={state}&token=jwt&refresh_token=rt_x")
+                &format!("state={state}&ua=Mozilla/5.0%20Test&token=jwt&refresh_token=rt_x")
             )
             .await,
             "HTTP/1.1 200 OK"
         );
         let tokens = task.await.unwrap().unwrap();
-        assert_eq!(tokens.access_token, "jwt");
-        assert_eq!(tokens.refresh_token, "rt_x");
+        assert_eq!(tokens.tokens.access_token, "jwt");
+        assert_eq!(tokens.tokens.refresh_token, "rt_x");
+        assert_eq!(tokens.user_agent, "Mozilla/5.0 Test");
     }
 
     #[tokio::test]
@@ -452,7 +533,7 @@ mod tests {
         let (finish_tx, finish_rx) = tokio::sync::oneshot::channel();
         let server = tokio::spawn(async move {
             receive_session(listener, "state", |tokens| async move {
-                assert_eq!(tokens.refresh_token, "rt_x");
+                assert_eq!(tokens.tokens.refresh_token, "rt_x");
                 started_tx.send(()).unwrap();
                 finish_rx.await.unwrap();
                 Ok(())
@@ -460,7 +541,11 @@ mod tests {
             .await
         });
         let mut browser = tokio::spawn(async move {
-            deposit(address, "state=state&token=jwt&refresh_token=rt_x").await
+            deposit(
+                address,
+                "state=state&ua=Mozilla/5.0%20Test&token=jwt&refresh_token=rt_x",
+            )
+            .await
         });
         started_rx.await.unwrap();
         assert!(
@@ -484,7 +569,11 @@ mod tests {
             .await
         });
         assert_eq!(
-            deposit(address, "state=state&token=jwt&refresh_token=rt_x").await,
+            deposit(
+                address,
+                "state=state&ua=Mozilla/5.0%20Test&token=jwt&refresh_token=rt_x"
+            )
+            .await,
             "HTTP/1.1 500 Internal Server Error"
         );
         assert!(server.await.unwrap().is_err());
@@ -497,7 +586,7 @@ mod tests {
         let task = tokio::spawn(async move {
             receive_session(listener, "state", |tokens| async { Ok(tokens) }).await
         });
-        let body = "state=state&token=jwt&refresh_token=rt_x";
+        let body = "state=state&ua=Mozilla/5.0%20Test&token=jwt&refresh_token=rt_x";
         let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
         stream
             .write_all(format!("POST {DEPOSIT_PATH} HTTP/1.1\r\nHost: local").as_bytes())
@@ -511,6 +600,6 @@ mod tests {
         tokio::task::yield_now().await;
         // The body itself arrives after the headers, in its own packet.
         stream.write_all(body.as_bytes()).await.unwrap();
-        assert_eq!(task.await.unwrap().unwrap().refresh_token, "rt_x");
+        assert_eq!(task.await.unwrap().unwrap().tokens.refresh_token, "rt_x");
     }
 }

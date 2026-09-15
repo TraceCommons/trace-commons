@@ -67,6 +67,7 @@ impl Fixture {
             refresh_token: format!("rt-synthetic-{account}"),
             refresh_token_expires_at: Some(now + chrono::Duration::hours(1)),
             stored_at: now,
+            user_agent: "Mozilla/5.0 Test".into(),
         };
         let mut settings = self.shared.settings.lock().expect("fixture settings lock");
         settings.near_ai_session = Some(session.clone());

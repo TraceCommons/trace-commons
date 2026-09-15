@@ -424,6 +424,7 @@ mod tests {
                 refresh_token: "rt-synthetic-funding".into(),
                 refresh_token_expires_at: Some(now + chrono::Duration::hours(1)),
                 stored_at: now,
+                user_agent: "Mozilla/5.0 Test".into(),
             });
             settings.save_for_test(&self.shared.store).unwrap();
         }

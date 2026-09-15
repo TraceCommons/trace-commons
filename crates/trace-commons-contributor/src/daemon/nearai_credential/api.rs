@@ -31,7 +31,9 @@ use std::time::Duration;
 pub const CLOUD_API_ORIGIN: &str = "https://cloud-api.near.ai";
 /// The sign-in providers the service exposes as a browser redirect.
 pub const PROVIDERS: [&str; 2] = ["github", "google"];
-const USER_AGENT: &str = "TraceCommons/0.12";
+/// This client's own agent. Also the agent recorded for a NEAR wallet
+/// sign-in, because that request is made here rather than in a browser.
+pub(crate) const USER_AGENT: &str = "TraceCommons/0.12";
 /// A whole ceremony's worth of HTTP is three small calls; none of them should
 /// ever take this long.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -283,7 +285,7 @@ impl CloudApi {
     ) -> Result<T> {
         // Every management route is session-only; an sk- key is refused
         // here exactly as a session is refused on inference.
-        self.call_with_bearer(method, path, &session.access_token, body)
+        self.call_with_bearer(method, path, &session.access_token, body, None)
             .await
     }
 
@@ -301,11 +303,18 @@ impl CloudApi {
         path: &str,
         bearer: &str,
         body: Option<&serde_json::Value>,
+        user_agent: Option<&str>,
     ) -> Result<T> {
         let mut request = self
             .http
             .request(method, self.url(path)?)
             .bearer_auth(bearer);
+        // Overrides the client default for this one call. Only the refresh
+        // route needs it, and only because the service matches the header
+        // against the session's originating agent -- see `refresh_session`.
+        if let Some(user_agent) = user_agent {
+            request = request.header(reqwest::header::USER_AGENT, user_agent);
+        }
         if let Some(body) = body {
             request = request.json(body);
         }
@@ -470,9 +479,20 @@ impl CloudApi {
     /// A 401 here arrives as `near_ai_credential_session_expired`, which is
     /// the recoverable state: re-running the ceremony fixes it, and nothing
     /// this function does clears the stored token on its own.
-    pub async fn refresh_session(&self, refresh_token: &str) -> Result<AuthenticatedSession> {
+    pub async fn refresh_session(
+        &self,
+        refresh_token: &str,
+        user_agent: &str,
+    ) -> Result<AuthenticatedSession> {
         if refresh_token.is_empty() {
             bail!("near_ai_credential_session_missing")
+        }
+        // An empty originating agent is the pre-`user_agent` stored session,
+        // and the service cannot match one. Refusing here rather than sending
+        // the client default names the recoverable state directly instead of
+        // spending a round trip to be told the same thing less clearly.
+        if user_agent.trim().is_empty() {
+            bail!("near_ai_credential_session_expired")
         }
         let refreshed: AccessAndRefreshToken = self
             .call_with_bearer(
@@ -480,6 +500,7 @@ impl CloudApi {
                 "/v1/users/me/access-tokens",
                 refresh_token,
                 None,
+                Some(user_agent),
             )
             .await?;
         if refreshed.access_token.is_empty() || refreshed.refresh_token.is_empty() {
@@ -832,5 +853,56 @@ mod tests {
         assert!(api.authorize_url("google", 1).is_ok());
         assert!(api.authorize_url("near", 1).is_err());
         assert!(api.authorize_url("../admin", 1).is_err());
+    }
+
+    /// cloud-api binds a refresh token to the normalized User-Agent of
+    /// whoever created the session, and the creator is the *browser* that
+    /// completed OAuth -- not this process. A refresh that presents this
+    /// crate's own `USER_AGENT` is answered `401` with an empty body, from
+    /// the middleware, before the handler runs. So the session's originating
+    /// User-Agent is part of the credential, and `refresh_session` has to
+    /// present it.
+    ///
+    /// The stub is the service's rule and nothing else: same token, same
+    /// route, refused or honoured purely on the header.
+    #[tokio::test]
+    async fn refresh_presents_the_user_agent_that_created_the_session() {
+        const BROWSER: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) \
+AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36";
+
+        let router = Router::new().route(
+            "/v1/users/me/access-tokens",
+            axum::routing::post(move |request: Request| async move {
+                let presented = request
+                    .headers()
+                    .get("user-agent")
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or_default()
+                    .to_string();
+                if presented == BROWSER {
+                    Ok(Json(serde_json::json!({
+                        "access_token": "session-jwt",
+                        "refresh_token": "rt_rotated",
+                        "refresh_token_expiration": "2026-10-01T00:00:00Z",
+                    })))
+                } else {
+                    Err(axum::http::StatusCode::UNAUTHORIZED)
+                }
+            }),
+        );
+        let api = CloudApi::for_test(&spawn(router).await).unwrap();
+
+        let refreshed = api
+            .refresh_session("rt_example", BROWSER)
+            .await
+            .expect("the originating User-Agent is honoured");
+        assert_eq!(refreshed.session.refresh_token, "rt_rotated");
+
+        // And the failure this fix exists for: the client's own product token
+        // is exactly what the service refuses.
+        assert!(
+            api.refresh_session("rt_example", USER_AGENT).await.is_err(),
+            "presenting our own User-Agent must not be treated as a live session"
+        );
     }
 }

@@ -553,6 +553,7 @@ mod tests {
                     refresh_token: "synthetic-state-fixture".into(),
                     refresh_token_expires_at: None,
                     stored_at: chrono::Utc::now(),
+                    user_agent: "Mozilla/5.0 Test".into(),
                 }),
                 ..Default::default()
             };
