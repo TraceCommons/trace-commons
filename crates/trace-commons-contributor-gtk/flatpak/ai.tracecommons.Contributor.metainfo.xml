@@ -62,6 +62,11 @@
   </provides>
 
   <releases>
+    <release version="0.12.5" date="2026-09-15">
+      <description>
+        <p>Signing in to NEAR AI Cloud now keeps working after the browser closes. The retained session records the agent that created it, which the service requires on every refresh, so the account and balance screens no longer report an expired session minutes after a successful sign-in.</p>
+      </description>
+    </release>
     <release version="0.12.4" date="2026-09-15">
       <description>
         <p>Signing in to NEAR AI through the browser now reports success only after the inference key is created and stored, so a failed setup is visible instead of hidden behind an older key.</p>
