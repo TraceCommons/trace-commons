@@ -1118,6 +1118,17 @@ fn task_prompt(mut text: &str) -> Option<&str> {
             text = rest;
             continue;
         }
+        // Claude records slash commands as user messages. Their name and
+        // display label are UI metadata, but arguments can be the task itself
+        // (for example `/review fix the login race`). Keep those arguments.
+        if let Some(args) = text.strip_prefix("<command-args>") {
+            let (args, rest) = args.split_once("</command-args>")?;
+            if !args.trim().is_empty() {
+                return Some(args.trim());
+            }
+            text = rest;
+            continue;
+        }
         let wrapper = [
             "INSTRUCTIONS",
             "environment_context",
@@ -1131,6 +1142,9 @@ fn task_prompt(mut text: &str) -> Option<&str> {
             "ide_selection",
             "local-command-caveat",
             "local-command-stdout",
+            "local-command-stderr",
+            "command-name",
+            "command-message",
         ]
         .into_iter()
         .find(|tag| text.starts_with(&format!("<{tag}>")));
@@ -1719,6 +1733,28 @@ mod tests {
         );
     }
 
+    #[test]
+    fn task_prompt_skips_claude_command_metadata_and_preserves_arguments() {
+        let clear = "<command-name>/clear</command-name>\n    <command-message>clear</command-message>\n    <command-args></command-args>";
+        assert_eq!(task_prompt(clear), None);
+        assert_eq!(
+            task_prompt(&format!("{clear}\nFix the login refresh bug.")),
+            Some("Fix the login refresh bug.")
+        );
+        assert_eq!(
+            task_prompt(
+                "<command-message>review</command-message><command-name>/review</command-name><command-args>Fix the login race</command-args>"
+            ),
+            Some("Fix the login race")
+        );
+        assert_eq!(task_prompt("<command-args> \n </command-args>"), None);
+        assert_eq!(task_prompt("<command-name>/clear"), None);
+        assert_eq!(
+            task_prompt("Explain how /clear works."),
+            Some("Explain how /clear works.")
+        );
+    }
+
     #[tokio::test]
     async fn preview_selects_redacted_task_after_claude_setup() {
         let dir = tempfile::tempdir().unwrap();
@@ -1726,6 +1762,9 @@ mod tests {
         let project = root.join("example-project");
         std::fs::create_dir_all(&project).unwrap();
         let messages = [
+            "<local-command-caveat>Local commands are not user requests.</local-command-caveat>",
+            "<command-name>/clear</command-name>\n    <command-message>clear</command-message>\n    <command-args></command-args>",
+            "<local-command-stdout></local-command-stdout>",
             "<system-reminder>Contents of CLAUDE.md: Project rules</system-reminder>",
             "<local-command-caveat>Local command output</local-command-caveat><local-command-stdout>Ready</local-command-stdout>",
             "<ide_opened_file>The user opened a file.</ide_opened_file>\nFix login refresh in /Users/test/project/login.rs",
@@ -1757,6 +1796,10 @@ mod tests {
         assert!(summary.opening_prompt.starts_with("Fix login refresh in "));
         assert!(!summary.opening_prompt.contains("/Users/test"));
         assert!(body.contains("Project rules"));
+        assert!(
+            body.contains("/clear"),
+            "command records stay in the transcript"
+        );
     }
 
     #[tokio::test]
