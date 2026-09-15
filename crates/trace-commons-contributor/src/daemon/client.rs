@@ -126,6 +126,7 @@ pub(crate) fn connect_for_shutdown(store: &ConfigStore) -> Option<PlatformStream
 /// Note the unix read timeout `connect` installs applies to this stream too.
 /// That is correct for request/response and wrong for a reader parked on the
 /// event stream, so `attached` clears it on its reader clone.
+#[cfg(unix)]
 pub(crate) fn connect_for_attach(store: &ConfigStore) -> Option<PlatformStream> {
     connect(store)
 }

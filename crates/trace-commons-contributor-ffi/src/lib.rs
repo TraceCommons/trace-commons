@@ -645,6 +645,15 @@ const ERR_NO_DAEMON_LISTENING: &str = "no-daemon-listening";
 /// hold it.
 const ERR_ATTACH_FAILED: &str = "attach-failed";
 
+/// The fixed label for a platform whose daemon endpoint cannot be attached
+/// to at all. Windows today: its named pipe is a synchronous handle and a
+/// held-open connection deadlocks on the first round trip. See
+/// `daemon::attached`'s module doc.
+///
+/// Distinct from `ERR_ATTACH_FAILED` because nothing about the machine or
+/// the daemon is wrong, and retrying will never help.
+const ERR_ATTACH_UNSUPPORTED: &str = "attach-unsupported";
+
 /// Attach to a daemon ALREADY RUNNING in another process, over its socket.
 ///
 /// This is the answer to `tc_daemon_start` reporting `already-running`.
@@ -711,6 +720,9 @@ pub unsafe extern "C" fn tc_daemon_attach(
         let attached = match AttachedDaemon::connect(&store) {
             Ok(attached) => attached,
             Err(AttachError::NotListening) => return Ok(fail(ERR_NO_DAEMON_LISTENING)),
+            Err(AttachError::UnsupportedTransport) => {
+                return Ok(fail(ERR_ATTACH_UNSUPPORTED));
+            }
             Err(_) => return Ok(fail(ERR_ATTACH_FAILED)),
         };
 
@@ -1183,7 +1195,14 @@ pub unsafe extern "C" fn tc_call(
                     Err(AttachError::StopRefused) => {
                         error_frame(ERR_REFUSED, ERR_ATTACHED_STOP_REFUSED)
                     }
-                    Err(AttachError::NotListening) | Err(AttachError::Disconnected) => {
+                    Err(AttachError::NotListening)
+                    | Err(AttachError::Disconnected)
+                    // Unreachable: a handle only becomes attached by a
+                    // successful `connect`, and on a platform that refuses
+                    // one there is never an attached handle to call. Matched
+                    // rather than left to a catch-all so that a new variant
+                    // is still a compile error here.
+                    | Err(AttachError::UnsupportedTransport) => {
                         error_frame("unavailable", "daemon-disconnected")
                     }
                     Err(AttachError::Transport(_)) => {
