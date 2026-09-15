@@ -21,6 +21,25 @@
 //! watcher is not running while their watcher is running. The daemon they
 //! want is up; this is how a shell reaches it.
 //!
+//! # UNIX ONLY, AND NOT AN OVERSIGHT
+//!
+//! This holds one connection open and reads it from a background thread
+//! while other threads write requests to it. On Unix that is a `UnixStream`,
+//! where the two directions are independent.
+//!
+//! The Windows endpoint is a named pipe opened as a plain `std::fs::File` --
+//! a synchronous handle. A blocking read parked on it does not run in
+//! parallel with a write to it, so the first real round trip never
+//! completes: the CI job for that platform ran one subscribe past sixty
+//! seconds and was killed at forty-five minutes. `client::try_call` is
+//! unaffected because it writes and then reads, never both at once.
+//!
+//! Making this work on Windows needs overlapped I/O -- a tokio
+//! `NamedPipeClient` -- not a `cfg`. No Windows or GTK shell calls attach
+//! today, so [`AttachedDaemon::connect`] reports
+//! [`AttachError::UnsupportedTransport`] there rather than shipping a client
+//! that deadlocks on first use.
+//!
 //! WHAT AN ATTACHED CLIENT MAY NOT DO. It must not stop the daemon. The
 //! process on the other end may be a `trace-commons-contributor daemon` under
 //! a service manager, or another window; a shell that did not start it does
@@ -28,11 +47,16 @@
 //! [`AttachError::StopRefused`] rather than forwarding it, so the refusal
 //! holds no matter which layer asks.
 
+#[cfg(unix)]
 use std::collections::HashMap;
+#[cfg(unix)]
 use std::io::{BufRead, BufReader, Write};
+#[cfg(unix)]
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+#[cfg(unix)]
 use std::sync::{Arc, Mutex, mpsc};
 
+#[cfg(unix)]
 use super::client::{PlatformStream, connect_for_attach};
 use super::ipc::{Event, Response};
 use crate::config::ConfigStore;
@@ -42,6 +66,7 @@ use crate::config::ConfigStore;
 /// Matched here rather than left to the daemon because the daemon would
 /// honour it: the socket has no notion of which client started the process,
 /// so the refusal can only live on this side.
+#[cfg(unix)]
 const METHOD_SHUTDOWN: &str = "shutdown";
 
 #[derive(Debug, thiserror::Error)]
@@ -55,11 +80,16 @@ pub enum AttachError {
     /// Asking an attached client to stop a daemon it did not start.
     #[error("an attached shell may not stop a daemon it did not start")]
     StopRefused,
+    /// This platform's daemon endpoint cannot carry a held-open connection.
+    /// See the module doc: the Windows named pipe is a synchronous handle.
+    #[error("this platform's daemon transport cannot be attached to")]
+    UnsupportedTransport,
     #[error("attached daemon transport: {0}")]
     Transport(String),
 }
 
 /// A live connection to a daemon running in another process.
+#[cfg(unix)]
 pub struct AttachedDaemon {
     /// The write half. Serialised because two threads may call at once and a
     /// request frame is only meaningful as a whole line.
@@ -73,6 +103,7 @@ pub struct AttachedDaemon {
     closed: Arc<AtomicBool>,
 }
 
+#[cfg(unix)]
 impl AttachedDaemon {
     /// Attach to the daemon listening on `store`'s endpoint.
     ///
@@ -208,7 +239,49 @@ impl AttachedDaemon {
     }
 }
 
-#[cfg(test)]
+/// The same surface on a platform whose endpoint cannot be held open.
+///
+/// A type rather than a `cfg` at every call site: the FFI reads one field and
+/// branches once, and it should not have to know which platforms can attach.
+/// Nothing constructs this -- `connect` is the only way in and it always
+/// refuses -- so the other methods exist to satisfy the shape and are
+/// unreachable.
+#[cfg(not(unix))]
+pub struct AttachedDaemon {
+    _never: std::convert::Infallible,
+}
+
+#[cfg(not(unix))]
+impl AttachedDaemon {
+    pub fn connect(_store: &ConfigStore) -> Result<Self, AttachError> {
+        Err(AttachError::UnsupportedTransport)
+    }
+
+    pub fn is_closed(&self) -> bool {
+        match self._never {}
+    }
+
+    pub fn clear_sink(&self) {
+        match self._never {}
+    }
+
+    pub fn call(
+        &self,
+        _method: &str,
+        _params: &serde_json::Value,
+    ) -> Result<Response, AttachError> {
+        match self._never {}
+    }
+
+    pub fn subscribe<F>(&self, _sink: F) -> Result<Response, AttachError>
+    where
+        F: Fn(Event) + Send + 'static,
+    {
+        match self._never {}
+    }
+}
+
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::daemon::start_embedded;
