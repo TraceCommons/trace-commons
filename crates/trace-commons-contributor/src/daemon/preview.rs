@@ -702,10 +702,11 @@ fn summarize_envelope(
     let opening_prompt = envelope
         .events
         .iter()
-        .find(|e| e.event_type == TraceContributionEventType::UserMessage)
-        .and_then(|e| e.redacted_content.clone())
-        .unwrap_or_default();
-    let opening_prompt = truncate_chars(&opening_prompt, 200);
+        .filter(|e| e.event_type == TraceContributionEventType::UserMessage)
+        .filter_map(|e| e.redacted_content.as_deref())
+        .find_map(task_prompt)
+        .unwrap_or("No task description found.");
+    let opening_prompt = truncate_chars(opening_prompt, 200);
 
     // The redaction pipeline's own counts describe what it TOOK OUT. Nothing
     // in them can describe what it left in: `redact_trace` never runs a
@@ -1103,6 +1104,44 @@ fn wire_name<T: serde::Serialize>(value: T) -> String {
         .ok()
         .and_then(|v| v.as_str().map(str::to_string))
         .unwrap_or_default()
+}
+
+/// Select display text only, from already-redacted user content. Harnesses
+/// inject setup as user messages; keep it in the envelope but skip known
+/// leading wrappers in the card. Unknown prose remains visible.
+fn task_prompt(mut text: &str) -> Option<&str> {
+    loop {
+        text = text.trim();
+        if text.starts_with("# AGENTS.md instructions for ") {
+            // The title and INSTRUCTIONS block form one injected preamble.
+            let (_, rest) = text.split_once("</INSTRUCTIONS>")?;
+            text = rest;
+            continue;
+        }
+        let wrapper = [
+            "INSTRUCTIONS",
+            "environment_context",
+            "environment_details",
+            "recommended_plugins",
+            "permissions instructions",
+            "collaboration_mode",
+            "skills_instructions",
+            "system-reminder",
+            "ide_opened_file",
+            "ide_selection",
+            "local-command-caveat",
+            "local-command-stdout",
+        ]
+        .into_iter()
+        .find(|tag| text.starts_with(&format!("<{tag}>")));
+        if let Some(tag) = wrapper {
+            // An incomplete setup block provides no reliable task excerpt.
+            let (_, rest) = text.split_once(&format!("</{tag}>"))?;
+            text = rest;
+            continue;
+        }
+        return (!text.is_empty()).then_some(text);
+    }
 }
 
 /// Truncate to at most `max_chars` characters, always on a char boundary.
@@ -1651,6 +1690,130 @@ mod tests {
                 .contains("sk-fake-fixture-secret-1234"),
             "the opening prompt must be the redacted one"
         );
+    }
+
+    #[test]
+    fn task_prompt_skips_setup_but_preserves_requests() {
+        for setup in [
+            "# AGENTS.md instructions for <PRIVATE_LOCAL_PATH_1>\n<INSTRUCTIONS>\n# Example project\nRules\n</INSTRUCTIONS>",
+            "<recommended_plugins>Available plugins</recommended_plugins>",
+            "<environment_context>cwd</environment_context>",
+        ] {
+            assert_eq!(task_prompt(setup), None);
+            assert_eq!(
+                task_prompt(&format!("{setup}\n\nFix the login refresh bug.")),
+                Some("Fix the login refresh bug.")
+            );
+        }
+        assert_eq!(task_prompt("<recommended_plugins>truncated"), None);
+        assert_eq!(task_prompt("  "), None);
+        assert_eq!(
+            task_prompt("Update AGENTS.md and <recommended_plugins> handling."),
+            Some("Update AGENTS.md and <recommended_plugins> handling.")
+        );
+        assert_eq!(
+            task_prompt(
+                "<environment_context>cwd</environment_context>\n<INSTRUCTIONS>rules</INSTRUCTIONS>\nBuild a dashboard."
+            ),
+            Some("Build a dashboard.")
+        );
+    }
+
+    #[tokio::test]
+    async fn preview_selects_redacted_task_after_claude_setup() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("projects");
+        let project = root.join("example-project");
+        std::fs::create_dir_all(&project).unwrap();
+        let messages = [
+            "<system-reminder>Contents of CLAUDE.md: Project rules</system-reminder>",
+            "<local-command-caveat>Local command output</local-command-caveat><local-command-stdout>Ready</local-command-stdout>",
+            "<ide_opened_file>The user opened a file.</ide_opened_file>\nFix login refresh in /Users/test/project/login.rs",
+        ];
+        let records: Vec<_> = messages
+            .iter()
+            .enumerate()
+            .map(|(i, message)| {
+                serde_json::json!({
+                    "type": "user", "message": {"role": "user", "content": message},
+                    "cwd": "/Users/test/project", "timestamp": "2026-08-08T10:00:00Z",
+                    "sessionId": "11111111-1111-1111-1111-111111111111", "uuid": format!("u{i}")
+                })
+                .to_string()
+            })
+            .collect();
+        std::fs::write(
+            project.join("11111111-1111-1111-1111-111111111111.jsonl"),
+            records.join("\n"),
+        )
+        .unwrap();
+        let source = ClaudeCodeSource::new(root);
+        let reference = source.discover().unwrap().remove(0);
+        let (_sd, store) = crate::config::tests_support::temp_store();
+        let cfg = sample_cfg(&store);
+        let (summary, body, _) = build_preview(&store, Some(&cfg), None, &source, &reference)
+            .await
+            .unwrap();
+        assert!(summary.opening_prompt.starts_with("Fix login refresh in "));
+        assert!(!summary.opening_prompt.contains("/Users/test"));
+        assert!(body.contains("Project rules"));
+    }
+
+    #[tokio::test]
+    async fn preview_selects_redacted_task_after_codex_setup() {
+        use crate::source::TraceSource;
+        use crate::source::codex::CodexSource;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rollout-preview.jsonl");
+        let setup = "# AGENTS.md instructions for /Users/test/project\n<INSTRUCTIONS>Project rules</INSTRUCTIONS>";
+        let mut records = vec![serde_json::json!({
+            "type": "session_meta",
+            "payload": {"id": "preview-test", "cwd": "/Users/test/project"}
+        })];
+        for message in [
+            setup,
+            "<recommended_plugins>Available plugins</recommended_plugins>",
+            "",
+            "Fix login refresh in /Users/test/project/login.rs",
+        ] {
+            records.push(serde_json::json!({
+                "type": "response_item",
+                "payload": {"type": "message", "role": "user",
+                    "content": [{"type": "input_text", "text": message}]}
+            }));
+        }
+        let write_records = |records: &[serde_json::Value]| {
+            std::fs::write(
+                &path,
+                records
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            )
+            .unwrap();
+        };
+        write_records(&records);
+        let source = CodexSource::new(dir.path().to_path_buf());
+        let reference = source.discover().unwrap().remove(0);
+        let (_sd, store) = crate::config::tests_support::temp_store();
+        let cfg = sample_cfg(&store);
+        let (summary, body, envelope) =
+            build_preview(&store, Some(&cfg), None, &source, &reference)
+                .await
+                .unwrap();
+        assert!(summary.opening_prompt.starts_with("Fix login refresh in "));
+        assert!(!summary.opening_prompt.contains("/Users/test"));
+        assert!(body.contains("Project rules"));
+        assert_eq!(summary.event_count, envelope.events.len());
+
+        records.pop();
+        write_records(&records);
+        let (summary, _, _) = build_preview(&store, Some(&cfg), None, &source, &reference)
+            .await
+            .unwrap();
+        assert_eq!(summary.opening_prompt, "No task description found.");
     }
 
     #[tokio::test]
