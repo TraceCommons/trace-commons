@@ -5,8 +5,14 @@
 //! lived entirely in what a host was told. A test that reached past the ABI
 //! into the Rust would not have caught it.
 
-use std::ffi::{CStr, CString, c_char, c_void};
+use std::ffi::{CStr, CString, c_char};
 use std::path::Path;
+// Only the subscriber test needs these, and it is unix-only. Left ungated
+// they are `unused_imports` on every other platform, which CI turns into an
+// error -- plain `cargo check` does not.
+#[cfg(unix)]
+use std::ffi::c_void;
+#[cfg(unix)]
 use std::sync::Mutex;
 
 #[cfg_attr(not(unix), allow(unused_imports))]
@@ -19,6 +25,7 @@ fn cstr(p: &Path) -> CString {
     CString::new(p.to_str().unwrap()).unwrap()
 }
 
+#[cfg(unix)]
 fn cstr_str(s: &str) -> CString {
     CString::new(s).unwrap()
 }
