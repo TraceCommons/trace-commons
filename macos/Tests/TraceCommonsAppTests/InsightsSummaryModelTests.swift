@@ -70,7 +70,21 @@ final class InsightsSummaryModelTests: XCTestCase {
             }.value
         })
         model.open(); try await settle(model)
-        let summary = try XCTUnwrap(model.summary)
+        // `settle` returns on `!busy`, and its own timeout path calls
+        // XCTFail. So a nil summary here means the copy -> list -> summary
+        // chain took the catch branch, which records why in `summaryError` /
+        // `error` -- and a bare XCTUnwrap throws exactly that away. This
+        // failed once on main and could not be reproduced locally (20 runs
+        // of this test, 5 full-suite runs, 8 concurrent copies of the test
+        // binary, all green), so the next occurrence has to carry its own
+        // diagnosis or it costs another investigation from nothing.
+        let summary = try XCTUnwrap(
+            model.summary,
+            "summary nil after the chain settled -- "
+                + "summaryError=\(model.summaryError ?? "nil") "
+                + "error=\(model.error ?? "nil") "
+                + "loadingSummary=\(model.loadingSummary) busy=\(model.busy) "
+                + "snapshots=\(model.snapshots.count)")
         XCTAssertEqual(summary.user_reported.unassessed_snapshots, 1)
         XCTAssertEqual(summary.user_reported.outcomes.first { $0.outcome == "unknown" }?.snapshots, 1)
         let calls = try XCTUnwrap(summary.metrics.first { $0.id == "tool_calls" })
