@@ -55,7 +55,13 @@ struct SessionMetadata {
     /// own session list -- so it rides with the metadata rather than the
     /// keychain bundle. `default` keeps records written before it existed
     /// readable; they refresh as empty and fail closed.
-    #[serde(default)]
+    ///
+    /// Skipped when empty so a record for a session that has no agent
+    /// serializes byte-for-byte as it did before this field existed. This
+    /// struct is `deny_unknown_fields`, so an older build refuses any record
+    /// carrying a name it does not know -- and without the skip that would be
+    /// every record, including the ones this field has nothing to say about.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     user_agent: String,
 }
 
