@@ -9,6 +9,7 @@ use std::ffi::{CStr, CString, c_char, c_void};
 use std::path::Path;
 use std::sync::Mutex;
 
+#[cfg_attr(not(unix), allow(unused_imports))]
 use trace_commons_contributor_ffi::{
     tc_call, tc_daemon_attach, tc_daemon_start, tc_daemon_stop, tc_handle, tc_handle_free,
     tc_preview_open, tc_string_free, tc_subscribe,
@@ -24,6 +25,7 @@ fn cstr_str(s: &str) -> CString {
 
 /// Same reason `abi.rs` does this: without declared roots the daemon scans
 /// the developer's real ~/.claude and ~/.codex.
+#[cfg(unix)]
 fn write_tempdir_session_roots(dir: &Path) {
     let claude_root = dir.join("claude-root");
     let codex_root = dir.join("codex-root");
@@ -46,6 +48,7 @@ fn write_tempdir_session_roots(dir: &Path) {
     settings.save(&store).unwrap();
 }
 
+#[cfg(unix)]
 fn start(dir: &Path) -> *mut tc_handle {
     write_tempdir_session_roots(dir);
     let mut err: *mut c_char = std::ptr::null_mut();
@@ -66,6 +69,7 @@ fn take_err(err: *mut c_char) -> String {
     s
 }
 
+#[cfg(unix)]
 fn call(h: *mut tc_handle, method: &str, params: &str) -> serde_json::Value {
     let raw = unsafe { tc_call(h, cstr_str(method).as_ptr(), cstr_str(params).as_ptr()) };
     assert!(!raw.is_null(), "tc_call returned NULL, which it never may");
@@ -80,6 +84,7 @@ fn call(h: *mut tc_handle, method: &str, params: &str) -> serde_json::Value {
 /// attaching gets a handle that answers, instead of a shell reporting a
 /// running watcher as absent.
 #[test]
+#[cfg(unix)]
 fn attaching_reaches_the_daemon_that_holds_the_lock() {
     let dir = tempfile::tempdir().unwrap();
     let started = start(dir.path());
@@ -120,6 +125,7 @@ fn attaching_reaches_the_daemon_that_holds_the_lock() {
 /// refusal would pass just as well against a client that had killed it, so
 /// this asserts the daemon is still answering afterwards.
 #[test]
+#[cfg(unix)]
 fn stopping_an_attached_handle_leaves_the_daemon_running() {
     let dir = tempfile::tempdir().unwrap();
     let started = start(dir.path());
@@ -152,6 +158,7 @@ fn stopping_an_attached_handle_leaves_the_daemon_running() {
 /// handle must say so rather than report the daemon as stopped, which is the
 /// same false statement this whole path exists to stop making.
 #[test]
+#[cfg(unix)]
 fn preview_on_an_attached_handle_names_the_reason() {
     let dir = tempfile::tempdir().unwrap();
     let started = start(dir.path());
@@ -180,8 +187,10 @@ fn preview_on_an_attached_handle_names_the_reason() {
     unsafe { tc_handle_free(started) };
 }
 
+#[cfg(unix)]
 static EVENTS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
+#[cfg(unix)]
 extern "C" fn record_event(event_json: *const c_char, _ctx: *mut c_void) {
     let text = unsafe { CStr::from_ptr(event_json) }
         .to_string_lossy()
@@ -197,6 +206,7 @@ extern "C" fn record_event(event_json: *const c_char, _ctx: *mut c_void) {
 /// sends whoever just subscribed -- the courtesy the in-process path does
 /// not get, and the reason an attached shell can paint without polling.
 #[test]
+#[cfg(unix)]
 fn an_attached_subscriber_receives_the_snapshot_push() {
     let dir = tempfile::tempdir().unwrap();
     let started = start(dir.path());
@@ -232,10 +242,32 @@ fn an_attached_subscriber_receives_the_snapshot_push() {
 /// Attaching where nothing is listening names that, and is distinct from
 /// every start failure.
 #[test]
+#[cfg(unix)]
 fn attaching_with_no_daemon_says_nothing_is_listening() {
     let dir = tempfile::tempdir().unwrap();
     let mut err: *mut c_char = std::ptr::null_mut();
     let h = unsafe { tc_daemon_attach(cstr(dir.path()).as_ptr(), &mut err) };
     assert!(h.is_null(), "attached to a daemon that does not exist");
     assert_eq!(take_err(err), "no-daemon-listening");
+}
+
+/// A platform whose endpoint cannot carry a held-open connection says so, in
+/// its own fixed label, and does not hang.
+///
+/// The Windows named pipe is a synchronous handle: a reader parked on it does
+/// not run in parallel with a write, so a held-open client never completes a
+/// round trip. An earlier revision of this change shipped that and the
+/// Windows CI job ran one subscribe for forty-five minutes before it was
+/// killed. This test is what stops it coming back silently.
+#[test]
+#[cfg(not(unix))]
+fn attaching_is_refused_where_the_transport_cannot_be_held_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let h = unsafe { tc_daemon_attach(cstr(dir.path()).as_ptr(), &mut err) };
+    assert!(
+        h.is_null(),
+        "a platform that cannot attach returned a handle"
+    );
+    assert_eq!(take_err(err), "attach-unsupported");
 }

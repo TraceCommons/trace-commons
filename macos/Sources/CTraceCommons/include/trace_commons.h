@@ -337,6 +337,17 @@ tc_handle*  tc_daemon_start_with_settings(const char* config_dir, const char* se
  *   "state-directory-not-writable" the state directory could not be opened.
  *   "attach-failed"                the endpoint was reached and the
  *                                  connection could not be held.
+ *   "attach-unsupported"           this platform's daemon endpoint cannot
+ *                                  carry a held-open connection at all.
+ *                                  Windows today: its named pipe is a
+ *                                  synchronous handle, so a client that
+ *                                  reads it from one thread while writing
+ *                                  from another never completes a round
+ *                                  trip. Nothing is wrong with the machine
+ *                                  or the daemon and retrying will never
+ *                                  help; a host there must treat
+ *                                  "already-running" as terminal, as it did
+ *                                  before this call existed.
  *
  * Unlike tc_daemon_start, this does NOT evaluate the session roots: the
  * daemon being attached to has already made that decision for itself, and
