@@ -111,9 +111,9 @@ fn bounce_page(state: &str) -> Result<String> {
          .then(function (r) {{\n\
          m.textContent = r.ok\n\
          ? \"Signed in. Return to Trace Commons.\"\n\
-         : \"This sign in was not accepted.\";\n\
+         : \"Trace Commons could not finish sign-in. Return to the app and try again.\";\n\
          }})\n\
-         .catch(function () {{ m.textContent = \"This sign in was not accepted.\"; }});\n\
+         .catch(function () {{ m.textContent = \"Trace Commons could not finish sign-in. Return to the app and try again.\"; }});\n\
          </script>\n"
     ))
 }
@@ -249,11 +249,16 @@ async fn respond(stream: &mut tokio::net::TcpStream, status: &str, kind: &str, b
 /// Unrelated local requests are answered and ignored rather than consuming the
 /// listener: a browser that prefetches, a probe, or a stray `GET /favicon.ico`
 /// must not end the ceremony. The caller bounds the total wait; this bounds
-/// each connection.
-pub async fn receive_session(
+/// each connection. A valid deposit is acknowledged only after `finish` succeeds.
+pub async fn receive_session<T, F, Fut>(
     listener: tokio::net::TcpListener,
     state: &str,
-) -> Result<SessionTokens> {
+    finish: F,
+) -> Result<T>
+where
+    F: FnOnce(SessionTokens) -> Fut,
+    Fut: std::future::Future<Output = Result<T>>,
+{
     let page = bounce_page(state)?;
     loop {
         let (mut stream, _) = listener.accept().await?;
@@ -286,14 +291,27 @@ pub async fn receive_session(
         }
         match parse_deposit(&request.body, state) {
             Ok(tokens) => {
+                // Receiving tokens is not success: key minting and durable
+                // credential replacement must finish before the browser is told
+                // to return to a signed-in app. Never expose the service error.
+                let outcome = finish(tokens).await;
+                let status = if outcome.is_ok() {
+                    "200 OK"
+                } else {
+                    "500 Internal Server Error"
+                };
                 respond(
                     &mut stream,
-                    "200 OK",
+                    status,
                     "text/plain; charset=utf-8",
-                    "Accepted.",
+                    if outcome.is_ok() {
+                        "Completed."
+                    } else {
+                        "Sign-in setup failed."
+                    },
                 )
                 .await;
-                return Ok(tokens);
+                return outcome;
             }
             Err(_) => {
                 respond(
@@ -389,7 +407,7 @@ mod tests {
         let state = random_state().unwrap();
         let task = tokio::spawn({
             let state = state.clone();
-            async move { receive_session(listener, &state).await }
+            async move { receive_session(listener, &state, |tokens| async { Ok(tokens) }).await }
         });
 
         // The browser's redirect arrives with the fragment already stripped.
@@ -427,10 +445,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn browser_success_waits_for_credential_setup_to_finish() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (finish_tx, finish_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            receive_session(listener, "state", |tokens| async move {
+                assert_eq!(tokens.refresh_token, "rt_x");
+                started_tx.send(()).unwrap();
+                finish_rx.await.unwrap();
+                Ok(())
+            })
+            .await
+        });
+        let mut browser = tokio::spawn(async move {
+            deposit(address, "state=state&token=jwt&refresh_token=rt_x").await
+        });
+        started_rx.await.unwrap();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), &mut browser)
+                .await
+                .is_err()
+        );
+        finish_tx.send(()).unwrap();
+        assert_eq!(browser.await.unwrap(), "HTTP/1.1 200 OK");
+        server.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn valid_browser_login_does_not_report_success_when_setup_fails() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            receive_session(listener, "state", |_tokens| async {
+                Err::<(), _>(anyhow!("synthetic credential storage failure"))
+            })
+            .await
+        });
+        assert_eq!(
+            deposit(address, "state=state&token=jwt&refresh_token=rt_x").await,
+            "HTTP/1.1 500 Internal Server Error"
+        );
+        assert!(server.await.unwrap().is_err());
+    }
+
+    #[tokio::test]
     async fn a_deposit_split_across_packets_still_arrives_whole() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let task = tokio::spawn(async move { receive_session(listener, "state").await });
+        let task = tokio::spawn(async move {
+            receive_session(listener, "state", |tokens| async { Ok(tokens) }).await
+        });
         let body = "state=state&token=jwt&refresh_token=rt_x";
         let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
         stream
