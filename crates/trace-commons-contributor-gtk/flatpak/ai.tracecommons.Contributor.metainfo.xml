@@ -62,6 +62,17 @@
   </provides>
 
   <releases>
+    <release version="0.12.4" date="2026-09-15">
+      <description>
+        <p>Signing in to NEAR AI through the browser now reports success only after the inference key is created and stored, so a failed setup is visible instead of hidden behind an older key.</p>
+      </description>
+    </release>
+    <release version="0.12.3" date="2026-09-14">
+      <description>
+        <p>Reopening the app while a watcher is already running now attaches to it instead of reporting that the watcher is not running.</p>
+        <p>A window driving a watcher started elsewhere says so, and says what it cannot do: stop that watcher, or open a trace's full text.</p>
+      </description>
+    </release>
     <release version="0.12.2" date="2026-09-10">
       <description>
         <p>Choose GitHub, Google or a NEAR wallet when signing in to NEAR AI. Wallet sign-in requests a login message, not a transaction.</p>

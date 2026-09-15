@@ -8680,7 +8680,7 @@ version = "0.1.0"
 
 [[package]]
 name = "trace-commons-contributor"
-version = "0.12.2"
+version = "0.12.4"
 dependencies = [
  "anyhow",
  "apple-native-keyring-store",
@@ -8723,7 +8723,7 @@ dependencies = [
 
 [[package]]
 name = "trace-commons-contributor-ffi"
-version = "0.12.2"
+version = "0.12.4"
 dependencies = [
  "anyhow",
  "serde_json",
