@@ -7,10 +7,12 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
 use crate::config::{ConfigStore, DAEMON_SETTINGS_FILE, tests_support::temp_store};
-use crate::daemon::cloud_credential_lifecycle::{Journal, native, sweep_legacy_cloud_entries};
-use crate::daemon::cloud_credential_test_support::{
-    backend, install_backend, install_legacy_backend,
-};
+use crate::daemon::cloud_credential_lifecycle::native;
+#[cfg(target_os = "macos")]
+use crate::daemon::cloud_credential_lifecycle::{Journal, sweep_legacy_cloud_entries};
+#[cfg(target_os = "macos")]
+use crate::daemon::cloud_credential_test_support::install_legacy_backend;
+use crate::daemon::cloud_credential_test_support::{backend, install_backend};
 use crate::daemon::credential_store::{CredentialError, CredentialReference, SecretBackend};
 use crate::daemon::ipc::{DaemonShared, Request, handle_request_async};
 use crate::daemon::nearai_credential::{api::MintedKey, ceremony};

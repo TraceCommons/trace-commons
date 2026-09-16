@@ -463,9 +463,20 @@ fn persist_checked(
         },
     )?;
     // The ceremony tail. The reference this replaced is no longer the active
-    // one, so this is the first moment the legacy entry behind it is genuinely
-    // an orphan -- and a contributor who just completed a sign-in is the one
-    // person for whom a keychain prompt is explicable. See the sweep's doc.
+    // one, so in principle this would be the first moment the legacy entry
+    // behind it is genuinely an orphan -- and a contributor who just
+    // completed a sign-in is the one person for whom a keychain prompt is
+    // explicable. See the sweep's doc.
+    //
+    // In practice this call is currently ineffective: `replace`'s own
+    // trailing `cleanup_locked` (see cloud_credential_lifecycle.rs) already
+    // ran and drained the journal of the old reference before we got here --
+    // `CredentialStore::delete` maps a missing entry in the data-protection
+    // backend to success, and the old reference only ever lived in the
+    // legacy keychain, so it reads as cleaned up and is pruned from the
+    // journal without anything legacy-side actually being swept. Fixing this
+    // needs the old reference captured by value before `replace` runs and
+    // deleted by reference afterward, which is a separate, larger change.
     crate::daemon::cloud_credential_lifecycle::sweep_legacy_cloud_entries(&store);
     Ok(())
 }
@@ -570,10 +581,14 @@ pub fn forget(store: &ConfigStore) -> Result<bool> {
         .map_err(|_| anyhow::anyhow!("near_ai_credential_unavailable"))?;
     let removed = forget_locked(store)?;
     drop(_commit);
-    crate::daemon::cloud_credential_lifecycle::cleanup_native(store)?;
     // A contributor-initiated moment, which is the only kind that may spend an
-    // authorization prompt on the legacy store. See the sweep's own doc.
+    // authorization prompt on the legacy store. See the sweep's own doc. This
+    // must run before `cleanup_native`: `forget_locked` has already cleared
+    // `cloud_credentials`, so every journal reference is genuinely an orphan
+    // now, but `cleanup_native` drains the journal as it deletes -- run after
+    // it, the sweep finds nothing left to do.
     crate::daemon::cloud_credential_lifecycle::sweep_legacy_cloud_entries(store);
+    crate::daemon::cloud_credential_lifecycle::cleanup_native(store)?;
     Ok(removed)
 }
 
