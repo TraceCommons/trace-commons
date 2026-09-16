@@ -106,14 +106,7 @@ pub(crate) fn sweep_legacy_cloud_entries(store: &ConfigStore) {
             .cloud_credentials
             .as_ref()
             .map(StoredCloudCredentials::reference);
-        #[cfg(test)]
-        let backend = crate::daemon::cloud_credential_test_support::legacy_backend(store.dir());
-        #[cfg(not(test))]
-        let backend: Option<std::sync::Arc<dyn SecretBackend>> =
-            crate::daemon::os_secret_store::OsSecretBackend::legacy_cloud()
-                .ok()
-                .map(|backend| std::sync::Arc::new(backend) as std::sync::Arc<dyn SecretBackend>);
-        let Some(backend) = backend else {
+        let Some(backend) = legacy_secret_backend(store) else {
             return;
         };
         for reference in journal.references {
@@ -125,6 +118,51 @@ pub(crate) fn sweep_legacy_cloud_entries(store: &ConfigStore) {
     }
     #[cfg(not(target_os = "macos"))]
     let _ = store;
+}
+
+/// Delete exactly one legacy Cloud entry, named by the caller rather than
+/// discovered by walking the journal. Same guarantees as
+/// [`sweep_legacy_cloud_entries`]: best effort, swallows every failure, never
+/// prompts anywhere the contributor did not just act.
+///
+/// This exists because the journal cannot be trusted to still name a
+/// reference the caller knows is superseded: `replace`'s trailing
+/// `cleanup_locked` deletes every non-active journal reference from the
+/// *current* (data-protection) backend before a caller-supplied cleanup runs,
+/// and `CredentialStore::delete` maps a missing entry to success. A reference
+/// that only ever lived in the legacy keychain reads as cleaned up under that
+/// mapping and is pruned from the journal without anything legacy-side being
+/// swept. Callers that already hold the superseded reference by value --
+/// captured before a replace -- must hand it here directly instead of relying
+/// on the journal to still contain it.
+pub(crate) fn sweep_legacy_cloud_reference(store: &ConfigStore, reference: CredentialReference) {
+    #[cfg(target_os = "macos")]
+    {
+        let Some(backend) = legacy_secret_backend(store) else {
+            return;
+        };
+        let _ = backend.delete(&reference);
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = store;
+        let _ = reference;
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn legacy_secret_backend(store: &ConfigStore) -> Option<std::sync::Arc<dyn SecretBackend>> {
+    #[cfg(test)]
+    {
+        crate::daemon::cloud_credential_test_support::legacy_backend(store.dir())
+    }
+    #[cfg(not(test))]
+    {
+        let _ = store;
+        crate::daemon::os_secret_store::OsSecretBackend::legacy_cloud()
+            .ok()
+            .map(|backend| std::sync::Arc::new(backend) as std::sync::Arc<dyn SecretBackend>)
+    }
 }
 
 pub(crate) fn cleanup_pending(store: &ConfigStore) -> Result<bool> {
