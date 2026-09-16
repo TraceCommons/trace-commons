@@ -983,12 +983,20 @@ pub async fn drain_approved_for_test(
 ///
 /// The FFI crate cannot reach `cloud_credential_lifecycle` directly -- that
 /// module is `pub(crate)` here -- so this is the public wrapper it calls
-/// through. The probe itself is Task 4's: a read of a reference that was
-/// never stored, which distinguishes `Unentitled` from every other outcome
-/// without writing anything.
+/// through. The probe is the same shape as
+/// [`cloud_credential_lifecycle::CloudCredentialLifecycle::probe`]: a read of
+/// a reference that was never stored, which answers without writing anything.
 ///
-/// Returns 0 reachable, 1 unentitled, 2 if the backend itself could not be
-/// constructed.
+/// The two map their errors **differently, on purpose**. `probe` guards a
+/// sign-in, so it treats everything that is not `Unentitled` as go -- a
+/// transient store error must not stop a contributor signing in. This one
+/// gates a release, where the same leniency reports PASS against a store that
+/// is failing for any reason at all. So only `NoEntry` is reachable here: it
+/// means the store answered and nothing was stored, which is exactly the
+/// question. Every other error is 2.
+///
+/// Returns 0 reachable, 1 unentitled, 2 for a backend that could not be
+/// constructed or a read that failed for any other reason.
 pub fn credential_store_self_check() -> i32 {
     use credential_store::{CredentialError, CredentialReference, CredentialStore};
 
@@ -999,7 +1007,8 @@ pub fn credential_store_self_check() -> i32 {
     };
     match CredentialStore::new(backend).load_bytes(&CredentialReference::allocate()) {
         Err(CredentialError::Unentitled) => 1,
-        _ => 0,
+        Err(CredentialError::NoEntry) | Ok(_) => 0,
+        Err(_) => 2,
     }
 }
 

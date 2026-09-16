@@ -218,6 +218,15 @@ impl<B: SecretBackend> CloudCredentialLifecycle<B> {
 
     /// One read of a reference that was never stored. `NoEntry` means the
     /// store answered; `Unentitled` means this process cannot reach it at all.
+    ///
+    /// [`crate::daemon::credential_store_self_check`] is the same probe with a
+    /// deliberately different error mapping, and the divergence is the point.
+    /// This one guards a sign-in: everything that is not `Unentitled` is go,
+    /// because a transient store error must not stop a contributor signing in.
+    /// That one gates a release, where the same leniency would report PASS
+    /// against a store failing for any reason other than entitlement, so
+    /// anything but `NoEntry` is a failure there. Change one and decide about
+    /// the other; do not unify them.
     pub(crate) fn probe(&self) -> Result<(), CredentialError> {
         match self
             .credentials

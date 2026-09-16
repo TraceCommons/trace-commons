@@ -204,6 +204,8 @@ mod tests {
     use crate::daemon::credential_store::{
         CredentialError, CredentialReference, MAX_SECRET_BYTES, SecretBackend,
     };
+    #[cfg(target_os = "macos")]
+    use crate::daemon::os_secret_store::ACCESS_GROUP;
     use crate::daemon::os_secret_store::{OsSecretBackend, storage_error, validate_bytes};
     use keyring_core::Error as KeyringError;
 
@@ -402,5 +404,40 @@ mod tests {
             OsSecretBackend::commons().unwrap().read(&reference),
             Err(CredentialError::NoEntry)
         ));
+    }
+
+    /// `ACCESS_GROUP` and the `keychain-access-groups` entry in
+    /// `macos/entitlements.plist` are the same string written twice, edited
+    /// independently, with nothing between them. If either drifts the
+    /// signature is still valid, every check in
+    /// `scripts/ci/verify-macos-entitlements.sh` still passes -- each one
+    /// reads the plist, not this constant -- and the first thing that notices
+    /// is a launch, because the store the binary asks for is not the one the
+    /// entitlement grants. This makes drift fail a test instead.
+    ///
+    /// It asserts the group inside the array specifically. The same string is
+    /// also the `com.apple.application-identifier` value, so a whole-file
+    /// search would pass with `keychain-access-groups` deleted outright.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_entitlements_file_names_the_access_group_this_binary_asks_for() {
+        const ENTITLEMENTS: &str = include_str!("../../../../macos/entitlements.plist");
+
+        let after_key = ENTITLEMENTS
+            .split_once("<key>keychain-access-groups</key>")
+            .expect("macos/entitlements.plist declares keychain-access-groups")
+            .1;
+        let array = after_key
+            .split_once("<array>")
+            .expect("keychain-access-groups is an array")
+            .1
+            .split_once("</array>")
+            .expect("the array is closed")
+            .0;
+        assert!(
+            array.contains(&format!("<string>{ACCESS_GROUP}</string>")),
+            "macos/entitlements.plist must grant {ACCESS_GROUP}; its \
+             keychain-access-groups array is {array:?}"
+        );
     }
 }
