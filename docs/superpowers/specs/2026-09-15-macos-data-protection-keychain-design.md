@@ -239,3 +239,22 @@ invalidated when its certificate expires or is revoked.
 The App ID `ai.tracecommons.shell` and the Developer ID provisioning profile
 exist as of 2026-09-15 in the Iqlusion Inc (KXSWJN7WY8) team. The profile file
 must be committed to the repository before any of this can be built.
+
+## Release note draft
+
+Not an announcement file: the version and date are unknown until release, and
+this repo writes announcements in the release-prep commit.
+
+> Upgrading the macOS app no longer asks for your login password.
+>
+> macOS ties a stored credential to the exact application that created it, so
+> every new build was a different application as far as the keychain was
+> concerned, and "Always Allow" only ever allowed the build already running.
+> The app now stores its NEAR AI credential in a place keyed to its signing
+> identity instead, which every future build shares.
+>
+> - Upgrades no longer prompt for a password.
+> - A credential stored by an earlier version is not carried over. Signing in
+>   once on this version replaces it -- which 0.12.5 already required.
+>
+> Contributing and private inference were never affected.

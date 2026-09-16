@@ -4,7 +4,7 @@ Release guidance for the native credential-store migration. Schedule this change
 
 ## Upgrade and rollback
 
-On the first daemon start after upgrading, the app moves its Private AI inference key and renewable sign-in from settings into macOS Keychain, Windows Credential Manager with Local persistence, or Linux Secret Service. The operating system may ask for access to its credential store at startup.
+On the first daemon start after upgrading, the app moves its Private AI inference key and renewable sign-in from settings into an OS credential store: the macOS data-protection keychain, Windows Credential Manager with Local persistence, or Linux Secret Service. On Windows and Linux, the operating system may ask for access to its credential store at startup. On macOS it does not: the data-protection keychain entry is reached by a team access group shared across every signed build, rather than bound to the one binary that wrote it, so there is no per-upgrade prompt to grant. A process without that entitlement -- an unsigned local build, or a command-line invocation -- cannot reach this store at all and refuses instead of falling back to a less-protected one. This is the Cloud credential only; see Commons credentials below for the account session and device identity, which are unchanged and can still prompt.
 
 The app reads the new entry back before removing the legacy secrets from settings. If storage is locked or unavailable, the app preserves the existing settings, disables Private AI credentials in memory and shows recovery instructions. Unlock the store and restart the app to retry.
 
