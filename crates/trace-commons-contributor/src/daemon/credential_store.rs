@@ -24,11 +24,6 @@ pub(crate) enum CredentialError {
     /// Distinct from `Unavailable`: no retry, no unlock and no later attempt
     /// changes it, because the answer is a property of the binary's code
     /// signature rather than of the store's state.
-    ///
-    /// Not yet constructed anywhere: this is the label alone, added ahead of
-    /// the data-protection-keychain backend that will return it. Allowed
-    /// dead until that backend lands.
-    #[allow(dead_code)]
     Unentitled,
     InvalidReference,
     UnsupportedVersion,
