@@ -938,6 +938,14 @@ jobs:
       # `swift test` can link anything. Debug profile, to match that default.
       - name: Build the FFI dylib
         run: cargo build -p trace-commons-contributor-ffi
+      # The only lane that runs these. They assert the data-protection store's
+      # behaviour from an unentitled process, which is exactly what a CI runner
+      # is, and they are the reason a drifted `security-framework` pin cannot
+      # silently mislabel every unentitled failure.
+      - name: macOS credential store tests
+        run: |
+          RUSTFLAGS="-D warnings" cargo test -p trace-commons-contributor --lib os_secret_store
+          RUSTFLAGS="-D warnings" cargo test -p trace-commons-contributor-ffi --test credential_store_self_check
       # Both language modes and every target in the package, not a filter:
       # TCShellCore, TCUpdates, TCBridge and the app target all carry tests,
       # and a per-target list is how a new one joins untested -- the same
