@@ -66,16 +66,46 @@ pub(crate) fn cleanup_native(store: &ConfigStore) -> Result<()> {
 /// Delete Cloud entries left in the legacy keychain by builds before the
 /// data-protection move. Best effort by construction.
 ///
-/// It returns nothing and swallows every failure on purpose. macOS may want
-/// authorization to delete a legacy item, and spending a password prompt to
-/// tidy up would reintroduce the exact interruption this work exists to
-/// remove. An entry we cannot delete is left alone.
+/// Never called at startup, and never for the active reference. Both of those
+/// are load-bearing rather than tidiness:
+///
+/// The active reference is not an orphan. `cleanup_locked` skips it for
+/// deletion and leaves it in the journal, so the journal permanently names the
+/// live credential. Before a contributor's first post-upgrade ceremony that
+/// reference still points at their working legacy entry -- an `sk-` inference
+/// key that is valid and does not expire -- and sweeping it would destroy a
+/// credential they still hold, with a downgrade afterwards finding nothing.
+///
+/// And macOS may want authorization to delete a legacy item. Swallowing that
+/// error does not prevent the prompt, it only hides the failure after the
+/// contributor has already been interrupted; a denial leaves the item in place
+/// so the next attempt asks again. So this runs from the ceremony tail and the
+/// forget handlers -- moments the contributor initiated -- and not from
+/// `DaemonShared::load`, where an unexplained dialog at launch is the exact
+/// interruption this work exists to remove.
+///
+/// Those two together mean nothing is swept before a new ceremony: the only
+/// journal reference is the active one, so there is nothing to delete and
+/// nothing that can prompt. After a ceremony the previous reference is no
+/// longer active and is swept right there, in a flow where the contributor has
+/// just accepted a re-sign-in.
+///
+/// It returns nothing and swallows every failure on purpose. An entry we
+/// cannot delete is left alone.
 pub(crate) fn sweep_legacy_cloud_entries(store: &ConfigStore) {
     #[cfg(target_os = "macos")]
     {
         let Ok(journal) = Journal::read(store) else {
             return;
         };
+        // Read the same way `cleanup_locked` does.
+        let Ok(settings) = DaemonSettings::load(store) else {
+            return;
+        };
+        let active = settings
+            .cloud_credentials
+            .as_ref()
+            .map(StoredCloudCredentials::reference);
         #[cfg(test)]
         let backend = crate::daemon::cloud_credential_test_support::legacy_backend(store.dir());
         #[cfg(not(test))]
@@ -87,6 +117,9 @@ pub(crate) fn sweep_legacy_cloud_entries(store: &ConfigStore) {
             return;
         };
         for reference in journal.references {
+            if Some(reference) == active {
+                continue;
+            }
             let _ = backend.delete(&reference);
         }
     }

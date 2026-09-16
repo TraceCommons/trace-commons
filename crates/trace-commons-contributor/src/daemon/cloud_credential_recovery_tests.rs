@@ -377,8 +377,10 @@ async fn pending_os_read_cannot_delay_forget_withdrawing_proxy_authority() {
 
 // Never installed at all against `backend()`/`install_backend`: the sweep
 // must reach only the legacy registry, never the current Cloud backend.
+#[cfg(target_os = "macos")]
 struct RefusingLegacyBackend;
 
+#[cfg(target_os = "macos")]
 impl SecretBackend for RefusingLegacyBackend {
     fn read(&self, _reference: &CredentialReference) -> Result<Vec<u8>, CredentialError> {
         Err(CredentialError::NoEntry)
@@ -395,11 +397,100 @@ impl SecretBackend for RefusingLegacyBackend {
     }
 }
 
-/// The sweep is housekeeping, not a control. A legacy entry that refuses to
-/// delete -- because macOS wants authorization for it, which is the exact
-/// interruption this work removes -- must leave startup untouched.
+/// A legacy backend that deletes nothing and records what it was asked for.
+///
+/// The sweep's body is `#[cfg(target_os = "macos")]`, so every assertion
+/// about what it deletes is macOS-only -- elsewhere it is a no-op and a test
+/// of it would pass without exercising anything.
+#[cfg(target_os = "macos")]
+#[derive(Default)]
+struct RecordingLegacyBackend(Mutex<Vec<CredentialReference>>);
+
+#[cfg(target_os = "macos")]
+impl SecretBackend for RecordingLegacyBackend {
+    fn read(&self, _reference: &CredentialReference) -> Result<Vec<u8>, CredentialError> {
+        Err(CredentialError::NoEntry)
+    }
+    fn write(
+        &self,
+        _reference: &CredentialReference,
+        _bytes: &[u8],
+    ) -> Result<(), CredentialError> {
+        Err(CredentialError::Unavailable)
+    }
+    fn delete(&self, reference: &CredentialReference) -> Result<(), CredentialError> {
+        self.0.lock().unwrap().push(*reference);
+        Ok(())
+    }
+}
+
+/// The reference settings currently point at is not an orphan. On the first
+/// launch after the upgrade the journal names exactly one reference -- the
+/// active one -- and the legacy entry behind it is the contributor's working
+/// `sk-` key. A sweep that deletes it destroys a credential they still hold.
 #[test]
-fn a_refused_legacy_delete_does_not_fail_startup() {
+#[cfg(target_os = "macos")]
+fn the_sweep_never_deletes_the_active_reference() {
+    let (_directory, store) = temp_store();
+    let mut settings = credentials("sweep-active-roots");
+    settings.save_for_test(&store).unwrap();
+    let active = settings.cloud_credentials.as_ref().unwrap().reference();
+    // What `cleanup_locked` leaves behind: the active reference, still in the
+    // journal because it is skipped for deletion and never pruned.
+    assert_eq!(
+        journal(&store),
+        vec![active],
+        "the post-replace journal must name the active reference"
+    );
+    let legacy = Arc::new(RecordingLegacyBackend::default());
+    install_legacy_backend(&store, legacy.clone());
+
+    sweep_legacy_cloud_entries(&store);
+
+    assert_eq!(
+        *legacy.0.lock().unwrap(),
+        Vec::new(),
+        "the active reference must never be handed to the legacy delete"
+    );
+}
+
+/// An orphan -- a reference the settings no longer point at -- is what the
+/// sweep exists for, so the active-reference skip must not have disabled it.
+#[test]
+#[cfg(target_os = "macos")]
+fn the_sweep_still_deletes_an_orphaned_reference() {
+    let (_directory, store) = temp_store();
+    let mut settings = credentials("sweep-orphan-roots");
+    settings.save_for_test(&store).unwrap();
+    let active = settings.cloud_credentials.as_ref().unwrap().reference();
+    let orphan = CredentialReference::allocate();
+    let mut legacy_journal = Journal::default();
+    legacy_journal.retain(active).unwrap();
+    legacy_journal.retain(orphan).unwrap();
+    legacy_journal.save_named(&store, JOURNAL).unwrap();
+    let legacy = Arc::new(RecordingLegacyBackend::default());
+    install_legacy_backend(&store, legacy.clone());
+
+    sweep_legacy_cloud_entries(&store);
+
+    assert_eq!(
+        *legacy.0.lock().unwrap(),
+        vec![orphan],
+        "the orphan and only the orphan is swept"
+    );
+}
+
+/// The sweep is housekeeping, not a control. A legacy entry that refuses to
+/// delete -- because macOS wants authorization for it, and the contributor
+/// declined -- must leave the caller's own operation untouched.
+///
+/// This no longer asserts anything about startup: the sweep was moved off
+/// `DaemonShared::load` precisely because a prompt there is unexplained. What
+/// remains true is that a refusal is swallowed and the reference is left
+/// alone, so the next contributor-initiated attempt can retry it.
+#[test]
+#[cfg(target_os = "macos")]
+fn a_refused_legacy_delete_is_swallowed() {
     let (_directory, store) = temp_store();
     install_legacy_backend(&store, Arc::new(RefusingLegacyBackend));
     let mut legacy_journal = Journal::default();
@@ -415,5 +506,4 @@ fn a_refused_legacy_delete_does_not_fail_startup() {
         1,
         "a refused delete must leave the orphaned reference alone"
     );
-    assert!(DaemonShared::load(store).is_ok(), "startup state is intact");
 }

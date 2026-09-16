@@ -662,10 +662,6 @@ impl DaemonShared {
             settings.cloud_storage_unavailable = true;
             Ok::<_, anyhow::Error>(settings)
         })?;
-        // Best-effort sweep of the orphaned legacy Cloud entry, on the way
-        // up. A refused delete (macOS wanting authorization) must not touch
-        // startup, so failure is silently discarded here.
-        crate::daemon::cloud_credential_lifecycle::sweep_legacy_cloud_entries(&store);
         // Built here from the declaration this settings file carries at
         // startup. A later edit does not wait for a restart:
         // `set_settings` rebuilds the instance in place.

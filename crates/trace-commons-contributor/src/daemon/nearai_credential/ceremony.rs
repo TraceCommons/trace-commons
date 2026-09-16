@@ -462,6 +462,11 @@ fn persist_checked(
             Ok(())
         },
     )?;
+    // The ceremony tail. The reference this replaced is no longer the active
+    // one, so this is the first moment the legacy entry behind it is genuinely
+    // an orphan -- and a contributor who just completed a sign-in is the one
+    // person for whom a keychain prompt is explicable. See the sweep's doc.
+    crate::daemon::cloud_credential_lifecycle::sweep_legacy_cloud_entries(&store);
     Ok(())
 }
 
@@ -566,6 +571,9 @@ pub fn forget(store: &ConfigStore) -> Result<bool> {
     let removed = forget_locked(store)?;
     drop(_commit);
     crate::daemon::cloud_credential_lifecycle::cleanup_native(store)?;
+    // A contributor-initiated moment, which is the only kind that may spend an
+    // authorization prompt on the legacy store. See the sweep's own doc.
+    crate::daemon::cloud_credential_lifecycle::sweep_legacy_cloud_entries(store);
     Ok(removed)
 }
 
