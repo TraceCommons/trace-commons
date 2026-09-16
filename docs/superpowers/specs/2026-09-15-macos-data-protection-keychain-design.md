@@ -245,7 +245,8 @@ must be committed to the repository before any of this can be built.
 Not an announcement file: the version and date are unknown until release, and
 this repo writes announcements in the release-prep commit.
 
-> Upgrading the macOS app no longer asks for your login password.
+> Upgrading the macOS app no longer asks for your login password to keep your
+> NEAR AI sign-in.
 >
 > macOS ties a stored credential to the exact application that created it, so
 > every new build was a different application as far as the keychain was
@@ -253,8 +254,9 @@ this repo writes announcements in the release-prep commit.
 > The app now stores its NEAR AI credential in a place keyed to its signing
 > identity instead, which every future build shares.
 >
-> - Upgrades no longer prompt for a password.
-> - A credential stored by an earlier version is not carried over. Signing in
->   once on this version replaces it -- which 0.12.5 already required.
+> - Upgrades no longer prompt for a password to keep your NEAR AI sign-in.
+> - A NEAR AI credential stored by an earlier version is not carried over.
+>   Signing in once on this version replaces it -- which 0.12.5 already
+>   required.
 >
 > Contributing and private inference were never affected.
