@@ -979,6 +979,30 @@ pub async fn drain_approved_for_test(
     drain_approved(shared, now).await
 }
 
+/// Can this process reach the Cloud credential store?
+///
+/// The FFI crate cannot reach `cloud_credential_lifecycle` directly -- that
+/// module is `pub(crate)` here -- so this is the public wrapper it calls
+/// through. The probe itself is Task 4's: a read of a reference that was
+/// never stored, which distinguishes `Unentitled` from every other outcome
+/// without writing anything.
+///
+/// Returns 0 reachable, 1 unentitled, 2 if the backend itself could not be
+/// constructed.
+pub fn credential_store_self_check() -> i32 {
+    use credential_store::{CredentialError, CredentialReference, CredentialStore};
+
+    let backend = match os_secret_store::OsSecretBackend::new() {
+        Ok(backend) => backend,
+        Err(CredentialError::Unentitled) => return 1,
+        Err(_) => return 2,
+    };
+    match CredentialStore::new(backend).load_bytes(&CredentialReference::allocate()) {
+        Err(CredentialError::Unentitled) => 1,
+        _ => 0,
+    }
+}
+
 /// Find the adapter and session reference matching a queue entry's path.
 fn find_session<'a>(
     sources: &'a [Box<dyn crate::source::TraceSource>],
