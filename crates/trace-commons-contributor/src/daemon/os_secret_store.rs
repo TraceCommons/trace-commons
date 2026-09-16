@@ -95,6 +95,22 @@ impl OsSecretBackend {
         }
     }
 
+    /// The legacy, pre-data-protection Cloud store. It exists solely so the
+    /// startup sweep can reach an orphaned entry left behind by a build
+    /// before the move; nothing reads or writes through it otherwise.
+    #[cfg(target_os = "macos")]
+    // Only reached outside `cfg(test)`, where the sweep uses the injected
+    // legacy registry instead; never opened against the real keychain here.
+    #[cfg_attr(test, allow(dead_code))]
+    pub(crate) fn legacy_cloud() -> Result<Self, CredentialError> {
+        let store: Arc<NativeStore> =
+            apple_native_keyring_store::keychain::Store::new().map_err(storage_error)?;
+        Ok(Self {
+            store,
+            service: SERVICE,
+        })
+    }
+
     fn entry(&self, reference: &CredentialReference) -> Result<Entry, CredentialError> {
         let storage_key = reference.storage_key()?;
         // The Windows provider otherwise defaults to Enterprise persistence,

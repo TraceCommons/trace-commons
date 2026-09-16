@@ -7,8 +7,10 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
 use crate::config::{ConfigStore, DAEMON_SETTINGS_FILE, tests_support::temp_store};
-use crate::daemon::cloud_credential_lifecycle::native;
-use crate::daemon::cloud_credential_test_support::{backend, install_backend};
+use crate::daemon::cloud_credential_lifecycle::{Journal, native, sweep_legacy_cloud_entries};
+use crate::daemon::cloud_credential_test_support::{
+    backend, install_backend, install_legacy_backend,
+};
 use crate::daemon::credential_store::{CredentialError, CredentialReference, SecretBackend};
 use crate::daemon::ipc::{DaemonShared, Request, handle_request_async};
 use crate::daemon::nearai_credential::{api::MintedKey, ceremony};
@@ -371,4 +373,47 @@ async fn pending_os_read_cannot_delay_forget_withdrawing_proxy_authority() {
         completed_before_release,
         "Forget waited for the unrelated OS read prompt"
     );
+}
+
+// Never installed at all against `backend()`/`install_backend`: the sweep
+// must reach only the legacy registry, never the current Cloud backend.
+struct RefusingLegacyBackend;
+
+impl SecretBackend for RefusingLegacyBackend {
+    fn read(&self, _reference: &CredentialReference) -> Result<Vec<u8>, CredentialError> {
+        Err(CredentialError::NoEntry)
+    }
+    fn write(
+        &self,
+        _reference: &CredentialReference,
+        _bytes: &[u8],
+    ) -> Result<(), CredentialError> {
+        Err(CredentialError::Unavailable)
+    }
+    fn delete(&self, _reference: &CredentialReference) -> Result<(), CredentialError> {
+        Err(CredentialError::Unavailable)
+    }
+}
+
+/// The sweep is housekeeping, not a control. A legacy entry that refuses to
+/// delete -- because macOS wants authorization for it, which is the exact
+/// interruption this work removes -- must leave startup untouched.
+#[test]
+fn a_refused_legacy_delete_does_not_fail_startup() {
+    let (_directory, store) = temp_store();
+    install_legacy_backend(&store, Arc::new(RefusingLegacyBackend));
+    let mut legacy_journal = Journal::default();
+    legacy_journal
+        .retain(CredentialReference::allocate())
+        .unwrap();
+    legacy_journal.save_named(&store, JOURNAL).unwrap();
+
+    sweep_legacy_cloud_entries(&store);
+
+    assert_eq!(
+        journal(&store).len(),
+        1,
+        "a refused delete must leave the orphaned reference alone"
+    );
+    assert!(DaemonShared::load(store).is_ok(), "startup state is intact");
 }

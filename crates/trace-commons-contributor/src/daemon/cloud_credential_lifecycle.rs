@@ -63,6 +63,37 @@ pub(crate) fn cleanup_native(store: &ConfigStore) -> Result<()> {
     native(store)?.cleanup()
 }
 
+/// Delete Cloud entries left in the legacy keychain by builds before the
+/// data-protection move. Best effort by construction.
+///
+/// It returns nothing and swallows every failure on purpose. macOS may want
+/// authorization to delete a legacy item, and spending a password prompt to
+/// tidy up would reintroduce the exact interruption this work exists to
+/// remove. An entry we cannot delete is left alone.
+pub(crate) fn sweep_legacy_cloud_entries(store: &ConfigStore) {
+    #[cfg(target_os = "macos")]
+    {
+        let Ok(journal) = Journal::read(store) else {
+            return;
+        };
+        #[cfg(test)]
+        let backend = crate::daemon::cloud_credential_test_support::legacy_backend(store.dir());
+        #[cfg(not(test))]
+        let backend: Option<std::sync::Arc<dyn SecretBackend>> =
+            crate::daemon::os_secret_store::OsSecretBackend::legacy_cloud()
+                .ok()
+                .map(|backend| std::sync::Arc::new(backend) as std::sync::Arc<dyn SecretBackend>);
+        let Some(backend) = backend else {
+            return;
+        };
+        for reference in journal.references {
+            let _ = backend.delete(&reference);
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = store;
+}
+
 pub(crate) fn cleanup_pending(store: &ConfigStore) -> Result<bool> {
     let locks = coordination(store.dir())?;
     let _commit = locks.commit.lock().map_err(|_| unavailable())?;
