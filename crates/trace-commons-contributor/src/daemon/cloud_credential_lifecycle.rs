@@ -5,7 +5,9 @@ use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 
 use crate::config::ConfigStore;
-use crate::daemon::credential_store::{CredentialReference, CredentialStore, SecretBackend};
+use crate::daemon::credential_store::{
+    CredentialError, CredentialReference, CredentialStore, SecretBackend,
+};
 use crate::daemon::nearai_credential::session::coordination;
 use crate::daemon::settings::{DaemonSettings, NearAiInferenceCredential, NearAiSession};
 use crate::daemon::stored_cloud_credentials::StoredCloudCredentials;
@@ -40,6 +42,18 @@ pub(crate) fn native(
         store.clone(),
         std::sync::Arc::new(crate::daemon::os_secret_store::OsSecretBackend::new()?),
     ))
+}
+
+/// Can this process hold a Cloud credential at all?
+///
+/// A read of a reference that does not exist answers `NoEntry` when the store
+/// is reachable and `Unentitled` when it is not, so one read distinguishes
+/// them without writing anything.
+pub(crate) fn store_is_reachable(store: &ConfigStore) -> Result<()> {
+    match native(store)?.probe() {
+        Err(CredentialError::Unentitled) => Err(anyhow!("near_ai_credential_storage_unentitled")),
+        _ => Ok(()),
+    }
 }
 
 pub(crate) fn cleanup_native(store: &ConfigStore) -> Result<()> {
@@ -135,6 +149,18 @@ impl<B: SecretBackend> CloudCredentialLifecycle<B> {
         Self {
             store,
             credentials: CredentialStore::new(backend),
+        }
+    }
+
+    /// One read of a reference that was never stored. `NoEntry` means the
+    /// store answered; `Unentitled` means this process cannot reach it at all.
+    pub(crate) fn probe(&self) -> Result<(), CredentialError> {
+        match self
+            .credentials
+            .load_bytes(&CredentialReference::allocate())
+        {
+            Err(CredentialError::Unentitled) => Err(CredentialError::Unentitled),
+            _ => Ok(()),
         }
     }
 

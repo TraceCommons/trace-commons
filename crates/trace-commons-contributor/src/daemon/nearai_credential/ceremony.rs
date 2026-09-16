@@ -132,6 +132,36 @@ pub fn change_count(dir: &std::path::Path) -> u64 {
         .unwrap_or(0)
 }
 
+/// Keyed by directory, like [`CHANGES`]. Test-only: production code never
+/// needs to ask how many browser URLs it minted, but a regression test that
+/// only inspected `begin`'s return value could not tell a guard that refused
+/// early from one that refused only after the URL was already handed out.
+#[cfg(test)]
+static BROWSER_URLS: OnceLock<Mutex<HashMap<PathBuf, u64>>> = OnceLock::new();
+
+#[cfg(test)]
+fn record_browser_url_served(dir: &std::path::Path) {
+    *BROWSER_URLS
+        .get_or_init(Default::default)
+        .lock()
+        .expect("browser url lock")
+        .entry(dir.to_path_buf())
+        .or_default() += 1;
+}
+
+/// How many browser URLs this process has minted for `dir`. Zero unless
+/// `begin` actually reached the point of building one.
+#[cfg(test)]
+pub(crate) fn browser_urls_served(dir: &std::path::Path) -> u64 {
+    BROWSER_URLS
+        .get_or_init(Default::default)
+        .lock()
+        .expect("browser url lock")
+        .get(dir)
+        .copied()
+        .unwrap_or(0)
+}
+
 /// A runtime that outlives the IPC call that started the ceremony.
 ///
 /// The embedded FFI builds a short-lived runtime per call, and the browser
@@ -231,10 +261,15 @@ impl BrowserSignIn {
 /// binding afterwards would leave a window in which another process could take
 /// the port and receive the session.
 pub async fn begin(store: &ConfigStore, provider: &str) -> Result<serde_json::Value> {
+    // Before anything that reaches the network or a browser: a ceremony this
+    // process could not store is a wasted sign-in at the service.
+    crate::daemon::cloud_credential_lifecycle::store_is_reachable(store)?;
     let api = CloudApi::live()?;
     let attempt_id = loopback::random_state()?;
     let dir = store.dir().to_path_buf();
     let (browser_url, sign_in) = BrowserSignIn::prepare(&api, provider).await?;
+    #[cfg(test)]
+    record_browser_url_served(&dir);
 
     {
         let mut map = attempts().lock().expect("ceremony state lock");
