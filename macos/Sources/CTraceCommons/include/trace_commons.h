@@ -2090,6 +2090,21 @@ void        tc_string_free(char*);
  */
 const char* tc_last_error(void);
 
+/*
+ * Can this process reach the Cloud credential store?
+ *
+ * 0 reachable, 1 unentitled, 2 otherwise. Reads and writes nothing. Exists so
+ * a release pipeline can ask a signed bundle a question no unit test can
+ * answer.
+ *
+ * "Reachable" means the store answered -- with nothing stored, which is the
+ * expected answer for a probe of a reference that was never written. Any
+ * other read failure is 2, not 0: this gates a release, so a store that is
+ * broken for a reason other than entitlement must not report PASS. The
+ * daemon's own sign-in guard maps the same probe more leniently on purpose.
+ */
+int32_t     tc_credential_store_self_check(void);
+
 #ifdef __cplusplus
 }
 #endif

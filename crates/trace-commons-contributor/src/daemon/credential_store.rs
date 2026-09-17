@@ -20,6 +20,19 @@ const VERSION: u8 = 1;
 pub(crate) enum CredentialError {
     NoEntry,
     Unavailable,
+    /// This process is not entitled to the store that holds this credential.
+    /// Distinct from `Unavailable`: no retry, no unlock and no later attempt
+    /// changes it, because the answer is a property of the binary's code
+    /// signature rather than of the store's state.
+    ///
+    /// Constructed only by the macOS entitlement path -- `storage_error`'s
+    /// `is_missing_entitlement` arm, which is itself
+    /// `#[cfg(target_os = "macos")]`. On every other platform nothing
+    /// constructs it, so it is genuinely dead there and `-D warnings` makes
+    /// that fatal. The allow is conditional rather than blanket on purpose: a
+    /// real dead-code regression on macOS still fails the build.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    Unentitled,
     InvalidReference,
     UnsupportedVersion,
     InvalidBundle,
@@ -35,6 +48,7 @@ impl fmt::Display for CredentialError {
         f.write_str(match self {
             Self::NoEntry => "near_ai_credential_storage_missing",
             Self::Unavailable => "near_ai_credential_storage_unavailable",
+            Self::Unentitled => "near_ai_credential_storage_unentitled",
             Self::InvalidReference => "near_ai_credential_storage_reference_invalid",
             Self::UnsupportedVersion => "near_ai_credential_storage_version_unsupported",
             Self::InvalidBundle => "near_ai_credential_storage_bundle_invalid",
@@ -763,6 +777,22 @@ mod tests {
         assert_eq!(
             SecretBundle::new(None, Some("x".repeat(MAX_SECRET_BYTES + 1)), binding()).unwrap_err(),
             CredentialError::TooLarge
+        );
+    }
+
+    /// The unentitled label is distinct from the unavailable one on purpose.
+    /// "Unavailable" invites a retry; this condition is permanent for the
+    /// process that hit it, and telling a contributor to try again would be
+    /// a lie they could act on.
+    #[test]
+    fn unentitled_is_its_own_label() {
+        assert_eq!(
+            CredentialError::Unentitled.to_string(),
+            "near_ai_credential_storage_unentitled"
+        );
+        assert_ne!(
+            CredentialError::Unentitled.to_string(),
+            CredentialError::Unavailable.to_string()
         );
     }
 }

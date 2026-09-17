@@ -4,14 +4,18 @@
 // Tests hold a synthetic completed mint at a channel barrier; no browser, Cloud
 // request, real credential, or runtime background ceremony is started.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::time::Duration;
 
 use crate::config::{ConfigStore, tests_support::temp_store};
+use crate::daemon::cloud_credential_test_support::{MemoryBackend, install_backend};
+use crate::daemon::credential_store::{CredentialError, CredentialReference, SecretBackend};
 use crate::daemon::nearai_credential::api::MintedKey;
 use crate::daemon::nearai_credential::ceremony::{
-    Attempt, Status, attempt_status, attempts, cancel, change_count, changes, forget, persist,
-    persist_attempt,
+    Attempt, Status, attempt_status, attempts, begin, browser_urls_served, cancel, change_count,
+    changes, forget, persist, persist_attempt,
 };
 use crate::daemon::settings::{DaemonSettings, NearAiInferenceCredential, NearAiSession};
 
@@ -23,14 +27,47 @@ struct Snapshot {
     changes: u64,
 }
 
+/// Wraps the shared in-memory double so this file can force the one outcome
+/// production code distinguishes -- `Unentitled` -- without adding a flag to
+/// `MemoryBackend` itself, which every other test in the suite also shares.
+#[derive(Default)]
+struct FailingBackend {
+    inner: MemoryBackend,
+    fail_next: AtomicBool,
+}
+
+impl FailingBackend {
+    fn fail_next_with_unentitled(&self) {
+        self.fail_next.store(true, Ordering::SeqCst);
+    }
+}
+
+impl SecretBackend for FailingBackend {
+    fn read(&self, reference: &CredentialReference) -> Result<Vec<u8>, CredentialError> {
+        if self.fail_next.swap(false, Ordering::SeqCst) {
+            return Err(CredentialError::Unentitled);
+        }
+        self.inner.read(reference)
+    }
+    fn write(&self, reference: &CredentialReference, bytes: &[u8]) -> Result<(), CredentialError> {
+        self.inner.write(reference, bytes)
+    }
+    fn delete(&self, reference: &CredentialReference) -> Result<(), CredentialError> {
+        self.inner.delete(reference)
+    }
+}
+
 struct Fixture {
     store: ConfigStore,
+    backend: Arc<FailingBackend>,
     _directory: tempfile::TempDir,
 }
 
 impl Fixture {
     fn new() -> Self {
         let (directory, store) = temp_store();
+        let backend = Arc::new(FailingBackend::default());
+        install_backend(&store, backend.clone());
         let mut settings =
             DaemonSettings::load_with_cloud_credentials(&store).expect("load synthetic settings");
         settings.max_uploads_per_day = 7;
@@ -48,8 +85,13 @@ impl Fixture {
         .expect("seed previous synthetic connection");
         Self {
             store,
+            backend,
             _directory: directory,
         }
+    }
+
+    fn browser_urls_served(&self) -> u64 {
+        browser_urls_served(self.store.dir())
     }
 
     fn waiting(&self, id: &str) {
@@ -251,4 +293,21 @@ fn a_late_mint_cannot_replace_a_new_waiting_attempts_credentials() {
     });
     assert_cancelled(result);
     fixture.assert_unchanged(&replacement);
+}
+
+/// A ceremony that cannot store its result must say so before it opens a
+/// browser. The contributor authenticates at NEAR AI, which mints a real
+/// session; failing after that point spends a sign-in and strands a session
+/// at the service that this machine will never hold.
+#[tokio::test]
+async fn an_unstorable_ceremony_refuses_before_opening_a_browser() {
+    let fixture = Fixture::new();
+    fixture.backend.fail_next_with_unentitled();
+    let error = begin(&fixture.store, "github").await.unwrap_err();
+    assert_eq!(error.to_string(), "near_ai_credential_storage_unentitled");
+    assert_eq!(
+        fixture.browser_urls_served(),
+        0,
+        "no browser URL was minted"
+    );
 }

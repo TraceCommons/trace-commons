@@ -194,12 +194,20 @@ find "$APP/Contents/Frameworks" -name '*.dylib' -print0 |
       --sign "$MACOS_SIGNING_IDENTITY" "$dylib"
   done
 
-# Hardened runtime is required for notarization. There is deliberately no
-# entitlements file: this app needs no exception to the hardened runtime, and
-# adding entitlements it does not use would widen what a compromised process
-# could do for no benefit. Sparkle's updater runs out of process precisely so
-# that the app does not need one.
+# Hardened runtime is required for notarization. The entitlements file requests
+# exactly one thing, and the app uses it: `keychain-access-groups`, which is
+# what lets a build read the Cloud credential an earlier build stored without
+# asking the contributor for their password. The legacy keychain binds an item
+# to the binary that created it, so every upgrade prompted, and "Always Allow"
+# only ever added the binary that was already running.
+#
+# The embedded profile is load-bearing, not decoration. A binary carrying this
+# entitlement WITHOUT a profile that grants it is killed by the kernel at exec
+# -- measured, not assumed. The failure is an application that does not start,
+# which is why CI launches the signed app rather than trusting that it signed.
+cp macos/TraceCommons-DeveloperID.provisionprofile "$APP/Contents/embedded.provisionprofile"
 codesign --force --timestamp --options runtime \
+  --entitlements macos/entitlements.plist \
   --sign "$MACOS_SIGNING_IDENTITY" "$APP"
 codesign --verify --deep --strict --verbose=2 "$APP"
 

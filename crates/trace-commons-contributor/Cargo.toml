@@ -608,7 +608,12 @@ windows-sys = { version = "0.61", features = [
 ] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-apple-native-keyring-store = { version = "=1.0.2", features = ["keychain"] }
+apple-native-keyring-store = { version = "=1.0.2", features = ["keychain", "protected"] }
+# Pinned to the exact version `apple-native-keyring-store` resolves, because
+# `storage_error` downcasts to this crate's `base::Error` to recover the
+# OSStatus. A different version is a different type and the downcast would
+# silently never match.
+security-framework = "=3.7.0"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 zbus-secret-service-keyring-store = { version = "=1.0.1", default-features = false, features = ["rt-tokio-crypto-rust"] }

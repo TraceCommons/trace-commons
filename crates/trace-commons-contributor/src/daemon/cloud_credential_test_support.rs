@@ -57,6 +57,28 @@ pub(crate) fn install_backend(store: &ConfigStore, backend: Arc<dyn SecretBacken
         .insert(store.dir().to_path_buf(), backend);
 }
 
+// Separate from `registry()` above: the legacy sweep and the current Cloud
+// backend are different stores, and a test that only installs one must not
+// accidentally satisfy the other.
+#[cfg(target_os = "macos")]
+fn legacy_registry() -> &'static Mutex<HashMap<PathBuf, Arc<dyn SecretBackend>>> {
+    static REGISTRY: OnceLock<Mutex<HashMap<PathBuf, Arc<dyn SecretBackend>>>> = OnceLock::new();
+    REGISTRY.get_or_init(Default::default)
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn legacy_backend(dir: &Path) -> Option<Arc<dyn SecretBackend>> {
+    legacy_registry().lock().unwrap().get(dir).cloned()
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn install_legacy_backend(store: &ConfigStore, backend: Arc<dyn SecretBackend>) {
+    legacy_registry()
+        .lock()
+        .unwrap()
+        .insert(store.dir().to_path_buf(), backend);
+}
+
 impl DaemonSettings {
     /// Exercise production OS publication with synthetic storage. Legacy
     /// migration tests deliberately write their old-format fixture as bytes.

@@ -23,6 +23,7 @@ use crate::config::ConfigStore;
 use crate::daemon::nearai_credential::near_wallet::NearWalletError;
 use crate::daemon::nearai_credential::near_wallet_loopback::{self, NearWalletListener};
 use crate::daemon::settings::{DaemonSettings, NearAiInferenceCredential, NearAiSession};
+use crate::daemon::stored_cloud_credentials::StoredCloudCredentials;
 use anyhow::{Result, anyhow, bail};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -132,6 +133,36 @@ pub fn change_count(dir: &std::path::Path) -> u64 {
         .unwrap_or(0)
 }
 
+/// Keyed by directory, like [`CHANGES`]. Test-only: production code never
+/// needs to ask how many browser URLs it minted, but a regression test that
+/// only inspected `begin`'s return value could not tell a guard that refused
+/// early from one that refused only after the URL was already handed out.
+#[cfg(test)]
+static BROWSER_URLS: OnceLock<Mutex<HashMap<PathBuf, u64>>> = OnceLock::new();
+
+#[cfg(test)]
+fn record_browser_url_served(dir: &std::path::Path) {
+    *BROWSER_URLS
+        .get_or_init(Default::default)
+        .lock()
+        .expect("browser url lock")
+        .entry(dir.to_path_buf())
+        .or_default() += 1;
+}
+
+/// How many browser URLs this process has minted for `dir`. Zero unless
+/// `begin` actually reached the point of building one.
+#[cfg(test)]
+pub(crate) fn browser_urls_served(dir: &std::path::Path) -> u64 {
+    BROWSER_URLS
+        .get_or_init(Default::default)
+        .lock()
+        .expect("browser url lock")
+        .get(dir)
+        .copied()
+        .unwrap_or(0)
+}
+
 /// A runtime that outlives the IPC call that started the ceremony.
 ///
 /// The embedded FFI builds a short-lived runtime per call, and the browser
@@ -231,10 +262,15 @@ impl BrowserSignIn {
 /// binding afterwards would leave a window in which another process could take
 /// the port and receive the session.
 pub async fn begin(store: &ConfigStore, provider: &str) -> Result<serde_json::Value> {
+    // Before anything that reaches the network or a browser: a ceremony this
+    // process could not store is a wasted sign-in at the service.
+    crate::daemon::cloud_credential_lifecycle::store_is_reachable(store)?;
     let api = CloudApi::live()?;
     let attempt_id = loopback::random_state()?;
     let dir = store.dir().to_path_buf();
     let (browser_url, sign_in) = BrowserSignIn::prepare(&api, provider).await?;
+    #[cfg(test)]
+    record_browser_url_served(&dir);
 
     {
         let mut map = attempts().lock().expect("ceremony state lock");
@@ -402,6 +438,10 @@ fn persist_checked(
 ) -> Result<()> {
     let store = ConfigStore::open(dir.to_path_buf())?;
     let expected = DaemonSettings::load(&store)?;
+    let superseded = expected
+        .cloud_credentials
+        .as_ref()
+        .map(StoredCloudCredentials::reference);
     let inference = Some(NearAiInferenceCredential {
         key: minted.key,
         key_id: minted.key_id,
@@ -427,6 +467,26 @@ fn persist_checked(
             Ok(())
         },
     )?;
+    // The ceremony tail. `superseded` is the reference `expected` pointed at
+    // before this replace -- no longer active now, so a contributor who just
+    // completed a sign-in is the one person for whom a keychain prompt over
+    // it is explicable. See the sweep's doc.
+    //
+    // This must delete by that captured reference, not by walking the
+    // journal the way the forget paths do. `replace`'s own trailing
+    // `cleanup_locked` (see cloud_credential_lifecycle.rs) already ran and
+    // deleted every non-active journal reference from the data-protection
+    // backend before we got here. `CredentialStore::delete` maps a missing
+    // entry to success, and `superseded` only ever lived in the legacy
+    // keychain, so by the time we reach this line the journal has already
+    // been pruned down to just the active reference -- there is nothing left
+    // for a journal walk to find. Only the reference captured above, by
+    // value, still names the legacy entry. Do not "simplify" this back to
+    // `sweep_legacy_cloud_entries`; that call is a no-op here by
+    // construction, not by bug.
+    if let Some(superseded) = superseded {
+        crate::daemon::cloud_credential_lifecycle::sweep_legacy_cloud_reference(&store, superseded);
+    }
     Ok(())
 }
 
@@ -530,6 +590,13 @@ pub fn forget(store: &ConfigStore) -> Result<bool> {
         .map_err(|_| anyhow::anyhow!("near_ai_credential_unavailable"))?;
     let removed = forget_locked(store)?;
     drop(_commit);
+    // A contributor-initiated moment, which is the only kind that may spend an
+    // authorization prompt on the legacy store. See the sweep's own doc. This
+    // must run before `cleanup_native`: `forget_locked` has already cleared
+    // `cloud_credentials`, so every journal reference is genuinely an orphan
+    // now, but `cleanup_native` drains the journal as it deletes -- run after
+    // it, the sweep finds nothing left to do.
+    crate::daemon::cloud_credential_lifecycle::sweep_legacy_cloud_entries(store);
     crate::daemon::cloud_credential_lifecycle::cleanup_native(store)?;
     Ok(removed)
 }
@@ -792,5 +859,152 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(status(dir.path(), Some(id)).unwrap().status, "cancelled");
+    }
+
+    /// `persist_checked`'s sweep is a distinct site from the journal-walking
+    /// one in `cloud_credential_lifecycle.rs`, and it is macOS-only for the
+    /// same reason `sweep_legacy_cloud_entries`'s body is: elsewhere it is a
+    /// no-op and a test of it would pass without exercising anything.
+    #[cfg(target_os = "macos")]
+    mod legacy_sweep_at_the_ceremony_tail {
+        use super::*;
+        use crate::daemon::cloud_credential_test_support::install_legacy_backend;
+        use crate::daemon::credential_store::{
+            CredentialError, CredentialReference, SecretBackend,
+        };
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Default)]
+        struct RecordingLegacyBackend(Mutex<Vec<CredentialReference>>);
+
+        impl SecretBackend for RecordingLegacyBackend {
+            fn read(&self, _reference: &CredentialReference) -> Result<Vec<u8>, CredentialError> {
+                Err(CredentialError::NoEntry)
+            }
+            fn write(
+                &self,
+                _reference: &CredentialReference,
+                _bytes: &[u8],
+            ) -> Result<(), CredentialError> {
+                Err(CredentialError::Unavailable)
+            }
+            fn delete(&self, reference: &CredentialReference) -> Result<(), CredentialError> {
+                self.0.lock().unwrap().push(*reference);
+                Ok(())
+            }
+        }
+
+        fn preexisting_credentials() -> DaemonSettings {
+            let now = Utc::now();
+            DaemonSettings {
+                private_inference: true,
+                near_ai_inference: Some(NearAiInferenceCredential {
+                    key: "sk-legacy-secret".into(),
+                    key_id: "legacy-key".into(),
+                    key_prefix: "sk-lega".into(),
+                    organization_id: "org-legacy".into(),
+                    workspace_id: "ws-legacy".into(),
+                    minted_at: now,
+                }),
+                near_ai_session: Some(NearAiSession {
+                    refresh_token: "rt-legacy".into(),
+                    refresh_token_expires_at: None,
+                    stored_at: now,
+                    user_agent: "Mozilla/5.0 Test".into(),
+                }),
+                ..Default::default()
+            }
+        }
+
+        /// This is the case the whole feature exists for: a contributor's
+        /// first re-sign-in after upgrading from a pre-migration build. Their
+        /// existing credential lives in the legacy keychain; the ceremony
+        /// mints a new one, `replace` publishes it to the data-protection
+        /// backend and (via its own trailing `cleanup_locked`) prunes the old
+        /// reference out of the journal -- leaving nothing for a journal walk
+        /// to find. Only the reference this test captured before the
+        /// ceremony, by value, still names the legacy entry, and that is what
+        /// `persist_checked` must hand to the legacy backend directly.
+        ///
+        /// Against the code before this change, `persist_checked` called
+        /// `sweep_legacy_cloud_entries` (the journal-walking sweep) here,
+        /// which finds nothing to delete once the journal has been pruned to
+        /// the active reference -- so this assertion fails red on that code.
+        #[test]
+        fn a_re_sign_in_sweeps_the_superseded_reference_by_value() {
+            let (dir, store) = temp_store();
+            let mut settings = preexisting_credentials();
+            settings.save_for_test(&store).unwrap();
+            let superseded = settings.cloud_credentials.as_ref().unwrap().reference();
+
+            let legacy = Arc::new(RecordingLegacyBackend::default());
+            install_legacy_backend(&store, legacy.clone());
+
+            persist(
+                dir.path(),
+                minted(),
+                "rt-new-session-secret".into(),
+                "Mozilla/5.0 Test".into(),
+            )
+            .unwrap();
+
+            assert_eq!(
+                *legacy.0.lock().unwrap(),
+                vec![superseded],
+                "the ceremony tail must sweep the reference it captured \
+                 before replace, not rely on the journal replace has already \
+                 pruned"
+            );
+        }
+
+        /// A contributor's very first ceremony: there is no prior credential
+        /// to supersede, so `expected.cloud_credentials` is `None` and there
+        /// is nothing to sweep. This must not prompt for anything and must
+        /// not hand the legacy backend a bogus reference.
+        #[test]
+        fn a_first_ever_ceremony_sweeps_nothing() {
+            let (dir, store) = temp_store();
+            let legacy = Arc::new(RecordingLegacyBackend::default());
+            install_legacy_backend(&store, legacy.clone());
+
+            persist(
+                dir.path(),
+                minted(),
+                "rt-first-session-secret".into(),
+                "Mozilla/5.0 Test".into(),
+            )
+            .unwrap();
+
+            assert_eq!(
+                *legacy.0.lock().unwrap(),
+                Vec::new(),
+                "there is no superseded reference on a first ceremony"
+            );
+        }
+
+        /// A re-sign-in that happens after the migration already ran once:
+        /// the superseded credential lives in the data-protection store, not
+        /// the legacy one, so deleting its reference from the legacy backend
+        /// is a harmless `NoEntry`-mapped no-op. The legacy backend still
+        /// receives the delete call (it cannot know in advance that it holds
+        /// nothing for that reference), but nothing observable breaks.
+        #[test]
+        fn a_second_re_sign_in_after_migration_is_a_harmless_legacy_miss() {
+            let (dir, store) = temp_store();
+            let mut settings = preexisting_credentials();
+            settings.save_for_test(&store).unwrap();
+
+            // No legacy backend installed at all: the reference this
+            // supersedes was never written to the legacy store, matching a
+            // contributor whose credential has already migrated once. The
+            // sweep must still swallow this rather than propagate an error.
+            persist(
+                dir.path(),
+                minted(),
+                "rt-second-session-secret".into(),
+                "Mozilla/5.0 Test".into(),
+            )
+            .unwrap();
+        }
     }
 }
