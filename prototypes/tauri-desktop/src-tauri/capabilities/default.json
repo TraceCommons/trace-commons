@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Permissions required by the main Trace Commons window.",
+  "windows": ["main"],
+  "permissions": ["core:event:default"]
+}

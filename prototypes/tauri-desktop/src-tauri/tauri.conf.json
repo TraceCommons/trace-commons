@@ -1,0 +1,30 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Trace Commons Tauri Prototype",
+  "version": "0.1.0",
+  "identifier": "ai.tracecommons.tauri.prototype",
+  "build": {
+    "devUrl": "http://127.0.0.1:1420",
+    "frontendDist": "../frontend/dist"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "title": "Trace Commons — Tauri prototype",
+        "width": 980,
+        "height": 720,
+        "minWidth": 760,
+        "minHeight": 560,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "capabilities": ["default"]
+    }
+  },
+  "bundle": {
+    "active": false,
+    "icon": ["../assets/trace-commons.png"]
+  }
+}

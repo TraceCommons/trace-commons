@@ -52,6 +52,8 @@ use std::collections::HashMap;
 #[cfg(unix)]
 use std::io::{BufRead, BufReader, Write};
 #[cfg(unix)]
+use std::net::Shutdown;
+#[cfg(unix)]
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 #[cfg(unix)]
 use std::sync::{Arc, Mutex, mpsc};
@@ -225,6 +227,18 @@ impl AttachedDaemon {
         *self.sink.lock().unwrap() = None;
     }
 
+    /// Close this client connection without sending the daemon's shutdown
+    /// method. This is for a shell that is exiting after attaching to a
+    /// daemon it did not start; closing the socket wakes the subscription
+    /// reader and leaves the daemon running for its owner.
+    pub fn close(&self) {
+        self.clear_sink();
+        self.closed.store(true, Ordering::SeqCst);
+        if let Ok(stream) = self.tx.lock() {
+            let _ = stream.shutdown(Shutdown::Both);
+        }
+    }
+
     /// Install the sink pushed events are delivered to, then subscribe.
     ///
     /// Ordering matters: the daemon answers `subscribe` and then begins
@@ -262,6 +276,10 @@ impl AttachedDaemon {
     }
 
     pub fn clear_sink(&self) {
+        match self._never {}
+    }
+
+    pub fn close(&self) {
         match self._never {}
     }
 

@@ -1,0 +1,16 @@
+[package]
+name = "trace-commons-tauri-prototype"
+version = "0.1.0"
+description = "Throwaway Tauri shell proof for Trace Commons"
+edition = "2024"
+build = "build.rs"
+
+[build-dependencies]
+tauri-build = "2"
+
+[dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", features = ["tray-icon"] }
+trace-commons-contributor = { path = "../../../crates/trace-commons-contributor" }

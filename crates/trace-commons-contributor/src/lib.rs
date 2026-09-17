@@ -43,3 +43,5 @@ pub mod witness_copy;
 
 pub mod evidence_import;
 pub mod public_run;
+
+pub use trace_commons_protocol::trace_contribution::secret_leak_pattern_names;
