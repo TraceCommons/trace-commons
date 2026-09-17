@@ -24,6 +24,14 @@ pub(crate) enum CredentialError {
     /// Distinct from `Unavailable`: no retry, no unlock and no later attempt
     /// changes it, because the answer is a property of the binary's code
     /// signature rather than of the store's state.
+    ///
+    /// Constructed only by the macOS entitlement path -- `storage_error`'s
+    /// `is_missing_entitlement` arm, which is itself
+    /// `#[cfg(target_os = "macos")]`. On every other platform nothing
+    /// constructs it, so it is genuinely dead there and `-D warnings` makes
+    /// that fatal. The allow is conditional rather than blanket on purpose: a
+    /// real dead-code regression on macOS still fails the build.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     Unentitled,
     InvalidReference,
     UnsupportedVersion,
