@@ -3742,6 +3742,79 @@ async fn pg_store_canonical_hash_lookup_reads_author_perplexity_by_position() {
     cleanup_tenant(&backend, &tenant_id).await;
 }
 
+/// The author-only backfill writes the five V73 columns on the LATEST decision
+/// row and nothing else: not whole-trace perplexity, not the pass flag, and
+/// not an older row for the same submission.
+#[tokio::test]
+async fn pg_store_author_perplexity_update_touches_only_its_columns_on_the_latest_row() {
+    let Some(backend) = postgres_backend().await else {
+        return;
+    };
+    backend.run_migrations().await.expect("run migrations");
+
+    let tenant_id = format!("pg-author-ppl-upd-{}", Uuid::new_v4());
+    let submission_id = Uuid::new_v4();
+    backend
+        .upsert_trace_submission(sample_submission(&tenant_id, submission_id))
+        .await
+        .expect("insert submission");
+
+    let older = sample_gate_decision(submission_id);
+    let older_id = older.decision_id;
+    backend
+        .insert_trace_gate_decision(&tenant_id, older)
+        .await
+        .expect("insert older decision");
+    let mut latest = sample_gate_decision(submission_id);
+    latest.decided_at = Utc::now() + chrono::Duration::seconds(5);
+    let latest_id = latest.decision_id;
+    let (ppl_before, passed_before) = (latest.perplexity_micros, latest.perplexity_passed);
+    backend
+        .insert_trace_gate_decision(&tenant_id, latest)
+        .await
+        .expect("insert latest decision");
+
+    backend
+        .update_trace_gate_decision_author_perplexity(
+            &tenant_id,
+            submission_id,
+            [Some(222), Some(333), None, Some(0), Some(666)],
+        )
+        .await
+        .expect("author-only update succeeds");
+
+    let rows = backend
+        .stream_trace_gate_decisions_for_replay(&tenant_id, 50, None)
+        .await
+        .expect("read back gate decisions");
+    let got = rows
+        .iter()
+        .find(|r| r.decision_id == latest_id)
+        .expect("latest row");
+    assert_eq!(got.agent_prose_perplexity_micros, Some(222));
+    assert_eq!(got.agent_prose_tokens, Some(333));
+    assert_eq!(got.tool_result_perplexity_micros, None);
+    assert_eq!(got.tool_result_tokens, Some(0));
+    assert_eq!(got.attributed_token_fraction_micros, Some(666));
+    assert_eq!(
+        got.perplexity_micros, ppl_before,
+        "whole-trace perplexity untouched"
+    );
+    assert_eq!(got.perplexity_passed, passed_before, "pass flag untouched");
+
+    let got = rows
+        .iter()
+        .find(|r| r.decision_id == older_id)
+        .expect("older row");
+    assert_eq!(
+        got.agent_prose_tokens, None,
+        "only the latest row is written"
+    );
+    assert_eq!(got.attributed_token_fraction_micros, None);
+
+    cleanup_tenant(&backend, &tenant_id).await;
+}
+
 #[tokio::test]
 async fn pg_store_inserts_trace_gate_decision_under_tenant_scope() {
     let Some(backend) = postgres_backend().await else {

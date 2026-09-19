@@ -67398,6 +67398,34 @@ impl trace_commons_server::trace_corpus_storage::TraceCorpusStore for Perplexity
         }
         Ok(())
     }
+    /// In-memory analogue of the Postgres impl: the five V73 columns on the
+    /// latest decision row for the submission, nothing else.
+    async fn update_trace_gate_decision_author_perplexity(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        columns: [Option<i64>; 5],
+    ) -> Result<(), DatabaseError> {
+        let mut rows = self.gate_decisions.write().unwrap();
+        let latest_decision_id = rows
+            .iter()
+            .filter(|(t, row)| t == tenant_id && row.submission_id == submission_id)
+            .max_by_key(|(_, row)| row.decided_at)
+            .map(|(_, row)| row.decision_id);
+        if let Some(decision_id) = latest_decision_id {
+            for (t, row) in rows.iter_mut() {
+                if t == tenant_id && row.decision_id == decision_id {
+                    row.agent_prose_perplexity_micros = columns[0];
+                    row.agent_prose_tokens = columns[1];
+                    row.tool_result_perplexity_micros = columns[2];
+                    row.tool_result_tokens = columns[3];
+                    row.attributed_token_fraction_micros = columns[4];
+                    break;
+                }
+            }
+        }
+        Ok(())
+    }
     /// In-memory analogue of the Postgres `update_trace_gate_decision_credit_quality`
     /// impl: record the three credit-quality values in a side table keyed by
     /// `(tenant_id, decision_id)`, exactly like the real backend's UPDATE,
@@ -70751,6 +70779,159 @@ async fn update_trace_gate_decision_perplexity_only_touches_latest_decision_row(
     );
 }
 
+/// Three scored submissions whose latest decision rows have had their
+/// whole-trace perplexity CORRUPTED and their per-author columns set to a
+/// sentinel, so a test can see exactly which columns a re-score pass rewrites.
+/// Same setup as `rescore_perplexity_pass_updates_only_perplexity_leaves_novelty_untouched`.
+struct CorruptedRescoreFixture {
+    // Held so the directories outlive the state.
+    _temp: tempfile::TempDir,
+    _artifact_temp: tempfile::TempDir,
+    state: Arc<AppState>,
+    db: Arc<PerplexityDriverTestDb>,
+    snapshot: Vec<StorageTraceGateDecisionRow>,
+}
+
+const AUTHOR_SENTINEL: [Option<i64>; 5] = [Some(1), Some(1), Some(1), Some(1), Some(1)];
+
+fn author_columns_of(row: &StorageTraceGateDecisionRow) -> [Option<i64>; 5] {
+    [
+        row.agent_prose_perplexity_micros,
+        row.agent_prose_tokens,
+        row.tool_result_perplexity_micros,
+        row.tool_result_tokens,
+        row.attributed_token_fraction_micros,
+    ]
+}
+
+async fn corrupted_rescore_fixture() -> CorruptedRescoreFixture {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+    let (artifact_store, _object_store_name) =
+        fixture_gate_worker_artifact_store(artifact_temp.path());
+    let db = seed_perplexity_driver_test_db(&artifact_store, "tenant-a", 3);
+    let db_mirror: Arc<dyn Database> = db.clone();
+    let state = test_state_with_configured_artifact_store_policies_and_export_guardrails(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        Some(artifact_store),
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+        BTreeMap::new(),
+        false,
+        false,
+    );
+    let config = PerplexityScoreDriverConfig {
+        interval: StdDuration::from_secs(45),
+        batch_size: 5,
+        knobs: PerplexityDriverKnobs {
+            skip_duplicates: false,
+            skip_duplicate_threshold_micros: 900_000,
+            max_attempts: 5,
+        },
+        backoff_base_seconds: 30,
+    };
+    run_perplexity_score_driver_tick(state.clone(), &config)
+        .await
+        .expect("initial drive succeeds");
+    let work_items = db
+        .list_submissions_with_gate_decision(100)
+        .await
+        .expect("enumeration succeeds");
+    assert_eq!(work_items.len(), 3, "all 3 submissions must have decisions");
+    let snapshot: Vec<StorageTraceGateDecisionRow> = work_items
+        .iter()
+        .map(|item| {
+            db.gate_decision_for(&item.tenant_id, item.submission_id)
+                .expect("decision present")
+        })
+        .collect();
+    for item in &work_items {
+        db.update_trace_gate_decision_perplexity(
+            &item.tenant_id,
+            item.submission_id,
+            0,
+            Some(0),
+            false,
+        )
+        .await
+        .expect("corrupt update succeeds");
+        db.update_trace_gate_decision_author_perplexity(
+            &item.tenant_id,
+            item.submission_id,
+            AUTHOR_SENTINEL,
+        )
+        .await
+        .expect("sentinel update succeeds");
+    }
+    CorruptedRescoreFixture {
+        _temp: temp,
+        _artifact_temp: artifact_temp,
+        state,
+        db,
+        snapshot,
+    }
+}
+
+/// The backfill mode: the pilot's scorer model has changed since stored rows
+/// were gated, so re-deriving `perplexity_passed` would rewrite gating
+/// history. `author_only` must leave the whole-trace columns exactly as it
+/// found them -- here, still corrupted.
+#[tokio::test]
+async fn author_only_rescore_leaves_whole_trace_perplexity_untouched() {
+    let fx = corrupted_rescore_fixture().await;
+
+    let summary = run_rescore_perplexity_pass(fx.state.clone(), None, true)
+        .await
+        .expect("author-only pass succeeds");
+    assert_eq!(summary.rescored, 3, "{summary:?}");
+    assert_eq!(summary.failed, 0, "{summary:?}");
+
+    for original in &fx.snapshot {
+        let after = fx
+            .db
+            .gate_decision_for("tenant-a", original.submission_id)
+            .expect("decision still present");
+        assert_eq!(
+            after.perplexity_micros, 0,
+            "author_only must not rewrite perplexity"
+        );
+        assert_eq!(after.peak_perplexity_micros, Some(0));
+        assert!(
+            !after.perplexity_passed,
+            "author_only must not re-derive the pass flag"
+        );
+        // The pass wrote its own outcome over the sentinel. This state's
+        // gate service reports no token lengths, so that outcome is absent.
+        assert_eq!(author_columns_of(&after), [None; 5]);
+    }
+}
+
+/// The default mode is unchanged, and is a superset: it still restores the
+/// whole-trace columns, and now writes the per-author ones as well.
+#[tokio::test]
+async fn the_default_rescore_restores_perplexity_and_writes_author_columns() {
+    let fx = corrupted_rescore_fixture().await;
+
+    run_rescore_perplexity_pass(fx.state.clone(), None, false)
+        .await
+        .expect("full pass succeeds");
+
+    for original in &fx.snapshot {
+        let after = fx
+            .db
+            .gate_decision_for("tenant-a", original.submission_id)
+            .expect("decision still present");
+        assert_eq!(after.perplexity_micros, original.perplexity_micros);
+        assert_eq!(after.perplexity_passed, original.perplexity_passed);
+        assert_eq!(author_columns_of(&after), [None; 5]);
+    }
+}
+
 /// Integration test for the re-score task end-to-end with the in-memory gate
 /// service: after a full gate drive populates decisions, corrupting the stored
 /// perplexity and running `run_rescore_perplexity_pass` restores the
@@ -70825,7 +71006,7 @@ async fn rescore_perplexity_pass_updates_only_perplexity_leaves_novelty_untouche
     }
 
     // Run the re-score pass.
-    let summary = run_rescore_perplexity_pass(state.clone(), None)
+    let summary = run_rescore_perplexity_pass(state.clone(), None, false)
         .await
         .expect("re-score pass succeeds");
     assert_eq!(summary.rescored, 3, "all 3 must re-score: {summary:?}");

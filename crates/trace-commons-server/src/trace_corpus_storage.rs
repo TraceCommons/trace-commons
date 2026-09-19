@@ -3063,6 +3063,32 @@ pub trait TraceCorpusStore: Send + Sync {
         Ok(())
     }
 
+    /// Write ONLY the five per-author perplexity columns (migration V73) on
+    /// the latest decision row for `submission_id`, in migration order:
+    /// agent-prose perplexity, agent-prose tokens, tool-result perplexity,
+    /// tool-result tokens, attributed fraction. Every other column --
+    /// including `perplexity_micros`, `peak_perplexity_micros` and
+    /// `perplexity_passed` -- is left untouched, so a backfill scored by a
+    /// different model than the row was gated under cannot rewrite gating
+    /// history. Implementations MUST scope the update by `tenant_id`.
+    ///
+    /// Defaults to a log-once warning + no-op, as
+    /// `update_trace_gate_decision_perplexity` does and for the same reason.
+    async fn update_trace_gate_decision_author_perplexity(
+        &self,
+        _tenant_id: &str,
+        _submission_id: Uuid,
+        _columns: [Option<i64>; 5],
+    ) -> Result<(), DatabaseError> {
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        WARNED.call_once(|| {
+            tracing::warn!(
+                "update_trace_gate_decision_author_perplexity called on a backend without a real impl"
+            );
+        });
+        Ok(())
+    }
+
     /// Update ONLY the credit-quality columns for the decision row identified by
     /// `(tenant_id, decision_id)`. Perplexity, novelty, tail-fraction, vector,
     /// gate status, and credit are left untouched. Implementations MUST scope by
