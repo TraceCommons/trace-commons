@@ -14,6 +14,7 @@
 //! crate depends on this one and adapts the orchestrator's `OrchestrationDecision`
 //! to its own audit-row shape.
 
+pub mod author_attribution;
 pub mod chunk_aggregate;
 pub mod chunker;
 pub mod embedder;
@@ -31,7 +32,7 @@ pub mod vector_index_usearch;
 // `trace_commons_gate_enclave::{Embedder, PerplexityScorer, ...}` paths keep
 // resolving. Implementations below remain local to this crate.
 pub use trace_commons_gate_api::{
-    ChunkPerplexity, Embedder, EnclaveGateOrchestratorConfig, InsertedChunkEntry,
+    AuthorPerplexity, ChunkPerplexity, Embedder, EnclaveGateOrchestratorConfig, InsertedChunkEntry,
     MOCK_EMBEDDING_DIM, NearestNeighbor, OrchestrationDecision, PerplexityOnlyOutcome,
     PerplexityResult, PerplexityScorer, ScorerFailure, TokenRarityResult, TokenRarityScorer,
     VectorIndex, scorer_status_is_transient,

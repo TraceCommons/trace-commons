@@ -1330,6 +1330,14 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "published_mission_packages",
         include_str!("../../../../migrations/V72__published_mission_packages.sql"),
     ),
+    // V73 adds per-author perplexity (shadow mode). Additive, nullable and
+    // backfill-free here: pre-V73 rows keep NULL until the author-only
+    // re-score route fills them.
+    (
+        73,
+        "trace_gate_decision_author_perplexity",
+        include_str!("../../../../migrations/V73__trace_gate_decision_author_perplexity.sql"),
+    ),
 ];
 
 #[async_trait]
@@ -5810,6 +5818,28 @@ mod tests {
              enrol every historical row into the calibration sample as a real \
              observation of the worst possible score"
         );
+    }
+
+    /// Shadow-mode columns: nullable and default-free, so a row written
+    /// before the migration, or scored by a backend that reports no token
+    /// lengths, reads as "not computed" rather than as a real zero.
+    #[test]
+    fn v73_adds_nullable_author_perplexity_columns() {
+        const V73: &str =
+            include_str!("../../../../migrations/V73__trace_gate_decision_author_perplexity.sql");
+        for col in [
+            "agent_prose_perplexity_micros",
+            "agent_prose_tokens",
+            "tool_result_perplexity_micros",
+            "tool_result_tokens",
+            "attributed_token_fraction_micros",
+        ] {
+            assert!(
+                V73.contains(&format!("ADD COLUMN IF NOT EXISTS {col} BIGINT")),
+                "V73 must add {col}"
+            );
+        }
+        assert!(!V73.contains("NOT NULL") && !V73.contains("DEFAULT"));
     }
 
     /// V55 gives the public register-stats endpoint (Task 4) a way to read

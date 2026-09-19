@@ -15,7 +15,8 @@ pub mod reference;
 pub mod vector_index;
 
 pub use decision::{
-    EnclaveGateOrchestratorConfig, InsertedChunkEntry, OrchestrationDecision, PerplexityOnlyOutcome,
+    AuthorPerplexity, EnclaveGateOrchestratorConfig, InsertedChunkEntry, OrchestrationDecision,
+    PerplexityOnlyOutcome,
 };
 pub use embedder::{Embedder, MOCK_EMBEDDING_DIM};
 pub use perplexity::{

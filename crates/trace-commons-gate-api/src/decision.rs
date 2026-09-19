@@ -95,6 +95,9 @@ pub struct OrchestrationDecision {
     /// `qualifying_chunk_floor_micros`. Shadow mode: recorded, gates nothing.
     /// See `ChunkedPerplexityAggregate::qualifying_token_fraction_micros`.
     pub qualifying_token_fraction_micros: u64,
+    /// Perplexity split by token author. Shadow mode: recorded, gates
+    /// nothing. `None` when no chunk could be attributed.
+    pub author_perplexity: Option<AuthorPerplexity>,
     /// Every chunk entry inserted into the vector index (both gates passed,
     /// per-chunk novelty at or above the insert threshold). Empty on fail.
     pub inserted_chunk_entries: Vec<InsertedChunkEntry>,
@@ -106,6 +109,29 @@ pub struct OrchestrationDecision {
     /// the same meaning as above and is deliberately distinct from `Some(0)`,
     /// which is the real observation for a tenant's first trace.
     pub index_cardinality_at_scoring: Option<u64>,
+}
+
+/// Perplexity split by who authored the scored tokens. Shadow mode:
+/// recorded, gates nothing. Absent as a whole when no chunk could be
+/// attributed (the scorer reported no token lengths, or none tiled).
+///
+/// Whole-trace perplexity is token-weighted, so in an agent session it is
+/// set by tool output and pasted input -- the most numerous and most
+/// predictable tokens. See
+/// `docs/superpowers/specs/2026-09-18-per-author-perplexity-shadow-design.md`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AuthorPerplexity {
+    /// `exp(sum_nll / n)` over `assistant_message` content tokens, in
+    /// micros. `None` when there were none -- never 0, which would read as
+    /// a real and maximally unsurprising score.
+    pub agent_prose_perplexity_micros: Option<u64>,
+    pub agent_prose_tokens: u64,
+    /// As above over `tool_result` content tokens.
+    pub tool_result_perplexity_micros: Option<u64>,
+    pub tool_result_tokens: u64,
+    /// Tokens in attributed chunks over all scored tokens: how much of the
+    /// trace the values above describe.
+    pub attributed_token_fraction_micros: u64,
 }
 
 /// Output of `EnclaveGateOrchestrator::evaluate_perplexity_only`. Carries
@@ -129,6 +155,9 @@ pub struct PerplexityOnlyOutcome {
     pub chunks_capped: bool,
     /// Token-weighted share of the scored trace clearing the per-chunk floor.
     pub qualifying_token_fraction_micros: u64,
+    /// Perplexity split by token author. Shadow mode: recorded, gates
+    /// nothing. `None` when no chunk could be attributed.
+    pub author_perplexity: Option<AuthorPerplexity>,
 }
 
 /// A per-chunk vector-index entry the orchestrator inserted. The host maps

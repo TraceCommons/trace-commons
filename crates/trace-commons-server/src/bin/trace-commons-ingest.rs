@@ -51142,6 +51142,9 @@ async fn evaluate_and_record_gate(
         i64::try_from(decision.novelty_score_micros).unwrap_or(i64::MAX),
         &trace_commons_server::credit_quality::CREDIT_QUALITY_ACTIVE,
     );
+    let author_cols = trace_commons_server::trace_gate_service::author_perplexity_columns(
+        decision.author_perplexity.as_ref(),
+    );
     let row = StorageTraceGateDecisionRow {
         decision_id,
         submission_id,
@@ -51175,6 +51178,14 @@ async fn evaluate_and_record_gate(
         qualifying_token_fraction_micros: decision
             .qualifying_token_fraction_micros
             .map(|v| i64::try_from(v).unwrap_or(i64::MAX)),
+        // Per-author perplexity (migration V73). Shadow mode, as above:
+        // recorded here, read by nothing that decides anything. All `None`
+        // when the gate service attributed nothing -- unknown, not zero.
+        agent_prose_perplexity_micros: author_cols[0],
+        agent_prose_tokens: author_cols[1],
+        tool_result_perplexity_micros: author_cols[2],
+        tool_result_tokens: author_cols[3],
+        attributed_token_fraction_micros: author_cols[4],
         // Prospective gate-utility instrumentation (#199).
         composite_score_micros: Some(composite.q_micros),
         // Reported by the index, not derived here: `None` when the configured
@@ -52728,6 +52739,12 @@ async fn score_one_submission(
                             // Same: no chunks were scored, so there is no
                             // per-chunk distribution to take a share of.
                             qualifying_token_fraction_micros: None,
+                            // Per-author perplexity (V73): absent here, never a real zero.
+                            agent_prose_perplexity_micros: None,
+                            agent_prose_tokens: None,
+                            tool_result_perplexity_micros: None,
+                            tool_result_tokens: None,
+                            attributed_token_fraction_micros: None,
                             // Not instrumented, and it never can be: this
                             // branch short-circuits before the gate service
                             // runs, so no composite was computed and no index
@@ -52999,6 +53016,8 @@ async fn gate_evaluate_worker_handler(
             // per-chunk scores the statistic is computed from, and the real
             // decision row already carries it. Unknown, not zero.
             qualifying_token_fraction_micros: None,
+            // Same again: the real decision row already carries it.
+            author_perplexity: None,
             chunk_vector_entries: Vec::new(),
             // This is a synthetic re-hydration of the already-persisted
             // decision for the credit-emission call below (no ciphertext or
