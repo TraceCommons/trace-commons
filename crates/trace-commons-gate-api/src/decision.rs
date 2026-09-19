@@ -95,6 +95,9 @@ pub struct OrchestrationDecision {
     /// `qualifying_chunk_floor_micros`. Shadow mode: recorded, gates nothing.
     /// See `ChunkedPerplexityAggregate::qualifying_token_fraction_micros`.
     pub qualifying_token_fraction_micros: u64,
+    /// Perplexity split by token author. Shadow mode: recorded, gates
+    /// nothing. `None` when no chunk could be attributed.
+    pub author_perplexity: Option<AuthorPerplexity>,
     /// Every chunk entry inserted into the vector index (both gates passed,
     /// per-chunk novelty at or above the insert threshold). Empty on fail.
     pub inserted_chunk_entries: Vec<InsertedChunkEntry>,
@@ -152,6 +155,9 @@ pub struct PerplexityOnlyOutcome {
     pub chunks_capped: bool,
     /// Token-weighted share of the scored trace clearing the per-chunk floor.
     pub qualifying_token_fraction_micros: u64,
+    /// Perplexity split by token author. Shadow mode: recorded, gates
+    /// nothing. `None` when no chunk could be attributed.
+    pub author_perplexity: Option<AuthorPerplexity>,
 }
 
 /// A per-chunk vector-index entry the orchestrator inserted. The host maps

@@ -134,7 +134,7 @@ where
         &self,
         plaintext: &[u8],
     ) -> anyhow::Result<PerplexityOnlyOutcome> {
-        let (plan, _chunk_scores, perp_agg) = self.chunk_and_score_perplexity(plaintext)?;
+        let (plan, chunk_scores, perp_agg) = self.chunk_and_score_perplexity(plaintext)?;
         let perplexity_passed = perp_agg.representative_perplexity_micros
             >= self.cfg.perplexity_floor_micros
             && perp_agg.tail_fraction_micros >= self.cfg.tail_fraction_floor_micros;
@@ -146,6 +146,11 @@ where
             chunk_count: plan.chunks.len() as u32,
             chunks_capped: plan.chunks_capped,
             qualifying_token_fraction_micros: perp_agg.qualifying_token_fraction_micros,
+            // Shadow mode: recorded, read by nothing that decides anything.
+            author_perplexity: crate::author_attribution::aggregate_author_perplexity(
+                &plan.chunks,
+                &chunk_scores,
+            ),
         })
     }
 
@@ -262,6 +267,11 @@ where
             total_chunk_count: (plan.chunks.len() as u32).saturating_add(plan.dropped_chunk_count),
             chunks_capped: plan.chunks_capped,
             qualifying_token_fraction_micros: perp_agg.qualifying_token_fraction_micros,
+            // Shadow mode: recorded, read by nothing that decides anything.
+            author_perplexity: crate::author_attribution::aggregate_author_perplexity(
+                &plan.chunks,
+                &chunk_scores,
+            ),
             inserted_chunk_entries,
             vector_index_snapshot_id: index_snapshot.map(|s| s.snapshot_id),
             index_cardinality_at_scoring: index_snapshot.map(|s| s.cardinality),
@@ -678,5 +688,113 @@ mod tests {
             ]
         }))
         .unwrap()
+    }
+
+    /// Scores every char as one token at -1.0 and, when `with_lengths`,
+    /// reports one char per token plus one generated token.
+    struct CharScorer {
+        with_lengths: bool,
+    }
+
+    impl PerplexityScorer for CharScorer {
+        fn score(
+            &self,
+            plaintext: &[u8],
+        ) -> anyhow::Result<trace_commons_gate_api::perplexity::PerplexityResult> {
+            let n = std::str::from_utf8(plaintext)?.chars().count() as u64;
+            Ok(trace_commons_gate_api::perplexity::PerplexityResult {
+                aggregate_perplexity_micros: 2_718_281,
+                tail_fraction_micros: 0,
+                tokens_scored: n,
+            })
+        }
+
+        fn score_chunk(
+            &self,
+            chunk: &[u8],
+        ) -> anyhow::Result<trace_commons_gate_api::perplexity::ChunkPerplexity> {
+            let n = std::str::from_utf8(chunk)?.chars().count();
+            // n prompt tokens + 1 generated; the first prompt token is dropped.
+            Ok(trace_commons_gate_api::perplexity::ChunkPerplexity {
+                sum_nll: n as f64,
+                tokens: n as u64,
+                tail_tokens: 0,
+                logprobs: vec![-1.0; n],
+                token_char_lens: if self.with_lengths {
+                    vec![1; n + 1]
+                } else {
+                    Vec::new()
+                },
+            })
+        }
+    }
+
+    fn orchestrator_with_scorer(
+        scorer: CharScorer,
+    ) -> EnclaveGateOrchestrator<CharScorer, MockEmbedder, MockVectorIndex> {
+        let mut cfg = EnclaveGateOrchestratorConfig::mock_default();
+        cfg.chunk_min_tokens = 1;
+        EnclaveGateOrchestrator::new(scorer, MockEmbedder::new(), MockVectorIndex::new(), cfg)
+    }
+
+    fn three_author_envelope() -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({"events": [
+            {"event_type": "user_message", "redacted_content": "please fix the build"},
+            {"event_type": "assistant_message", "redacted_content": "the linker flag was wrong"},
+            {"event_type": "tool_result", "tool_name": "Bash", "redacted_content": "ok"},
+        ]}))
+        .unwrap()
+    }
+
+    #[test]
+    fn author_perplexity_is_recorded_and_decides_nothing() {
+        let envelope = three_author_envelope();
+        let with = orchestrator_with_scorer(CharScorer { with_lengths: true })
+            .evaluate_perplexity_only(&envelope)
+            .unwrap();
+        let without = orchestrator_with_scorer(CharScorer {
+            with_lengths: false,
+        })
+        .evaluate_perplexity_only(&envelope)
+        .unwrap();
+
+        let ap = with.author_perplexity.expect("lengths were reported");
+        assert_eq!(
+            ap.agent_prose_tokens,
+            "the linker flag was wrong".chars().count() as u64
+        );
+        assert_eq!(ap.agent_prose_perplexity_micros, Some(2_718_281));
+        assert_eq!(ap.tool_result_tokens, 2);
+        assert_eq!(ap.attributed_token_fraction_micros, 1_000_000);
+        assert_eq!(without.author_perplexity, None);
+
+        // Shadow: every pre-existing field is identical either way.
+        let strip = |mut o: trace_commons_gate_api::decision::PerplexityOnlyOutcome| {
+            o.author_perplexity = None;
+            o
+        };
+        assert_eq!(strip(with), strip(without));
+    }
+
+    #[test]
+    fn the_full_decision_carries_author_perplexity_and_is_otherwise_unchanged() {
+        let envelope = three_author_envelope();
+        let with = orchestrator_with_scorer(CharScorer { with_lengths: true })
+            .evaluate(&envelope, "tenant_a")
+            .unwrap();
+        let without = orchestrator_with_scorer(CharScorer {
+            with_lengths: false,
+        })
+        .evaluate(&envelope, "tenant_a")
+        .unwrap();
+        assert!(with.author_perplexity.is_some());
+        assert_eq!(without.author_perplexity, None);
+        assert_eq!(with.perplexity_micros, without.perplexity_micros);
+        assert_eq!(with.perplexity_passed, without.perplexity_passed);
+        assert_eq!(with.novelty_passed, without.novelty_passed);
+        assert_eq!(
+            with.qualifying_token_fraction_micros,
+            without.qualifying_token_fraction_micros
+        );
     }
 }
