@@ -3644,6 +3644,59 @@ async fn pg_store_round_trips_author_perplexity_including_null() {
     cleanup_tenant(&backend, &tenant_id).await;
 }
 
+/// `insert_trace_gate_decision_with_chunk_entries` is the INSERT ingest
+/// actually calls, and it has its own positional `$26..$30` binding. All five
+/// columns are BIGINT, so a swapped pair there is no type error -- only five
+/// distinct values read back in order can see it.
+#[tokio::test]
+async fn pg_store_chunk_entries_insert_binds_author_perplexity_in_order() {
+    let Some(backend) = postgres_backend().await else {
+        return;
+    };
+    backend.run_migrations().await.expect("run migrations");
+
+    let tenant_id = format!("pg-author-ppl-chunks-{}", Uuid::new_v4());
+    let submission_id = Uuid::new_v4();
+    backend
+        .upsert_trace_submission(sample_submission(&tenant_id, submission_id))
+        .await
+        .expect("insert submission");
+
+    let mut decision = sample_gate_decision(submission_id);
+    decision.agent_prose_perplexity_micros = Some(222);
+    decision.agent_prose_tokens = Some(333);
+    decision.tool_result_perplexity_micros = Some(444);
+    decision.tool_result_tokens = Some(555);
+    decision.attributed_token_fraction_micros = Some(666);
+    let decision_id = decision.decision_id;
+    let entries = vec![TraceGateChunkVectorEntryRow {
+        decision_id,
+        submission_id,
+        chunk_index: 0,
+        vector_entry_id: Uuid::new_v4(),
+    }];
+    backend
+        .insert_trace_gate_decision_with_chunk_entries(&tenant_id, decision, entries)
+        .await
+        .expect("atomic insert of decision + chunk entries");
+
+    let rows = backend
+        .stream_trace_gate_decisions_for_replay(&tenant_id, 50, None)
+        .await
+        .expect("read back gate decisions");
+    let got = rows
+        .iter()
+        .find(|r| r.decision_id == decision_id)
+        .expect("decision row");
+    assert_eq!(got.agent_prose_perplexity_micros, Some(222));
+    assert_eq!(got.agent_prose_tokens, Some(333));
+    assert_eq!(got.tool_result_perplexity_micros, Some(444));
+    assert_eq!(got.tool_result_tokens, Some(555));
+    assert_eq!(got.attributed_token_fraction_micros, Some(666));
+
+    cleanup_tenant(&backend, &tenant_id).await;
+}
+
 /// `find_gate_decision_by_canonical_hash` reads its row POSITIONALLY, so the
 /// by-name roundtrip above does not reach it: a wrong index there is a
 /// runtime type error or a silently swapped value, not a compile error.

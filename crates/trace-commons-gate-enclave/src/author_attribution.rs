@@ -3,9 +3,14 @@
 
 //! Split a chunk's per-token NLL by who authored each token.
 //!
-//! Pure: no I/O, no logging. Exact-or-skip: a chunk whose token lengths do
+//! Pure: no I/O, no logging. Tile-or-skip: a chunk whose token lengths do
 //! not tile its chars exactly yields `None` and contributes nothing, so a
-//! mis-decoded token can shrink coverage but can never mis-attribute.
+//! mis-decoded token shrinks coverage instead of shifting attribution.
+//!
+//! Tiling checks the TOTAL char count, not each token's position: an
+//! over-count and an equal under-count inside one chunk would cancel and
+//! shift every token between them. Rare, and bounded to that chunk. The
+//! stronger check belongs at the scorer, which holds both strings.
 
 use trace_commons_gate_api::decision::AuthorPerplexity;
 

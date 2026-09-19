@@ -419,6 +419,27 @@ impl NearAiPerplexityScorer {
     }
 }
 
+/// Char lengths from a response's `tokens` value, or empty when it is not an
+/// array of exactly `expected` strings. Never an error: anything unusable
+/// means "the scorer cannot say", which is what an empty vector already
+/// means everywhere downstream.
+fn token_char_lens(tokens: Option<serde_json::Value>, expected: usize) -> Vec<u32> {
+    let Some(serde_json::Value::Array(tokens)) = tokens else {
+        return Vec::new();
+    };
+    if tokens.len() != expected {
+        return Vec::new();
+    }
+    tokens
+        .iter()
+        .map(|t| {
+            t.as_str()
+                .map(|t| u32::try_from(t.chars().count()).unwrap_or(u32::MAX))
+        })
+        .collect::<Option<Vec<u32>>>()
+        .unwrap_or_default()
+}
+
 /// One response's scoring material: the raw logprob slice (element 0 is the
 /// BOS placeholder) and, when the response carried a parallel `tokens`
 /// array, each token's char length.
@@ -451,13 +472,7 @@ fn parse_scored_body(body: &str) -> anyhow::Result<ScoredTokens> {
     }
     // Lengths feed a shadow signal only. A response without a usable
     // `tokens` array still scores exactly as before.
-    let token_char_lens: Vec<u32> = match lp.tokens.take() {
-        Some(tokens) if tokens.len() == lp.token_logprobs.len() => tokens
-            .iter()
-            .map(|t| u32::try_from(t.chars().count()).unwrap_or(u32::MAX))
-            .collect(),
-        _ => Vec::new(),
-    };
+    let token_char_lens = token_char_lens(lp.tokens.take(), lp.token_logprobs.len());
     // NEAR AI returns `null` for token 0 (no prior context). Map to 0.0;
     // `aggregate_perplexity_metrics` drops the first element regardless.
     // Positions 1..N must be finite — non-finite there is a degenerate
@@ -592,8 +607,13 @@ struct LogprobsBlock {
     /// Decoded text of each token, parallel to `token_logprobs`. Optional:
     /// the score does not depend on it. `text_offset` is deliberately not
     /// read -- observed 2026-09-18, the endpoint returns -1 for every token.
+    ///
+    /// Held as an opaque value, never as `Vec<String>`: a typed field would
+    /// make a wrong-shaped `tokens` (a `null` element, numbers, a string)
+    /// fail the WHOLE response parse, turning a body that scored before
+    /// this field was read into `NearAiScorerResponseParseFailed`.
     #[serde(default)]
-    tokens: Option<Vec<String>>,
+    tokens: Option<serde_json::Value>,
 }
 
 // ---------------------------------------------------------------------------
@@ -929,6 +949,28 @@ mod tests {
         let body = r#"{"choices":[{"logprobs":{
             "tokens":["a","b"],"token_logprobs":[null,-1.0,-2.0]}}]}"#;
         assert!(parse_scored_body(body).unwrap().token_char_lens.is_empty());
+    }
+
+    #[test]
+    fn a_malformed_tokens_field_never_fails_a_score_that_would_succeed() {
+        // Before token lengths existed this field was ignored entirely, so
+        // no shape of it may turn a scorable body into a parse error.
+        for tokens in [
+            r#"[null,"a","b"]"#,
+            r#"[1,2,3]"#,
+            r#""abc""#,
+            r#"{"0":"a"}"#,
+            "null",
+            "[]",
+        ] {
+            let body = format!(
+                r#"{{"choices":[{{"logprobs":{{"tokens":{tokens},"token_logprobs":[null,-1.0,-2.0]}}}}]}}"#
+            );
+            let scored = parse_scored_body(&body)
+                .unwrap_or_else(|e| panic!("tokens={tokens} must still score: {e}"));
+            assert_eq!(scored.logprobs.len(), 3, "tokens={tokens}");
+            assert!(scored.token_char_lens.is_empty(), "tokens={tokens}");
+        }
     }
 
     #[test]
