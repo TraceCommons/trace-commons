@@ -70909,10 +70909,10 @@ fn rescore_ack_states_which_mode_was_accepted() {
     let ack = serde_json::to_value(RescorePerplexityAck {
         accepted: true,
         limit: Some(5),
-        author_only: true,
+        mode: RescoreMode::DryRun,
     })
     .expect("serialize ack");
-    assert_eq!(ack["author_only"], serde_json::json!(true));
+    assert_eq!(ack["mode"], serde_json::json!("dry_run"));
 }
 
 /// Re-score double: the in-memory service for everything, except that its
@@ -70992,7 +70992,7 @@ async fn author_only_rescore_writes_author_columns_and_nothing_else() {
     )))))
     .await;
 
-    let summary = run_rescore_perplexity_pass(fx.state.clone(), None, true)
+    let summary = run_rescore_perplexity_pass(fx.state.clone(), None, RescoreMode::AuthorOnly)
         .await
         .expect("author-only pass succeeds");
     assert_eq!(summary.rescored, 3, "{summary:?}");
@@ -71025,7 +71025,7 @@ async fn author_only_rescore_writes_author_columns_and_nothing_else() {
 async fn author_only_rescore_never_erases_values_it_cannot_recompute() {
     let fx = corrupted_rescore_fixture(Some(Arc::new(FixedRescoreGateService(None)))).await;
 
-    let summary = run_rescore_perplexity_pass(fx.state.clone(), None, true)
+    let summary = run_rescore_perplexity_pass(fx.state.clone(), None, RescoreMode::AuthorOnly)
         .await
         .expect("author-only pass succeeds");
     assert_eq!(summary.rescored, 0, "{summary:?}");
@@ -71042,6 +71042,138 @@ async fn author_only_rescore_never_erases_values_it_cannot_recompute() {
     }
 }
 
+/// Calibration mode. A dry run scores every decided submission exactly as a
+/// re-score would and writes NOTHING: not whole-trace perplexity, not the
+/// pass flag, not the per-author columns. Moving the floor to a new scorer
+/// model needs that model's distribution over real traces, and getting it
+/// must not rewrite the history it is measured against.
+#[tokio::test]
+async fn dry_run_rescore_scores_everything_and_writes_nothing() {
+    let fx = corrupted_rescore_fixture(Some(Arc::new(FixedRescoreGateService(Some(
+        MEASURED_AUTHOR,
+    )))))
+    .await;
+
+    let summary = run_rescore_perplexity_pass(fx.state.clone(), None, RescoreMode::DryRun)
+        .await
+        .expect("dry-run pass succeeds");
+    assert_eq!(summary.rescored, 0, "{summary:?}");
+    assert_eq!(summary.failed, 0, "{summary:?}");
+    let scored = summary.dry_run.as_ref().expect("dry run collects scores");
+    assert_eq!(
+        scored.perplexity_micros,
+        vec![RESCORED_PERPLEXITY_MICROS; 3]
+    );
+    assert_eq!(scored.agent_prose_perplexity_micros, vec![222; 3]);
+    assert_eq!(scored.agent_prose_tokens, vec![333; 3]);
+    assert_eq!(scored.tool_result_perplexity_micros, vec![444; 3]);
+    assert_eq!(scored.attributed_token_fraction_micros, vec![666; 3]);
+    assert_eq!(scored.author_unattributed, 0);
+
+    for original in &fx.snapshot {
+        let after = fx
+            .db
+            .gate_decision_for("tenant-a", original.submission_id)
+            .expect("decision still present");
+        // Still exactly as the fixture corrupted them.
+        assert_eq!(after.perplexity_micros, 0);
+        assert_eq!(after.peak_perplexity_micros, Some(0));
+        assert!(!after.perplexity_passed);
+        assert_eq!(author_columns_of(&after), AUTHOR_SENTINEL);
+    }
+}
+
+/// A dry run under a scorer that attributes nothing still reports the
+/// whole-trace distribution, and says how many rows had no author values.
+#[tokio::test]
+async fn dry_run_rescore_counts_unattributed_rows_separately() {
+    let fx = corrupted_rescore_fixture(Some(Arc::new(FixedRescoreGateService(None)))).await;
+    let summary = run_rescore_perplexity_pass(fx.state.clone(), None, RescoreMode::DryRun)
+        .await
+        .expect("dry-run pass succeeds");
+    let scored = summary.dry_run.as_ref().expect("dry run collects scores");
+    assert_eq!(scored.perplexity_micros.len(), 3);
+    assert!(scored.agent_prose_perplexity_micros.is_empty());
+    assert_eq!(scored.author_unattributed, 3);
+}
+
+/// Writing modes collect nothing: the score vectors exist only in a dry run.
+#[tokio::test]
+async fn writing_modes_collect_no_scores() {
+    let fx = corrupted_rescore_fixture(Some(Arc::new(FixedRescoreGateService(None)))).await;
+    let summary = run_rescore_perplexity_pass(fx.state.clone(), None, RescoreMode::Full)
+        .await
+        .expect("full pass succeeds");
+    assert!(summary.dry_run.is_none());
+}
+
+/// What a dry run logs is aggregates only, and below the row minimum not even
+/// those: a percentile of three rows is a per-submission score.
+#[test]
+fn dry_run_report_is_aggregate_only_and_silent_on_small_passes() {
+    let small = DryRunScores {
+        perplexity_micros: vec![7_000_000; 3],
+        ..Default::default()
+    };
+    let report = dry_run_report(&small);
+    assert_eq!(report.whole_trace_perplexity.count, 3);
+    assert_eq!(report.whole_trace_perplexity.percentiles, None);
+    assert!(report.share_below_floor_micros.is_empty());
+
+    let values: Vec<u64> = (1..=100).map(|v| v * 100_000).collect(); // 0.1 ..= 10.0
+    let big = DryRunScores {
+        perplexity_micros: values.clone(),
+        agent_prose_tokens: (1..=100).map(|v| v * 10).collect(), // 10 ..= 1000
+        author_unattributed: 4,
+        ..Default::default()
+    };
+    let report = dry_run_report(&big);
+    let p = report.whole_trace_perplexity.percentiles.expect("100 rows");
+    assert_eq!(p.p50, 5_000_000);
+    // 59 of 100 values sit strictly below 6.0.
+    assert_eq!(
+        report
+            .share_below_floor_micros
+            .iter()
+            .find(|(floor, _)| *floor == 6_000_000)
+            .map(|(_, share)| *share),
+        Some(590_000)
+    );
+    // Floors are reported in ascending order and the share never decreases.
+    let shares: Vec<u64> = report
+        .share_below_floor_micros
+        .iter()
+        .map(|(_, s)| *s)
+        .collect();
+    assert!(shares.windows(2).all(|w| w[0] <= w[1]));
+    // 19 of 100 rows have fewer than 200 agent-prose tokens (10..=190).
+    assert_eq!(report.thin_agent_prose_rows, 19);
+    assert_eq!(report.author_unattributed, 4);
+    // The report serializes, because it is logged as one JSON field.
+    let json = serde_json::to_value(&report).expect("serialize report");
+    assert_eq!(
+        json["whole_trace_perplexity"]["count"],
+        serde_json::json!(100)
+    );
+}
+
+#[test]
+fn rescore_mode_is_derived_from_the_query_with_dry_run_winning() {
+    let mode = |json: &str| {
+        serde_json::from_str::<RescorePerplexityQuery>(json)
+            .expect("valid query")
+            .mode()
+    };
+    assert_eq!(mode("{}"), RescoreMode::Full);
+    assert_eq!(mode(r#"{"author_only":true}"#), RescoreMode::AuthorOnly);
+    assert_eq!(mode(r#"{"dry_run":true}"#), RescoreMode::DryRun);
+    // A dry run writes nothing whatever else was asked for.
+    assert_eq!(
+        mode(r#"{"dry_run":true,"author_only":true}"#),
+        RescoreMode::DryRun
+    );
+}
+
 /// The default mode is unchanged and is a superset: it rewrites the
 /// whole-trace columns, and writes the per-author ones with them.
 #[tokio::test]
@@ -71051,7 +71183,7 @@ async fn the_default_rescore_writes_whole_trace_and_author_columns() {
     )))))
     .await;
 
-    run_rescore_perplexity_pass(fx.state.clone(), None, false)
+    run_rescore_perplexity_pass(fx.state.clone(), None, RescoreMode::Full)
         .await
         .expect("full pass succeeds");
 
@@ -71073,7 +71205,7 @@ async fn the_default_rescore_writes_whole_trace_and_author_columns() {
 async fn the_default_rescore_clears_author_columns_it_cannot_recompute() {
     let fx = corrupted_rescore_fixture(Some(Arc::new(FixedRescoreGateService(None)))).await;
 
-    run_rescore_perplexity_pass(fx.state.clone(), None, false)
+    run_rescore_perplexity_pass(fx.state.clone(), None, RescoreMode::Full)
         .await
         .expect("full pass succeeds");
 
@@ -71161,7 +71293,7 @@ async fn rescore_perplexity_pass_updates_only_perplexity_leaves_novelty_untouche
     }
 
     // Run the re-score pass.
-    let summary = run_rescore_perplexity_pass(state.clone(), None, false)
+    let summary = run_rescore_perplexity_pass(state.clone(), None, RescoreMode::Full)
         .await
         .expect("re-score pass succeeds");
     assert_eq!(summary.rescored, 3, "all 3 must re-score: {summary:?}");

@@ -190,11 +190,11 @@ The route acknowledges immediately and works in the background. Check the
 acknowledgement before walking away:
 
 ```json
-{"accepted": true, "limit": 5, "author_only": true}
+{"accepted": true, "limit": 5, "mode": "author_only"}
 ```
 
-`"author_only": true` is the only confirmation of which columns the pass
-writes. A mistyped parameter (`author-only`, `authorOnly`) is refused with a
+`"mode"` is the only confirmation of which columns the pass writes:
+`"full"`, `"author_only"`, or `"dry_run"` (which writes none). A mistyped parameter (`author-only`, `authorOnly`) is refused with a
 400 rather than read as the default, because the default is the dangerous
 one here.
 
@@ -251,6 +251,70 @@ few agent-prose tokens to trust; how much of a typical trace
 `attributed_token_fraction_micros` says was attributable; and whether the
 signal agrees with human labels. Until that is answered these columns gate
 nothing, and the floor does not move.
+
+## Calibrating the floor for a new scorer model
+
+The perplexity floor is a property of the scorer model. A floor calibrated
+under one model says nothing under another, so a model switch puts the gate
+back in the state described below: **floor 0 until calibrated.** Switch the
+model and set `TRACE_COMMONS_GATE_PERPLEXITY_FLOOR_MICROS=0` in the same
+restart; novelty keeps doing dedup in the meantime.
+
+The earlier procedure (`a27-perplexity-floor-calibration.md`) calibrated
+from the bake-off corpus. Do not reuse it for a production floor: that
+corpus's classes were separable by source format alone (#204, #205), and the
+bake-off scores a text-only rendering, while the gate scores rendered
+envelope events -- tool results included -- in a token-weighted aggregate. A
+floor has to be calibrated on what production scores.
+
+Get the new model's distribution over real traces with a **dry run**, which
+scores every decided submission through the production path
+(`evaluate_perplexity_only`: same packer, same aggregate) and writes
+nothing:
+
+```sh
+curl -sS -X POST \
+  -H "Authorization: Bearer $ADMIN_JWT" \
+  "$INGEST_BASE/v1/admin/rescore-perplexity?dry_run=true"
+```
+
+Check that the acknowledgement says `"mode": "dry_run"`. When the pass ends
+it logs one line, `Trace Commons perplexity re-score pass completed`, whose
+`dry_run_report` field is a JSON object of aggregates:
+
+- `whole_trace_perplexity`, `peak_chunk_perplexity`: count, min, p05, p10,
+  p25, p50, p75, p90, p95, max, in micros.
+- `share_below_floor_micros`: for each candidate floor from 1.5 to 8.0, the
+  share of scored traces a floor there would refuse.
+- `agent_prose_perplexity`, `agent_prose_tokens`, `tool_result_perplexity`,
+  `attributed_token_fraction`, `thin_agent_prose_rows` (attributed rows with
+  under 200 agent-prose tokens) and `author_unattributed`: the per-author
+  signal, in the same pass.
+
+```sh
+sudo grep 're-score pass completed' /var/log/tracecommons/ingest.log | tail -n 1
+```
+
+Below 20 scored submissions the report carries counts only -- no
+percentiles, no shares. A percentile of three rows is a per-submission
+score, and the hash-only convention applies here as everywhere. So
+`limit=5` is a smoke test of the mechanism, not a preview of the numbers.
+
+A dry run pays for inference on every submission it scores and, like the
+other modes, is not resumable.
+
+Choosing the floor. Whole-trace perplexity falls as traces get longer and
+is set largely by tool output, so its defensible job is to refuse junk, not
+to grade work. Place the floor just above junk, with headroom:
+
+1. Anchor the junk end by scoring a few known-junk envelopes through the
+   same path: empty-after-redaction, greeting-only, a bare login prompt.
+2. Read the real-trace low percentiles (p05, p10) from the dry run.
+3. Put the floor in the gap, and read `share_below_floor_micros` for what
+   it would refuse. Decide that rate on purpose. Under the previous model a
+   6.0 floor refused about 31% of pilot traces.
+4. Record the distribution, the junk anchors, the chosen floor and the
+   refusal rate in a report under `docs/superpowers/reports/`.
 
 ## Floor stays 0 until calibration
 
