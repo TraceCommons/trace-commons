@@ -51175,6 +51175,12 @@ async fn evaluate_and_record_gate(
         qualifying_token_fraction_micros: decision
             .qualifying_token_fraction_micros
             .map(|v| i64::try_from(v).unwrap_or(i64::MAX)),
+        // Per-author perplexity (V73): absent here, never a real zero.
+        agent_prose_perplexity_micros: None,
+        agent_prose_tokens: None,
+        tool_result_perplexity_micros: None,
+        tool_result_tokens: None,
+        attributed_token_fraction_micros: None,
         // Prospective gate-utility instrumentation (#199).
         composite_score_micros: Some(composite.q_micros),
         // Reported by the index, not derived here: `None` when the configured
@@ -52728,6 +52734,12 @@ async fn score_one_submission(
                             // Same: no chunks were scored, so there is no
                             // per-chunk distribution to take a share of.
                             qualifying_token_fraction_micros: None,
+                            // Per-author perplexity (V73): absent here, never a real zero.
+                            agent_prose_perplexity_micros: None,
+                            agent_prose_tokens: None,
+                            tool_result_perplexity_micros: None,
+                            tool_result_tokens: None,
+                            attributed_token_fraction_micros: None,
                             // Not instrumented, and it never can be: this
                             // branch short-circuits before the gate service
                             // runs, so no composite was computed and no index

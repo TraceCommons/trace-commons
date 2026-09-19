@@ -3490,6 +3490,12 @@ fn sample_gate_decision(submission_id: Uuid) -> TraceGateDecisionRow {
         chunk_count: None,
         total_chunk_count: None,
         qualifying_token_fraction_micros: None,
+        // Per-author perplexity (V73): absent here, never a real zero.
+        agent_prose_perplexity_micros: None,
+        agent_prose_tokens: None,
+        tool_result_perplexity_micros: None,
+        tool_result_tokens: None,
+        attributed_token_fraction_micros: None,
         chunks_capped: None,
         composite_score_micros: None,
         vector_index_snapshot_id: None,
@@ -3566,6 +3572,119 @@ async fn pg_store_round_trips_prospective_gate_instrumentation() {
         read_uninstrumented.index_cardinality_at_scoring, None,
         "an unrecorded cardinality must not read as an empty index"
     );
+
+    cleanup_tenant(&backend, &tenant_id).await;
+}
+
+/// V73: the five per-author perplexity columns round-trip, and the difference
+/// between "measured zero tokens" and "never measured" survives storage.
+#[tokio::test]
+async fn pg_store_round_trips_author_perplexity_including_null() {
+    let Some(backend) = postgres_backend().await else {
+        return;
+    };
+    backend.run_migrations().await.expect("run migrations");
+
+    let tenant_id = format!("pg-author-ppl-{}", Uuid::new_v4());
+    let submission_id = Uuid::new_v4();
+    backend
+        .upsert_trace_submission(sample_submission(&tenant_id, submission_id))
+        .await
+        .expect("insert submission");
+
+    let mut measured = sample_gate_decision(submission_id);
+    measured.agent_prose_perplexity_micros = Some(4_540_000);
+    measured.agent_prose_tokens = Some(397);
+    measured.tool_result_perplexity_micros = None; // no tool-result tokens
+    measured.tool_result_tokens = Some(0);
+    measured.attributed_token_fraction_micros = Some(850_000);
+    let measured_id = measured.decision_id;
+    backend
+        .insert_trace_gate_decision(&tenant_id, measured)
+        .await
+        .expect("insert measured gate decision");
+
+    let mut unmeasured = sample_gate_decision(submission_id);
+    let unmeasured_id = unmeasured.decision_id;
+    unmeasured.decided_at = Utc::now() + chrono::Duration::seconds(1);
+    backend
+        .insert_trace_gate_decision(&tenant_id, unmeasured)
+        .await
+        .expect("insert unmeasured gate decision");
+
+    let rows = backend
+        .stream_trace_gate_decisions_for_replay(&tenant_id, 50, None)
+        .await
+        .expect("read back gate decisions");
+    let got = rows
+        .iter()
+        .find(|r| r.decision_id == measured_id)
+        .expect("measured row");
+    assert_eq!(got.agent_prose_perplexity_micros, Some(4_540_000));
+    assert_eq!(got.agent_prose_tokens, Some(397));
+    assert_eq!(got.tool_result_perplexity_micros, None);
+    assert_eq!(
+        got.tool_result_tokens,
+        Some(0),
+        "a real zero must not read as NULL"
+    );
+    assert_eq!(got.attributed_token_fraction_micros, Some(850_000));
+
+    let got = rows
+        .iter()
+        .find(|r| r.decision_id == unmeasured_id)
+        .expect("unmeasured row");
+    assert_eq!(
+        got.agent_prose_tokens, None,
+        "unmeasured must stay NULL, not 0"
+    );
+    assert_eq!(got.tool_result_tokens, None);
+    assert_eq!(got.attributed_token_fraction_micros, None);
+
+    cleanup_tenant(&backend, &tenant_id).await;
+}
+
+/// `find_gate_decision_by_canonical_hash` reads its row POSITIONALLY, so the
+/// by-name roundtrip above does not reach it: a wrong index there is a
+/// runtime type error or a silently swapped value, not a compile error.
+#[tokio::test]
+async fn pg_store_canonical_hash_lookup_reads_author_perplexity_by_position() {
+    let Some(backend) = postgres_backend().await else {
+        return;
+    };
+    backend.run_migrations().await.expect("run migrations");
+
+    let tenant_id = format!("pg-author-ppl-pos-{}", Uuid::new_v4());
+    let submission_id = Uuid::new_v4();
+    backend
+        .upsert_trace_submission(sample_submission(&tenant_id, submission_id))
+        .await
+        .expect("insert submission");
+
+    // Five distinct values, so a swapped index cannot pass.
+    let mut decision = sample_gate_decision(submission_id);
+    decision.qualifying_token_fraction_micros = Some(111);
+    decision.agent_prose_perplexity_micros = Some(222);
+    decision.agent_prose_tokens = Some(333);
+    decision.tool_result_perplexity_micros = Some(444);
+    decision.tool_result_tokens = Some(555);
+    decision.attributed_token_fraction_micros = Some(666);
+    backend
+        .insert_trace_gate_decision(&tenant_id, decision)
+        .await
+        .expect("insert gate decision");
+
+    let found = backend
+        .find_gate_decision_by_canonical_hash(&tenant_id, "sha256:canonical", Uuid::new_v4())
+        .await
+        .expect("lookup succeeds")
+        .expect("a decision for the fixture's canonical hash");
+    assert_eq!(found.qualifying_token_fraction_micros, Some(111));
+    assert_eq!(found.agent_prose_perplexity_micros, Some(222));
+    assert_eq!(found.agent_prose_tokens, Some(333));
+    assert_eq!(found.tool_result_perplexity_micros, Some(444));
+    assert_eq!(found.tool_result_tokens, Some(555));
+    assert_eq!(found.attributed_token_fraction_micros, Some(666));
 
     cleanup_tenant(&backend, &tenant_id).await;
 }

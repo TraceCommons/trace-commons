@@ -113,6 +113,12 @@ fn sample_gate_decision(
         chunk_count: None,
         total_chunk_count: None,
         qualifying_token_fraction_micros: None,
+        // Per-author perplexity (V73): absent here, never a real zero.
+        agent_prose_perplexity_micros: None,
+        agent_prose_tokens: None,
+        tool_result_perplexity_micros: None,
+        tool_result_tokens: None,
+        attributed_token_fraction_micros: None,
         chunks_capped: None,
         composite_score_micros: None,
         vector_index_snapshot_id: None,

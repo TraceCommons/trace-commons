@@ -1936,6 +1936,16 @@ pub struct TraceGateDecisionRow {
     /// or calibration will read every unmeasured row as the worst possible
     /// observation.
     pub qualifying_token_fraction_micros: Option<i64>,
+    /// Per-author perplexity (migration V73). Shadow mode. All five are
+    /// `None` when nothing was attributed -- pre-V73 rows and backends that
+    /// report no token lengths. A `*_perplexity_micros` is also `None` when
+    /// that author had no attributed tokens. Readers MUST NOT default any of
+    /// them.
+    pub agent_prose_perplexity_micros: Option<i64>,
+    pub agent_prose_tokens: Option<i64>,
+    pub tool_result_perplexity_micros: Option<i64>,
+    pub tool_result_tokens: Option<i64>,
+    pub attributed_token_fraction_micros: Option<i64>,
     /// The composite credit-quality score `q` * 1e6 as computed at scoring
     /// time under the calibration active then (migration V53, #199).
     ///
