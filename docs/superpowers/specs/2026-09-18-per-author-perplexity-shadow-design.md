@@ -112,9 +112,13 @@ on the existing fixtures.
 `ChunkPerplexity` gains:
 
 ```rust
-/// Char length of each scored token's decoded text, parallel to
-/// `logprobs`. Empty means the scorer cannot say; attribution is then
-/// unavailable and every per-author value is absent.
+/// Char length of every returned token's decoded text, INCLUDING the
+/// first token that `logprobs` drops: when present,
+/// `token_char_lens.len() == logprobs.len() + 1`, and
+/// `token_char_lens[i + 1]` is the length of the token `logprobs[i]`
+/// scores. The dropped token still occupies chars in the chunk, so the
+/// aligner needs its length to know where token 1 starts. Empty means
+/// the scorer cannot say; attribution is then unavailable.
 pub token_char_lens: Vec<u32>,
 ```
 
@@ -122,19 +126,23 @@ The `PerplexityScorer` trait signature does not change. Scorers report
 lengths; they do not learn about spans. Alignment lives once, in the
 enclave, which keeps the proprietary-backend seam a plain data contract.
 
-`NearAiPerplexityScorer` fills it from the response's `logprobs.tokens`,
-dropping the same leading BOS placeholder it drops from `token_logprobs`.
+`NearAiPerplexityScorer` fills it from the response's `logprobs.tokens`.
+A response with no `tokens` array, or one whose length differs from
+`token_logprobs`, yields an empty vector, never an error: the shadow
+signal must not be able to fail a score that succeeds today.
 `text_offset` is not used: observed 2026-09-18, the NEAR AI endpoint
 returns `-1` for every token. Every other implementation
 (`LocalPerplexityScorer`, reference, mocks, the default
 `score_chunk` derived from `score`) returns an empty vector.
 
 Trailing prediction position: the request sends `max_tokens: 1`, so the
-response carries one generated token after the prompt tokens. Whatever
-`aggregate_perplexity_metrics` / `chunk_perplexity_from_logprobs` do with
-that position today is kept; `token_char_lens` must stay parallel to
-`logprobs` element for element. The plan's first task is a test that pins
-this on a recorded wire fixture.
+response carries one generated token after the prompt tokens.
+`chunk_perplexity_from_logprobs` sums `logprobs[1..]`, so that token's
+NLL is part of today's whole-trace value; this design leaves that alone.
+The aligner recognizes it as the token whose start cursor equals the
+chunk's char count, requires it to be last, and attributes it to no
+author. Per-author sums therefore exclude one token per chunk that the
+whole-trace value includes.
 
 ### 3. Alignment and aggregation (`trace-commons-gate-enclave`)
 
@@ -142,31 +150,39 @@ New pure module `author_attribution.rs`:
 
 ```rust
 pub fn attribute_chunk(chunk: &TraceChunk, scored: &ChunkPerplexity)
-    -> Option<[AuthorSums; 3]>   // sum_nll + tokens per AuthorKind
+    -> Option<AuthorSums>        // sum_nll + tokens per AuthorKind
 ```
 
 Walk tokens left to right, advancing a char cursor by each length; each
 token is attributed to the span containing its **first** char. Returns
 `None` (chunk unattributed) when `token_char_lens` is empty, its length
-differs from `logprobs`, or the lengths do not account for the chunk's
-char count exactly, allowing only the trailing generated token to extend
-past the end. There is no partial or best-effort attribution: a chunk is
+is not `logprobs.len() + 1`, or the prompt tokens do not tile the chunk's
+char count exactly. There is no partial or best-effort attribution: a chunk is
 exact or it contributes nothing. (In the experiment a naive walk drifted
 on 6 of 40 sessions where multi-byte characters split across tokens
 decoded to replacement characters; those chunks must drop out rather
 than mis-attribute.)
 
-`ChunkedPerplexityAggregate` gains:
+The result type lives in `trace-commons-gate-api` beside the other
+decision types and travels as one value, `Option<AuthorPerplexity>`, from
+the orchestrator to the storage boundary, where it fans out into five
+columns:
 
-- `agent_prose_perplexity_micros: Option<u64>`, `agent_prose_tokens: Option<u64>`
-- `tool_result_perplexity_micros: Option<u64>`, `tool_result_tokens: Option<u64>`
-- `attributed_token_fraction_micros: Option<u64>` — tokens in attributed
-  chunks over all scored tokens.
+```rust
+pub struct AuthorPerplexity {
+    pub agent_prose_perplexity_micros: Option<u64>,
+    pub agent_prose_tokens: u64,
+    pub tool_result_perplexity_micros: Option<u64>,
+    pub tool_result_tokens: u64,
+    /// Tokens in attributed chunks over all scored tokens.
+    pub attributed_token_fraction_micros: u64,
+}
+```
 
-All five are `None` when no chunk was attributable. When some were, the
-fraction says how much of the trace the per-author values describe. A
+The whole value is `None` when no chunk was attributable. When some were,
+the fraction says how much of the trace the per-author values describe. A
 per-author perplexity is `None` when that author has zero attributed
-tokens (token count `Some(0)`). Math is f64, saturating micros,
+tokens (its token count is then 0). Math is f64, saturating micros,
 non-finite collapses to `None` — never to a number that looks real.
 
 ### 4. Persistence (`trace-commons-server`, migration)
@@ -199,8 +215,18 @@ decision field is identical.
 
 `/v1/admin/rescore-perplexity` runs `evaluate_perplexity_only`, which
 shares `chunk_and_score_perplexity` with ingest. `PerplexityOnlyOutcome`
-gains the five fields and the route's update writes them. No new route,
-no new credential; the existing admin gate applies.
+gains `author_perplexity`. No new route, no new credential; the existing
+admin gate applies.
+
+The route today overwrites `perplexity_micros`, `peak_perplexity_micros`
+and `perplexity_passed` via `update_trace_gate_decision_perplexity`. A
+backfill must not do that: the pilot's scorer model has changed since
+those rows were written, and re-deriving `perplexity_passed` under a new
+model would silently change gating history. PR 2 adds a request field
+`author_only` (default `false`, preserving today's behavior) and a second
+storage method, `update_trace_gate_decision_author_perplexity`, that
+writes only the five new columns on the latest decision row. With
+`author_only: true` the three whole-trace columns are never touched.
 
 Operational prerequisite, not a code change: before any backfill,
 confirm which model and host the pilot scorer is actually using. The
