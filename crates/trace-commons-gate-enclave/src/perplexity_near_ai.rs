@@ -315,7 +315,7 @@ impl NearAiPerplexityScorer {
     /// [`TokenRarityScorer::score_rarity`] so a caller computing both metrics
     /// on the same trace pays a single round-trip per scorer-pair invocation
     /// (the orchestrator must wire that sharing; this method does not cache).
-    fn fetch_logprobs(&self, plaintext: &[u8]) -> anyhow::Result<Vec<f32>> {
+    fn fetch_logprobs(&self, plaintext: &[u8]) -> anyhow::Result<ScoredTokens> {
         // Built once, outside the retry loop: a non-UTF-8 prompt is a
         // property of the trace, not of the upstream, and must never consume
         // an attempt.
@@ -344,7 +344,7 @@ impl NearAiPerplexityScorer {
         &self,
         url: &str,
         req: &CompletionsRequest,
-    ) -> Result<Vec<f32>, AttemptError> {
+    ) -> Result<ScoredTokens, AttemptError> {
         // Strip the URL from any reqwest transport error before it enters an
         // error chain: reqwest's Display embeds the request URL, and error
         // labels are recorded/logged under the hash-only convention (no raw
@@ -412,18 +412,29 @@ impl NearAiPerplexityScorer {
         // same question again produces the same answer at full inference
         // cost. They stay permanent for attempt accounting too -- unlike a
         // transport blip, this one is reproducible.
-        parse_logprobs_body(&body).map_err(|err| AttemptError {
+        parse_scored_body(&body).map_err(|err| AttemptError {
             class: RetryClass::Fatal,
             err,
         })
     }
 }
 
-/// Parse a 2xx `/v1/completions` body into its realized-token logprob slice.
+/// One response's scoring material: the raw logprob slice (element 0 is the
+/// BOS placeholder) and, when the response carried a parallel `tokens`
+/// array, each token's char length.
+#[derive(Debug, Clone, PartialEq)]
+struct ScoredTokens {
+    logprobs: Vec<f32>,
+    /// Same length as `logprobs`, or empty.
+    token_char_lens: Vec<u32>,
+}
+
+/// Parse a 2xx `/v1/completions` body into its realized-token logprob slice
+/// and, when present, the char length of each token.
 /// Split out of the HTTP path so the wire-shape contract unit-tests without
 /// a request, and so the retry loop has one place to classify body-shape
 /// failures.
-fn parse_logprobs_body(body: &str) -> anyhow::Result<Vec<f32>> {
+fn parse_scored_body(body: &str) -> anyhow::Result<ScoredTokens> {
     let parsed: CompletionsResponse =
         serde_json::from_str(body).context("NearAiScorerResponseParseFailed")?;
     let choice = parsed
@@ -431,13 +442,22 @@ fn parse_logprobs_body(body: &str) -> anyhow::Result<Vec<f32>> {
         .into_iter()
         .next()
         .ok_or_else(|| anyhow!("NearAiScorerResponseEmptyChoices"))?;
-    let lp = choice
+    let mut lp = choice
         .logprobs
         .ok_or_else(|| anyhow!("NearAiScorerResponseLogprobsMissing"))?;
 
     if lp.token_logprobs.is_empty() {
         bail!("NearAiScorerResponseTokenLogprobsEmpty");
     }
+    // Lengths feed a shadow signal only. A response without a usable
+    // `tokens` array still scores exactly as before.
+    let token_char_lens: Vec<u32> = match lp.tokens.take() {
+        Some(tokens) if tokens.len() == lp.token_logprobs.len() => tokens
+            .iter()
+            .map(|t| u32::try_from(t.chars().count()).unwrap_or(u32::MAX))
+            .collect(),
+        _ => Vec::new(),
+    };
     // NEAR AI returns `null` for token 0 (no prior context). Map to 0.0;
     // `aggregate_perplexity_metrics` drops the first element regardless.
     // Positions 1..N must be finite — non-finite there is a degenerate
@@ -450,14 +470,32 @@ fn parse_logprobs_body(body: &str) -> anyhow::Result<Vec<f32>> {
             None => bail!("NearAiScorerResponseNullLogprobInBody"),
         }
     }
-    Ok(out)
+    Ok(ScoredTokens {
+        logprobs: out,
+        token_char_lens,
+    })
 }
 
 /// Convert a raw logprob slice (element 0 = BOS placeholder, dropped) into
 /// [`ChunkPerplexity`]. Factored out of `score_chunk` so it unit-tests
 /// without HTTP. Fail-closed parallel to `aggregate_perplexity_metrics`:
 /// short or non-finite input collapses to a zero-token chunk.
+#[cfg(test)]
 fn chunk_perplexity_from_logprobs(logprobs: &[f32], tail_logprob_cutoff: f32) -> ChunkPerplexity {
+    chunk_perplexity_from_scored(
+        &ScoredTokens {
+            logprobs: logprobs.to_vec(),
+            token_char_lens: Vec::new(),
+        },
+        tail_logprob_cutoff,
+    )
+}
+
+/// As `chunk_perplexity_from_logprobs`, carrying token lengths through.
+/// `logprobs` loses element 0; `token_char_lens` keeps it, because the
+/// dropped token still occupies chars. A degenerate chunk drops both.
+fn chunk_perplexity_from_scored(scored: &ScoredTokens, tail_logprob_cutoff: f32) -> ChunkPerplexity {
+    let logprobs = &scored.logprobs;
     if logprobs.len() < 2 || logprobs[1..].iter().any(|lp| !lp.is_finite()) {
         return ChunkPerplexity {
             sum_nll: 0.0,
@@ -478,13 +516,13 @@ fn chunk_perplexity_from_logprobs(logprobs: &[f32], tail_logprob_cutoff: f32) ->
         tokens: usable.len() as u64,
         tail_tokens,
         logprobs: usable.to_vec(),
-        token_char_lens: Vec::new(),
+        token_char_lens: scored.token_char_lens.clone(),
     }
 }
 
 impl PerplexityScorer for NearAiPerplexityScorer {
     fn score(&self, plaintext: &[u8]) -> anyhow::Result<PerplexityResult> {
-        let logprobs = self.fetch_logprobs(plaintext)?;
+        let logprobs = self.fetch_logprobs(plaintext)?.logprobs;
         Ok(aggregate_perplexity_metrics(
             &logprobs,
             self.cfg.tail_logprob_cutoff,
@@ -492,9 +530,9 @@ impl PerplexityScorer for NearAiPerplexityScorer {
     }
 
     fn score_chunk(&self, chunk: &[u8]) -> anyhow::Result<ChunkPerplexity> {
-        let logprobs = self.fetch_logprobs(chunk)?;
-        Ok(chunk_perplexity_from_logprobs(
-            &logprobs,
+        let scored = self.fetch_logprobs(chunk)?;
+        Ok(chunk_perplexity_from_scored(
+            &scored,
             self.cfg.tail_logprob_cutoff,
         ))
     }
@@ -502,7 +540,7 @@ impl PerplexityScorer for NearAiPerplexityScorer {
 
 impl TokenRarityScorer for NearAiPerplexityScorer {
     fn score_rarity(&self, plaintext: &[u8], k: usize) -> anyhow::Result<TokenRarityResult> {
-        let logprobs = self.fetch_logprobs(plaintext)?;
+        let logprobs = self.fetch_logprobs(plaintext)?.logprobs;
         // Mirrors the local scorer: token 0 is dropped, K is capped at the
         // count of usable tokens, K=0 collapses to zero.
         let token_rarity_micros = per_token_rarity_micros(&logprobs, k);
@@ -548,6 +586,11 @@ struct LogprobsBlock {
     /// first entry is `null` (no prior context for token 0). vLLM emits f64
     /// values; we narrow to f32 to match the local scorer's arithmetic.
     token_logprobs: Vec<Option<f64>>,
+    /// Decoded text of each token, parallel to `token_logprobs`. Optional:
+    /// the score does not depend on it. `text_offset` is deliberately not
+    /// read -- observed 2026-09-18, the endpoint returns -1 for every token.
+    #[serde(default)]
+    tokens: Option<Vec<String>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -846,6 +889,65 @@ mod tests {
             err.downcast_ref::<ScorerFailure>()
                 .is_some_and(|f| matches!(f, ScorerFailure::ScorerFailed { .. }))
         );
+    }
+
+    const BODY_WITH_TOKENS: &str = r#"{"choices":[{"logprobs":{
+        "tokens":["The"," capital"," of"," Fran","ce","."," It"],
+        "token_logprobs":[null,-13.17,-0.5,-2.0,-0.1,-1.5,-3.0],
+        "text_offset":[-1,-1,-1,-1,-1,-1,-1]}}]}"#;
+
+    #[test]
+    fn scored_body_reports_one_char_length_per_returned_token() {
+        let scored = parse_scored_body(BODY_WITH_TOKENS).unwrap();
+        assert_eq!(scored.logprobs.len(), 7);
+        assert_eq!(scored.token_char_lens, vec![3, 8, 3, 5, 2, 1, 3]);
+    }
+
+    #[test]
+    fn token_lengths_are_chars_not_bytes() {
+        let body = r#"{"choices":[{"logprobs":{
+            "tokens":["na","ï","ve"],"token_logprobs":[null,-1.0,-1.0]}}]}"#;
+        assert_eq!(
+            parse_scored_body(body).unwrap().token_char_lens,
+            vec![2, 1, 2]
+        );
+    }
+
+    #[test]
+    fn a_missing_tokens_array_scores_normally_with_no_lengths() {
+        let body = r#"{"choices":[{"logprobs":{"token_logprobs":[null,-1.0,-2.0]}}]}"#;
+        let scored = parse_scored_body(body).unwrap();
+        assert_eq!(scored.logprobs.len(), 3);
+        assert!(scored.token_char_lens.is_empty());
+    }
+
+    #[test]
+    fn a_tokens_array_of_the_wrong_length_is_ignored_not_an_error() {
+        let body = r#"{"choices":[{"logprobs":{
+            "tokens":["a","b"],"token_logprobs":[null,-1.0,-2.0]}}]}"#;
+        assert!(parse_scored_body(body)
+            .unwrap()
+            .token_char_lens
+            .is_empty());
+    }
+
+    #[test]
+    fn chunk_lengths_stay_parallel_to_the_usable_logprobs() {
+        let scored = parse_scored_body(BODY_WITH_TOKENS).unwrap();
+        let chunk = chunk_perplexity_from_scored(&scored, -10.0);
+        assert_eq!(chunk.logprobs.len(), 6);
+        assert_eq!(chunk.token_char_lens.len(), chunk.logprobs.len() + 1);
+    }
+
+    #[test]
+    fn a_degenerate_chunk_drops_its_lengths_with_its_logprobs() {
+        let scored = ScoredTokens {
+            logprobs: vec![0.0, f32::NAN],
+            token_char_lens: vec![1, 1],
+        };
+        let chunk = chunk_perplexity_from_scored(&scored, -10.0);
+        assert_eq!(chunk.tokens, 0);
+        assert!(chunk.token_char_lens.is_empty());
     }
 
     #[test]
