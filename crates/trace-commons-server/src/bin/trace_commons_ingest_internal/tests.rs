@@ -70877,6 +70877,37 @@ async fn corrupted_rescore_fixture() -> CorruptedRescoreFixture {
     }
 }
 
+/// The route acknowledges and then works in the background, and a full
+/// re-score rewrites `perplexity_passed`. So a mistyped mode must be refused,
+/// never silently read as "full": `?author-only=true` parsing as the default
+/// would rewrite gating history while the operator believed they had asked
+/// for the safe mode.
+#[test]
+fn rescore_query_refuses_unknown_parameters_and_defaults_to_full() {
+    let parse = |json: &str| serde_json::from_str::<RescorePerplexityQuery>(json);
+    assert!(!parse("{}").expect("empty is valid").author_only);
+    assert!(parse(r#"{"author_only":true}"#).expect("valid").author_only);
+    assert!(
+        parse(r#"{"author-only":true}"#).is_err(),
+        "typo must not parse"
+    );
+    assert!(
+        parse(r#"{"authorOnly":true}"#).is_err(),
+        "typo must not parse"
+    );
+}
+
+#[test]
+fn rescore_ack_states_which_mode_was_accepted() {
+    let ack = serde_json::to_value(RescorePerplexityAck {
+        accepted: true,
+        limit: Some(5),
+        author_only: true,
+    })
+    .expect("serialize ack");
+    assert_eq!(ack["author_only"], serde_json::json!(true));
+}
+
 /// The backfill mode: the pilot's scorer model has changed since stored rows
 /// were gated, so re-deriving `perplexity_passed` would rewrite gating
 /// history. `author_only` must leave the whole-trace columns exactly as it

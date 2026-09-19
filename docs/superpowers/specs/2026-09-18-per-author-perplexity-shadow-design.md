@@ -227,8 +227,11 @@ The route today overwrites `perplexity_micros`, `peak_perplexity_micros`
 and `perplexity_passed` via `update_trace_gate_decision_perplexity`. A
 backfill must not do that: the pilot's scorer model has changed since
 those rows were written, and re-deriving `perplexity_passed` under a new
-model would silently change gating history. PR 2 adds a request field
-`author_only` (default `false`, preserving today's behavior) and a second
+model would silently change gating history. PR 2 adds a query parameter
+`author_only` (default `false`, preserving today's behavior; the route
+already takes `limit` as a query parameter). The query struct refuses
+unknown parameters, so a mistyped mode is a 400 rather than a silent full
+re-score, and the acknowledgement echoes the mode it accepted and a second
 storage method, `update_trace_gate_decision_author_perplexity`, that
 writes only the five new columns on the latest decision row. With
 `author_only: true` the three whole-trace columns are never touched.

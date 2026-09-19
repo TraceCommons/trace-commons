@@ -51629,6 +51629,10 @@ async fn requeue_pii_backstop_handler(
 /// (useful for a `?limit=5` pilot smoke before a full pass); absent means the
 /// whole decision backlog.
 #[derive(Debug, Deserialize)]
+// A mistyped `author_only` must be refused, not read as the default: the
+// default is a FULL re-score, which rewrites `perplexity_passed`, and the
+// route acknowledges before it works.
+#[serde(deny_unknown_fields)]
 struct RescorePerplexityQuery {
     #[serde(default)]
     limit: Option<i64>,
@@ -51648,6 +51652,9 @@ struct RescorePerplexityQuery {
 struct RescorePerplexityAck {
     accepted: bool,
     limit: Option<i64>,
+    /// The mode the pass was started in. The work is fire-and-forget, so
+    /// this is the operator's only confirmation of which columns it writes.
+    author_only: bool,
 }
 
 /// Running tally for one perplexity re-score pass.
@@ -51809,6 +51816,7 @@ async fn rescore_perplexity_handler(
     Ok(Json(RescorePerplexityAck {
         accepted: true,
         limit,
+        author_only,
     }))
 }
 
