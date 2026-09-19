@@ -108,6 +108,29 @@ pub struct OrchestrationDecision {
     pub index_cardinality_at_scoring: Option<u64>,
 }
 
+/// Perplexity split by who authored the scored tokens. Shadow mode:
+/// recorded, gates nothing. Absent as a whole when no chunk could be
+/// attributed (the scorer reported no token lengths, or none tiled).
+///
+/// Whole-trace perplexity is token-weighted, so in an agent session it is
+/// set by tool output and pasted input -- the most numerous and most
+/// predictable tokens. See
+/// `docs/superpowers/specs/2026-09-18-per-author-perplexity-shadow-design.md`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AuthorPerplexity {
+    /// `exp(sum_nll / n)` over `assistant_message` content tokens, in
+    /// micros. `None` when there were none -- never 0, which would read as
+    /// a real and maximally unsurprising score.
+    pub agent_prose_perplexity_micros: Option<u64>,
+    pub agent_prose_tokens: u64,
+    /// As above over `tool_result` content tokens.
+    pub tool_result_perplexity_micros: Option<u64>,
+    pub tool_result_tokens: u64,
+    /// Tokens in attributed chunks over all scored tokens: how much of the
+    /// trace the values above describe.
+    pub attributed_token_fraction_micros: u64,
+}
+
 /// Output of `EnclaveGateOrchestrator::evaluate_perplexity_only`. Carries
 /// only the perplexity-derived fields — there is deliberately no novelty,
 /// embedding, or vector-entry state, because the perplexity-only path never

@@ -154,7 +154,12 @@ pub fn attribute_chunk(chunk: &TraceChunk, scored: &ChunkPerplexity)
 ```
 
 Walk tokens left to right, advancing a char cursor by each length; each
-token is attributed to the span containing its **first** char. Returns
+token is attributed to the author kind covering **most of its chars**, a
+tie going to the author rather than to `Other`. (An earlier draft said
+"first char". BPE tokens carry their leading space and every rendered
+prefix ends in `": "`, so the first content token of every event starts on
+a prefix char; a first-char rule hands the first word of every message to
+`Other`. Found while writing the attribution tests.) Returns
 `None` (chunk unattributed) when `token_char_lens` is empty, its length
 is not `logprobs.len() + 1`, or the prompt tokens do not tile the chunk's
 char count exactly. There is no partial or best-effort attribution: a chunk is
