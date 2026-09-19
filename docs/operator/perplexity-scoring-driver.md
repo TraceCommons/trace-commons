@@ -214,6 +214,23 @@ Before a backfill:
    written, but nothing is backfilled either.
 2. Run with `limit=5` first and read the five rows back before a full pass.
 
+The pass is not resumable. It enumerates decisions oldest-first with
+`limit` and no "already backfilled" filter, so running `limit=500` twice
+re-scores the same 500 rows and pays for their inference again. Use a small
+`limit` as a smoke test, then one unlimited pass; do not try to page through
+the backlog with repeated limited calls.
+
+An author-only pass can only add. For a submission where the scorer
+attributes nothing -- it reports no token lengths, or lengths that never
+tile the chunk -- nothing is written and any value an earlier pass computed
+is left alone. The pass logs three counts when it finishes: `rescored`,
+`failed`, and `author_unattributed`. A pass that reports mostly
+`author_unattributed` has a scorer that supplies no usable token lengths;
+fix that before running it again, because rerunning will not help. A full
+(non-author-only) re-score is different: it has just rewritten the row's
+perplexity under the current scorer, so it clears per-author values it
+cannot recompute rather than leave them describing an older scoring.
+
 Reading the result:
 
 ```sql

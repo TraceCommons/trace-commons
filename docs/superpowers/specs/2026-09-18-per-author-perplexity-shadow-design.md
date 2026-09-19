@@ -93,7 +93,8 @@ pub enum AuthorKind { AgentProse, ToolResult, Other }
 `reasoning` is `Other` on purpose: its presence follows the contributor's
 `--no-reasoning` choice, and a score must not move with a consent flag.
 
-`parse_envelope_rendered_events` returns, per event, the rendered string
+A new `parse_envelope_events` (the existing `parse_envelope_rendered_events`
+becomes a text-only wrapper over it) returns, per event, the rendered string
 plus the char range of its content within that string and its kind.
 `TraceChunk` gains `spans: Vec<AuthorSpan { start: u32, len: u32, kind }>`
 in chars, relative to `TraceChunk::text`, covering the chunk exactly once
@@ -102,10 +103,14 @@ paths: greedy event packing and the fixed-window split of an oversized
 event. The fallback path for plaintext with no event structure yields one
 `Other` span per chunk.
 
-`TraceChunk::text` is byte-identical to today for every input. The
-existing guard `only_redacted_content_reaches_the_scored_text` stays and
-a new test asserts text identity against the pre-change renderer output
-on the existing fixtures.
+`TraceChunk::text` is byte-identical to today for every input. What
+guards that is the pre-existing chunker tests, which pin literal expected
+chunk texts and pass unchanged, plus the existing guard
+`only_redacted_content_reaches_the_scored_text`. The new test
+`adding_spans_does_not_change_the_scored_text` is weaker than its name: the
+legacy string entry point is now a wrapper over the typed one, so it
+compares the typed path with itself and proves only that the two entry
+points agree.
 
 ### 2. Token lengths at the scorer seam (`trace-commons-gate-api`)
 
@@ -137,7 +142,7 @@ returns `-1` for every token. Every other implementation
 
 Trailing prediction position: the request sends `max_tokens: 1`, so the
 response carries one generated token after the prompt tokens.
-`chunk_perplexity_from_logprobs` sums `logprobs[1..]`, so that token's
+`chunk_perplexity_from_scored` sums `logprobs[1..]`, so that token's
 NLL is part of today's whole-trace value; this design leaves that alone.
 The aligner recognizes it as the token whose start cursor equals the
 chunk's char count, requires it to be last, and attributes it to no
@@ -162,11 +167,21 @@ a prefix char; a first-char rule hands the first word of every message to
 `Other`. Found while writing the attribution tests.) Returns
 `None` (chunk unattributed) when `token_char_lens` is empty, its length
 is not `logprobs.len() + 1`, or the prompt tokens do not tile the chunk's
-char count exactly. There is no partial or best-effort attribution: a chunk is
-exact or it contributes nothing. (In the experiment a naive walk drifted
+char count exactly. There is no partial or best-effort attribution: a chunk
+tiles or it contributes nothing. (In the experiment a naive walk drifted
 on 6 of 40 sessions where multi-byte characters split across tokens
 decoded to replacement characters; those chunks must drop out rather
 than mis-attribute.)
+
+Known limit: tiling checks the TOTAL char count, not each token's
+position. A chunk containing both an over-count (one char decoded as two
+replacement chars) and an equal under-count (a token that decodes to fewer
+chars than it covers) would tile while every token between the two is
+shifted. Rare and bounded to one chunk, but it means "exact" is a claim
+about the total, not a proof of alignment. The stronger check belongs at
+the scorer, which holds both strings: report lengths only when the prompt
+tokens concatenate to the prompt text. Not done here; recorded as a
+follow-up.
 
 The result type lives in `trace-commons-gate-api` beside the other
 decision types and travels as one value, `Option<AuthorPerplexity>`, from
@@ -204,8 +219,11 @@ type, `trace_gate_service.rs`, `trace_corpus_storage.rs`,
 `db/trace_corpus_pg.rs`, `db/postgres.rs`. RLS is unchanged: same table,
 same policies.
 
-Hash-only logging holds: the new code logs counts (chunks attributed,
-chunks skipped) and fixed labels only.
+Hash-only logging holds trivially: the attribution module is pure and logs
+nothing. The only new log fields anywhere are the `author_only` bool and
+the `author_unattributed` count on the re-score pass. How much of a trace
+was attributed is persisted per row (`attributed_token_fraction_micros`)
+rather than logged.
 
 ### 5. Shadow guarantee
 
@@ -231,10 +249,15 @@ model would silently change gating history. PR 2 adds a query parameter
 `author_only` (default `false`, preserving today's behavior; the route
 already takes `limit` as a query parameter). The query struct refuses
 unknown parameters, so a mistyped mode is a 400 rather than a silent full
-re-score, and the acknowledgement echoes the mode it accepted and a second
-storage method, `update_trace_gate_decision_author_perplexity`, that
-writes only the five new columns on the latest decision row. With
-`author_only: true` the three whole-trace columns are never touched.
+re-score, and the acknowledgement echoes the mode it accepted. PR 2 also
+adds a second storage method,
+`update_trace_gate_decision_author_perplexity`, that writes only the five
+new columns on the latest decision row. With
+`author_only=true` the three whole-trace columns are never touched, and a
+submission for which nothing can be attributed is skipped and counted
+(`author_unattributed`) rather than overwritten with NULLs: a backfill can
+only add. A full re-score, which has just rewritten the row's perplexity
+under the current scorer, clears per-author values it cannot recompute.
 
 Operational prerequisite, not a code change: before any backfill,
 confirm which model and host the pilot scorer is actually using. The
@@ -274,3 +297,12 @@ many traces have too few agent-prose tokens to trust, and at agreement
 with human labels. Only then decide whether the floor moves to the new
 signal, whether short traces need a fallback, and whether a minimum
 agent-token count belongs in admission. None of that is decided here.
+
+Calibration must condition on `attributed_token_fraction_micros`, because
+skipped chunks are not a random sample. One split multi-byte character
+drops a whole chunk of roughly two thousand tokens, so chunks carrying
+unusual Unicode -- box-drawing, emoji, CJK in tool output, which are also
+plausibly the higher-perplexity ones -- are excluded systematically. The
+fraction says how much was dropped, not what the drop did to the value.
+Separately, five NULLs do not say why: "the scorer reported no lengths" and
+"lengths were reported but no chunk tiled" are indistinguishable from SQL.
