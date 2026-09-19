@@ -336,8 +336,20 @@ mod tests {
                 })
             }
         }
-        assert!(Fixed(0).score_chunk(b"x").unwrap().token_char_lens.is_empty());
-        assert!(Fixed(10).score_chunk(b"x").unwrap().token_char_lens.is_empty());
+        assert!(
+            Fixed(0)
+                .score_chunk(b"x")
+                .unwrap()
+                .token_char_lens
+                .is_empty()
+        );
+        assert!(
+            Fixed(10)
+                .score_chunk(b"x")
+                .unwrap()
+                .token_char_lens
+                .is_empty()
+        );
     }
 
     #[test]

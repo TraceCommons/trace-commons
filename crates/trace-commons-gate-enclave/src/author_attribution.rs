@@ -108,13 +108,8 @@ fn perplexity_micros(nll: f64, tokens: u64) -> Option<u64> {
     }
     let v = (nll / tokens as f64).exp() * 1_000_000.0;
     // Non-finite collapses to absent, never to a number that looks real.
-    (v.is_finite() && v >= 0.0).then(|| {
-        if v >= u64::MAX as f64 {
-            u64::MAX
-        } else {
-            v as u64
-        }
-    })
+    // `f64 as u64` saturates, so an enormous value pins at u64::MAX.
+    (v.is_finite() && v >= 0.0).then_some(v as u64)
 }
 
 /// Whole-trace per-author perplexity over every attributable chunk.

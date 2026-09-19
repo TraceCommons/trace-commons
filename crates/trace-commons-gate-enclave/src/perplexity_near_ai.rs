@@ -494,7 +494,10 @@ fn chunk_perplexity_from_logprobs(logprobs: &[f32], tail_logprob_cutoff: f32) ->
 /// As `chunk_perplexity_from_logprobs`, carrying token lengths through.
 /// `logprobs` loses element 0; `token_char_lens` keeps it, because the
 /// dropped token still occupies chars. A degenerate chunk drops both.
-fn chunk_perplexity_from_scored(scored: &ScoredTokens, tail_logprob_cutoff: f32) -> ChunkPerplexity {
+fn chunk_perplexity_from_scored(
+    scored: &ScoredTokens,
+    tail_logprob_cutoff: f32,
+) -> ChunkPerplexity {
     let logprobs = &scored.logprobs;
     if logprobs.len() < 2 || logprobs[1..].iter().any(|lp| !lp.is_finite()) {
         return ChunkPerplexity {
@@ -925,10 +928,7 @@ mod tests {
     fn a_tokens_array_of_the_wrong_length_is_ignored_not_an_error() {
         let body = r#"{"choices":[{"logprobs":{
             "tokens":["a","b"],"token_logprobs":[null,-1.0,-2.0]}}]}"#;
-        assert!(parse_scored_body(body)
-            .unwrap()
-            .token_char_lens
-            .is_empty());
+        assert!(parse_scored_body(body).unwrap().token_char_lens.is_empty());
     }
 
     #[test]

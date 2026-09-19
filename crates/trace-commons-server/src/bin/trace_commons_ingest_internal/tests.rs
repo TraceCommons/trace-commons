@@ -68476,9 +68476,7 @@ impl TraceGateService for FixedAuthorGateService {
 }
 
 /// Score one seeded submission under `gate_service` and return its row.
-async fn record_gate_with(
-    gate_service: Arc<dyn TraceGateService>,
-) -> StorageTraceGateDecisionRow {
+async fn record_gate_with(gate_service: Arc<dyn TraceGateService>) -> StorageTraceGateDecisionRow {
     let temp = tempfile::tempdir().expect("temp dir");
     let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
     let (artifact_store, _object_store_name) =

@@ -24,8 +24,8 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use trace_commons_gate_enclave::{
-    AuthorPerplexity, Embedder, EnclaveGateOrchestrator, EnclaveGateOrchestratorConfig, MockEmbedder,
-    MockPerplexityScorer, MockVectorIndex, PerplexityScorer, VectorIndex,
+    AuthorPerplexity, Embedder, EnclaveGateOrchestrator, EnclaveGateOrchestratorConfig,
+    MockEmbedder, MockPerplexityScorer, MockVectorIndex, PerplexityScorer, VectorIndex,
 };
 
 use crate::trace_artifact_kek::{KekContext, KmsKeyWrapper, WrappedDek};

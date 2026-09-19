@@ -387,8 +387,7 @@ fn finalize_plan(packed: Vec<(String, Vec<AuthorSpan>)>, cfg: &ChunkerConfig) ->
     // downstream requires contiguity or a zero start — per-chunk vector
     // entries are already sparse today, since only chunks clearing
     // `embed_insert_novelty_micros` are inserted.
-    let mut packed: Vec<Option<(String, Vec<AuthorSpan>)>> =
-        packed.into_iter().map(Some).collect();
+    let mut packed: Vec<Option<(String, Vec<AuthorSpan>)>> = packed.into_iter().map(Some).collect();
     let chunks = strided_selection_indices(total, cap)
         .into_iter()
         .map(|i| {
