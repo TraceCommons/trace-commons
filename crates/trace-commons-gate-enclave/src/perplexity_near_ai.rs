@@ -464,6 +464,7 @@ fn chunk_perplexity_from_logprobs(logprobs: &[f32], tail_logprob_cutoff: f32) ->
             tokens: 0,
             tail_tokens: 0,
             logprobs: Vec::new(),
+            token_char_lens: Vec::new(),
         };
     }
     let usable = &logprobs[1..];
@@ -477,6 +478,7 @@ fn chunk_perplexity_from_logprobs(logprobs: &[f32], tail_logprob_cutoff: f32) ->
         tokens: usable.len() as u64,
         tail_tokens,
         logprobs: usable.to_vec(),
+        token_char_lens: Vec::new(),
     }
 }
 

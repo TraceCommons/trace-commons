@@ -37,6 +37,15 @@ pub struct ChunkPerplexity {
     /// logprobs (e.g. the mock) — rarity then simply has no contribution
     /// from that chunk.
     pub logprobs: Vec<f32>,
+    /// Char length of every returned token's decoded text, INCLUDING the
+    /// first token that `logprobs` drops: when present,
+    /// `token_char_lens.len() == logprobs.len() + 1`, and
+    /// `token_char_lens[i + 1]` is the length of the token `logprobs[i]`
+    /// scores. The dropped token still occupies chars in the chunk, so an
+    /// aligner needs its length to know where token 1 starts. Empty means
+    /// the scorer cannot say; per-author attribution is then unavailable.
+    /// Shadow-mode input: nothing that decides a gate reads it.
+    pub token_char_lens: Vec<u32>,
 }
 
 /// Score a plaintext trace for perplexity. Real implementations run a local
@@ -62,6 +71,7 @@ pub trait PerplexityScorer: Send + Sync {
                 tokens: 0,
                 tail_tokens: 0,
                 logprobs: Vec::new(),
+                token_char_lens: Vec::new(),
             });
         }
         let perp = r.aggregate_perplexity_micros as f64 / 1_000_000.0;
@@ -73,6 +83,7 @@ pub trait PerplexityScorer: Send + Sync {
             tokens,
             tail_tokens,
             logprobs: Vec::new(),
+            token_char_lens: Vec::new(),
         })
     }
 }
@@ -308,6 +319,25 @@ mod tests {
         assert!(diff <= 2, "ln/exp round trip drifted by {diff} micros");
         assert!(chunk.logprobs.is_empty());
         assert!(chunk.tail_tokens <= chunk.tokens);
+    }
+
+    #[test]
+    fn default_score_chunk_reports_no_token_lengths() {
+        // The default derives sums from collapsed micros and never sees
+        // tokens, so it must say "cannot say" rather than invent lengths --
+        // on both of its branches.
+        struct Fixed(u64);
+        impl PerplexityScorer for Fixed {
+            fn score(&self, _plaintext: &[u8]) -> anyhow::Result<PerplexityResult> {
+                Ok(PerplexityResult {
+                    aggregate_perplexity_micros: 2_000_000,
+                    tail_fraction_micros: 0,
+                    tokens_scored: self.0,
+                })
+            }
+        }
+        assert!(Fixed(0).score_chunk(b"x").unwrap().token_char_lens.is_empty());
+        assert!(Fixed(10).score_chunk(b"x").unwrap().token_char_lens.is_empty());
     }
 
     #[test]
