@@ -1,10 +1,14 @@
 # Perplexity floor calibration for Qwen/Qwen3.8-27B
 
 Date: 2026-09-19
-Status: **recommended, not yet applied.** Update this line when the pilot's
-`TRACE_COMMONS_GATE_PERPLEXITY_FLOOR_MICROS` changes.
+Status: **applied to the pilot 2026-09-19 17:51Z.** The running process
+reports `TRACE_COMMONS_GATE_PERPLEXITY_FLOOR_MICROS=1500000`; the previous
+env file is kept beside it as a timestamped `bak-ppl-floor` backup. Health
+and `/v1/source` returned 200 after the restart and no errors were logged.
+No gate decision had been made under the new floor when this was written,
+so its effect on outcomes is calibrated here, not yet observed.
 
-Recommended floor: **1,500,000 micros (1.5).** Previous: 6,000,000 (6.0),
+Floor: **1,500,000 micros (1.5).** Previous: 6,000,000 (6.0),
 calibrated for `Qwen3.6-27B-FP8`.
 
 ## Why this was needed
