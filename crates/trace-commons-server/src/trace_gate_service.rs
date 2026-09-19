@@ -24,7 +24,7 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use trace_commons_gate_enclave::{
-    Embedder, EnclaveGateOrchestrator, EnclaveGateOrchestratorConfig, MockEmbedder,
+    AuthorPerplexity, Embedder, EnclaveGateOrchestrator, EnclaveGateOrchestratorConfig, MockEmbedder,
     MockPerplexityScorer, MockVectorIndex, PerplexityScorer, VectorIndex,
 };
 
@@ -119,6 +119,10 @@ pub struct GateDecision {
     /// qualifies. Unknown and zero are different facts, and the column is
     /// nullable so it can say so.
     pub qualifying_token_fraction_micros: Option<u64>,
+    /// Perplexity split by token author. Shadow mode. `None` from a
+    /// deterministic service and from any backend that reports no token
+    /// lengths -- unknown, not zero.
+    pub author_perplexity: Option<AuthorPerplexity>,
     /// Every per-chunk vector-index entry the gate inserted. Empty for
     /// deterministic/legacy services and failed gates. The host persists
     /// these as (submission_id, chunk_index)-tagged rows for revocation.
@@ -214,6 +218,28 @@ pub struct PerplexityOnlyGateOutcome {
     /// Whether the perplexity cleared the configured floor(s) — the same
     /// predicate a full evaluation applies.
     pub perplexity_passed: bool,
+    /// Perplexity split by token author. Shadow mode; never part of the
+    /// predicate above. `None` when nothing could be attributed.
+    pub author_perplexity: Option<AuthorPerplexity>,
+}
+
+/// Fan `AuthorPerplexity` out into its five nullable columns, in migration
+/// order: agent-prose perplexity, agent-prose tokens, tool-result
+/// perplexity, tool-result tokens, attributed fraction. Absent stays `None`
+/// throughout; a real zero token count stays `Some(0)`. Saturates rather
+/// than wraps, as the other micros mappings do.
+pub fn author_perplexity_columns(ap: Option<&AuthorPerplexity>) -> [Option<i64>; 5] {
+    let Some(ap) = ap else {
+        return [None; 5];
+    };
+    let sat = |v: u64| i64::try_from(v).unwrap_or(i64::MAX);
+    [
+        ap.agent_prose_perplexity_micros.map(sat),
+        Some(sat(ap.agent_prose_tokens)),
+        ap.tool_result_perplexity_micros.map(sat),
+        Some(sat(ap.tool_result_tokens)),
+        Some(sat(ap.attributed_token_fraction_micros)),
+    ]
 }
 
 /// Pluggable gate-evaluation service.
@@ -408,6 +434,7 @@ fn build_deterministic_decision(
         total_chunk_count: 1,
         chunks_capped: false,
         qualifying_token_fraction_micros: None,
+        author_perplexity: None,
         chunk_vector_entries: Vec::new(),
         dedup_simhash,
         // Names the derivation above, so the value is never clustered against
@@ -494,6 +521,8 @@ impl TraceGateService for InMemoryGateService {
             perplexity_micros: decision.perplexity_micros,
             peak_perplexity_micros: decision.peak_perplexity_micros,
             perplexity_passed: decision.perplexity_passed,
+            // The deterministic service sees no tokens to attribute.
+            author_perplexity: None,
         })
     }
 
@@ -750,6 +779,7 @@ where
             total_chunk_count: decision.total_chunk_count,
             chunks_capped: decision.chunks_capped,
             qualifying_token_fraction_micros: Some(decision.qualifying_token_fraction_micros),
+            author_perplexity: decision.author_perplexity,
             chunk_vector_entries: decision
                 .inserted_chunk_entries
                 .iter()
@@ -824,6 +854,7 @@ where
             perplexity_micros: outcome.perplexity_micros,
             peak_perplexity_micros: outcome.peak_perplexity_micros,
             perplexity_passed: outcome.perplexity_passed,
+            author_perplexity: outcome.author_perplexity,
         })
     }
 
@@ -1395,5 +1426,67 @@ mod enclave_gate_service_tests {
             without_correction.correction_simhash, None,
             "an envelope with no correction must not produce a correction signal"
         );
+    }
+
+    #[test]
+    fn author_perplexity_columns_keep_absent_and_zero_apart() {
+        assert_eq!(author_perplexity_columns(None), [None; 5]);
+        let ap = AuthorPerplexity {
+            agent_prose_perplexity_micros: Some(4_540_000),
+            agent_prose_tokens: 397,
+            tool_result_perplexity_micros: None,
+            tool_result_tokens: 0,
+            attributed_token_fraction_micros: 850_000,
+        };
+        assert_eq!(
+            author_perplexity_columns(Some(&ap)),
+            [Some(4_540_000), Some(397), None, Some(0), Some(850_000)]
+        );
+    }
+
+    #[test]
+    fn author_perplexity_columns_saturate_instead_of_wrapping() {
+        let ap = AuthorPerplexity {
+            agent_prose_perplexity_micros: Some(u64::MAX),
+            agent_prose_tokens: u64::MAX,
+            tool_result_perplexity_micros: None,
+            tool_result_tokens: 0,
+            attributed_token_fraction_micros: 0,
+        };
+        let cols = author_perplexity_columns(Some(&ap));
+        assert_eq!(cols[0], Some(i64::MAX));
+        assert_eq!(cols[1], Some(i64::MAX));
+    }
+
+    #[test]
+    fn a_scorer_without_token_lengths_reports_no_author_perplexity() {
+        // The mock scorer reports no token lengths, so nothing can be
+        // attributed: unknown, not zero -- on both service paths.
+        let decryptor = fixture_decryptor();
+        let svc = EnclaveGateService::mock_with_decryptor(Arc::clone(&decryptor));
+        let tenant = TenantCtx::new("tenant-a");
+        let (dek, wrapped) = wrap_fixture_dek(decryptor.as_ref(), tenant.tenant_storage_ref());
+        let ciphertext =
+            aead_encrypt_with_dek(&dek, b"a fresh trace plaintext").expect("encrypt fixture");
+
+        let decision = svc
+            .evaluate_trace(
+                &tenant,
+                &ciphertext,
+                &wrapped,
+                TraceArtifactKind::ContributionEnvelope,
+            )
+            .expect("evaluate_trace should succeed");
+        assert_eq!(decision.author_perplexity, None);
+
+        let outcome = svc
+            .evaluate_trace_perplexity_only(
+                &tenant,
+                &ciphertext,
+                &wrapped,
+                TraceArtifactKind::ContributionEnvelope,
+            )
+            .expect("perplexity-only evaluation should succeed");
+        assert_eq!(outcome.author_perplexity, None);
     }
 }

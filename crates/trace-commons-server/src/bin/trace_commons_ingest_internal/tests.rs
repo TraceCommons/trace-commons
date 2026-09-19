@@ -68437,6 +68437,117 @@ impl TraceGateService for FixedSignalGateService {
     }
 }
 
+/// Test-only gate service: the deterministic in-memory decision with a fixed
+/// `author_perplexity`, so a test can assert exactly what reaches the row.
+struct FixedAuthorGateService(Option<trace_commons_gate_enclave::AuthorPerplexity>);
+
+impl TraceGateService for FixedAuthorGateService {
+    fn evaluate_trace(
+        &self,
+        tenant_ctx: &trace_commons_server::trace_gate_service::TenantCtx,
+        envelope_ciphertext: &[u8],
+        wrapped_dek: &trace_commons_server::trace_artifact_kek::WrappedDek,
+        object_kind: TraceArtifactKind,
+    ) -> anyhow::Result<GateDecision> {
+        let in_memory =
+            InMemoryGateService::new("fixed_author_for_tests", "sha256:fixed_author_for_tests");
+        let mut decision =
+            in_memory.evaluate_trace(tenant_ctx, envelope_ciphertext, wrapped_dek, object_kind)?;
+        decision.author_perplexity = self.0;
+        Ok(decision)
+    }
+
+    fn invalidate_vector_entry(
+        &self,
+        _tenant_ctx: &trace_commons_server::trace_gate_service::TenantCtx,
+        _vector_entry_id: Uuid,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn safe_status(&self) -> GateServiceStatus {
+        GateServiceStatus {
+            kind: "in_memory".into(),
+            gate_policy_version: "fixed_author_for_tests".into(),
+            gate_version_hash: "sha256:fixed_author_for_tests".into(),
+            attestation_verifier_configured: false,
+        }
+    }
+}
+
+/// Score one seeded submission under `gate_service` and return its row.
+async fn record_gate_with(
+    gate_service: Arc<dyn TraceGateService>,
+) -> StorageTraceGateDecisionRow {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+    let (artifact_store, _object_store_name) =
+        fixture_gate_worker_artifact_store(artifact_temp.path());
+    let tenant_id = "tenant-a";
+    let db = seed_perplexity_driver_test_db(&artifact_store, tenant_id, 1);
+    let db_mirror: Arc<dyn Database> = db.clone();
+    let mut state = test_state_with_configured_artifact_store_policies_and_export_guardrails(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        Some(artifact_store),
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+        BTreeMap::new(),
+        false,
+        false,
+    );
+    Arc::make_mut(&mut state).gate_service = gate_service;
+    let submission_id = db
+        .list_submissions_needing_gate_decision(Utc::now(), 5, 0, 10)
+        .await
+        .expect("list seeded backlog")
+        .into_iter()
+        .next()
+        .expect("exactly one seeded submission")
+        .submission_id;
+    evaluate_and_record_gate(state.as_ref(), tenant_id, submission_id)
+        .await
+        .expect("evaluate_and_record_gate succeeds");
+    db.gate_decision_for(tenant_id, submission_id)
+        .expect("decision present")
+}
+
+/// V73: what the gate service reports about per-author perplexity is what the
+/// decision row stores -- including the difference between a measured zero
+/// and nothing measured.
+#[tokio::test]
+async fn evaluate_and_record_gate_persists_author_perplexity() {
+    let row = record_gate_with(Arc::new(FixedAuthorGateService(Some(
+        trace_commons_gate_enclave::AuthorPerplexity {
+            agent_prose_perplexity_micros: Some(4_540_000),
+            agent_prose_tokens: 397,
+            tool_result_perplexity_micros: None,
+            tool_result_tokens: 0,
+            attributed_token_fraction_micros: 850_000,
+        },
+    ))))
+    .await;
+    assert_eq!(row.agent_prose_perplexity_micros, Some(4_540_000));
+    assert_eq!(row.agent_prose_tokens, Some(397));
+    assert_eq!(row.tool_result_perplexity_micros, None);
+    assert_eq!(row.tool_result_tokens, Some(0));
+    assert_eq!(row.attributed_token_fraction_micros, Some(850_000));
+}
+
+#[tokio::test]
+async fn evaluate_and_record_gate_leaves_author_perplexity_null_when_unreported() {
+    let row = record_gate_with(Arc::new(FixedAuthorGateService(None))).await;
+    assert_eq!(row.agent_prose_perplexity_micros, None);
+    assert_eq!(row.agent_prose_tokens, None);
+    assert_eq!(row.tool_result_perplexity_micros, None);
+    assert_eq!(row.tool_result_tokens, None);
+    assert_eq!(row.attributed_token_fraction_micros, None);
+}
+
 /// Task 5 payoff: `evaluate_and_record_gate` must compute and persist a
 /// shadow-mode credit-quality score inline, immediately after it writes the
 /// gate decision row — not only via the separate batch backfill. Drives the
