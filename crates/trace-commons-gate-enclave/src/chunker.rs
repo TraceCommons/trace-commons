@@ -52,6 +52,110 @@ impl ChunkerConfig {
 pub struct TraceChunk {
     pub chunk_index: u32,
     pub text: String,
+    /// Who authored each run of `text`, in chars, tiling it exactly. Feeds
+    /// per-author perplexity (shadow mode); never changes what is scored.
+    pub spans: Vec<AuthorSpan>,
+}
+
+/// Who authored a run of scored chars. Drives per-author perplexity, a
+/// shadow signal; it never changes what text is scored.
+///
+/// `reasoning` is deliberately `Other`: its presence follows the
+/// contributor's `--no-reasoning` choice, and a score must not move with a
+/// consent flag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthorKind {
+    AgentProse,
+    ToolResult,
+    Other,
+}
+
+impl AuthorKind {
+    pub const COUNT: usize = 3;
+
+    pub fn index(self) -> usize {
+        match self {
+            AuthorKind::AgentProse => 0,
+            AuthorKind::ToolResult => 1,
+            AuthorKind::Other => 2,
+        }
+    }
+
+    fn of_event_type(event_type: &str) -> Self {
+        match event_type {
+            "assistant_message" => AuthorKind::AgentProse,
+            "tool_result" => AuthorKind::ToolResult,
+            _ => AuthorKind::Other,
+        }
+    }
+}
+
+/// A run of chars of one kind, in chars relative to the owning text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AuthorSpan {
+    pub start: u32,
+    pub len: u32,
+    pub kind: AuthorKind,
+}
+
+/// One canonically rendered event with its author spans. `text` is exactly
+/// what [`render_event_text`] produces.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenderedEvent {
+    pub text: String,
+    pub spans: Vec<AuthorSpan>,
+}
+
+/// Append a span, merging into the previous one when the kind matches.
+/// Zero-length spans are dropped so spans always tile with no empties.
+fn push_span(spans: &mut Vec<AuthorSpan>, len: usize, kind: AuthorKind) {
+    let len = u32::try_from(len).unwrap_or(u32::MAX);
+    if len == 0 {
+        return;
+    }
+    if let Some(last) = spans.last_mut() {
+        if last.kind == kind {
+            last.len = last.len.saturating_add(len);
+            return;
+        }
+    }
+    let start = spans
+        .last()
+        .map(|s| s.start.saturating_add(s.len))
+        .unwrap_or(0);
+    spans.push(AuthorSpan { start, len, kind });
+}
+
+/// The part of `spans` covering chars `[from, from + len)`, rebased to 0.
+fn slice_spans(spans: &[AuthorSpan], from: usize, len: usize) -> Vec<AuthorSpan> {
+    let (from, to) = (from as u64, (from + len) as u64);
+    let mut out = Vec::new();
+    for s in spans {
+        let (s_from, s_to) = (s.start as u64, s.start as u64 + s.len as u64);
+        let (lo, hi) = (s_from.max(from), s_to.min(to));
+        if lo < hi {
+            push_span(&mut out, (hi - lo) as usize, s.kind);
+        }
+    }
+    out
+}
+
+fn render_event(event_type: &str, tool_name: Option<&str>, content: &str) -> RenderedEvent {
+    let text = render_event_text(event_type, tool_name, content);
+    let content_chars = content.chars().count();
+    // `render_event_text` is `<prefix><content>\n`, so the prefix length is
+    // what is left. Derived rather than re-formatted so the two can never
+    // disagree about the prefix.
+    let prefix_chars = text.chars().count() - content_chars - 1;
+    let mut spans = Vec::new();
+    push_span(&mut spans, prefix_chars, AuthorKind::Other);
+    push_span(
+        &mut spans,
+        content_chars,
+        AuthorKind::of_event_type(event_type),
+    );
+    push_span(&mut spans, 1, AuthorKind::Other);
+    RenderedEvent { text, spans }
 }
 
 /// The full chunking outcome for one trace.
@@ -77,6 +181,16 @@ pub fn render_event_text(event_type: &str, tool_name: Option<&str>, content: &st
 /// when the plaintext is not JSON, has no `events` array, or the array is
 /// empty — callers fall back to fixed-window chunking of the raw text.
 pub fn parse_envelope_rendered_events(plaintext: &[u8]) -> Option<Vec<String>> {
+    Some(
+        parse_envelope_events(plaintext)?
+            .into_iter()
+            .map(|e| e.text)
+            .collect(),
+    )
+}
+
+/// As [`parse_envelope_rendered_events`], keeping each event's author spans.
+pub fn parse_envelope_events(plaintext: &[u8]) -> Option<Vec<RenderedEvent>> {
     let v: serde_json::Value = serde_json::from_slice(plaintext).ok()?;
     let events = v.get("events")?.as_array()?;
     if events.is_empty() {
@@ -95,7 +209,7 @@ pub fn parse_envelope_rendered_events(plaintext: &[u8]) -> Option<Vec<String>> {
                     .get("redacted_content")
                     .and_then(|x| x.as_str())
                     .unwrap_or("");
-                render_event_text(event_type, tool_name, content)
+                render_event(event_type, tool_name, content)
             })
             .collect(),
     )
@@ -130,36 +244,69 @@ fn split_fixed_char_windows(text: &str, window_chars: usize) -> Vec<String> {
 /// `max_chars` splits into `target_chars` fixed windows. Applies the cap via
 /// coverage-preserving strided selection.
 pub fn chunk_rendered_events(events: &[String], cfg: &ChunkerConfig) -> ChunkPlan {
+    let typed: Vec<RenderedEvent> = events
+        .iter()
+        .map(|text| {
+            let mut spans = Vec::new();
+            push_span(&mut spans, text.chars().count(), AuthorKind::Other);
+            RenderedEvent {
+                text: text.clone(),
+                spans,
+            }
+        })
+        .collect();
+    chunk_events(&typed, cfg)
+}
+
+/// [`chunk_rendered_events`] over typed events: identical packing and
+/// identical text, with each event's author spans carried through every
+/// path (greedy packing, oversized-event windows, the cap).
+pub fn chunk_events(events: &[RenderedEvent], cfg: &ChunkerConfig) -> ChunkPlan {
     let target = cfg.target_chars();
     let max = cfg.max_chars();
-    let mut texts: Vec<String> = Vec::new();
+    let mut packed: Vec<(String, Vec<AuthorSpan>)> = Vec::new();
     let mut current = String::new();
+    let mut current_spans: Vec<AuthorSpan> = Vec::new();
     let mut current_chars = 0usize;
     for event in events {
-        let event_chars = event.chars().count();
+        let event_chars = event.text.chars().count();
         if event_chars > max {
             // Oversized event: flush the open chunk, then fixed windows.
             if !current.is_empty() {
-                texts.push(std::mem::take(&mut current));
+                packed.push((
+                    std::mem::take(&mut current),
+                    std::mem::take(&mut current_spans),
+                ));
                 current_chars = 0;
             }
-            texts.extend(split_fixed_char_windows(event, target));
+            let mut from = 0usize;
+            for window in split_fixed_char_windows(&event.text, target) {
+                let len = window.chars().count();
+                packed.push((window, slice_spans(&event.spans, from, len)));
+                from += len;
+            }
             continue;
         }
         if !current.is_empty() && current_chars + event_chars > target {
-            texts.push(std::mem::take(&mut current));
+            packed.push((
+                std::mem::take(&mut current),
+                std::mem::take(&mut current_spans),
+            ));
             current_chars = 0;
         }
-        current.push_str(event);
+        current.push_str(&event.text);
+        for s in &event.spans {
+            push_span(&mut current_spans, s.len as usize, s.kind);
+        }
         current_chars += event_chars;
     }
     if !current.is_empty() {
-        texts.push(current);
+        packed.push((current, current_spans));
     }
-    if texts.is_empty() {
-        texts.push(String::new());
+    if packed.is_empty() {
+        packed.push((String::new(), Vec::new()));
     }
-    finalize_plan(texts, cfg)
+    finalize_plan(packed, cfg)
 }
 
 /// Identifier for the chunk-SELECTION algorithm (which chunks survive the
@@ -223,9 +370,9 @@ pub fn strided_selection_indices(total: usize, cap: usize) -> Vec<usize> {
         .collect()
 }
 
-fn finalize_plan(texts: Vec<String>, cfg: &ChunkerConfig) -> ChunkPlan {
+fn finalize_plan(packed: Vec<(String, Vec<AuthorSpan>)>, cfg: &ChunkerConfig) -> ChunkPlan {
     let cap = cfg.chunk_cap.max(1);
-    let total = texts.len();
+    let total = packed.len();
     // Unchanged meaning: capped iff more chunks existed than the cap allows,
     // and the drop count is how many the cap removed.
     let (chunks_capped, dropped_chunk_count) = if total > cap {
@@ -240,14 +387,19 @@ fn finalize_plan(texts: Vec<String>, cfg: &ChunkerConfig) -> ChunkPlan {
     // downstream requires contiguity or a zero start — per-chunk vector
     // entries are already sparse today, since only chunks clearing
     // `embed_insert_novelty_micros` are inserted.
-    let mut texts: Vec<Option<String>> = texts.into_iter().map(Some).collect();
+    let mut packed: Vec<Option<(String, Vec<AuthorSpan>)>> =
+        packed.into_iter().map(Some).collect();
     let chunks = strided_selection_indices(total, cap)
         .into_iter()
-        .map(|i| TraceChunk {
-            chunk_index: i as u32,
-            text: texts[i]
+        .map(|i| {
+            let (text, spans) = packed[i]
                 .take()
-                .expect("strided selection indices are unique"),
+                .expect("strided selection indices are unique");
+            TraceChunk {
+                chunk_index: i as u32,
+                text,
+                spans,
+            }
         })
         .collect();
     ChunkPlan {
@@ -263,11 +415,19 @@ fn finalize_plan(texts: Vec<String>, cfg: &ChunkerConfig) -> ChunkPlan {
 /// chunk. All chunk text is valid UTF-8 by construction, which also
 /// guarantees the NEAR AI scorer's UTF-8 prompt requirement downstream.
 pub fn chunk_envelope_plaintext(plaintext: &[u8], cfg: &ChunkerConfig) -> ChunkPlan {
-    if let Some(events) = parse_envelope_rendered_events(plaintext) {
-        return chunk_rendered_events(&events, cfg);
+    if let Some(events) = parse_envelope_events(plaintext) {
+        return chunk_events(&events, cfg);
     }
     let text = String::from_utf8_lossy(plaintext);
-    finalize_plan(split_fixed_char_windows(&text, cfg.target_chars()), cfg)
+    let packed = split_fixed_char_windows(&text, cfg.target_chars())
+        .into_iter()
+        .map(|w| {
+            let mut spans = Vec::new();
+            push_span(&mut spans, w.chars().count(), AuthorKind::Other);
+            (w, spans)
+        })
+        .collect();
+    finalize_plan(packed, cfg)
 }
 
 #[cfg(test)]
@@ -605,5 +765,136 @@ mod tests {
         let a = chunk_envelope_plaintext(&plaintext, &cfg(8, 16, 16));
         let b = chunk_envelope_plaintext(&plaintext, &cfg(8, 16, 16));
         assert_eq!(a, b);
+    }
+
+    fn assert_spans_tile(chunk: &TraceChunk) {
+        let mut cursor = 0u32;
+        for s in &chunk.spans {
+            assert_eq!(s.start, cursor, "spans must be contiguous");
+            assert!(s.len > 0, "no empty spans");
+            cursor += s.len;
+        }
+        assert_eq!(
+            cursor as usize,
+            chunk.text.chars().count(),
+            "spans must tile the text"
+        );
+        for w in chunk.spans.windows(2) {
+            assert_ne!(w[0].kind, w[1].kind, "adjacent same-kind spans must merge");
+        }
+    }
+
+    fn kind_chars(chunk: &TraceChunk, kind: AuthorKind) -> String {
+        let chars: Vec<char> = chunk.text.chars().collect();
+        chunk
+            .spans
+            .iter()
+            .filter(|s| s.kind == kind)
+            .flat_map(|s| chars[s.start as usize..(s.start + s.len) as usize].iter())
+            .collect()
+    }
+
+    fn typed_envelope(events: &[(&str, Option<&str>, &str)]) -> Vec<u8> {
+        let events: Vec<serde_json::Value> = events
+            .iter()
+            .map(|(ty, tool, content)| {
+                let mut e = serde_json::json!({"event_type": ty, "redacted_content": content});
+                if let Some(t) = tool {
+                    e["tool_name"] = serde_json::json!(t);
+                }
+                e
+            })
+            .collect();
+        serde_json::to_vec(&serde_json::json!({ "events": events })).unwrap()
+    }
+
+    #[test]
+    fn spans_mark_only_the_content_of_prose_and_tool_results() {
+        let env = typed_envelope(&[
+            ("user_message", None, "fix it"),
+            ("assistant_message", None, "on it"),
+            ("tool_call", Some("Bash"), ""),
+            ("tool_result", Some("Bash"), "ok\n"),
+            ("reasoning", None, "hmm"),
+        ]);
+        let plan = chunk_envelope_plaintext(&env, &cfg(2048, 3072, 16));
+        assert_eq!(plan.chunks.len(), 1);
+        let c = &plan.chunks[0];
+        assert_spans_tile(c);
+        assert_eq!(kind_chars(c, AuthorKind::AgentProse), "on it");
+        assert_eq!(kind_chars(c, AuthorKind::ToolResult), "ok\n");
+        // Prefixes, newlines, user text, reasoning and the empty tool_call
+        // scaffold are all Other.
+        assert!(kind_chars(c, AuthorKind::Other).contains("reasoning: hmm"));
+        assert!(kind_chars(c, AuthorKind::Other).contains("tool_call (Bash): "));
+    }
+
+    #[test]
+    fn adding_spans_does_not_change_the_scored_text() {
+        let env = typed_envelope(&[
+            ("user_message", None, "héllo wörld"),
+            ("assistant_message", None, "naïve café"),
+            ("tool_result", Some("Read"), "x".repeat(40).as_str()),
+        ]);
+        let config = cfg(4, 6, 16);
+        let legacy = chunk_rendered_events(&parse_envelope_rendered_events(&env).unwrap(), &config);
+        let typed = chunk_envelope_plaintext(&env, &config);
+        let texts = |p: &ChunkPlan| p.chunks.iter().map(|c| c.text.clone()).collect::<Vec<_>>();
+        assert_eq!(texts(&legacy), texts(&typed));
+        assert_eq!(legacy.chunks_capped, typed.chunks_capped);
+    }
+
+    #[test]
+    fn an_oversized_event_keeps_exact_spans_across_its_windows() {
+        let env = typed_envelope(&[("tool_result", Some("Read"), "y".repeat(100).as_str())]);
+        let plan = chunk_envelope_plaintext(&env, &cfg(5, 6, 64));
+        assert!(plan.chunks.len() > 1);
+        for c in &plan.chunks {
+            assert_spans_tile(c);
+        }
+        let all: String = plan
+            .chunks
+            .iter()
+            .map(|c| kind_chars(c, AuthorKind::ToolResult))
+            .collect();
+        assert_eq!(all, "y".repeat(100));
+        // The prefix lives in the first window only.
+        assert!(kind_chars(&plan.chunks[0], AuthorKind::Other).starts_with("tool_result (Read): "));
+        assert_eq!(kind_chars(&plan.chunks[1], AuthorKind::Other), "");
+    }
+
+    #[test]
+    fn spans_survive_the_strided_cap() {
+        let contents: Vec<String> = (0..40)
+            .map(|i| format!("assistant text number {i} ").repeat(3))
+            .collect();
+        let events: Vec<(&str, Option<&str>, &str)> = contents
+            .iter()
+            .map(|c| ("assistant_message", None, c.as_str()))
+            .collect();
+        let plan = chunk_envelope_plaintext(&typed_envelope(&events), &cfg(8, 64, 4));
+        assert!(plan.chunks_capped);
+        assert_eq!(plan.chunks.len(), 4);
+        for c in &plan.chunks {
+            assert_spans_tile(c);
+        }
+    }
+
+    #[test]
+    fn unstructured_plaintext_is_all_other() {
+        let plan = chunk_envelope_plaintext(b"not json at all", &cfg(2048, 3072, 16));
+        let c = &plan.chunks[0];
+        assert_spans_tile(c);
+        assert!(c.spans.iter().all(|s| s.kind == AuthorKind::Other));
+    }
+
+    #[test]
+    fn legacy_string_events_are_all_other() {
+        let plan = chunk_rendered_events(
+            &["assistant_message: hi\n".to_string()],
+            &cfg(2048, 3072, 16),
+        );
+        assert_spans_tile(&plan.chunks[0]);
+        assert_eq!(kind_chars(&plan.chunks[0], AuthorKind::AgentProse), "");
     }
 }
