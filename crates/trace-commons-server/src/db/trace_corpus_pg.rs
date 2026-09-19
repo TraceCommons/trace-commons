@@ -6328,6 +6328,48 @@ impl TraceCorpusStore for PgBackend {
         Ok(())
     }
 
+    async fn update_trace_gate_decision_author_perplexity(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        columns: [Option<i64>; 5],
+    ) -> Result<(), DatabaseError> {
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        // The five V73 columns and nothing else, on the latest decision row
+        // only -- the same row selection as
+        // `update_trace_gate_decision_perplexity`, for the same reason: a
+        // submission can own several rows and the older ones carry an older
+        // gate version stamp. Leaving `perplexity_micros` /
+        // `perplexity_passed` alone is the point: a backfill scored by a
+        // different model must not rewrite what the row was gated on.
+        tx.execute(
+            "UPDATE trace_gate_decisions
+                SET agent_prose_perplexity_micros = $3,
+                    agent_prose_tokens = $4,
+                    tool_result_perplexity_micros = $5,
+                    tool_result_tokens = $6,
+                    attributed_token_fraction_micros = $7
+             WHERE tenant_id = $1 AND decision_id = (
+                 SELECT decision_id FROM trace_gate_decisions
+                  WHERE tenant_id = $1 AND submission_id = $2
+                  ORDER BY decided_at DESC LIMIT 1)",
+            &[
+                &tenant_id,
+                &submission_id,
+                &columns[0],
+                &columns[1],
+                &columns[2],
+                &columns[3],
+                &columns[4],
+            ],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(())
+    }
+
     async fn update_trace_gate_decision_credit_quality(
         &self,
         tenant_id: &str,

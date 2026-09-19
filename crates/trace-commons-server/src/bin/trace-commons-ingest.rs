@@ -51629,9 +51629,21 @@ async fn requeue_pii_backstop_handler(
 /// (useful for a `?limit=5` pilot smoke before a full pass); absent means the
 /// whole decision backlog.
 #[derive(Debug, Deserialize)]
+// A mistyped `author_only` must be refused, not read as the default: the
+// default is a FULL re-score, which rewrites `perplexity_passed`, and the
+// route acknowledges before it works.
+#[serde(deny_unknown_fields)]
 struct RescorePerplexityQuery {
     #[serde(default)]
     limit: Option<i64>,
+    /// Backfill the per-author perplexity columns (migration V73) only;
+    /// never touch whole-trace perplexity or `perplexity_passed`. This is the
+    /// mode to use on rows gated under a scorer model that has since changed:
+    /// a full re-score would re-derive `perplexity_passed` under the new
+    /// model and silently rewrite gating history. Absent means `false`,
+    /// which is the route's behavior before this parameter existed.
+    #[serde(default)]
+    author_only: bool,
 }
 
 /// Hash-only acknowledgement for the perplexity re-score admin route. The work
@@ -51640,6 +51652,9 @@ struct RescorePerplexityQuery {
 struct RescorePerplexityAck {
     accepted: bool,
     limit: Option<i64>,
+    /// The mode the pass was started in. The work is fire-and-forget, so
+    /// this is the operator's only confirmation of which columns it writes.
+    author_only: bool,
 }
 
 /// Running tally for one perplexity re-score pass.
@@ -51649,6 +51664,11 @@ struct RescorePerplexitySummary {
     rescored: usize,
     /// Submissions skipped because load/scoring/update failed (left as-is).
     failed: usize,
+    /// Author-only mode: submissions scored successfully for which nothing
+    /// could be attributed, so nothing was written. Not a failure, but not a
+    /// backfill either -- a pass that reports only this has a scorer that
+    /// supplies no usable token lengths.
+    author_unattributed: usize,
 }
 
 /// Re-score the perplexity of ONE already-decided submission and update only
@@ -51658,7 +51678,19 @@ struct RescorePerplexitySummary {
 /// query, no vector-index insert), then updates only `perplexity_micros`,
 /// `peak_perplexity_micros`, and `perplexity_passed`. Novelty, tail-fraction,
 /// vector-entry, gate status, and credit are never touched.
-async fn rescore_perplexity_one(state: &AppState, item: &GateWorkItem) -> anyhow::Result<()> {
+/// What one re-score wrote.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RescoreOneOutcome {
+    Updated,
+    /// Author-only mode, and the scorer attributed nothing: nothing written.
+    AuthorUnattributed,
+}
+
+async fn rescore_perplexity_one(
+    state: &AppState,
+    item: &GateWorkItem,
+    author_only: bool,
+) -> anyhow::Result<RescoreOneOutcome> {
     let db = state
         .db_mirror
         .as_ref()
@@ -51677,21 +51709,46 @@ async fn rescore_perplexity_one(state: &AppState, item: &GateWorkItem) -> anyhow
     let perplexity_micros = i64::try_from(outcome.perplexity_micros).unwrap_or(i64::MAX);
     let peak_perplexity_micros =
         Some(i64::try_from(outcome.peak_perplexity_micros).unwrap_or(i64::MAX));
-    db.update_trace_gate_decision_perplexity(
+    let author_cols = trace_commons_server::trace_gate_service::author_perplexity_columns(
+        outcome.author_perplexity.as_ref(),
+    );
+    // A backfill can only add. In author-only mode a scorer that attributes
+    // nothing (no token lengths, or lengths that never tile) must not erase
+    // values an earlier pass computed; the pass counts it instead, so a
+    // backlog-wide "nothing attributed" is visible rather than reported as
+    // success.
+    if author_only && outcome.author_perplexity.is_none() {
+        return Ok(RescoreOneOutcome::AuthorUnattributed);
+    }
+    if !author_only {
+        db.update_trace_gate_decision_perplexity(
+            &item.tenant_id,
+            item.submission_id,
+            perplexity_micros,
+            peak_perplexity_micros,
+            outcome.perplexity_passed,
+        )
+        .await?;
+    }
+    // Both modes write the per-author columns: a full re-score is a superset
+    // of the author-only backfill. In full mode an absent value is written
+    // as NULL on purpose: the row's perplexity was just rewritten under the
+    // current scorer, so per-author values from an older scoring no longer
+    // describe the row and must not be left to disagree with it.
+    db.update_trace_gate_decision_author_perplexity(
         &item.tenant_id,
         item.submission_id,
-        perplexity_micros,
-        peak_perplexity_micros,
-        outcome.perplexity_passed,
+        author_cols,
     )
     .await?;
     // Hash-only: identify the submission by hash, never the perplexity value.
     tracing::info!(
         tenant_hash = %sha256_prefixed(&item.tenant_id),
         submission_hash = %sha256_prefixed(&item.submission_id.to_string()),
+        author_only,
         "perplexity re-score updated one submission"
     );
-    Ok(())
+    Ok(RescoreOneOutcome::Updated)
 }
 
 /// One perplexity re-score pass. Enumerates submissions that already have a gate
@@ -51703,6 +51760,7 @@ async fn rescore_perplexity_one(state: &AppState, item: &GateWorkItem) -> anyhow
 async fn run_rescore_perplexity_pass(
     state: Arc<AppState>,
     limit: Option<i64>,
+    author_only: bool,
 ) -> anyhow::Result<RescorePerplexitySummary> {
     let db = state
         .db_mirror
@@ -51714,8 +51772,9 @@ async fn run_rescore_perplexity_pass(
         .await?;
     let mut summary = RescorePerplexitySummary::default();
     for item in &items {
-        match rescore_perplexity_one(state.as_ref(), item).await {
-            Ok(()) => summary.rescored += 1,
+        match rescore_perplexity_one(state.as_ref(), item, author_only).await {
+            Ok(RescoreOneOutcome::Updated) => summary.rescored += 1,
+            Ok(RescoreOneOutcome::AuthorUnattributed) => summary.author_unattributed += 1,
             Err(error) => {
                 summary.failed += 1;
                 tracing::warn!(
@@ -51760,13 +51819,15 @@ async fn rescore_perplexity_handler(
         ));
     }
     let limit = query.limit;
+    let author_only = query.author_only;
     let task_state = state.clone();
     tokio::spawn(async move {
-        match run_rescore_perplexity_pass(task_state, limit).await {
+        match run_rescore_perplexity_pass(task_state, limit, author_only).await {
             Ok(summary) => {
                 tracing::info!(
                     rescored = summary.rescored,
                     failed = summary.failed,
+                    author_unattributed = summary.author_unattributed,
                     "Trace Commons perplexity re-score pass completed"
                 );
             }
@@ -51781,6 +51842,7 @@ async fn rescore_perplexity_handler(
     Ok(Json(RescorePerplexityAck {
         accepted: true,
         limit,
+        author_only,
     }))
 }
 
