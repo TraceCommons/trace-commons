@@ -1017,5 +1017,24 @@ GRANT EXECUTE ON FUNCTION trace_reward_cancel(TEXT, UUID, UUID) TO trace_reward_
 GRANT EXECUTE ON FUNCTION trace_reward_invalidate(TEXT, TEXT, UUID) TO trace_reward_runtime;
 GRANT EXECUTE ON FUNCTION trace_reward_history(TEXT, TEXT, INTEGER) TO trace_reward_runtime;
 
-GRANT trace_reward_runtime TO CURRENT_USER WITH ADMIN OPTION;
+-- The migrator must end up holding ADMIN on trace_reward_runtime, so it can hand
+-- the role to the login roles an operator provisions. Only when it does not hold
+-- it already: since PostgreSQL 16 the role's creator holds ADMIN from the moment
+-- of creation, and granting it to yourself a second time is refused to anyone
+-- but a superuser -- `ADMIN option cannot be granted back to your own grantor`.
+-- A superuser, and any migrator on 15 or earlier, has no such row and takes the
+-- grant exactly as before.
+DO $$ BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+          FROM pg_catalog.pg_auth_members membership
+          JOIN pg_catalog.pg_roles granted ON granted.oid = membership.roleid
+          JOIN pg_catalog.pg_roles holder ON holder.oid = membership.member
+         WHERE granted.rolname = 'trace_reward_runtime'
+           AND holder.rolname = CURRENT_USER
+           AND membership.admin_option
+    ) THEN
+        GRANT trace_reward_runtime TO CURRENT_USER WITH ADMIN OPTION;
+    END IF;
+END $$;
 REVOKE trace_reward_guard FROM CURRENT_USER;
