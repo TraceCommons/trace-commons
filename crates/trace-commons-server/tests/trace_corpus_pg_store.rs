@@ -4643,6 +4643,55 @@ async fn pg_store_list_dedup_signals_round_trips_the_stamp() {
     cleanup_tenant(&backend, &tenant_id).await;
 }
 
+/// The credit-quality batch pass picks its calibration from each row's
+/// `decided_at`, read through the NARROW trace_gate_driver pool. A column the
+/// narrow role cannot select is a runtime permission error, not a compile
+/// error, and an in-memory store cannot see it.
+#[tokio::test]
+async fn pg_store_credit_scoring_inputs_carry_decided_at_through_the_narrow_pool() {
+    let Some(backend) = gate_driver_backend().await else {
+        return;
+    };
+
+    let tenant_id = format!("pg-credit-inputs-{}", Uuid::new_v4());
+    let submission_id = Uuid::new_v4();
+    backend
+        .upsert_trace_submission(sample_submission(&tenant_id, submission_id))
+        .await
+        .expect("insert scoped submission");
+
+    // One second before the Qwen3.8 switch: the instant the schedule turns on.
+    let decided_at = chrono::DateTime::<Utc>::from_timestamp(
+        trace_commons_server::credit_quality::QWEN3_8_EFFECTIVE_FROM_UNIX - 1,
+        0,
+    )
+    .expect("valid timestamp");
+    let mut decision = sample_gate_decision(submission_id);
+    decision.decided_at = decided_at;
+    let decision_id = decision.decision_id;
+    backend
+        .insert_trace_gate_decision(&tenant_id, decision)
+        .await
+        .expect("insert gate decision");
+
+    let inputs = backend
+        .list_gate_decisions_for_credit_scoring(i64::MAX)
+        .await
+        .expect("enumeration runs on the gate-driver pool");
+    let seen = inputs
+        .iter()
+        .find(|row| row.tenant_id == tenant_id && row.decision_id == decision_id)
+        .expect("the decision is enumerated");
+    assert_eq!(seen.decided_at, decided_at);
+    assert_eq!(
+        trace_commons_server::credit_quality::constants_at(seen.decided_at.timestamp()).version,
+        2,
+        "a row decided before the switch resolves to the Qwen3.6 calibration"
+    );
+
+    cleanup_tenant(&backend, &tenant_id).await;
+}
+
 #[tokio::test]
 async fn revocation_propagation_failure_audit_metadata_round_trips() {
     // Phase A6: the typed RevocationPropagationFailure audit-metadata variant

@@ -4850,7 +4850,8 @@ impl Database for PgBackend {
                 "SELECT tenant_id, decision_id,
                         COALESCE(perplexity_micros, 0)      AS perplexity_micros,
                         COALESCE(peak_perplexity_micros, 0) AS peak_perplexity_micros,
-                        COALESCE(novelty_score_micros, 0)   AS novelty_score_micros
+                        COALESCE(novelty_score_micros, 0)   AS novelty_score_micros,
+                        decided_at
                  FROM trace_gate_decisions
                  ORDER BY decided_at ASC
                  LIMIT $1",
@@ -4866,6 +4867,7 @@ impl Database for PgBackend {
                 perplexity_micros: row.get("perplexity_micros"),
                 peak_perplexity_micros: row.get("peak_perplexity_micros"),
                 novelty_score_micros: row.get("novelty_score_micros"),
+                decided_at: row.get("decided_at"),
             })
             .collect())
     }

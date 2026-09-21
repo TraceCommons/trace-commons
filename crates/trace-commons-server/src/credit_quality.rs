@@ -56,9 +56,77 @@ pub const CREDIT_QUALITY_CONSTANTS_V2: CreditQualityConstants = CreditQualityCon
     ..CREDIT_QUALITY_CONSTANTS_V1
 };
 
-/// The active calibration used by the production inline score and the batch
-/// re-score route. Bumping the active version touches this one line.
-pub const CREDIT_QUALITY_ACTIVE: CreditQualityConstants = CREDIT_QUALITY_CONSTANTS_V2;
+/// V3 recalibrates for `Qwen/Qwen3.8-27B`, which the pilot has scored with
+/// since 2026-09-09. Whole-trace perplexity under it is about a quarter of
+/// what `Qwen3.6-27B-FP8` produced (p50 5.14, p90 13.73 over 307 production
+/// traces), so V2's floor and ceiling sat above almost every real trace.
+///
+/// The anomaly thresholds move with it, for a reason that predates the model
+/// switch. `peak / whole-trace` was specified to default to 1 and bite only on
+/// a suspiciously spiky profile, but it grows with chunk count -- exactly 1
+/// for a single-chunk trace, a median of 8.3 at the 16-chunk cap -- so under
+/// thresholds of 3 and 10 it penalised 79% of real traces and zeroed 36%. V3
+/// sets them from the observed ratio: soft at p90 (39.5), hard at p99 (310).
+/// That restores the intent at the cost of a weaker guard against one inserted
+/// garbage chunk; normalising the ratio by chunk count is the real fix and is
+/// a change to the function, not to a constant.
+///
+/// Novelty and the graded multipliers are unchanged. See
+/// `docs/superpowers/reports/2026-09-19-credit-quality-v3-calibration.md`.
+pub const CREDIT_QUALITY_CONSTANTS_V3: CreditQualityConstants = CreditQualityConstants {
+    ppl_floor_micros: 1_500_000,
+    ppl_ceil_micros: 13_730_000,
+    anomaly_soft_ratio_micros: 40_000_000,
+    anomaly_hard_ratio_micros: 310_000_000,
+    version: 3,
+    ..CREDIT_QUALITY_CONSTANTS_V2
+};
+
+/// When the pilot's scorer moved to `Qwen/Qwen3.8-27B`: 2026-09-09T05:49:19Z.
+pub const QWEN3_8_EFFECTIVE_FROM_UNIX: i64 = 1_788_932_959;
+
+/// One era of the calibration schedule.
+#[derive(Debug, Clone, Copy)]
+pub struct CalibrationEra {
+    /// Decisions at or after this instant (Unix seconds) use `constants`,
+    /// until the next era begins.
+    pub effective_from_unix: i64,
+    pub constants: CreditQualityConstants,
+}
+
+/// A calibration belongs to a scorer model, and decisions made under different
+/// models sit in one table. The batch pass recomputes EVERY row, so a single
+/// active constant set would re-score Qwen3.6-era rows against the Qwen3.8
+/// ceiling, where their perplexities saturate. Each decision is scored with
+/// the calibration in force when it was decided, which also makes the batch
+/// pass idempotent across a model switch. Append an era; never edit one.
+pub const CREDIT_QUALITY_SCHEDULE: [CalibrationEra; 2] = [
+    CalibrationEra {
+        effective_from_unix: i64::MIN,
+        constants: CREDIT_QUALITY_CONSTANTS_V2,
+    },
+    CalibrationEra {
+        effective_from_unix: QWEN3_8_EFFECTIVE_FROM_UNIX,
+        constants: CREDIT_QUALITY_CONSTANTS_V3,
+    },
+];
+
+/// The calibration in force for a decision made at `decided_at_unix`.
+pub fn constants_at(decided_at_unix: i64) -> &'static CreditQualityConstants {
+    let mut chosen = &CREDIT_QUALITY_SCHEDULE[0].constants;
+    for era in &CREDIT_QUALITY_SCHEDULE {
+        if era.effective_from_unix <= decided_at_unix {
+            chosen = &era.constants;
+        }
+    }
+    chosen
+}
+
+/// The newest calibration: the schedule's last era. Scoring paths do NOT read
+/// this -- they ask [`constants_at`] for the calibration in force when the
+/// decision was made. It remains for callers that want "the current one"
+/// without a timestamp, and a test pins it to the schedule.
+pub const CREDIT_QUALITY_ACTIVE: CreditQualityConstants = CREDIT_QUALITY_CONSTANTS_V3;
 
 /// Result of scoring one decision row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -361,5 +429,103 @@ mod tests {
                 p += 0.5;
             }
         }
+    }
+
+    // ---- V3 and the calibration schedule -------------------------------
+
+    const V2: CreditQualityConstants = CREDIT_QUALITY_CONSTANTS_V2;
+    const V3: CreditQualityConstants = CREDIT_QUALITY_CONSTANTS_V3;
+
+    #[test]
+    fn v3_pins_the_2026_09_19_qwen3_8_calibration() {
+        assert_eq!(V3.version, 3);
+        assert_eq!(V3.ppl_floor_micros, 1_500_000);
+        assert_eq!(V3.ppl_ceil_micros, 13_730_000);
+        assert_eq!(V3.anomaly_soft_ratio_micros, 40_000_000);
+        assert_eq!(V3.anomaly_hard_ratio_micros, 310_000_000);
+        // Deliberately unchanged from V2: novelty is pinned to the gate's
+        // floor, and the graded multipliers are a policy choice, not a
+        // property of the scorer model.
+        assert_eq!(V3.nov_floor_micros, V2.nov_floor_micros);
+        assert_eq!(V3.nov_ceil_micros, V2.nov_ceil_micros);
+        assert_eq!(V3.ppl_floor_mult_micros, V2.ppl_floor_mult_micros);
+        assert_eq!(V3.nov_floor_mult_micros, V2.nov_floor_mult_micros);
+    }
+
+    /// The median capped trace under Qwen3.8: whole-trace 4.62, peak chunk
+    /// 38, novelty 0.16. Under V2 it sits below the perplexity floor AND its
+    /// ordinary peak/whole ratio of 8.2 reads as an anomaly. V3 must treat it
+    /// as ordinary work.
+    #[test]
+    fn an_ordinary_long_trace_under_qwen3_8_is_not_an_anomaly_in_v3() {
+        let v2 = credit_quality(m(4.62), m(38.0), m(0.16), &V2);
+        let v3 = credit_quality(m(4.62), m(38.0), m(0.16), &V3);
+        // Same ratio either way; only its interpretation changes.
+        assert_eq!(v2.anomaly_ratio_micros, v3.anomaly_ratio_micros);
+        assert!(!v3.anomaly_withheld);
+        // V2: f = 0.25 (below floor), g = 0.30, a = 1 - (8.225 - 3) / 7.
+        assert_eq!(v2.q_micros, 19_017);
+        // V3: f = 0.25 + 0.75 * ln(4.12) / ln(13.23), g = 0.30, a = 1.
+        assert_eq!(v3.q_micros, 198_357);
+    }
+
+    #[test]
+    fn v3_still_withholds_a_trace_whose_peak_dwarfs_it() {
+        // One garbage chunk at perplexity 2000 inside an ordinary trace.
+        let s = credit_quality(m(5.0), m(2000.0), m(0.2), &V3);
+        assert!(s.anomaly_withheld);
+        assert_eq!(s.q_micros, 0);
+        // And penalises, without zeroing, between the thresholds.
+        let mid = credit_quality(m(5.0), m(5.0 * 175.0), m(0.2), &V3);
+        let clean = credit_quality(m(5.0), m(5.0), m(0.2), &V3);
+        assert!(!mid.anomaly_withheld);
+        // 175 is halfway from 40 to 310, so the penalty is one half, to
+        // within the one micro that rounding each score can cost.
+        assert_eq!((clean.q_micros, mid.q_micros), (206_043, 103_022));
+    }
+
+    #[test]
+    fn the_schedule_gives_each_decision_the_calibration_of_its_scorer_model() {
+        let switch = QWEN3_8_EFFECTIVE_FROM_UNIX;
+        assert_eq!(constants_at(switch - 1).version, 2);
+        assert_eq!(constants_at(switch).version, 3);
+        assert_eq!(constants_at(switch + 86_400 * 365).version, 3);
+        assert_eq!(constants_at(0).version, 2);
+        assert_eq!(constants_at(i64::MIN).version, 2);
+    }
+
+    /// The reason a schedule exists rather than a bumped ACTIVE: the batch
+    /// pass recomputes every row, and a Qwen3.6-era perplexity scored against
+    /// the Qwen3.8 ceiling saturates. An old row must come out exactly as V2
+    /// scores it.
+    #[test]
+    fn a_qwen3_6_era_decision_is_never_rescored_with_v3() {
+        let before = QWEN3_8_EFFECTIVE_FROM_UNIX - 1;
+        let (ppl, peak, nov) = (m(19.0), m(21.0), m(0.2));
+        let by_schedule = credit_quality(ppl, peak, nov, constants_at(before));
+        assert_eq!(by_schedule, credit_quality(ppl, peak, nov, &V2));
+        assert_ne!(by_schedule, credit_quality(ppl, peak, nov, &V3));
+    }
+
+    #[test]
+    fn the_schedule_is_ordered_and_active_is_its_last_entry() {
+        let s = &CREDIT_QUALITY_SCHEDULE;
+        assert!(
+            s.windows(2)
+                .all(|w| w[0].effective_from_unix < w[1].effective_from_unix)
+        );
+        assert!(
+            s.windows(2)
+                .all(|w| w[0].constants.version < w[1].constants.version)
+        );
+        assert_eq!(
+            s[0].effective_from_unix,
+            i64::MIN,
+            "every instant must resolve"
+        );
+        assert_eq!(
+            CREDIT_QUALITY_ACTIVE.version,
+            s[s.len() - 1].constants.version
+        );
     }
 }

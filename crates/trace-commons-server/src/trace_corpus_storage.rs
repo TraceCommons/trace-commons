@@ -2009,6 +2009,11 @@ pub struct GateCreditInput {
     pub perplexity_micros: i64,
     pub peak_perplexity_micros: i64,
     pub novelty_score_micros: i64,
+    /// When the decision was made. Selects the calibration: a calibration
+    /// belongs to a scorer model, and the batch pass must score each row with
+    /// the constants in force when it was decided
+    /// (`credit_quality::constants_at`), not with whatever is newest.
+    pub decided_at: DateTime<Utc>,
 }
 
 /// Cross-trace dedup cluster signal for one decision row (migration V40),

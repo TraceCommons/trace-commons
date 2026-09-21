@@ -51136,11 +51136,17 @@ async fn evaluate_and_record_gate(
     // same number today, but the batch re-score route overwrites that column
     // in place; the composite recorded here is the value production used, and
     // only a value production used can be joined to an outcome.
+    // One instant for both the row and its calibration: the batch re-score
+    // selects constants by `decided_at`, so the inline score must select by
+    // the same value or the two would disagree about a row decided on a
+    // calibration boundary.
+    let decided_at = Utc::now();
+    let calibration = trace_commons_server::credit_quality::constants_at(decided_at.timestamp());
     let composite = trace_commons_server::credit_quality::credit_quality(
         i64::try_from(decision.perplexity_micros).unwrap_or(i64::MAX),
         i64::try_from(decision.peak_perplexity_micros).unwrap_or(i64::MAX),
         i64::try_from(decision.novelty_score_micros).unwrap_or(i64::MAX),
-        &trace_commons_server::credit_quality::CREDIT_QUALITY_ACTIVE,
+        calibration,
     );
     let author_cols = trace_commons_server::trace_gate_service::author_perplexity_columns(
         decision.author_perplexity.as_ref(),
@@ -51158,7 +51164,7 @@ async fn evaluate_and_record_gate(
         novelty_passed: decision.novelty_passed,
         embedding_evidence_hash: decision.embedding_evidence_hash.clone(),
         attestation_chain_hash: decision.attestation_chain_hash.clone(),
-        decided_at: Utc::now(),
+        decided_at,
         vector_entry_id: decision.vector_entry_id,
         credit_withheld_reason: None,
         peak_perplexity_micros: Some(
@@ -51223,7 +51229,7 @@ async fn evaluate_and_record_gate(
             decision_id,
             cq.q_micros,
             cq.anomaly_ratio_micros,
-            trace_commons_server::credit_quality::CREDIT_QUALITY_ACTIVE.version,
+            calibration.version,
         )
         .await
     {
@@ -52041,18 +52047,23 @@ async fn score_credit_quality_one(
         .db_mirror
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("credit-quality scoring requires a configured DB mirror"))?;
+    // The calibration in force when this row was decided, not the newest:
+    // this pass recomputes every row, and a row scored under an earlier
+    // scorer model must not be re-scored against a later model's constants.
+    let calibration =
+        trace_commons_server::credit_quality::constants_at(input.decided_at.timestamp());
     let cq = trace_commons_server::credit_quality::credit_quality(
         input.perplexity_micros,
         input.peak_perplexity_micros,
         input.novelty_score_micros,
-        &trace_commons_server::credit_quality::CREDIT_QUALITY_ACTIVE,
+        calibration,
     );
     db.update_trace_gate_decision_credit_quality(
         &input.tenant_id,
         input.decision_id,
         cq.q_micros,
         cq.anomaly_ratio_micros,
-        trace_commons_server::credit_quality::CREDIT_QUALITY_ACTIVE.version,
+        calibration.version,
     )
     .await?;
     // Hash-only: identify the decision by hash, never the perplexity/novelty

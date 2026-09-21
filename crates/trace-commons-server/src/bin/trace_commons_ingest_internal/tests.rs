@@ -67666,6 +67666,7 @@ impl Database for PerplexityDriverTestDb {
                     perplexity_micros: row.perplexity_micros,
                     peak_perplexity_micros: row.peak_perplexity_micros.unwrap_or(0),
                     novelty_score_micros: row.novelty_score_micros,
+                    decided_at: row.decided_at,
                 },
             )
             .collect())
@@ -71333,6 +71334,74 @@ async fn rescore_perplexity_pass_updates_only_perplexity_leaves_novelty_untouche
         assert_eq!(after.chunk_count, original.chunk_count);
         assert_eq!(after.chunks_capped, original.chunks_capped);
     }
+}
+
+/// A calibration belongs to a scorer model. The batch pass recomputes every
+/// row, so two decisions with IDENTICAL signals on either side of the
+/// Qwen3.6 -> Qwen3.8 switch must be scored under different constants: the
+/// older one exactly as V2 scores it, never against the Qwen3.8 ceiling where
+/// a Qwen3.6-era perplexity saturates.
+#[tokio::test]
+async fn score_credit_quality_pass_uses_the_calibration_in_force_when_each_row_was_decided() {
+    use trace_commons_server::credit_quality as cq;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db = Arc::new(PerplexityDriverTestDb::new());
+    let db_mirror: Arc<dyn Database> = db.clone();
+    let state = test_state_with_configured_artifact_store_policies_and_export_guardrails(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+        BTreeMap::new(),
+        false,
+        false,
+    );
+
+    let switch = chrono::DateTime::<Utc>::from_timestamp(cq::QWEN3_8_EFFECTIVE_FROM_UNIX, 0)
+        .expect("valid timestamp");
+    // A typical Qwen3.6-era trace: whole-trace 19, peak 21, novelty 0.2.
+    let (ppl, peak, nov) = (19_000_000, 21_000_000, 200_000);
+    let mut before = rescore_test_decision_row(Uuid::new_v4());
+    let mut after = rescore_test_decision_row(Uuid::new_v4());
+    for row in [&mut before, &mut after] {
+        row.perplexity_micros = ppl;
+        row.peak_perplexity_micros = Some(peak);
+        row.novelty_score_micros = nov;
+    }
+    before.decided_at = switch - chrono::Duration::seconds(1);
+    after.decided_at = switch;
+    db.seed_gate_decision("tenant-a", before.clone());
+    db.seed_gate_decision("tenant-a", after.clone());
+
+    let summary = run_score_credit_quality_pass(state.clone(), None)
+        .await
+        .expect("credit-quality pass succeeds");
+    assert_eq!((summary.scored, summary.failed), (2, 0), "{summary:?}");
+
+    let stored = |id| {
+        db.gate_decision_with_credit_quality_by_id("tenant-a", id)
+            .expect("decision row present")
+    };
+    let v2 = cq::credit_quality(ppl, peak, nov, &cq::CREDIT_QUALITY_CONSTANTS_V2);
+    let v3 = cq::credit_quality(ppl, peak, nov, &cq::CREDIT_QUALITY_CONSTANTS_V3);
+    assert_ne!(
+        v2.q_micros, v3.q_micros,
+        "the fixture must distinguish them"
+    );
+
+    let got = stored(before.decision_id);
+    assert_eq!(got.credit_quality_calibration_version, Some(2));
+    assert_eq!(got.credit_quality_micros, Some(v2.q_micros));
+
+    let got = stored(after.decision_id);
+    assert_eq!(got.credit_quality_calibration_version, Some(3));
+    assert_eq!(got.credit_quality_micros, Some(v3.q_micros));
 }
 
 /// Task 6 payoff: `run_score_credit_quality_pass` backfills/recomputes `q`
