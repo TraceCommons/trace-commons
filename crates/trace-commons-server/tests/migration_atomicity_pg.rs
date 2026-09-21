@@ -389,6 +389,20 @@ async fn a_non_superuser_owner_can_apply_every_migration() {
         .await
         .expect("create the owner-probe database");
 
+    // PostgreSQL 15 stopped giving PUBLIC the CREATE privilege on `public` and
+    // handed the schema to the database owner. Put every version in that
+    // shape: on 14 an `ALTER FUNCTION ... OWNER TO` a role that was never
+    // granted CREATE passes by way of PUBLIC, and the migration that forgot the
+    // grant fails only on the servers people actually deploy.
+    connect(&with_database(&url, OWNER_DB))
+        .await
+        .batch_execute(&format!(
+            "REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+             ALTER SCHEMA public OWNER TO {OWNER};"
+        ))
+        .await
+        .expect("put the public schema in its PostgreSQL 15 shape");
+
     let owner_url = with_user(&with_database(&url, OWNER_DB), OWNER, "probe");
     let config = DatabaseConfig {
         url: SecretString::from(owner_url),

@@ -1288,7 +1288,11 @@ $$;
 GRANT trace_reward_guard TO CURRENT_USER;
 GRANT trace_reward_participant_guard TO CURRENT_USER;
 GRANT trace_reward_offer_reader TO CURRENT_USER;
-GRANT CREATE ON SCHEMA public TO trace_reward_guard, trace_reward_participant_guard;
+-- trace_reward_offer_reader too: it becomes the owner of trace_reward_offer_get
+-- below, and from PostgreSQL 15 on a new owner no longer has CREATE by way of
+-- PUBLIC.
+GRANT CREATE ON SCHEMA public
+    TO trace_reward_guard, trace_reward_participant_guard, trace_reward_offer_reader;
 
 -- Down here, not with the other participant-guard grants above: V69 gave this
 -- function to trace_reward_guard, and only its owner may grant on it. A
@@ -1341,7 +1345,8 @@ ALTER FUNCTION public.trace_reward_participant_history(TEXT, UUID, INTEGER, UUID
 ALTER FUNCTION public.trace_reward_accounts_merge(TEXT, UUID, UUID, UUID)
     OWNER TO trace_reward_participant_guard;
 
-REVOKE CREATE ON SCHEMA public FROM trace_reward_guard, trace_reward_participant_guard;
+REVOKE CREATE ON SCHEMA public
+    FROM trace_reward_guard, trace_reward_participant_guard, trace_reward_offer_reader;
 
 REVOKE ALL ON FUNCTION public.trace_reward_manifest_valid(JSONB)
     FROM PUBLIC, trace_reward_runtime, trace_reward_participant_runtime;

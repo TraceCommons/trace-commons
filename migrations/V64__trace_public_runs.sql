@@ -272,6 +272,12 @@ BEGIN
 END;
 $$;
 
+-- A function's new owner must hold CREATE on its schema. Through PostgreSQL 14
+-- every role had that by way of PUBLIC; from 15 on PUBLIC does not, and the
+-- transfers below were refused -- `permission denied for schema public` -- to
+-- anyone but a superuser. Granted for the transfers and taken back after them,
+-- as V59 does.
+GRANT CREATE ON SCHEMA public TO trace_public_run_reader, trace_public_run_graph_guard;
 GRANT trace_public_run_reader TO CURRENT_USER;
 ALTER FUNCTION trace_public_run_page(TEXT, INTEGER) OWNER TO trace_public_run_reader;
 ALTER FUNCTION trace_resolve_public_run_source(TEXT) OWNER TO trace_public_run_reader;
@@ -283,6 +289,7 @@ ALTER FUNCTION trace_public_run_would_cycle(UUID, UUID)
 ALTER FUNCTION trace_public_run_retained_source(TEXT, UUID, UUID)
     OWNER TO trace_public_run_graph_guard;
 REVOKE trace_public_run_graph_guard FROM CURRENT_USER;
+REVOKE CREATE ON SCHEMA public FROM trace_public_run_reader, trace_public_run_graph_guard;
 
 REVOKE ALL ON FUNCTION trace_public_run_page(TEXT, INTEGER) FROM PUBLIC;
 REVOKE ALL ON FUNCTION trace_resolve_public_run_source(TEXT) FROM PUBLIC;
