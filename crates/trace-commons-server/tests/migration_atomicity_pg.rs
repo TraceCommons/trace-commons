@@ -12,9 +12,10 @@
 //! afterwards.
 //!
 //! Requires PostgreSQL: set `TRACE_COMMONS_PG_TEST_DATABASE_URL` or
-//! `DATABASE_URL`. CI runs no PostgreSQL, so these skip there;
-//! `applying_a_migration_and_recording_it_share_one_transaction` in
-//! `src/db/postgres.rs` is what gates the shape on every run.
+//! `DATABASE_URL`, and these skip without one. CI's PostgreSQL job runs this
+//! suite as its own step; the plain `cargo test` job has no server, so
+//! `applying_a_migration_and_recording_it_share_one_transaction` and the
+//! `no_migration_*` tests in `src/db/postgres.rs` gate the shape there.
 //!
 //! Everything here lives in a scratch schema of its own and is dropped again,
 //! so the shared test database keeps whatever migration state it already had.
@@ -190,6 +191,27 @@ async fn connect(url: &str) -> tokio_postgres::Client {
     client
 }
 
+/// Held by every test here that migrates a database of its own from nothing.
+///
+/// The runner's advisory lock is per database, and the roles migrations create
+/// are per server: two virgin databases migrating side by side both reach
+/// `CREATE ROLE` and `ALTER ROLE` on the same catalog rows, and one of them
+/// loses with `tuple concurrently updated`. libtest runs this file's tests in
+/// parallel, so they take turns instead.
+static VIRGIN_DATABASE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Puts a different login in a connection URL, keeping host, database and query.
+fn with_user(url: &str, user: &str, password: &str) -> String {
+    let (scheme, rest) = url
+        .split_once("://")
+        .expect("a connection URL with a scheme");
+    let host_onwards = match rest.rsplit_once('@') {
+        Some((_, host_onwards)) => host_onwards,
+        None => rest,
+    };
+    format!("{scheme}://{user}:{password}@{host_onwards}")
+}
+
 /// Nothing serialised the migration runner. `CREATE TABLE IF NOT EXISTS` is not
 /// atomic against a concurrent `CREATE TABLE` in PostgreSQL, and neither is the
 /// applied/not-applied check the runner makes per migration: two callers both
@@ -215,6 +237,8 @@ async fn concurrent_migration_runs_do_not_race_on_a_virgin_database() {
         eprintln!("skipping: TRACE_COMMONS_PG_TEST_DATABASE_URL or DATABASE_URL not configured");
         return;
     };
+
+    let _turn = VIRGIN_DATABASE.lock().await;
 
     // A database of its own, created and dropped here: the point is to start
     // from nothing, which the shared test database cannot offer twice.
@@ -271,4 +295,228 @@ async fn concurrent_migration_runs_do_not_race_on_a_virgin_database() {
         failures.len()
     );
     dropped.expect("drop the probe database");
+}
+
+/// Every suite migrates as a superuser, and a superuser may do things the role
+/// an operator is told to migrate with may not. The pilot found one the hard
+/// way: V64, V71 and V72 attached `SET trace_commons.trace_tenant_id = ''` to
+/// six functions, which PostgreSQL permits only to a true superuser, so the
+/// database's own non-superuser owner could not apply them at all --
+/// `permission denied to set parameter "trace_commons.trace_tenant_id"`.
+///
+/// So: a login that owns its database and may create roles, and nothing more,
+/// applies every migration through the real runner.
+///
+/// The second half is what the fix had to keep. Those clauses cleared the
+/// caller's tenant for the length of the call, and that is load-bearing: row
+/// policies combine with OR, so a definer function entered with a tenant still
+/// set also sees that tenant's rows -- for `trace_public_run_page`, its
+/// withdrawn pages. The replacement clears the setting in the body, so it also
+/// has to hand the caller's value back: the server calls these from inside a
+/// tenant-scoped write transaction and keeps going afterwards.
+#[tokio::test]
+async fn a_non_superuser_owner_can_apply_every_migration() {
+    let Some(url) = std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL")
+        .or_else(|_| std::env::var("DATABASE_URL"))
+        .ok()
+    else {
+        eprintln!("skipping: TRACE_COMMONS_PG_TEST_DATABASE_URL or DATABASE_URL not configured");
+        return;
+    };
+    let _turn = VIRGIN_DATABASE.lock().await;
+
+    const OWNER: &str = "trace_migration_owner_probe";
+    const OWNER_DB: &str = "trace_migration_owner_probe_db";
+    let admin = connect(&with_database(&url, "postgres")).await;
+    admin
+        .execute(
+            &format!("DROP DATABASE IF EXISTS {OWNER_DB} WITH (FORCE)"),
+            &[],
+        )
+        .await
+        .expect("drop any owner-probe database left by an earlier run");
+    admin
+        .batch_execute(&format!(
+            "DO $$ BEGIN
+                 IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{OWNER}') THEN
+                     CREATE ROLE {OWNER};
+                 END IF;
+             END $$;
+             ALTER ROLE {OWNER} LOGIN CREATEROLE NOSUPERUSER NOBYPASSRLS PASSWORD 'probe';"
+        ))
+        .await
+        .expect("create the non-superuser owner");
+    // Roles are per server, so on a shared one the group roles the migrations
+    // create already exist, made by whoever migrated first. Since PostgreSQL 16
+    // CREATEROLE may only administer roles it holds ADMIN on, which a real
+    // operator's migrator has by having created them. Give the probe the same
+    // standing; on 15 and earlier CREATEROLE already covers it.
+    let sixteen_or_later: bool = admin
+        .query_one(
+            "SELECT current_setting('server_version_num')::int >= 160000",
+            &[],
+        )
+        .await
+        .expect("server version")
+        .get(0);
+    if sixteen_or_later {
+        let existing = admin
+            .query(
+                "SELECT rolname FROM pg_roles
+                  WHERE rolname LIKE 'trace\\_%' AND NOT rolcanlogin AND NOT rolsuper",
+                &[],
+            )
+            .await
+            .expect("list existing group roles");
+        for row in existing {
+            let role: String = row.get(0);
+            admin
+                .execute(
+                    &format!("GRANT \"{role}\" TO {OWNER} WITH ADMIN OPTION"),
+                    &[],
+                )
+                .await
+                .unwrap_or_else(|error| panic!("grant admin on {role}: {error}"));
+        }
+    }
+    admin
+        .execute(&format!("CREATE DATABASE {OWNER_DB} OWNER {OWNER}"), &[])
+        .await
+        .expect("create the owner-probe database");
+
+    let owner_url = with_user(&with_database(&url, OWNER_DB), OWNER, "probe");
+    let config = DatabaseConfig {
+        url: SecretString::from(owner_url),
+        pool_size: 2,
+        ssl_mode: SslMode::Prefer,
+        login_resolver_url: DatabaseConfig::login_resolver_url_from_env(),
+        gate_driver_url: DatabaseConfig::gate_driver_url_from_env(),
+        pii_backstop_driver_url: DatabaseConfig::pii_backstop_driver_url_from_env(),
+        invite_registry_url: DatabaseConfig::invite_registry_url_from_env(),
+    };
+    let backend = PgBackend::new(&config).await.expect("backend");
+    // Debug, not Display: Display stops at "db error" and drops the server's message,
+    // which is the only part that says which migration and why.
+    let migrated = backend
+        .run_migrations()
+        .await
+        .map_err(|error| format!("{error:?}"));
+    drop(backend);
+
+    let behaviour = match &migrated {
+        Ok(()) => Some(tenant_is_cleared_inside_and_restored_after(&url, OWNER_DB).await),
+        Err(_) => None,
+    };
+
+    let dropped = admin
+        .execute(
+            &format!("DROP DATABASE IF EXISTS {OWNER_DB} WITH (FORCE)"),
+            &[],
+        )
+        .await;
+
+    assert_eq!(
+        migrated,
+        Ok(()),
+        "a database owner with CREATEROLE and no superuser must be able to apply every migration"
+    );
+    let problems = behaviour.expect("behaviour is checked whenever the migrations applied");
+    assert!(
+        problems.is_empty(),
+        "the definer functions must run with the tenant cleared and return it untouched:\n  {}",
+        problems.join("\n  ")
+    );
+    dropped.expect("drop the owner-probe database");
+}
+
+/// One withdrawn page and one live page for a tenant, then every call made the
+/// way the server makes it: inside a transaction that already has that tenant.
+/// Returns what went wrong rather than panicking, so the caller can still drop
+/// its database.
+async fn tenant_is_cleared_inside_and_restored_after(url: &str, database: &str) -> Vec<String> {
+    const TENANT: &str = "tenant-owner-probe";
+    const SETTING: &str = "trace_commons.trace_tenant_id";
+    let client = connect(&with_database(url, database)).await;
+    // The fixture skips the tenant, account and submission rows the foreign keys
+    // want: this is about row visibility, and a superuser session in replica
+    // mode is the shortest honest way to two rows.
+    client
+        .batch_execute(&format!(
+            "SET session_replication_role = replica;
+             INSERT INTO trace_public_runs (
+                 tenant_id, publication_id, account_id, submission_id, slug, title,
+                 outcome_summary, workflow, reuse_permission, evidence_jsonb, task_success,
+                 contributed_version, approval_sha256, unpublished_at)
+             SELECT '{TENANT}', gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), slug,
+                    'A run', 'It worked.', 'Steps.', 'cc0_1_0', '[{{\"excerpt\": \"x\"}}]'::jsonb,
+                    'success', '1', 'sha256:' || repeat('0', 64), withdrawn
+               FROM (VALUES ('withdrawn-run', NOW()), ('live-run', NULL)) AS run(slug, withdrawn);
+             SET session_replication_role = origin;"
+        ))
+        .await
+        .expect("insert the two fixture pages");
+
+    let mut problems = Vec::new();
+    // (what it is, a query returning one bigint, the count it must return)
+    let calls: [(&str, &str, i64); 5] = [
+        (
+            "trace_public_run_page on a withdrawn page of the caller's own tenant",
+            "SELECT count(*) FROM trace_public_run_page('withdrawn-run', 5)",
+            0,
+        ),
+        (
+            "trace_public_run_page on a live page",
+            "SELECT count(*) FROM trace_public_run_page('live-run', 5)",
+            1,
+        ),
+        (
+            "trace_resolve_public_run_source on a withdrawn page of the caller's own tenant",
+            "SELECT count(*) FROM trace_resolve_public_run_source('withdrawn-run')",
+            0,
+        ),
+        (
+            "trace_public_run_retained_source for an owner with no page",
+            "SELECT count(*) FROM trace_public_run_retained_source(
+                 'tenant-owner-probe', gen_random_uuid(), gen_random_uuid())",
+            0,
+        ),
+        (
+            "trace_reward_mission_list on an empty catalogue",
+            "SELECT count(*) FROM (SELECT public.trace_reward_mission_list(NULL, 10)) AS listed",
+            1,
+        ),
+    ];
+    for (what, query, expected) in calls {
+        client
+            .batch_execute(&format!(
+                "BEGIN; SELECT set_config('{SETTING}', '{TENANT}', true);"
+            ))
+            .await
+            .expect("open a tenant-scoped transaction");
+        match client.query_one(query, &[]).await {
+            Ok(row) => {
+                let got: i64 = row.get(0);
+                if got != expected {
+                    problems.push(format!("{what}: returned {got} rows, expected {expected}"));
+                }
+            }
+            Err(error) => problems.push(format!("{what}: {error}")),
+        }
+        match client
+            .query_one(&format!("SELECT current_setting('{SETTING}', true)"), &[])
+            .await
+        {
+            Ok(row) => {
+                let after: Option<String> = row.get(0);
+                if after.as_deref() != Some(TENANT) {
+                    problems.push(format!(
+                        "{what}: the caller's tenant came back as {after:?}, not {TENANT:?}"
+                    ));
+                }
+            }
+            Err(error) => problems.push(format!("{what}: reading the tenant back: {error}")),
+        }
+        let _ = client.batch_execute("ROLLBACK").await;
+    }
+    problems
 }

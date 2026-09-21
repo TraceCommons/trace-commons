@@ -13,8 +13,26 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-ALTER ROLE trace_reward_guard NOSUPERUSER NOLOGIN NOBYPASSRLS;
-ALTER ROLE trace_reward_runtime NOSUPERUSER NOLOGIN NOBYPASSRLS;
+-- Roles are per server, so one of these names may already exist, made by
+-- someone else with more than this migration would have given it. NOLOGIN can
+-- be forced: CREATEROLE may do that. SUPERUSER and BYPASSRLS cannot -- PostgreSQL
+-- refuses `ALTER ROLE ... NOSUPERUSER` to everyone but a superuser, even though it
+-- only takes away, and a database migrated by its own non-superuser owner died
+-- on it. So look, and refuse to build on a role that holds either.
+ALTER ROLE trace_reward_guard NOLOGIN;
+ALTER ROLE trace_reward_runtime NOLOGIN;
+DO $$
+DECLARE
+    v_role TEXT;
+BEGIN
+    SELECT rolname INTO v_role FROM pg_catalog.pg_roles
+     WHERE rolname IN ('trace_reward_guard', 'trace_reward_runtime')
+       AND (rolsuper OR rolbypassrls)
+     ORDER BY rolname LIMIT 1;
+    IF v_role IS NOT NULL THEN
+        RAISE EXCEPTION 'V69: role % already exists with SUPERUSER or BYPASSRLS; refusing to build on it', v_role;
+    END IF;
+END $$;
 
 CREATE TABLE trace_reward_operators (
     tenant_id TEXT NOT NULL REFERENCES trace_tenants(tenant_id) ON DELETE CASCADE,

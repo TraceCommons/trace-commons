@@ -28,9 +28,27 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-ALTER ROLE trace_reward_participant_guard NOSUPERUSER NOLOGIN NOBYPASSRLS;
-ALTER ROLE trace_reward_participant_runtime NOSUPERUSER NOLOGIN NOBYPASSRLS;
-ALTER ROLE trace_reward_offer_reader NOSUPERUSER NOLOGIN NOBYPASSRLS;
+-- Roles are per server, so one of these names may already exist, made by
+-- someone else with more than this migration would have given it. NOLOGIN can
+-- be forced: CREATEROLE may do that. SUPERUSER and BYPASSRLS cannot -- PostgreSQL
+-- refuses `ALTER ROLE ... NOSUPERUSER` to everyone but a superuser, even though it
+-- only takes away, and a database migrated by its own non-superuser owner died
+-- on it. So look, and refuse to build on a role that holds either.
+ALTER ROLE trace_reward_participant_guard NOLOGIN;
+ALTER ROLE trace_reward_participant_runtime NOLOGIN;
+ALTER ROLE trace_reward_offer_reader NOLOGIN;
+DO $$
+DECLARE
+    v_role TEXT;
+BEGIN
+    SELECT rolname INTO v_role FROM pg_catalog.pg_roles
+     WHERE rolname IN ('trace_reward_participant_guard', 'trace_reward_participant_runtime', 'trace_reward_offer_reader')
+       AND (rolsuper OR rolbypassrls)
+     ORDER BY rolname LIMIT 1;
+    IF v_role IS NOT NULL THEN
+        RAISE EXCEPTION 'V71: role % already exists with SUPERUSER or BYPASSRLS; refusing to build on it', v_role;
+    END IF;
+END $$;
 
 ALTER TABLE public.trace_reward_programs
     DROP CONSTRAINT trace_reward_programs_identity_mode_check;
@@ -277,8 +295,6 @@ GRANT UPDATE (account_id) ON public.trace_accounts
 GRANT UPDATE (account_id, reward_principal_id)
     ON public.trace_reward_principal_accounts TO trace_reward_participant_guard;
 GRANT EXECUTE ON FUNCTION public.trace_current_tenant_id()
-    TO trace_reward_participant_guard;
-GRANT EXECUTE ON FUNCTION public.trace_reward_capacity_used(TEXT, UUID, TEXT)
     TO trace_reward_participant_guard;
 
 GRANT SELECT (tenant_id, program_id, manifest, offer_version_hash,
@@ -645,16 +661,23 @@ BEGIN
 END;
 $$;
 
+-- Runs with the caller's tenant cleared, in the body rather than with a
+-- `SET trace_commons.trace_tenant_id = ''` clause: PostgreSQL allows that clause, for a
+-- parameter it has no definition of, only to a true superuser, so a database
+-- migrated by its own non-superuser owner could not create this function.
+-- `set_config` is transaction-local, not function-local, so the caller's value
+-- goes back before the single RETURN. See the note in V64.
 CREATE FUNCTION public.trace_reward_offer_get(p_program UUID)
 RETURNS JSONB
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = pg_catalog
-SET trace_commons.trace_tenant_id = ''
 AS $$
 DECLARE
+    v_caller_tenant TEXT := pg_catalog.current_setting('trace_commons.trace_tenant_id', true);
     v_result JSONB;
 BEGIN
+    PERFORM pg_catalog.set_config('trace_commons.trace_tenant_id', '', true);
     IF p_program IS NULL THEN
         RAISE EXCEPTION USING MESSAGE = 'reward_request_invalid';
     END IF;
@@ -692,6 +715,7 @@ BEGIN
     IF v_result IS NULL THEN
         RAISE EXCEPTION USING MESSAGE = 'reward_not_found';
     END IF;
+    PERFORM pg_catalog.set_config('trace_commons.trace_tenant_id', COALESCE(v_caller_tenant, ''), true);
     RETURN v_result;
 END;
 $$;
@@ -1265,6 +1289,14 @@ GRANT trace_reward_guard TO CURRENT_USER;
 GRANT trace_reward_participant_guard TO CURRENT_USER;
 GRANT trace_reward_offer_reader TO CURRENT_USER;
 GRANT CREATE ON SCHEMA public TO trace_reward_guard, trace_reward_participant_guard;
+
+-- Down here, not with the other participant-guard grants above: V69 gave this
+-- function to trace_reward_guard, and only its owner may grant on it. A
+-- superuser never notices the order; the database's own owner is refused with
+-- `permission denied for function trace_reward_capacity_used` until the
+-- membership three lines up exists.
+GRANT EXECUTE ON FUNCTION public.trace_reward_capacity_used(TEXT, UUID, TEXT)
+    TO trace_reward_participant_guard;
 
 -- Keep the R0 signature and privileges; all callers now share the array-aware
 -- invariant above. This replacement runs after acquiring owner membership.

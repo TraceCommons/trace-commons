@@ -343,18 +343,25 @@ EXCEPTION WHEN unique_violation THEN
 END;
 $$;
 
+-- Runs with the caller's tenant cleared, in the body rather than with a
+-- `SET trace_commons.trace_tenant_id = ''` clause: PostgreSQL allows that clause, for a
+-- parameter it has no definition of, only to a true superuser, so a database
+-- migrated by its own non-superuser owner could not create this function.
+-- `set_config` is transaction-local, not function-local, so the caller's value
+-- goes back before the single RETURN. See the note in V64.
 CREATE FUNCTION public.trace_reward_mission_get(p_mission UUID)
 RETURNS JSONB
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = pg_catalog
-SET trace_commons.trace_tenant_id = ''
 AS $$
 DECLARE
+    v_caller_tenant TEXT := pg_catalog.current_setting('trace_commons.trace_tenant_id', true);
     v_result JSONB;
     v_suspended BOOLEAN;
     v_closes_at TIMESTAMPTZ;
 BEGIN
+    PERFORM pg_catalog.set_config('trace_commons.trace_tenant_id', '', true);
     IF p_mission IS NULL
         OR p_mission = '00000000-0000-0000-0000-000000000000'::UUID THEN
         RAISE EXCEPTION USING MESSAGE = 'reward_request_invalid';
@@ -392,10 +399,17 @@ BEGIN
     IF v_closes_at <= pg_catalog.clock_timestamp() THEN
         RAISE EXCEPTION USING MESSAGE = 'reward_program_closed';
     END IF;
+    PERFORM pg_catalog.set_config('trace_commons.trace_tenant_id', COALESCE(v_caller_tenant, ''), true);
     RETURN v_result;
 END;
 $$;
 
+-- Runs with the caller's tenant cleared, in the body rather than with a
+-- `SET trace_commons.trace_tenant_id = ''` clause: PostgreSQL allows that clause, for a
+-- parameter it has no definition of, only to a true superuser, so a database
+-- migrated by its own non-superuser owner could not create this function.
+-- `set_config` is transaction-local, not function-local, so the caller's value
+-- goes back before the single RETURN. See the note in V64.
 CREATE FUNCTION public.trace_reward_mission_list(
     p_before UUID, p_limit INTEGER
 )
@@ -403,12 +417,13 @@ RETURNS JSONB
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = pg_catalog
-SET trace_commons.trace_tenant_id = ''
 AS $$
 DECLARE
+    v_caller_tenant TEXT := pg_catalog.current_setting('trace_commons.trace_tenant_id', true);
     v_entries JSONB;
     v_next_cursor UUID;
 BEGIN
+    PERFORM pg_catalog.set_config('trace_commons.trace_tenant_id', '', true);
     IF p_limit IS NULL OR p_limit < 1 OR p_limit > 50
         OR (
             p_before IS NOT NULL
@@ -473,6 +488,7 @@ BEGIN
       INTO v_entries, v_next_cursor
       FROM chosen;
 
+    PERFORM pg_catalog.set_config('trace_commons.trace_tenant_id', COALESCE(v_caller_tenant, ''), true);
     RETURN pg_catalog.jsonb_build_object(
         'schema_version', 1,
         'entries', v_entries,
