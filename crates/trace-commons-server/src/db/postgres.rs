@@ -1338,6 +1338,15 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "trace_gate_decision_author_perplexity",
         include_str!("../../../../migrations/V73__trace_gate_decision_author_perplexity.sql"),
     ),
+    // V74 repairs V64's function ACL, which a non-superuser migrator could not
+    // set (it had already left the owner roles), and makes the unpublish
+    // trigger a definer function so the ingest login needs no grant on
+    // trace_public_runs. Runtime EXECUTE moves to trace_public_run_runtime.
+    (
+        74,
+        "public_run_function_acl",
+        include_str!("../../../../migrations/V74__public_run_function_acl.sql"),
+    ),
 ];
 
 #[async_trait]
@@ -6576,6 +6585,176 @@ mod tests {
             offenders.is_empty(),
             "these transfers hand an object to a role that does not hold CREATE on the \
              schema at that point, which PostgreSQL 15 and later refuse:\n  {}",
+            offenders.join("\n  ")
+        );
+    }
+
+    /// A `GRANT` or `REVOKE ... ON FUNCTION` must run while the migrator can
+    /// still act for the function's owner.
+    ///
+    /// Only an owner, a member of the owner role, or a superuser may change a
+    /// function's ACL. For anyone else PostgreSQL does not refuse: it prints
+    /// `WARNING: no privileges could be revoked` (or `were granted`) and
+    /// carries on, so the migration records as applied with the ACL untouched.
+    /// V64 handed its four definer functions to `trace_public_run_reader` and
+    /// `trace_public_run_graph_guard`, left both roles, and only then revoked
+    /// PUBLIC's EXECUTE and granted its own -- eight no-ops on the pilot, which
+    /// migrates as the database's non-superuser owner. V74 repairs the ACL; it
+    /// cannot be repaired in V64, which the pilot has already recorded.
+    ///
+    /// Read in statement order across every migration, since a function keeps
+    /// its owner from one migration to the next: `ALTER FUNCTION ... OWNER TO`
+    /// records the owner, `GRANT <role> TO CURRENT_USER` and `REVOKE <role>
+    /// FROM CURRENT_USER` track membership, `EXECUTE ... WITH GRANT OPTION`
+    /// held by the migrator also counts, and V60's `IF pg_has_role(current_user,
+    /// ...) THEN` block counts as membership for its own length. A function
+    /// never transferred is the migrator's own.
+    #[test]
+    fn no_migration_changes_a_function_acl_it_cannot_change() {
+        /// V64 is the defect this test was written for, and it is recorded on
+        /// deployments already. V74 repairs its ACL; V64 stays as it is.
+        const REPAIRED_BY_A_LATER_MIGRATION: &[i32] = &[64];
+
+        assert!(
+            super::MIGRATIONS.len() >= 60,
+            "the MIGRATIONS table came back with {} rows: an empty or truncated \
+             table passes the check below vacuously",
+            super::MIGRATIONS.len()
+        );
+
+        fn strip_parenthesised(text: &str) -> String {
+            let mut depth = 0usize;
+            let mut out = String::new();
+            for c in text.chars() {
+                match c {
+                    '(' => depth += 1,
+                    ')' => depth = depth.saturating_sub(1),
+                    _ if depth == 0 => out.push(c),
+                    _ => {}
+                }
+            }
+            out
+        }
+
+        /// The function names in a `f(TEXT, INTEGER), public.g(UUID)` list.
+        fn function_names(list: &str) -> Vec<String> {
+            strip_parenthesised(list)
+                .split(',')
+                .map(|name| name.trim().trim_start_matches("public.").to_string())
+                .filter(|name| !name.is_empty())
+                .collect()
+        }
+
+        let mut owner: std::collections::BTreeMap<String, String> = Default::default();
+        let mut member: std::collections::BTreeSet<String> = Default::default();
+        let mut grantable: std::collections::BTreeSet<String> = Default::default();
+        let mut checked = 0usize;
+        let mut offenders: Vec<String> = Vec::new();
+        for (version, name, sql) in super::MIGRATIONS {
+            let uncommented: String = sql
+                .lines()
+                .filter(|line| !line.trim_start().starts_with("--"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let mut guarded_as: Option<String> = None;
+            for statement in uncommented.split(';') {
+                let lower = statement
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+                    .to_ascii_lowercase();
+                let words: Vec<&str> = lower.split_whitespace().collect();
+
+                if let Some(at) = lower.find("pg_has_role(current_user,") {
+                    let role = lower[at + "pg_has_role(current_user,".len()..]
+                        .split(',')
+                        .next()
+                        .unwrap_or_default()
+                        .trim()
+                        .trim_matches('\'')
+                        .to_string();
+                    guarded_as = Some(role);
+                }
+                if lower.contains("end $$") {
+                    guarded_as = None;
+                }
+
+                if let Some(at) = lower.find(" owner to ") {
+                    let role = lower[at + " owner to ".len()..]
+                        .split_whitespace()
+                        .next()
+                        .unwrap_or_default()
+                        .trim_matches('"')
+                        .to_string();
+                    if let Some(rest) = lower.strip_prefix("alter function ") {
+                        for function in function_names(&rest[..rest.find(" owner to ").unwrap()]) {
+                            owner.insert(function, role.clone());
+                        }
+                    }
+                    continue;
+                }
+
+                for window in words.windows(4) {
+                    match window {
+                        ["grant", role, "to", "current_user" | "current_user;"] => {
+                            member.insert(role.trim_matches(',').to_string());
+                        }
+                        ["revoke", role, "from", "current_user" | "current_user;"] => {
+                            member.remove(role.trim_matches(','));
+                        }
+                        _ => {}
+                    }
+                }
+
+                let Some(at) = lower.find(" on function ") else {
+                    continue;
+                };
+                let is_grant = lower.starts_with("grant ") || lower.contains(" grant ");
+                let separator = if is_grant { " to " } else { " from " };
+                let list = &lower[at + " on function ".len()..];
+                let Some(end) = list.find(separator) else {
+                    continue;
+                };
+                let grantees = &list[end + separator.len()..];
+                for function in function_names(&list[..end]) {
+                    checked += 1;
+                    let owner_role = owner.get(&function).cloned();
+                    let allowed = match &owner_role {
+                        None => true,
+                        Some(role) => {
+                            role == "current_user"
+                                || member.contains(role)
+                                || guarded_as.as_deref() == Some(role)
+                                || grantable.contains(&function)
+                        }
+                    };
+                    if !allowed && !REPAIRED_BY_A_LATER_MIGRATION.contains(version) {
+                        offenders.push(format!(
+                            "V{version} ({name}): {} on {function}, owned by {}",
+                            if is_grant { "GRANT" } else { "REVOKE" },
+                            owner_role.unwrap_or_default()
+                        ));
+                    }
+                    if is_grant
+                        && grantees.contains("current_user")
+                        && grantees.contains("with grant option")
+                    {
+                        grantable.insert(function);
+                    }
+                }
+            }
+        }
+
+        assert!(
+            checked >= 60,
+            "only {checked} function grants and revokes were recognised; the migrations \
+             hold more than sixty, so the statement scan has stopped seeing them"
+        );
+        assert!(
+            offenders.is_empty(),
+            "these statements change a function's ACL while the migrator is neither its \
+             owner nor a member of the owner role; a non-superuser migrator gets a WARNING \
+             and no change, so grant and revoke before leaving the role:\n  {}",
             offenders.join("\n  ")
         );
     }

@@ -445,6 +445,53 @@ Two more things this incident showed:
   change."** It links the same library crate as ingest; its published sha256
   differed across a range in which its own `bin` file was untouched.
 
+### V74: the public-run functions move to a runtime role
+
+V64 meant to close its four public-run definer functions
+(`trace_public_run_page`, `trace_resolve_public_run_source`,
+`trace_public_run_would_cycle`, `trace_public_run_retained_source`) to PUBLIC
+and grant EXECUTE to the migrator, but it did so after leaving the roles that
+own them. A non-superuser migrator may not change the ACL of a function it does
+not own, and PostgreSQL warns rather than fails there, so on every deployment
+migrated by its own owner V64 recorded as applied with PUBLIC still holding
+EXECUTE on all four and nobody holding an explicit grant. Every role could call
+them; they were reachable because nothing had been closed.
+
+V74 repairs that from inside the owner roles, and the runtime's EXECUTE now
+comes from membership in a new `NOLOGIN NOBYPASSRLS` role,
+`trace_public_run_runtime`, the way `trace_reward_runtime` works. The migrator
+keeps EXECUTE directly, so a deployment that migrates and serves as one role
+(CI, local development) needs nothing further.
+
+**A least-privilege deployment must grant the runtime role in the same step as
+V74.** V74 takes PUBLIC's EXECUTE away, so from the moment it commits an ingest
+login that is not the migrator loses the public-run pages -- every
+`/v1/community/runs/{slug}` read and every publication returns a permission
+error -- until the grant exists. Apply V74 as the migrator and, in the same session or
+the same `psql` script, run:
+
+```sql
+GRANT trace_public_run_runtime TO <ingest runtime login>;
+```
+
+On the pilot that is, as the migrator:
+
+```sql
+GRANT trace_public_run_runtime TO trace_ingest_runtime;
+```
+
+V74 also makes the unpublish trigger
+(`trace_unpublish_run_when_submission_leaves_accepted`, fired when a
+submission's status leaves `accepted`) a `SECURITY DEFINER` function owned by
+`trace_public_run_unpublisher`, a role that holds only the columns its one
+UPDATE touches. Under V64 the trigger ran as the caller and needed UPDATE on
+`trace_public_runs`, which the ingest runtime has no other reason to hold; a
+deployment that added `GRANT SELECT, UPDATE ON trace_public_runs TO <ingest
+runtime login>` by hand to get past `permission denied for table
+trace_public_runs` no longer needs it and may revoke it. The caller's tenant
+setting carries into the definer function, so the forced tenant policy still
+scopes the update to the caller's own tenant.
+
 ### Build and install
 
 The pilot host has no Rust toolchain; binaries are built by Cloud Build and

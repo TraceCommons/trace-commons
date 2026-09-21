@@ -423,7 +423,10 @@ async fn a_non_superuser_owner_can_apply_every_migration() {
     drop(backend);
 
     let behaviour = match &migrated {
-        Ok(()) => Some(tenant_is_cleared_inside_and_restored_after(&url, OWNER_DB).await),
+        Ok(()) => Some((
+            tenant_is_cleared_inside_and_restored_after(&url, OWNER_DB).await,
+            public_run_acl_is_closed_and_the_trigger_needs_no_table_grant(&url, OWNER_DB).await,
+        )),
         Err(_) => None,
     };
 
@@ -439,13 +442,228 @@ async fn a_non_superuser_owner_can_apply_every_migration() {
         Ok(()),
         "a database owner with CREATEROLE and no superuser must be able to apply every migration"
     );
-    let problems = behaviour.expect("behaviour is checked whenever the migrations applied");
+    let (tenant_problems, acl_problems) =
+        behaviour.expect("behaviour is checked whenever the migrations applied");
     assert!(
-        problems.is_empty(),
+        tenant_problems.is_empty(),
         "the definer functions must run with the tenant cleared and return it untouched:\n  {}",
-        problems.join("\n  ")
+        tenant_problems.join("\n  ")
+    );
+    assert!(
+        acl_problems.is_empty(),
+        "the public-run functions must be closed to PUBLIC and open to trace_public_run_runtime, \
+         and the unpublish trigger must work for a login with no grant on trace_public_runs:\n  {}",
+        acl_problems.join("\n  ")
     );
     dropped.expect("drop the owner-probe database");
+}
+
+/// The ACL a non-superuser migrator leaves behind on the public-run functions,
+/// and whether the unpublish trigger works for the login the docs describe.
+///
+/// V64 revoked PUBLIC's EXECUTE on its four definer functions and granted its
+/// own after it had left the roles that own them. A non-superuser migrator may
+/// not do that, and PostgreSQL warns rather than fails, so on the pilot PUBLIC
+/// kept EXECUTE and the migrator got none. V64's trigger function also ran as
+/// the caller, so a runtime login with no grant on `trace_public_runs` could not
+/// move a submission away from `accepted`. V74 repairs both; this is the check
+/// that says whether it did, as three probe roles that hold nothing else:
+///
+/// - one that holds nothing at all, which must not be able to execute any of
+///   the four functions (that is PUBLIC's EXECUTE, or its absence);
+/// - one that is a member of `trace_public_run_runtime`, which must;
+/// - an ingest-shaped login with DML on the submission tables and nothing on
+///   `trace_public_runs`, which must be able to revoke an accepted submission
+///   and thereby unpublish its page, and only its own tenant's page.
+///
+/// Returns what went wrong rather than panicking, so the caller can still drop
+/// its database.
+async fn public_run_acl_is_closed_and_the_trigger_needs_no_table_grant(
+    url: &str,
+    database: &str,
+) -> Vec<String> {
+    const NOBODY: &str = "trace_public_run_probe_nobody";
+    const RUNTIME: &str = "trace_public_run_probe_runtime";
+    const INGEST: &str = "trace_public_run_probe_ingest";
+    const FUNCTIONS: [&str; 4] = [
+        "trace_public_run_page(text, integer)",
+        "trace_resolve_public_run_source(text)",
+        "trace_public_run_would_cycle(uuid, uuid)",
+        "trace_public_run_retained_source(text, uuid, uuid)",
+    ];
+    let mut problems = Vec::new();
+    let admin = connect(&with_database(url, database)).await;
+
+    // Roles are per server; the probe roles from an interrupted run may exist.
+    for role in [NOBODY, RUNTIME, INGEST] {
+        admin
+            .batch_execute(&format!(
+                "DO $$ BEGIN
+                     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{role}') THEN
+                         DROP OWNED BY {role};
+                         DROP ROLE {role};
+                     END IF;
+                 END $$;"
+            ))
+            .await
+            .expect("drop a probe role left by an earlier run");
+    }
+    admin
+        .batch_execute(&format!(
+            "CREATE ROLE {NOBODY} NOLOGIN NOSUPERUSER NOBYPASSRLS NOINHERIT;
+             CREATE ROLE {RUNTIME} LOGIN NOSUPERUSER NOBYPASSRLS PASSWORD 'probe';
+             CREATE ROLE {INGEST} LOGIN NOSUPERUSER NOBYPASSRLS PASSWORD 'probe';
+             GRANT USAGE ON SCHEMA public TO {RUNTIME}, {INGEST};
+             GRANT SELECT, INSERT, UPDATE ON trace_tenants, trace_accounts, trace_submissions,
+                 trace_token_bundles TO {INGEST};"
+        ))
+        .await
+        .expect("create the probe roles");
+    if let Err(error) = admin
+        .batch_execute(&format!("GRANT trace_public_run_runtime TO {RUNTIME}"))
+        .await
+    {
+        problems.push(format!("granting trace_public_run_runtime: {error:?}"));
+    }
+
+    for function in FUNCTIONS {
+        for (role, expected) in [(NOBODY, false), (RUNTIME, true)] {
+            match admin
+                .query_one(
+                    "SELECT has_function_privilege($1, $2, 'EXECUTE')",
+                    &[&role, &function],
+                )
+                .await
+            {
+                Ok(row) => {
+                    let got: bool = row.get(0);
+                    if got != expected {
+                        problems.push(format!(
+                            "{role} {} execute {function}",
+                            if got { "may" } else { "may not" }
+                        ));
+                    }
+                }
+                Err(error) => {
+                    problems.push(format!("has_function_privilege for {function}: {error:?}"))
+                }
+            }
+        }
+    }
+
+    // Two tenants, each with an accepted submission and a live page. Replica
+    // mode is the shortest honest way past the foreign keys and the forced RLS
+    // policy for a superuser fixture; the update under test runs without it.
+    admin
+        .batch_execute(
+            "SET session_replication_role = replica;
+             INSERT INTO trace_tenants (tenant_id) VALUES ('tenant-probe-a'), ('tenant-probe-b');
+             INSERT INTO trace_accounts (tenant_id, account_id) VALUES
+                 ('tenant-probe-a', '00000000-0000-4000-8000-00000000000a'),
+                 ('tenant-probe-b', '00000000-0000-4000-8000-00000000000b');
+             INSERT INTO trace_submissions (
+                 tenant_id, submission_id, trace_id, auth_principal_ref, schema_version,
+                 consent_policy_version, retention_policy_id, status, privacy_risk,
+                 redaction_pipeline_version, redaction_hash)
+             VALUES
+                 ('tenant-probe-a', '00000000-0000-4000-8000-0000000000a1', gen_random_uuid(),
+                  'sha256:' || repeat('a', 64), '1', '1', 'default', 'accepted', 'low', '1',
+                  'sha256:' || repeat('1', 64)),
+                 ('tenant-probe-b', '00000000-0000-4000-8000-0000000000b1', gen_random_uuid(),
+                  'sha256:' || repeat('b', 64), '1', '1', 'default', 'accepted', 'low', '1',
+                  'sha256:' || repeat('2', 64));
+             INSERT INTO trace_public_runs (
+                 tenant_id, publication_id, account_id, submission_id, slug, title,
+                 outcome_summary, workflow, reuse_permission, evidence_jsonb, task_success,
+                 contributed_version, approval_sha256)
+             VALUES
+                 ('tenant-probe-a', gen_random_uuid(), '00000000-0000-4000-8000-00000000000a',
+                  '00000000-0000-4000-8000-0000000000a1', 'probe-run-a', 'A run', 'It worked.',
+                  'Steps.', 'cc0_1_0', '[{\"excerpt\": \"x\"}]'::jsonb, 'success', '1',
+                  'sha256:' || repeat('0', 64)),
+                 ('tenant-probe-b', gen_random_uuid(), '00000000-0000-4000-8000-00000000000b',
+                  '00000000-0000-4000-8000-0000000000b1', 'probe-run-b', 'B run', 'It worked.',
+                  'Steps.', 'cc0_1_0', '[{\"excerpt\": \"x\"}]'::jsonb, 'success', '1',
+                  'sha256:' || repeat('0', 64));
+             SET session_replication_role = origin;",
+        )
+        .await
+        .expect("insert the two tenants' fixtures");
+
+    // The runtime member calls a page the way the server does, with a tenant
+    // set: EXECUTE on paper is not the same as a call that returns.
+    let runtime = connect(&with_user(&with_database(url, database), RUNTIME, "probe")).await;
+    match runtime
+        .query_one(
+            "SELECT count(*) FROM trace_public_run_page('probe-run-b', 5)",
+            &[],
+        )
+        .await
+    {
+        Ok(row) => {
+            let got: i64 = row.get(0);
+            if got != 1 {
+                problems.push(format!(
+                    "the runtime member's trace_public_run_page returned {got} rows, expected 1"
+                ));
+            }
+        }
+        Err(error) => problems.push(format!(
+            "the runtime member calling trace_public_run_page: {error:?}"
+        )),
+    }
+
+    let ingest = connect(&with_user(&with_database(url, database), INGEST, "probe")).await;
+    if let Err(error) = ingest
+        .batch_execute(
+            "BEGIN;
+             SELECT set_config('trace_commons.trace_tenant_id', 'tenant-probe-a', true);
+             UPDATE trace_submissions SET status = 'revoked'
+              WHERE submission_id = '00000000-0000-4000-8000-0000000000a1';
+             COMMIT;",
+        )
+        .await
+    {
+        problems.push(format!(
+            "the ingest login revoking an accepted submission with no grant on trace_public_runs: {error:?}"
+        ));
+        let _ = ingest.batch_execute("ROLLBACK").await;
+    }
+    match admin
+        .query(
+            "SELECT slug, unpublished_at IS NOT NULL, version FROM trace_public_runs
+              WHERE slug LIKE 'probe-run-%' ORDER BY slug",
+            &[],
+        )
+        .await
+    {
+        Ok(rows) => {
+            let state: Vec<(String, bool, i32)> = rows
+                .iter()
+                .map(|row| (row.get(0), row.get(1), row.get(2)))
+                .collect();
+            let expected = vec![
+                ("probe-run-a".to_string(), true, 2),
+                ("probe-run-b".to_string(), false, 1),
+            ];
+            if state != expected {
+                problems.push(format!(
+                    "after revoking tenant-probe-a's submission the pages read {state:?}, expected {expected:?}"
+                ));
+            }
+        }
+        Err(error) => problems.push(format!("reading the pages back: {error:?}")),
+    }
+
+    drop(runtime);
+    drop(ingest);
+    for role in [NOBODY, RUNTIME, INGEST] {
+        admin
+            .batch_execute(&format!("DROP OWNED BY {role}; DROP ROLE {role};"))
+            .await
+            .expect("drop the probe role");
+    }
+    problems
 }
 
 /// One withdrawn page and one live page for a tenant, then every call made the
@@ -519,7 +737,7 @@ async fn tenant_is_cleared_inside_and_restored_after(url: &str, database: &str) 
                     problems.push(format!("{what}: returned {got} rows, expected {expected}"));
                 }
             }
-            Err(error) => problems.push(format!("{what}: {error}")),
+            Err(error) => problems.push(format!("{what}: {error:?}")),
         }
         match client
             .query_one(&format!("SELECT current_setting('{SETTING}', true)"), &[])
@@ -533,7 +751,7 @@ async fn tenant_is_cleared_inside_and_restored_after(url: &str, database: &str) 
                     ));
                 }
             }
-            Err(error) => problems.push(format!("{what}: reading the tenant back: {error}")),
+            Err(error) => problems.push(format!("{what}: reading the tenant back: {error:?}")),
         }
         let _ = client.batch_execute("ROLLBACK").await;
     }
