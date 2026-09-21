@@ -346,11 +346,14 @@ async fn a_non_superuser_owner_can_apply_every_migration() {
         ))
         .await
         .expect("create the non-superuser owner");
-    // Roles are per server, so on a shared one the group roles the migrations
-    // create already exist, made by whoever migrated first. Since PostgreSQL 16
+    // Roles are per server, so on a shared one the roles the migrations create
+    // already exist, made by whoever migrated first. Since PostgreSQL 16
     // CREATEROLE may only administer roles it holds ADMIN on, which a real
     // operator's migrator has by having created them. Give the probe the same
-    // standing; on 15 and earlier CREATEROLE already covers it.
+    // standing; on 15 and earlier CREATEROLE already covers it. Login roles
+    // too: V30 runs `ALTER ROLE trace_login_resolver SET statement_timeout`,
+    // and 16 asks for ADMIN there as well -- leaving them out is how this
+    // test's first CI run failed.
     let sixteen_or_later: bool = admin
         .query_one(
             "SELECT current_setting('server_version_num')::int >= 160000",
@@ -359,15 +362,17 @@ async fn a_non_superuser_owner_can_apply_every_migration() {
         .await
         .expect("server version")
         .get(0);
+    // Listed on every version so the statement is exercised wherever this runs;
+    // only the grants are version-specific.
+    let existing = admin
+        .query(
+            "SELECT rolname FROM pg_roles
+              WHERE rolname LIKE 'trace\\_%' AND NOT rolsuper AND rolname <> $1",
+            &[&OWNER],
+        )
+        .await
+        .expect("list the roles already on this server");
     if sixteen_or_later {
-        let existing = admin
-            .query(
-                "SELECT rolname FROM pg_roles
-                  WHERE rolname LIKE 'trace\\_%' AND NOT rolcanlogin AND NOT rolsuper",
-                &[],
-            )
-            .await
-            .expect("list existing group roles");
         for row in existing {
             let role: String = row.get(0);
             admin
