@@ -2002,6 +2002,9 @@ pub struct GateWorkItem {
 /// Numeric inputs for shadow credit-quality scoring of one decision row, read
 /// cross-tenant through the narrow `trace_gate_driver` pool (no tenant GUC).
 /// The peak/novelty are stored micros; NULLs map to 0 (below-floor -> q 0).
+/// Only decisions the gate actually scored are inputs: a row with perplexity 0
+/// (the skip-duplicate branch) is never enumerated, so its credit quality
+/// stays NULL, as the inline path leaves it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GateCreditInput {
     pub tenant_id: String,

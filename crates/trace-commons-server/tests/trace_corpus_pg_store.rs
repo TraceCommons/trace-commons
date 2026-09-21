@@ -4692,6 +4692,56 @@ async fn pg_store_credit_scoring_inputs_carry_decided_at_through_the_narrow_pool
     cleanup_tenant(&backend, &tenant_id).await;
 }
 
+/// The real enumeration query, through the narrow pool: a decision the gate
+/// never scored (perplexity 0, the skip-duplicate branch) is not a
+/// credit-scoring input, and a scored one decided at the same time is.
+#[tokio::test]
+async fn pg_store_credit_scoring_inputs_exclude_never_scored_decisions() {
+    let Some(backend) = gate_driver_backend().await else {
+        return;
+    };
+
+    let tenant_id = format!("pg-credit-unscored-{}", Uuid::new_v4());
+    let scored_submission = Uuid::new_v4();
+    let skipped_submission = Uuid::new_v4();
+    for submission_id in [scored_submission, skipped_submission] {
+        backend
+            .upsert_trace_submission(sample_submission(&tenant_id, submission_id))
+            .await
+            .expect("insert scoped submission");
+    }
+
+    let scored = sample_gate_decision(scored_submission);
+    assert!(scored.perplexity_micros > 0, "the fixture is a scored row");
+    let scored_id = scored.decision_id;
+    let mut skipped = sample_gate_decision(skipped_submission);
+    skipped.perplexity_micros = 0;
+    let skipped_id = skipped.decision_id;
+    for decision in [scored, skipped] {
+        backend
+            .insert_trace_gate_decision(&tenant_id, decision)
+            .await
+            .expect("insert gate decision");
+    }
+
+    let inputs = backend
+        .list_gate_decisions_for_credit_scoring(i64::MAX)
+        .await
+        .expect("enumeration runs on the gate-driver pool");
+    let ours: Vec<_> = inputs
+        .iter()
+        .filter(|row| row.tenant_id == tenant_id)
+        .map(|row| row.decision_id)
+        .collect();
+    assert!(ours.contains(&scored_id), "a scored decision is an input");
+    assert!(
+        !ours.contains(&skipped_id),
+        "a never-scored decision must not be an input"
+    );
+
+    cleanup_tenant(&backend, &tenant_id).await;
+}
+
 #[tokio::test]
 async fn revocation_propagation_failure_audit_metadata_round_trips() {
     // Phase A6: the typed RevocationPropagationFailure audit-metadata variant

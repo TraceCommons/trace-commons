@@ -4853,6 +4853,11 @@ impl Database for PgBackend {
                         COALESCE(novelty_score_micros, 0)   AS novelty_score_micros,
                         decided_at
                  FROM trace_gate_decisions
+                 -- A row the gate never scored has no credit quality. The
+                 -- driver's skip-duplicate branch records perplexity 0 and
+                 -- leaves credit quality NULL; scoring it here would hand
+                 -- every skipped duplicate the graded-floor product.
+                 WHERE COALESCE(perplexity_micros, 0) > 0
                  ORDER BY decided_at ASC
                  LIMIT $1",
                 &[&limit],

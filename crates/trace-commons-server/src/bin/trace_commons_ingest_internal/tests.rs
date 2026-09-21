@@ -67658,6 +67658,9 @@ impl Database for PerplexityDriverTestDb {
             .read()
             .unwrap()
             .iter()
+            // Mirrors the Postgres enumeration: never-scored rows are not
+            // credit-scoring inputs.
+            .filter(|(_, row)| row.perplexity_micros > 0)
             .take(limit)
             .map(
                 |(tenant_id, row)| trace_commons_server::trace_corpus_storage::GateCreditInput {
@@ -71334,6 +71337,66 @@ async fn rescore_perplexity_pass_updates_only_perplexity_leaves_novelty_untouche
         assert_eq!(after.chunk_count, original.chunk_count);
         assert_eq!(after.chunks_capped, original.chunks_capped);
     }
+}
+
+/// A decision the gate never scored has no credit quality. The driver's
+/// skip-duplicate branch records a row without calling the gate service:
+/// perplexity 0, and credit quality left NULL because "no composite was
+/// computed". The batch pass must leave it NULL too. Scoring it would hand
+/// every skipped duplicate the graded-floor product (0.25 * 0.30 = 0.075)
+/// -- credit for exactly the traces the driver declined to score.
+#[tokio::test]
+async fn score_credit_quality_pass_leaves_never_scored_rows_without_a_score() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db = Arc::new(PerplexityDriverTestDb::new());
+    let db_mirror: Arc<dyn Database> = db.clone();
+    let state = test_state_with_configured_artifact_store_policies_and_export_guardrails(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+        BTreeMap::new(),
+        false,
+        false,
+    );
+
+    let mut scored = rescore_test_decision_row(Uuid::new_v4());
+    scored.perplexity_micros = 5_000_000;
+    scored.peak_perplexity_micros = Some(6_000_000);
+    scored.novelty_score_micros = 200_000;
+
+    // What the skip-duplicate branch writes: never scored, flags true.
+    let mut skipped = rescore_test_decision_row(Uuid::new_v4());
+    skipped.perplexity_micros = 0;
+    skipped.peak_perplexity_micros = None;
+    skipped.novelty_score_micros = 100_000;
+    skipped.perplexity_passed = true;
+    skipped.novelty_passed = true;
+
+    db.seed_gate_decision("tenant-a", scored.clone());
+    db.seed_gate_decision("tenant-a", skipped.clone());
+
+    let summary = run_score_credit_quality_pass(state.clone(), None)
+        .await
+        .expect("credit-quality pass succeeds");
+    assert_eq!((summary.scored, summary.failed), (1, 0), "{summary:?}");
+
+    let stored = |id| {
+        db.gate_decision_with_credit_quality_by_id("tenant-a", id)
+            .expect("decision row present")
+    };
+    assert!(stored(scored.decision_id).credit_quality_micros.is_some());
+    let never = stored(skipped.decision_id);
+    assert_eq!(
+        never.credit_quality_micros, None,
+        "a never-scored row earns no score"
+    );
+    assert_eq!(never.credit_quality_calibration_version, None);
 }
 
 /// A calibration belongs to a scorer model. The batch pass recomputes every
