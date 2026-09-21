@@ -107,6 +107,12 @@ Authoritative contracts to read before changing anything substantive:
 - [`docs/contributor-daemon-ipc-v1_1.md`](docs/contributor-daemon-ipc-v1_1.md) —
   IPC contract between the contributor background daemon and the native
   menu-bar and window applications
+- [`docs/superpowers/specs/2026-09-09-versioned-pipeline-design.md`](docs/superpowers/specs/2026-09-09-versioned-pipeline-design.md) —
+  versioned four-phase pipeline design
+- [`docs/superpowers/specs/2026-09-11-versioned-pipeline-behavioral-contracts.md`](docs/superpowers/specs/2026-09-11-versioned-pipeline-behavioral-contracts.md) —
+  pipeline acceptance contracts and scenarios
+- [`docs/superpowers/plans/2026-09-14-versioned-pipeline-implementation-plan.md`](docs/superpowers/plans/2026-09-14-versioned-pipeline-implementation-plan.md) —
+  ordered pipeline implementation sequence
 
 ## Repository Layout
 

@@ -27,6 +27,9 @@ the link.
 | Publishing the public `tracecommons.ai` leaderboard | [`./tracecommons-ai-community-site.md`](./tracecommons-ai-community-site.md) |
 | Setting gate floors or calibrating thresholds | [`./calibration.md`](./calibration.md) |
 | Validating a deployment before promoting | [`./smoke-test.md`](./smoke-test.md) |
+| Running the versioned pipeline lab | [`./pipeline-lab.md`](./pipeline-lab.md) |
+| Qualifying a versioned pipeline candidate | [`./pipeline-qualification.md`](./pipeline-qualification.md) |
+| Activating or containing the versioned pipeline | [`./pipeline-activation.md`](./pipeline-activation.md) |
 | Verifying the contributor apps before tagging a release | [`./client-end-to-end-verification.md`](./client-end-to-end-verification.md) |
 | Running the model bake-off | [`./calibration.md`](./calibration.md) (Phase 0) + [`./agent-traces-bakeoff-run.md`](./agent-traces-bakeoff-run.md) |
 | Building or admitting a bake-off corpus | [`./corpus-validity-battery.md`](./corpus-validity-battery.md) |
@@ -176,6 +179,12 @@ Every runbook in this directory, with a one-line description.
   env-var matrix, common sequences, defense-in-depth notes, and an
   error-variant troubleshooting table.
 - [`./participant-rewards.md`](./participant-rewards.md): publish readable offers, provision account access, and inspect participant reservations and history.
+- [`./pipeline-activation.md`](./pipeline-activation.md) — activation,
+  containment, rollback, and legacy-writer retirement for qualified bundles.
+- [`./pipeline-lab.md`](./pipeline-lab.md) — local corpus, package, report,
+  catalog, and qualification workflow.
+- [`./pipeline-qualification.md`](./pipeline-qualification.md) — package trust,
+  operational evidence, restore checks, and promotion gates.
 - [`./pii-classify-policy.md`](./pii-classify-policy.md) — `TRACE_COMMONS_PII_CLASSIFY_POLICY`
   (`all-events` / `prose-only`): the measured ~10x round-trip reduction from
   restricting the NEAR AI privacy filter to prose events, the accepted

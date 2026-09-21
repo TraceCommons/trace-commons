@@ -11,6 +11,7 @@
 pub mod decision;
 pub mod embedder;
 pub mod perplexity;
+pub mod pipeline;
 pub mod reference;
 pub mod vector_index;
 

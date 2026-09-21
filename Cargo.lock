@@ -8738,7 +8738,10 @@ name = "trace-commons-gate-api"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
+ "serde",
  "sha2 0.10.9",
+ "thiserror 2.0.18",
  "uuid 1.23.1",
 ]
 
