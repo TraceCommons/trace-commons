@@ -70357,6 +70357,36 @@ async fn rederive_fixture() -> RederiveFixture {
     for submission_id in &submission_ids {
         decision_ids.push(score_submission_for_dedup_test(&state, tenant_id, *submission_id).await);
     }
+    // The pass's precondition is a corpus derived under v1. Write that state
+    // explicitly -- the v1 value of each row's own render, the legacy stamp,
+    // and the clusters v1 forms (two identical, one apart) -- rather than
+    // trusting whatever the inline path stamps in this build, so the
+    // fixture means the same thing before and after the constant flips.
+    const V1_STAMP: &str = trace_commons_server::dedup_assign::LEGACY_DEDUP_SIGNAL_VERSION;
+    let shared_cluster = Uuid::new_v4();
+    let distinct_cluster = Uuid::new_v4();
+    for (i, (decision_id, plaintext)) in decision_ids.iter().zip(&plaintexts).enumerate() {
+        let v1 = trace_commons_server::dedup_simhash::trace_simhash_v1(
+            &trace_commons_server::trace_gate_service::dedup_canonical_text(plaintext),
+        ) as i64;
+        let (cluster_id, size) = if i < 2 {
+            (shared_cluster, 2)
+        } else {
+            (distinct_cluster, 1)
+        };
+        db.update_trace_gate_decision_dedup(
+            tenant_id,
+            *decision_id,
+            trace_commons_server::trace_corpus_storage::DedupAssignmentWrite {
+                dedup_simhash: v1,
+                dedup_cluster_id: cluster_id,
+                dedup_cluster_size: size,
+                dedup_signal_version: V1_STAMP.to_string(),
+            },
+        )
+        .await
+        .expect("seed the v1 corpus");
+    }
     RederiveFixture {
         _temp: temp,
         _artifact_temp: artifact_temp,
