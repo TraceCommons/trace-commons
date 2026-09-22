@@ -5312,6 +5312,139 @@ async fn pg_store_scoped_scores_distinguish_unscored_from_unowned() {
     );
 }
 
+/// The contributor status surface's credit read, against a real database.
+///
+/// Four claims about SQL that an in-memory double cannot pin: the latest of
+/// two decisions wins, not the first written; a skipped-duplicate cost-control
+/// row comes back with its `credit_withheld_reason` and a NULL credit quality,
+/// so the handler can tell "duplicate" from "not scored yet"; a submission
+/// with no decision is absent rather than a row of NULLs; and forced RLS keeps
+/// another tenant's decision out even when its id is asked about by name.
+#[tokio::test]
+async fn pg_store_latest_gate_credit_decisions_are_tenant_scoped_and_latest_wins() {
+    let Some(backend) = postgres_backend().await else {
+        return;
+    };
+    backend.run_migrations().await.expect("run migrations");
+
+    let tenant = format!("pg-gate-credit-{}", Uuid::new_v4());
+    let other_tenant = format!("pg-gate-credit-other-{}", Uuid::new_v4());
+
+    let scored_id = Uuid::new_v4();
+    let duplicate_id = Uuid::new_v4();
+    let unscored_id = Uuid::new_v4();
+    let foreign_id = Uuid::new_v4();
+
+    for id in [scored_id, duplicate_id, unscored_id] {
+        backend
+            .upsert_trace_submission(sample_submission(&tenant, id))
+            .await
+            .expect("insert own submission");
+    }
+    backend
+        .upsert_trace_submission(sample_submission(&other_tenant, foreign_id))
+        .await
+        .expect("insert the other tenant's submission");
+
+    // Two decisions on the scored submission, an hour apart. Only the newer
+    // one gets a credit quality, so a reader that picked the older row would
+    // surface a NULL where the contributor has a real figure.
+    let mut older = sample_gate_decision(scored_id);
+    older.decided_at = Utc::now() - chrono::Duration::hours(1);
+    backend
+        .insert_trace_gate_decision(&tenant, older)
+        .await
+        .expect("insert the older decision");
+    let newer = sample_gate_decision(scored_id);
+    let newer_decision_id = newer.decision_id;
+    backend
+        .insert_trace_gate_decision(&tenant, newer)
+        .await
+        .expect("insert the newer decision");
+    backend
+        .update_trace_gate_decision_credit_quality(
+            &tenant,
+            newer_decision_id,
+            300_000,
+            1_000_000,
+            3,
+        )
+        .await
+        .expect("score the newer decision");
+
+    // The skip-duplicate branch of the perplexity driver writes exactly this
+    // shape: perplexity 0, no chunks, a withheld reason, and no credit quality
+    // ever follows because no scoring ran.
+    let mut duplicate = sample_gate_decision(duplicate_id);
+    duplicate.gate_policy_version = "skip_duplicate".to_string();
+    duplicate.perplexity_micros = 0;
+    duplicate.credit_withheld_reason = Some("skipped_duplicate".to_string());
+    backend
+        .insert_trace_gate_decision(&tenant, duplicate)
+        .await
+        .expect("insert the skipped-duplicate decision");
+
+    let mut foreign = sample_gate_decision(foreign_id);
+    foreign.decided_at = Utc::now();
+    let foreign_decision_id = foreign.decision_id;
+    backend
+        .insert_trace_gate_decision(&other_tenant, foreign)
+        .await
+        .expect("insert the other tenant's decision");
+    backend
+        .update_trace_gate_decision_credit_quality(
+            &other_tenant,
+            foreign_decision_id,
+            900_000,
+            1_000_000,
+            3,
+        )
+        .await
+        .expect("score the other tenant's decision");
+
+    let rows = backend
+        .list_latest_gate_credit_decisions(
+            &tenant,
+            &[scored_id, duplicate_id, unscored_id, foreign_id],
+        )
+        .await
+        .expect("tenant-scoped gate credit read");
+    let by_id: BTreeMap<Uuid, _> = rows.into_iter().map(|r| (r.submission_id, r)).collect();
+
+    let scored = by_id
+        .get(&scored_id)
+        .expect("the scored submission must come back");
+    assert_eq!(
+        scored.credit_quality_micros,
+        Some(300_000),
+        "the LATEST decision's credit quality must win, not the older NULL"
+    );
+    assert_eq!(scored.credit_quality_calibration_version, Some(3));
+    assert_eq!(scored.credit_withheld_reason, None);
+
+    let duplicate = by_id
+        .get(&duplicate_id)
+        .expect("the skipped-duplicate submission must come back");
+    assert_eq!(duplicate.credit_quality_micros, None);
+    assert_eq!(
+        duplicate.credit_withheld_reason.as_deref(),
+        Some("skipped_duplicate"),
+        "the withheld reason is what tells a duplicate from an unscored trace"
+    );
+
+    assert!(
+        !by_id.contains_key(&unscored_id),
+        "a submission with no decision must be absent, not a row of NULLs"
+    );
+    assert!(
+        !by_id.contains_key(&foreign_id),
+        "another tenant's decision must not be returned under this tenant's context"
+    );
+
+    cleanup_tenant(&backend, &tenant).await;
+    cleanup_tenant(&backend, &other_tenant).await;
+}
+
 /// An invite's use limit must bind across derived tenants.
 ///
 /// V29's counter is keyed `(tenant_id, invite_subject_hash)`. Under

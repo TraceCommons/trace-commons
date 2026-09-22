@@ -201,7 +201,9 @@ cross-principal probes indistinguishable from genuinely unknown submissions.
 
 Status records keep estimates and settled credit separate:
 
-- `credit_points_pending` — the online estimate.
+- `credit_points_pending` — the submit-time estimate until the gate has scored
+  the trace, then the gate's credit quality on the same 0-10 points scale
+  (`round(10 * credit_quality, 2)`).
 - `credit_points_final` — present only when explicit final settlement exists.
 - `credit_points_ledger`, `credit_points_total`, `delayed_credit_explanations`
   — present once review or downstream jobs award later utility credit.
@@ -211,6 +213,22 @@ final credit **plus** the delayed ledger delta (not pending estimate plus
 ledger). If a trace is later revoked, expired, or purged, status sync reports a
 zero delayed ledger and a safe explanation that retained ledger events are
 excluded.
+
+What `credit_points_pending` means depends on whether the gate has run. Before
+scoring, it is the estimate `compute_value_scorecard` produced at submit, and
+the `explanation` carries a line saying so; that estimate docks 0.40 for the
+duplicate score, which reads same-project sessions as near-duplicates of each
+other, so it is often 0.0 for a trace the gate will later credit. Once the
+submission has a gate decision with a credit quality, status and receipt
+surfaces report that quality as points instead, with a line naming the
+calibration version and the chunk coverage it was scored over. A decision the
+perplexity driver recorded without scoring, because the content duplicated an
+earlier submission under the same tenant, reports 0.0 with a line saying so.
+Only statuses that carry pending credit (`accepted`,
+`awaiting_pii_backstop`) present the gate figure; every other status reports
+0.0 as before. This is presentation only: the stored `credit_points_pending`
+column, the credit ledger, `credit_points_final`, and the signed score
+attestation are unchanged.
 
 Reviewers/admins append delayed credit once downstream utility is known:
 

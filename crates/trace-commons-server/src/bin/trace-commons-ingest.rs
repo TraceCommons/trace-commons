@@ -166,6 +166,7 @@ use trace_commons_server::trace_corpus_storage::{
     TraceExportManifestRecord as StorageTraceExportManifestRecord,
     TraceExportManifestWrite as StorageTraceExportManifestWrite,
     TraceGateChunkVectorEntryRow as StorageTraceGateChunkVectorEntryRow,
+    TraceGateCreditDecisionRow as StorageTraceGateCreditDecisionRow,
     TraceGateDecisionRow as StorageTraceGateDecisionRow,
     TraceNearCreditOutboxItemRecord as StorageTraceNearCreditOutboxItemRecord,
     TraceNearCreditOutboxItemWrite as StorageTraceNearCreditOutboxItemWrite,
@@ -13300,9 +13301,13 @@ async fn submit_trace_handler(
                 "admission_identity_conflict",
             ));
         }
+        let gate_decision = gate_credit_decision_for_record(state.as_ref(), &existing)
+            .await
+            .map_err(internal_error)?;
         return Ok(Json(receipt_from_record(
             &existing,
             state.near_settlement_mode,
+            gate_decision.as_ref(),
         )));
     }
     let result = async {
@@ -13326,7 +13331,14 @@ async fn submit_trace_handler(
             if principal_can_remediate_quarantined(tenant.auth(), &existing) {
                 Some(existing)
             } else {
-                let receipt = receipt_from_record(&existing, state.near_settlement_mode);
+                let gate_decision = gate_credit_decision_for_record(state.as_ref(), &existing)
+                    .await
+                    .map_err(internal_error)?;
+                let receipt = receipt_from_record(
+                    &existing,
+                    state.near_settlement_mode,
+                    gate_decision.as_ref(),
+                );
                 append_audit_event(
                     &state.root,
                     tenant.tenant_id(),
@@ -13572,9 +13584,13 @@ async fn submit_trace_handler(
             }
         }
 
+        // The record has only just landed (or been re-scrubbed from
+        // quarantine): the gate has not seen it, so there is no decision to
+        // look up and the receipt carries the labelled estimate.
         Ok(Json(receipt_from_record(
             &record,
             state.near_settlement_mode,
+            None,
         )))
     }
     .await;
@@ -14880,6 +14896,15 @@ async fn submission_status_handler(
     )
     .await
     .map_err(internal_error)?;
+    // One batched lookup over the visible records that were asked about,
+    // not one per status row: the request may carry 500 ids.
+    let asked_records = body
+        .submission_ids
+        .iter()
+        .filter_map(|submission_id| visible_by_submission.get(submission_id).copied());
+    let gate_decisions = gate_credit_decisions_for_records(state.as_ref(), asked_records)
+        .await
+        .map_err(internal_error)?;
     let mut statuses = Vec::new();
     for submission_id in body.submission_ids {
         if let Some(record) = visible_by_submission.get(&submission_id) {
@@ -14887,6 +14912,7 @@ async fn submission_status_handler(
                 record,
                 &status_credit_events,
                 state.near_settlement_mode,
+                gate_decisions.get(&submission_id),
             ));
         }
     }
@@ -38765,7 +38791,17 @@ async fn apply_review_decision(
             .map_err(internal_error)?;
     }
 
-    Ok(receipt_from_record(&record, state.near_settlement_mode))
+    // A decision can already exist here (a re-review of an accepted record),
+    // and the reviewer's receipt must say the same thing the contributor's
+    // next status poll will.
+    let gate_decision = gate_credit_decision_for_record(state, &record)
+        .await
+        .map_err(internal_error)?;
+    Ok(receipt_from_record(
+        &record,
+        state.near_settlement_mode,
+        gate_decision.as_ref(),
+    ))
 }
 
 fn ensure_review_decision_eligible(
@@ -43119,10 +43155,12 @@ async fn run_canary_read_drill(
                 &credit_view.records,
             )
             .await?;
+            let gate_decision = gate_credit_decision_for_record(state, status_record).await?;
             let status = submission_status_from_record(
                 status_record,
                 &status_credit_events,
                 state.near_settlement_mode,
+                gate_decision.as_ref(),
             );
             submit_status_visible = status.submission_id == request.submission_id
                 && status.status == record.status.as_str();
@@ -57425,11 +57463,186 @@ fn witness_admitted_record(record: &TraceCommonsSubmissionRecord) -> bool {
         .is_some_and(|reason| reason == WITNESS_ADMITTED_STATUS_REASON)
 }
 
+/// Which corpus statuses carry pending credit on the contributor surface.
+///
+/// Mirrors the write side, which holds the stored estimate at 0.0 for every
+/// other status at submit, re-scrub, and review time (the
+/// Accepted -> AwaitingPiiBackstop hold keeps it). The gate's figure obeys
+/// the same rule: it is presented only on a status that carries credit, so
+/// this function does not change which statuses do.
+fn status_carries_pending_credit(status: TraceCorpusStatus) -> bool {
+    matches!(
+        status,
+        TraceCorpusStatus::Accepted | TraceCorpusStatus::AwaitingPiiBackstop
+    )
+}
+
+/// The `credit_withheld_reason` labels the perplexity driver's cost-control
+/// branches stamp on a decision it recorded WITHOUT scoring, because the
+/// same content already had a decision under this tenant: the skip-duplicate
+/// short-circuit (`skipped_duplicate`) and the canonical-hash cache
+/// (`cached`). Neither row ever receives a credit quality, so without this
+/// list they would be indistinguishable from a decision still waiting on its
+/// inline credit-quality write.
+const GATE_DUPLICATE_WITHHELD_REASONS: [&str; 2] = ["skipped_duplicate", "cached"];
+
+/// Shown beside the stored submit-time estimate until a gate figure exists.
+const PRELIMINARY_ESTIMATE_LINE: &str = "This is a preliminary estimate made at submission; \
+                                         the figure is replaced by the gate's scoring once the \
+                                         trace has been scored.";
+
+/// The gate's credit quality on the estimate's scale: `round(10 * q, 2)`,
+/// the same expression `compute_value_scorecard` applies to its online
+/// score, so a contributor comparing the two figures compares like with
+/// like.
+fn credit_points_from_quality_micros(credit_quality_micros: i64) -> f32 {
+    let quality = credit_quality_micros.clamp(0, 1_000_000) as f64 / 1_000_000.0;
+    ((10.0 * quality * 100.0).round() / 100.0) as f32
+}
+
+/// The pending-credit figure a contributor is shown for `record`, and the
+/// explanation lines that account for it.
+///
+/// The stored `credit_points_pending` is a submit-time estimate whose
+/// duplicate penalty reads same-project sessions as near-duplicates of each
+/// other, so on the pilot 12 of 13 real uploads showed 0.0 while the gate
+/// later scored them at 0.108-0.300 credit quality. Once a decision with a
+/// credit quality exists, that is the figure; until then the estimate stands,
+/// labelled as preliminary. This is presentation only: the stored column,
+/// the ledger, and the attestation surface are untouched.
+struct GateCreditPresentation {
+    credit_points_pending: f32,
+    explanation: Vec<String>,
+}
+
+fn gate_credit_presentation(
+    record: &TraceCommonsSubmissionRecord,
+    decision: Option<&StorageTraceGateCreditDecisionRow>,
+) -> GateCreditPresentation {
+    // A status that carries no credit reports its stored figure (held at 0.0
+    // by the write side) exactly as before, whatever the gate decided.
+    if !status_carries_pending_credit(record.status) {
+        return GateCreditPresentation {
+            credit_points_pending: record.credit_points_pending,
+            explanation: Vec::new(),
+        };
+    }
+    let Some(decision) = decision else {
+        return GateCreditPresentation {
+            credit_points_pending: record.credit_points_pending,
+            explanation: vec![PRELIMINARY_ESTIMATE_LINE.to_string()],
+        };
+    };
+    if let Some(credit_quality_micros) = decision.credit_quality_micros {
+        return GateCreditPresentation {
+            credit_points_pending: credit_points_from_quality_micros(credit_quality_micros),
+            explanation: vec![gate_credit_basis_line(decision)],
+        };
+    }
+    let is_duplicate = decision
+        .credit_withheld_reason
+        .as_deref()
+        .is_some_and(|reason| GATE_DUPLICATE_WITHHELD_REASONS.contains(&reason));
+    if is_duplicate {
+        return GateCreditPresentation {
+            credit_points_pending: 0.0,
+            explanation: vec![
+                "This trace duplicates an earlier submission under your account and earns no \
+                 separate credit."
+                    .to_string(),
+            ],
+        };
+    }
+    // A decision with no credit quality and no duplicate label: the inline
+    // credit-quality write did not land (it is best-effort, and the
+    // recompute pass fills it in later). Nothing to show yet, so the
+    // estimate stands with its label.
+    GateCreditPresentation {
+        credit_points_pending: record.credit_points_pending,
+        explanation: vec![PRELIMINARY_ESTIMATE_LINE.to_string()],
+    }
+}
+
+/// Names the basis of a gate-derived credit figure: the calibration schedule
+/// and how much of the trace the scoring read. Hash-only by construction --
+/// counts and a version number, never an id or a raw score.
+///
+/// Chunk NULL semantics follow `TraceGateDecisionRow`: `chunk_count` NULL is
+/// one chunk, `chunks_capped` NULL is uncapped, and `total_chunk_count` NULL
+/// is an unknown denominator that is never estimated, so a capped decision
+/// without one says only how many chunks were read.
+fn gate_credit_basis_line(decision: &StorageTraceGateCreditDecisionRow) -> String {
+    let calibration = decision
+        .credit_quality_calibration_version
+        .map(|version| format!(" (calibration V{version})"))
+        .unwrap_or_default();
+    let chunk_count = decision.chunk_count.unwrap_or(1);
+    let coverage = match (
+        decision.chunks_capped.unwrap_or(false),
+        decision.total_chunk_count,
+    ) {
+        (true, Some(total)) => format!("over {chunk_count} of {total} chunks"),
+        (true, None) => format!("over the first {chunk_count} chunks"),
+        (false, _) if chunk_count > 1 => format!("over all {chunk_count} chunks"),
+        (false, _) => "over the whole trace".to_string(),
+    };
+    format!("Credit reflects the gate's scoring{calibration} {coverage}.")
+}
+
+/// The latest gate decision for each of `records`, keyed by submission id.
+///
+/// Batched per tenant, so a 500-id status refresh costs one round trip per
+/// tenant rather than one per row. Gate decisions live only in the database:
+/// without a DB mirror there is nothing to look up, and every record keeps
+/// its estimate with the preliminary label. Callers pass only records the
+/// requesting principal can already see, which is what scopes the read
+/// below the tenant.
+async fn gate_credit_decisions_for_records<'a>(
+    state: &AppState,
+    records: impl IntoIterator<Item = &'a TraceCommonsSubmissionRecord>,
+) -> Result<BTreeMap<Uuid, StorageTraceGateCreditDecisionRow>, DatabaseError> {
+    let Some(db) = state.db_mirror.as_ref() else {
+        return Ok(BTreeMap::new());
+    };
+    let mut by_tenant: BTreeMap<&str, Vec<Uuid>> = BTreeMap::new();
+    for record in records {
+        by_tenant
+            .entry(record.tenant_id.as_str())
+            .or_default()
+            .push(record.submission_id);
+    }
+    let mut decisions = BTreeMap::new();
+    for (tenant_id, submission_ids) in by_tenant {
+        for row in db
+            .list_latest_gate_credit_decisions(tenant_id, &submission_ids)
+            .await?
+        {
+            decisions.insert(row.submission_id, row);
+        }
+    }
+    Ok(decisions)
+}
+
+/// Single-record form of `gate_credit_decisions_for_records`, for the
+/// receipt paths that answer about one submission.
+async fn gate_credit_decision_for_record(
+    state: &AppState,
+    record: &TraceCommonsSubmissionRecord,
+) -> Result<Option<StorageTraceGateCreditDecisionRow>, DatabaseError> {
+    Ok(
+        gate_credit_decisions_for_records(state, std::iter::once(record))
+            .await?
+            .remove(&record.submission_id),
+    )
+}
+
 fn receipt_from_record(
     record: &TraceCommonsSubmissionRecord,
     settlement_mode: NearSettlementMode,
+    gate_decision: Option<&StorageTraceGateCreditDecisionRow>,
 ) -> TraceSubmissionReceipt {
-    let explanation = match record.status {
+    let credit = gate_credit_presentation(record, gate_decision);
+    let mut explanation = match record.status {
         TraceCorpusStatus::Accepted => {
             let mut lines = vec!["Accepted into the private redacted corpus.".to_string()];
             // #445's argument, applied to a second indistinguishable pair of
@@ -57471,10 +57684,11 @@ fn receipt_from_record(
         TraceCorpusStatus::Expired => vec!["Expired under the retention policy.".to_string()],
         TraceCorpusStatus::Purged => vec!["Purged under the retention policy.".to_string()],
     };
+    explanation.extend(credit.explanation);
 
     TraceSubmissionReceipt {
         status: record.status.as_str().to_string(),
-        credit_points_pending: Some(record.credit_points_pending),
+        credit_points_pending: Some(credit.credit_points_pending),
         credit_points_final: record.credit_points_final,
         explanation,
     }
@@ -57484,8 +57698,9 @@ fn submission_status_from_record(
     record: &TraceCommonsSubmissionRecord,
     credit_events: &[TraceCommonsCreditLedgerRecord],
     settlement_mode: NearSettlementMode,
+    gate_decision: Option<&StorageTraceGateCreditDecisionRow>,
 ) -> TraceSubmissionStatusUpdate {
-    let receipt = receipt_from_record(record, settlement_mode);
+    let receipt = receipt_from_record(record, settlement_mode, gate_decision);
     let delayed_events = credit_events
         .iter()
         .filter(|event| event.submission_id == record.submission_id)
@@ -57531,7 +57746,11 @@ fn submission_status_from_record(
         submission_id: record.submission_id,
         trace_id: record.trace_id,
         status: record.status.as_str().to_string(),
-        credit_points_pending: record.credit_points_pending,
+        // The receipt already resolved estimate-vs-gate figure; the two
+        // surfaces must never disagree about the same record.
+        credit_points_pending: receipt
+            .credit_points_pending
+            .unwrap_or(record.credit_points_pending),
         credit_points_final: record.credit_points_final,
         credit_points_ledger: ledger_points,
         credit_points_total,

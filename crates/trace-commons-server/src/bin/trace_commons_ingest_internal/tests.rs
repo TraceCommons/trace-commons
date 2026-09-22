@@ -66387,6 +66387,10 @@ struct PerplexityDriverTestDb {
     /// Hash-only audit rows appended via `append_trace_audit_event`, so
     /// handler tests can assert an audited read emitted its event.
     audit_events: std::sync::RwLock<Vec<StorageTraceAuditEventWrite>>,
+    /// Every `list_latest_gate_credit_decisions` call, as `(tenant_id,
+    /// submission_ids)`, so a test can assert the contributor status lookup
+    /// batched its ids rather than reading once per record.
+    gate_credit_reads: std::sync::RwLock<Vec<(String, Vec<Uuid>)>>,
 }
 
 impl PerplexityDriverTestDb {
@@ -66403,6 +66407,7 @@ impl PerplexityDriverTestDb {
             corrections: std::sync::RwLock::new(std::collections::HashMap::new()),
             contributor_cap: std::sync::RwLock::new(std::collections::HashMap::new()),
             audit_events: std::sync::RwLock::new(Vec::new()),
+            gate_credit_reads: std::sync::RwLock::new(Vec::new()),
         }
     }
 
@@ -67444,6 +67449,55 @@ impl trace_commons_server::trace_corpus_storage::TraceCorpusStore for Perplexity
             (q_micros, anomaly_ratio_micros, calibration_version),
         );
         Ok(())
+    }
+    /// In-memory analogue of the Postgres `list_latest_gate_credit_decisions`
+    /// read: tenant-scoped, latest decision per asked-about submission by
+    /// `(decided_at, decision_id)`, credit quality joined from the side
+    /// table the credit-quality write keeps. Records the call so a test can
+    /// count round trips.
+    async fn list_latest_gate_credit_decisions(
+        &self,
+        tenant_id: &str,
+        submission_ids: &[Uuid],
+    ) -> Result<
+        Vec<trace_commons_server::trace_corpus_storage::TraceGateCreditDecisionRow>,
+        DatabaseError,
+    > {
+        self.gate_credit_reads
+            .write()
+            .unwrap()
+            .push((tenant_id.to_string(), submission_ids.to_vec()));
+        let decisions = self.gate_decisions.read().unwrap();
+        let credit = self.credit_quality_scores.read().unwrap();
+        let mut latest: std::collections::HashMap<Uuid, &StorageTraceGateDecisionRow> =
+            std::collections::HashMap::new();
+        for (row_tenant, row) in decisions.iter() {
+            if row_tenant != tenant_id || !submission_ids.contains(&row.submission_id) {
+                continue;
+            }
+            let candidate_key = (row.decided_at, row.decision_id);
+            match latest.get(&row.submission_id) {
+                Some(existing) if (existing.decided_at, existing.decision_id) >= candidate_key => {}
+                _ => {
+                    latest.insert(row.submission_id, row);
+                }
+            }
+        }
+        Ok(latest
+            .into_values()
+            .map(|row| {
+                let scored = credit.get(&(tenant_id.to_string(), row.decision_id));
+                trace_commons_server::trace_corpus_storage::TraceGateCreditDecisionRow {
+                    submission_id: row.submission_id,
+                    credit_quality_micros: scored.map(|(q, _, _)| *q),
+                    credit_quality_calibration_version: scored.map(|(_, _, v)| *v),
+                    credit_withheld_reason: row.credit_withheld_reason.clone(),
+                    chunk_count: row.chunk_count,
+                    total_chunk_count: row.total_chunk_count,
+                    chunks_capped: row.chunks_capped,
+                }
+            })
+            .collect())
     }
     /// In-memory analogue of the Postgres `update_trace_gate_decision_dedup`
     /// impl: record the four dedup values in a side table keyed by
@@ -88787,7 +88841,7 @@ fn an_accepted_receipt_says_settlement_is_disabled_when_it_is() {
     let record = submission_record_with_principal("principal_a");
     assert_eq!(record.status, TraceCorpusStatus::Accepted);
 
-    let receipt = receipt_from_record(&record, NearSettlementMode::Disabled);
+    let receipt = receipt_from_record(&record, NearSettlementMode::Disabled, None);
 
     assert!(
         receipt
@@ -88808,7 +88862,7 @@ fn an_accepted_receipt_does_not_claim_settlement_is_disabled_when_it_is_not() {
     let record = submission_record_with_principal("principal_a");
 
     for mode in [NearSettlementMode::Http, NearSettlementMode::DryRun] {
-        let receipt = receipt_from_record(&record, mode);
+        let receipt = receipt_from_record(&record, mode, None);
         assert!(
             !receipt
                 .explanation
@@ -88818,6 +88872,266 @@ fn an_accepted_receipt_does_not_claim_settlement_is_disabled_when_it_is_not() {
             mode,
             receipt.explanation
         );
+    }
+}
+
+/// The contributor-facing credit figure once the gate has scored a trace.
+///
+/// On the pilot, 12 of 13 real uploads showed `credit_points_pending` 0.0:
+/// the submit-time estimate docks 0.40 for the duplicate score, and
+/// same-project sessions read as 64-95% duplicates of each other before any
+/// scoring has happened. The gate later scored those same traces at 0.108
+/// to 0.300 credit quality, and nothing the contributor could see ever
+/// changed. These tests pin the read-path rule: a scored decision's credit
+/// quality replaces the estimate, on the same 0-10 points scale.
+mod gate_credit_display {
+    use super::*;
+    use trace_commons_server::trace_corpus_storage::TraceGateCreditDecisionRow;
+
+    fn accepted_record_with_estimate(credit_points_pending: f32) -> TraceCommonsSubmissionRecord {
+        let mut record = submission_record_with_principal("principal_a");
+        record.credit_points_pending = credit_points_pending;
+        record
+    }
+
+    fn quarantined_record() -> TraceCommonsSubmissionRecord {
+        let mut record = submission_record_with_principal("principal_a");
+        record.status = TraceCorpusStatus::Quarantined;
+        record.credit_points_pending = 0.0;
+        record
+    }
+
+    fn scored_decision(record: &TraceCommonsSubmissionRecord) -> TraceGateCreditDecisionRow {
+        TraceGateCreditDecisionRow {
+            submission_id: record.submission_id,
+            credit_quality_micros: Some(300_000),
+            credit_quality_calibration_version: Some(3),
+            credit_withheld_reason: None,
+            chunk_count: Some(4),
+            total_chunk_count: Some(12),
+            chunks_capped: Some(true),
+        }
+    }
+
+    fn skipped_duplicate_decision(
+        record: &TraceCommonsSubmissionRecord,
+    ) -> TraceGateCreditDecisionRow {
+        TraceGateCreditDecisionRow {
+            submission_id: record.submission_id,
+            credit_quality_micros: None,
+            credit_quality_calibration_version: None,
+            credit_withheld_reason: Some("skipped_duplicate".to_string()),
+            chunk_count: None,
+            total_chunk_count: None,
+            chunks_capped: None,
+        }
+    }
+
+    fn line_containing(lines: &[String], needle: &str) -> Option<String> {
+        lines.iter().find(|line| line.contains(needle)).cloned()
+    }
+
+    /// (a) A scored decision replaces the estimate. The stored estimate here is
+    /// the pilot's 0.0; the contributor must see the gate's 0.300 as 3.00
+    /// points, and be told which scoring produced it and over how much of
+    /// the trace.
+    #[test]
+    fn a_scored_decision_replaces_the_estimate_and_names_its_basis() {
+        let record = accepted_record_with_estimate(0.0);
+        let decision = scored_decision(&record);
+
+        let receipt = receipt_from_record(&record, NearSettlementMode::Disabled, Some(&decision));
+
+        assert_eq!(receipt.credit_points_pending, Some(3.0));
+        let basis = line_containing(&receipt.explanation, "gate's scoring")
+            .unwrap_or_else(|| panic!("no basis line in {:?}", receipt.explanation));
+        assert!(
+            basis.contains("calibration V3") && basis.contains("4 of 12 chunks"),
+            "basis line must name the calibration and the chunk coverage; got {basis:?}"
+        );
+        assert!(
+            line_containing(&receipt.explanation, "preliminary").is_none(),
+            "a gate-derived figure is not preliminary; got {:?}",
+            receipt.explanation
+        );
+    }
+
+    /// The same rule through the status update, which is what the desktop
+    /// app actually polls. Round to two decimals on the 10-point scale, the
+    /// way the estimate always was, so the two figures stay comparable.
+    #[test]
+    fn the_status_update_carries_the_gate_figure_rounded_to_points() {
+        let record = accepted_record_with_estimate(0.0);
+        let mut decision = scored_decision(&record);
+        decision.credit_quality_micros = Some(123_456);
+        decision.chunks_capped = Some(false);
+        decision.chunk_count = Some(3);
+        decision.total_chunk_count = Some(3);
+
+        let status = submission_status_from_record(
+            &record,
+            &[],
+            NearSettlementMode::Disabled,
+            Some(&decision),
+        );
+
+        assert_eq!(status.credit_points_pending, 1.23);
+        let basis = line_containing(&status.explanation, "gate's scoring")
+            .unwrap_or_else(|| panic!("no basis line in {:?}", status.explanation));
+        assert!(
+            basis.contains("all 3 chunks"),
+            "an uncapped decision covered the whole trace; got {basis:?}"
+        );
+    }
+
+    /// (b) The perplexity driver's skip-duplicate branch records a decision
+    /// with no credit quality at all. That is a verdict, not a pending score,
+    /// and the contributor is owed the reason.
+    #[test]
+    fn a_skipped_duplicate_decision_reports_zero_with_the_reason() {
+        let record = accepted_record_with_estimate(4.2);
+        let decision = skipped_duplicate_decision(&record);
+
+        let receipt = receipt_from_record(&record, NearSettlementMode::Disabled, Some(&decision));
+
+        assert_eq!(receipt.credit_points_pending, Some(0.0));
+        let reason = line_containing(&receipt.explanation, "duplicates an earlier submission")
+            .unwrap_or_else(|| panic!("no duplicate line in {:?}", receipt.explanation));
+        assert!(
+            reason.contains("no separate credit"),
+            "the line must say no separate credit is earned; got {reason:?}"
+        );
+        assert!(
+            line_containing(&receipt.explanation, "gate's scoring").is_none(),
+            "a skipped duplicate was never scored, so no scoring basis applies"
+        );
+    }
+
+    /// (c) Before the gate has run, the estimate stands, but it is labelled as
+    /// the placeholder it is.
+    #[test]
+    fn without_a_decision_the_estimate_stands_and_is_labelled_preliminary() {
+        let record = accepted_record_with_estimate(4.2);
+
+        let receipt = receipt_from_record(&record, NearSettlementMode::Disabled, None);
+
+        assert_eq!(receipt.credit_points_pending, Some(4.2));
+        let line = line_containing(&receipt.explanation, "preliminary")
+            .unwrap_or_else(|| panic!("no preliminary line in {:?}", receipt.explanation));
+        assert!(
+            line.contains("replaced") && line.contains("scoring"),
+            "the line must say the figure is replaced once scoring completes; got {line:?}"
+        );
+    }
+
+    /// (d) Which statuses carry credit does not change. A quarantined record
+    /// reports 0.0 today and keeps doing so even when a scored decision
+    /// exists for it; the gate figure is only ever shown on a status that
+    /// carries pending credit.
+    #[test]
+    fn a_quarantined_record_with_a_scored_decision_still_reports_zero() {
+        let record = quarantined_record();
+        let decision = scored_decision(&record);
+
+        let receipt = receipt_from_record(&record, NearSettlementMode::Disabled, Some(&decision));
+
+        assert_eq!(receipt.credit_points_pending, Some(0.0));
+        assert!(
+            line_containing(&receipt.explanation, "gate's scoring").is_none(),
+            "a quarantined record must not present a gate credit figure; got {:?}",
+            receipt.explanation
+        );
+        assert!(
+            line_containing(&receipt.explanation, "preliminary").is_none(),
+            "a quarantined record carries no estimate to label; got {:?}",
+            receipt.explanation
+        );
+    }
+
+    /// Hash-only rules on the contributor surface: the basis line carries the
+    /// calibration version and chunk counts, never a submission id, a raw
+    /// micros score, or a decision id.
+    #[test]
+    fn the_basis_line_carries_no_identifiers_or_raw_scores() {
+        let record = accepted_record_with_estimate(0.0);
+        let decision = scored_decision(&record);
+
+        let receipt = receipt_from_record(&record, NearSettlementMode::Disabled, Some(&decision));
+
+        let basis = line_containing(&receipt.explanation, "gate's scoring").expect("basis line");
+        assert!(!basis.contains(&record.submission_id.to_string()));
+        assert!(!basis.contains("300000") && !basis.contains("300_000"));
+    }
+
+    /// Design item 6: a status refresh of up to 500 ids must not become up
+    /// to 500 decision reads. The lookup groups the visible records by tenant
+    /// and issues ONE read per tenant carrying every id in that group, and a
+    /// record with no decision simply has no entry in the result.
+    #[tokio::test]
+    async fn the_decision_lookup_is_one_batched_read_per_tenant() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db = Arc::new(PerplexityDriverTestDb::new());
+        let db_mirror: Arc<dyn Database> = db.clone();
+        let state = test_state_with_options(
+            temp.path().to_path_buf(),
+            Some(db_mirror),
+            None,
+            false,
+            false,
+            false,
+            false,
+        );
+
+        let scored = accepted_record_with_estimate(0.0);
+        let unscored = accepted_record_with_estimate(0.0);
+        let mut other_tenant = accepted_record_with_estimate(0.0);
+        other_tenant.tenant_id = "tenant-b".to_string();
+
+        let mut row = rescore_test_decision_row(scored.submission_id);
+        row.credit_withheld_reason = None;
+        let decision_id = row.decision_id;
+        db.seed_gate_decision("tenant-a", row);
+        db.update_trace_gate_decision_credit_quality(
+            "tenant-a",
+            decision_id,
+            250_000,
+            1_000_000,
+            3,
+        )
+        .await
+        .expect("credit quality write");
+
+        let decisions =
+            gate_credit_decisions_for_records(state.as_ref(), [&scored, &unscored, &other_tenant])
+                .await
+                .expect("lookup succeeds");
+
+        let reads = db.gate_credit_reads.read().unwrap().clone();
+        assert_eq!(
+            reads.len(),
+            2,
+            "three records in two tenants must cost two reads, not three; got {reads:?}"
+        );
+        let tenant_a_read = reads
+            .iter()
+            .find(|(tenant, _)| tenant == "tenant-a")
+            .expect("one read for tenant-a");
+        assert_eq!(
+            tenant_a_read.1.len(),
+            2,
+            "the tenant-a read carries both of its ids in one call; got {reads:?}"
+        );
+
+        let found = decisions
+            .get(&scored.submission_id)
+            .expect("the scored record has a decision");
+        assert_eq!(found.credit_quality_micros, Some(250_000));
+        assert_eq!(found.credit_quality_calibration_version, Some(3));
+        assert!(
+            !decisions.contains_key(&unscored.submission_id),
+            "an unscored record has no entry, which the presentation reads as preliminary"
+        );
+        assert!(!decisions.contains_key(&other_tenant.submission_id));
     }
 }
 
@@ -89471,7 +89785,7 @@ fn credit_cycle_response_with_failed_submits(failed: usize) -> TraceCreditCycleW
 fn a_dry_run_receipt_does_not_imply_an_on_chain_credit() {
     let record = submission_record_with_principal("principal_a");
 
-    let receipt = receipt_from_record(&record, NearSettlementMode::DryRun);
+    let receipt = receipt_from_record(&record, NearSettlementMode::DryRun, None);
 
     assert!(
         receipt
@@ -91866,7 +92180,11 @@ mod witness_receipt_wording {
 
     #[test]
     fn a_witness_admitted_receipt_says_so() {
-        let receipt = receipt_from_record(&witness_admitted_record(), NearSettlementMode::Disabled);
+        let receipt = receipt_from_record(
+            &witness_admitted_record(),
+            NearSettlementMode::Disabled,
+            None,
+        );
         assert!(
             receipt
                 .explanation
@@ -91879,8 +92197,11 @@ mod witness_receipt_wording {
 
     #[test]
     fn an_ordinarily_accepted_receipt_is_unchanged() {
-        let receipt =
-            receipt_from_record(&ordinary_accepted_record(), NearSettlementMode::Disabled);
+        let receipt = receipt_from_record(
+            &ordinary_accepted_record(),
+            NearSettlementMode::Disabled,
+            None,
+        );
         assert!(
             !receipt
                 .explanation
@@ -91896,12 +92217,18 @@ mod witness_receipt_wording {
     /// re-open #445 while fixing its sibling.
     #[test]
     fn the_witness_sentence_is_added_and_displaces_nothing() {
-        let ordinary =
-            receipt_from_record(&ordinary_accepted_record(), NearSettlementMode::Disabled)
-                .explanation;
-        let witnessed =
-            receipt_from_record(&witness_admitted_record(), NearSettlementMode::Disabled)
-                .explanation;
+        let ordinary = receipt_from_record(
+            &ordinary_accepted_record(),
+            NearSettlementMode::Disabled,
+            None,
+        )
+        .explanation;
+        let witnessed = receipt_from_record(
+            &witness_admitted_record(),
+            NearSettlementMode::Disabled,
+            None,
+        )
+        .explanation;
         assert_eq!(
             witnessed.len(),
             ordinary.len() + 1,
@@ -91923,7 +92250,8 @@ mod witness_receipt_wording {
             ordinary_accepted_record(),
             held_record(),
         ] {
-            for line in receipt_from_record(&record, NearSettlementMode::Disabled).explanation {
+            for line in receipt_from_record(&record, NearSettlementMode::Disabled, None).explanation
+            {
                 let lower = line.to_ascii_lowercase();
                 for claim in [
                     "verified clean",
@@ -91944,7 +92272,11 @@ mod witness_receipt_wording {
     /// rule puts them out of bounds regardless.
     #[test]
     fn no_receipt_line_carries_a_measurement_or_an_address() {
-        let receipt = receipt_from_record(&witness_admitted_record(), NearSettlementMode::Disabled);
+        let receipt = receipt_from_record(
+            &witness_admitted_record(),
+            NearSettlementMode::Disabled,
+            None,
+        );
         for line in receipt.explanation {
             assert!(!line.contains("mrtd:"), "{line}");
             assert!(!line.contains("0x"), "{line}");

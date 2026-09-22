@@ -27,21 +27,21 @@ use crate::trace_corpus_storage::{
     TraceExportJobStatus, TraceExportJobStatusUpdate, TraceExportJobWrite,
     TraceExportManifestItemInvalidationReason, TraceExportManifestItemRecord,
     TraceExportManifestItemWrite, TraceExportManifestMirrorWrite, TraceExportManifestRecord,
-    TraceExportManifestWrite, TraceGateChunkVectorEntryRow, TraceGateDecisionRow,
-    TraceNearCreditOutboxItemRecord, TraceNearCreditOutboxItemWrite, TraceObjectArtifactKind,
-    TraceObjectRefRecord, TraceObjectRefWrite, TraceRankingCalibrationDatasetRecord,
-    TraceRankingCalibrationDatasetStatus, TraceRankingCalibrationDatasetStatusUpdate,
-    TraceRankingCalibrationDatasetWrite, TraceRankingCalibrationRunRecord,
-    TraceRankingCalibrationRunWrite, TraceRankingFeatureRecord, TraceRankingFeatureWrite,
-    TraceRankingLabelOutcome, TraceRankingLabelRecord, TraceRankingLabelSource,
-    TraceRankingLabelWrite, TraceRankingModelStatus, TraceRankingModelVersionRecord,
-    TraceRankingModelVersionWrite, TraceRankingPredictionRecord, TraceRankingPredictionWrite,
-    TraceRankingPreferenceLabelRecord, TraceRankingPreferenceLabelWrite,
-    TraceRankingUtilityCategory, TraceRankingWorkerRunKind, TraceRankingWorkerRunRecord,
-    TraceRankingWorkerRunStatus, TraceRankingWorkerRunWrite, TraceRetentionJobItemAction,
-    TraceRetentionJobItemRecord, TraceRetentionJobItemStatus, TraceRetentionJobItemWrite,
-    TraceRetentionJobRecord, TraceRetentionJobStatus, TraceRetentionJobWrite,
-    TraceRevocationPropagationAction, TraceRevocationPropagationItemRecord,
+    TraceExportManifestWrite, TraceGateChunkVectorEntryRow, TraceGateCreditDecisionRow,
+    TraceGateDecisionRow, TraceNearCreditOutboxItemRecord, TraceNearCreditOutboxItemWrite,
+    TraceObjectArtifactKind, TraceObjectRefRecord, TraceObjectRefWrite,
+    TraceRankingCalibrationDatasetRecord, TraceRankingCalibrationDatasetStatus,
+    TraceRankingCalibrationDatasetStatusUpdate, TraceRankingCalibrationDatasetWrite,
+    TraceRankingCalibrationRunRecord, TraceRankingCalibrationRunWrite, TraceRankingFeatureRecord,
+    TraceRankingFeatureWrite, TraceRankingLabelOutcome, TraceRankingLabelRecord,
+    TraceRankingLabelSource, TraceRankingLabelWrite, TraceRankingModelStatus,
+    TraceRankingModelVersionRecord, TraceRankingModelVersionWrite, TraceRankingPredictionRecord,
+    TraceRankingPredictionWrite, TraceRankingPreferenceLabelRecord,
+    TraceRankingPreferenceLabelWrite, TraceRankingUtilityCategory, TraceRankingWorkerRunKind,
+    TraceRankingWorkerRunRecord, TraceRankingWorkerRunStatus, TraceRankingWorkerRunWrite,
+    TraceRetentionJobItemAction, TraceRetentionJobItemRecord, TraceRetentionJobItemStatus,
+    TraceRetentionJobItemWrite, TraceRetentionJobRecord, TraceRetentionJobStatus,
+    TraceRetentionJobWrite, TraceRevocationPropagationAction, TraceRevocationPropagationItemRecord,
     TraceRevocationPropagationItemStatus, TraceRevocationPropagationItemStatusUpdate,
     TraceRevocationPropagationItemWrite, TraceRevocationPropagationTarget,
     TraceRevocationPropagationTargetKind, TraceSubmissionKeysetCursor, TraceSubmissionRecord,
@@ -6744,6 +6744,57 @@ impl TraceCorpusStore for PgBackend {
             tool_result_tokens: row.get(27),
             attributed_token_fraction_micros: row.get(28),
         }))
+    }
+
+    async fn list_latest_gate_credit_decisions(
+        &self,
+        tenant_id: &str,
+        submission_ids: &[Uuid],
+    ) -> Result<Vec<TraceGateCreditDecisionRow>, DatabaseError> {
+        if submission_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        // One round trip for the whole id set: the status route hands over
+        // up to 500 ids at once. Forced RLS on the tenant GUC is what scopes
+        // the read; the explicit `tenant_id = $1` is belt-and-braces and
+        // keeps the plan on the (tenant_id, submission_id) index.
+        //
+        // `decision_id` is the final tiebreaker, as in every other
+        // latest-decision read, so two decisions sharing a `decided_at`
+        // resolve the same way on every call.
+        let rows = tx
+            .query(
+                "SELECT DISTINCT ON (submission_id)
+                        submission_id,
+                        credit_quality_micros,
+                        credit_quality_calibration_version,
+                        credit_withheld_reason,
+                        chunk_count,
+                        total_chunk_count,
+                        chunks_capped
+                 FROM trace_gate_decisions
+                 WHERE tenant_id = $1
+                   AND submission_id = ANY($2)
+                 ORDER BY submission_id, decided_at DESC, decision_id DESC",
+                &[&tenant_id, &submission_ids],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(rows
+            .into_iter()
+            .map(|row| TraceGateCreditDecisionRow {
+                submission_id: row.get("submission_id"),
+                credit_quality_micros: row.get("credit_quality_micros"),
+                credit_quality_calibration_version: row.get("credit_quality_calibration_version"),
+                credit_withheld_reason: row.get("credit_withheld_reason"),
+                chunk_count: row.get("chunk_count"),
+                total_chunk_count: row.get("total_chunk_count"),
+                chunks_capped: row.get("chunks_capped"),
+            })
+            .collect())
     }
 }
 

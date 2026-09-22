@@ -2158,6 +2158,27 @@ pub struct OwnSubmissionScoreRow {
     pub score: Option<TraceScoreBySubmissionRow>,
 }
 
+/// The credit-bearing slice of a submission's latest gate decision, as the
+/// contributor status surface presents it in place of the submit-time
+/// estimate. Read tenant-scoped by `list_latest_gate_credit_decisions`.
+///
+/// `credit_quality_micros` is `None` on a cost-control decision (a
+/// `skipped_duplicate` or `cached` row, told apart from a genuine unscored
+/// decision by `credit_withheld_reason`) and on the rare decision whose
+/// inline credit-quality write failed. Chunk columns keep
+/// `TraceGateDecisionRow`'s NULL semantics: `chunk_count` NULL reads as 1,
+/// `chunks_capped` NULL as false, `total_chunk_count` NULL as unknown.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TraceGateCreditDecisionRow {
+    pub submission_id: Uuid,
+    pub credit_quality_micros: Option<i64>,
+    pub credit_quality_calibration_version: Option<i32>,
+    pub credit_withheld_reason: Option<String>,
+    pub chunk_count: Option<i32>,
+    pub total_chunk_count: Option<i32>,
+    pub chunks_capped: Option<bool>,
+}
+
 /// Safe, label-only missing-control name returned when a storage backend has
 /// no real withdrawal implementation. Withdrawal deletes content and reports a
 /// distribution tier; a backend that cannot do either must refuse rather than
@@ -3355,6 +3376,32 @@ pub trait TraceCorpusStore: Send + Sync {
         _exclude_submission_id: Uuid,
     ) -> Result<Option<TraceGateDecisionRow>, DatabaseError> {
         Ok(None)
+    }
+
+    /// For each of `submission_ids` that has at least one gate decision
+    /// under `tenant_id`, return the credit-bearing slice of its LATEST
+    /// decision (by `decided_at`, then `decision_id`). Ids with no decision
+    /// yet are simply absent: the contributor status surface reads that
+    /// absence as "not scored yet" and keeps showing the submit-time
+    /// estimate.
+    ///
+    /// Tenant-scoped through the forced-RLS trace pool, not the cross-tenant
+    /// gate-driver pool: the two columns this read needs beyond the
+    /// attestation surface (`credit_quality_calibration_version`,
+    /// `credit_withheld_reason`) are not in the gate-driver role's
+    /// column grants, and the callers already hold an authenticated tenant
+    /// context. Callers pass only ids the requesting principal can already
+    /// see; the id list narrows, it never widens.
+    ///
+    /// Default: empty (test doubles / backends without the decision table),
+    /// which degrades to the preliminary estimate rather than failing the
+    /// status read.
+    async fn list_latest_gate_credit_decisions(
+        &self,
+        _tenant_id: &str,
+        _submission_ids: &[Uuid],
+    ) -> Result<Vec<TraceGateCreditDecisionRow>, DatabaseError> {
+        Ok(Vec::new())
     }
 
     /// Paginated scan over `trace_gate_decisions` for the replay binary.
