@@ -26764,6 +26764,130 @@ async fn db_reconciliation_drill_records_clean_smoke_evidence() {
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
 }
 
+/// An accepted trace the PII backstop has released has NO active
+/// `submitted_envelope` ref (the release invalidates it) and an active
+/// `rescrubbed_envelope` ref instead. The reconciliation drill must read the
+/// rescrubbed ref as the trace's envelope rather than count the trace under
+/// `accepted_without_active_envelope_object_ref`, which is a blocking gap.
+#[tokio::test]
+async fn db_reconciliation_drill_reads_rescrubbed_envelope_ref_for_released_backstop_trace() {
+    use axum::body::Body;
+    use tower::ServiceExt;
+
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let mut state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        true,
+        true,
+        true,
+        true,
+    );
+    Arc::make_mut(&mut state).require_db_mirror_writes = true;
+
+    let mut envelope = sample_envelope().await;
+    make_metadata_only_low_risk(&mut envelope);
+    let submission_id = envelope.submission_id;
+    let _ = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        submit_body(envelope),
+    )
+    .await
+    .expect("submission mirrors to DB");
+
+    // Model the backstop release on the object-ref table: append a
+    // `rescrubbed_envelope` ref (pointing at the same readable bytes) and
+    // invalidate the pre-backstop `submitted_envelope` ref.
+    let submitted = backend
+        .list_trace_object_refs("tenant-a", submission_id)
+        .await
+        .expect("list object refs")
+        .into_iter()
+        .find(|r| r.artifact_kind == StorageTraceObjectArtifactKind::SubmittedEnvelope)
+        .expect("submitted envelope ref present");
+    backend
+        .append_trace_object_ref(StorageTraceObjectRefWrite {
+            object_ref_id: Uuid::new_v4(),
+            tenant_id: "tenant-a".to_string(),
+            submission_id,
+            artifact_kind: StorageTraceObjectArtifactKind::RescrubbedEnvelope,
+            object_store: submitted.object_store.clone(),
+            object_key: submitted.object_key.clone(),
+            content_sha256: submitted.content_sha256.clone(),
+            encryption_key_ref: submitted.encryption_key_ref.clone(),
+            size_bytes: submitted.size_bytes,
+            compression: None,
+            created_by_job_id: None,
+        })
+        .await
+        .expect("append rescrubbed envelope ref");
+    let invalidated = backend
+        .invalidate_trace_object_refs_by_kind(
+            "tenant-a",
+            submission_id,
+            StorageTraceObjectArtifactKind::SubmittedEnvelope,
+        )
+        .await
+        .expect("invalidate submitted envelope ref");
+    assert_eq!(invalidated, 1);
+
+    let response = app(state.clone())
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/v1/admin/db-reconciliation-drill")
+                .header(AUTHORIZATION, "Bearer admin-token-a")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "purpose": "operator DB reconciliation drill",
+                        "record_evidence": false
+                    })
+                    .to_string(),
+                ))
+                .expect("request builds"),
+        )
+        .await
+        .expect("DB reconciliation drill response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 16 * 1024)
+        .await
+        .expect("body reads");
+    let value: serde_json::Value =
+        serde_json::from_slice(&body).expect("DB reconciliation drill response parses");
+    assert_eq!(
+        value["accepted_without_active_envelope_object_ref_count"],
+        serde_json::json!(0),
+        "released-backstop trace must be read through its rescrubbed ref: {value}"
+    );
+    assert_eq!(
+        value["unreadable_active_envelope_object_ref_count"],
+        serde_json::json!(0)
+    );
+    // The clean-evidence test above pins `ready` / an empty gap list; those
+    // depend on runtime-role provisioning a bare local database lacks, so
+    // this test pins only the gap it is about.
+    let blocking_gaps = value["blocking_gaps"]
+        .as_array()
+        .expect("blocking_gaps is an array");
+    assert!(
+        !blocking_gaps.iter().any(|gap| gap
+            .as_str()
+            .is_some_and(|gap| gap.starts_with("accepted_without_active_envelope_object_ref="))),
+        "released-backstop trace must not be a blocking gap: {blocking_gaps:?}"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
 #[tokio::test]
 async fn postgres_rls_drill_without_db_mirror_returns_operator_error() {
     use axum::body::Body;
@@ -66454,8 +66578,14 @@ struct RecordedDedup {
 struct PerplexityDriverTestDb {
     submissions:
         std::sync::RwLock<std::collections::HashMap<(String, Uuid), StorageTraceSubmissionRecord>>,
-    object_refs:
-        std::sync::RwLock<std::collections::HashMap<(String, Uuid), StorageTraceObjectRefRecord>>,
+    /// Every object ref appended for a submission, in append order.
+    /// `get_latest_active_trace_object_ref` filters by artifact kind and
+    /// skips invalidated / deleted rows the way the Postgres query does, so a
+    /// test can model the PII backstop's "invalidated `submitted_envelope`,
+    /// active `rescrubbed_envelope`" shape.
+    object_refs: std::sync::RwLock<
+        std::collections::HashMap<(String, Uuid), Vec<StorageTraceObjectRefRecord>>,
+    >,
     gate_decisions: std::sync::RwLock<Vec<(String, StorageTraceGateDecisionRow)>>,
     ungated: std::sync::RwLock<Vec<GateWorkItem>>,
     /// Derived records keyed loosely by tenant, scanned linearly by
@@ -66844,14 +66974,51 @@ impl PerplexityDriverTestDb {
                 residual_risk_basis: None,
             },
         );
-        self.object_refs
-            .write()
-            .unwrap()
-            .insert((tenant_id.to_string(), submission_id), object_ref);
+        self.seed_object_ref(tenant_id, submission_id, object_ref);
         self.ungated.write().unwrap().push(GateWorkItem {
             tenant_id: tenant_id.to_string(),
             submission_id,
         });
+    }
+
+    /// Append one more object ref for an already-seeded submission (e.g. the
+    /// `rescrubbed_envelope` ref the PII backstop writes on release).
+    fn seed_object_ref(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        object_ref: StorageTraceObjectRefRecord,
+    ) {
+        self.object_refs
+            .write()
+            .unwrap()
+            .entry((tenant_id.to_string(), submission_id))
+            .or_default()
+            .push(object_ref);
+    }
+
+    /// Mark every active ref of `artifact_kind` invalidated, mirroring
+    /// `invalidate_trace_object_refs_by_kind` / the backstop release.
+    fn invalidate_object_refs_by_kind(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        artifact_kind: StorageTraceObjectArtifactKind,
+    ) {
+        let now = Utc::now();
+        if let Some(refs) = self
+            .object_refs
+            .write()
+            .unwrap()
+            .get_mut(&(tenant_id.to_string(), submission_id))
+        {
+            for object_ref in refs
+                .iter_mut()
+                .filter(|r| r.artifact_kind == artifact_kind && r.invalidated_at.is_none())
+            {
+                object_ref.invalidated_at = Some(now);
+            }
+        }
     }
 
     fn gate_decision_count(&self) -> usize {
@@ -66994,14 +67161,25 @@ impl trace_commons_server::trace_corpus_storage::TraceCorpusStore for Perplexity
         &self,
         tenant_id: &str,
         submission_id: Uuid,
-        _: StorageTraceObjectArtifactKind,
+        artifact_kind: StorageTraceObjectArtifactKind,
     ) -> Result<Option<StorageTraceObjectRefRecord>, DatabaseError> {
+        // Same predicate + ordering as the Postgres query: matching kind,
+        // not invalidated, not deleted, newest `created_at` first.
         Ok(self
             .object_refs
             .read()
             .unwrap()
             .get(&(tenant_id.to_string(), submission_id))
-            .cloned())
+            .and_then(|refs| {
+                refs.iter()
+                    .filter(|r| {
+                        r.artifact_kind == artifact_kind
+                            && r.invalidated_at.is_none()
+                            && r.deleted_at.is_none()
+                    })
+                    .max_by_key(|r| r.created_at)
+                    .cloned()
+            }))
     }
     async fn append_trace_derived_record(
         &self,
@@ -69506,6 +69684,401 @@ async fn evaluate_and_record_gate_clusters_duplicate_traces_by_simhash() {
         Some(1),
         "the distinct trace is a singleton cluster"
     );
+}
+
+/// Write one v2 KEK-wrapped envelope artifact carrying `{"text": text}` and
+/// return the object ref record that points at it, stamped with
+/// `artifact_kind`. `created_at` is `receipt.encrypted_at` for the same
+/// reason as in `seed_perplexity_driver_test_db`: the loader rebuilds the
+/// receipt from the ref and the store checks it for identity.
+fn write_v2_envelope_object_ref(
+    artifact_store: &ConfiguredTraceArtifactStore,
+    tenant_id: &str,
+    submission_id: Uuid,
+    object_id: &str,
+    artifact_kind: StorageTraceObjectArtifactKind,
+    text: &str,
+) -> StorageTraceObjectRefRecord {
+    let plaintext =
+        serde_json::to_vec(&serde_json::json!({"text": text})).expect("plaintext serializes");
+    // The PII backstop stores the rescrubbed envelope through the same
+    // `store_envelope` path as the original, i.e. as a
+    // `TraceArtifactKind::ContributionEnvelope` artifact; only the DB object
+    // ref's kind differs.
+    let receipt = artifact_store
+        .store
+        .put_serialized_json(
+            &tenant_storage_ref(tenant_id),
+            TraceArtifactKind::ContributionEnvelope,
+            object_id,
+            &plaintext,
+        )
+        .expect("v2 artifact write");
+    StorageTraceObjectRefRecord {
+        tenant_id: tenant_id.to_string(),
+        submission_id,
+        object_ref_id: Uuid::new_v4(),
+        artifact_kind,
+        object_store: artifact_store.object_store_name().to_string(),
+        object_key: receipt.object_key.clone(),
+        content_sha256: format!("sha256:{}", receipt.ciphertext_sha256),
+        encryption_key_ref: format!("tenant:{}", tenant_storage_ref(tenant_id)),
+        size_bytes: plaintext.len() as i64,
+        compression: None,
+        created_by_job_id: None,
+        invalidated_at: None,
+        deleted_at: None,
+        updated_at: receipt.encrypted_at,
+        created_at: receipt.encrypted_at,
+    }
+}
+
+/// Seed one submission in the PII-backstop-released shape: the pre-backstop
+/// `submitted_envelope` ref (text `submitted_text`) is INVALIDATED and an
+/// ACTIVE `rescrubbed_envelope` ref (text `rescrubbed_text`) sits beside it.
+/// Returns `(submission_id, submitted_ref, rescrubbed_ref)`.
+fn seed_rescrubbed_only_submission(
+    db: &PerplexityDriverTestDb,
+    artifact_store: &ConfiguredTraceArtifactStore,
+    tenant_id: &str,
+    submitted_text: &str,
+    rescrubbed_text: &str,
+) -> (
+    Uuid,
+    StorageTraceObjectRefRecord,
+    StorageTraceObjectRefRecord,
+) {
+    let submission_id = Uuid::new_v4();
+    let submitted = write_v2_envelope_object_ref(
+        artifact_store,
+        tenant_id,
+        submission_id,
+        &submission_id.to_string(),
+        StorageTraceObjectArtifactKind::SubmittedEnvelope,
+        submitted_text,
+    );
+    db.seed_ungated_submission(tenant_id, submission_id, submitted.clone());
+    let rescrubbed = write_v2_envelope_object_ref(
+        artifact_store,
+        tenant_id,
+        submission_id,
+        &format!("{submission_id}-rescrubbed"),
+        StorageTraceObjectArtifactKind::RescrubbedEnvelope,
+        rescrubbed_text,
+    );
+    db.seed_object_ref(tenant_id, submission_id, rescrubbed.clone());
+    db.invalidate_object_refs_by_kind(
+        tenant_id,
+        submission_id,
+        StorageTraceObjectArtifactKind::SubmittedEnvelope,
+    );
+    (submission_id, submitted, rescrubbed)
+}
+
+fn ciphertext_sha256_prefixed(ciphertext: &[u8]) -> String {
+    format!("sha256:{}", hex::encode(Sha256::digest(ciphertext)))
+}
+
+/// Pilot 2026-09-22: on a deployment with the PII backstop enabled the release
+/// path invalidates the `submitted_envelope` ref and writes an active
+/// `rescrubbed_envelope` ref instead, so 1215 of 1802 decision rows had no
+/// active submitted ref. The shared envelope loader (gate worker, rescore-
+/// perplexity, rederive-dedup) must read the rescrubbed ciphertext in that
+/// shape instead of failing with the missing-object-ref error.
+#[tokio::test]
+async fn load_trace_ciphertext_prefers_active_rescrubbed_envelope_over_invalidated_submitted() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+    let (artifact_store, _object_store_name) =
+        fixture_gate_worker_artifact_store(artifact_temp.path());
+    let tenant_id = "tenant-a";
+    let db = Arc::new(PerplexityDriverTestDb::new());
+    let (submission_id, submitted, rescrubbed) = seed_rescrubbed_only_submission(
+        db.as_ref(),
+        &artifact_store,
+        tenant_id,
+        "pre-backstop text with residual pii",
+        "rescrubbed text",
+    );
+    let db_mirror: Arc<dyn Database> = db.clone();
+    let state = test_state_with_configured_artifact_store_policies_and_export_guardrails(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        Some(artifact_store),
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+        BTreeMap::new(),
+        false,
+        false,
+    );
+
+    let (ciphertext, _wrapped_dek) =
+        load_trace_ciphertext_and_wrapped_dek(state.as_ref(), tenant_id, submission_id)
+            .await
+            .expect("loader reads the active rescrubbed envelope");
+    assert_eq!(
+        ciphertext_sha256_prefixed(&ciphertext),
+        rescrubbed.content_sha256,
+        "the loader must return the rescrubbed ciphertext"
+    );
+    assert_ne!(
+        ciphertext_sha256_prefixed(&ciphertext),
+        submitted.content_sha256,
+        "the invalidated pre-backstop ciphertext must not be read"
+    );
+}
+
+/// Fallback: a submission that never went through the backstop has only a
+/// `submitted_envelope` ref, and that ref still loads.
+#[tokio::test]
+async fn load_trace_ciphertext_falls_back_to_active_submitted_envelope() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+    let (artifact_store, _object_store_name) =
+        fixture_gate_worker_artifact_store(artifact_temp.path());
+    let tenant_id = "tenant-a";
+    let db = Arc::new(PerplexityDriverTestDb::new());
+    let submission_id = Uuid::new_v4();
+    let submitted = write_v2_envelope_object_ref(
+        &artifact_store,
+        tenant_id,
+        submission_id,
+        &submission_id.to_string(),
+        StorageTraceObjectArtifactKind::SubmittedEnvelope,
+        "submitted text",
+    );
+    db.seed_ungated_submission(tenant_id, submission_id, submitted.clone());
+    let db_mirror: Arc<dyn Database> = db.clone();
+    let state = test_state_with_configured_artifact_store_policies_and_export_guardrails(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        Some(artifact_store),
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+        BTreeMap::new(),
+        false,
+        false,
+    );
+
+    let (ciphertext, _wrapped_dek) =
+        load_trace_ciphertext_and_wrapped_dek(state.as_ref(), tenant_id, submission_id)
+            .await
+            .expect("loader reads the active submitted envelope");
+    assert_eq!(
+        ciphertext_sha256_prefixed(&ciphertext),
+        submitted.content_sha256
+    );
+}
+
+/// Neither kind active (the submitted ref was invalidated and no rescrubbed
+/// ref was ever written): the loader keeps its existing fail-closed error,
+/// text unchanged, because the gate-worker handler maps that exact string
+/// onto its missing-control response.
+#[tokio::test]
+async fn load_trace_ciphertext_errors_when_no_envelope_ref_is_active() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+    let (artifact_store, _object_store_name) =
+        fixture_gate_worker_artifact_store(artifact_temp.path());
+    let tenant_id = "tenant-a";
+    let db = Arc::new(PerplexityDriverTestDb::new());
+    let submission_id = Uuid::new_v4();
+    let submitted = write_v2_envelope_object_ref(
+        &artifact_store,
+        tenant_id,
+        submission_id,
+        &submission_id.to_string(),
+        StorageTraceObjectArtifactKind::SubmittedEnvelope,
+        "submitted text",
+    );
+    db.seed_ungated_submission(tenant_id, submission_id, submitted);
+    db.invalidate_object_refs_by_kind(
+        tenant_id,
+        submission_id,
+        StorageTraceObjectArtifactKind::SubmittedEnvelope,
+    );
+    let db_mirror: Arc<dyn Database> = db.clone();
+    let state = test_state_with_configured_artifact_store_policies_and_export_guardrails(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        Some(artifact_store),
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+        BTreeMap::new(),
+        false,
+        false,
+    );
+
+    let error = load_trace_ciphertext_and_wrapped_dek(state.as_ref(), tenant_id, submission_id)
+        .await
+        .expect_err("no active envelope ref must fail closed");
+    assert_eq!(error.to_string(), TRACE_GATE_WORKER_AUTH_MISSING_OBJECT_REF);
+}
+
+/// Derived-export source revalidation (benchmark conversion, ranker training
+/// exports) must accept a released-backstop source through its active
+/// `rescrubbed_envelope` ref when object refs are required, and record THAT
+/// ref's id in the manifest, rather than failing on the invalidated
+/// `submitted_envelope` ref.
+#[tokio::test]
+async fn revalidate_db_export_sources_accepts_rescrubbed_envelope_ref_when_refs_required() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+    let (artifact_store, _object_store_name) =
+        fixture_gate_worker_artifact_store(artifact_temp.path());
+    let tenant_id = "tenant-a";
+    let db = Arc::new(PerplexityDriverTestDb::new());
+
+    // A real envelope, since the revalidation reads it back as one.
+    let mut envelope = sample_envelope().await;
+    make_metadata_only_low_risk(&mut envelope);
+    let submission_id = envelope.submission_id;
+    let envelope_json = serde_json::to_vec(&envelope).expect("envelope serializes");
+    let write_ref = |object_id: &str, artifact_kind: StorageTraceObjectArtifactKind| {
+        let receipt = artifact_store
+            .store
+            .put_serialized_json(
+                &tenant_storage_ref(tenant_id),
+                TraceArtifactKind::ContributionEnvelope,
+                object_id,
+                &envelope_json,
+            )
+            .expect("v2 artifact write");
+        StorageTraceObjectRefRecord {
+            tenant_id: tenant_id.to_string(),
+            submission_id,
+            object_ref_id: Uuid::new_v4(),
+            artifact_kind,
+            object_store: artifact_store.object_store_name().to_string(),
+            object_key: receipt.object_key.clone(),
+            content_sha256: format!("sha256:{}", receipt.ciphertext_sha256),
+            encryption_key_ref: format!("tenant:{}", tenant_storage_ref(tenant_id)),
+            size_bytes: envelope_json.len() as i64,
+            compression: None,
+            created_by_job_id: None,
+            invalidated_at: None,
+            deleted_at: None,
+            updated_at: receipt.encrypted_at,
+            created_at: receipt.encrypted_at,
+        }
+    };
+    let submitted = write_ref(
+        &submission_id.to_string(),
+        StorageTraceObjectArtifactKind::SubmittedEnvelope,
+    );
+    db.seed_ungated_submission(tenant_id, submission_id, submitted);
+    let rescrubbed = write_ref(
+        &format!("{submission_id}-rescrubbed"),
+        StorageTraceObjectArtifactKind::RescrubbedEnvelope,
+    );
+    db.seed_object_ref(tenant_id, submission_id, rescrubbed.clone());
+    db.invalidate_object_refs_by_kind(
+        tenant_id,
+        submission_id,
+        StorageTraceObjectArtifactKind::SubmittedEnvelope,
+    );
+
+    let db_mirror: Arc<dyn Database> = db.clone();
+    let state = test_state_with_configured_artifact_store_policies_and_export_guardrails(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        Some(artifact_store),
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+        BTreeMap::new(),
+        false,
+        false,
+    );
+
+    let object_ref_ids = revalidate_db_export_sources(
+        state.as_ref(),
+        &test_reviewer_auth(tenant_id),
+        &[submission_id],
+        true,
+    )
+    .await
+    .expect("released-backstop source revalidates through its rescrubbed ref");
+    assert_eq!(
+        object_ref_ids.get(&submission_id),
+        Some(&rescrubbed.object_ref_id),
+        "the manifest must point at the rescrubbed ref"
+    );
+}
+
+/// End to end through the real `EnclaveGateService` decrypt path: a
+/// rescrubbed-only submission scores, and it scores the RESCRUBBED bytes.
+/// Its rescrubbed text is byte-identical to a plain submission's text, so the
+/// two must land in one dedup cluster; the pre-backstop text is unrelated and
+/// would have produced a distinct simhash.
+#[tokio::test]
+async fn evaluate_and_record_gate_scores_the_rescrubbed_envelope() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+    let (artifact_store, decryptor, _object_store_name) =
+        fixture_gate_worker_artifact_store_with_decryptor(artifact_temp.path());
+    let tenant_id = "tenant-a";
+    let shared_text = "the quick brown fox jumps over the lazy dog near the riverbank at dawn";
+    let pre_backstop_text = "an entirely unrelated trace about deploying kubernetes clusters";
+
+    let (db, plain_ids) =
+        seed_perplexity_driver_test_db_with_texts(&artifact_store, tenant_id, &[shared_text]);
+    let (rescrubbed_id, _submitted, _rescrubbed) = seed_rescrubbed_only_submission(
+        db.as_ref(),
+        &artifact_store,
+        tenant_id,
+        pre_backstop_text,
+        shared_text,
+    );
+    let db_mirror: Arc<dyn Database> = db.clone();
+    let mut state = test_state_with_configured_artifact_store_policies_and_export_guardrails(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        Some(artifact_store),
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+        BTreeMap::new(),
+        false,
+        false,
+    );
+    Arc::make_mut(&mut state).gate_service =
+        Arc::new(EnclaveGateService::mock_with_decryptor(decryptor));
+
+    let plain_decision = score_submission_for_dedup_test(&state, tenant_id, plain_ids[0]).await;
+    let rescrubbed_decision =
+        score_submission_for_dedup_test(&state, tenant_id, rescrubbed_id).await;
+
+    let plain = db
+        .gate_decision_with_dedup_by_id(tenant_id, plain_decision)
+        .expect("plain decision row present");
+    let rescrubbed = db
+        .gate_decision_with_dedup_by_id(tenant_id, rescrubbed_decision)
+        .expect("rescrubbed decision row present");
+    assert!(plain.dedup_cluster_id.is_some());
+    assert_eq!(
+        plain.dedup_cluster_id, rescrubbed.dedup_cluster_id,
+        "the rescrubbed bytes (not the invalidated pre-backstop bytes) must be what the gate scored"
+    );
+    assert_eq!(rescrubbed.dedup_cluster_size, Some(2));
 }
 
 /// Run one submission through `evaluate_and_record_gate` and return the

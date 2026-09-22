@@ -41365,12 +41365,14 @@ async fn process_one_pii_backstop(
     // The status flip and the invalidation of the pre-backstop
     // `submitted_envelope` ref(s) happen ATOMICALLY via
     // `release_pii_backstop_hold` (one tenant-scoped transaction). Neither may
-    // commit without the other: by-ref export consumers select
-    // `SubmittedEnvelope` explicitly (see e.g. the export revalidation path),
-    // so a status release with a still-active pre-backstop ref would publish
-    // un-scrubbed, PII-bearing bytes on an ordinary transient DB failure with
-    // no re-enumeration path to heal it (enumeration only selects
-    // `awaiting_pii_backstop`). Conversely the driver's own re-enumeration
+    // commit without the other: envelope readers go through
+    // `get_latest_active_envelope_object_ref` (rescrubbed first, then
+    // submitted), and the object-primary read drill selects
+    // `SubmittedEnvelope` explicitly, so a status release with a still-active
+    // pre-backstop ref would leave un-scrubbed, PII-bearing bytes reachable
+    // on an ordinary transient DB failure with no re-enumeration path to heal
+    // it (enumeration only selects `awaiting_pii_backstop`). Conversely the
+    // driver's own re-enumeration
     // INNER JOINs an active `submitted_envelope` ref, so invalidating it
     // without also releasing the status would strand the submission forever.
     // Atomicity resolves both hazards: on any failure the transaction rolls
@@ -51065,7 +51067,41 @@ enum GateOutcome {
     },
 }
 
-/// Resolve the latest active submitted-envelope object ref for a submission and
+/// Resolve the object ref of the envelope the corpus currently holds for a
+/// submission: the active `RescrubbedEnvelope` ref when the PII backstop has
+/// released the submission, else the active `SubmittedEnvelope` ref.
+///
+/// The backstop release (`process_one_pii_backstop`) appends a rescrubbed ref
+/// and, in the same transaction that flips the status, invalidates the
+/// pre-backstop `submitted_envelope` ref(s). A released-backstop trace
+/// therefore has NO active submitted ref, only a rescrubbed one; a trace that
+/// never went through the backstop has only a submitted ref. Any reader that
+/// wants "the envelope as it stands" must ask for both in that order.
+async fn get_latest_active_envelope_object_ref(
+    db: &dyn Database,
+    tenant_id: &str,
+    submission_id: Uuid,
+) -> Result<Option<StorageTraceObjectRefRecord>, DatabaseError> {
+    if let Some(rescrubbed) = db
+        .get_latest_active_trace_object_ref(
+            tenant_id,
+            submission_id,
+            StorageTraceObjectArtifactKind::RescrubbedEnvelope,
+        )
+        .await?
+    {
+        return Ok(Some(rescrubbed));
+    }
+    db.get_latest_active_trace_object_ref(
+        tenant_id,
+        submission_id,
+        StorageTraceObjectArtifactKind::SubmittedEnvelope,
+    )
+    .await
+}
+
+/// Resolve the latest active envelope object ref for a submission (rescrubbed
+/// first, then submitted; see `get_latest_active_envelope_object_ref`) and
 /// read back its ciphertext + wrapped DEK from the encrypted artifact store.
 ///
 /// This is the exact envelope-load path `evaluate_and_record_gate` uses before
@@ -51073,6 +51109,12 @@ enum GateOutcome {
 /// identical ciphertext bytes and wrapped DEK. Keeping a single loader
 /// guarantees the re-score path decrypts and chunks byte-identical inputs to
 /// production scoring — the values are only comparable if the bytes are.
+///
+/// The rescrubbed envelope is what the corpus holds and what the gate would
+/// score today, so it is the right input for both re-scoring and dedup
+/// re-derivation. Both kinds are stored as `ContributionEnvelope` artifacts
+/// (the backstop writes through `store_envelope`), so the receipt kind below
+/// is right for either.
 async fn load_trace_ciphertext_and_wrapped_dek(
     state: &AppState,
     tenant_id: &str,
@@ -51082,12 +51124,7 @@ async fn load_trace_ciphertext_and_wrapped_dek(
         .db_mirror
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("trace gate worker requires a configured DB mirror"))?;
-    let object_ref = db
-        .get_latest_active_trace_object_ref(
-            tenant_id,
-            submission_id,
-            StorageTraceObjectArtifactKind::SubmittedEnvelope,
-        )
+    let object_ref = get_latest_active_envelope_object_ref(db.as_ref(), tenant_id, submission_id)
         .await?
         .ok_or_else(|| anyhow::anyhow!(TRACE_GATE_WORKER_AUTH_MISSING_OBJECT_REF))?;
 
@@ -62071,43 +62108,18 @@ async fn read_envelope_from_active_db_object_ref(
     let Some(db) = state.db_mirror.as_ref() else {
         return Ok(None);
     };
-    // Prefer an active `RescrubbedEnvelope` ref: once the PII backstop releases a
-    // held submission it writes a rescrubbed ref and invalidates the pre-backstop
-    // `submitted_envelope` ref, so a released-backstop trace only has an active
-    // rescrubbed ref. Non-backstopped traces have only a `submitted_envelope`
-    // ref, so they fall through to the same query as before. This keeps the
-    // `require_object_refs` hardening satisfiable for released-backstop traces.
-    let object_ref = match db
-        .get_latest_active_trace_object_ref(
-            tenant_id,
-            submission_id,
-            StorageTraceObjectArtifactKind::RescrubbedEnvelope,
-        )
-        .await
-        .with_context(|| {
-            format!(
-                "failed to read active rescrubbed envelope object ref for submission {submission_id}"
-            )
-        })? {
-        Some(rescrubbed) => rescrubbed,
-        None => {
-            let Some(submitted) = db
-                .get_latest_active_trace_object_ref(
-                    tenant_id,
-                    submission_id,
-                    StorageTraceObjectArtifactKind::SubmittedEnvelope,
-                )
-                .await
-                .with_context(|| {
-                    format!(
-                        "failed to read active submitted envelope object ref for submission {submission_id}"
-                    )
-                })?
-            else {
-                return Ok(None);
-            };
-            submitted
-        }
+    // Prefer an active `RescrubbedEnvelope` ref, falling back to the
+    // `SubmittedEnvelope` ref (see `get_latest_active_envelope_object_ref`).
+    // This keeps the `require_object_refs` hardening satisfiable for
+    // released-backstop traces.
+    let Some(object_ref) =
+        get_latest_active_envelope_object_ref(db.as_ref(), tenant_id, submission_id)
+            .await
+            .with_context(|| {
+                format!("failed to read active envelope object ref for submission {submission_id}")
+            })?
+    else {
+        return Ok(None);
     };
     let envelope = read_envelope_from_object_ref(state, tenant_id, &object_ref)?;
     Ok(Some(TraceEnvelopeBodyRead {
@@ -64828,23 +64840,22 @@ async fn revalidate_db_export_sources(
                 && record.purged_at.is_none(),
             "trace export source {submission_id} is no longer accepted"
         );
-        let object_ref = db
-            .get_latest_active_trace_object_ref(
-                &tenant.tenant_id,
-                submission_id,
-                StorageTraceObjectArtifactKind::SubmittedEnvelope,
-            )
-            .await
-            .with_context(|| {
-                format!("failed to read active submitted-envelope object ref for {submission_id}")
-            })?;
+        // Rescrubbed first, then submitted: a released-backstop source has
+        // only an active `rescrubbed_envelope` ref, and that is the envelope
+        // the export must derive from.
+        let object_ref =
+            get_latest_active_envelope_object_ref(db.as_ref(), &tenant.tenant_id, submission_id)
+                .await
+                .with_context(|| {
+                    format!("failed to read active envelope object ref for {submission_id}")
+                })?;
         if let Some(object_ref) = object_ref {
             read_envelope_from_object_ref(state, &tenant.tenant_id, &object_ref).with_context(
                 || format!("failed to verify export source object ref for {submission_id}"),
             )?;
             object_ref_ids.insert(submission_id, object_ref.object_ref_id);
         } else if require_object_refs {
-            anyhow::bail!("missing active submitted-envelope object ref for {submission_id}");
+            anyhow::bail!("missing active envelope object ref for {submission_id}");
         }
     }
     Ok(object_ref_ids)
@@ -68648,19 +68659,21 @@ async fn reconcile_db_mirror(
             && record.revoked_at.is_none()
             && record.purged_at.is_none()
         {
-            let active_object_ref = db
-                .get_latest_active_trace_object_ref(
-                    &tenant.tenant_id,
-                    record.submission_id,
-                    StorageTraceObjectArtifactKind::SubmittedEnvelope,
+            // Rescrubbed first, then submitted: an accepted trace the PII
+            // backstop released has only an active `rescrubbed_envelope` ref,
+            // and must not be counted as lacking an envelope.
+            let active_object_ref = get_latest_active_envelope_object_ref(
+                db.as_ref(),
+                &tenant.tenant_id,
+                record.submission_id,
+            )
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to get latest active trace object ref for submission {}",
+                    record.submission_id
                 )
-                .await
-                .with_context(|| {
-                    format!(
-                        "failed to get latest active trace object ref for submission {}",
-                        record.submission_id
-                    )
-                })?;
+            })?;
             if let Some(object_ref) = active_object_ref {
                 if let Err(error) =
                     read_envelope_from_object_ref(state, &tenant.tenant_id, &object_ref)
