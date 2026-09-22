@@ -31,8 +31,13 @@ Three tiers, and the contributor sees which applies:
 | `accepted` — in the commons, not yet used downstream | Content deleted, trace excluded from future exports and training sets. |
 | `accepted` and already included in a published export or benchmark | Content deleted and excluded going forward. Copies already distributed cannot be recalled, and the UI says exactly that. |
 
-Credit already awarded is **not** clawed back. Withdrawal is not a punishment
-and treating it as one would deter honest use.
+Credit that has already settled is **not** clawed back. Withdrawal is not a
+punishment and treating it as one would deter honest use.
+
+Credit still pending when the trace is withdrawn is forfeited: settlement only
+batches credit on `accepted` traces, and withdrawal moves the trace to
+`revoked`. The endpoint's `credit_retained` is false exactly when that
+happened, and the UI copy says so up front (#989).
 
 ## Server
 
@@ -83,7 +88,7 @@ Confirmation copy, tier-aware. For a quarantined trace:
 > It is waiting for privacy review and has not entered the commons. Its
 > content will be deleted. No one but a reviewer has seen it.
 >
-> Credit already recorded stays.
+> Credit that has already settled stays. Credit still pending is forfeited.
 >
 > [ Keep it ]  [ Withdraw ]
 
@@ -98,7 +103,7 @@ For an accepted trace already included in a published export:
 > distributed cannot be recalled. We cannot undo that and will not pretend
 > otherwise.
 >
-> Credit already recorded stays.
+> Credit that has already settled stays. Credit still pending is forfeited.
 >
 > [ Keep it ]  [ Withdraw anyway ]
 

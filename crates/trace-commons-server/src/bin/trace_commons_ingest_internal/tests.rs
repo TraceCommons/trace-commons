@@ -94146,3 +94146,157 @@ async fn wallet_readiness_refuses_missing_identity_before_starting_a_ceremony() 
 }
 
 include!("token_bundle_journey_test.rs");
+
+fn withdrawal_credit_event(
+    submission_id: Uuid,
+    event_type: TraceCreditLedgerEventType,
+    credit_points_delta: f32,
+) -> TraceCommonsCreditLedgerRecord {
+    TraceCommonsCreditLedgerRecord {
+        event_id: Uuid::new_v4(),
+        tenant_id: "tenant-a".to_string(),
+        tenant_storage_ref: tenant_storage_ref("tenant-a"),
+        submission_id,
+        trace_id: Uuid::new_v4(),
+        auth_principal_ref: "principal:contributor".to_string(),
+        event_type,
+        credit_points_delta,
+        reason: None,
+        external_ref: None,
+        actor_role: TokenRole::Reviewer,
+        actor_principal_ref: "principal:reviewer".to_string(),
+        created_at: Utc::now(),
+    }
+}
+
+/// Withdrawal forfeits credit that has not settled yet: settlement only
+/// batches events on `Accepted` submissions, and withdrawal flips the record
+/// to `Revoked`. `credit_retained` must say so rather than promise otherwise.
+#[test]
+fn withdrawal_credit_retained_is_false_when_eligible_credit_is_unsettled() {
+    let submission_id = Uuid::new_v4();
+    let pending = withdrawal_credit_event(
+        submission_id,
+        TraceCreditLedgerEventType::TrainingUtility,
+        2.0,
+    );
+
+    assert!(!withdrawal_retains_all_credit(
+        submission_id,
+        &[pending],
+        &BTreeSet::new(),
+    ));
+}
+
+#[test]
+fn withdrawal_credit_retained_is_true_when_eligible_credit_has_settled() {
+    let submission_id = Uuid::new_v4();
+    let settled = withdrawal_credit_event(
+        submission_id,
+        TraceCreditLedgerEventType::RankingUtility,
+        2.0,
+    );
+    let finalized = BTreeSet::from([settled.event_id]);
+
+    assert!(withdrawal_retains_all_credit(
+        submission_id,
+        &[settled],
+        &finalized,
+    ));
+}
+
+/// Only events the settlement batcher would ever pick up count as forfeited.
+/// Non-settling types, non-positive deltas and other submissions' events do
+/// not change the answer.
+#[test]
+fn withdrawal_credit_retained_ignores_events_settlement_would_never_batch() {
+    let submission_id = Uuid::new_v4();
+    let events = [
+        withdrawal_credit_event(
+            submission_id,
+            TraceCreditLedgerEventType::ReviewerBonus,
+            1.0,
+        ),
+        withdrawal_credit_event(
+            submission_id,
+            TraceCreditLedgerEventType::NoveltyUtility,
+            1.0,
+        ),
+        withdrawal_credit_event(
+            submission_id,
+            TraceCreditLedgerEventType::TrainingUtility,
+            0.0,
+        ),
+        withdrawal_credit_event(
+            submission_id,
+            TraceCreditLedgerEventType::AbusePenalty,
+            -1.0,
+        ),
+        withdrawal_credit_event(
+            Uuid::new_v4(),
+            TraceCreditLedgerEventType::TrainingUtility,
+            3.0,
+        ),
+    ];
+
+    assert!(withdrawal_retains_all_credit(
+        submission_id,
+        &events,
+        &BTreeSet::new(),
+    ));
+}
+
+#[tokio::test]
+async fn account_trace_withdraw_reports_forfeited_unsettled_credit() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    let _ = mint_login_link_handler(State(state.clone()), auth_headers("token-a"))
+        .await
+        .expect("mint");
+    let device_principal = static_token_principal_ref("token-a");
+    let owned = insert_account_test_submission_with_status(
+        backend.as_ref(),
+        "tenant-a",
+        &device_principal,
+        StorageTraceCorpusStatus::Accepted,
+    )
+    .await;
+    append_credit_event(
+        temp.path(),
+        "tenant-a",
+        &withdrawal_credit_event(owned, TraceCreditLedgerEventType::TrainingUtility, 2.0),
+    )
+    .expect("unsettled credit event persists");
+
+    let ext = account_ctx_ext(&state, &account_session_headers(&state, "token-a").await).await;
+    let Json(first) =
+        account_trace_withdraw_handler(State(state.clone()), ext.clone(), AxumPath(owned))
+            .await
+            .expect("own trace withdraws");
+    assert!(
+        !first.credit_retained,
+        "unsettled credit on a withdrawn trace never settles, so it is not retained"
+    );
+
+    let Json(retry) = account_trace_withdraw_handler(State(state.clone()), ext, AxumPath(owned))
+        .await
+        .expect("withdraw retry is idempotent");
+    assert!(
+        !retry.credit_retained,
+        "a retry reports the same forfeiture"
+    );
+}

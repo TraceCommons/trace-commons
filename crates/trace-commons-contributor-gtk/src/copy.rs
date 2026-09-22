@@ -699,8 +699,8 @@ pub const QUARANTINE_BODY: &str = "An agent inspects these before they enter the
 // 2. Never claim more erasure than the tier achieved -- which is why
 //    [`withdraw_confirmation`] shows an `accepted` trace BOTH commons
 //    bodies rather than picking the gentler one.
-// 3. Withdrawal does not reverse settled credit -- [`WITHDRAW_CREDIT_NOTE`],
-//    and nothing here implies otherwise.
+// 3. Withdrawal does not reverse settled credit and forfeits pending credit
+//    -- [`WITHDRAW_CREDIT_NOTE`], and nothing here implies otherwise.
 // 4. `not_found` must not disclose which -- [`WITHDRAW_NOT_FOUND`].
 // 5. Bulk withdrawal spans tiers -- [`WITHDRAW_NO_BULK`] says why this
 //    shell does not offer it.
@@ -736,9 +736,11 @@ pub const WITHDRAW_BODY_COMMONS_DISTRIBUTED: &str = "This trace has already been
      deletes our copy and excludes it from everything published from here on, but copies that \
      have already been distributed cannot be recalled. Withdrawing does not undo that.";
 
-/// Credit is not clawed back, and this says only that -- nothing about how
-/// much, when it settles, or what it is worth.
-pub const WITHDRAW_CREDIT_NOTE: &str = "Credit already recorded stays.";
+/// Settled credit is not clawed back; credit still pending never settles once
+/// the trace is withdrawn. This says only that -- nothing about how much, when
+/// it would have settled, or what it is worth.
+pub const WITHDRAW_CREDIT_NOTE: &str =
+    "Credit that has already settled stays. Credit still pending is forfeited.";
 
 /// The canonical body for a tier, or `None` for a tier this build has never
 /// heard of.
@@ -3012,8 +3014,8 @@ mod tests {
 
     #[test]
     fn every_tier_states_the_same_verified_thing_about_credit() {
-        // Rule 3. Credit already awarded stays awarded, and no tier says
-        // anything else about it.
+        // Rule 3. Settled credit stays, pending credit is forfeited, and no
+        // tier says anything else about it.
         for stage in [
             WithdrawStage::NotInTheCommons,
             WithdrawStage::InTheCommons,
@@ -3021,6 +3023,10 @@ mod tests {
         ] {
             assert_eq!(withdraw_confirmation(stage).credit, WITHDRAW_CREDIT_NOTE);
         }
+        assert_eq!(
+            WITHDRAW_CREDIT_NOTE,
+            "Credit that has already settled stays. Credit still pending is forfeited."
+        );
     }
 
     #[test]

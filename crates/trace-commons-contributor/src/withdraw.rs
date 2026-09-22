@@ -174,12 +174,12 @@ pub fn confirmation_prompt(reach: DistributionReach, export_published_on: Option
         DistributionReach::NotDistributed => "Withdraw this trace?\n\n\
 It is waiting for privacy review and has not entered the commons. Its \
 content will be deleted. No one but a reviewer has seen it.\n\n\
-Credit already recorded stays."
+Credit that has already settled stays. Credit still pending is forfeited."
             .to_string(),
         DistributionReach::InCommons => "Withdraw this trace?\n\n\
 Its content will be deleted and it will be excluded from future exports and \
 training sets.\n\n\
-Credit already recorded stays."
+Credit that has already settled stays. Credit still pending is forfeited."
             .to_string(),
         DistributionReach::Distributed => {
             let published = export_published_on.unwrap_or("an earlier date");
@@ -190,7 +190,7 @@ training sets.\n\n\
 It was included in an export published on {published}. Copies already \
 distributed cannot be recalled. We cannot undo that and will not pretend \
 otherwise.\n\n\
-Credit already recorded stays."
+Credit that has already settled stays. Credit still pending is forfeited."
             )
         }
     }
@@ -362,7 +362,11 @@ mod tests {
             "It is waiting for privacy review and has not entered the commons. Its \
              content will be deleted. No one but a reviewer has seen it."
         ));
-        assert!(copy.contains("Credit already recorded stays."));
+        assert!(
+            copy.contains(
+                "Credit that has already settled stays. Credit still pending is forfeited."
+            )
+        );
         // Must never claim exclusion from exports for a trace that was
         // never in the commons in the first place.
         assert!(!copy.contains("excluded from future exports"));
@@ -376,7 +380,11 @@ mod tests {
             "Copies already distributed cannot be recalled. We cannot undo that and \
              will not pretend otherwise."
         ));
-        assert!(copy.contains("Credit already recorded stays."));
+        assert!(
+            copy.contains(
+                "Credit that has already settled stays. Credit still pending is forfeited."
+            )
+        );
     }
 
     #[test]

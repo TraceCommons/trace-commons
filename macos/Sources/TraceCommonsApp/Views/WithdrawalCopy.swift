@@ -19,8 +19,8 @@ import Foundation
 /// 2. Never claim more erasure than the tier achieved -- see the ambiguity
 ///    note below, which is the whole reason this file is more than three
 ///    strings.
-/// 3. Withdrawal does not reverse settled credit -- `creditNote`, and
-///    nothing here says or implies otherwise.
+/// 3. Withdrawal does not reverse settled credit and forfeits pending
+///    credit -- `creditNote`, and nothing here says or implies otherwise.
 /// 4. `not_found` must not disclose which -- `failureSentence`.
 /// 5. Bulk withdrawal spans tiers -- `noBulkAction` explains why this app
 ///    does not offer it.
@@ -84,12 +84,12 @@ enum WithdrawalCopy {
         }
     }
 
-    /// Credit is not clawed back. Verified rather than assumed: the
-    /// endpoint's response sets `credit_retained: true` unconditionally
-    /// ("Always true. Withdrawal is not a punishment: credit already awarded
-    /// stays awarded"). This app states only that -- nothing about how much
-    /// credit, when it settles, or what it is worth.
-    static let creditNote = "Credit already recorded stays."
+    /// Settled credit is not clawed back; credit still pending is forfeited,
+    /// because settlement never picks up a withdrawn trace. The endpoint's
+    /// `credit_retained` is false exactly when pending credit was forfeited.
+    /// This app states only that -- nothing about how much credit, when it
+    /// would have settled, or what it is worth.
+    static let creditNote = "Credit that has already settled stays. Credit still pending is forfeited."
 
     // MARK: - Before the action
 

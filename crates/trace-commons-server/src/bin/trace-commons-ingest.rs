@@ -16301,13 +16301,14 @@ struct AccountTraceWithdrawalResponse {
     /// and the trace is excluded going forward, but copies already distributed
     /// cannot be recalled — and the API says so rather than implying otherwise.
     already_distributed: bool,
-    /// Always true. Withdrawal is not a punishment: credit already awarded
-    /// stays awarded.
+    /// False when withdrawal forfeited credit. Settled credit is never clawed
+    /// back, but credit not yet settled never will be once the trace is
+    /// withdrawn. See `withdrawal_retains_all_credit`.
     credit_retained: bool,
 }
 
 impl AccountTraceWithdrawalResponse {
-    fn from_record(record: StorageTraceWithdrawalRecord) -> Self {
+    fn from_record(record: StorageTraceWithdrawalRecord, credit_retained: bool) -> Self {
         let already_distributed =
             record.distribution_reach == TRACE_WITHDRAWAL_REACH_COMMONS_DISTRIBUTED;
         Self {
@@ -16317,7 +16318,7 @@ impl AccountTraceWithdrawalResponse {
             prior_status: record.prior_status,
             distribution_reach: record.distribution_reach,
             already_distributed,
-            credit_retained: true,
+            credit_retained,
         }
     }
 }
@@ -16488,7 +16489,8 @@ async fn evict_withdrawn_trace_from_derived_surfaces(
 ///   returns the same tier and the same `withdrawn_at`. Deletion and eviction
 ///   are re-run on every call, so a partial failure converges on retry rather
 ///   than leaving content behind under a tombstone that says it is gone.
-/// * Credit is NOT clawed back.
+/// * Settled credit is NOT clawed back. Credit not yet settled is forfeited,
+///   and `credit_retained` reports whether there was any.
 /// * Fail-closed: any deletion or eviction failure is a generic label-only
 ///   `500`. The withdrawal is not reported as complete while content or a
 ///   derived copy may survive.
@@ -16554,6 +16556,23 @@ async fn account_trace_withdraw_handler(
         }
     };
 
+    // Read before any state change, so a failed read leaves nothing withdrawn.
+    // Recomputing on a retry gives the same answer: once the record is
+    // revoked, no batch can pick its events up.
+    let credit_tenant = account_audit_tenant(&ctx);
+    let credit_events = read_credit_events_for_admin(state.as_ref(), &credit_tenant)
+        .await
+        .map_err(|error| withdrawal_failed(&error))?;
+    let settlement_batches =
+        read_credit_settlement_batches_for_admin(state.as_ref(), &credit_tenant)
+            .await
+            .map_err(|error| withdrawal_failed(&error))?;
+    let credit_retained = withdrawal_retains_all_credit(
+        submission_id,
+        &credit_events,
+        &finalized_settlement_credit_event_ids(&settlement_batches),
+    );
+
     // Tombstone + status FIRST, bytes second: a crash between the two leaves a
     // tombstone whose retry deletes the content, never content with no record
     // that it was withdrawn.
@@ -16598,7 +16617,7 @@ async fn account_trace_withdraw_handler(
         );
     }
 
-    let mut response = AccountTraceWithdrawalResponse::from_record(tombstone);
+    let mut response = AccountTraceWithdrawalResponse::from_record(tombstone, credit_retained);
     if db.supports_token_bundles() {
         let pending = db
             .pending_token_bundle_deletions(&ctx.tenant_id, Some(submission_id))
@@ -25271,11 +25290,7 @@ async fn run_credit_settlement_unlocked(
     let held_credit_accounts = active_credit_hold_account_refs_for_admin(state, tenant)
         .await
         .map_err(internal_error)?;
-    let already_settled_event_ids = existing_batches
-        .iter()
-        .filter(|batch| batch.status == StorageTraceCreditSettlementBatchStatus::Finalized)
-        .flat_map(|batch| batch.source_credit_event_ids.iter().copied())
-        .collect::<BTreeSet<_>>();
+    let already_settled_event_ids = finalized_settlement_credit_event_ids(&existing_batches);
     let credit_events = read_credit_events_for_admin(state, tenant)
         .await
         .map_err(internal_error)?;
@@ -26745,11 +26760,7 @@ async fn build_credit_risk_summary(
     let settlement_batches = read_credit_settlement_batches_for_admin(state, tenant)
         .await
         .map_err(internal_error)?;
-    let settled_credit_event_ids = settlement_batches
-        .iter()
-        .filter(|batch| batch.status == StorageTraceCreditSettlementBatchStatus::Finalized)
-        .flat_map(|batch| batch.source_credit_event_ids.iter().copied())
-        .collect::<BTreeSet<_>>();
+    let settled_credit_event_ids = finalized_settlement_credit_event_ids(&settlement_batches);
     let held_credit_accounts = active_credit_hold_account_refs_for_admin(state, tenant)
         .await
         .map_err(internal_error)?;
@@ -36523,12 +36534,8 @@ struct RankingCreditReadinessInputs<'a> {
 fn ranking_credit_readiness_report(
     inputs: RankingCreditReadinessInputs<'_>,
 ) -> TraceRankingCreditReadinessReport {
-    let already_settled_event_ids = inputs
-        .settlement_batches
-        .iter()
-        .filter(|batch| batch.status == StorageTraceCreditSettlementBatchStatus::Finalized)
-        .flat_map(|batch| batch.source_credit_event_ids.iter().copied())
-        .collect::<BTreeSet<_>>();
+    let already_settled_event_ids =
+        finalized_settlement_credit_event_ids(inputs.settlement_batches);
     let model_risk_codes_by_key =
         blocking_ranking_model_risk_codes_by_key(ranking_model_risk_report(
             inputs.state,
@@ -37356,6 +37363,37 @@ fn trace_credit_event_type_is_settlement_eligible(event_type: TraceCreditLedgerE
             | TraceCreditLedgerEventType::TrainingUtility
             | TraceCreditLedgerEventType::RankingUtility
     )
+}
+
+/// Credit event ids already carried by a finalized settlement batch.
+fn finalized_settlement_credit_event_ids(
+    batches: &[TraceCreditSettlementBatchRecord],
+) -> BTreeSet<Uuid> {
+    batches
+        .iter()
+        .filter(|batch| batch.status == StorageTraceCreditSettlementBatchStatus::Finalized)
+        .flat_map(|batch| batch.source_credit_event_ids.iter().copied())
+        .collect()
+}
+
+/// Whether withdrawing `submission_id` leaves all of its credit in place.
+///
+/// Settled credit is never clawed back. Credit that has not settled yet is
+/// forfeited: `run_credit_settlement` only batches events on `Accepted`
+/// submissions, and withdrawal moves the record to `revoked`. This is false
+/// exactly when the submission has an event that batcher would otherwise
+/// have picked up and that no finalized batch carries yet.
+fn withdrawal_retains_all_credit(
+    submission_id: Uuid,
+    events: &[TraceCommonsCreditLedgerRecord],
+    finalized_event_ids: &BTreeSet<Uuid>,
+) -> bool {
+    !events.iter().any(|event| {
+        event.submission_id == submission_id
+            && trace_credit_event_type_is_settlement_eligible(event.event_type)
+            && event.credit_points_delta > 0.0
+            && !finalized_event_ids.contains(&event.event_id)
+    })
 }
 
 fn delayed_credit_required_allowed_uses(
