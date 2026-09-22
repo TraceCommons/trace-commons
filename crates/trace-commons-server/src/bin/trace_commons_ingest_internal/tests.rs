@@ -23786,6 +23786,113 @@ async fn operational_summary_reports_private_vector_infrastructure_readiness() {
     assert!(!metrics.contains("do not expose raw vector ops purpose"));
 }
 
+/// Paths of every JSON leaf whose value is exactly `needle`: a number equal to
+/// it, or a string equal to its decimal form. Substring matching is
+/// deliberately not used -- `generated_at` carries a nanosecond tail, and any
+/// four-digit run turns up inside it now and then, so a `contains` check on
+/// the whole body is a coin flip, not a leak detector.
+fn json_leaves_equal_to(value: &serde_json::Value, needle: u64) -> Vec<String> {
+    fn walk(value: &serde_json::Value, path: &str, needle: u64, hits: &mut Vec<String>) {
+        match value {
+            serde_json::Value::Object(map) => {
+                for (key, child) in map {
+                    walk(child, &format!("{path}/{key}"), needle, hits);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for (index, child) in items.iter().enumerate() {
+                    walk(child, &format!("{path}/{index}"), needle, hits);
+                }
+            }
+            serde_json::Value::Number(number) => {
+                if number.as_u64() == Some(needle) {
+                    hits.push(path.to_string());
+                }
+            }
+            serde_json::Value::String(text) => {
+                if *text == needle.to_string() {
+                    hits.push(path.to_string());
+                }
+            }
+            serde_json::Value::Bool(_) | serde_json::Value::Null => {}
+        }
+    }
+    let mut hits = Vec::new();
+    walk(value, "", needle, &mut hits);
+    hits
+}
+
+/// Prometheus text-format sample lines whose sample value, or any label value,
+/// is exactly `needle`. Comment lines are skipped; the sample value is the
+/// token after the last space, and label values are the quoted strings.
+fn prometheus_samples_equal_to(body: &str, needle: u64) -> Vec<String> {
+    let needle_text = needle.to_string();
+    body.lines()
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .filter(|line| {
+            let (series, sample) = line.rsplit_once(' ').unwrap_or((line, ""));
+            if sample == needle_text {
+                return true;
+            }
+            series
+                .split('"')
+                .skip(1)
+                .step_by(2)
+                .any(|label_value| label_value == needle_text)
+        })
+        .map(str::to_string)
+        .collect()
+}
+
+/// The reproduction for the flake this replaces: a timestamp whose nanosecond
+/// tail happens to contain the digits must not count as a leak, while the
+/// value itself -- as a number, a string, a gauge, or a label -- must.
+#[test]
+fn exact_value_probes_ignore_digit_runs_inside_other_fields() {
+    let clean = serde_json::json!({
+        "generated_at": "2026-09-21T00:00:00.123456789Z",
+        "evidence_hash": "6789abcdef",
+        "ranking": { "process_evaluator_configured": true, "count": 67890 }
+    });
+    let clean_text = serde_json::to_string(&clean).expect("serializes");
+    assert!(
+        clean_text.contains("6789"),
+        "the substring check this test replaces trips on the timestamp alone"
+    );
+    assert!(json_leaves_equal_to(&clean, 6_789).is_empty());
+
+    let leaking = serde_json::json!({
+        "generated_at": "2026-09-21T00:00:00.123456789Z",
+        "ranking": { "process_evaluator_timeout_ms": 6789 },
+        "notes": ["6789"]
+    });
+    let mut leaks = json_leaves_equal_to(&leaking, 6_789);
+    leaks.sort();
+    assert_eq!(
+        leaks,
+        vec![
+            "/notes/0".to_string(),
+            "/ranking/process_evaluator_timeout_ms".to_string()
+        ]
+    );
+
+    let clean_metrics =
+        "# HELP x y\n# TYPE x gauge\nx{tenant_storage_ref=\"a6789b\"} 1\nx{state=\"ok\"} 67890\n";
+    assert!(prometheus_samples_equal_to(clean_metrics, 6_789).is_empty());
+    let leaking_metrics =
+        "x{tenant_storage_ref=\"a\"} 6789\ny{timeout_ms=\"6789\",state=\"ok\"} 1\nz{a=\"b\"} 2\n";
+    assert_eq!(
+        prometheus_samples_equal_to(leaking_metrics, 6_789),
+        vec![
+            "x{tenant_storage_ref=\"a\"} 6789".to_string(),
+            "y{timeout_ms=\"6789\",state=\"ok\"} 1".to_string()
+        ]
+    );
+}
+
+/// The operational summary reports process-evaluator readiness as a boolean
+/// and nothing more: the configured timeout is operator configuration and
+/// stays off this surface and off the metrics scrape built from it.
 #[tokio::test]
 async fn operational_summary_reports_process_evaluator_readiness() {
     let temp = tempfile::tempdir().expect("temp dir");
@@ -23805,15 +23912,28 @@ async fn operational_summary_reports_process_evaluator_readiness() {
         response_json["ranking"]["process_evaluator_configured"],
         serde_json::json!(true)
     );
-    let response_text = serde_json::to_string(&response).expect("response serializes");
-    assert!(!response_text.contains("6789"));
+    assert!(
+        response_json["ranking"]
+            .get("process_evaluator_timeout_ms")
+            .is_none(),
+        "the ranking summary must not carry the evaluator timeout"
+    );
+    let leaked = json_leaves_equal_to(&response_json, 6_789);
+    assert!(
+        leaked.is_empty(),
+        "process evaluator timeout leaked into the operational summary at {leaked:?}"
+    );
 
     let (metrics, _) = trace_operational_metrics_body(&response);
     let tenant_ref = tenant_storage_ref("tenant-a");
     assert!(metrics.contains(&format!(
             "trace_commons_operational_ranking_evaluator_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"process_evaluator_configured\"}} 1"
         )));
-    assert!(!metrics.contains("6789"));
+    let leaked = prometheus_samples_equal_to(&metrics, 6_789);
+    assert!(
+        leaked.is_empty(),
+        "process evaluator timeout leaked into the operational metrics: {leaked:?}"
+    );
 }
 
 #[tokio::test]
