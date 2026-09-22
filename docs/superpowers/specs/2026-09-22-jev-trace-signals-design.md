@@ -1,8 +1,10 @@
 # Semantic Trace Signals from a System One Model (TypeSafe Jev) — Design
 
 Date: 2026-09-22
-Status: exploratory draft for discussion. Nothing here is wired into ingest,
-the gate, or credit.
+Status: **tabled 2026-09-22.** Hosted Jev is incompatible with Trace Commons'
+privacy goals. This work resumes only once an open-source System One class
+model runs on NEAR infrastructure. The experiments and combinations below are kept as the design to
+pick up then. Nothing here is wired into ingest, the gate, or credit.
 Scope: design only. No code, no migration. Records two offline experiments and
 proposes ways to combine typed semantic judgments with the existing scoring
 signals (perplexity, novelty, dedup cluster, replay sufficiency, credit
@@ -51,16 +53,15 @@ deployments:
 1. **Offline calibration.** Run Jev on public corpora and on sessions whose
    owner consents to the send. Use the results to derive thresholds, rules, or
    cheap local features that production computes without Jev.
-2. **Production signal** only after one of: an enterprise ZDR agreement, an
-   attested TypeSafe deployment, or a self-hosted System One class model. It
-   would sit behind a new trait in `trace-commons-gate-api`, beside
+2. **Production signal** only on an open-source System One class model
+   served on NEAR infrastructure. It would sit behind a new trait in `trace-commons-gate-api`, beside
    `PerplexityScorer` and `Embedder`, held as a trait object per the
    gate-contract convention, with a `Reference*` implementation that is
    simple and uncalibrated.
 
 Note the privacy paradox for idea 6 below: detecting that a session is
 personal by sending it to a third party defeats the purpose. That idea only
-works with a local or attested model.
+works with a model served under our own data-handling guarantees.
 
 ## Experiments run
 
@@ -185,7 +186,7 @@ under-represented categories. Contributor insights can show the same breakdown
 E2 marked a personal-document question `non_code` with `is_coding` 0.02. Such
 sessions are not agent training data and carry elevated privacy risk; they
 should be excluded or routed to review rather than scored. Requires a local
-or attested model (see the constraint above).
+or NEAR-hosted open model (see the constraint above).
 
 ### 7. Jev as a second rater for per-author perplexity
 
@@ -207,7 +208,8 @@ disagree sharply are the ones worth a human look first.
    question/research, setup/ops, non-code) with an inferred provenance
    variant stored beside `UserReported`, never overwriting it. Only after
    step 1 shows the categories are reliable.
-5. **Decide the production path** (ZDR, attested deployment, or local model)
+5. **Stand up the production path** (an open-source System One class model
+   on NEAR infrastructure)
    before any combination moves from offline to gate.
 
 ## Non-goals
