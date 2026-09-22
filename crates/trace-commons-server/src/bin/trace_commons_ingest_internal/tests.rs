@@ -726,20 +726,20 @@ async fn contributor_credit_visibility_broadens_to_account_scope() {
         "unlinked P3 counts only its own submission"
     );
 
-    // The scalar sums track the broadened record set: P2's account-scoped pending
-    // (2 accepted submissions across P1 + P2) is strictly greater than P3's
-    // own-principal pending (1 accepted submission), and strictly positive. The
-    // exact per-submission novelty credit is scoring-dependent, so we assert the
-    // ordering rather than a fixed value.
-    assert!(
-        p2_credit.credit_points_pending > p3_credit.credit_points_pending,
-        "P2 account-scoped pending ({}) must exceed P3 own-principal pending ({})",
-        p2_credit.credit_points_pending,
-        p3_credit.credit_points_pending,
+    // The scalar sums track the broadened record set. Submit stores 0.0
+    // pending (the submit-time estimate is retired), so the stored pending
+    // sum is 0.0 on both views; the ledger sum is what broadens: P2's
+    // account-scoped ledger carries P1's and P2's 1.0 training-utility
+    // events, P3's own-principal ledger carries only its own.
+    assert_eq!(p2_credit.credit_points_pending, 0.0);
+    assert_eq!(p3_credit.credit_points_pending, 0.0);
+    assert_eq!(
+        p2_credit.credit_points_ledger, 2.0,
+        "P2's account-scoped ledger sums P1's and P2's events"
     );
-    assert!(
-        p2_credit.credit_points_pending > 0.0,
-        "P2 account-scoped pending must be strictly positive"
+    assert_eq!(
+        p3_credit.credit_points_ledger, 1.0,
+        "P3's own-principal ledger sums only its own event"
     );
 
     let _ = (p1_submission, p2_submission, p3_submission);
@@ -6813,6 +6813,66 @@ async fn submit_rescrubs_and_stores_under_authenticated_tenant() {
         stored.contains(trace_commons_protocol::trace_contribution::SERVER_RESCRUB_PIPELINE_SUFFIX)
     );
     assert!(!stored.contains("/tmp/ironclaw/private/token.txt"));
+}
+
+/// An accepted submit stores 0.0 pending credit and tells the contributor
+/// scoring is in progress. The scorecard is still computed -- the review
+/// queue and the ranker exports read `submission_score` -- but its
+/// `credit_points_estimate` no longer reaches the record, the receipt, or
+/// the credit ledger.
+#[tokio::test]
+async fn accepted_submit_stores_zero_pending_credit_and_reports_scoring_in_progress() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+    let mut envelope = sample_envelope().await;
+    make_metadata_only_low_risk(&mut envelope);
+
+    let Json(receipt) = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        submit_body(envelope.clone()),
+    )
+    .await
+    .expect("submission succeeds");
+
+    assert_eq!(receipt.status, "accepted");
+    assert_eq!(receipt.credit_points_pending, Some(0.0));
+    assert!(
+        receipt
+            .explanation
+            .iter()
+            .any(|line| line.contains("Scoring in progress")),
+        "got {:?}",
+        receipt.explanation
+    );
+    assert!(
+        !receipt
+            .explanation
+            .iter()
+            .any(|line| line.contains("preliminary") || line.contains("estimate")),
+        "no estimate is presented at submit; got {:?}",
+        receipt.explanation
+    );
+
+    let record = read_submission_record(temp.path(), "tenant-a", envelope.submission_id)
+        .expect("record reads")
+        .expect("record exists");
+    assert_eq!(record.status, TraceCorpusStatus::Accepted);
+    assert_eq!(record.credit_points_pending, 0.0);
+    assert!(
+        record.submission_score > 0.0,
+        "the scorecard is still computed for the review and ranker surfaces"
+    );
+    let stored: TraceContributionEnvelope = serde_json::from_str(
+        &std::fs::read_to_string(temp.path().join(&record.object_key))
+            .expect("stored envelope reads"),
+    )
+    .expect("stored envelope parses");
+    assert_eq!(stored.value.credit_points_pending, 0.0);
+    assert!(
+        stored.value_card.scorecard.credit_points_estimate > 0.0,
+        "the scorecard keeps its own estimate field; only the pending figure is retired"
+    );
 }
 
 #[tokio::test]
@@ -90334,8 +90394,11 @@ fn an_accepted_receipt_does_not_claim_settlement_is_disabled_when_it_is_not() {
 /// same-project sessions read as 64-95% duplicates of each other before any
 /// scoring has happened. The gate later scored those same traces at 0.108
 /// to 0.300 credit quality, and nothing the contributor could see ever
-/// changed. These tests pin the read-path rule: a scored decision's credit
-/// quality replaces the estimate, on the same 0-10 points scale.
+/// changed. The estimate is now retired as a contributor figure: submit
+/// stores 0.0 pending. These tests pin the read-path rule: a scored
+/// decision's credit quality is the figure, on the 0-10 points scale the
+/// estimate used, and before a decision exists the contributor sees no
+/// figure and a scoring-in-progress line.
 mod gate_credit_display {
     use super::*;
     use trace_commons_server::trace_corpus_storage::TraceGateCreditDecisionRow;
@@ -90459,21 +90522,68 @@ mod gate_credit_display {
         );
     }
 
-    /// (c) Before the gate has run, the estimate stands, but it is labelled as
-    /// the placeholder it is.
+    /// (c) Before the gate has run there is no figure to show. Submit stores
+    /// 0.0 pending, the surface reports that 0.0 (which every shell renders
+    /// as no figure), and one line says scoring is in progress. No
+    /// "preliminary estimate" -- the estimate is retired as a contributor
+    /// figure.
     #[test]
-    fn without_a_decision_the_estimate_stands_and_is_labelled_preliminary() {
-        let record = accepted_record_with_estimate(4.2);
+    fn without_a_decision_there_is_no_figure_and_scoring_is_in_progress() {
+        let record = accepted_record_with_estimate(0.0);
 
         let receipt = receipt_from_record(&record, NearSettlementMode::Disabled, None);
 
-        assert_eq!(receipt.credit_points_pending, Some(4.2));
-        let line = line_containing(&receipt.explanation, "preliminary")
-            .unwrap_or_else(|| panic!("no preliminary line in {:?}", receipt.explanation));
+        assert_eq!(receipt.credit_points_pending, Some(0.0));
+        let line = line_containing(&receipt.explanation, "Scoring in progress")
+            .unwrap_or_else(|| panic!("no scoring-in-progress line in {:?}", receipt.explanation));
         assert!(
-            line.contains("replaced") && line.contains("scoring"),
-            "the line must say the figure is replaced once scoring completes; got {line:?}"
+            line.contains("gate") && line.contains("assigned"),
+            "the line must say credit is assigned when the gate completes; got {line:?}"
         );
+        assert!(
+            line_containing(&receipt.explanation, "preliminary").is_none()
+                && line_containing(&receipt.explanation, "estimate").is_none(),
+            "no estimate is presented before a decision exists; got {:?}",
+            receipt.explanation
+        );
+    }
+
+    /// The same branch through the status update, which is what the desktop
+    /// app polls: 0.0 and the in-progress line, nothing else about credit.
+    #[test]
+    fn the_status_update_reports_scoring_in_progress_before_a_decision() {
+        let record = accepted_record_with_estimate(0.0);
+
+        let status =
+            submission_status_from_record(&record, &[], NearSettlementMode::Disabled, None);
+
+        assert_eq!(status.credit_points_pending, 0.0);
+        assert!(
+            line_containing(&status.explanation, "Scoring in progress").is_some(),
+            "got {:?}",
+            status.explanation
+        );
+        assert!(line_containing(&status.explanation, "preliminary").is_none());
+    }
+
+    /// A reviewer-assigned pending figure is not the submit-time estimate:
+    /// the approve path stores the reviewer's explicit points or the
+    /// `reviewer_credit_for_record` floor, and that figure stays presented
+    /// until the gate's decision replaces it. The in-progress line still
+    /// applies, because the gate has not run.
+    #[test]
+    fn a_reviewer_assigned_figure_is_still_presented_before_a_decision() {
+        let record = accepted_record_with_estimate(1.25);
+
+        let receipt = receipt_from_record(&record, NearSettlementMode::Disabled, None);
+
+        assert_eq!(receipt.credit_points_pending, Some(1.25));
+        assert!(
+            line_containing(&receipt.explanation, "Scoring in progress").is_some(),
+            "got {:?}",
+            receipt.explanation
+        );
+        assert!(line_containing(&receipt.explanation, "preliminary").is_none());
     }
 
     /// (d) Which statuses carry credit does not change. A quarantined record
@@ -90581,7 +90691,7 @@ mod gate_credit_display {
         assert_eq!(found.credit_quality_calibration_version, Some(3));
         assert!(
             !decisions.contains_key(&unscored.submission_id),
-            "an unscored record has no entry, which the presentation reads as preliminary"
+            "an unscored record has no entry, which the presentation reads as scoring in progress"
         );
         assert!(!decisions.contains_key(&other_tenant.submission_id));
     }
@@ -93132,6 +93242,10 @@ mod witness_bypass {
     async fn a_bypassed_trace_keeps_its_pending_credit() {
         let mut envelope = sample_envelope().await;
         apply_credit_estimate_to_envelope(&mut envelope);
+        // The estimate no longer lands on the envelope (submit stores 0.0
+        // pending), so seed a figure directly: the zeroing branch's keying
+        // is what this test is about, not where the figure came from.
+        envelope.value.credit_points_pending = 1.5;
         let before = envelope.value.credit_points_pending;
         assert!(before > 0.0, "the fixture must have credit to lose");
 

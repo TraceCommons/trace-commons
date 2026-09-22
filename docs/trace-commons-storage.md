@@ -654,7 +654,7 @@ reads, policy administration, review decisions, or unrestricted credit mutation.
 | `redaction_hash` | Hash over redacted content projection. |
 | `canonical_summary_hash` | Duplicate precheck key. |
 | `submission_score` | Current scoring result. |
-| `credit_points_pending` | Mutable pending credit estimate; do not count it as settled credit. |
+| `credit_points_pending` | Mutable pending credit: 0.0 from submit and re-scrub, the reviewer-assigned figure from review approval. Never the submit-time estimate. Do not count it as settled credit. |
 | `credit_points_final` | Explicit final credit snapshot when settled. Missing values are treated as `0` for aggregate settled totals. |
 | `review_assigned_to_principal_ref`, `review_assigned_at`, `review_lease_expires_at`, `review_due_at` | Optional DB-backed review lease state, scoped to the authenticated reviewer/admin principal and cleared when the trace leaves quarantine. |
 | `received_at`, `reviewed_at`, `revoked_at`, `expires_at`, `purged_at` | Lifecycle timestamps. |

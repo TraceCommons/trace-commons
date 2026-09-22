@@ -13411,6 +13411,9 @@ async fn submit_trace_handler(
             enforce_submission_quota(state.as_ref(), &tenant)?;
         }
         apply_embedding_precheck(&mut envelope, &derived_precheck);
+        // Writes the scorecard and `submission_score` (the review queue and
+        // the ranker exports read them) and holds `credit_points_pending` at
+        // 0.0: the contributor's figure is the gate's, once it has scored.
         apply_credit_estimate_to_envelope(&mut envelope);
         let corpus_status = status_for_risk(
             envelope.privacy.residual_pii_risk,
@@ -20288,9 +20291,10 @@ async fn operator_rescrub_quarantined_submission(
         return Ok(result);
     }
 
-    // Match submit: estimate credit from the post-rescrub envelope, then
-    // zero it unless the risk-derived status is Accepted (including the
-    // Accepted→AwaitingPiiBackstop hold, which keeps pending credit).
+    // Match submit: re-score the post-rescrub envelope (the scorecard and
+    // `submission_score`; pending credit is held at 0.0 either way), then
+    // zero the credit fields unless the risk-derived status is Accepted
+    // (including the Accepted→AwaitingPiiBackstop hold).
     apply_credit_estimate_to_envelope(&mut envelope);
     if target_status != TraceCorpusStatus::Accepted
         && target_status != TraceCorpusStatus::AwaitingPiiBackstop
@@ -58100,7 +58104,7 @@ fn witness_admitted_record(record: &TraceCommonsSubmissionRecord) -> bool {
 
 /// Which corpus statuses carry pending credit on the contributor surface.
 ///
-/// Mirrors the write side, which holds the stored estimate at 0.0 for every
+/// Mirrors the write side, which holds the stored figure at 0.0 for every
 /// other status at submit, re-scrub, and review time (the
 /// Accepted -> AwaitingPiiBackstop hold keeps it). The gate's figure obeys
 /// the same rule: it is presented only on a status that carries credit, so
@@ -58121,10 +58125,11 @@ fn status_carries_pending_credit(status: TraceCorpusStatus) -> bool {
 /// inline credit-quality write.
 const GATE_DUPLICATE_WITHHELD_REASONS: [&str; 2] = ["skipped_duplicate", "cached"];
 
-/// Shown beside the stored submit-time estimate until a gate figure exists.
-const PRELIMINARY_ESTIMATE_LINE: &str = "This is a preliminary estimate made at submission; \
-                                         the figure is replaced by the gate's scoring once the \
-                                         trace has been scored.";
+/// Shown until a gate figure exists. There is no estimate to label any
+/// more: submit and re-scrub store 0.0 pending, so a contributor sees no
+/// points figure before the gate has scored the trace.
+const SCORING_IN_PROGRESS_LINE: &str =
+    "Scoring in progress; credit is assigned when the gate's evaluation completes.";
 
 /// The gate's credit quality on the estimate's scale: `round(10 * q, 2)`,
 /// the same expression `compute_value_scorecard` applies to its online
@@ -58138,13 +58143,15 @@ fn credit_points_from_quality_micros(credit_quality_micros: i64) -> f32 {
 /// The pending-credit figure a contributor is shown for `record`, and the
 /// explanation lines that account for it.
 ///
-/// The stored `credit_points_pending` is a submit-time estimate whose
-/// duplicate penalty reads same-project sessions as near-duplicates of each
-/// other, so on the pilot 12 of 13 real uploads showed 0.0 while the gate
-/// later scored them at 0.108-0.300 credit quality. Once a decision with a
-/// credit quality exists, that is the figure; until then the estimate stands,
-/// labelled as preliminary. This is presentation only: the stored column,
-/// the ledger, and the attestation surface are untouched.
+/// The gate's credit quality is the number. Submit and re-scrub store 0.0
+/// pending (the submit-time estimate is retired as a contributor figure:
+/// its duplicate penalty read same-project sessions as near-duplicates of
+/// each other, and on the pilot 12 of 13 real uploads showed 0.0 while the
+/// gate later scored them at 0.108-0.300 credit quality). Once a decision
+/// with a credit quality exists, that is the figure; until then the stored
+/// figure is reported -- 0.0 from submit, or the reviewer-assigned points the
+/// approve path stores -- with a line saying scoring is in progress. The
+/// ledger and the attestation surface are untouched.
 struct GateCreditPresentation {
     credit_points_pending: f32,
     explanation: Vec<String>,
@@ -58165,7 +58172,7 @@ fn gate_credit_presentation(
     let Some(decision) = decision else {
         return GateCreditPresentation {
             credit_points_pending: record.credit_points_pending,
-            explanation: vec![PRELIMINARY_ESTIMATE_LINE.to_string()],
+            explanation: vec![SCORING_IN_PROGRESS_LINE.to_string()],
         };
     };
     if let Some(credit_quality_micros) = decision.credit_quality_micros {
@@ -58190,11 +58197,11 @@ fn gate_credit_presentation(
     }
     // A decision with no credit quality and no duplicate label: the inline
     // credit-quality write did not land (it is best-effort, and the
-    // recompute pass fills it in later). Nothing to show yet, so the
-    // estimate stands with its label.
+    // recompute pass fills it in later). Nothing to show yet, so scoring is
+    // still in progress from the contributor's side.
     GateCreditPresentation {
         credit_points_pending: record.credit_points_pending,
-        explanation: vec![PRELIMINARY_ESTIMATE_LINE.to_string()],
+        explanation: vec![SCORING_IN_PROGRESS_LINE.to_string()],
     }
 }
 
@@ -58228,8 +58235,8 @@ fn gate_credit_basis_line(decision: &StorageTraceGateCreditDecisionRow) -> Strin
 ///
 /// Batched per tenant, so a 500-id status refresh costs one round trip per
 /// tenant rather than one per row. Gate decisions live only in the database:
-/// without a DB mirror there is nothing to look up, and every record keeps
-/// its estimate with the preliminary label. Callers pass only records the
+/// without a DB mirror there is nothing to look up, and every record reports
+/// scoring in progress. Callers pass only records the
 /// requesting principal can already see, which is what scopes the read
 /// below the tenant.
 async fn gate_credit_decisions_for_records<'a>(

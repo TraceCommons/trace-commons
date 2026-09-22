@@ -8083,10 +8083,22 @@ pub struct TraceSubmissionStatusUpdate {
     pub consent_scopes: Vec<ConsentScope>,
 }
 
+/// Computes the value scorecard and writes it onto the envelope.
+///
+/// `submission_score`, the scorecard, and the explanation lines are kept:
+/// the review queue, the ranker feature exports and process evaluation read
+/// them. `credit_points_pending` is deliberately NOT taken from the
+/// estimate. That figure was `round(10 * clamp(raw))` with a 0.40 duplicate
+/// penalty from a header-plus-first-12-events comparison against every
+/// prior record in the tenant, which read same-project sessions as
+/// near-duplicates of each other; on the pilot 12 of 13 real uploads showed
+/// 0.0 that way. The contributor-facing figure is the gate's credit
+/// quality, presented once a decision exists, so the envelope's pending
+/// credit is held at 0.0 here regardless of what the client sent.
 pub fn apply_credit_estimate_to_envelope(envelope: &mut TraceContributionEnvelope) {
     let estimate = estimate_initial_credit(envelope);
     envelope.value.submission_score = estimate.submission_score;
-    envelope.value.credit_points_pending = estimate.credit_points_pending;
+    envelope.value.credit_points_pending = 0.0;
     envelope.value.explanation = estimate.explanation;
     envelope.value_card.scorecard = estimate.scorecard;
     envelope.value_card.user_visible_explanation = envelope.value.explanation.clone();
@@ -13052,6 +13064,39 @@ mod tests {
             scored.credit_points_estimate > 0.0,
             "medium-risk work that is accepted must be able to earn credit, got {}",
             scored.credit_points_estimate
+        );
+    }
+
+    /// The submit-time estimate is no longer a contributor-facing figure.
+    /// The scorecard is still computed and still lands on the envelope --
+    /// `submission_score`, the scorecard, and the explanation lines feed the
+    /// review queue, ranker exports and process evaluation -- but the
+    /// `credit_points_pending` a contributor is shown is the gate's, so the
+    /// envelope's copy stays at 0.0 until the gate assigns one.
+    #[test]
+    fn applying_the_estimate_leaves_pending_credit_at_zero() {
+        use super::*;
+        let mut envelope = scoring_envelope(ResidualPiiRisk::Low);
+        envelope.value.credit_points_pending = 4.2;
+        let scorecard = compute_value_scorecard(&envelope);
+        assert!(
+            scorecard.credit_points_estimate > 0.0,
+            "the fixture must produce a positive estimate for this test to mean anything, got {}",
+            scorecard.credit_points_estimate
+        );
+
+        apply_credit_estimate_to_envelope(&mut envelope);
+
+        assert_eq!(
+            envelope.value.credit_points_pending, 0.0,
+            "the estimate must not be stored as pending credit"
+        );
+        assert_eq!(envelope.value.submission_score, scorecard.online_score);
+        assert_eq!(envelope.value_card.scorecard, scorecard);
+        assert_eq!(envelope.value.explanation, scorecard.explanation);
+        assert_eq!(
+            envelope.value_card.user_visible_explanation,
+            scorecard.explanation
         );
     }
 

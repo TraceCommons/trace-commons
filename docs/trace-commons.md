@@ -169,9 +169,11 @@ point, fanning out to every derived artifact (see
 
 ## How credit works
 
-Each local submission record stores append-only credit events. The first event
-records the accepted submission estimate as pending; it is not treated as
-settled final credit unless a later review or utility process finalizes it.
+Each local submission record stores append-only credit events. Pending credit
+is not treated as settled final credit unless a later review or utility process
+finalizes it. Submit no longer records an estimate: the accepted-submission
+ledger event is written only when a record carries a positive pending figure,
+which after a plain submit it does not (see below).
 
 Delayed credit can be appended only through privileged, audited paths:
 
@@ -201,9 +203,10 @@ cross-principal probes indistinguishable from genuinely unknown submissions.
 
 Status records keep estimates and settled credit separate:
 
-- `credit_points_pending` — the submit-time estimate until the gate has scored
-  the trace, then the gate's credit quality on the same 0-10 points scale
-  (`round(10 * credit_quality, 2)`).
+- `credit_points_pending` — 0.0 until the gate has scored the trace, then the
+  gate's credit quality on a 0-10 points scale
+  (`round(10 * credit_quality, 2)`). A reviewer-approved trace carries the
+  reviewer-assigned figure until the gate's decision replaces it.
 - `credit_points_final` — present only when explicit final settlement exists.
 - `credit_points_ledger`, `credit_points_total`, `delayed_credit_explanations`
   — present once review or downstream jobs award later utility credit.
@@ -214,21 +217,29 @@ ledger). If a trace is later revoked, expired, or purged, status sync reports a
 zero delayed ledger and a safe explanation that retained ledger events are
 excluded.
 
-What `credit_points_pending` means depends on whether the gate has run. Before
-scoring, it is the estimate `compute_value_scorecard` produced at submit, and
-the `explanation` carries a line saying so; that estimate docks 0.40 for the
-duplicate score, which reads same-project sessions as near-duplicates of each
-other, so it is often 0.0 for a trace the gate will later credit. Once the
-submission has a gate decision with a credit quality, status and receipt
-surfaces report that quality as points instead, with a line naming the
-calibration version and the chunk coverage it was scored over. A decision the
-perplexity driver recorded without scoring, because the content duplicated an
-earlier submission under the same tenant, reports 0.0 with a line saying so.
-Only statuses that carry pending credit (`accepted`,
+The gate's credit quality is the number. The submit-time estimate
+`compute_value_scorecard` produces is no longer a contributor-facing figure:
+it docked 0.40 for a duplicate score computed from the header and the first
+twelve events against every prior record in the tenant, which read
+same-project sessions as near-duplicates of each other, so it was 0.0 for
+most traces the gate later credited. Submit and operator re-scrub store 0.0
+as `credit_points_pending`; the scorecard and `submission_score` are still
+computed and stored on the envelope for the review queue, ranker exports and
+process evaluation. Before a gate decision exists, status and receipt
+surfaces report 0.0 (the desktop apps render that as no figure) and the
+`explanation` carries one line: "Scoring in progress; credit is assigned when
+the gate's evaluation completes." Once the submission has a gate decision
+with a credit quality, they report that quality as points, with a line naming
+the calibration version and the chunk coverage it was scored over. A decision
+the perplexity driver recorded without scoring, because the content
+duplicated an earlier submission under the same tenant, reports 0.0 with a
+line saying so. A reviewer approving a quarantined trace stores the
+reviewer's explicit points, or `(0.5 + submission_score).clamp(0.5, 2.0)`
+when none are given; that figure is presented until the gate's decision
+replaces it. Only statuses that carry pending credit (`accepted`,
 `awaiting_pii_backstop`) present the gate figure; every other status reports
-0.0 as before. This is presentation only: the stored `credit_points_pending`
-column, the credit ledger, `credit_points_final`, and the signed score
-attestation are unchanged.
+0.0. The credit ledger's delayed-utility events, `credit_points_final`, and
+the signed score attestation are unchanged.
 
 Reviewers/admins append delayed credit once downstream utility is known:
 

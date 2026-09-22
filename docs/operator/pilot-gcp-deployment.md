@@ -245,7 +245,7 @@ can still mint the temporary workload JWT fallback. Then call
 The accepted-corpus response looks like:
 
 ```
-{"status":"accepted","credit_points_pending":5.2,"explanation":["Accepted into the private redacted corpus.","Attributed to tenant tenant_sha256:<hash>"]}
+{"status":"accepted","credit_points_pending":0.0,"explanation":["Accepted into the private redacted corpus.","Attributed to tenant tenant_sha256:<hash>","Scoring in progress; credit is assigned when the gate's evaluation completes."]}
 ```
 
 Confirm the GCS object lands:

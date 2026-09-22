@@ -3427,7 +3427,7 @@ pub trait TraceCorpusStore: Send + Sync {
     /// see; the id list narrows, it never widens.
     ///
     /// Default: empty (test doubles / backends without the decision table),
-    /// which degrades to the preliminary estimate rather than failing the
+    /// which degrades to "scoring in progress" rather than failing the
     /// status read.
     async fn list_latest_gate_credit_decisions(
         &self,
