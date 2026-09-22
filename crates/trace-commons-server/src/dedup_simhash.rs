@@ -9,8 +9,9 @@
 //! 2-shingle v1 the corpus was first derived under, and the set-semantic
 //! 3-shingle v2 that replaces it. Both are kept because a stored row names
 //! the algorithm that produced it and the re-derivation pass can target
-//! either. Which one the inline gate path uses is [`ACTIVE_DEDUP_ALGORITHM`];
-//! see `dedup_assign.rs` for the rollout rules that govern moving it.
+//! either. Which one the inline gate path uses is [`ACTIVE_DEDUP_ALGORITHM`],
+//! v2 since the re-derivation pass moved the corpus onto it; see
+//! `dedup_assign.rs` for the rollout rules that govern moving it.
 
 use std::collections::HashSet;
 use std::fmt;
@@ -92,8 +93,10 @@ impl From<DedupAlgorithm> for String {
 /// constants it clusters under. This is the constant the rollout in
 /// `dedup_assign.rs` is about: it moves only after the re-derivation pass
 /// has completed on every production database, and never in the same
-/// binary that introduced the pass.
-pub const ACTIVE_DEDUP_ALGORITHM: DedupAlgorithm = DedupAlgorithm::V1;
+/// binary that introduced the pass. Moved to v2 on 2026-09-21; the pass that
+/// preceded it is `POST /v1/admin/rederive-dedup`
+/// (`docs/operator/dedup-recluster.md`).
+pub const ACTIVE_DEDUP_ALGORITHM: DedupAlgorithm = DedupAlgorithm::V2;
 
 /// Identifier for the simhash ALGORITHM the inline path uses: the name of
 /// [`ACTIVE_DEDUP_ALGORITHM`]. Composed with the enclave's canonical render
@@ -253,15 +256,30 @@ mod tests {
     }
 
     /// The inline entry point is the function the active algorithm names,
-    /// and in this build that is v1. PR 2 moves `ACTIVE_DEDUP_ALGORITHM` and
-    /// this assertion moves with it.
+    /// and since the flip that is v2. The legacy literal is frozen and must
+    /// now differ from what the build stamps: that difference is the whole
+    /// point of the stamp, and it is why the re-derivation pass had to
+    /// complete before this build was installed.
     #[test]
     fn the_inline_simhash_is_the_active_algorithm() {
-        assert_eq!(ACTIVE_DEDUP_ALGORITHM, DedupAlgorithm::V1);
-        assert_eq!(DEDUP_SIMHASH_ALGORITHM, "fnv1a-2shingle.v1");
+        assert_eq!(ACTIVE_DEDUP_ALGORITHM, DedupAlgorithm::V2);
+        assert_eq!(DEDUP_SIMHASH_ALGORITHM, "fnv1a-3shingle-set.v2");
         let text = "the agent read the config file parsed the yaml and validated every key";
-        assert_eq!(trace_simhash(text), trace_simhash_v1(text));
+        assert_eq!(trace_simhash(text), trace_simhash_v2(text));
         assert_eq!(trace_simhash(text), ACTIVE_DEDUP_ALGORITHM.simhash(text));
+        assert_ne!(
+            format!("events.v1+{DEDUP_SIMHASH_ALGORITHM}"),
+            crate::dedup_assign::LEGACY_DEDUP_SIGNAL_VERSION,
+            "the build's stamp has moved off the frozen legacy literal"
+        );
+        assert_eq!(
+            crate::dedup_assign::LEGACY_DEDUP_SIGNAL_VERSION,
+            "events.v1+fnv1a-2shingle.v1",
+            "and the legacy literal itself did not move"
+        );
+        // v1 stays reachable by name for stored rows and for a rollback pass.
+        assert_eq!(DedupAlgorithm::V1.name(), "fnv1a-2shingle.v1");
+        assert_ne!(trace_simhash_v1(text), 0);
     }
 
     /// `trace_simhash_v1` is the pre-refactor body moved, not rewritten:

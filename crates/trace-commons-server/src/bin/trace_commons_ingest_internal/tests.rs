@@ -70103,18 +70103,18 @@ async fn score_submission_for_dedup_test(
 /// `evaluate_and_record_gate` calls over BYTE-IDENTICAL text — so every
 /// simhash here is the same number and the stamp is the only variable.
 ///
-/// Two claims, in order:
+/// Since the flip the enclave path stamps `events.v1+fnv1a-3shingle-set.v2`,
+/// which is not the frozen legacy literal. Three claims, in order:
 ///
-///  1. `NULL` maps to the legacy v1 stamp (D2). The first decision's stamp is
-///     dropped to `NULL` — the shape of every row recorded before the column
-///     existed — and the second decision, stamped v1 by the enclave path,
-///     must still join its cluster. If `NULL` were read as its own version,
-///     the entire pre-transition corpus would fall out of clustering the
-///     moment this column shipped: a worse split than the one it exists to
-///     prevent, and a silent one.
-///  2. Two named versions never join. Both earlier rows are then re-stamped
-///     to a v2, and the third decision — still v1 — must mint its own cluster
-///     at Hamming distance 0 from both.
+///  1. The build's stamp names v2 and differs from
+///     `LEGACY_DEDUP_SIGNAL_VERSION`.
+///  2. A `NULL` stamp reads as the legacy v1 stamp (D2) and is therefore
+///     REFUSED by an incoming v2 decision at Hamming 0. This is the
+///     transition-window behaviour the re-derivation pass exists to close:
+///     a corpus that has not been re-derived clusters nothing with new
+///     rows, and nothing fuses across the bump.
+///  3. Once the earlier row carries the build's stamp (as the pass writes
+///     it), the next identical decision joins.
 #[tokio::test]
 async fn evaluate_and_record_gate_clusters_only_within_one_dedup_signal_version() {
     let temp = tempfile::tempdir().expect("temp dir");
@@ -70122,7 +70122,6 @@ async fn evaluate_and_record_gate_clusters_only_within_one_dedup_signal_version(
     let (artifact_store, decryptor, _object_store_name) =
         fixture_gate_worker_artifact_store_with_decryptor(artifact_temp.path());
     let tenant_id = "tenant-a";
-    const V2_STAMP: &str = "events.v2+fnv1a-2shingle.v1";
 
     let shared_text = "the quick brown fox jumps over the lazy dog near the riverbank at dawn";
     let (db, submission_ids) = seed_perplexity_driver_test_db_with_texts(
@@ -70148,29 +70147,30 @@ async fn evaluate_and_record_gate_clusters_only_within_one_dedup_signal_version(
     Arc::make_mut(&mut state).gate_service =
         Arc::new(EnclaveGateService::mock_with_decryptor(decryptor));
 
-    // --- 1. The enclave path stamps the composed v1 version. ---
+    // --- 1. The enclave path stamps the composed v2 version. ---
     let first_id = score_submission_for_dedup_test(&state, tenant_id, submission_ids[0]).await;
     let first = db
         .gate_decision_with_dedup_by_id(tenant_id, first_id)
         .expect("first decision row present");
-    let v1_stamp = format!(
+    let active_stamp = format!(
         "{}+{}",
         trace_commons_gate_enclave::chunker::CANONICAL_RENDER_VERSION,
         trace_commons_server::dedup_simhash::DEDUP_SIMHASH_ALGORITHM
     );
+    assert_eq!(active_stamp, "events.v1+fnv1a-3shingle-set.v2");
     assert_eq!(
         first.dedup_signal_version,
-        Some(Some(v1_stamp.clone())),
+        Some(Some(active_stamp.clone())),
         "the enclave path names both halves of its derivation"
     );
-    assert_eq!(
-        v1_stamp,
+    assert_ne!(
+        active_stamp,
         trace_commons_server::dedup_assign::LEGACY_DEDUP_SIGNAL_VERSION,
-        "PR 1 leaves behaviour byte-identical: what the code stamps today and \
-         what a pre-column row is read as are the same string"
+        "the flip: what the code stamps today is no longer what a pre-column \
+         row is read as"
     );
 
-    // --- 2. A NULL stamp still clusters with a v1 one. ---
+    // --- 2. A NULL stamp reads as legacy v1 and is refused by a v2 row. ---
     db.overwrite_dedup_signal_version_for_tests(tenant_id, first_id, None);
     let second_id = score_submission_for_dedup_test(&state, tenant_id, submission_ids[1]).await;
     let second = db
@@ -70180,42 +70180,41 @@ async fn evaluate_and_record_gate_clusters_only_within_one_dedup_signal_version(
         first.dedup_cluster_id.is_some(),
         "first decision must be assigned a cluster"
     );
-    assert_eq!(
+    assert_ne!(
         second.dedup_cluster_id, first.dedup_cluster_id,
-        "a NULL-stamped row reads as the legacy v1 stamp, so an incoming v1 \
-         decision joins its cluster"
+        "a NULL-stamped row reads as the legacy v1 stamp, so an incoming v2 \
+         decision must not join its cluster however equal the numbers are"
     );
     assert_eq!(
         second.dedup_cluster_size,
-        Some(2),
-        "the second decision observes cluster size 2"
-    );
-
-    // --- 3. A differently stamped cluster is not a candidate at all. ---
-    db.overwrite_dedup_signal_version_for_tests(tenant_id, first_id, Some(V2_STAMP));
-    db.overwrite_dedup_signal_version_for_tests(tenant_id, second_id, Some(V2_STAMP));
-    let third_id = score_submission_for_dedup_test(&state, tenant_id, submission_ids[2]).await;
-    let third = db
-        .gate_decision_with_dedup_by_id(tenant_id, third_id)
-        .expect("third decision row present");
-    assert_ne!(
-        third.dedup_cluster_id, first.dedup_cluster_id,
-        "identical canonical text must NOT join a cluster whose representative \
-         was rendered by a different version"
-    );
-    assert_eq!(
-        third.dedup_cluster_size,
         Some(1),
         "the version-isolated decision is a singleton despite Hamming 0"
     );
     assert_eq!(
-        third.dedup_signal_version,
-        Some(Some(v1_stamp)),
+        second.dedup_signal_version,
+        Some(Some(active_stamp.clone())),
         "and it stamps its own version, not the one it declined to join"
+    );
+
+    // --- 3. On the build's stamp, identical text joins. ---
+    db.overwrite_dedup_signal_version_for_tests(tenant_id, first_id, Some(&active_stamp));
+    let third_id = score_submission_for_dedup_test(&state, tenant_id, submission_ids[2]).await;
+    let third = db
+        .gate_decision_with_dedup_by_id(tenant_id, third_id)
+        .expect("third decision row present");
+    assert!(
+        third.dedup_cluster_id == first.dedup_cluster_id
+            || third.dedup_cluster_id == second.dedup_cluster_id,
+        "on one stamp, identical canonical text joins an existing cluster"
+    );
+    assert_eq!(
+        third.dedup_cluster_size,
+        Some(2),
+        "the third decision observes cluster size 2"
     );
     assert_eq!(
         third.dedup_simhash, first.dedup_simhash,
-        "the split is the stamp's doing: the simhashes are identical"
+        "every split above was the stamp's doing: the simhashes are identical"
     );
 }
 

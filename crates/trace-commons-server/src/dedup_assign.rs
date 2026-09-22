@@ -492,6 +492,21 @@ mod tests {
         );
     }
 
+    /// The inline path clusters under the active algorithm's constants, and
+    /// since the flip those are v2's: tau 8, embedding arm ceiling 0.03.
+    #[test]
+    fn the_inline_path_clusters_under_v2_constants() {
+        let k = crate::dedup_simhash::ACTIVE_DEDUP_ALGORITHM.constants();
+        assert_eq!(k.version, 2);
+        assert_eq!(k.tau_hamming, 8);
+        assert_eq!(k.tau_e_micros, 30_000);
+        assert!(std::ptr::eq(k, &DEDUP_CONSTANTS_V2));
+        // The v1 constants are unchanged: a rollback pass still clusters v1
+        // rows under them.
+        assert_eq!(DEDUP_CONSTANTS_V1.tau_hamming, 10);
+        assert_eq!(DEDUP_CONSTANTS_V1.tau_e_micros, 150_000);
+    }
+
     #[test]
     fn each_algorithm_maps_to_its_own_constants() {
         assert_eq!(DedupAlgorithm::V1.constants().version, 1);
