@@ -1432,8 +1432,9 @@ mod enclave_gate_service_tests {
         let plaintext = serde_json::to_vec(&envelope).expect("envelope serializes");
         assert_eq!(
             correction_simhash_from_plaintext(&plaintext),
-            Some(crate::dedup_simhash::trace_simhash(correction) as i64),
-            "the correction simhash must be over the correction text alone"
+            Some(crate::dedup_simhash::trace_simhash_v1(correction) as i64),
+            "the correction simhash must be over the correction text alone, \
+             under v1 by name whatever the active algorithm is"
         );
 
         // The SAME correction inside a different session must produce the same
@@ -1501,7 +1502,7 @@ mod enclave_gate_service_tests {
         }));
         assert_eq!(
             with_correction.correction_simhash,
-            Some(crate::dedup_simhash::trace_simhash(correction) as i64)
+            Some(crate::dedup_simhash::trace_simhash_v1(correction) as i64)
         );
 
         let without_correction = evaluate(serde_json::json!({
