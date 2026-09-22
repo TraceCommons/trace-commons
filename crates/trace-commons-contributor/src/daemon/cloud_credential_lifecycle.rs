@@ -5,7 +5,9 @@ use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 
 use crate::config::ConfigStore;
-use crate::daemon::credential_store::{CredentialReference, CredentialStore, SecretBackend};
+use crate::daemon::credential_store::{
+    CredentialError, CredentialReference, CredentialStore, SecretBackend,
+};
 use crate::daemon::nearai_credential::session::coordination;
 use crate::daemon::settings::{DaemonSettings, NearAiInferenceCredential, NearAiSession};
 use crate::daemon::stored_cloud_credentials::StoredCloudCredentials;
@@ -42,11 +44,125 @@ pub(crate) fn native(
     ))
 }
 
+/// Can this process hold a Cloud credential at all?
+///
+/// A read of a reference that does not exist answers `NoEntry` when the store
+/// is reachable and `Unentitled` when it is not, so one read distinguishes
+/// them without writing anything.
+pub(crate) fn store_is_reachable(store: &ConfigStore) -> Result<()> {
+    match native(store)?.probe() {
+        Err(CredentialError::Unentitled) => Err(anyhow!("near_ai_credential_storage_unentitled")),
+        _ => Ok(()),
+    }
+}
+
 pub(crate) fn cleanup_native(store: &ConfigStore) -> Result<()> {
     if Journal::read(store)?.references.is_empty() {
         return Ok(());
     }
     native(store)?.cleanup()
+}
+
+/// Delete Cloud entries left in the legacy keychain by builds before the
+/// data-protection move. Best effort by construction.
+///
+/// Never called at startup, and never for the active reference. Both of those
+/// are load-bearing rather than tidiness:
+///
+/// The active reference is not an orphan. `cleanup_locked` skips it for
+/// deletion and leaves it in the journal, so the journal permanently names the
+/// live credential. Before a contributor's first post-upgrade ceremony that
+/// reference still points at their working legacy entry -- an `sk-` inference
+/// key that is valid and does not expire -- and sweeping it would destroy a
+/// credential they still hold, with a downgrade afterwards finding nothing.
+///
+/// And macOS may want authorization to delete a legacy item. Swallowing that
+/// error does not prevent the prompt, it only hides the failure after the
+/// contributor has already been interrupted; a denial leaves the item in place
+/// so the next attempt asks again. So this runs from the ceremony tail and the
+/// forget handlers -- moments the contributor initiated -- and not from
+/// `DaemonShared::load`, where an unexplained dialog at launch is the exact
+/// interruption this work exists to remove.
+///
+/// Those two together mean nothing is swept before a new ceremony: the only
+/// journal reference is the active one, so there is nothing to delete and
+/// nothing that can prompt. After a ceremony the previous reference is no
+/// longer active and is swept right there, in a flow where the contributor has
+/// just accepted a re-sign-in.
+///
+/// It returns nothing and swallows every failure on purpose. An entry we
+/// cannot delete is left alone.
+pub(crate) fn sweep_legacy_cloud_entries(store: &ConfigStore) {
+    #[cfg(target_os = "macos")]
+    {
+        let Ok(journal) = Journal::read(store) else {
+            return;
+        };
+        // Read the same way `cleanup_locked` does.
+        let Ok(settings) = DaemonSettings::load(store) else {
+            return;
+        };
+        let active = settings
+            .cloud_credentials
+            .as_ref()
+            .map(StoredCloudCredentials::reference);
+        let Some(backend) = legacy_secret_backend(store) else {
+            return;
+        };
+        for reference in journal.references {
+            if Some(reference) == active {
+                continue;
+            }
+            let _ = backend.delete(&reference);
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = store;
+}
+
+/// Delete exactly one legacy Cloud entry, named by the caller rather than
+/// discovered by walking the journal. Same guarantees as
+/// [`sweep_legacy_cloud_entries`]: best effort, swallows every failure, never
+/// prompts anywhere the contributor did not just act.
+///
+/// This exists because the journal cannot be trusted to still name a
+/// reference the caller knows is superseded: `replace`'s trailing
+/// `cleanup_locked` deletes every non-active journal reference from the
+/// *current* (data-protection) backend before a caller-supplied cleanup runs,
+/// and `CredentialStore::delete` maps a missing entry to success. A reference
+/// that only ever lived in the legacy keychain reads as cleaned up under that
+/// mapping and is pruned from the journal without anything legacy-side being
+/// swept. Callers that already hold the superseded reference by value --
+/// captured before a replace -- must hand it here directly instead of relying
+/// on the journal to still contain it.
+pub(crate) fn sweep_legacy_cloud_reference(store: &ConfigStore, reference: CredentialReference) {
+    #[cfg(target_os = "macos")]
+    {
+        let Some(backend) = legacy_secret_backend(store) else {
+            return;
+        };
+        let _ = backend.delete(&reference);
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = store;
+        let _ = reference;
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn legacy_secret_backend(store: &ConfigStore) -> Option<std::sync::Arc<dyn SecretBackend>> {
+    #[cfg(test)]
+    {
+        crate::daemon::cloud_credential_test_support::legacy_backend(store.dir())
+    }
+    #[cfg(not(test))]
+    {
+        let _ = store;
+        crate::daemon::os_secret_store::OsSecretBackend::legacy_cloud()
+            .ok()
+            .map(|backend| std::sync::Arc::new(backend) as std::sync::Arc<dyn SecretBackend>)
+    }
 }
 
 pub(crate) fn cleanup_pending(store: &ConfigStore) -> Result<bool> {
@@ -135,6 +251,27 @@ impl<B: SecretBackend> CloudCredentialLifecycle<B> {
         Self {
             store,
             credentials: CredentialStore::new(backend),
+        }
+    }
+
+    /// One read of a reference that was never stored. `NoEntry` means the
+    /// store answered; `Unentitled` means this process cannot reach it at all.
+    ///
+    /// [`crate::daemon::credential_store_self_check`] is the same probe with a
+    /// deliberately different error mapping, and the divergence is the point.
+    /// This one guards a sign-in: everything that is not `Unentitled` is go,
+    /// because a transient store error must not stop a contributor signing in.
+    /// That one gates a release, where the same leniency would report PASS
+    /// against a store failing for any reason other than entitlement, so
+    /// anything but `NoEntry` is a failure there. Change one and decide about
+    /// the other; do not unify them.
+    pub(crate) fn probe(&self) -> Result<(), CredentialError> {
+        match self
+            .credentials
+            .load_bytes(&CredentialReference::allocate())
+        {
+            Err(CredentialError::Unentitled) => Err(CredentialError::Unentitled),
+            _ => Ok(()),
         }
     }
 

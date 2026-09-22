@@ -375,6 +375,10 @@ fn forget_local(shared: &DaemonShared, req: &Request) -> Response {
 
 pub fn handle_forget(shared: &DaemonShared, req: &Request) -> Response {
     let response = forget_local(shared, req);
+    if response.error.is_none() {
+        // Contributor-initiated, so a legacy-store prompt here is explicable.
+        crate::daemon::cloud_credential_lifecycle::sweep_legacy_cloud_entries(&shared.store);
+    }
     if response.error.is_none()
         && crate::daemon::cloud_credential_lifecycle::cleanup_native(&shared.store).is_err()
     {
@@ -403,6 +407,9 @@ pub async fn handle_forget_async(shared: &DaemonShared, req: &Request) -> Respon
         let store = shared.store.clone();
         if !matches!(
             tokio::task::spawn_blocking(move || {
+                // Contributor-initiated, so a legacy-store prompt here is
+                // explicable. Blocking with the cleanup it sits beside.
+                crate::daemon::cloud_credential_lifecycle::sweep_legacy_cloud_entries(&store);
                 crate::daemon::cloud_credential_lifecycle::cleanup_native(&store)
             })
             .await,

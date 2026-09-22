@@ -4739,6 +4739,17 @@ pub extern "C" fn tc_onboarding_copy() -> *mut c_char {
     })
 }
 
+/// Can this process reach the Cloud credential store?
+///
+/// Exists so a release pipeline can ask a *signed bundle* the question, which
+/// no unit test can answer: entitlements are a property of the code signature
+/// and `cargo test` never has one. Returns 0 reachable, 1 unentitled, 2
+/// otherwise. Reads nothing and writes nothing.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_credential_store_self_check() -> i32 {
+    trace_commons_contributor::daemon::credential_store_self_check()
+}
+
 #[cfg(test)]
 mod string_guard_tests {
     use super::*;
