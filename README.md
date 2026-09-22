@@ -441,7 +441,7 @@ outbound one and what that means for you.
 
 Branch protection on `main` requires:
 
-- **Fourteen** required status checks green, and they must be green on a
+- **Ten** required status checks green, and they must be green on a
   branch that is up to date with `main`:
 
   | | |
@@ -449,16 +449,17 @@ Branch protection on `main` requires:
   | `cargo fmt --check` | `cargo clippy` |
   | `cargo check (default features)` | `cargo test (default features)` |
   | `cargo check (near-ai-scorer)` | `pilot-bootstrap smoke` |
-  | `cargo check (local-gpu-models, non-CUDA)` | `macOS app tests` |
-  | `cargo check (permissive crates, standalone)` | `windows named-pipe ACL` |
-  | `windows contributor app` | `windows contributor crate tests` |
-  | `linux-shell desktop integration (weston + portal)` | `builds at the declared MSRV floor` |
+  | `cargo check (local-gpu-models, non-CUDA)` | `database suites against a real PostgreSQL` |
+  | `cargo check (permissive crates, standalone)` | `builds at the declared MSRV floor` |
 
-  `.github/workflows/ci.yml` holds more jobs than this (twenty-one as of
-  2026-09-07); the other seven run on every PR but do not block the merge.
-  All three desktop shells and the standalone permissive-crate build are on
-  the required list, so a change that only builds in the workspace's unified
-  feature set will not merge.
+  `.github/workflows/ci.yml` holds more jobs than this (sixteen as of
+  2026-09-22); the others run on every PR but do not block the merge. The
+  client shells -- the macOS app, the Windows app, installer, named-pipe ACL
+  and update conformance, and the Linux GTK shell -- live in
+  `.github/workflows/clients.yml` since 2026-09-22. They run on every push to
+  `main`, on demand, and on a pull request only when it touches a client
+  path, and none of them is required: a client regression shows up on
+  `main` after the merge rather than blocking it.
 - A pull request (no direct pushes).
 - Linear history (squash or rebase, no merge commits).
 - Any review conversations resolved before merge.

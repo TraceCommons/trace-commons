@@ -1,0 +1,705 @@
+# Client shells and their platform checks: the macOS app, the Windows app,
+# installer, daemon pipe ACL and update conformance, and the Linux (GTK) shell.
+#
+# Split out of ci.yml on 2026-09-22 so a server-only pull request no longer
+# waits on three operating systems' worth of runners. These jobs run on every
+# push to main, on demand, and on a pull request only when it touches a client
+# path (the `paths:` filter below). None of them is a required status check,
+# so they never hold the merge queue; a client regression therefore surfaces on
+# main after the merge rather than blocking it. The jobs themselves are
+# unchanged: the Windows named-pipe ACL job is still the only check behind the
+# daemon IPC access-control claim, and the macOS job is still the only thing
+# that runs the Swift suite. Do not weaken them here.
+name: clients
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "macos/**"
+      - "windows/**"
+      - "installer/**"
+      - "scripts/windows/**"
+      - "scripts/install.ps1"
+      - "scripts/make-appinstaller.ps1"
+      - "crates/trace-commons-contributor/**"
+      - "crates/trace-commons-contributor-ffi/**"
+      - "crates/trace-commons-contributor-gtk/**"
+      - "crates/trace-commons-protocol/**"
+      - ".github/workflows/clients.yml"
+      - ".github/actions/**"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # Same rule as ci.yml: superseded PR runs are cancelled, push-to-main runs
+  # are not, so the default-branch caches keep getting written.
+  cancel-in-progress: ${{ github.event_name != 'push' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUSTFLAGS: -D warnings
+
+jobs:
+  macos-app-tests:
+    name: macOS app tests
+    # macos-26, not macos-14: macos/Package.swift declares
+    # swift-tools-version:6.0 and the 14 image ships Swift 5.10. This is the
+    # same image release-apps.yml builds the signed DMG on, so a green test
+    # run and a shipped build agree about the toolchain.
+    #
+    # This is the only thing that runs the Swift suite. Before it existed,
+    # `macos/` was covered by `swift build` in the release workflow and
+    # nothing else -- the tests were real, ran locally, and gated nothing.
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-macos-app-tests-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-macos-app-tests-
+      # The Swift package links the contributor FFI dylib
+      # (`-ltrace_commons_contributor_ffi` out of TC_FFI_LIB_DIR, which
+      # defaults to ../target/debug), so the dylib has to exist before
+      # `swift test` can link anything. Debug profile, to match that default.
+      - name: Build the FFI dylib
+        run: cargo build -p trace-commons-contributor-ffi
+      # Both language modes and every target in the package, not a filter:
+      # TCShellCore, TCUpdates, TCBridge and the app target all carry tests,
+      # and a per-target list is how a new one joins untested -- the same
+      # trap the cargo-test-default job records.
+      - name: Verify compute signature tools with the system verifier
+        run: python3 -m unittest discover -s macos/scripts -p 'test_*.py'
+      - name: swift test
+        working-directory: macos
+        run: swift test
+      # Last, so every step above still has its binaries; see the action for
+      # what is removed and why. Only a finished job saves its cache, so this
+      # runs exactly when a save is about to happen.
+      - uses: ./.github/actions/trim-cargo-cache
+
+  windows-pipe-acl:
+    name: windows named-pipe ACL
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-windows-pipe-acl-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-windows-pipe-acl-
+      # On Windows the daemon's named-pipe DACL is the ONLY access control on
+      # the IPC socket -- there is no 0700 state directory doing that work as
+      # there is on unix, and behind the pipe are the contributor's coding
+      # transcripts, per-project auto-upload arming, and upload approval.
+      #
+      # Type-checking the transport proves the FFI shapes and the control
+      # flow and nothing about whether the descriptor denies anybody. This
+      # job is the observation: a second, non-administrator local account
+      # must be refused. Without it the control ships on an argument rather
+      # than evidence.
+      - name: Build the ACL probe
+        run: cargo build -p trace-commons-contributor --bin win-pipe-acl-probe
+      - name: Verify the pipe excludes a second local user
+        shell: pwsh
+        run: pwsh -File scripts/windows/verify-pipe-acl.ps1
+      # Last, so every step above still has its binaries; see the action for
+      # what is removed and why. Only a finished job saves its cache, so this
+      # runs exactly when a save is about to happen.
+      - uses: ./.github/actions/trim-cargo-cache
+
+  # The contributor crate's Rust tests, on Windows. Nothing ran them there
+  # before this job existed, and the cost was not that some tests were
+  # skipped -- it was that six integration targets FAILED TO COMPILE on
+  # Windows for an unknown length of time and no signal existed anywhere.
+  #
+  # They imported UnixStream, UnixListener and ipc::bind/serve at the top
+  # level. Those are cfg(unix) in the library, so on Windows the targets did
+  # not skip, they broke the build of the whole test suite -- which is also
+  # why the failure hid: a suite that never compiles never reports.
+  #
+  # The other Windows jobs cannot catch this. windows-pipe-acl builds one
+  # binary, windows-contributor-app builds the cdylib and runs the .NET
+  # tests, and none of them invoke cargo test. The gating that fixed it
+  # rots the first time somebody adds another ungated unix import, so the
+  # gate needs an observer rather than a convention.
+  #
+  # This is also the only place the daemon's Windows behaviour is exercised
+  # in Rust at all: the transport is a named pipe rather than a unix socket,
+  # and session discovery resolves %USERPROFILE% rather than $HOME.
+  windows-contributor-tests:
+    name: windows contributor crate tests
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-windows-contributor-tests-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-windows-contributor-tests-
+      # RUSTFLAGS=-D warnings comes from the workflow-level env, so an
+      # unused import behind a cfg gate fails here the way it would in the
+      # unix jobs.
+      - name: Test the contributor and FFI crates
+        run: cargo test -p trace-commons-contributor -p trace-commons-contributor-ffi
+      - name: Verify real Windows Credential Manager storage
+        run: cargo test -p trace-commons-contributor --lib real_os_round_trip_removes_only_its_synthetic_entry -- --ignored
+      - name: Verify real Commons Windows Credential Manager storage
+        run: cargo test -p trace-commons-contributor --lib real_commons_os_round_trip -- --ignored
+      # Last, so every step above still has its binaries; see the action for
+      # what is removed and why. Only a finished job saves its cache, so this
+      # runs exactly when a save is about to happen.
+      - uses: ./.github/actions/trim-cargo-cache
+
+  windows-update-conformance:
+    name: windows update conformance
+    runs-on: windows-latest
+    timeout-minutes: 30
+    # crates/trace-commons-contributor/src/update/authenticode.rs has a
+    # #[cfg(windows)] body -- the real Authenticode verification call -- that
+    # has never been compiled anywhere: cross-checking from macOS fails
+    # inside ring's C build for lack of a Windows SDK, so
+    # `cargo check --target x86_64-pc-windows-msvc` cannot serve as the gate.
+    # The upcoming binary-swap code (rename + MoveFileEx +
+    # PendingFileRenameOperations) is the same story. A Windows runner is the
+    # only thing that can compile, let alone exercise, either of those paths,
+    # so this job is what stands behind the claim that they work at all.
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-windows-update-conformance-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-windows-update-conformance-
+      # Proven on a real Windows host (the tc-win-dev GCE box) on 2026-08-17:
+      # this compiles every #[cfg(windows)] body under -D warnings. It is the
+      # load-bearing step of this job. It uses --bins and needs no OpenSSL,
+      # because nothing here pulls the dev-dependency graph.
+      - name: Build trace-commons-contributor for Windows
+        env:
+          RUSTFLAGS: -D warnings
+        run: cargo check -p trace-commons-contributor --bins
+      # The test steps below DO pull dev-dependencies, and that graph reaches
+      # OpenSSL: trace-commons-contributor dev-depends on trace-commons-server,
+      # which depends on webauthn-rs -> webauthn-rs-core ->
+      # webauthn-attestation-ca -> openssl -> openssl-sys. On the real Windows
+      # box that build script fails with "Could not find directory of OpenSSL
+      # installation", so the tests cannot run without pointing it at one.
+      # windows-latest ships OpenSSL; this locates it rather than assuming a
+      # hardcoded path, and fails loudly if the image ever stops shipping it.
+      - name: Point openssl-sys at the runner's OpenSSL
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $candidates = @(
+            "C:\Program Files\OpenSSL",
+            "C:\Program Files\OpenSSL-Win64",
+            "C:\Strawberry\c"
+          ) | Where-Object { Test-Path (Join-Path $_ "include\openssl\ssl.h") }
+          if (-not $candidates) {
+            throw "No OpenSSL installation found on this runner. openssl-sys cannot build, so the update tests cannot run. Install one or adjust this step."
+          }
+          $dir = $candidates[0]
+          Write-Host "using OPENSSL_DIR=$dir"
+          "OPENSSL_DIR=$dir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Run the update unit tests
+        run: cargo test -p trace-commons-contributor --lib "update::"
+      # Includes the_platform_verifier_refuses_the_unsigned_fixture, the only
+      # #[cfg(windows)] test in this file -- it is a plain #[test] behind that
+      # cfg, so it compiles and runs here as part of the normal test binary;
+      # nothing filters it out.
+      - name: Run the update conformance fixtures
+        run: cargo test -p trace-commons-contributor --test update_conformance
+      # update_manifest_roundtrip.rs is deliberately NOT run here. It shells
+      # out to the real scripts/updates/generate-manifest.sh, and that script
+      # (a) has a `#!/usr/bin/env bash` shebang -- Windows CreateProcess does
+      # not interpret shebangs, so invoking the .sh path directly the way the
+      # test does (`Command::new(path)`) has no reliable interpreter behind
+      # it on windows-latest even though Git for Windows ships a bash.exe --
+      # and (b) pipes its output through `jq`, an unpinned external
+      # dependency of the script rather than of this crate. Failing this test
+      # here would prove something about the runner's shell associations and
+      # tool cache, not about the update code this job exists to gate. The
+      # roundtrip is still exercised on Linux via cargo-test-default.
+      - name: Note on the manifest roundtrip test
+        shell: pwsh
+        run: Write-Host "update_manifest_roundtrip.rs intentionally skipped on Windows -- see job comment"
+      # Last, so every step above still has its binaries; see the action for
+      # what is removed and why. Only a finished job saves its cache, so this
+      # runs exactly when a save is about to happen.
+      - uses: ./.github/actions/trim-cargo-cache
+
+  windows-install-script:
+    name: install.ps1 against the real release
+    runs-on: windows-latest
+    timeout-minutes: 15
+    # The installer resolves the newest contributor-v* tag through the GitHub
+    # API, and anonymous api.github.com is rate-limited per source IP. Actions
+    # runners share those IPs, so unauthenticated the lookup fails on most
+    # runs -- sometimes as a 403, sometimes as an empty release list -- and
+    # this job goes red for reasons that have nothing to do with the change
+    # under test. GITHUB_TOKEN is read by install.ps1 when present and is
+    # read-only here; a contributor running the script by hand still makes the
+    # same anonymous request.
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+      # This installer's whole claim is that it refuses to install what it
+      # cannot verify, and that claim is not testable by reading it. Both paths
+      # run here against the actually published release: the success path, and
+      # the refusal path with the expected signer changed so verification must
+      # fail. Asserting the refusal leaves ZERO files behind is the point --
+      # an installer that reports failure after writing the binary has already
+      # lost.
+      # -Version is passed explicitly so this job never calls the GitHub REST
+      # API. Resolving "latest" costs an unauthenticated request, which is
+      # limited to 60/hour PER IP -- shared across every Actions runner leaving
+      # the same egress address. This job failed exactly that way
+      # ("The property 'tag_name' cannot be found on this object": the API
+      # returned a rate-limit body instead of a release list), and it failed on
+      # main as well as on PRs, so it was flaking for reasons that had nothing
+      # to do with the change under test.
+      #
+      # Pinning also makes the job deterministic: it asserts install.ps1's
+      # verify-and-refuse behavior against a known published artifact rather
+      # than against whatever was cut most recently. The cost is that this
+      # version must be bumped when contributor-v0.1.0's assets are eventually
+      # removed; the job will fail loudly if that happens, which is the right
+      # way to find out.
+      - name: It installs the real, verified binary
+        shell: pwsh
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP 'tc-ok'
+          ./scripts/install.ps1 -Dir $dir -Version 0.1.0
+          $exe = Join-Path $dir 'trace-commons-contributor.exe'
+          if (-not (Test-Path $exe)) { throw "no binary at $exe" }
+          $v = & $exe --version
+          Write-Host "reported: $v"
+          if ($v -notmatch 'trace-commons-contributor') { throw "unexpected --version output: $v" }
+
+      - name: It refuses, and installs nothing, when the signer is wrong
+        shell: pwsh
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP 'tc-refuse'
+          $bad = Join-Path $env:RUNNER_TEMP 'install-wrong-signer.ps1'
+          # Same script, one expectation changed: demand a publisher we are not.
+          (Get-Content -Raw ./scripts/install.ps1).
+            Replace("'O=Iqlusion Inc'", "'O=Somebody Else Entirely'") |
+            Set-Content -Path $bad -Encoding UTF8
+
+          # -Version here for the same reason as the step above, and for one
+          # more: this step asserts the installer fails ON THE SIGNATURE CHECK
+          # specifically. A rate-limited API call would make it fail earlier,
+          # for an unrelated reason, and the guard below would then correctly
+          # report that the test proved nothing. Removing the network variable
+          # keeps a red result here meaning what it claims to mean.
+          $out = & pwsh -File $bad -Dir $dir -Version 0.1.0 2>&1 | Out-String
+          $code = $LASTEXITCODE
+          Write-Host $out
+
+          if ($code -eq 0) { throw 'the installer exited 0 with a signer it should have rejected' }
+          if ($out -notmatch 'unexpected signing identity') {
+            throw 'it failed, but not on the signature check -- so this proves nothing'
+          }
+          $left = @(Get-ChildItem -Path $dir -Recurse -File -ErrorAction SilentlyContinue)
+          if ($left.Count -ne 0) {
+            throw "refused but left $($left.Count) file(s) behind: $($left.FullName -join ', ')"
+          }
+          Write-Host "refused correctly, and installed 0 files"
+          # The inner pwsh exited 1 -- correctly, that is what we asserted --
+          # and $LASTEXITCODE survives to the end of the step, where PowerShell
+          # hands it back as the step's own status. Without this the step fails
+          # precisely because the installer behaved.
+          exit 0
+
+  linux-shell-desktop-entry:
+    name: linux-shell desktop entry and metainfo
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # The four validations below used to run only inside the weston job,
+    # after its apt install and before its two cold cargo builds -- so a
+    # one-character metainfo typo was reported after the whole build had
+    # been paid for, and on a 40-minute cancellation it was not reported at
+    # all. They take seconds and need two apt packages, so they get a job
+    # of their own that answers in about a minute.
+    #
+    # They are DELIBERATELY still run in the weston job as well. This job is
+    # not a required status check until someone adds it to branch
+    # protection, and until then a validation that lived only here would
+    # still run and no longer block -- the metainfo-version pin exists
+    # because 0.10.0 was tagged with a stale metainfo, and that is not a
+    # check to let go quiet. Once this job's name is in the required list,
+    # the copy in the weston job can be removed.
+    steps:
+      - uses: actions/checkout@v6
+      # Through the hardened update, never a bare `apt-get update`: the
+      # runner image's vendor repositories would fail this job before it
+      # validated anything, which is the exposure the action exists to close.
+      - uses: ./.github/actions/apt-update-ubuntu-only
+      - name: Install the validators
+        run: sudo apt-get install -y --no-install-recommends desktop-file-utils appstream
+      - name: Validate the desktop entry and AppStream metainfo
+        run: bash crates/trace-commons-contributor-gtk/scripts/validate-desktop-entry.sh
+
+  linux-shell-desktop-integration:
+    name: linux-shell desktop integration (weston + portal)
+    runs-on: ubuntu-latest
+    # 40, not the 20 this started with, and not the 30 the other Rust jobs
+    # use. This job builds TWO cargo workspaces -- the root one for the daemon
+    # and the GTK crate, which is deliberately excluded from the root
+    # workspace so the root still builds on macOS -- on top of a large apt
+    # install, a compositor, a portal stack and OCR.
+    #
+    # On a cold cargo cache that exceeded 20 minutes and the job was cancelled
+    # mid-build. A cancellation reads as a red required check with no failing
+    # assertion, which is the most confusing possible signal: it looks like the
+    # PR broke desktop integration when nothing ever ran.
+    timeout-minutes: 40
+    # crates/trace-commons-contributor-gtk is excluded from the root
+    # workspace (it cannot build on macOS) and was previously verified only
+    # under Xvfb with no portal/tray service on the bus at all -- see
+    # docs/superpowers/plans/linux-integration-report.md's "What this
+    # evidence actually proves, and what it does not". That is real
+    # coverage of the fail-closed path, but weaker than it sounds: it does
+    # not prove anything renders, and it does not prove a portal call
+    # reaches an actual portal implementation.
+    #
+    # This job upgrades both axes as far as CI genuinely can:
+    #   1. Renders under weston's headless backend (a real Wayland
+    #      compositor, not just a display-less pixel sink) and asserts the
+    #      captured frame is not blank/uniform and that expected header-bar
+    #      text is present via OCR.
+    #   2. Runs RequestBackground against a real, running
+    #      xdg-desktop-portal + xdg-desktop-portal-gtk under
+    #      dbus-run-session, so the call reaches a live D-Bus service
+    #      instead of failing with ServiceUnknown before it leaves the
+    #      process.
+    #
+    # What it does NOT establish, and does not claim to:
+    #   - xdg-desktop-portal-gtk does not implement
+    #     org.freedesktop.impl.portal.Background at all (checked directly
+    #     against its .portal manifest). The only backend that does is
+    #     xdg-desktop-portal-gnome, and that implementation calls
+    #     org.gnome.Shell.Introspect -- i.e. it needs a real running GNOME
+    #     Shell, which this job does not have and does not fake by
+    #     installing the package without the shell behind it. So this job
+    #     cannot get an actual grant/deny out of a permission dialog; it
+    #     only proves the request reaches a live portal daemon and gets a
+    #     real (non-absence) reply.
+    #   - A tray icon appearing in a real desktop shell. GNOME has not shown
+    #     StatusNotifierItem without a user-installed extension for years;
+    #     nothing here starts GNOME Shell, KDE Plasma, or any other shell
+    #     that hosts a StatusNotifierWatcher, so src/tray.rs stays
+    #     unverified beyond the existing "watcher absent" path. It is worth
+    #     exactly what a bonus, deliberately non-load-bearing surface is
+    #     worth -- see the report.
+    #   - GNOME/KDE/Mutter-specific window-manager behaviour of any kind
+    #     (the Background Apps panel, its quit affordance, real desktop
+    #     theming). weston's headless backend is not Mutter or KWin.
+    #
+    # See docs/superpowers/plans/linux-desktop-verification-report.md for
+    # the full writeup, including what was verified statically (apt package
+    # names, the weston-screenshooter binary path, the portal manifests)
+    # versus what ran live.
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+            crates/trace-commons-contributor-gtk/target
+          key: ${{ runner.os }}-cargo-linux-shell-desktop-${{ hashFiles('Cargo.lock', 'crates/trace-commons-contributor-gtk/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-linux-shell-desktop-
+      # fonts-dejavu-core is not decoration. --no-install-recommends means
+      # GTK pulls no fonts, so the shell renders chrome and colour but no
+      # legible glyphs: the frame is non-uniform (so the blank check passes)
+      # while OCR finds no text at all. That is exactly the failure mode seen
+      # on the first run with capture working -- a screenshot that looks fine
+      # to a stddev test and contains nothing readable.
+      # Not a bare `apt-get update`: the runner image ships vendor apt
+      # repositories this project never installs from, and one bad vendor
+      # index fails the job before it compiles anything. The action removes
+      # them, asserts none remain, and fails loudly if Ubuntu's own archive
+      # is what is broken. A red check here that mentions apt is an
+      # infrastructure failure, not an MSRV or GTK regression.
+      - uses: ./.github/actions/apt-update-ubuntu-only
+      - name: Install GTK/portal/compositor dependencies
+        run: |
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config \
+            libgtk-4-dev \
+            libadwaita-1-dev \
+            libnotify-dev \
+            weston \
+            xdg-desktop-portal \
+            xdg-desktop-portal-gtk \
+            dbus \
+            dbus-x11 \
+            libglib2.0-bin \
+            imagemagick \
+            tesseract-ocr \
+            tesseract-ocr-eng \
+            fonts-dejavu-core \
+            desktop-file-utils \
+            appstream
+      # The desktop entry has always named an icon; until the icon slice
+      # nothing installed one, and a dangling Icon= is invisible until a
+      # software centre shows a blank tile. appstreamcli validate is the only
+      # thing that checks the metainfo at all, and Flathub runs it on
+      # submission, so it is better to fail here.
+      # Also run in its own fast job (`linux-shell-desktop-entry`); kept here
+      # until that job is a required check, so the pin never stops blocking.
+      - name: Validate the desktop entry and AppStream metainfo
+        run: bash crates/trace-commons-contributor-gtk/scripts/validate-desktop-entry.sh
+      # trace-commons-contributor is a root-workspace crate; the shell links
+      # it directly (see the crate's own Cargo.toml comment on why -- both
+      # sides are Rust on Linux, no FFI boundary needed).
+      - name: Build the daemon
+        run: cargo build -p trace-commons-contributor --bin trace-commons-contributor
+      # The GTK crate is its own workspace, excluded from the root one.
+      - name: Build the shell
+        run: cargo build --locked --manifest-path crates/trace-commons-contributor-gtk/Cargo.toml --bin trace-commons-shell
+      # The GTK crate is its own workspace, so the root workspace's test job
+      # never touches it. Its update, portal-parsing and copy logic is all
+      # pure and needs no display -- but without this step nothing runs it.
+      - name: Test the shell
+        run: cargo test --locked --manifest-path crates/trace-commons-contributor-gtk/Cargo.toml
+      # Being its own workspace also puts this crate outside the root
+      # `cargo fmt --all` and the root clippy job, so for as long as it has
+      # existed nothing has checked either one here and it drifted. Same
+      # allow-list as the root job, deliberately not widened.
+      - name: Check the shell's formatting
+        run: cargo fmt --manifest-path crates/trace-commons-contributor-gtk/Cargo.toml -- --check
+      - name: Clippy the shell
+        run: |
+          cargo clippy --locked --manifest-path crates/trace-commons-contributor-gtk/Cargo.toml \
+            --all-targets -- -D warnings \
+            -A clippy::type_complexity -A clippy::collapsible_if \
+            -A clippy::manual_option_as_slice -A clippy::useless_vec \
+            -A clippy::redundant_pattern_matching
+      - name: Run weston + portal verification
+        run: bash crates/trace-commons-contributor-gtk/scripts/weston-portal-verify.sh
+      # Last, so every step above still has its binaries; see the action for
+      # what is removed and why. Only a finished job saves its cache, so this
+      # runs exactly when a save is about to happen.
+      - uses: ./.github/actions/trim-cargo-cache
+
+  windows-contributor-app:
+    name: windows contributor app
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+
+      # The project defaults to its unpackaged flavour, and that remains worth
+      # asserting because changing the default changes what contributors get.
+      # Later in this job CI explicitly opts into the packaged flavour so the
+      # manifest, assets and App Installer feed are exercised too. The package
+      # stays unsigned and is never installed: pull-request runners hold no
+      # signing authority.
+      - name: Check the MSIX manifest and that the default build is still unpackaged
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          # XPath with local-name() throughout: the manifest is namespaced
+          # across four namespaces, and PowerShell's dotted XML adapter returns
+          # an XmlElement rather than a string for any element carrying
+          # attributes -- which would compare unequal in a way that reads like
+          # a content mismatch and is not one.
+          $manifest = "windows/packaging/Package.appxmanifest"
+          [xml] $xml = Get-Content -Path $manifest -Raw
+
+          $expectedPublisher = 'CN=Iqlusion Inc, O=Iqlusion Inc, L=Santa Clara, S=California, C=US'
+          $identity = $xml.SelectSingleNode("/*[local-name()='Package']/*[local-name()='Identity']")
+          if (-not $identity) { throw "$manifest has no Identity element." }
+          $publisher = $identity.GetAttribute("Publisher")
+          if ($publisher -ne $expectedPublisher) {
+            throw "$manifest Publisher is '$publisher', expected '$expectedPublisher'. It must equal the signing certificate's subject exactly or the package installs nowhere -- see windows/packaging/README.md."
+          }
+
+          # Every logo the manifest names has to exist, or packaging fails on a
+          # release runner rather than here.
+          $visual = $xml.SelectSingleNode("//*[local-name()='VisualElements']")
+          $storeLogo = $xml.SelectSingleNode("//*[local-name()='Properties']/*[local-name()='Logo']")
+          if (-not $visual -or -not $storeLogo) { throw "$manifest is missing VisualElements or the store Logo." }
+          $logos = @(
+            $storeLogo.InnerText,
+            $visual.GetAttribute("Square150x150Logo"),
+            $visual.GetAttribute("Square44x44Logo")
+          )
+          foreach ($logo in $logos) {
+            if ([string]::IsNullOrWhiteSpace($logo)) { throw "$manifest names an empty logo path." }
+            $path = Join-Path "windows/packaging" ($logo -replace '\\', '/')
+            if (-not (Test-Path $path -PathType Leaf)) {
+              throw "$manifest references '$logo' but $path does not exist."
+            }
+          }
+
+          $csproj = "windows/src/TraceCommons.App/TraceCommons.App.csproj"
+          [xml] $proj = Get-Content -Path $csproj -Raw
+          $node = $proj.SelectSingleNode("/Project/PropertyGroup/TcPackaged")
+          if (-not $node -or $node.InnerText.Trim() -ne "false") {
+            throw "$csproj no longer defaults TcPackaged to false. The shipping Windows artifact is the unpackaged zip; MSIX is additive and must stay opt-in."
+          }
+
+          Write-Host "manifest publisher, logo assets and unpackaged default all check out"
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-windows-app-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-windows-app-
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      # The WinUI shell is C# over the same C ABI the macOS app uses, so the
+      # cdylib has to exist before anything managed builds. The app project
+      # fails its own build if the DLL is missing rather than deferring that to
+      # a runtime "core not found", so this step is a hard prerequisite.
+      - name: Build the contributor FFI cdylib
+        run: cargo build -p trace-commons-contributor-ffi --release
+
+      # The interop layer targets plain net8.0 and its tests drive a REAL
+      # daemon through the real cdylib: pointer ownership, UTF-8 marshalling,
+      # delegate rooting, and the unsubscribe barrier. These are the tests that
+      # would catch a binding defect, and they are also the ones that already
+      # run on a developer's macOS machine against the .dylib -- this job is
+      # what proves the same binding holds on Windows, where the daemon's
+      # transport is a named pipe rather than a unix socket.
+      #
+      # Both dotnet steps run from windows/ so that windows/global.json applies.
+      # MSBuild selects the NEWEST installed SDK regardless of what setup-dotnet
+      # put there, and GitHub's Windows image ships .NET 10, whose layout
+      # Windows App SDK 1.6 cannot build against.
+      - name: Run interop tests against the real cdylib
+        working-directory: windows
+        env:
+          TC_FFI_LIB_DIR: ${{ github.workspace }}\target\release
+        run: >-
+          dotnet test tests/TraceCommons.Interop.Tests/TraceCommons.Interop.Tests.csproj
+          --configuration Release
+          --blame-hang
+          --blame-hang-timeout 2m
+
+      # Building the WinUI project is the only verification the XAML and the
+      # Windows App SDK wiring get: neither can be compiled anywhere but
+      # Windows, so a change that builds cleanly on a contributor's Mac can
+      # still be broken here. Warnings are errors in both projects, matching
+      # the RUSTFLAGS="-D warnings" discipline the Rust jobs apply.
+      #
+      # MSBuild FROM VISUAL STUDIO, not `dotnet build`, and that is not a
+      # preference.
+      #
+      # A WinUI 3 project invokes MSBuild tasks that live in
+      # Microsoft.Build.AppxPackage.dll and
+      # Microsoft.Build.Packaging.Pri.Tasks.dll. Those assemblies ship with
+      # Visual Studio's tooling and are NEVER part of the .NET SDK, so
+      # `dotnet build` fails with MSB4062 naming a path under the dotnet SDK
+      # directory -- which reads like a .NET version problem and is not one.
+      # Suppressing the first failing target only surfaces the next task from
+      # the same missing assembly set; this was confirmed by reproducing both
+      # failures on a clean Windows box.
+      - uses: microsoft/setup-msbuild@v2
+
+      # Packaging, not just compiling. Package.appxmanifest, MakePri and the
+      # visual assets are only exercised by a packaging build, and every one
+      # of them can break without touching a line of C#. The package is
+      # unsigned here -- this runner holds no signing authority and must not.
+      - name: Build and package the WinUI app
+        working-directory: windows
+        env:
+          TC_FFI_LIB_DIR: ${{ github.workspace }}\target\release
+        run: msbuild src/TraceCommons.App/TraceCommons.App.csproj -restore -p:Configuration=Release -p:Platform=x64 -p:TcPackaged=true -p:GenerateAppxPackageOnBuild=true
+
+      - name: Confirm exactly one package was produced
+        working-directory: windows
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $found = @(Get-ChildItem -Recurse -Filter *.msix -Path dist\msix)
+          if ($found.Count -ne 1) {
+            throw "expected exactly 1 .msix, found $($found.Count): $($found.Name -join ', ')"
+          }
+          Write-Host $found[0].Name
+
+      # The feed generator runs against the same identity the manifest
+      # carries, so a rename on either side fails here rather than at
+      # release time.
+      - name: Generate and parse the appinstaller feed
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          ./windows/scripts/make-appinstaller.ps1 `
+            -PackageName Iqlusion.TraceCommons `
+            -Publisher "CN=Iqlusion Inc, O=Iqlusion Inc, L=Santa Clara, S=California, C=US" `
+            -Version 0.0.1.0 -ProcessorArchitecture x64 `
+            -BaseUri https://storage.googleapis.com/tracecommons-flatpak/windows `
+            -PackageFileName probe.msix `
+            -OutputPath "$env:RUNNER_TEMP\TraceCommons.appinstaller"
+          [xml]$feed = Get-Content "$env:RUNNER_TEMP\TraceCommons.appinstaller"
+          $ns = New-Object System.Xml.XmlNamespaceManager($feed.NameTable)
+          $ns.AddNamespace('a', 'http://schemas.microsoft.com/appx/appinstaller/2017/2')
+          $ns.AddNamespace('s4', 'http://schemas.microsoft.com/appx/appinstaller/2021')
+          if (-not $feed.SelectSingleNode('/a:AppInstaller/a:UpdateSettings/s4:AutomaticBackgroundTask', $ns)) {
+            throw "the feed lost its background update task"
+          }
+          if ($feed.SelectSingleNode('//s4:ForceUpdateFromAnyVersion', $ns)) {
+            throw "the feed allows downgrades, which this project forbids"
+          }
+          $main = $feed.SelectSingleNode('/a:AppInstaller/a:MainPackage', $ns)
+          [xml]$manifest = Get-Content windows\packaging\Package.appxmanifest
+          if ($main.Name -ne $manifest.Package.Identity.Name) {
+            throw "feed package name $($main.Name) does not match manifest identity $($manifest.Package.Identity.Name)"
+          }
+      # Last, so every step above still has its binaries; see the action for
+      # what is removed and why. Only a finished job saves its cache, so this
+      # runs exactly when a save is about to happen.
+      - uses: ./.github/actions/trim-cargo-cache

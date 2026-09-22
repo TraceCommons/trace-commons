@@ -73,11 +73,22 @@ The protocol crate is `crates/trace-commons-protocol`; the server crate is
 
 ## CI
 
-Every job in `.github/workflows/ci.yml` runs on every PR. There are
-twenty-four as of 2026-09-09; the list below covers the long-standing ones and
-is not a full inventory -- read the workflow for that. (It said "nine" while the
-file held fifteen, and "eighteen" while it held twenty, so treat any count
-here as stale until re-checked.)
+`.github/workflows/ci.yml` holds the server-side jobs and runs every one of
+them on every PR: sixteen as of 2026-09-22. The list below covers the
+long-standing ones and is not a full inventory -- read the workflow for that.
+(It said "nine" while the file held fifteen, and "eighteen" while it held
+twenty, so treat any count here as stale until re-checked.)
+
+The client shells are in `.github/workflows/clients.yml` since 2026-09-22:
+`macOS app tests`, `windows named-pipe ACL`, `windows contributor crate
+tests`, `windows update conformance`, `install.ps1 against the real release`,
+`windows contributor app`, `linux-shell desktop entry and metainfo`,
+`linux-shell desktop integration (weston + portal)`. That workflow runs on
+every push to `main`, on `workflow_dispatch`, and on a pull request only when
+it touches a client path (its `paths:` filter). None of its jobs is a
+required status check, so a server-only PR never waits on a macOS or Windows
+runner, and a client regression surfaces on `main` after the merge. The jobs
+are unchanged: the notes on them below still apply.
 
 Every job that caches `target` ends with `./.github/actions/trim-cargo-cache`,
 which deletes linked test and bin executables and `incremental/` before
@@ -88,7 +99,7 @@ churn. Push-to-main runs are exempt from `cancel-in-progress` for the same
 reason: a cancelled job saves no cache, and on 2026-09-09 22 of 40 main runs
 were cancelled by the next merge.
 
-Running is not the same as blocking. **Fourteen** of the twenty-one are required
+Running is not the same as blocking. **Ten** of the sixteen are required
 status checks on `main`, and only those block a merge -- `README.md` lists
 them. `main` is also behind a merge queue (`main merge queue`), so the
 required checks are re-run against `main` at merge time; a PR that never
