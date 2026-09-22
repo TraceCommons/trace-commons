@@ -4924,6 +4924,51 @@ impl Database for PgBackend {
             .collect())
     }
 
+    async fn list_dedup_rederive_rows(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<crate::trace_corpus_storage::DedupRederiveRow>, DatabaseError> {
+        let pool = self
+            .gate_driver_pool
+            .as_ref()
+            .ok_or_else(|| DatabaseError::Pool("gate-driver pool not configured".to_string()))?;
+        let client = pool.get().await.map_err(DatabaseError::from)?;
+        // No tenant GUC: the trace_gate_driver role's permissive cross-tenant
+        // SELECT policies authorize this read across every tenant's decisions.
+        // Every column here is in the role's column-scoped grants (V45 for
+        // the identifiers, `decided_at` and the three V40 dedup columns; V57
+        // for the stamp), so the query needs no migration.
+        //
+        // `decision_id` is the tie-break so two decisions at one instant
+        // enumerate in the same order every run: the sweep is
+        // order-dependent, and its idempotence depends on this.
+        let rows = client
+            .query(
+                "SELECT tenant_id, submission_id, decision_id, decided_at,
+                        dedup_simhash, dedup_cluster_id, dedup_cluster_size,
+                        dedup_signal_version
+                 FROM trace_gate_decisions
+                 ORDER BY decided_at ASC, decision_id ASC
+                 LIMIT $1",
+                &[&limit],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        Ok(rows
+            .into_iter()
+            .map(|row| crate::trace_corpus_storage::DedupRederiveRow {
+                tenant_id: row.get("tenant_id"),
+                submission_id: row.get("submission_id"),
+                decision_id: row.get("decision_id"),
+                decided_at: row.get("decided_at"),
+                dedup_simhash: row.get("dedup_simhash"),
+                dedup_cluster_id: row.get("dedup_cluster_id"),
+                dedup_cluster_size: row.get("dedup_cluster_size"),
+                dedup_signal_version: row.get("dedup_signal_version"),
+            })
+            .collect())
+    }
+
     async fn list_correction_signals(
         &self,
         limit: i64,

@@ -4643,6 +4643,129 @@ async fn pg_store_list_dedup_signals_round_trips_the_stamp() {
     cleanup_tenant(&backend, &tenant_id).await;
 }
 
+/// The re-derivation pass enumerates through the NARROW trace_gate_driver
+/// pool: every column it selects (`tenant_id, submission_id, decision_id,
+/// decided_at, dedup_cluster_id, dedup_simhash, dedup_cluster_size` from V45
+/// and `dedup_signal_version` from V57) must already be granted, which is why
+/// the spec says no migration -- and why this runs as the role, so the claim
+/// is tested rather than asserted. Rows come back across tenants in
+/// `decided_at ASC, decision_id ASC` order, un-stamped rows included, and a
+/// four-column write followed by a re-read shows the stamp, the value, the
+/// cluster and the size while the must-not-touch assertion still holds.
+#[tokio::test]
+async fn pg_store_list_dedup_rederive_rows_enumerates_cross_tenant_in_decided_order() {
+    let Some(backend) = gate_driver_backend().await else {
+        return;
+    };
+
+    let tenant_a = format!("pg-rederive-a-{}", Uuid::new_v4());
+    let tenant_b = format!("pg-rederive-b-{}", Uuid::new_v4());
+    let base = Utc::now() - chrono::Duration::days(30);
+
+    // Three decisions, interleaved across two tenants and inserted OUT of
+    // decided order so the ORDER BY is what sorts them, not insertion.
+    let mut seeded = Vec::new();
+    for (i, (tenant, offset_secs)) in [(&tenant_b, 20), (&tenant_a, 10), (&tenant_a, 30)]
+        .into_iter()
+        .enumerate()
+    {
+        let submission_id = Uuid::new_v4();
+        backend
+            .upsert_trace_submission(sample_submission(tenant, submission_id))
+            .await
+            .expect("insert scoped submission");
+        let mut decision = sample_gate_decision(submission_id);
+        decision.decided_at = base + chrono::Duration::seconds(offset_secs);
+        backend
+            .insert_trace_gate_decision(tenant, decision.clone())
+            .await
+            .expect("insert gate decision");
+        seeded.push((tenant.clone(), submission_id, decision.decision_id, i));
+    }
+    // The middle one (tenant_a, +10) is stamped and clustered already; the
+    // other two have never been through a dedup pass.
+    let (stamped_tenant, stamped_submission, stamped_decision, _) = seeded[1].clone();
+    let cluster_id = Uuid::new_v4();
+    backend
+        .update_trace_gate_decision_dedup(
+            &stamped_tenant,
+            stamped_decision,
+            trace_commons_server::trace_corpus_storage::DedupAssignmentWrite {
+                dedup_simhash: -77,
+                dedup_cluster_id: cluster_id,
+                dedup_cluster_size: 4,
+                dedup_signal_version: "events.v1+fnv1a-3shingle-set.v2".to_string(),
+            },
+        )
+        .await
+        .expect("dedup update succeeds");
+
+    let rows = backend
+        .list_dedup_rederive_rows(i64::MAX)
+        .await
+        .expect("list_dedup_rederive_rows runs on the gate-driver pool");
+    let ours: Vec<_> = rows
+        .iter()
+        .filter(|r| r.tenant_id == tenant_a || r.tenant_id == tenant_b)
+        .collect();
+    assert_eq!(
+        ours.len(),
+        3,
+        "every decision is enumerated, stamped or not"
+    );
+    // decided_at order: tenant_a +10, tenant_b +20, tenant_a +30.
+    assert_eq!(ours[0].tenant_id, tenant_a);
+    assert_eq!(ours[1].tenant_id, tenant_b);
+    assert_eq!(ours[2].tenant_id, tenant_a);
+    assert!(ours.windows(2).all(|w| w[0].decided_at <= w[1].decided_at));
+    for (tenant, submission_id, decision_id, _) in &seeded {
+        let row = ours
+            .iter()
+            .find(|r| r.decision_id == *decision_id)
+            .expect("seeded decision enumerated");
+        assert_eq!(&row.tenant_id, tenant);
+        assert_eq!(row.submission_id, *submission_id);
+    }
+
+    let stamped = ours
+        .iter()
+        .find(|r| r.decision_id == stamped_decision)
+        .expect("stamped row enumerated");
+    assert_eq!(stamped.submission_id, stamped_submission);
+    assert_eq!(stamped.dedup_simhash, Some(-77));
+    assert_eq!(stamped.dedup_cluster_id, Some(cluster_id));
+    assert_eq!(stamped.dedup_cluster_size, Some(4));
+    assert_eq!(
+        stamped.dedup_signal_version.as_deref(),
+        Some("events.v1+fnv1a-3shingle-set.v2")
+    );
+    assert_eq!(
+        stamped.effective_signal_version(),
+        "events.v1+fnv1a-3shingle-set.v2"
+    );
+    for r in ours.iter().filter(|r| r.decision_id != stamped_decision) {
+        assert_eq!(r.dedup_simhash, None);
+        assert_eq!(r.dedup_cluster_id, None);
+        assert_eq!(r.dedup_cluster_size, None);
+        assert_eq!(r.dedup_signal_version, None);
+        assert_eq!(
+            r.effective_signal_version(),
+            trace_commons_server::dedup_assign::LEGACY_DEDUP_SIGNAL_VERSION,
+            "NULL reads as the legacy stamp here as everywhere"
+        );
+    }
+
+    // A `limit` bounds the enumeration from the oldest end.
+    let limited = backend
+        .list_dedup_rederive_rows(1)
+        .await
+        .expect("limited enumeration");
+    assert_eq!(limited.len(), 1);
+
+    cleanup_tenant(&backend, &tenant_a).await;
+    cleanup_tenant(&backend, &tenant_b).await;
+}
+
 /// The credit-quality batch pass picks its calibration from each row's
 /// `decided_at`, read through the NARROW trace_gate_driver pool. A column the
 /// narrow role cannot select is a runtime permission error, not a compile

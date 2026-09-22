@@ -7978,6 +7978,7 @@ fn app(state: Arc<AppState>) -> Router {
             post(score_credit_quality_handler),
         )
         .route("/v1/admin/recluster-dedup", post(recluster_dedup_handler))
+        .route("/v1/admin/rederive-dedup", post(rederive_dedup_handler))
         .route(
             "/v1/admin/pii-backstop-requeue-quarantined",
             post(pii_backstop_requeue_quarantined_handler),
@@ -51300,11 +51301,13 @@ async fn evaluate_and_record_gate(
             }
         })
         .collect();
+    // The constants belong to the algorithm that derived the value: the
+    // gate service stamped `ACTIVE_DEDUP_ALGORITHM`, so its tau applies.
     let cluster_id = match trace_commons_server::dedup_assign::assign_cluster(
         dedup_simhash as u64,
         &dedup_signal_version,
         &candidates,
-        &trace_commons_server::dedup_assign::DEDUP_CONSTANTS_V1,
+        trace_commons_server::dedup_simhash::ACTIVE_DEDUP_ALGORITHM.constants(),
     ) {
         trace_commons_server::dedup_assign::ClusterAssignment::Existing(id) => id,
         trace_commons_server::dedup_assign::ClusterAssignment::New => uuid::Uuid::new_v4(),
@@ -51392,9 +51395,14 @@ async fn evaluate_and_record_gate(
         //
         // Passing the constant is what the signature requires, not a claim of
         // protection. Closing this needs a `correction_signal_version` column,
-        // which is a migration and belongs with the re-derivation pass, not
-        // here.
-        let correction_version = trace_commons_server::dedup_simhash::DEDUP_SIMHASH_ALGORITHM;
+        // which is a migration and is out of scope for the trace-side
+        // re-derivation pass.
+        //
+        // Pinned to v1 BY NAME, as `correction_simhash_from_plaintext` is:
+        // because nothing here is versioned, the correction path must not
+        // follow `ACTIVE_DEDUP_ALGORITHM` when it moves, or old and new
+        // correction values would fuse under the new label.
+        let correction_version = trace_commons_server::dedup_simhash::DedupAlgorithm::V1.name();
         let correction_candidates: Vec<trace_commons_server::dedup_assign::ClusterCandidate<'_>> =
             correction_reps
                 .iter()
@@ -51412,7 +51420,7 @@ async fn evaluate_and_record_gate(
             correction_simhash as u64,
             correction_version,
             &correction_candidates,
-            &trace_commons_server::dedup_assign::DEDUP_CONSTANTS_V1,
+            trace_commons_server::dedup_simhash::DedupAlgorithm::V1.constants(),
         ) {
             trace_commons_server::dedup_assign::ClusterAssignment::Existing(id) => id,
             trace_commons_server::dedup_assign::ClusterAssignment::New => uuid::Uuid::new_v4(),
@@ -52189,12 +52197,12 @@ struct ReclusterDedupSummary {
 ///
 /// Enumerates dedup signal rows cross-tenant (`decided_at ASC`, per
 /// `list_dedup_signals`), then recomputes cluster assignments over that whole
-/// snapshot in a SINGLE deterministic sweep: walking rows in order, each row
-/// with a recorded simhash is assigned against the clusters formed so far
-/// (via `assign_cluster`, simhash-only candidates — `embed_cosine_micros:
-/// None`), joining an existing cluster or minting a new one. Rows without a
-/// recorded simhash cannot be clustered and are left untouched (not counted,
-/// not written).
+/// snapshot in a SINGLE deterministic sweep (`dedup_assign::sweep_clusters`,
+/// the same function the re-derivation pass uses, so the two cannot disagree
+/// on membership): walking rows in order, each row with a recorded simhash is
+/// assigned against the clusters formed so far, joining an existing cluster
+/// or minting a new one. Rows without a recorded simhash cannot be clustered
+/// and are left untouched (not counted, not written).
 ///
 /// Candidates are scoped to the row's own `dedup_signal_version` (V57) by
 /// `assign_cluster` itself: the pass reads stored simhashes and never
@@ -52220,77 +52228,37 @@ async fn run_recluster_dedup_pass(
     let effective_limit = limit.unwrap_or(i64::MAX).max(0);
     let rows = db.list_dedup_signals(effective_limit).await?;
 
-    // Pass 1: single deterministic sweep building cluster assignments over
-    // the snapshot. `reps` holds each cluster's representative simhash AND
-    // the signal version it was derived under (both taken from the row that
-    // created the cluster); `counts` holds each cluster's running (and, after
-    // the loop, final) membership.
-    let mut reps: std::collections::HashMap<uuid::Uuid, (u64, &str)> =
-        std::collections::HashMap::new();
-    let mut counts: std::collections::HashMap<uuid::Uuid, i64> = std::collections::HashMap::new();
-    /// One row the sweep placed, carrying what pass 2 needs to write it --
-    /// which is the cluster and nothing else. The simhash and the stamp are
-    /// deliberately absent: the pass read them, it did not derive them, so it
-    /// has nothing to say about them.
-    struct AssignedRow<'a> {
-        row: &'a trace_commons_server::trace_corpus_storage::DedupSignalRow,
-        cluster_id: uuid::Uuid,
-    }
-    let mut assigned: Vec<AssignedRow<'_>> = Vec::new();
-
-    for row in &rows {
-        let Some(simhash_i64) = row.dedup_simhash else {
-            // No simhash recorded yet: cannot cluster this row. Skip it —
-            // leave it as-is, do not write it.
-            continue;
-        };
-        let simhash_u64 = simhash_i64 as u64;
-        // NULL reads as the legacy v1 stamp, never as unknown (V57, D2), so a
-        // pre-V57 row and a freshly stamped v1 row still cluster together.
-        // Borrowed from `rows`, which outlives every map built from it.
-        let row_version = row.effective_signal_version();
-        // No version filter here: `assign_cluster` refuses a differently
-        // stamped candidate itself. That gate is what keeps the transition
-        // window honest — the pass reads stored simhashes and never
-        // re-renders, so without it a corpus holding both versions would fuse
-        // them silently.
-        let candidates: Vec<trace_commons_server::dedup_assign::ClusterCandidate<'_>> = reps
-            .iter()
-            .map(|(cluster_id, (simhash, version))| {
-                trace_commons_server::dedup_assign::ClusterCandidate {
-                    cluster_id: *cluster_id,
-                    size: *counts.get(cluster_id).unwrap_or(&0),
-                    simhash: *simhash,
-                    embed_cosine_micros: None,
-                    signal_version: version,
-                }
-            })
-            .collect();
-        let cluster_id = match trace_commons_server::dedup_assign::assign_cluster(
-            simhash_u64,
-            row_version,
-            &candidates,
-            &trace_commons_server::dedup_assign::DEDUP_CONSTANTS_V1,
-        ) {
-            trace_commons_server::dedup_assign::ClusterAssignment::Existing(id) => id,
-            trace_commons_server::dedup_assign::ClusterAssignment::New => {
-                let id = uuid::Uuid::new_v4();
-                reps.insert(id, (simhash_u64, row_version));
-                id
-            }
-        };
-        *counts.entry(cluster_id).or_insert(0) += 1;
-        assigned.push(AssignedRow { row, cluster_id });
-    }
+    // Pass 1: the sweep, over every row with a recorded simhash. Each row's
+    // stored cluster id is offered as its preferred id so a converged corpus
+    // re-sweeps to itself.
+    let clusterable: Vec<&trace_commons_server::trace_corpus_storage::DedupSignalRow> = rows
+        .iter()
+        .filter(|row| row.dedup_simhash.is_some())
+        .collect();
+    let sweep_rows: Vec<trace_commons_server::dedup_assign::SweepRow<'_>> = clusterable
+        .iter()
+        .map(|row| trace_commons_server::dedup_assign::SweepRow {
+            simhash: row.dedup_simhash.unwrap_or_default() as u64,
+            // NULL reads as the legacy v1 stamp, never as unknown (V57, D2),
+            // so a pre-V57 row and a freshly stamped v1 row still cluster
+            // together.
+            signal_version: row.effective_signal_version(),
+            stored_cluster_id: row.dedup_cluster_id,
+        })
+        .collect();
+    // The inline path's constants: this route re-sweeps what the inline
+    // path wrote, under the stamps it wrote, so it clusters the same way.
+    let sweep = trace_commons_server::dedup_assign::sweep_clusters(
+        &sweep_rows,
+        trace_commons_server::dedup_simhash::ACTIVE_DEDUP_ALGORITHM.constants(),
+    );
 
     // Pass 2: write every assigned row with its cluster's FINAL total
     // membership count (computed after the whole sweep above).
     let mut summary = ReclusterDedupSummary::default();
-    for assignment in assigned {
-        let row = assignment.row;
+    for (row, assignment) in clusterable.iter().zip(&sweep.assignments) {
         let cluster_id = assignment.cluster_id;
-        let final_size =
-            i32::try_from(counts.get(&cluster_id).copied().unwrap_or(1)).unwrap_or(i32::MAX);
+        let final_size = i32::try_from(sweep.size_of(cluster_id).max(1)).unwrap_or(i32::MAX);
         // Cluster columns only. The pass derives neither the simhash nor the
         // stamp, so it writes neither -- and in particular it does not
         // materialise the legacy literal into a row whose stamp is NULL.
@@ -52582,6 +52550,636 @@ async fn recluster_dedup_handler(
     Ok(Json(ReclusterDedupAck {
         accepted: true,
         limit,
+    }))
+}
+
+// ---------------------------------------------------------------------------
+// Dedup re-derivation pass (`POST /v1/admin/rederive-dedup`)
+// ---------------------------------------------------------------------------
+
+/// Query params for the dedup re-derivation admin route. `algorithm` is
+/// required and closed (an unknown name is a 400, never a default); `limit`
+/// bounds the enumeration for a `?limit=5` smoke; `dry_run` derives and
+/// sweeps, writes nothing and logs aggregates.
+#[derive(Debug, Deserialize)]
+// A mistyped `dry_run` must be refused, not read as the default: the default
+// is WRITE mode, which re-stamps every derivable row, and the route
+// acknowledges before it works.
+#[serde(deny_unknown_fields)]
+struct RederiveDedupQuery {
+    algorithm: trace_commons_server::dedup_simhash::DedupAlgorithm,
+    #[serde(default)]
+    dry_run: bool,
+    #[serde(default)]
+    limit: Option<i64>,
+}
+
+/// Whether a re-derivation pass writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum RederiveDedupMode {
+    /// Derive, sweep, log the report, store nothing.
+    DryRun,
+    /// Derive, sweep, and write every row whose four dedup columns changed.
+    Write,
+}
+
+impl RederiveDedupQuery {
+    fn mode(&self) -> RederiveDedupMode {
+        if self.dry_run {
+            RederiveDedupMode::DryRun
+        } else {
+            RederiveDedupMode::Write
+        }
+    }
+}
+
+/// Hash-only acknowledgement for the re-derivation route. The work runs in
+/// a spawned background task; this is the operator's only confirmation of
+/// which mode and which algorithm were started.
+#[derive(Debug, Serialize)]
+struct RederiveDedupAck {
+    accepted: bool,
+    limit: Option<i64>,
+    mode: RederiveDedupMode,
+    algorithm: trace_commons_server::dedup_simhash::DedupAlgorithm,
+}
+
+/// Per-row outcome counts for one pass, shared by the summary and the
+/// dry-run report.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
+struct RederiveDedupCounts {
+    /// Decision rows enumerated.
+    rows: usize,
+    /// Rows whose envelope was loaded, decrypted, rendered and hashed.
+    derived: usize,
+    /// Rows already on the target stamp with a stored value: no load.
+    reused: usize,
+    /// Rows whose stored stamp is not a simhash of any text
+    /// (`digest-prefix.v1`, the placeholder): skipped, never written.
+    not_derivable: usize,
+    /// Rows whose load or derivation failed: kept on their old stamp and
+    /// value, so still refused against every re-derived row until a rerun
+    /// succeeds on them.
+    failed: usize,
+}
+
+/// Running tally for one re-derivation pass.
+#[derive(Debug, Default)]
+struct RederiveDedupSummary {
+    rows: usize,
+    derived: usize,
+    reused: usize,
+    not_derivable: usize,
+    failed: usize,
+    /// Write mode: rows whose four columns differed and were updated.
+    written: usize,
+    /// Write mode: rows whose four columns already matched; not written. A
+    /// rerun over a converged corpus reads `unchanged = rows`.
+    unchanged: usize,
+    /// Write mode: rows whose update failed (left as-is).
+    write_failed: usize,
+    /// Dry-run mode only.
+    dry_run: Option<RederiveDedupDryRunReport>,
+}
+
+/// One row as the sweep sees it, with the tenant kept for the report's
+/// same-tenant / cross-tenant cluster counts. Never logged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RederiveSweepInput {
+    tenant_id: String,
+    simhash: u64,
+    signal_version: String,
+    stored_cluster_id: Option<uuid::Uuid>,
+}
+
+impl RederiveSweepInput {
+    fn sweep_row(&self) -> trace_commons_server::dedup_assign::SweepRow<'_> {
+        trace_commons_server::dedup_assign::SweepRow {
+            simhash: self.simhash,
+            signal_version: &self.signal_version,
+            stored_cluster_id: self.stored_cluster_id,
+        }
+    }
+}
+
+/// Buckets for the nearest-representative Hamming histogram: `(label,
+/// lowest, highest)`, inclusive. The spec's twelve, plus `33-64` so a
+/// distance above 32 (where two unrelated 64-bit signatures sit, about
+/// 32 +/- 4) is counted rather than dropped.
+const HAMMING_HISTOGRAM_BUCKETS: [(&str, u32, u32); 13] = [
+    ("0", 0, 0),
+    ("1-2", 1, 2),
+    ("3-4", 3, 4),
+    ("5-6", 5, 6),
+    ("7-8", 7, 8),
+    ("9-10", 9, 10),
+    ("11-12", 11, 12),
+    ("13-14", 13, 14),
+    ("15-16", 15, 16),
+    ("17-20", 17, 20),
+    ("21-24", 21, 24),
+    ("25-32", 25, 32),
+    ("33-64", 33, 64),
+];
+
+/// The would-be cluster-size distribution at one candidate `tau_hamming`,
+/// over the target-stamped rows: the shape of the table the pilot was
+/// measured with, so before and after read the same way.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ClusterSizeDistribution {
+    tau_hamming: u32,
+    clusters: usize,
+    singletons: usize,
+    size_2_to_9: usize,
+    size_10_to_99: usize,
+    size_100_plus: usize,
+    largest_cluster_size: i64,
+    /// Share of target rows in the largest cluster, in micros.
+    largest_cluster_share_micros: u64,
+}
+
+/// Everything a dry run logs: aggregates only. Below
+/// `rescore_distribution::MIN_ROWS_FOR_PERCENTILES` target rows the shape is
+/// withheld -- histogram and per-tau tables empty, tenant-span counts `None`
+/// -- and the report carries counts only, so a `limit=5` smoke reports the
+/// mechanism and nothing a row could be read out of. No simhash value, no
+/// id and no tenant appears in it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct RederiveDedupDryRunReport {
+    algorithm: trace_commons_server::dedup_simhash::DedupAlgorithm,
+    target_signal_version: String,
+    rows: usize,
+    derived: usize,
+    reused: usize,
+    not_derivable: usize,
+    failed: usize,
+    /// Rows on the target stamp after derivation; the distributions below
+    /// describe these.
+    target_rows: usize,
+    distinct_target_simhashes: usize,
+    /// `(bucket label, rows)` for each row's Hamming distance to its nearest
+    /// same-stamped cluster representative, at the algorithm's own tau,
+    /// every bucket present in order.
+    nearest_representative_hamming: Vec<(String, usize)>,
+    /// One entry per `DRY_RUN_CANDIDATE_TAU_HAMMING`, ascending.
+    by_candidate_tau: Vec<ClusterSizeDistribution>,
+    /// At the algorithm's own tau: multi-member clusters whose members all
+    /// share one `tenant_id` (on the pilot, one contributor resubmitting or
+    /// forking), and clusters spanning two or more (the sybil case or a
+    /// shared session). Counts only.
+    single_tenant_multi_member_clusters: Option<usize>,
+    multi_tenant_multi_member_clusters: Option<usize>,
+}
+
+fn cluster_size_distribution(
+    tau_hamming: u32,
+    sizes: &[i64],
+    target_rows: usize,
+) -> ClusterSizeDistribution {
+    let largest = sizes.iter().copied().max().unwrap_or(0);
+    ClusterSizeDistribution {
+        tau_hamming,
+        clusters: sizes.len(),
+        singletons: sizes.iter().filter(|s| **s == 1).count(),
+        size_2_to_9: sizes.iter().filter(|s| (2..=9).contains(*s)).count(),
+        size_10_to_99: sizes.iter().filter(|s| (10..=99).contains(*s)).count(),
+        size_100_plus: sizes.iter().filter(|s| **s >= 100).count(),
+        largest_cluster_size: largest,
+        largest_cluster_share_micros: if target_rows == 0 {
+            0
+        } else {
+            (largest.max(0) as u64 * 1_000_000) / target_rows as u64
+        },
+    }
+}
+
+/// Build the dry-run report from the sweep inputs. Pure, so its shape is
+/// unit-tested without a store; the pass calls it once at the end.
+fn rederive_dedup_dry_run_report(
+    inputs: &[RederiveSweepInput],
+    algorithm: trace_commons_server::dedup_simhash::DedupAlgorithm,
+    counts: &RederiveDedupCounts,
+) -> RederiveDedupDryRunReport {
+    use std::collections::{HashMap, HashSet};
+    use trace_commons_server::dedup_assign::{
+        DRY_RUN_CANDIDATE_TAU_HAMMING, DedupConstants, sweep_clusters,
+    };
+    use trace_commons_server::rescore_distribution::MIN_ROWS_FOR_PERCENTILES;
+
+    let target = trace_commons_server::trace_gate_service::dedup_signal_version_for(algorithm);
+    let is_target: Vec<bool> = inputs.iter().map(|i| i.signal_version == target).collect();
+    let target_rows = is_target.iter().filter(|t| **t).count();
+    let distinct_target_simhashes = inputs
+        .iter()
+        .zip(&is_target)
+        .filter(|(_, t)| **t)
+        .map(|(i, _)| i.simhash)
+        .collect::<HashSet<u64>>()
+        .len();
+    let mut report = RederiveDedupDryRunReport {
+        algorithm,
+        target_signal_version: target,
+        rows: counts.rows,
+        derived: counts.derived,
+        reused: counts.reused,
+        not_derivable: counts.not_derivable,
+        failed: counts.failed,
+        target_rows,
+        distinct_target_simhashes,
+        nearest_representative_hamming: Vec::new(),
+        by_candidate_tau: Vec::new(),
+        single_tenant_multi_member_clusters: None,
+        multi_tenant_multi_member_clusters: None,
+    };
+    if target_rows < MIN_ROWS_FOR_PERCENTILES {
+        return report;
+    }
+
+    let rows: Vec<trace_commons_server::dedup_assign::SweepRow<'_>> =
+        inputs.iter().map(RederiveSweepInput::sweep_row).collect();
+    // Sizes of the clusters target rows land in, for one sweep result.
+    let target_cluster_sizes = |sweep: &trace_commons_server::dedup_assign::SweepResult| {
+        let mut sizes: HashMap<uuid::Uuid, i64> = HashMap::new();
+        for (a, t) in sweep.assignments.iter().zip(&is_target) {
+            if *t {
+                *sizes.entry(a.cluster_id).or_insert(0) += 1;
+            }
+        }
+        sizes
+    };
+
+    let own = algorithm.constants();
+    let at_own_tau = sweep_clusters(&rows, own);
+    report.nearest_representative_hamming = HAMMING_HISTOGRAM_BUCKETS
+        .iter()
+        .map(|(label, lo, hi)| {
+            let n = at_own_tau
+                .assignments
+                .iter()
+                .zip(&is_target)
+                .filter(|(_, t)| **t)
+                .filter_map(|(a, _)| a.nearest_representative_hamming)
+                .filter(|d| (*lo..=*hi).contains(d))
+                .count();
+            (label.to_string(), n)
+        })
+        .collect();
+    let mut tenants_by_cluster: HashMap<uuid::Uuid, HashSet<&str>> = HashMap::new();
+    for ((a, t), input) in at_own_tau.assignments.iter().zip(&is_target).zip(inputs) {
+        if *t {
+            tenants_by_cluster
+                .entry(a.cluster_id)
+                .or_default()
+                .insert(input.tenant_id.as_str());
+        }
+    }
+    let own_sizes = target_cluster_sizes(&at_own_tau);
+    let multi_member = own_sizes.iter().filter(|(_, size)| **size >= 2);
+    let (mut single_tenant, mut multi_tenant) = (0usize, 0usize);
+    for (cluster_id, _) in multi_member {
+        match tenants_by_cluster.get(cluster_id).map(HashSet::len) {
+            Some(n) if n >= 2 => multi_tenant += 1,
+            _ => single_tenant += 1,
+        }
+    }
+    report.single_tenant_multi_member_clusters = Some(single_tenant);
+    report.multi_tenant_multi_member_clusters = Some(multi_tenant);
+
+    report.by_candidate_tau = DRY_RUN_CANDIDATE_TAU_HAMMING
+        .iter()
+        .map(|tau| {
+            let k = DedupConstants {
+                tau_hamming: *tau,
+                ..*own
+            };
+            let sizes: Vec<i64> = target_cluster_sizes(&sweep_clusters(&rows, &k))
+                .into_values()
+                .collect();
+            cluster_size_distribution(*tau, &sizes, target_rows)
+        })
+        .collect();
+    report
+}
+
+/// What the pass established about one enumerated row before the sweep.
+enum RederiveRowOutcome {
+    /// A `(simhash, stamp)` the sweep can place, and whether it came from
+    /// a derivation or from the stored columns.
+    Signal {
+        simhash: u64,
+        signal_version: String,
+        derived: bool,
+    },
+    /// Stored stamp names no text derivation; the row is swept under its
+    /// own stamp if it has a value, and never written.
+    NotDerivable,
+    /// Load or derivation failed; the row is swept under its stored stamp
+    /// and value if it has one, and never written by this pass.
+    Failed(anyhow::Error),
+}
+
+/// Establish one row's `(simhash, stamp)` for the target algorithm.
+async fn rederive_dedup_row(
+    state: &AppState,
+    row: &trace_commons_server::trace_corpus_storage::DedupRederiveRow,
+    algorithm: trace_commons_server::dedup_simhash::DedupAlgorithm,
+    target: &str,
+) -> RederiveRowOutcome {
+    let stored = row.effective_signal_version();
+    // 1. Already on the target stamp with a value: reuse. No load, no
+    //    decrypt. This is what makes a rerun cheap and a crash resumable.
+    if stored == target {
+        if let Some(simhash) = row.dedup_simhash {
+            return RederiveRowOutcome::Signal {
+                simhash: simhash as u64,
+                signal_version: target.to_string(),
+                derived: false,
+            };
+        }
+    }
+    // 2. A digest window or a placeholder is not a simhash of any text and
+    //    cannot be re-derived from one. Such rows come only from development
+    //    and test services.
+    if stored == trace_commons_server::trace_gate_service::DETERMINISTIC_DEDUP_SIGNAL_VERSION
+        || stored == trace_commons_server::dedup_assign::PLACEHOLDER_DEDUP_SIGNAL_VERSION
+    {
+        return RederiveRowOutcome::NotDerivable;
+    }
+    // 3. Load the exact ciphertext the gate scored and derive inside the
+    //    gate service. The plaintext never comes back here.
+    let derived = async {
+        let (ciphertext, wrapped_dek) =
+            load_trace_ciphertext_and_wrapped_dek(state, &row.tenant_id, row.submission_id).await?;
+        // Canonical tenant_storage_ref: the wrapped DEK was produced under
+        // this ref (matches `evaluate_and_record_gate`); anything else fails
+        // KekContextMismatch.
+        let tenant_ctx = GateTenantCtx::from_canonical(tenant_storage_ref(&row.tenant_id));
+        state.gate_service.derive_dedup_signal(
+            &tenant_ctx,
+            &ciphertext,
+            &wrapped_dek,
+            TraceArtifactKind::ContributionEnvelope,
+            algorithm,
+        )
+    }
+    .await;
+    match derived {
+        Ok(signal) => RederiveRowOutcome::Signal {
+            simhash: signal.simhash as u64,
+            signal_version: signal.signal_version,
+            derived: true,
+        },
+        Err(error) => RederiveRowOutcome::Failed(error),
+    }
+}
+
+/// One dedup re-derivation pass. Enumerates every decision row cross-tenant
+/// in `decided_at` order, establishes each row's `(simhash, stamp)` for the
+/// target algorithm (reusing stored target-stamped values, deriving the rest
+/// from the encrypted envelopes, skipping the non-derivable, keeping failed
+/// rows as they are), sweeps everything with `dedup_assign::sweep_clusters`
+/// under the target algorithm's constants, and then either logs the report
+/// (dry run) or writes every row whose four dedup columns changed.
+///
+/// Rows carrying a non-target stamp (skipped or failed) are in the sweep, so
+/// they keep clustering among themselves as today, and the version gate
+/// inside `assign_cluster` keeps them out of the target clusters. Their
+/// cluster columns are refreshed with the sweep's totals when they changed,
+/// through the cluster-only writer, so sizes stay consistent corpus-wide;
+/// their simhash and stamp are never touched by this pass.
+///
+/// Idempotent: two consecutive runs on a quiet corpus produce identical
+/// columns and the second writes nothing.
+async fn run_rederive_dedup_pass(
+    state: Arc<AppState>,
+    limit: Option<i64>,
+    mode: RederiveDedupMode,
+    algorithm: trace_commons_server::dedup_simhash::DedupAlgorithm,
+) -> anyhow::Result<RederiveDedupSummary> {
+    let db = state
+        .db_mirror
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("dedup re-derivation requires a configured DB mirror"))?;
+    let effective_limit = limit.unwrap_or(i64::MAX).max(0);
+    let rows = db.list_dedup_rederive_rows(effective_limit).await?;
+    let target = trace_commons_server::trace_gate_service::dedup_signal_version_for(algorithm);
+
+    let mut counts = RederiveDedupCounts {
+        rows: rows.len(),
+        ..RederiveDedupCounts::default()
+    };
+    // Parallel to `rows`: what the sweep gets for each, or `None` for a row
+    // with nothing to place (never dedup'd and not derivable now).
+    let mut signals: Vec<Option<(RederiveSweepInput, bool)>> = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let stored_signal = row.dedup_simhash.map(|simhash| RederiveSweepInput {
+            tenant_id: row.tenant_id.clone(),
+            simhash: simhash as u64,
+            signal_version: row.effective_signal_version().to_string(),
+            stored_cluster_id: row.dedup_cluster_id,
+        });
+        let outcome = rederive_dedup_row(state.as_ref(), row, algorithm, &target).await;
+        signals.push(match outcome {
+            RederiveRowOutcome::Signal {
+                simhash,
+                signal_version,
+                derived,
+            } => {
+                if derived {
+                    counts.derived += 1;
+                } else {
+                    counts.reused += 1;
+                }
+                Some((
+                    RederiveSweepInput {
+                        tenant_id: row.tenant_id.clone(),
+                        simhash,
+                        signal_version,
+                        stored_cluster_id: row.dedup_cluster_id,
+                    },
+                    true,
+                ))
+            }
+            RederiveRowOutcome::NotDerivable => {
+                counts.not_derivable += 1;
+                stored_signal.map(|s| (s, false))
+            }
+            RederiveRowOutcome::Failed(error) => {
+                counts.failed += 1;
+                tracing::warn!(
+                    tenant_hash = %sha256_prefixed(&row.tenant_id),
+                    submission_hash = %sha256_prefixed(&row.submission_id.to_string()),
+                    error_hash = %safe_display_error_hash(&error),
+                    "dedup re-derivation skipped one decision"
+                );
+                stored_signal.map(|s| (s, false))
+            }
+        });
+    }
+
+    let mut summary = RederiveDedupSummary {
+        rows: counts.rows,
+        derived: counts.derived,
+        reused: counts.reused,
+        not_derivable: counts.not_derivable,
+        failed: counts.failed,
+        ..RederiveDedupSummary::default()
+    };
+    let inputs: Vec<RederiveSweepInput> = signals
+        .iter()
+        .flatten()
+        .map(|(input, _)| input.clone())
+        .collect();
+    if mode == RederiveDedupMode::DryRun {
+        // Before any storage call, so "writes nothing" is structural: a dry
+        // run never reaches code that can update a row.
+        summary.dry_run = Some(rederive_dedup_dry_run_report(&inputs, algorithm, &counts));
+        return Ok(summary);
+    }
+
+    let sweep_rows: Vec<trace_commons_server::dedup_assign::SweepRow<'_>> =
+        inputs.iter().map(RederiveSweepInput::sweep_row).collect();
+    let sweep =
+        trace_commons_server::dedup_assign::sweep_clusters(&sweep_rows, algorithm.constants());
+    // Sizes are the sweep's final totals, computed before the first write,
+    // so every member of a cluster is written with the same total.
+    let mut assignments = sweep.assignments.iter();
+    for (row, signal) in rows.iter().zip(&signals) {
+        let Some((input, on_target)) = signal else {
+            continue;
+        };
+        let assignment = assignments
+            .next()
+            .expect("one sweep assignment per placed row");
+        let cluster_id = assignment.cluster_id;
+        let cluster_size = i32::try_from(sweep.size_of(cluster_id).max(1)).unwrap_or(i32::MAX);
+        let unchanged = row.dedup_simhash == Some(input.simhash as i64)
+            && row.effective_signal_version() == input.signal_version
+            && row.dedup_cluster_id == Some(cluster_id)
+            && row.dedup_cluster_size == Some(cluster_size);
+        if unchanged {
+            summary.unchanged += 1;
+            continue;
+        }
+        let written = if *on_target {
+            // All four columns, on the tenant-scoped pool as the inline path
+            // writes them: the stamp lands in the same statement as the
+            // value it names.
+            db.update_trace_gate_decision_dedup(
+                &row.tenant_id,
+                row.decision_id,
+                trace_commons_server::trace_corpus_storage::DedupAssignmentWrite {
+                    dedup_simhash: input.simhash as i64,
+                    dedup_cluster_id: cluster_id,
+                    dedup_cluster_size: cluster_size,
+                    dedup_signal_version: input.signal_version.clone(),
+                },
+            )
+            .await
+        } else {
+            // A row this pass did not derive keeps its simhash and stamp;
+            // only its cluster columns follow the sweep.
+            db.update_trace_gate_decision_dedup_cluster(
+                &row.tenant_id,
+                row.decision_id,
+                cluster_id,
+                cluster_size,
+            )
+            .await
+        };
+        match written {
+            Ok(()) => summary.written += 1,
+            Err(error) => {
+                summary.write_failed += 1;
+                tracing::warn!(
+                    tenant_hash = %sha256_prefixed(&row.tenant_id),
+                    decision_hash = %sha256_prefixed(&row.decision_id.to_string()),
+                    error_hash = %safe_display_error_hash(&error),
+                    "dedup re-derivation failed to write one decision"
+                );
+            }
+        }
+    }
+    Ok(summary)
+}
+
+/// Admin route: re-derive the cross-trace dedup signal of every decision
+/// from its encrypted envelope under a named algorithm, re-stamp it,
+/// re-cluster, and write consistent sizes -- or, with `dry_run=true`, do all
+/// of that in memory and log the would-be distribution.
+///
+/// Auth: reuses the admin bearer credential (`require_admin`), matching the
+/// other `/v1/admin/*` maintenance routes; no new gate is introduced. Spawns
+/// a background task and returns a hash-only ack immediately. See
+/// `docs/operator/dedup-recluster.md` for the two-phase rollout this route
+/// is the first half of.
+async fn rederive_dedup_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<RederiveDedupQuery>,
+) -> ApiResult<Json<RederiveDedupAck>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(&tenant)?;
+    // Fail-closed preconditions: the pass needs a DB mirror to enumerate and
+    // an artifact store to load ciphertext. The gate service is exercised
+    // per row (one that cannot derive fails each row closed via the
+    // `DedupRederiveUnsupported` bail).
+    if state.db_mirror.is_none() {
+        return Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "dedup re-derivation requires a configured DB mirror",
+        ));
+    }
+    if state.artifact_store.is_none() {
+        return Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "dedup re-derivation requires a configured artifact store",
+        ));
+    }
+    let limit = query.limit;
+    let mode = query.mode();
+    let algorithm = query.algorithm;
+    let task_state = state.clone();
+    tokio::spawn(async move {
+        match run_rederive_dedup_pass(task_state, limit, mode, algorithm).await {
+            Ok(summary) => {
+                tracing::info!(
+                    rows = summary.rows,
+                    derived = summary.derived,
+                    reused = summary.reused,
+                    not_derivable = summary.not_derivable,
+                    failed = summary.failed,
+                    written = summary.written,
+                    unchanged = summary.unchanged,
+                    write_failed = summary.write_failed,
+                    algorithm = %algorithm,
+                    // Aggregates only, and counts only for a small pass; see
+                    // `RederiveDedupDryRunReport`. Empty outside dry-run mode.
+                    dry_run_report = %summary
+                        .dry_run
+                        .as_ref()
+                        .map(|report| {
+                            serde_json::to_string(report)
+                                .unwrap_or_else(|_| "unserializable".to_string())
+                        })
+                        .unwrap_or_default(),
+                    "Trace Commons dedup re-derivation pass completed"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error_hash = %safe_display_error_hash(&error),
+                    "Trace Commons dedup re-derivation pass failed"
+                );
+            }
+        }
+    });
+    Ok(Json(RederiveDedupAck {
+        accepted: true,
+        limit,
+        mode,
+        algorithm,
     }))
 }
 

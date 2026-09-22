@@ -1542,6 +1542,20 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         Ok(Vec::new())
     }
 
+    /// Enumerate every decision row for the dedup re-derivation pass,
+    /// cross-tenant, ordered `decided_at ASC, decision_id ASC`, capped at
+    /// `limit`. Not filtered by stamp: the pass reuses rows already on its
+    /// target stamp and derives the rest, which is what makes it resumable.
+    /// Reads through the gate-driver reader pool with NO tenant GUC. Every
+    /// column is granted to `trace_gate_driver` by V45 and V57. Default:
+    /// empty (test doubles / backends without a gate-driver pool).
+    async fn list_dedup_rederive_rows(
+        &self,
+        _limit: i64,
+    ) -> Result<Vec<crate::trace_corpus_storage::DedupRederiveRow>, DatabaseError> {
+        Ok(Vec::new())
+    }
+
     /// Enumerate correction-value signal rows (migration V48), cross-tenant,
     /// oldest-decided first, capped at `limit`. Reads through the gate-driver
     /// reader pool with NO tenant GUC (the trace_gate_driver role's permissive

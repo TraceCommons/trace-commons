@@ -2038,23 +2038,56 @@ pub struct DedupSignalRow {
     pub dedup_signal_version: Option<String>,
 }
 
+/// Decode a stored `dedup_signal_version`. `NULL` (and an empty string,
+/// which is a `NULL` that survived a round trip through a text column) reads
+/// as [`crate::dedup_assign::LEGACY_DEDUP_SIGNAL_VERSION`], never as
+/// "unknown": an unknown would have to cluster either with everything or
+/// with nothing, and both are wrong.
+///
+/// This is the ONE place a stored `NULL` is decoded; the two row types that
+/// carry the column both go through it. A caller that decoded it for itself
+/// would be a second answer to the question, free to drift from this one.
+fn effective_dedup_signal_version(stored: Option<&str>) -> &str {
+    match stored {
+        Some(v) if !v.is_empty() => v,
+        _ => crate::dedup_assign::LEGACY_DEDUP_SIGNAL_VERSION,
+    }
+}
+
 impl DedupSignalRow {
-    /// The version this row's `dedup_simhash` was derived under. `NULL` (and
-    /// an empty string, which is a `NULL` that survived a round trip through
-    /// a text column) reads as
-    /// [`crate::dedup_assign::LEGACY_DEDUP_SIGNAL_VERSION`], never as
-    /// "unknown": an unknown would have to cluster either with everything or
-    /// with nothing, and both are wrong.
-    ///
-    /// This is the ONE place a stored `NULL` is decoded, and it sits on the
-    /// row because that is where the `Option` originates. A caller that
-    /// decoded it for itself would be a second answer to the question, free
-    /// to drift from this one.
+    /// The version this row's `dedup_simhash` was derived under; see
+    /// [`effective_dedup_signal_version`].
     pub fn effective_signal_version(&self) -> &str {
-        match self.dedup_signal_version.as_deref() {
-            Some(v) if !v.is_empty() => v,
-            _ => crate::dedup_assign::LEGACY_DEDUP_SIGNAL_VERSION,
-        }
+        effective_dedup_signal_version(self.dedup_signal_version.as_deref())
+    }
+}
+
+/// One decision row as the dedup re-derivation pass enumerates it (through
+/// the narrow `trace_gate_driver` pool, no tenant GUC, every column granted
+/// by V45 and V57). Carries what the pass needs to decide whether to reuse
+/// the stored value or re-derive it (`dedup_simhash`, `dedup_signal_version`),
+/// what to load if it must (`tenant_id`, `submission_id`), and what is stored
+/// so it can write only rows that changed (`dedup_cluster_id`,
+/// `dedup_cluster_size`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DedupRederiveRow {
+    pub tenant_id: String,
+    pub submission_id: Uuid,
+    pub decision_id: Uuid,
+    pub decided_at: DateTime<Utc>,
+    pub dedup_simhash: Option<i64>,
+    pub dedup_cluster_id: Option<Uuid>,
+    pub dedup_cluster_size: Option<i32>,
+    /// The stored stamp (V57); `None` for a row recorded before the column
+    /// existed. Read through [`Self::effective_signal_version`].
+    pub dedup_signal_version: Option<String>,
+}
+
+impl DedupRederiveRow {
+    /// The version this row's `dedup_simhash` was derived under; see
+    /// [`effective_dedup_signal_version`].
+    pub fn effective_signal_version(&self) -> &str {
+        effective_dedup_signal_version(self.dedup_signal_version.as_deref())
     }
 }
 

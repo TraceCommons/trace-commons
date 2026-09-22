@@ -47,6 +47,7 @@ the link.
 | Recording GPU instance spend | [`./gpu-cost-ledger.md`](./gpu-cost-ledger.md) |
 | Rotating cloud-KMS keys | [`./key-rotation.md`](./key-rotation.md) |
 | Swapping the gate model or embedder | [`./model-swap.md`](./model-swap.md) |
+| Re-deriving the dedup simhash and reclustering the corpus | [`./dedup-recluster.md`](./dedup-recluster.md) |
 | Restoring from backup | [`./backup-restore.md`](./backup-restore.md) |
 | Recovering a corrupted vector index | [`./vector-replay.md`](./vector-replay.md) |
 | Investigating an audit-chain failure | [`./audit-trail-forensics.md`](./audit-trail-forensics.md) |
@@ -121,6 +122,10 @@ Every runbook in this directory, with a one-line description.
   channel that install method actually uses. Produces a committed pass record
   under [`./verification-records/`](./verification-records/) which gates the
   next `app-v*` tag.
+- [`./dedup-recluster.md`](./dedup-recluster.md) — moving the cross-trace
+  dedup simhash to a new algorithm: `POST /v1/admin/rederive-dedup`, the
+  dry-run report, the before/after measurement script, and the two-build
+  rollout that keeps stamps from ever mixing.
 - [`./deployment.md`](./deployment.md) — end-to-end first-deploy walkthrough;
   the authoritative top-of-funnel doc.
 - [`../../deploy/witness/README.md`](../../deploy/witness/README.md) — deploying

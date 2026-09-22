@@ -67710,6 +67710,46 @@ impl Database for PerplexityDriverTestDb {
             .collect())
     }
 
+    /// In-memory analogue of the Postgres `list_dedup_rederive_rows`
+    /// enumeration: every decision row (any tenant), sorted
+    /// `decided_at ASC, decision_id ASC` as the real query orders it, capped
+    /// at `limit`, with the dedup columns flattened from the side table the
+    /// way the real SELECT flattens NULLs.
+    async fn list_dedup_rederive_rows(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<trace_commons_server::trace_corpus_storage::DedupRederiveRow>, DatabaseError>
+    {
+        let limit = usize::try_from(limit.max(0)).unwrap_or(usize::MAX);
+        let dedup = self.dedup.read().unwrap();
+        let mut rows: Vec<trace_commons_server::trace_corpus_storage::DedupRederiveRow> = self
+            .gate_decisions
+            .read()
+            .unwrap()
+            .iter()
+            .map(|(tenant_id, row)| {
+                let seen = dedup.get(&(tenant_id.clone(), row.decision_id));
+                trace_commons_server::trace_corpus_storage::DedupRederiveRow {
+                    tenant_id: tenant_id.clone(),
+                    submission_id: row.submission_id,
+                    decision_id: row.decision_id,
+                    decided_at: row.decided_at,
+                    dedup_simhash: seen.map(|d| d.simhash),
+                    dedup_cluster_id: seen.map(|d| d.cluster_id),
+                    dedup_cluster_size: seen.map(|d| d.cluster_size),
+                    dedup_signal_version: seen.and_then(|d| d.signal_version.clone()),
+                }
+            })
+            .collect();
+        rows.sort_by(|a, b| {
+            a.decided_at
+                .cmp(&b.decided_at)
+                .then(a.decision_id.cmp(&b.decision_id))
+        });
+        rows.truncate(limit);
+        Ok(rows)
+    }
+
     /// In-memory analogue of the Postgres `list_correction_signals`
     /// enumeration: one `CorrectionSignalRow` per decision row that has a
     /// recorded correction (any tenant, insertion order, capped at `limit`).
@@ -70220,6 +70260,695 @@ async fn recluster_dedup_pass_never_clusters_a_deterministic_row_with_an_enclave
     );
     assert_eq!(after_enclave.dedup_cluster_size, Some(1));
     assert_eq!(after_deterministic.dedup_cluster_size, Some(1));
+}
+
+// -----------------------------------------------------------------------
+// Dedup re-derivation pass (`POST /v1/admin/rederive-dedup`)
+// -----------------------------------------------------------------------
+
+/// Three envelopes scored inline under the active (v1) algorithm through the
+/// real `EnclaveGateService` decrypt path: two byte-identical sessions and
+/// one unrelated, so the corpus has one cluster of two and one singleton.
+/// Returns the state, the db, the plaintext of each envelope (in decision
+/// order) and the decision ids.
+struct RederiveFixture {
+    _temp: tempfile::TempDir,
+    _artifact_temp: tempfile::TempDir,
+    state: Arc<AppState>,
+    db: Arc<PerplexityDriverTestDb>,
+    plaintexts: Vec<Vec<u8>>,
+    decision_ids: Vec<Uuid>,
+}
+
+const REDERIVE_SHARED_EVENTS: &[(&str, Option<&str>, &str)] = &[
+    (
+        "user_message",
+        None,
+        "make the failing dedup test pass without touching the renderer",
+    ),
+    (
+        "tool_result",
+        Some("Read"),
+        "pub fn trace_simhash(canonical_text: &str) -> u64 { let toks = tokens(canonical_text);",
+    ),
+    (
+        "assistant_message",
+        None,
+        "the multiset vote is owned by the repeated scaffolding shingles so I will deduplicate",
+    ),
+];
+const REDERIVE_DISTINCT_EVENTS: &[(&str, Option<&str>, &str)] = &[
+    (
+        "user_message",
+        None,
+        "rotate the kek on the pilot host and confirm the health endpoint reports the new key",
+    ),
+    (
+        "tool_result",
+        Some("Bash"),
+        "kek rotation complete: 412 artifacts rewrapped, 0 failures, health reports key v7",
+    ),
+];
+
+async fn rederive_fixture() -> RederiveFixture {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+    let (artifact_store, decryptor, _object_store_name) =
+        fixture_gate_worker_artifact_store_with_decryptor(artifact_temp.path());
+    let tenant_id = "tenant-a";
+    let (db, submission_ids) = seed_perplexity_driver_test_db_with_envelopes(
+        &artifact_store,
+        tenant_id,
+        &[
+            REDERIVE_SHARED_EVENTS,
+            REDERIVE_SHARED_EVENTS,
+            REDERIVE_DISTINCT_EVENTS,
+        ],
+    );
+    // The render omits every per-submission-unique field, so an envelope
+    // rebuilt from the same events under other ids renders identically to
+    // the one the seed helper encrypted.
+    let plaintexts: Vec<Vec<u8>> = [
+        REDERIVE_SHARED_EVENTS,
+        REDERIVE_SHARED_EVENTS,
+        REDERIVE_DISTINCT_EVENTS,
+    ]
+    .iter()
+    .map(|events| rederive_envelope_plaintext(events))
+    .collect();
+    let db_mirror: Arc<dyn Database> = db.clone();
+    let mut state = test_state_with_configured_artifact_store_policies_and_export_guardrails(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        Some(artifact_store),
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+        BTreeMap::new(),
+        false,
+        false,
+    );
+    Arc::make_mut(&mut state).gate_service =
+        Arc::new(EnclaveGateService::mock_with_decryptor(decryptor));
+    let mut decision_ids = Vec::with_capacity(submission_ids.len());
+    for submission_id in &submission_ids {
+        decision_ids.push(score_submission_for_dedup_test(&state, tenant_id, *submission_id).await);
+    }
+    RederiveFixture {
+        _temp: temp,
+        _artifact_temp: artifact_temp,
+        state,
+        db,
+        plaintexts,
+        decision_ids,
+    }
+}
+
+const V2_TARGET_STAMP: &str = "events.v1+fnv1a-3shingle-set.v2";
+
+/// An envelope in the shape `seed_perplexity_driver_test_db_with_envelopes`
+/// encrypts, minus the metadata the render omits.
+fn rederive_envelope_plaintext(events: &[(&str, Option<&str>, &str)]) -> Vec<u8> {
+    let events_json: Vec<serde_json::Value> = events
+        .iter()
+        .map(|(event_type, tool_name, content)| {
+            serde_json::json!({
+                "event_type": event_type,
+                "tool_name": tool_name,
+                "redacted_content": content,
+            })
+        })
+        .collect();
+    serde_json::to_vec(&serde_json::json!({ "events": events_json })).expect("plaintext serializes")
+}
+
+fn expected_v2(plaintext: &[u8]) -> i64 {
+    trace_commons_server::dedup_simhash::trace_simhash_v2(
+        &trace_commons_server::trace_gate_service::dedup_canonical_text(plaintext),
+    ) as i64
+}
+
+/// A dry run derives and sweeps every row and writes nothing: after it the
+/// three rows carry exactly the v1 values the inline path stamped, and the
+/// report describes the fixture -- three rows derived, two distinct v2
+/// values, one cluster of two and one singleton at every candidate tau
+/// (identical text is Hamming 0 and the unrelated pair is far), and no
+/// percentile-shaped detail below the row minimum.
+#[tokio::test]
+async fn rederive_dedup_dry_run_writes_nothing_and_reports_the_distribution() {
+    let fx = rederive_fixture().await;
+    let before: Vec<DecisionRowWithDedup> = fx
+        .decision_ids
+        .iter()
+        .map(|id| {
+            fx.db
+                .gate_decision_with_dedup_by_id("tenant-a", *id)
+                .expect("row present")
+        })
+        .collect();
+    assert!(before.iter().all(|r| r.dedup_signal_version
+        == Some(Some(
+            trace_commons_server::dedup_assign::LEGACY_DEDUP_SIGNAL_VERSION.to_string()
+        ))));
+
+    let summary = run_rederive_dedup_pass(
+        fx.state.clone(),
+        None,
+        RederiveDedupMode::DryRun,
+        trace_commons_server::dedup_simhash::DedupAlgorithm::V2,
+    )
+    .await
+    .expect("dry run succeeds");
+    assert_eq!(summary.rows, 3, "{summary:?}");
+    assert_eq!(summary.derived, 3, "{summary:?}");
+    assert_eq!(summary.reused, 0, "{summary:?}");
+    assert_eq!(summary.not_derivable, 0, "{summary:?}");
+    assert_eq!(summary.failed, 0, "{summary:?}");
+    assert_eq!(summary.written, 0, "a dry run writes nothing: {summary:?}");
+    assert_eq!(summary.unchanged, 0, "{summary:?}");
+    let report = summary.dry_run.as_ref().expect("dry run carries a report");
+    assert_eq!(
+        report.algorithm,
+        trace_commons_server::dedup_simhash::DedupAlgorithm::V2
+    );
+    assert_eq!(report.target_signal_version, V2_TARGET_STAMP);
+    assert_eq!(report.rows, 3);
+    assert_eq!(report.derived, 3);
+    assert_eq!(report.target_rows, 3);
+    assert_eq!(report.distinct_target_simhashes, 2);
+    // Below the row minimum the shape is withheld: counts only.
+    assert!(report.nearest_representative_hamming.is_empty());
+    assert!(report.by_candidate_tau.is_empty());
+    assert_eq!(report.single_tenant_multi_member_clusters, None);
+    assert_eq!(report.multi_tenant_multi_member_clusters, None);
+
+    let after: Vec<DecisionRowWithDedup> = fx
+        .decision_ids
+        .iter()
+        .map(|id| {
+            fx.db
+                .gate_decision_with_dedup_by_id("tenant-a", *id)
+                .expect("row present")
+        })
+        .collect();
+    assert_eq!(
+        after, before,
+        "a dry run must leave every row as it found it"
+    );
+}
+
+/// The report over a corpus large enough to show its shape. Built from
+/// sweep inputs directly, so the buckets and the per-tau table can be
+/// checked against a known layout: forty rows at simhash 0 (one cluster at
+/// every tau), one row at Hamming 9 from them (joins at tau 10+, singleton
+/// below), and nine rows pairwise far apart, across two tenants.
+#[test]
+fn rederive_dedup_report_shape_and_aggregate_only_thresholds() {
+    use trace_commons_server::dedup_simhash::DedupAlgorithm;
+    let far: [u64; 9] = [
+        u64::MAX,
+        0xFFFF_FFFF_0000_0000,
+        0x0000_0000_FFFF_FFFF,
+        0xF0F0_F0F0_F0F0_F0F0,
+        0x0F0F_0F0F_0F0F_0F0F,
+        0xFF00_FF00_FF00_FF00,
+        0x00FF_00FF_00FF_00FF,
+        0xAAAA_AAAA_AAAA_AAAA,
+        0x5555_5555_5555_5555,
+    ];
+    let mut inputs: Vec<RederiveSweepInput> = Vec::new();
+    for i in 0..40u64 {
+        inputs.push(RederiveSweepInput {
+            tenant_id: if i % 2 == 0 { "tenant-a" } else { "tenant-b" }.to_string(),
+            simhash: 0,
+            signal_version: V2_TARGET_STAMP.to_string(),
+            stored_cluster_id: None,
+        });
+    }
+    inputs.push(RederiveSweepInput {
+        tenant_id: "tenant-a".to_string(),
+        simhash: 0b1_1111_1111, // Hamming 9 from the block
+        signal_version: V2_TARGET_STAMP.to_string(),
+        stored_cluster_id: None,
+    });
+    for f in far {
+        inputs.push(RederiveSweepInput {
+            tenant_id: "tenant-a".to_string(),
+            simhash: f,
+            signal_version: V2_TARGET_STAMP.to_string(),
+            stored_cluster_id: None,
+        });
+    }
+    // One non-target row: excluded from every target statistic.
+    inputs.push(RederiveSweepInput {
+        tenant_id: "tenant-a".to_string(),
+        simhash: 0,
+        signal_version: trace_commons_server::dedup_assign::LEGACY_DEDUP_SIGNAL_VERSION.to_string(),
+        stored_cluster_id: None,
+    });
+
+    let counts = RederiveDedupCounts {
+        rows: 51,
+        derived: 50,
+        reused: 0,
+        not_derivable: 0,
+        failed: 1,
+    };
+    let report = rederive_dedup_dry_run_report(&inputs, DedupAlgorithm::V2, &counts);
+    assert_eq!(report.rows, 51);
+    assert_eq!(report.failed, 1);
+    assert_eq!(report.target_rows, 50);
+    assert_eq!(report.distinct_target_simhashes, 11);
+
+    // Histogram at v2's own tau (8): 39 rows at distance 0 from the block's
+    // representative, the Hamming-9 row in 9-10, and the nine far rows in
+    // the upper buckets (each far row's nearest representative is at least
+    // 16 bits away). Every target row after the first is counted once.
+    let hist: std::collections::HashMap<&str, usize> = report
+        .nearest_representative_hamming
+        .iter()
+        .map(|(b, n)| (b.as_str(), *n))
+        .collect();
+    assert_eq!(hist["0"], 39);
+    assert_eq!(hist["9-10"], 1);
+    assert_eq!(
+        report
+            .nearest_representative_hamming
+            .iter()
+            .map(|(_, n)| n)
+            .sum::<usize>(),
+        49
+    );
+    assert_eq!(
+        report
+            .nearest_representative_hamming
+            .iter()
+            .map(|(b, _)| b.as_str())
+            .collect::<Vec<_>>(),
+        HAMMING_HISTOGRAM_BUCKETS
+            .iter()
+            .map(|(label, _, _)| *label)
+            .collect::<Vec<_>>(),
+        "every bucket is present, empty ones included, in order"
+    );
+
+    // Per-tau: below 10 the Hamming-9 row is a singleton, so 11 clusters
+    // (one of 40, ten singletons); at 10+ it joins, so 10 clusters (one of
+    // 41, nine singletons).
+    let taus: Vec<u32> = report
+        .by_candidate_tau
+        .iter()
+        .map(|d| d.tau_hamming)
+        .collect();
+    assert_eq!(
+        taus,
+        trace_commons_server::dedup_assign::DRY_RUN_CANDIDATE_TAU_HAMMING.to_vec()
+    );
+    for d in &report.by_candidate_tau {
+        if d.tau_hamming < 9 {
+            assert_eq!(d.clusters, 11, "tau {}", d.tau_hamming);
+            assert_eq!(d.singletons, 10);
+            assert_eq!(d.largest_cluster_size, 40);
+            assert_eq!(d.largest_cluster_share_micros, 800_000);
+        } else {
+            assert_eq!(d.clusters, 10, "tau {}", d.tau_hamming);
+            assert_eq!(d.singletons, 9);
+            assert_eq!(d.largest_cluster_size, 41);
+            assert_eq!(d.largest_cluster_share_micros, 820_000);
+        }
+        assert_eq!(d.size_2_to_9, 0);
+        assert_eq!(d.size_100_plus, 0);
+        assert_eq!(d.size_10_to_99, 1);
+    }
+    // The one multi-member cluster spans both tenants.
+    assert_eq!(report.single_tenant_multi_member_clusters, Some(0));
+    assert_eq!(report.multi_tenant_multi_member_clusters, Some(1));
+
+    // Serializes, because it is logged as one JSON field, and carries no
+    // ids: the only uuid-shaped or tenant-shaped strings would be leaks.
+    let json = serde_json::to_string(&report).expect("serialize report");
+    assert!(!json.contains("tenant-a"));
+    assert!(!json.contains("tenant-b"));
+
+    // Below the row minimum: counts only.
+    let small = rederive_dedup_dry_run_report(
+        &inputs[..5],
+        DedupAlgorithm::V2,
+        &RederiveDedupCounts {
+            rows: 5,
+            derived: 5,
+            reused: 0,
+            not_derivable: 0,
+            failed: 0,
+        },
+    );
+    assert_eq!(small.target_rows, 5);
+    assert_eq!(small.distinct_target_simhashes, 1);
+    assert!(small.nearest_representative_hamming.is_empty());
+    assert!(small.by_candidate_tau.is_empty());
+    assert_eq!(small.single_tenant_multi_member_clusters, None);
+}
+
+/// Write mode re-stamps every derivable row with the v2 value of its own
+/// render, writes all four columns with the sweep's final sizes, and a
+/// second run reuses every stored value, derives nothing and writes nothing.
+#[tokio::test]
+async fn rederive_dedup_write_mode_restamps_and_a_second_run_writes_nothing() {
+    let fx = rederive_fixture().await;
+    let summary = run_rederive_dedup_pass(
+        fx.state.clone(),
+        None,
+        RederiveDedupMode::Write,
+        trace_commons_server::dedup_simhash::DedupAlgorithm::V2,
+    )
+    .await
+    .expect("write pass succeeds");
+    assert_eq!(summary.rows, 3, "{summary:?}");
+    assert_eq!(summary.derived, 3, "{summary:?}");
+    assert_eq!(summary.written, 3, "{summary:?}");
+    assert_eq!(summary.unchanged, 0, "{summary:?}");
+    assert_eq!(summary.failed, 0, "{summary:?}");
+    assert!(summary.dry_run.is_none(), "write mode collects no report");
+
+    let rows: Vec<DecisionRowWithDedup> = fx
+        .decision_ids
+        .iter()
+        .map(|id| {
+            fx.db
+                .gate_decision_with_dedup_by_id("tenant-a", *id)
+                .expect("row present")
+        })
+        .collect();
+    for (row, plaintext) in rows.iter().zip(&fx.plaintexts) {
+        assert_eq!(
+            row.dedup_signal_version,
+            Some(Some(V2_TARGET_STAMP.to_string()))
+        );
+        assert_eq!(row.dedup_simhash, Some(expected_v2(plaintext)));
+    }
+    assert_eq!(rows[0].dedup_cluster_id, rows[1].dedup_cluster_id);
+    assert_eq!(rows[0].dedup_cluster_size, Some(2));
+    assert_eq!(rows[1].dedup_cluster_size, Some(2));
+    assert_ne!(rows[2].dedup_cluster_id, rows[0].dedup_cluster_id);
+    assert_eq!(rows[2].dedup_cluster_size, Some(1));
+
+    let again = run_rederive_dedup_pass(
+        fx.state.clone(),
+        None,
+        RederiveDedupMode::Write,
+        trace_commons_server::dedup_simhash::DedupAlgorithm::V2,
+    )
+    .await
+    .expect("second write pass succeeds");
+    assert_eq!(again.rows, 3, "{again:?}");
+    assert_eq!(again.reused, 3, "{again:?}");
+    assert_eq!(again.derived, 0, "{again:?}");
+    assert_eq!(again.written, 0, "{again:?}");
+    assert_eq!(again.unchanged, 3, "{again:?}");
+    let rows_again: Vec<DecisionRowWithDedup> = fx
+        .decision_ids
+        .iter()
+        .map(|id| {
+            fx.db
+                .gate_decision_with_dedup_by_id("tenant-a", *id)
+                .expect("row present")
+        })
+        .collect();
+    assert_eq!(rows_again, rows, "a converged corpus re-sweeps to itself");
+
+    // Re-deriving back to v1 is the same route with the v1 algorithm.
+    let back = run_rederive_dedup_pass(
+        fx.state.clone(),
+        None,
+        RederiveDedupMode::Write,
+        trace_commons_server::dedup_simhash::DedupAlgorithm::V1,
+    )
+    .await
+    .expect("rollback pass succeeds");
+    assert_eq!(back.derived, 3);
+    assert_eq!(back.written, 3);
+    let first = fx
+        .db
+        .gate_decision_with_dedup_by_id("tenant-a", fx.decision_ids[0])
+        .expect("row present");
+    assert_eq!(
+        first.dedup_signal_version,
+        Some(Some(
+            trace_commons_server::dedup_assign::LEGACY_DEDUP_SIGNAL_VERSION.to_string()
+        ))
+    );
+}
+
+/// A row whose envelope cannot be loaded is counted `failed` and keeps its
+/// old stamp and value, so it stays refused against every re-derived row; a
+/// `digest-prefix.v1` row is not a simhash of any text, is counted
+/// `not_derivable`, and is untouched. Neither aborts the pass.
+#[tokio::test]
+async fn rederive_dedup_failed_and_not_derivable_rows_keep_their_stamps() {
+    let fx = rederive_fixture().await;
+    const V1_STAMP: &str = trace_commons_server::dedup_assign::LEGACY_DEDUP_SIGNAL_VERSION;
+
+    // A decision with no object ref behind it: the loader fails.
+    let orphan = rescore_test_decision_row(Uuid::new_v4());
+    fx.db.seed_gate_decision("tenant-a", orphan.clone());
+    let orphan_cluster = Uuid::new_v4();
+    fx.db
+        .update_trace_gate_decision_dedup(
+            "tenant-a",
+            orphan.decision_id,
+            trace_commons_server::trace_corpus_storage::DedupAssignmentWrite {
+                dedup_simhash: 0x0123_4567,
+                dedup_cluster_id: orphan_cluster,
+                dedup_cluster_size: 1,
+                dedup_signal_version: V1_STAMP.to_string(),
+            },
+        )
+        .await
+        .expect("seed orphan dedup");
+
+    // A deterministic-service row: a digest window under its own stamp.
+    let deterministic = rescore_test_decision_row(Uuid::new_v4());
+    fx.db.seed_gate_decision("tenant-b", deterministic.clone());
+    let deterministic_cluster = Uuid::new_v4();
+    fx.db
+        .update_trace_gate_decision_dedup(
+            "tenant-b",
+            deterministic.decision_id,
+            trace_commons_server::trace_corpus_storage::DedupAssignmentWrite {
+                dedup_simhash: 0x0123_4567,
+                dedup_cluster_id: deterministic_cluster,
+                dedup_cluster_size: 1,
+                dedup_signal_version:
+                    trace_commons_server::trace_gate_service::DETERMINISTIC_DEDUP_SIGNAL_VERSION
+                        .to_string(),
+            },
+        )
+        .await
+        .expect("seed deterministic dedup");
+
+    let summary = run_rederive_dedup_pass(
+        fx.state.clone(),
+        None,
+        RederiveDedupMode::Write,
+        trace_commons_server::dedup_simhash::DedupAlgorithm::V2,
+    )
+    .await
+    .expect("pass succeeds despite one failing row");
+    assert_eq!(summary.rows, 5, "{summary:?}");
+    assert_eq!(summary.derived, 3, "{summary:?}");
+    assert_eq!(summary.failed, 1, "{summary:?}");
+    assert_eq!(summary.not_derivable, 1, "{summary:?}");
+    assert_eq!(summary.written, 3, "{summary:?}");
+    assert_eq!(summary.unchanged, 2, "{summary:?}");
+
+    let orphan_after = fx
+        .db
+        .gate_decision_with_dedup_by_id("tenant-a", orphan.decision_id)
+        .expect("orphan present");
+    assert_eq!(orphan_after.dedup_simhash, Some(0x0123_4567));
+    assert_eq!(
+        orphan_after.dedup_signal_version,
+        Some(Some(V1_STAMP.to_string()))
+    );
+    assert_eq!(orphan_after.dedup_cluster_id, Some(orphan_cluster));
+    assert_eq!(orphan_after.dedup_cluster_size, Some(1));
+
+    let deterministic_after = fx
+        .db
+        .gate_decision_with_dedup_by_id("tenant-b", deterministic.decision_id)
+        .expect("deterministic present");
+    assert_eq!(deterministic_after.dedup_simhash, Some(0x0123_4567));
+    assert_eq!(
+        deterministic_after.dedup_signal_version,
+        Some(Some(
+            trace_commons_server::trace_gate_service::DETERMINISTIC_DEDUP_SIGNAL_VERSION
+                .to_string()
+        ))
+    );
+    assert_eq!(
+        deterministic_after.dedup_cluster_id,
+        Some(deterministic_cluster)
+    );
+    // The two stayed apart from each other and from the v2 rows, at Hamming 0.
+    assert_ne!(
+        orphan_after.dedup_cluster_id,
+        deterministic_after.dedup_cluster_id
+    );
+    let v2_first = fx
+        .db
+        .gate_decision_with_dedup_by_id("tenant-a", fx.decision_ids[0])
+        .expect("row present");
+    assert_eq!(
+        v2_first.dedup_signal_version,
+        Some(Some(V2_TARGET_STAMP.to_string()))
+    );
+    assert_ne!(v2_first.dedup_cluster_id, orphan_after.dedup_cluster_id);
+}
+
+/// A `limit` bounds the enumeration for a smoke.
+#[tokio::test]
+async fn rederive_dedup_limit_bounds_the_enumeration() {
+    let fx = rederive_fixture().await;
+    let summary = run_rederive_dedup_pass(
+        fx.state.clone(),
+        Some(2),
+        RederiveDedupMode::DryRun,
+        trace_commons_server::dedup_simhash::DedupAlgorithm::V2,
+    )
+    .await
+    .expect("limited dry run succeeds");
+    assert_eq!(summary.rows, 2, "{summary:?}");
+    assert_eq!(summary.derived, 2, "{summary:?}");
+}
+
+/// The route acknowledges before it works, so a request it cannot read must
+/// be refused, never defaulted: an unknown algorithm, a missing one, and a
+/// mistyped `dry_run` are each a 400. Without a DB mirror or an artifact
+/// store the pass cannot load ciphertext and the route is a 503 before it
+/// spawns anything.
+#[tokio::test]
+async fn rederive_dedup_route_refuses_bad_queries_and_missing_dependencies() {
+    use axum::body::Body;
+    use tower::ServiceExt;
+
+    let admin = |uri: &str| {
+        axum::http::Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header(AUTHORIZATION, "Bearer admin-token-a")
+            .body(Body::empty())
+            .expect("request builds")
+    };
+
+    // No DB mirror at all: the query is fine, the dependency is not.
+    let temp = tempfile::tempdir().expect("temp dir");
+    let bare = test_state(temp.path().to_path_buf());
+    for (uri, expected) in [
+        (
+            "/v1/admin/rederive-dedup?algorithm=fnv1a-3shingle-set.v2&dry_run=true",
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+        (
+            "/v1/admin/rederive-dedup?algorithm=digest-prefix.v1",
+            StatusCode::BAD_REQUEST,
+        ),
+        ("/v1/admin/rederive-dedup", StatusCode::BAD_REQUEST),
+        (
+            "/v1/admin/rederive-dedup?algorithm=fnv1a-3shingle-set.v2&dryrun=true",
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            "/v1/admin/rederive-dedup?algorithm=fnv1a-3shingle-set.v2&dry-run=true",
+            StatusCode::BAD_REQUEST,
+        ),
+    ] {
+        let response = app(bare.clone())
+            .oneshot(admin(uri))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), expected, "{uri}");
+    }
+
+    // A DB mirror but no artifact store: still a 503, still before spawning.
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db: Arc<dyn Database> = Arc::new(PerplexityDriverTestDb::new());
+    let no_store = test_state_with_configured_artifact_store_policies_and_export_guardrails(
+        temp.path().to_path_buf(),
+        Some(db),
+        None,
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+        BTreeMap::new(),
+        false,
+        false,
+    );
+    let response = app(no_store)
+        .oneshot(admin(
+            "/v1/admin/rederive-dedup?algorithm=fnv1a-3shingle-set.v2",
+        ))
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    // A contributor token is forbidden before any of the above.
+    let temp = tempfile::tempdir().expect("temp dir");
+    let response = app(test_state(temp.path().to_path_buf()))
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/v1/admin/rederive-dedup?algorithm=fnv1a-3shingle-set.v2")
+                .header(AUTHORIZATION, "Bearer token-a")
+                .body(Body::empty())
+                .expect("request builds"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+/// The ack names the mode and the algorithm: the work is fire-and-forget,
+/// so this is the operator's one confirmation of what was started.
+#[test]
+fn rederive_dedup_query_and_ack_name_the_mode_and_algorithm() {
+    let parse = |json: &str| serde_json::from_str::<RederiveDedupQuery>(json);
+    let q = parse(r#"{"algorithm":"fnv1a-3shingle-set.v2"}"#).expect("valid");
+    assert_eq!(q.mode(), RederiveDedupMode::Write);
+    assert_eq!(q.limit, None);
+    let q = parse(r#"{"algorithm":"fnv1a-2shingle.v1","dry_run":true,"limit":5}"#).expect("valid");
+    assert_eq!(q.mode(), RederiveDedupMode::DryRun);
+    assert_eq!(
+        q.algorithm,
+        trace_commons_server::dedup_simhash::DedupAlgorithm::V1
+    );
+    assert!(
+        parse(r#"{"dry_run":true}"#).is_err(),
+        "algorithm is required"
+    );
+    assert!(parse(r#"{"algorithm":"fnv1a-3shingle-set.v2","author_only":true}"#).is_err());
+
+    let ack = serde_json::to_value(RederiveDedupAck {
+        accepted: true,
+        limit: Some(5),
+        mode: RederiveDedupMode::DryRun,
+        algorithm: trace_commons_server::dedup_simhash::DedupAlgorithm::V2,
+    })
+    .expect("serialize ack");
+    assert_eq!(
+        ack,
+        serde_json::json!({
+            "accepted": true,
+            "limit": 5,
+            "mode": "dry_run",
+            "algorithm": "fnv1a-3shingle-set.v2",
+        })
+    );
 }
 
 // -----------------------------------------------------------------------

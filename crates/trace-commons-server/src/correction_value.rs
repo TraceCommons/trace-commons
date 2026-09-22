@@ -121,7 +121,7 @@ mod tests {
     use crate::dedup_assign::{
         ClusterAssignment, ClusterCandidate, DEDUP_CONSTANTS_V1, assign_cluster,
     };
-    use crate::dedup_simhash::trace_simhash;
+    use crate::dedup_simhash::trace_simhash_v1 as trace_simhash;
     use uuid::Uuid;
 
     const K: CorrectionValueConstants = CORRECTION_VALUE_CONSTANTS_V1;
@@ -152,14 +152,16 @@ mod tests {
             let simhash = trace_simhash(text);
             let novelty = correction_novelty_micros(simhash, &self.reps());
             // The correction signal's derivation is the simhash algorithm
-            // alone, exactly as the inline path stamps it: `trace_simhash`
+            // alone, exactly as the inline path stamps it: `trace_simhash_v1`
             // above is the whole of it, and no event renderer is involved.
+            // Pinned to v1 by name, as the inline path is: corrections store
+            // no stamp, so they must never follow the active algorithm.
             //
             // Unversioned in the same way the inline path is, and this
             // fixture reproduces that faithfully: one constant serves as both
             // the incoming version and every candidate's, so the comparison
             // in `assign_cluster` never fires. See #538.
-            let version = crate::dedup_simhash::DEDUP_SIMHASH_ALGORITHM;
+            let version = crate::dedup_simhash::DedupAlgorithm::V1.name();
             let candidates: Vec<ClusterCandidate<'_>> = self
                 .clusters
                 .iter()
