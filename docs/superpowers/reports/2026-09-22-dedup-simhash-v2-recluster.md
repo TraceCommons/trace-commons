@@ -2,11 +2,11 @@
 
 Date: 2026-09-22 (all times UTC)
 Status: **the write-mode pass completed on the pilot 2026-09-22 18:08-18:15Z
-under the pass build; the flip build (#980) is in flight and not yet
-installed.** The corpus is on the v2 stamp and the inline path still stamps
-v1, so the mixed-stamp window described in `dedup_assign.rs` is open as
-this is written. The post-flip steps (runbook steps 10-12) are pending and
-their fields are left to fill in at the end of this document.
+under the pass build, and the flip build (#980, merged 18:45Z as `dd0a581fd`)
+was installed at 19:19Z.** The corpus and the inline path are on the v2
+stamp; the mixed-stamp window described in `dedup_assign.rs` was open from
+18:15Z to 19:19Z and exactly one trace was scored in it. Steps 10-12 are
+complete and recorded at the end of this document.
 
 Runbook: [`../../operator/dedup-recluster.md`](../../operator/dedup-recluster.md)
 (this report is its step 12). Design:
@@ -114,9 +114,10 @@ the submitted one. The same fix reached the export revalidation and the
 DB-reconciliation drill, which had been counting every backstop-released
 trace as a blocking gap.
 
-**The flip** (#980, open, rebased onto main, queued as this is written): a
-one-commit change of `ACTIVE_DEDUP_ALGORITHM` to `DedupAlgorithm::V2` plus
-its tests. Not installed on the pilot yet.
+**The flip** (#980, merged 2026-09-22 18:45Z as `dd0a581fd`): a one-commit
+change of `ACTIVE_DEDUP_ALGORITHM` to `DedupAlgorithm::V2` plus its tests,
+rebased onto main after #978 so the PR was the flip alone. Installed on the
+pilot as build `dd0a581f` at 19:19Z.
 
 ## Dry runs
 
@@ -275,24 +276,26 @@ which is exactly the case author-kind weighting is designed to move.
   code path, not from a per-row log; which two v1-stamped rows changed
   cluster columns was not looked up.
 
-## Post-flip (to fill in)
+## Post-flip (runbook steps 10-12)
 
-The fields below are what runbook steps 10-12 produce. They are blank
-until #980 is installed on the pilot.
-
-- Flip build commit installed, and `/health` confirming it: ____
-- Time the flip build went live (end of the mixed-stamp window): ____
-- **Step 10, write mode once more** (reuses every stored v2 value; derives
-  only the rows scored between the write-mode pass and the flip):
-  `rows=____ derived=____ reused=____ not_derivable=____ failed=____
-  written=____ unchanged=____ write_failed=____`. `derived` should equal
-  the count of rows scored in the window.
-- **Step 11, `POST /v1/admin/recompute-contributor-caps`**: completion line
-  ____
-- **Step 12, final `dedup-cluster-report.sh`**: rows with a cluster ____,
-  clusters ____, singletons ____, 2-9 ____, 10-99 ____, 100+ ____,
-  largest ____ (____%), stamps v2 ____ / legacy ____ / explicit v1 ____,
-  member-to-earliest median / p95 / max ____, largest-cluster median
-  nearest-member ____.
-- Whether the 2 unidentified failures and the 46 non-derived rows are
-  unchanged: ____
+- Flip build installed: `dd0a581f`; `/health` reported
+  `"build_commit":"dd0a581f"`, 12 of 12 healthy samples, no restart, no
+  migration applied at boot (max recorded version 74).
+- The flip build went live at 2026-09-22 19:19:16Z, closing the mixed-stamp
+  window that opened with the write-mode pass at 18:15Z.
+- **Step 10, write mode once more** (19:20Z, build `dd0a581f`):
+  `rows=1803 derived=1 reused=1756 not_derivable=0 failed=46 written=1
+  unchanged=1758 write_failed=0`. One trace was scored inside the window and
+  `derived=1` is that row; every stored v2 value was reused.
+- **Step 11, `POST /v1/admin/recompute-contributor-caps`** (19:2xZ):
+  `contributor-cap recompute pass completed updated=1803 failed=0`, no
+  skipped-decision warnings.
+- **Step 12, final `dedup-cluster-report.sh`** (19:20:44Z, as
+  `tc_gate_driver_login`): rows with a cluster 1759, clusters 1428,
+  singletons 1330, 2-9: 92, 10-99: 6, 100+: 0, largest 48 (2.7%); stamps v2
+  1757 / legacy (NULL) 45 / explicit v1 1; member-to-earliest Hamming
+  median 0.0 / p95 6 / max 8; largest-cluster median nearest-member 1.0.
+  Identical to the post-pass report apart from the one window row.
+- The 46 non-derived rows are unchanged (45 legacy + 1 explicit v1 after the
+  window row moved onto v2); the 2 unidentified failures remain unidentified.
+- Ingest was healthy throughout every step; load stayed below 0.4.
