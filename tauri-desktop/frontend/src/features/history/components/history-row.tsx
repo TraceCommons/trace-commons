@@ -1,7 +1,14 @@
 import { Button } from "@/components/ui/button";
 import { isTauriRuntime } from "../../../lib/tauri/core-api";
-import { canWithdrawStatus, historyStatusLabel } from "../withdrawal-eligibility";
-import { contributorFacingExplanations } from "../history-view-model";
+import {
+  canWithdrawStatus,
+  historyStatusLabel,
+  type SharedHistoryStatusCopy,
+} from "../withdrawal-eligibility";
+import {
+  contributorFacingExplanations,
+  historyCreditLine,
+} from "../history-view-model";
 import type { HistoryRecord, WithdrawalResult } from "../types";
 import { AccountSignInControl } from "./account-sign-in-control";
 import { WithdrawalControl } from "./withdrawal-control";
@@ -17,6 +24,7 @@ export function HistoryRow({
   onAccountSignIn,
   onOpenSignInUrl,
   heldRowFallback,
+  statusCopy,
   onOpen,
   confirming,
   busy,
@@ -36,6 +44,7 @@ export function HistoryRow({
   onAccountSignIn?: () => void;
   onOpenSignInUrl?: () => void;
   heldRowFallback?: string | null;
+  statusCopy?: SharedHistoryStatusCopy | null;
   onOpen?: () => void;
   confirming?: boolean;
   busy?: boolean;
@@ -49,8 +58,12 @@ export function HistoryRow({
     month: "short",
     day: "numeric",
   });
-  const status = historyStatusLabel(record.status);
+  const status = historyStatusLabel(record.status, statusCopy);
   const canWithdraw = canWithdrawStatus(record.status);
+  const creditLine = historyCreditLine(
+    record.credit_points_final,
+    record.credit_points_pending,
+  );
   const visibleExplanations = contributorFacingExplanations(record.explanations);
   const rowExplanations =
     record.status === "quarantined" && visibleExplanations.length === 0
@@ -74,10 +87,7 @@ export function HistoryRow({
             {explanation}
           </small>
         ))}
-        <small>
-          Final credit: {formatCredit(record.credit_points_final)} · Pending
-          credit: {formatPendingCredit(record.credit_points_pending)}
-        </small>
+        {creditLine && <small>{creditLine}</small>}
       </div>
       <div className="flex flex-wrap items-center justify-end gap-2">
         <Button
@@ -115,12 +125,4 @@ export function HistoryRow({
       </div>
     </article>
   );
-}
-
-function formatCredit(value: number | null) {
-  return value === null ? "not issued" : value.toFixed(1);
-}
-
-function formatPendingCredit(value: number | null) {
-  return value === null || value === 0 ? "still being scored" : value.toFixed(1);
 }

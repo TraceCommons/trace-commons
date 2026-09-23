@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { coreKeys } from "../../../lib/tauri/query-keys";
 import { useCoreStatus } from "../../../lib/tauri/use-core-status";
+import { useContributorDisclosureCopy } from "../../../lib/tauri/use-contributor-copy";
 import { settingsKeys } from "../../settings/public";
 import {
   answerPrivateInferenceOffer,
@@ -11,6 +12,7 @@ import { waitingKeys } from "../api/query-keys";
 export function usePrivateInferenceOffer() {
   const core = useCoreStatus();
   const queryClient = useQueryClient();
+  const disclosure = useContributorDisclosureCopy();
   const query = useQuery({
     queryKey: waitingKeys.privateInference(core.scope),
     queryFn: getPrivateInferenceOfferState,
@@ -49,8 +51,11 @@ export function usePrivateInferenceOffer() {
       ? query.data.configured && !query.data.answered && !query.data.enabled
       : false,
     busy: mutation.isPending,
+    // A failed write may still have persisted, so the shared sentence says
+    // the change is unconfirmed rather than claiming nothing changed.
     error: mutation.isError
-      ? "Private inference choice was not changed."
+      ? (disclosure.data?.private_inference.write_unconfirmed ??
+        "The change could not be confirmed.")
       : null,
     refresh: async () => {
       await query.refetch();

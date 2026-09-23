@@ -12,14 +12,14 @@ export type PrivateInferenceOfferState = {
 export async function getPrivateInferenceOfferState(): Promise<PrivateInferenceOfferState> {
   const value = await daemonCall("get_settings");
   if (typeof value !== "object" || value === null || Array.isArray(value))
-    throw new Error("Invalid private inference settings");
+    throw new Error("Invalid Private AI settings");
   const item = value as Record<string, unknown>;
   if (
     typeof item.near_ai_inference_configured !== "boolean" ||
     typeof item.private_inference_offer_seen !== "boolean" ||
     typeof item.private_inference !== "boolean"
   )
-    throw new Error("Invalid private inference settings");
+    throw new Error("Invalid Private AI settings");
   return {
     configured: item.near_ai_inference_configured,
     answered: item.private_inference_offer_seen,

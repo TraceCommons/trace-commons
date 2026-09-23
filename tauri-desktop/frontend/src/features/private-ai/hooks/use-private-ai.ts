@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useState } from "react";
 import { coreKeys } from "../../../lib/tauri/query-keys";
+import { useContributorDisclosureCopy } from "../../../lib/tauri/use-contributor-copy";
 import { useCoreStatus } from "../../../lib/tauri/use-core-status";
 import { settingsKeys } from "../../settings/public";
 import { waitingKeys } from "../../waiting/public";
@@ -23,6 +24,8 @@ export function usePrivateAi() {
   const core = useCoreStatus();
   const queryClient = useQueryClient();
   const [actionError, setActionError] = useState<string | null>(null);
+  const writeUnconfirmed =
+    useContributorDisclosureCopy().data?.private_inference.write_unconfirmed;
   const [verifiedFundingUrl, setVerifiedFundingUrl] = useState<string | null>(
     null,
   );
@@ -161,11 +164,12 @@ export function usePrivateAi() {
         await setEnabledMutation.mutateAsync(enabled);
       } catch {
         setActionError(
-          "Private inference setting was not confirmed. Refresh status before retrying.",
+          writeUnconfirmed ??
+            "The change could not be confirmed. Refresh status before retrying.",
         );
       }
     },
-    [setEnabledMutation],
+    [setEnabledMutation, writeUnconfirmed],
   );
   const start = useCallback(
     async (provider: string) => {

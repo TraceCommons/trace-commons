@@ -5,6 +5,7 @@ import {
   contributorFacingExplanations,
   filterHistory,
   groupHistory,
+  historyCreditLine,
   quarantineExplanations,
 } from "./history-view-model.ts";
 
@@ -87,4 +88,22 @@ test("history hides digest explanations and supplies held fallback only when nee
     "Privacy hold",
     "Needs review",
   ]);
+});
+
+test("row credit states a settled figure alone", () => {
+  assert.equal(historyCreditLine(4, 0), "credit 4.0");
+  assert.equal(historyCreditLine(12.5, 3), "credit 12.5");
+});
+
+test("row credit still pending reads as still being scored, as the native shells do", () => {
+  assert.equal(historyCreditLine(null, 3), "credit 3.0, still being scored");
+  assert.equal(historyCreditLine(0, 3), "credit 3.0, still being scored");
+  assert.equal(historyCreditLine(undefined, 0.25), "credit 0.3, still being scored");
+});
+
+test("a row with no credit states nothing rather than a zero", () => {
+  assert.equal(historyCreditLine(null, 0), null);
+  assert.equal(historyCreditLine(0, 0), null);
+  assert.equal(historyCreditLine(null, undefined), null);
+  assert.equal(historyCreditLine(null, Number.NaN), null);
 });

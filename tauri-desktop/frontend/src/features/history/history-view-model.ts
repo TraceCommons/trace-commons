@@ -77,3 +77,25 @@ export function quarantineExplanations(
 export function contributorFacingExplanations(explanations: string[]) {
   return explanations.filter((explanation) => !explanation.includes("sha256:"));
 }
+
+/**
+ * The credit figure under a history row, or null when there is none to state.
+ *
+ * Same shape as the GTK (`ui/history.rs` `credit_line`) and Windows
+ * (`HistoryCopy.CreditLine`) shells: a settled figure stands alone, a figure
+ * still moving says so, and a row with no credit says nothing rather than a
+ * confident zero. A zero final beside a pending figure is not a settlement,
+ * so the pending figure is what gets stated.
+ */
+export function historyCreditLine(
+  final: number | null | undefined,
+  pending: number | null | undefined,
+): string | null {
+  if (typeof final === "number" && Number.isFinite(final) && final > 0) {
+    return `credit ${final.toFixed(1)}`;
+  }
+  if (typeof pending === "number" && Number.isFinite(pending) && pending > 0) {
+    return `credit ${pending.toFixed(1)}, still being scored`;
+  }
+  return null;
+}

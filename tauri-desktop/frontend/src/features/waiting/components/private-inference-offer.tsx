@@ -16,12 +16,14 @@ export function PrivateInferenceOffer({
   if (!offered && !error) return null;
   return (
     <section className="mb-4 rounded-2xl border border-border bg-card/80 p-[22px_26px]">
-      <span className="mb-3 block font-mono text-[10px] font-extrabold leading-none tracking-[.16em] text-primary">
-        OPTIONAL PRIVATE AI
-      </span>
+      {copy && (
+        <span className="mb-3 block font-mono text-[10px] font-extrabold uppercase leading-none tracking-[.16em] text-primary">
+          {copy.destination}
+        </span>
+      )}
       {offered && (
         <>
-          <h2>{copy?.offer_title ?? "Private AI"}</h2>
+          {copy && <h2>{copy.offer_title}</h2>}
           {copy ? (
             <div className="grid gap-2">
               <p className="m-0">{copy.offer_what}</p>
@@ -32,8 +34,8 @@ export function PrivateInferenceOffer({
           ) : (
             <p className="text-destructive">
               {disclosure.isError
-                ? "Private AI disclosure unavailable. Enabling is disabled."
-                : "Loading Private AI disclosure…"}
+                ? "Disclosure unavailable. Enabling is disabled."
+                : "Loading disclosure…"}
             </p>
           )}
           <div className="mt-6 flex gap-2.5">

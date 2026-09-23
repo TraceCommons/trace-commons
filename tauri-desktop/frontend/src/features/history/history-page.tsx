@@ -31,6 +31,7 @@ export function HistoryPage() {
   const withdrawal = useHistoryWithdrawal();
   const contributorCopy = useContributorDisclosureCopy();
   const heldRowFallback = contributorCopy.data?.history_ui.held_row_body ?? null;
+  const historyStatusCopy = contributorCopy.data?.history_ui ?? null;
   const [filter, setFilter] = useState<HistoryFilter>("all");
   const counts = useMemo(() => countHistory(records), [records]);
   const visibleRecords = useMemo(
@@ -153,6 +154,7 @@ export function HistoryPage() {
                           onAccountSignIn={withdrawal.startSignIn}
                           onOpenSignInUrl={() => void withdrawal.openSignInUrl()}
                           heldRowFallback={heldRowFallback}
+                          statusCopy={historyStatusCopy}
                           onOpen={() => void detail.open(item.submission_id)}
                           confirming={
                             withdrawal.confirmingId === item.submission_id

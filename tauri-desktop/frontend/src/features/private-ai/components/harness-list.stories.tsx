@@ -41,7 +41,7 @@ const data = {
     what: "Choose tools one at a time.",
     spend_scope: "This amount covers calls answered here since midnight.",
     none_found: "No supported tools found.",
-    credential_notice: "Connect requires a private inference credential.",
+    credential_notice: "No key is set up here for Private AI yet.",
     spend_line: "Cost of calls answered here since midnight: $0.00.",
     state_lines: {},
   },

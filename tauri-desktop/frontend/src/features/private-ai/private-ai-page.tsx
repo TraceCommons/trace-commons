@@ -1,5 +1,6 @@
 import { PageHeader } from "../../components/page-header";
 import { StatCard } from "../../components/stat-card";
+import { useContributorDisclosureCopy } from "../../lib/tauri/use-contributor-copy";
 import { useSettings } from "../settings/public";
 import { HarnessListPanel } from "./components/harness-list";
 import { PrivateAiBalancePanel } from "./components/private-ai-balance-panel";
@@ -21,6 +22,7 @@ export function PrivateAiPage() {
   const settings = useSettings();
   const privateAi = usePrivateAi();
   const harnesses = useHarnesses();
+  const disclosure = useContributorDisclosureCopy();
   const snapshot = settings.data;
   const runtime =
     typeof snapshot?.private_inference_state === "object" &&
@@ -32,7 +34,7 @@ export function PrivateAiPage() {
       <PageHeader
         eyebrow="PRIVATE / ANSWERS"
         title="Private AI"
-        description="Connect a private inference path without confusing it with contribution enrollment or the privacy filter."
+        description={disclosure.data?.private_inference.subtitle ?? ""}
         phase="PHASE 4"
       />
       <div className="mb-4 grid grid-cols-3 gap-3 max-[860px]:grid-cols-1">
