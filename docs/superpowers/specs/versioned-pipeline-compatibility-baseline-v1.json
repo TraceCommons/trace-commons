@@ -25,10 +25,10 @@
     "evaluate_insert": "forbidden_in_score",
     "novelty_utility_delta": "score_decision.awards[trace_credit].atomic_units",
     "novelty_utility_ledger_event": "not_settlement_eligible",
-    "q_micros": "score_evidence_shadow_no_award",
-    "dedup_penalty": "score_evidence_shadow_no_award",
-    "contributor_cap": "score_evidence_shadow_no_award",
-    "anomaly_withheld": "score_evidence_shadow_no_effect"
+    "q_micros": "score_evidence.credit_quality_micros",
+    "dedup_penalty": "shadow_on_main_not_in_score_contract",
+    "contributor_cap": "shadow_on_main_not_in_score_contract",
+    "anomaly_withheld": "shadow_on_main_not_in_score_contract"
   },
   "required_behavior_changes": [
     "score_does_not_write_index",

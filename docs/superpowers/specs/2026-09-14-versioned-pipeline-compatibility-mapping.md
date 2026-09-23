@@ -43,8 +43,8 @@ inserts vectors while it scores. The new path splits that work.
 | insert during `evaluate` | Forbidden in Score. Settle writes a sealed command. |
 | random `entry_id` | Deterministic index key: tenant, index, revision, projection, model, chunk |
 | `NoveltyUtility` credit event when both floors pass | Score award of the configured delta for `trace_credit`. Settle records it as a `NoveltyUtility` ledger event, which does not settle. |
-| credit quality `q_micros`, dedup penalty, contributor cap | Score evidence shadow values. No award. |
-| `anomaly_withheld` | Score evidence shadow flag. No effect on awards or index membership. |
+| credit quality `q_micros` | Score evidence `credit_quality_micros` and `credit_quality_version`. No award. |
+| dedup penalty, contributor cap, `anomaly_withheld` | Shadow values on `main`. This contract does not store them. No award, and no effect on index membership. |
 | Review before Score | Unchanged. A Score failure does not change a Review outcome. |
 
 ## Membership and credit rules
@@ -67,10 +67,14 @@ set is empty. Settle records a positive award as a `NoveltyUtility` ledger
 event. `main` does not settle that event type, so the pipeline must not settle
 it either.
 
-`q_micros`, the dedup penalty, the contributor cap, and `anomaly_withheld` are
-shadow values on `main`. They stay in Score evidence. They make no award and do
-not change index membership. Shadow credit quality uses the constants of the
-decision's era, not `CREDIT_QUALITY_ACTIVE`.
+`q_micros` is a shadow value on `main`. Score evidence stores it as
+`credit_quality_micros`, with `credit_quality_version` for the constants of
+the decision's era, not `CREDIT_QUALITY_ACTIVE`. It makes no award.
+
+The dedup penalty, the contributor cap, and `anomaly_withheld` are shadow
+values on `main`. They make no award and do not change index membership.
+This contract does not store them. The compatibility adapter adds fields
+for them when it records them.
 
 An empty Score award set is a completed decision. It is not an incomplete
 Score phase.
