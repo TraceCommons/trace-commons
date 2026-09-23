@@ -15,7 +15,12 @@ The canonical package bytes contain these fields:
 4. The sorted set of artifact hashes.
 
 Package validation checks each artifact before signature validation. Thus, the
-signature binds all policy code, data, and configuration artifacts.
+signature binds the policy and implementation identifiers and all configuration
+and data artifacts.
+
+The signature does not bind policy code. Policies are Rust code in the server
+binary, and the package does not contain them. The qualification record below
+binds the package to the code revision that it tested.
 
 The trust store maps a bounded key identifier to one Ed25519 public key. An
 unknown key, algorithm, implementation, or artifact causes a safe refusal.
@@ -34,7 +39,11 @@ a current passing promotion decision. It also requires the deployed code
 revision and the current production dependency profile.
 
 The code revision must match the qualified revision. All production
-dependencies must remain available. The operation selects only a qualified
+dependencies must remain available.
+
+This check runs only at activation. A later deploy of a different revision is
+not checked again. A check after each deploy is a promotion requirement; the
+[roadmap](../../trace-commons-roadmap.md) tracks it. The operation selects only a qualified
 package with four runnable policies.
 
 Foreign keys prevent package removal while a run, active selection, or

@@ -147,12 +147,12 @@ PKCS#8 DER. Use `--output` and `--public-key-output` to select output paths.
 Protect signing keys outside the catalog. A public key emitted by this command
 is a local verification input; it is not automatically a trusted release key.
 
-The package names `implementation_id` and `code_artifact_hash`. Policies remain
-Rust code in the server. The current profiles reuse the existing hashed
-implementation descriptors as code artifacts; they do not ship an executable
-algorithm. The report's executable hash is separate build evidence. A new
-algorithm requires a server implementation, a new `implementation_id`, its
-artifact identity, and tests. Editing JSON cannot install a new algorithm.
+The package names each policy's `implementation_id`. Policies remain Rust code
+in the server. The package does not hash or contain that code. The report's
+executable hash is separate build evidence, and qualification binds a package
+to the code revision that it tested. A new algorithm requires a server
+implementation, a new `implementation_id`, and tests. Editing JSON cannot
+install a new algorithm.
 
 Both bundled profiles are local/test candidates. Signing does not make them
 production-selectable. Production qualification rejects minimal implementations

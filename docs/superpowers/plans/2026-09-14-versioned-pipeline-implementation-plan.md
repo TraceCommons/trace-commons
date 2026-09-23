@@ -214,8 +214,8 @@ retries, concurrent work, activation changes, and process restarts.
    Scope policy work, capabilities, and commit transactions to the tenant.
 3. **Bundle registry behavior.** Retain validated packages. Explicitly select
    the active bundle for each tenant and load the bound package on each
-   retry. Test changes to code, configuration, data, projection, format, and
-   policy identity. Test missing and altered artifacts. Store whether a
+   retry. Test changes to implementation, configuration, data, projection,
+   format, and policy identity. Test missing and altered artifacts. Store whether a
    policy can run outside the immutable manifest. Milestone 4 tests concurrent
    changes to that operational status.
 

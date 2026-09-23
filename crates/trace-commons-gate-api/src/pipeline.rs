@@ -316,7 +316,6 @@ impl SchemaRef {
 pub struct PolicyRef {
     pub policy_id: String,
     pub implementation_id: String,
-    pub code_artifact_hash: String,
     pub configuration_hash: String,
     pub data_artifact_hashes: Vec<String>,
     pub projection_ids: Vec<String>,
@@ -352,8 +351,7 @@ impl BundleManifest {
     fn referenced_artifacts(&self) -> Result<BTreeSet<String>, ContractError> {
         let mut hashes = BTreeSet::new();
         for policy in [&self.admission, &self.review, &self.score, &self.settle] {
-            for hash in std::iter::once(&policy.code_artifact_hash)
-                .chain(std::iter::once(&policy.configuration_hash))
+            for hash in std::iter::once(&policy.configuration_hash)
                 .chain(policy.data_artifact_hashes.iter())
             {
                 if !is_sha256(hash) {
@@ -389,7 +387,6 @@ fn encode_policy(output: &mut Vec<u8>, policy: &PolicyRef) -> Result<(), Contrac
     }
     encode_string(output, &policy.policy_id)?;
     encode_string(output, &policy.implementation_id)?;
-    encode_string(output, &policy.code_artifact_hash)?;
     encode_string(output, &policy.configuration_hash)?;
     encode_list(output, &policy.data_artifact_hashes)?;
     encode_list(output, &policy.projection_ids)
@@ -918,11 +915,10 @@ mod tests {
         sha256_prefixed(bytes)
     }
 
-    fn policy(name: &str, code: &[u8], configuration: &[u8]) -> PolicyRef {
+    fn policy(name: &str, configuration: &[u8]) -> PolicyRef {
         PolicyRef {
             policy_id: name.to_string(),
             implementation_id: format!("{name}.v1"),
-            code_artifact_hash: hash(code),
             configuration_hash: hash(configuration),
             data_artifact_hashes: Vec::new(),
             projection_ids: Vec::new(),
@@ -1083,27 +1079,21 @@ mod tests {
     #[test]
     fn package_validation_binds_manifest_and_all_artifacts() {
         let policies = [
-            (
-                "admission",
-                b"admission".as_slice(),
-                b"admission-config".as_slice(),
-            ),
-            ("review", b"review".as_slice(), b"review-config".as_slice()),
-            ("score", b"score".as_slice(), b"score-config".as_slice()),
-            ("settle", b"settle".as_slice(), b"settle-config".as_slice()),
+            ("admission", b"admission-config".as_slice()),
+            ("review", b"review-config".as_slice()),
+            ("score", b"score-config".as_slice()),
+            ("settle", b"settle-config".as_slice()),
         ];
         let manifest = BundleManifest {
             format_version: BUNDLE_MANIFEST_FORMAT_VERSION,
-            admission: policy(policies[0].0, policies[0].1, policies[0].2),
-            review: policy(policies[1].0, policies[1].1, policies[1].2),
-            score: policy(policies[2].0, policies[2].1, policies[2].2),
-            settle: policy(policies[3].0, policies[3].1, policies[3].2),
+            admission: policy(policies[0].0, policies[0].1),
+            review: policy(policies[1].0, policies[1].1),
+            score: policy(policies[2].0, policies[2].1),
+            settle: policy(policies[3].0, policies[3].1),
         };
         let artifacts = policies
             .iter()
-            .flat_map(|(_, code, config)| {
-                [(hash(code), code.to_vec()), (hash(config), config.to_vec())]
-            })
+            .map(|(_, config)| (hash(config), config.to_vec()))
             .collect();
         let package = BundlePackage {
             bundle_id: manifest.bundle_id().unwrap(),
@@ -1119,6 +1109,13 @@ mod tests {
         altered.artifacts.values_mut().next().unwrap().push(0);
         assert_eq!(altered.validate(), Err(ContractError::ArtifactHashMismatch));
 
+        // Policy code is not a package artifact; an extra descriptor is refused.
+        let mut extra = package.clone();
+        extra
+            .artifacts
+            .insert(hash(b"admission-code"), b"admission-code".to_vec());
+        assert_eq!(extra.validate(), Err(ContractError::ArtifactSetMismatch));
+
         let mut missing = package;
         missing.artifacts.pop_first();
         assert_eq!(missing.validate(), Err(ContractError::ArtifactSetMismatch));
@@ -1128,16 +1125,12 @@ mod tests {
     fn every_immutable_policy_input_changes_bundle_identity() {
         let mut base = BundleManifest {
             format_version: BUNDLE_MANIFEST_FORMAT_VERSION,
-            admission: policy("admission", b"admission", b"configuration"),
-            review: policy("review", b"review", b"configuration"),
-            score: policy("score", b"score", b"configuration"),
-            settle: policy("settle", b"settle", b"configuration"),
+            admission: policy("admission", b"configuration"),
+            review: policy("review", b"configuration"),
+            score: policy("score", b"configuration"),
+            settle: policy("settle", b"configuration"),
         };
         let base_id = base.bundle_id().unwrap();
-
-        let mut changed = base.clone();
-        changed.admission.code_artifact_hash = hash(b"changed-code");
-        assert_ne!(changed.bundle_id().unwrap(), base_id);
 
         let mut changed = base.clone();
         changed.review.configuration_hash = hash(b"changed-configuration");

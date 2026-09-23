@@ -420,8 +420,10 @@ hashes through every supported submission path.
 
 - The manifest MUST include its format version.
 - A bundle manifest MUST select one policy for each phase.
-- Each policy reference MUST identify its policy, code, configuration, data
-  artifacts, and projection identifiers.
+- Each policy reference MUST identify its policy, implementation,
+  configuration, data artifacts, and projection identifiers.
+- The manifest MUST NOT claim to bind policy code. Qualification binds a
+  package to a code revision.
 - The bundle identifier MUST be the canonical hash of the manifest.
 - The bundle hash MUST exclude mutable external state.
 - A change to a listed immutable input MUST change the bundle identifier.

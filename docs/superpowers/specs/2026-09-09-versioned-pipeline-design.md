@@ -176,7 +176,8 @@ struct Outcome<D, E, V> {
 ```
 
 One outcome schema identifies the three payload types for a policy family. The
-`bundle_id` resolves the exact deployed policies and configuration.
+`bundle_id` resolves the selected policy implementations, configuration, and
+data. It does not identify the code revision that ran; see section 3.
 
 This diagram shows the complete reasoning boundary:
 
@@ -212,7 +213,7 @@ struct BundleManifest {
 
 struct PolicyRef {
     policy_id: PolicyId,
-    code_artifact_hash: ContentHash,
+    implementation_id: ImplementationId,
     configuration_hash: ContentHash,
     data_artifact_hashes: Vec<ContentHash>,
     projection_ids: Vec<ProjectionId>,
@@ -228,6 +229,12 @@ impl BundleManifest {
 Configuration includes thresholds and other parameters. Data artifacts include
 models, bootstrap data, and fixed reference data when a policy uses them.
 
+Policies are Rust code in the server binary. The `implementation_id` selects
+one of them. The manifest does not hash policy code, and the package does not
+contain it. Qualification binds a package to the code revision that it tested,
+and activation checks that revision. See
+[package qualification](2026-09-14-versioned-pipeline-package-qualification.md).
+
 The bundle package contains the manifest and deployable artifacts. The ingest
 service makes sure that the package matches its bundle identifier before use.
 
@@ -238,8 +245,9 @@ bundle.
 The bundle hash excludes mutable external state. A policy records the exact
 external state that it reads as evidence.
 
-Golden tests protect bundle identity. A change to code, configuration, data, or
-projection identity must change the bundle identifier.
+Golden tests protect bundle identity. A change to a policy or implementation
+identifier, configuration, data, or projection identity must change the bundle
+identifier.
 
 ## 4. Workflow
 
