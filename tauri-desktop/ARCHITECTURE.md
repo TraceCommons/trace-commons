@@ -40,7 +40,10 @@ and GTK shells remain unchanged; no legacy app is removed by this work.
 
 - The macOS app and Tauri both register `tracecommons://`. Assign callback
   ownership before distributing both on macOS; verify cold-start and
-  already-running callback delivery from packaged builds on every OS.
+  already-running callback delivery from packaged builds on every OS. A
+  digest notification click does not depend on that: the notification
+  delegate calls back into Rust, which shows the window and opens the review
+  queue in-process instead of asking LaunchServices for the scheme handler.
 - Certificate display stays within native parity: held-session list and shared
   copy only; no Tauri-only certificate detail surface.
 - Tauri tray still lacks legacy health, budget, and armed-project summaries;

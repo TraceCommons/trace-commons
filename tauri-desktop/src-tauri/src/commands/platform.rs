@@ -406,6 +406,10 @@ fn credential_deep_link(url: &str) -> Option<String> {
     })
 }
 
+/// The link that opens the review queue. A digest notification's click
+/// is routed to it in-process (see `native::configure_notifications`).
+pub(crate) const REVIEW_DEEP_LINK: &str = "tracecommons://review";
+
 fn review_deep_link(url: &str) -> bool {
     deep_link_parts(url).is_some_and(|(authority, rest)| {
         authority.eq_ignore_ascii_case("review") && rest.is_empty()
@@ -565,10 +569,10 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        credential_deep_link, deep_link_invite, existing_directory, external_url_is_allowed,
-        git_repository, installed_by_homebrew, near_credits_url_is_allowed, public_run_deep_link,
-        quit_prompt_value, review_deep_link, tracecommons_fixture_url_is_allowed,
-        tracecommons_run_url_is_allowed, wallet_url_is_valid,
+        REVIEW_DEEP_LINK, credential_deep_link, deep_link_invite, existing_directory,
+        external_url_is_allowed, git_repository, installed_by_homebrew,
+        near_credits_url_is_allowed, public_run_deep_link, quit_prompt_value, review_deep_link,
+        tracecommons_fixture_url_is_allowed, tracecommons_run_url_is_allowed, wallet_url_is_valid,
     };
     use trace_commons_contributor::quit_copy::{self, QuitRole};
 
@@ -725,6 +729,7 @@ mod tests {
             credential_deep_link("tracecommons://credential?token=secret"),
             None
         );
+        assert!(review_deep_link(REVIEW_DEEP_LINK));
         assert!(review_deep_link("tracecommons://review"));
         assert!(review_deep_link("TraceCommons://REVIEW"));
         assert!(!review_deep_link("tracecommons://review?next=/settings"));

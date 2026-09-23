@@ -10,6 +10,13 @@ static NSString * const TC_REVIEW_ACTION = @"trace-commons.review";
 static NSString * const TC_NOT_NOW_ACTION = @"trace-commons.not-now";
 static NSObject<UNUserNotificationCenterDelegate> *tc_notification_delegate = nil;
 
+// Set once by tc_macos_notification_configure. Rust owns what a Review
+// click does (show the window, open the review queue), so the click never
+// goes through LaunchServices, where another app claiming
+// tracecommons:// could receive it.
+typedef void (*tc_review_callback)(void);
+static tc_review_callback tc_on_review = NULL;
+
 @interface TCNotificationDelegate : NSObject <UNUserNotificationCenterDelegate>
 @end
 
@@ -21,8 +28,14 @@ static NSObject<UNUserNotificationCenterDelegate> *tc_notification_delegate = ni
     NSString *action = response.actionIdentifier;
     if ([action isEqualToString:TC_REVIEW_ACTION]
         || [action isEqualToString:UNNotificationDefaultActionIdentifier]) {
-        NSURL *review = [NSURL URLWithString:@"tracecommons://review"];
-        [[NSWorkspace sharedWorkspace] openURL:review];
+        tc_review_callback on_review = tc_on_review;
+        if (on_review != NULL) {
+            // The delegate's thread is not guaranteed; the window work the
+            // callback triggers belongs on the main thread.
+            dispatch_async(dispatch_get_main_queue(), ^{
+                on_review();
+            });
+        }
     }
     completionHandler();
 }
@@ -55,8 +68,9 @@ static int tc_notification_status_value(UNAuthorizationStatus status) {
     }
 }
 
-int tc_macos_notification_configure(void) {
+int tc_macos_notification_configure(tc_review_callback on_review) {
     @autoreleasepool {
+        tc_on_review = on_review;
         if (!tc_available()) return -1;
         if (tc_notification_delegate == nil) {
             tc_notification_delegate = [TCNotificationDelegate new];

@@ -7,7 +7,7 @@ use std::ffi::c_void;
 
 #[cfg(target_os = "macos")]
 unsafe extern "C" {
-    fn tc_macos_notification_configure() -> i32;
+    fn tc_macos_notification_configure(on_review: extern "C" fn()) -> i32;
     fn tc_macos_notification_status() -> i32;
     fn tc_macos_request_notification_permission() -> i32;
     fn tc_macos_post_digest(body: *const std::ffi::c_char) -> i32;
@@ -90,14 +90,58 @@ impl Drop for CurrentUserKey {
     }
 }
 
-pub(crate) fn configure_notifications() {
-    #[cfg(target_os = "macos")]
-    // The native bridge returns a fixed status only. There is no user-facing
-    // failure at launch: an unsigned/dev binary may not have a notification
-    // center, while the packaged app will configure its category here.
-    unsafe {
-        let _ = tc_macos_notification_configure();
+/// What a digest notification's Review click does, registered once at
+/// launch. Held behind a lock rather than a `OnceLock` so a test (or a
+/// second configure) replaces it instead of failing.
+#[cfg(any(target_os = "macos", test))]
+type ReviewRoute = std::sync::Arc<dyn Fn() + Send + Sync>;
+
+#[cfg(any(target_os = "macos", test))]
+static REVIEW_ROUTE: std::sync::Mutex<Option<ReviewRoute>> = std::sync::Mutex::new(None);
+
+#[cfg(any(target_os = "macos", test))]
+fn set_review_route(route: impl Fn() + Send + Sync + 'static) {
+    let mut slot = REVIEW_ROUTE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    *slot = Some(std::sync::Arc::new(route));
+}
+
+/// Called by the notification delegate in `native_macos.m` when a digest
+/// notification (or its Review action) is clicked.
+///
+/// The click is handled inside this process instead of asking
+/// LaunchServices to open `tracecommons://review`: another installed app
+/// that also claims the scheme (the native macOS shell) could otherwise
+/// receive the click this app's notification produced.
+///
+/// It must not unwind into Objective-C, so a panicking route is caught.
+#[cfg(any(target_os = "macos", test))]
+extern "C" fn tc_notification_review_requested() {
+    let route = REVIEW_ROUTE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    if let Some(route) = route {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| route()));
     }
+}
+
+/// Register the digest category and route its Review click to `on_review`.
+pub(crate) fn configure_notifications(on_review: impl Fn() + Send + Sync + 'static) {
+    #[cfg(target_os = "macos")]
+    {
+        set_review_route(on_review);
+        // The native bridge returns a fixed status only. There is no
+        // user-facing failure at launch: an unsigned/dev binary may not have
+        // a notification center, while the packaged app will configure its
+        // category here.
+        unsafe {
+            let _ = tc_macos_notification_configure(tc_notification_review_requested);
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    drop(on_review);
 }
 
 pub(crate) fn notification_capability() -> serde_json::Value {
@@ -548,9 +592,48 @@ fn windows_wide(value: &str) -> Vec<u16> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
     use super::{
         login_item_change_succeeded, login_item_state, notification_can_post, notification_state,
+        set_review_route, tc_notification_review_requested,
     };
+
+    // One test owns the process-wide route, so parallel tests cannot race
+    // over which closure is registered.
+    #[test]
+    fn a_notification_review_click_is_routed_in_process() {
+        // Before configuration there is nothing to route to, and the click
+        // must be a no-op rather than a crash on the notification thread.
+        tc_notification_review_requested();
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&calls);
+        set_review_route(move || {
+            counted.fetch_add(1, Ordering::SeqCst);
+        });
+        tc_notification_review_requested();
+        tc_notification_review_requested();
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+        // A panic must never unwind across the Objective-C frame that
+        // called in.
+        set_review_route(|| panic!("route failed"));
+        tc_notification_review_requested();
+
+        // Re-registering replaces the route rather than stacking it.
+        let replaced = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&replaced);
+        set_review_route(move || {
+            counted.fetch_add(1, Ordering::SeqCst);
+        });
+        tc_notification_review_requested();
+        assert_eq!(replaced.load(Ordering::SeqCst), 1);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
 
     #[test]
     fn native_state_mapping_is_explicit() {
