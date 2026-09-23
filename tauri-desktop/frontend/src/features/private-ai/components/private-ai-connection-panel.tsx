@@ -40,7 +40,9 @@ export function PrivateAiConnectionPanel({
           <span className="mb-3 block font-mono text-[10px] font-extrabold leading-none tracking-[.16em] text-primary">
             CONNECTION
           </span>
-          <h2>Private inference setup</h2>
+          {disclosure.data && (
+            <h2>{disclosure.data.private_inference.settings_title}</h2>
+          )}
         </div>
         <Button
           className="border-0 bg-transparent p-0 text-[11px] font-bold text-primary"
@@ -60,7 +62,7 @@ export function PrivateAiConnectionPanel({
         presence and daemon runtime state without exposing secrets.
       </p>
       <p className="m-0 text-[11px] leading-[1.55] text-muted-foreground">
-        Enabling private inference starts a local listener for configured tools.
+        Turning this on starts a local listener for configured tools.
         It does not publish traces. Credential enrollment remains separate.
       </p>
       {disclosure.data ? (

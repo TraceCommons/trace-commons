@@ -254,8 +254,12 @@ fn copy_commands_reach_the_frontend_through_tauri_and_render_at_safety_surfaces(
     assert!(private_inference.contains("copy.offer_exposure"));
     assert!(private_inference.contains("copy.offer_no_repoint"));
     assert!(private_inference.contains("disabled={busy || !copy}"));
+    assert!(private_inference.contains("copy.destination"));
+    assert!(private_inference.contains("copy.offer_title"));
     for stale_label in [
         "OPTIONAL PRIVATE INFERENCE",
+        "OPTIONAL PRIVATE AI",
+        "?? \"Private AI\"",
         "\"Private inference\"",
         "Enable private inference",
     ] {
@@ -327,4 +331,54 @@ fn copy_commands_reach_the_frontend_through_tauri_and_render_at_safety_surfaces(
         assert!(group.contains("eligibility.data?.can_contribute === true"));
         assert!(group.contains("eligibility.data.eligible_count"));
     }
+}
+
+fn visit_sources(dir: &Path, found: &mut Vec<PathBuf>) {
+    let entries = std::fs::read_dir(dir)
+        .unwrap_or_else(|error| panic!("{} is unreadable: {error}", dir.display()));
+    for entry in entries {
+        let path = entry.expect("directory entry is readable").path();
+        if path.is_dir() {
+            visit_sources(&path, found);
+        } else if path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| matches!(extension, "ts" | "tsx" | "mjs" | "rs"))
+        {
+            found.push(path);
+        }
+    }
+}
+
+/// The destination is called "Private AI" (`private_inference_copy::DESTINATION`).
+/// "Private inference" is the setting's internal name and a privacy claim the
+/// feature does not make, so no Tauri source may put it in front of a
+/// contributor -- not in a label, an error, a tray item, or a story fixture.
+#[test]
+fn tauri_never_says_private_inference_to_a_contributor() {
+    let root = repo_root();
+    let mut sources = Vec::new();
+    for dir in ["tauri-desktop/frontend/src", "tauri-desktop/src-tauri/src"] {
+        visit_sources(&root.join(dir), &mut sources);
+    }
+    assert!(!sources.is_empty(), "no Tauri sources were found");
+    let offenders: Vec<String> = sources
+        .iter()
+        .filter(|path| {
+            std::fs::read_to_string(path)
+                .unwrap_or_default()
+                .to_lowercase()
+                .contains("private inference")
+        })
+        .map(|path| {
+            path.strip_prefix(&root)
+                .unwrap_or(path)
+                .display()
+                .to_string()
+        })
+        .collect();
+    assert!(
+        offenders.is_empty(),
+        "\"private inference\" is contributor-facing in: {offenders:?}"
+    );
 }

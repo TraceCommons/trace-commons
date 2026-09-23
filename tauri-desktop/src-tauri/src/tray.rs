@@ -34,6 +34,16 @@ struct TraySnapshot {
     weekly: Option<WeeklySummary>,
 }
 
+/// The tray's Private AI row and, while it is answering calls, its stop
+/// action. Both names come from the contributor core: the destination is
+/// "Private AI", never the setting's internal name.
+fn private_ai_tray_items(state: &str) -> (String, Option<&'static str>) {
+    use trace_commons_contributor::private_inference_copy::{DESTINATION, TRAY_TURN_OFF};
+    let label = format!("{DESTINATION} · {}", state.replace('_', " "));
+    let stop = matches!(state, "running" | "running_without_backends").then_some(TRAY_TURN_OFF);
+    (label, stop)
+}
+
 fn safe_label(value: Option<&Value>) -> String {
     value
         .and_then(Value::as_str)
@@ -145,12 +155,10 @@ fn tray_menu<R: TauriRuntime, M: Manager<R>>(
     };
 
     if let Some(state) = snapshot.private_inference_state.as_deref() {
-        builder = builder.text(
-            "private-inference",
-            format!("Private inference · {}", state.replace('_', " ")),
-        );
-        if matches!(state, "running" | "running_without_backends") {
-            builder = builder.text("private-inference-stop", "Stop private inference");
+        let (label, stop) = private_ai_tray_items(state);
+        builder = builder.text("private-inference", label);
+        if let Some(stop) = stop {
+            builder = builder.text("private-inference-stop", stop);
         }
     }
 
@@ -327,4 +335,23 @@ pub(crate) fn start_tray_refresh<R: TauriRuntime>(app: AppHandle<R>) {
             std::thread::sleep(Duration::from_secs(2));
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use trace_commons_contributor::private_inference_copy::{DESTINATION, TRAY_TURN_OFF};
+
+    use super::private_ai_tray_items;
+
+    #[test]
+    fn tray_names_private_ai_with_the_shared_destination_and_stop_action() {
+        let (label, stop) = private_ai_tray_items("running_without_backends");
+        assert_eq!(label, format!("{DESTINATION} · running without backends"));
+        assert_eq!(stop, Some(TRAY_TURN_OFF));
+        assert_eq!(private_ai_tray_items("running").1, Some(TRAY_TURN_OFF));
+
+        let (label, stop) = private_ai_tray_items("off");
+        assert_eq!(label, format!("{DESTINATION} · off"));
+        assert_eq!(stop, None);
+    }
 }

@@ -107,6 +107,10 @@ export type ContributorDisclosureCopy = {
     failed: string;
   };
   private_inference: {
+    destination: string;
+    subtitle: string;
+    settings_title: string;
+    write_unconfirmed: string;
     offer_title: string;
     offer_what: string;
     offer_exposure: string;
@@ -225,7 +229,7 @@ export async function getContributorDisclosureCopy(): Promise<ContributorDisclos
   );
   const wallet = record(value.wallet, "wallet copy");
   const admission = record(value.admission, "admission copy");
-  const privateInference = record(value.private_inference, "private inference copy");
+  const privateInference = record(value.private_inference, "Private AI copy");
   const onboarding = record(value.onboarding, "first contribution copy");
   const onboardingShell = record(value.onboarding_shell, "onboarding copy");
   const sourceSettings = record(value.source_settings, "source settings copy");
@@ -258,6 +262,10 @@ export async function getContributorDisclosureCopy(): Promise<ContributorDisclos
       failed: string(admission, "failed"),
     },
     private_inference: {
+      destination: string(privateInference, "destination"),
+      subtitle: string(privateInference, "subtitle"),
+      settings_title: string(privateInference, "settings_title"),
+      write_unconfirmed: string(privateInference, "write_unconfirmed"),
       offer_title: string(privateInference, "offer_title"),
       offer_what: string(privateInference, "offer_what"),
       offer_exposure: string(privateInference, "offer_exposure"),

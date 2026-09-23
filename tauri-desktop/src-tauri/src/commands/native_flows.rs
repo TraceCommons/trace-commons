@@ -113,6 +113,10 @@ pub(crate) fn contributor_disclosure_copy() -> Value {
         },
         "outcome": trace_commons_contributor::outcome_copy::outcome_copy(),
         "private_inference": {
+            "destination": inference.destination,
+            "subtitle": inference.subtitle,
+            "settings_title": inference.settings_title,
+            "write_unconfirmed": inference.write_unconfirmed,
             "offer_title": inference.offer_title,
             "offer_what": inference.offer_what,
             "offer_exposure": inference.offer_exposure,
@@ -219,6 +223,27 @@ mod tests {
     use serde_json::Value;
 
     use super::{contributor_disclosure_copy, near_ai_error_view, wallet_action};
+
+    #[test]
+    fn private_ai_copy_carries_the_shared_destination_and_its_surrounding_lines() {
+        use trace_commons_contributor::private_inference_copy::{
+            DESTINATION, SETTINGS_TITLE, SUBTITLE, WRITE_UNCONFIRMED,
+        };
+        let copy = contributor_disclosure_copy();
+        for (key, expected) in [
+            ("destination", DESTINATION),
+            ("subtitle", SUBTITLE),
+            ("settings_title", SETTINGS_TITLE),
+            ("write_unconfirmed", WRITE_UNCONFIRMED),
+        ] {
+            assert_eq!(
+                copy.pointer(&format!("/private_inference/{key}"))
+                    .and_then(Value::as_str),
+                Some(expected),
+                "{key}"
+            );
+        }
+    }
 
     #[test]
     fn history_copy_names_the_privacy_backstop_hold_from_the_shared_status_table() {
