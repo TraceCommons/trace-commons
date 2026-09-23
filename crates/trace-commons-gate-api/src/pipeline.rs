@@ -22,6 +22,9 @@ pub const BUNDLE_MANIFEST_FORMAT_VERSION: u32 = 1;
 pub const MICROCREDITS_PER_CREDIT: u64 = 1_000_000;
 pub const MAX_INSTRUMENT_ID_LEN: usize = 64;
 pub const TRACE_CREDIT_INSTRUMENT_ID: &str = "trace_credit";
+/// Largest Trace Credit award, in microcredits. The credit ledger stores
+/// amounts as signed 64-bit integers (`BIGINT`).
+pub const MAX_TRACE_CREDIT_MICROCREDITS: u64 = i64::MAX as u64;
 pub const INDEX_COMMAND_SCHEMA: &str = "trace_commons.pipeline_index_command.v1";
 
 fn sha256_prefixed(bytes: &[u8]) -> String {
@@ -285,6 +288,11 @@ impl InstrumentAward {
     ) -> Result<Self, ContractError> {
         if atomic_units == AtomicUnits::ZERO {
             return Err(ContractError::ZeroInstrumentAward);
+        }
+        if instrument_id.as_str() == TRACE_CREDIT_INSTRUMENT_ID
+            && atomic_units.get() > MAX_TRACE_CREDIT_MICROCREDITS
+        {
+            return Err(ContractError::TraceCreditOutOfRange);
         }
         Ok(Self {
             instrument_id,
@@ -604,6 +612,8 @@ pub enum ContractError {
     AtomicUnitOverflow,
     #[error("the award does not use the Trace Credit instrument")]
     NotTraceCredit,
+    #[error("a Trace Credit award exceeds the credit ledger's signed 64-bit range")]
+    TraceCreditOutOfRange,
     #[error("settlement operation references must be SHA-256 hashes")]
     InvalidSettlementReference,
     #[error("settlement operations do not exactly match the score awards")]
@@ -2288,6 +2298,32 @@ mod tests {
         assert_eq!(
             loaded.matches_score(&ScoreDecision { awards: other }),
             Err(ContractError::SettlementOperationMismatch)
+        );
+    }
+
+    #[test]
+    fn trace_credit_awards_fit_the_credit_ledger() {
+        let ledger_max = AtomicUnits::from_raw(i64::MAX as u64);
+        let over = AtomicUnits::from_raw(i64::MAX as u64 + 1);
+        assert!(InstrumentAward::new(InstrumentId::trace_credit(), ledger_max).is_ok());
+        assert_eq!(
+            InstrumentAward::new(InstrumentId::trace_credit(), over),
+            Err(ContractError::TraceCreditOutOfRange)
+        );
+        assert_eq!(
+            InstrumentAward::trace_credit(Microcredits::from_raw(u64::MAX)),
+            Err(ContractError::TraceCreditOutOfRange)
+        );
+        // Other instruments keep the full range the settlement table stores.
+        let rebate = InstrumentId::new("storage_rebate").unwrap();
+        assert!(InstrumentAward::new(rebate, AtomicUnits::from_raw(u64::MAX)).is_ok());
+        // A loaded award is bounded too.
+        assert!(
+            serde_json::from_value::<InstrumentAward>(serde_json::json!({
+                "instrument_id": "trace_credit",
+                "atomic_units": i64::MAX as u64 + 1,
+            }))
+            .is_err()
         );
     }
 
