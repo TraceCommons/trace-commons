@@ -1,245 +1,187 @@
 # Connect-and-Forget Contribution Consent — Design
 
 Date: 2026-09-23
-Status: draft for review
-Scope: `trace-commons-contributor` (`daemon/policy.rs`, `daemon/uploader.rs`,
-`daemon/eligibility.rs`, `consent_copy.rs`), the onboarding surface in each
-shell, and one server-side visibility change
-(`TraceCorpusStatus::AwaitingPiiBackstop`). No production code in this PR.
-Motivated by `docs/contributor-ux-review.md`.
+Status: revised after review (rev 2)
+Extends: [`2026-08-31-contributor-trust-by-default-design.md`](2026-08-31-contributor-trust-by-default-design.md) (#507)
+Source: [`../../contributor-ux-review.md`](../../contributor-ux-review.md)
+Scope: `trace-commons-contributor` (`daemon/policy.rs`, `daemon/watcher.rs`,
+`daemon/queue.rs`, `daemon/uploader.rs`, `consent_copy.rs`), the onboarding
+surface in each shell. No production code in this PR.
+
+> **Rev 2.** The first revision proposed flipping the default to automatic
+> contribution and derived a routing rule from `residual_risk`. Review showed
+> the rule does not hold for most contributors, and that #507 had already
+> decided this question and named the prerequisite. This revision keeps the
+> product goal, drops the blanket default, and reorganises around two
+> first-class paths. The corrections are recorded in "What review established"
+> rather than quietly absorbed.
 
 ## What this is
 
-Today a contributor approves sessions. The product asks them to be the last
-check before anything leaves the machine, once per session or once per project
-after they have earned the right to stop being asked.
+The product brief's Flow 1: *connect → consent → contribute automatically →
+earn*. The UX review's ask is narrower and better stated: *"exclude
+selectively, rather than approve continuously."*
 
-The proposal is the flow the product brief calls connect-and-forget:
+## The prior decision this has to answer
 
-> Connect → consent to automatically contribute scrubbed sessions → sessions
-> are scrubbed → contributed → earn
+#507 was written from the same UX review and reached a conclusion this design
+initially contradicted without citing it. Its Pile 3 is the binding part:
 
-The UX review states the case plainly: *"I do not really want to become the
-privacy filter myself. I want to understand and consent to the privacy model
-once, then trust the app to apply it."*
+> A *global* automatic default should wait on a local content pass, not just a
+> key-name pass. Until then the product promise for auto-armed projects is
+> "you decided this project is safe", not "we guarantee it is."
 
-This spec is about what has to be true for that sentence to be honest.
+And its Pile 2 kept onboarding ask-first, quoting
+`OnboardingProjectsView.swift:15`:
 
-## The thing worth saying first
+> arming automation before the contributor has seen a single preview asks for
+> trust they have no basis to give yet.
 
-**Connect-and-forget does not remove a consent gate. It relocates one.** The
-gate moves from per-session approval to a per-policy grant, and the safety
-burden moves from a human backstop onto two machine backstops. Both of those
-backstops already exist. The design's whole job is to make that shift honest
-rather than silent.
+**That prerequisite is still unmet, and this spec's own research confirms it
+independently.** Rev 1 read the redactor and found two mechanisms of different
+reliability — nine deterministic credential patterns plus email and path
+passes, and an optional LLM prose filter. Review then established the part rev
+1 missed: **the prose filter is not configured on any production path.** Every
+config writer sets `pii_filter: None` (`commands.rs:66`, `:182`,
+`account_onboarding.rs:913`, `nearai_onboarding.rs:413`), and
+`envelope.rs:105-106` returns a deterministic-only redactor for `None`.
 
-It is also worth being clear about how much of this is already built, because
-the answer is most of it.
+So #507's "not just a key-name pass" is still the shipped state for
+contributors without a witness. **This spec therefore does not propose a
+blanket automatic default.** It proposes the two-path model below, in which the
+automatic path is available only where its disclosure is true.
 
-| Capability | Where it lives | State |
-|---|---|---|
-| Per-project unattended upload | `daemon/policy.rs`, `ProjectMode::AutoUpload` | built |
-| "Session is finished" inference | `daemon/eligibility.rs` | built |
-| Unattended upload pipeline with re-hash and input-fingerprint guards | `daemon/uploader.rs` | built |
-| Batched digest instead of per-session prompts | `daemon/settings.rs`, `digest_interval_secs` (4h default) | built |
-| Independent server-side PII backstop, held out of distribution | `trace_corpus_storage.rs`, `TraceCorpusStatus::AwaitingPiiBackstop` | built |
-| Withdrawal after the fact | `withdraw.rs`, `POST /v1/account/traces/{id}/withdraw` | built |
-| Publishable list of what the scrubber looks for | `secret_leak_pattern_names()` | built |
+## What review established
 
-What is missing is not a subsystem. It is the onboarding path that grants
-`AutoUpload` at connect time, the copy that makes that grant truthful, and the
-fallback rules that decide which sessions are *not* eligible for it.
+Recorded rather than absorbed, because several are reversals.
 
-## Four places where the current design says the opposite
+**The routing rule in rev 1 was wrong.** `residual_risk != High` cannot
+distinguish "no prose model ran" from "a model ran and found nothing".
+`coverage_incomplete` is set only for *a configured* backend
+(`trace_contribution.rs:3901-3903`), so with `pii_filter: None` the prose step
+returns silently, `message_text_included` yields Medium, and the session
+auto-uploads having had no model pass at all — while `AUTO_SCRUB_SCOPE` claims
+a model removed names and employers. Additionally `key_finding_detected` is set
+only in `classify_structured_payload_node`, which only the server backstop
+reaches (`:5247`, `:5422`), so client-side High mostly means "a field over
+32,000 bytes" (`:5089-5091`).
 
-Each of these is a deliberate decision with a written rationale. None should be
-reversed by accident.
+**Rev 1 contradicted itself.** Its body held sessions that hit a secret-leak
+pattern; its addendum's rule mapped `blocked_secret_detected` to Medium and
+uploaded them, while presenting that as clarification. **The body's rule wins**:
+all nine patterns are High/Critical (`:4318-4323`), the flag can be true over a
+*partially* removed secret (`:3582-3587`), and `README.md:343-350` requires
+review before submitting a surviving bearer-token shape.
 
-### 1. The arming threshold inverts
+**`AwaitingPiiBackstop` is not a standing check.** It is an operator opt-in that
+ships disabled (`TRACE_COMMONS_PII_BACKSTOP_ENABLED`), applies only when
+`risk_status == Accepted && carries_raw_content`, and is skipped under a witness
+bypass. Rev 1 leaned on it as a compensating control. It cannot be one, and
+client copy must not promise a server-side second check the client cannot
+observe.
 
-`policy.rs` offers to arm a project only after five successful contributions:
+**The witness path was missing entirely.** For NEAR AI-login and wallet
+enrollees, sessions leave the machine **raw and unredacted** for the redaction
+witness (`submit.rs:1256-1300`; `witness/mod.rs:5-6` calls it "the largest
+disclosure in this system"). Today that is disclosed per session and refused
+without `raw_session_confirmed` (`ipc.rs:3581-3587`). Automatic contribution
+removes that step and nothing replaced it.
 
-> Five, because the offer has to be backed by evidence the contributor actually
-> has. Arming asks someone to stop reading previews from a project; the only
-> honest basis for that question is that they have read several already and kept
-> approving. One or two is a coincidence.
+**The grant would not have been prospective.** At connect every project is newly
+discovered and arming has no cool-off, so the entire settled backlog is approved
+within about two polls and uploads before any digest names a project
+(`eligibility.rs:80-85`, `watcher.rs:592-594`).
 
-Connect-and-forget grants the same autonomy at zero. That is not a small
-parameter change — it removes the stated basis for the grant.
+**Several mechanisms rev 1 relied on do not reach far enough.** `Ignore` refuses
+only Pending entries and `drain_approved` never re-reads the mode
+(`queue.rs:780-784`, `mod.rs:557-566`), so exclusion does not stop an in-flight
+backlog. Policy lookup falls back to `NotifyOnly` on a key miss
+(`policy.rs:314-319`) — a fallback that becomes silent arming if the default is
+implemented by changing it. Withdrawal is not durable: a withdrawn session that
+is resumed and grows re-uploads under a new `submission_id`
+(`eligibility.rs:141-157`). The digest cannot deliver a first-contribution
+notice — it names three projects alphabetically, records no first contribution,
+and has no replay (`notify.rs:113-118`, `mod.rs:1286-1303`).
 
-**Proposal.** The basis changes rather than disappearing. Today it is
-*contributor evidence*: you have seen five of these and they were fine. Under
-connect-and-forget it becomes *disclosed mechanism*: you were told precisely
-what the scrubber removes, what it cannot promise, and what you can do
-afterwards. That is a weaker basis and the spec should say so out loud rather
-than claim equivalence. It is defensible only if the disclosure is specific,
-which is finding 3.
+**Smaller corrections.** Subagent transcripts merge into the parent session; the
+guard that keeps staged trajectory imports from auto-uploading is the watcher's
+`from_staging` check, not the unknown-project bucket. `input_fingerprint` does
+not include the session hash and does cover consent scopes, witness and
+endpoints (`preview.rs:295-331`); "pattern-set version" names nothing in the
+code, and neither `REDACTION_RULESET_VERSION` nor the crate version tracks
+`secret_leak_patterns` — #544 added `cursor_api_key` without moving either, so a
+real pattern-set digest is needed. #989 was closed by #990, this branch's own
+base commit.
 
-`ARMING_SUGGESTION_THRESHOLD` should not be deleted. It still governs the
-review-everything mode, which the UX review keeps as an option.
+## The proposal: two paths, both first-class
 
-### 2. Per-project specificity is load-bearing, and connect time has no projects
+Adopted from review. Connect asks one question, and neither answer is an
+advanced setting.
 
-`policy.rs` opens:
+**Automatic** — contribute without per-session review, for contributors whose
+work is safe to share by default.
 
-> Autonomy is per-project and opt-in. An unknown project is `NotifyOnly`, so a
-> freshly installed daemon uploads nothing until the contributor has
-> deliberately said otherwise **about a specific project**.
+**Choose myself** — per-folder and per-session control, for contributors doing
+client, employer or otherwise sensitive work. This is not "review-everything
+mode" hidden in settings; it is half the product.
 
-At connect time there is no list of specific projects to say it about. A blanket
-"everything, including things I have not opened yet" grant is a different act
-from the one the current model was built around.
+Whichever is chosen becomes **the default mode for newly discovered folders**,
+which is the only new policy concept required: today `ProjectMode` is per
+project with a hardcoded `NotifyOnly` fallback, and this adds a
+contributor-owned default that the fallback reads.
 
-**Proposal.** The grant is prospective but not silent. `AutoUpload` becomes the
-default mode for newly discovered projects, and every newly discovered project
-produces a first-contribution notice naming it — not a prompt, a notice, in the
-digest the UX review already asks for ("12 conversations contributed"). The
-contributor learns a new repository started contributing on the first digest
-after it did, not never.
+Required properties, each of which review showed is currently absent:
 
-**Non-negotiable:** `UNKNOWN_PROJECT_KEY` stays permanently `NotifyOnly`.
-`policy.rs` locks it because the daemon cannot attribute those sessions to a
-project, and therefore cannot honour any opt-in or any later exclusion for them.
-Subagent transcripts and normalized trajectory files land there. A blanket grant
-must not reach that bucket, or "exclude this project" becomes unenforceable for
-the sessions most likely to need it.
+1. **Per-folder selection at connect and after.** Onboarding screen 5 already
+   lists discovered projects; it gains Automatic / Ask me / Never. `Never` must
+   take effect on entries already Approved but not yet uploaded, which means
+   `drain_approved` re-reading policy.
+2. **Per-session control in ask-first folders**, with three invariants: bulk
+   approval never sends a session held for review; a decline is permanent across
+   logout and re-grant; a withdrawn session is never re-offered or re-sent.
+3. **A per-entry held-for-review state.** Today a risk verdict exists only
+   inside `submit_loaded`, and returning an entry to Pending makes the watcher
+   re-approve it next poll — a rebuild/classify/revoke loop that the digest never
+   counts. The hold must be a queue state the watcher respects and bulk approval
+   excludes.
+4. **A revocation path.** Switching from automatic to choose-myself, globally or
+   per folder, taking effect on everything not yet uploaded. Today no such path
+   exists: per-project changes touch only Pending, there is no global default
+   switch in `DaemonSettings`, and the only global stops are pause, source-off
+   and CLI logout — which wipes the record of declines.
+5. **Migration.** Existing contributors keep their per-project modes and stay
+   ask-first for new folders unless they opt in. `ProjectMode::more_restrictive`
+   exists because *"a merge may only ever ask more permission than before, never
+   less."*
+6. **A rule for the pre-existing backlog.** Only sessions first seen after the
+   grant, or a mandatory preview of the backlog. Not the current behaviour,
+   which uploads a contributor's whole history in about a minute.
 
-### 3. `GATE_STATEMENT` becomes false
+## When is the automatic path's disclosure true?
 
-The sentence is:
+The automatic path may run only where the sentence shown at connect is
+actually true of the session. That is a narrower condition than rev 1 proposed
+and it is the honest one:
 
-> "Exactly what would be sent" is the exact text that would leave this machine.
-> Pattern-based scrubbing may have missed something in it, and nothing here
-> checks that you looked.
+- **A prose pass actually ran.** `pii_filter` configured, or a witness present.
+  With neither, there is no model and the disclosure's second clause is false.
+  Treat "no filter configured" as disqualifying, not as Low risk.
+- **No secret-leak pattern hit.** Per the body's rule above, not the addendum's.
+- **`residual_risk` is not High**, as a floor rather than the whole test.
 
-Under automatic contribution there is no "exactly what would be sent" screen and
-nothing for anyone to have looked at. The sentence cannot survive unchanged, and
-it must not simply be dropped: its doc comment records that it is what survived
-when the acknowledgement checkbox was removed, kept precisely because the
-*claim* had to outlive the friction.
+This is deliberately restrictive. It means that today, for most contributors,
+**the automatic path is not available at all** — which is the same conclusion
+#507 reached, arrived at from the disclosure rather than from the threat model.
+Widening it is the local-content-pass slice #507 named, and that slice is the
+prerequisite for connect-and-forget being the default experience rather than an
+option for contributors who have configured a filter.
 
-**Proposal.** A parallel constant in `consent_copy.rs` for the automatic path,
-stating what is actually true of it:
+## The disclosure
 
-- what the scrubber removes, enumerated from `secret_leak_pattern_names()` —
-  the names are already publishable by design, the regexes deliberately are not;
-- that it is pattern-based and may miss things, which is unchanged and must stay;
-- **that no person reviews a session before it is sent** — the new fact, and the
-  one the old sentence never had to state;
-- that there is a second, independent check server-side before anything is
-  distributed (finding 4), and what withdrawal does afterwards.
-
-This constant must be covered by `harness_copy_is_central.rs`. Note that scanner
-currently hardcodes a path list of exactly three shells and has no needle for
-`.tsx`, so a fourth shell would not be held to it — see the discussion on #963.
-
-### 4. The approval-binding property loses its anchor
-
-`uploader.rs` describes what it calls the central consent property of the whole
-daemon: an approval pins an input fingerprint, and for a previewed entry the
-exact bytes shown are written to disk and re-sent verbatim rather than
-re-derived.
-
-Under connect-and-forget nothing was previewed, so there are no pinned bytes.
-The input-fingerprint guard still functions — it pins the session hash, the
-filter selection, the backend and model, the consent scopes, the identity and
-endpoints — but the property it protects changes from *"you saw these exact
-bytes"* to *"the mechanism you consented to is the mechanism that ran."*
-
-**Proposal.** Make that explicit and enforce it. The policy grant records the
-filter configuration it was given under — backend, model, pattern-set version.
-A change to any of them reverts affected projects to `NotifyOnly` until the
-contributor re-consents. If the consent is to a mechanism rather than to bytes,
-then changing the mechanism must void the consent. This is the direct analogue
-of the existing re-offer on fingerprint mismatch, lifted from the session to the
-policy.
-
-## What compensates for the missing human
-
-Three controls, all on substrate that exists.
-
-**Auto-contribute only the confident path.** A session whose local redaction hits
-a secret-leak pattern, or which ran while the LLM privacy filter was unavailable
-or degraded, does not auto-upload. It falls back to `NotifyOnly` and appears in
-the digest as needing a look. Automatic contribution is for sessions the scrubber
-had no trouble with; the human comes back exactly where the machine is unsure.
-This is the substantive safety mechanism in the proposal and it is the one most
-worth arguing about.
-
-**Make the server-side backstop load-bearing and visible.**
-`AwaitingPiiBackstop` is documented as *"Never consumer/export/credit eligible
-and never reviewer-eligible."* Today it is a second opinion behind a human first
-opinion. Under connect-and-forget it becomes the only independent check between
-a bad scrub and distribution. That is a promotion, and it should be stated in
-the design and surfaced in the app rather than left as server-side detail.
-
-**Keep exclusion cheap and retroactive.** The UX review's framing — *"exclude
-selectively, rather than approve continuously"* — is right, and it only holds if
-exclusion works after the fact. Withdrawal exists. Note that #989 reports
-withdrawal currently returns `credit_retained: true` while unsettled credit
-never settles; connect-and-forget raises the volume flowing through that path
-and makes it more load-bearing.
-
-## Open questions
-
-- **Legal posture.** Moving from per-session approval to a one-time grant is
-  plausibly a different consent basis, not a UI change.
-  `docs/legal-counsel-review-checklist.md` should be run against this before it
-  ships.
-- **Corpus quality and credit.** Auto-contribution raises volume and probably
-  raises duplication. Interaction with the dedup work (#975, #980, #985) and with
-  credit quality (#969) is unmodelled here.
-- **Does a blanket grant have a scope ceiling?** `ConsentScope` distinguishes
-  `benchmark_only` through `model_training` and `public_attribution`. Whether a
-  connect-time grant should reach the widest scopes, or cap at something
-  narrower until the contributor widens it deliberately, is not settled here.
-- **Migration.** What happens to existing contributors with per-project policies
-  and earned arming offers. They should not be silently widened; `ProjectMode`'s
-  `more_restrictive` merge rule exists because *"a merge may only ever ask more
-  permission than before, never less."*
-
-## Not in scope
-
-No production code in this PR. The onboarding flow itself (Flow 1 of Epic 1),
-the settings surface for review-everything mode, and the digest redesign are
-each their own slice.
-
----
-
-# Addendum: the disclosure, written first
-
-Finding 3 above said a parallel constant is needed and did not say what it
-would contain. This addendum writes it, because the sentence you can honestly
-show someone at connect time constrains every other choice in the flow, and it
-is the cheapest thing to get wrong late.
-
-## What the scrubber actually does
-
-Writing the sentence forced a reading of the redactor, and the finding is that
-it is **two mechanisms with different reliability**, which the current single
-sentence flattens into one claim.
-
-**Deterministic.** Fixed patterns, near-certain for the formats they cover.
-`secret_leak_patterns()` holds nine: `openai_api_key`, `github_token`,
-`aws_access_key`, `provider_token`, `cursor_api_key`, `jwt`, `npm_token`,
-`google_api_key`, `pem_header_orphan`. Alongside them
-`redact_private_emails`, `redact_known_paths` and `redact_generic_paths`
-handle addresses and identifying paths.
-
-**Probabilistic.** `redact_text_through_prose_filter` — an LLM. Everything
-that is not a known format: names, employers, customer identifiers, a
-credential someone typed into a sentence rather than pasted as a token.
-
-The first can be promised. The second cannot. `GATE_STATEMENT` today says
-"pattern-based scrubbing may have missed something", which is true of both but
-tells the contributor nothing about which half is which — acceptable when a
-human was about to read the transcript anyway, and not acceptable when nobody
-is.
-
-## The proposed constants
-
-Four sentences, in `consent_copy.rs`, covered by `harness_copy_is_central.rs`.
-Written to be shown together at the moment automatic contribution is granted.
+Four constants in `consent_copy.rs`. Note that `harness_copy_is_central.rs`
+scans six harness files for `HARNESS_*` fields only; macOS and Windows receive
+consent copy through the three-field `ConsentCopy` payload, so new constants
+reach GTK alone unless that payload is extended.
 
 ```rust
 /// What runs on every session, split by how much it can be trusted.
@@ -251,94 +193,56 @@ pub const AUTO_SCRUB_LIMIT: &str = "The patterns are reliable for the formats th
 /// The new fact. The old gate never had to state it.
 pub const AUTO_NO_REVIEW: &str = "No one looks at a session before it is sent, including you.";
 
-/// What reversal actually is. See "The holdback question" below -- this is
-/// the sentence if there is no holdback window, and it is the weaker one.
-pub const AUTO_REVERSAL: &str = "You can withdraw any session at any time, from History. Withdrawing stops further use, and anything already shared stays shared.";
+/// Reversal, stated at what it actually is.
+pub const AUTO_REVERSAL: &str = "You can withdraw any session at any time, from History. Withdrawing before it has been shared deletes it. After that it stops further use, and anything already shared stays shared.";
 ```
 
-`AUTO_NO_REVIEW` is the sentence the product will most want to soften, and it
-is the one that must not be softened. It is the entire difference between this
-flow and the current one.
+`AUTO_NO_REVIEW` is the sentence the product will most want to soften and the
+one that must not be. Three constraints on the set:
 
-## What writing it first revealed
+- **`AUTO_SCRUB_SCOPE` is only true where a prose pass ran**, which is why the
+  eligibility rule above gates on it rather than showing this sentence
+  regardless.
+- **A witness enrollee needs a fifth sentence.** Their sessions leave raw. The
+  per-session `witness_copy.rs:685` disclosure is being removed by this flow and
+  has no replacement.
+- **No constant may promise a server-side check.** The client cannot see whether
+  the backstop is enabled.
 
-The two-tier split gives a **principled definition of the confident path**,
-which the body of this spec proposed and left hand-waved as "the scrubber had
-no trouble". Better than that: the verdict already exists and does not need
-inventing.
+`AUTO_SCRUB_SCOPE` also currently over- and under-states the deterministic tier:
+path redaction is a case-sensitive exact match plus a POSIX-only regex, so a
+Windows drive letter or doubled-backslash JSON ships the username; and "blind to
+everything else" ignores the cue-gated contextual-entropy pass that removes
+`password: <high-entropy value>` with no model. Both need the wording revised
+against `trace_contribution.rs:4528-4543` and `:3423-3424` before this is final.
 
-`residual_risk(consent, report) -> ResidualPiiRisk::{Low, Medium, High}`
-already reduces a pass to a tier, and its cases line up with the disclosure
-almost exactly:
+## What is not a control
 
-- `key_finding_detected` -> **High**. A classifier flagged an object *key*,
-  which redaction cannot resolve in place.
-- `coverage_incomplete` -> **High**. The filter was unavailable, errored, or
-  left content unexamined. The comment is the right one: *"Absence of findings
-  under a broken filter is not evidence of cleanliness."*
-- `blocked_secret_detected`, or a severity-bearing label -> **Medium**. The
-  deterministic tier found things and removed them.
-- message text / tool payloads / correction included -> **Medium**.
-- otherwise **Low**.
+`ARMED_SETTLE_SECS` is 24h and armed sessions do sit Pending for it, which looks
+like a settle window that could serve as the reversal period. Its own doc
+comment forbids that reading:
 
-**So the routing rule is `residual_risk != High`.** Auto-contribute everything
-that is not High; send High to the review queue.
+> it is not a control, and nothing should be built on it as though it were
 
-The tempting rule -- auto-contribute only `Low` -- is wrong, and the codebase
-already records why. `consent.message_text_included` alone forces Medium, and
-a real coding session always includes message text, so `Low` is nearly empty
-in practice. `RedactionReport::blocked_secret_detected`'s doc comment records
-the same mistake being made once already: *"Treating it as evidence of danger
-is what made every real coding session High (issue #373)."* Medium is the
-normal, healthy state of a real session, not a warning.
-
-High is the honest boundary because High means precisely **the mechanism could
-not do what the disclosure says it does** -- the filter could not vouch for the
-text, or it found something redaction cannot fix. That is the sentence failing,
-not a risk score crossing a tuned threshold:
-
-| | `residual_risk` | Claim available | Route |
-|---|---|---|---|
-| Mechanism worked as described | Low / Medium | the disclosure holds | auto-contribute |
-| Mechanism could not vouch | High | the disclosure does not hold | review queue |
-
-The fallback is therefore not a heuristic anyone has to tune. It is the
-boundary of the sentence, and it is already computed on every pass.
+because both inputs are contributor-manipulable (file mtime and wall clock). It
+protects someone from sending an unfinished session, not from a mistaken grant.
+Any real holdback would have to be server-side, and the earlier holdback
+proposal is withdrawn on those grounds rather than on the grounds rev 1 gave.
 
 ## Open
 
-- **The holdback question, for review.** An earlier draft of `AUTO_REVERSAL`
-  promised a window -- contributed automatically, but held undistributed for
-  some hours, cancellable from History -- as the thing replacing the review
-  step. **The current position is that this is not needed**, and the constant
-  above reflects that. Recorded here because it is a genuine fork and is worth
-  a second opinion rather than a silent decision.
-
-  The case for not building it: three backstops remain without it. The
-  `residual_risk != High` routing keeps unvouched sessions out of the automatic
-  path entirely, the server-side `AwaitingPiiBackstop` re-check still runs
-  independently of anything the contributor does, and withdrawal already works
-  and works forever.
-
-  The case for it: withdrawal is post-distribution, so it stops further use but
-  cannot un-share. Without a window there is no point at which a contributor
-  can cleanly undo an automatic decision, and `AUTO_NO_REVIEW` -- "no one looks
-  at a session before it is sent, including you" -- stands on its own. Note
-  also that the mechanism may be nearly free: `AwaitingPiiBackstop` is already
-  a held state documented as never consumer, export, credit or reviewer
-  eligible, so the work could be exposing an existing hold rather than building
-  a new one. How long submissions actually sit there today has not been
-  measured.
-- **Measure the High rate on the pilot corpus.** This is the number that
-  decides whether "forget" is true in practice, and it is measurable today
-  without building anything: what fraction of real sessions come out High.
-  If it is small, the review queue is a rare interruption and the flow works
-  as advertised. If it is large, connect-and-forget interrupts often enough
-  that the premise fails -- and the answer is to widen the deterministic tier,
-  or to fix whatever is driving `coverage_incomplete`, rather than to relax the
-  routing rule until the sentence stops being true.
-- **Which High causes are actually filter reliability rather than content.**
-  `coverage_incomplete` forces High when a backend errored or was unavailable.
-  That is an availability problem wearing a privacy verdict's clothes, and
-  under connect-and-forget it converts directly into review-queue volume. Worth
-  separating before the rate above is interpreted.
+- **Measure, on the pilot corpus, how many sessions would qualify** under the
+  eligibility rule above. If the answer isnear zero without a configured filter,
+  that is the argument for scheduling the local content pass, and the number to
+  put in front of it. Note the earlier plan to read `trace_submissions.privacy_risk`
+  measures the server's re-scored value over sessions that survived client
+  refusals — a different population. `residual_risk_basis` (#474, V52) already
+  provides the cause breakdown.
+- **Does the automatic path ship before the local content pass exists?** On this
+  spec's own rule it would be available to almost nobody. Shipping the two-path
+  UI anyway has value — it makes the choice legible and is the revocation
+  surface — but the "forget" half stays mostly theoretical until the pass lands.
+- **Legal posture**, unchanged and now sharper: a one-time grant is a different
+  consent basis, and review established that withdrawing it is currently much
+  harder than giving it. `docs/legal-counsel-review-checklist.md` should be run
+  against this.
