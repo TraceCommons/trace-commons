@@ -917,6 +917,7 @@ impl InstrumentSettlement {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(try_from = "AdmissionEvidenceFields")]
 pub struct AdmissionEvidence {
     pub request_content_hash: String,
     // No validity flag has a serde default: a stored record that lacks one
@@ -932,6 +933,45 @@ pub struct AdmissionEvidence {
     pub detector_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub privacy_risk: Option<PrivacyRisk>,
+}
+
+/// Loaded `AdmissionEvidence`. `validate` runs again, so a stored hash cannot
+/// skip the check the output path uses.
+#[derive(Deserialize)]
+struct AdmissionEvidenceFields {
+    request_content_hash: String,
+    schema_valid: bool,
+    authority_valid: bool,
+    contribution_path_valid: bool,
+    grant_valid: bool,
+    consent_valid: bool,
+    allowed_uses_valid: bool,
+    quota_counted: bool,
+    #[serde(default)]
+    detector_ids: Vec<String>,
+    #[serde(default)]
+    privacy_risk: Option<PrivacyRisk>,
+}
+
+impl TryFrom<AdmissionEvidenceFields> for AdmissionEvidence {
+    type Error = ContractError;
+
+    fn try_from(fields: AdmissionEvidenceFields) -> Result<Self, Self::Error> {
+        let evidence = Self {
+            request_content_hash: fields.request_content_hash,
+            schema_valid: fields.schema_valid,
+            authority_valid: fields.authority_valid,
+            contribution_path_valid: fields.contribution_path_valid,
+            grant_valid: fields.grant_valid,
+            consent_valid: fields.consent_valid,
+            allowed_uses_valid: fields.allowed_uses_valid,
+            quota_counted: fields.quota_counted,
+            detector_ids: fields.detector_ids,
+            privacy_risk: fields.privacy_risk,
+        };
+        evidence.validate()?;
+        Ok(evidence)
+    }
 }
 
 /// Residual privacy risk that Admission reads. The wire values match the
@@ -956,6 +996,7 @@ pub struct AdmissionEvaluation {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(try_from = "ReviewEvidenceFields")]
 pub struct ReviewEvidence {
     pub source_content_hash: String,
     /// Hash of the approved bytes. Equals `source_content_hash` for a
@@ -971,6 +1012,39 @@ pub struct ReviewEvidence {
     pub human_assessment_hash: Option<String>,
     #[serde(default)]
     pub resolved_quarantine_reasons: Vec<ReasonCode>,
+}
+
+#[derive(Deserialize)]
+struct ReviewEvidenceFields {
+    source_content_hash: String,
+    result_content_hash: String,
+    content_changed: bool,
+    #[serde(default)]
+    worker_identity: Option<String>,
+    #[serde(default)]
+    transformation_metadata_hash: Option<String>,
+    #[serde(default)]
+    human_assessment_hash: Option<String>,
+    #[serde(default)]
+    resolved_quarantine_reasons: Vec<ReasonCode>,
+}
+
+impl TryFrom<ReviewEvidenceFields> for ReviewEvidence {
+    type Error = ContractError;
+
+    fn try_from(fields: ReviewEvidenceFields) -> Result<Self, Self::Error> {
+        let evidence = Self {
+            source_content_hash: fields.source_content_hash,
+            result_content_hash: fields.result_content_hash,
+            content_changed: fields.content_changed,
+            worker_identity: fields.worker_identity,
+            transformation_metadata_hash: fields.transformation_metadata_hash,
+            human_assessment_hash: fields.human_assessment_hash,
+            resolved_quarantine_reasons: fields.resolved_quarantine_reasons,
+        };
+        evidence.validate()?;
+        Ok(evidence)
+    }
 }
 
 impl ReviewEvidence {
@@ -1139,6 +1213,7 @@ impl ReviewOutput {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(try_from = "ScoreEvidenceFields")]
 pub struct ScoreEvidence {
     pub fixed_awards: InstrumentAwards,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1195,6 +1270,98 @@ pub struct ScoreEvidence {
     pub credit_quality_version: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub neighbor_artifact_hash: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ScoreEvidenceFields {
+    fixed_awards: InstrumentAwards,
+    #[serde(default)]
+    embedding_artifact_hash: Option<String>,
+    #[serde(default)]
+    index_id: Option<String>,
+    #[serde(default)]
+    index_snapshot_id: Option<String>,
+    #[serde(default)]
+    index_snapshot_hash: Option<String>,
+    #[serde(default)]
+    scorer_model_id: Option<String>,
+    #[serde(default)]
+    embedder_model_id: Option<String>,
+    #[serde(default)]
+    projection_id: Option<String>,
+    #[serde(default)]
+    projection_input_hash: Option<String>,
+    #[serde(default)]
+    perplexity_micros: Option<u64>,
+    #[serde(default)]
+    tail_fraction_micros: Option<u64>,
+    #[serde(default)]
+    novelty_score_micros: Option<u64>,
+    #[serde(default)]
+    peak_perplexity_micros: Option<u64>,
+    #[serde(default)]
+    peak_novelty_micros: Option<u64>,
+    #[serde(default)]
+    quality_passed: Option<bool>,
+    #[serde(default)]
+    novelty_passed: Option<bool>,
+    #[serde(default)]
+    nearest_neighbor_hash: Option<String>,
+    #[serde(default)]
+    index_cardinality: Option<u64>,
+    #[serde(default)]
+    coverage_tokens: Option<u64>,
+    #[serde(default)]
+    chunk_count: Option<u32>,
+    #[serde(default)]
+    total_chunk_count: Option<u32>,
+    #[serde(default)]
+    chunks_capped: Option<bool>,
+    #[serde(default)]
+    include_eligible: Option<bool>,
+    #[serde(default)]
+    credit_quality_micros: Option<u64>,
+    #[serde(default)]
+    credit_quality_version: Option<i32>,
+    #[serde(default)]
+    neighbor_artifact_hash: Option<String>,
+}
+
+impl TryFrom<ScoreEvidenceFields> for ScoreEvidence {
+    type Error = ContractError;
+
+    fn try_from(fields: ScoreEvidenceFields) -> Result<Self, Self::Error> {
+        let evidence = Self {
+            fixed_awards: fields.fixed_awards,
+            embedding_artifact_hash: fields.embedding_artifact_hash,
+            index_id: fields.index_id,
+            index_snapshot_id: fields.index_snapshot_id,
+            index_snapshot_hash: fields.index_snapshot_hash,
+            scorer_model_id: fields.scorer_model_id,
+            embedder_model_id: fields.embedder_model_id,
+            projection_id: fields.projection_id,
+            projection_input_hash: fields.projection_input_hash,
+            perplexity_micros: fields.perplexity_micros,
+            tail_fraction_micros: fields.tail_fraction_micros,
+            novelty_score_micros: fields.novelty_score_micros,
+            peak_perplexity_micros: fields.peak_perplexity_micros,
+            peak_novelty_micros: fields.peak_novelty_micros,
+            quality_passed: fields.quality_passed,
+            novelty_passed: fields.novelty_passed,
+            nearest_neighbor_hash: fields.nearest_neighbor_hash,
+            index_cardinality: fields.index_cardinality,
+            coverage_tokens: fields.coverage_tokens,
+            chunk_count: fields.chunk_count,
+            total_chunk_count: fields.total_chunk_count,
+            chunks_capped: fields.chunks_capped,
+            include_eligible: fields.include_eligible,
+            credit_quality_micros: fields.credit_quality_micros,
+            credit_quality_version: fields.credit_quality_version,
+            neighbor_artifact_hash: fields.neighbor_artifact_hash,
+        };
+        evidence.validate()?;
+        Ok(evidence)
+    }
 }
 
 impl ScoreEvidence {
@@ -1507,6 +1674,7 @@ impl fmt::Debug for ScoreOutput {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(try_from = "SettleEvidenceFields")]
 pub struct SettleEvidence {
     pub index_operation_required: bool,
     pub settlement_operations_required: u32,
@@ -1520,6 +1688,40 @@ pub struct SettleEvidence {
     pub submission_operable: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guard_reason: Option<ReasonCode>,
+}
+
+#[derive(Deserialize)]
+struct SettleEvidenceFields {
+    index_operation_required: bool,
+    settlement_operations_required: u32,
+    #[serde(default)]
+    index_command_hash: Option<String>,
+    #[serde(default)]
+    settlement_progress: Vec<InstrumentSettlementProgress>,
+    #[serde(default)]
+    index_progress: Option<String>,
+    #[serde(default)]
+    submission_operable: Option<bool>,
+    #[serde(default)]
+    guard_reason: Option<ReasonCode>,
+}
+
+impl TryFrom<SettleEvidenceFields> for SettleEvidence {
+    type Error = ContractError;
+
+    fn try_from(fields: SettleEvidenceFields) -> Result<Self, Self::Error> {
+        let evidence = Self {
+            index_operation_required: fields.index_operation_required,
+            settlement_operations_required: fields.settlement_operations_required,
+            index_command_hash: fields.index_command_hash,
+            settlement_progress: fields.settlement_progress,
+            index_progress: fields.index_progress,
+            submission_operable: fields.submission_operable,
+            guard_reason: fields.guard_reason,
+        };
+        evidence.validate()?;
+        Ok(evidence)
+    }
 }
 
 impl SettleEvidence {
@@ -1593,12 +1795,38 @@ pub enum ReviewRecommendation {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(try_from = "HumanReviewAssessmentFields")]
 pub struct HumanReviewAssessment {
     pub assessment_id: Uuid,
     pub recommendation: ReviewRecommendation,
     pub reason: ReasonCode,
     pub resolved_quarantine_reasons: Vec<ReasonCode>,
     pub evidence_hash: String,
+}
+
+#[derive(Deserialize)]
+struct HumanReviewAssessmentFields {
+    assessment_id: Uuid,
+    recommendation: ReviewRecommendation,
+    reason: ReasonCode,
+    resolved_quarantine_reasons: Vec<ReasonCode>,
+    evidence_hash: String,
+}
+
+impl TryFrom<HumanReviewAssessmentFields> for HumanReviewAssessment {
+    type Error = ContractError;
+
+    fn try_from(fields: HumanReviewAssessmentFields) -> Result<Self, Self::Error> {
+        let assessment = Self {
+            assessment_id: fields.assessment_id,
+            recommendation: fields.recommendation,
+            reason: fields.reason,
+            resolved_quarantine_reasons: fields.resolved_quarantine_reasons,
+            evidence_hash: fields.evidence_hash,
+        };
+        assessment.validate()?;
+        Ok(assessment)
+    }
 }
 
 impl HumanReviewAssessment {
@@ -2154,6 +2382,84 @@ mod tests {
     }
 
     #[test]
+    fn loaded_evidence_rejects_a_malformed_hash() {
+        use serde_json::{from_value, json, to_value};
+
+        let digest = hash(b"evidence");
+        let bad = "sha256:not-lowercase-sha256";
+
+        let admission = AdmissionEvidence {
+            request_content_hash: digest.clone(),
+            schema_valid: true,
+            authority_valid: true,
+            contribution_path_valid: true,
+            grant_valid: true,
+            consent_valid: true,
+            allowed_uses_valid: true,
+            quota_counted: true,
+            detector_ids: Vec::new(),
+            privacy_risk: None,
+        };
+        assert_eq!(
+            from_value::<AdmissionEvidence>(to_value(&admission).unwrap()).unwrap(),
+            admission
+        );
+        let mut stored = to_value(&admission).unwrap();
+        stored["request_content_hash"] = json!(bad);
+        assert!(from_value::<AdmissionEvidence>(stored).is_err());
+
+        let review = ReviewEvidence {
+            source_content_hash: digest.clone(),
+            result_content_hash: digest.clone(),
+            content_changed: false,
+            worker_identity: None,
+            transformation_metadata_hash: None,
+            human_assessment_hash: None,
+            resolved_quarantine_reasons: Vec::new(),
+        };
+        assert_eq!(
+            from_value::<ReviewEvidence>(to_value(&review).unwrap()).unwrap(),
+            review
+        );
+        let mut stored = to_value(&review).unwrap();
+        stored["human_assessment_hash"] = json!(bad);
+        assert!(from_value::<ReviewEvidence>(stored).is_err());
+
+        let score = ScoreEvidence::fixed(InstrumentAwards::default());
+        assert_eq!(
+            from_value::<ScoreEvidence>(to_value(&score).unwrap()).unwrap(),
+            score
+        );
+        let mut stored = to_value(&score).unwrap();
+        stored["nearest_neighbor_hash"] = json!(bad);
+        assert!(from_value::<ScoreEvidence>(stored).is_err());
+
+        let settle = SettleEvidence::operations(false, 0);
+        assert_eq!(
+            from_value::<SettleEvidence>(to_value(&settle).unwrap()).unwrap(),
+            settle
+        );
+        let mut stored = to_value(&settle).unwrap();
+        stored["index_command_hash"] = json!(bad);
+        assert!(from_value::<SettleEvidence>(stored).is_err());
+
+        let assessment = HumanReviewAssessment {
+            assessment_id: Uuid::nil(),
+            recommendation: ReviewRecommendation::Reject,
+            reason: ReasonCode::new("unsafe").unwrap(),
+            resolved_quarantine_reasons: Vec::new(),
+            evidence_hash: digest,
+        };
+        assert_eq!(
+            from_value::<HumanReviewAssessment>(to_value(&assessment).unwrap()).unwrap(),
+            assessment
+        );
+        let mut stored = to_value(&assessment).unwrap();
+        stored["evidence_hash"] = json!(bad);
+        assert!(from_value::<HumanReviewAssessment>(stored).is_err());
+    }
+
+    #[test]
     fn decisions_use_snake_case_tags() {
         use serde::de::IntoDeserializer;
         use serde::de::value::Error;
@@ -2239,7 +2545,10 @@ mod tests {
         use TestValue::{Bool, Str};
 
         let fields = [
-            ("request_content_hash", Str("sha256:request")),
+            (
+                "request_content_hash",
+                Str("sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
+            ),
             ("schema_valid", Bool(true)),
             ("authority_valid", Bool(true)),
             ("contribution_path_valid", Bool(true)),
