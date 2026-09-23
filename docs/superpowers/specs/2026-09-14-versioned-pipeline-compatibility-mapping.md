@@ -11,7 +11,8 @@ the Score adapter.
 | Admission and Review policies | `trace_commons.admission.authority_privacy.v1` and `trace_commons.review.authority_privacy.v1` |
 | Scorer | `reference_perplexity.v1` (`ReferencePerplexityScorer`) |
 | Embedder | `reference_embedder.v1` (`ReferenceEmbedder`) |
-| Credit quality | `CREDIT_QUALITY_ACTIVE` version 2 |
+| Gate-path credit | `NoveltyUtility` flat delta from `TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_POINTS_DELTA` (default 0) |
+| Credit quality | Shadow only. Constants of the decision's era (`credit_quality::constants_at`) |
 | Index | isolated `pipeline-test-index-v1` |
 | Projection | `pipeline-test-projection-v1` |
 | Corpus | `docs/superpowers/specs/fixtures/versioned-pipeline-minimal-corpus-v1.json` |
@@ -41,8 +42,9 @@ inserts vectors while it scores. The new path splits that work.
 | `inserted_chunk_entries` empty | Settle `Exclude` |
 | insert during `evaluate` | Forbidden in Score. Settle writes a sealed command. |
 | random `entry_id` | Deterministic index key: tenant, index, revision, projection, model, chunk |
-| credit quality `q_micros` | Score award for `trace_credit`, unless anomaly withhold omits the award |
-| anomaly withhold | Empty award set and index exclusion |
+| `NoveltyUtility` credit event when both floors pass | Score award of the configured delta for `trace_credit`. Settle records it as a `NoveltyUtility` ledger event, which does not settle. |
+| credit quality `q_micros`, dedup penalty, contributor cap | Score evidence shadow values. No award. |
+| `anomaly_withheld` | Score evidence shadow flag. No effect on awards or index membership. |
 | Review before Score | Unchanged. A Score failure does not change a Review outcome. |
 
 ## Membership and credit rules
@@ -56,11 +58,22 @@ Include the revision when all of these are true:
 
 - `quality_passed`
 - `novelty_passed`
-- anomaly withhold is false
 - at least one chunk has novelty at or above `embed_insert_novelty_micros`
 
-Award the `trace_credit` instrument from `CREDIT_QUALITY_ACTIVE`. An empty
-Score award set is a completed decision. It is not an incomplete Score phase.
+The compatibility Score award equals the gate-path credit on `main`. When
+both gate floors pass, Score awards the configured `NoveltyUtility` delta to
+the `trace_credit` instrument. The default delta is 0, so by default the award
+set is empty. Settle records a positive award as a `NoveltyUtility` ledger
+event. `main` does not settle that event type, so the pipeline must not settle
+it either.
+
+`q_micros`, the dedup penalty, the contributor cap, and `anomaly_withheld` are
+shadow values on `main`. They stay in Score evidence. They make no award and do
+not change index membership. Shadow credit quality uses the constants of the
+decision's era, not `CREDIT_QUALITY_ACTIVE`.
+
+An empty Score award set is a completed decision. It is not an incomplete
+Score phase.
 
 Inclusion does not require a positive Score. A positive Score does not
 require inclusion.

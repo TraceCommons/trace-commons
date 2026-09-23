@@ -12,7 +12,8 @@
     "embedder_model_id": "reference_embedder.v1",
     "projection_id": "pipeline-test-projection-v1",
     "index_id": "pipeline-test-index-v1",
-    "credit_quality_version": 2,
+    "gate_path_credit": "novelty_utility_flat_delta_default_zero",
+    "credit_quality": "shadow_only_decision_era_constants",
     "gate_floors": "local_zero_uncalibrated_reference",
     "external_payout": false
   },
@@ -22,8 +23,12 @@
     "inserted_chunk_entries_nonempty": "settle_include",
     "inserted_chunk_entries_empty": "settle_exclude",
     "evaluate_insert": "forbidden_in_score",
-    "q_micros": "score_decision.awards[trace_credit].atomic_units",
-    "anomaly_withheld": "zero_credit_and_exclude"
+    "novelty_utility_delta": "score_decision.awards[trace_credit].atomic_units",
+    "novelty_utility_ledger_event": "not_settlement_eligible",
+    "q_micros": "score_evidence_shadow_no_award",
+    "dedup_penalty": "score_evidence_shadow_no_award",
+    "contributor_cap": "score_evidence_shadow_no_award",
+    "anomaly_withheld": "score_evidence_shadow_no_effect"
   },
   "required_behavior_changes": [
     "score_does_not_write_index",
