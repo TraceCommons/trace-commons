@@ -108,9 +108,14 @@ different bundle.
 - Cross-tenant job claims MUST use a narrow role.
 - The claimer role MUST update lease columns only.
 - All policy work MUST use a tenant-scoped transaction.
+- Every phase input MUST carry the tenant's derived storage reference
+  (`TenantStorageRef`), the key of every index and storage seam. A phase input
+  MUST NOT carry the raw tenant identifier.
 
 **Acceptance:** Seed equal identifiers in two tenants. Exercise every read,
 write, claim, object, index, credit, and export path. No path can cross tenants.
+A Score policy that queries the index with its input's storage reference must
+see entries that ingest wrote for the same tenant.
 
 ### SYS-002: Least privilege
 

@@ -487,6 +487,11 @@ capabilities. Settle policies receive write capabilities.
 Policies hold their scorers, embedders, vector indexes, and credit adapters as
 trait objects. This boundary prevents Score from modifying an index.
 
+Every phase input carries the tenant's `TenantStorageRef`, the derived key that
+ingest uses for every index and storage write. A policy queries an index with
+that key. It never receives the raw tenant identifier, so it cannot open an
+empty shard by keying with the wrong value.
+
 Tests use small policy implementations through the production trait:
 
 ```rust

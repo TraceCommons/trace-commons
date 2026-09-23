@@ -40,13 +40,17 @@ fn is_safe_identifier(value: &str) -> bool {
         })
 }
 
+fn is_lower_hex(value: &str, len: usize) -> bool {
+    value.len() == len
+        && value
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+}
+
 fn is_sha256(value: &str) -> bool {
-    value.strip_prefix("sha256:").is_some_and(|hex| {
-        hex.len() == 64
-            && hex
-                .bytes()
-                .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
-    })
+    value
+        .strip_prefix("sha256:")
+        .is_some_and(|hex| is_lower_hex(hex, 64))
 }
 
 /// Every present value must be a lowercase SHA-256 reference.
@@ -97,6 +101,30 @@ impl ReasonCode {
                 .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
         {
             return Err(ContractError::InvalidReasonCode);
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// A tenant's derived storage reference: `tenant_sha256:` and 32 lowercase
+/// hex digits, the shape the server derives from the tenant identifier. Every
+/// index and storage seam is keyed by it, so a policy that reads an index uses
+/// this value and never sees the raw tenant identifier.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TenantStorageRef(String);
+
+impl TenantStorageRef {
+    pub fn new(value: impl Into<String>) -> Result<Self, ContractError> {
+        let value = value.into();
+        if !value
+            .strip_prefix("tenant_sha256:")
+            .is_some_and(|hex| is_lower_hex(hex, 32))
+        {
+            return Err(ContractError::InvalidTenantStorageRef);
         }
         Ok(Self(value))
     }
@@ -630,6 +658,8 @@ pub enum ContractError {
     ScoreOutputMismatch,
     #[error("a hash field is not a lowercase SHA-256 reference")]
     MalformedHash,
+    #[error("tenant storage reference is not in its derived form")]
+    InvalidTenantStorageRef,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1531,6 +1561,7 @@ pub struct PhaseResult<D, E, V> {
 #[derive(Debug, Clone)]
 pub struct AdmissionInput {
     pub run_id: Uuid,
+    pub tenant_storage_ref: TenantStorageRef,
     pub trace_id: Uuid,
     pub request_content_hash: String,
     pub schema_version: String,
@@ -1570,6 +1601,7 @@ impl HumanReviewAssessment {
 #[derive(Debug, Clone)]
 pub struct ReviewInput {
     pub run_id: Uuid,
+    pub tenant_storage_ref: TenantStorageRef,
     pub trace_id: Uuid,
     pub source_content_hash: String,
     pub source_artifact: Vec<u8>,
@@ -1580,16 +1612,17 @@ pub struct ReviewInput {
 #[derive(Debug, Clone)]
 pub struct ScoreInput {
     pub run_id: Uuid,
+    pub tenant_storage_ref: TenantStorageRef,
     pub trace_id: Uuid,
     pub registry_revision_id: Uuid,
     pub source_content_hash: String,
-    pub tenant_id: String,
     pub reviewed_artifact: Vec<u8>,
 }
 
 #[derive(Debug, Clone)]
 pub struct SettleInput {
     pub run_id: Uuid,
+    pub tenant_storage_ref: TenantStorageRef,
     pub trace_id: Uuid,
     pub registry_revision_id: Uuid,
     pub source_content_hash: String,
@@ -2374,6 +2407,27 @@ mod tests {
             PolicyError::transient("HttpStatusError status=502"),
             Err(ContractError::InvalidReasonCode)
         );
+    }
+
+    #[test]
+    fn tenant_storage_refs_take_only_the_derived_form() {
+        let derived = format!("tenant_sha256:{}", "0123456789abcdef".repeat(2));
+        assert_eq!(
+            TenantStorageRef::new(derived.clone()).unwrap().as_str(),
+            derived
+        );
+        for refused in [
+            "tenant-a".to_string(),
+            "7b1f0c36-8f5e-4f55-9d1e-3b2a6c0e9f11".to_string(),
+            derived.to_uppercase(),
+            format!("tenant_sha256:{}", "0".repeat(64)),
+            format!("sha256:{}", "0".repeat(32)),
+        ] {
+            assert_eq!(
+                TenantStorageRef::new(refused),
+                Err(ContractError::InvalidTenantStorageRef)
+            );
+        }
     }
 
     #[test]
