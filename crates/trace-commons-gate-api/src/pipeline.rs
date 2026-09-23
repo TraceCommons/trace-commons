@@ -1598,7 +1598,8 @@ impl HumanReviewAssessment {
     }
 }
 
-#[derive(Debug, Clone)]
+/// `Debug` withholds `source_artifact`, the decrypted trace.
+#[derive(Clone)]
 pub struct ReviewInput {
     pub run_id: Uuid,
     pub tenant_storage_ref: TenantStorageRef,
@@ -1609,7 +1610,25 @@ pub struct ReviewInput {
     pub human_assessment: Option<HumanReviewAssessment>,
 }
 
-#[derive(Debug, Clone)]
+impl fmt::Debug for ReviewInput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Hand-written, like `WitnessRequest`: a derived Debug over the
+        // decrypted trace is one `?input` away from a whole trace in a log.
+        formatter
+            .debug_struct("ReviewInput")
+            .field("run_id", &self.run_id)
+            .field("tenant_storage_ref", &self.tenant_storage_ref)
+            .field("trace_id", &self.trace_id)
+            .field("source_content_hash", &self.source_content_hash)
+            .field("source_artifact", &"<withheld>")
+            .field("admission", &self.admission)
+            .field("human_assessment", &self.human_assessment)
+            .finish()
+    }
+}
+
+/// `Debug` withholds `reviewed_artifact`, the decrypted approved trace.
+#[derive(Clone)]
 pub struct ScoreInput {
     pub run_id: Uuid,
     pub tenant_storage_ref: TenantStorageRef,
@@ -1617,6 +1636,20 @@ pub struct ScoreInput {
     pub registry_revision_id: Uuid,
     pub source_content_hash: String,
     pub reviewed_artifact: Vec<u8>,
+}
+
+impl fmt::Debug for ScoreInput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ScoreInput")
+            .field("run_id", &self.run_id)
+            .field("tenant_storage_ref", &self.tenant_storage_ref)
+            .field("trace_id", &self.trace_id)
+            .field("registry_revision_id", &self.registry_revision_id)
+            .field("source_content_hash", &self.source_content_hash)
+            .field("reviewed_artifact", &"<withheld>")
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -2428,6 +2461,57 @@ mod tests {
                 Err(ContractError::InvalidTenantStorageRef)
             );
         }
+    }
+
+    #[test]
+    fn debug_output_withholds_trace_bodies_and_vectors() {
+        let tenant_storage_ref =
+            TenantStorageRef::new(format!("tenant_sha256:{}", "a".repeat(32))).unwrap();
+        let body = b"key AKIAIOSFODNN7EXAMPLE mail alice@example.com".to_vec();
+        // How a derived `Debug` prints the body's first bytes, "key".
+        let printed_bytes = "107, 101, 121";
+
+        let review = ReviewInput {
+            run_id: Uuid::nil(),
+            tenant_storage_ref: tenant_storage_ref.clone(),
+            trace_id: Uuid::nil(),
+            source_content_hash: hash(&body),
+            source_artifact: body.clone(),
+            admission: AdmissionDecision::Admit,
+            human_assessment: None,
+        };
+        let score = ScoreInput {
+            run_id: Uuid::nil(),
+            tenant_storage_ref: tenant_storage_ref.clone(),
+            trace_id: Uuid::nil(),
+            registry_revision_id: Uuid::nil(),
+            source_content_hash: hash(&body),
+            reviewed_artifact: body,
+        };
+        let command = index_command(vec![index_entry(1, vec![0.125])]).unwrap();
+        let settle = SettleInput {
+            run_id: Uuid::nil(),
+            tenant_storage_ref,
+            trace_id: Uuid::nil(),
+            registry_revision_id: Uuid::nil(),
+            source_content_hash: hash(b"source"),
+            score: ScoreDecision {
+                awards: InstrumentAwards::default(),
+            },
+            score_evidence: score_result(None, false).evidence,
+            index_command: Some(command),
+        };
+
+        for printed in [
+            format!("{review:?}"),
+            format!("{score:?}"),
+            format!("{settle:?}"),
+        ] {
+            assert!(!printed.contains(printed_bytes), "{printed}");
+            assert!(!printed.contains("0.125"), "{printed}");
+        }
+        assert!(format!("{review:?}").contains("<withheld>"));
+        assert!(format!("{score:?}").contains("<withheld>"));
     }
 
     #[test]
