@@ -71,6 +71,7 @@ const TAURI_COMMANDS: &[&str] = &[
     "set_start_at_login",
     "open_system_settings",
     "quit_app",
+    "quit_confirmation_copy",
     "cancel_private_ai_credential",
     "forget_private_ai_credential",
     "native_wallet_flow",

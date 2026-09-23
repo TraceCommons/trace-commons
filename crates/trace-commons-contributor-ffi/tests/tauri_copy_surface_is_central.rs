@@ -128,6 +128,27 @@ fn tauri_commands_project_shared_contributor_copy() {
     let preview = rust_function(&daemon, "fn preview_entry");
     assert!(preview.contains("consent_copy::consent_copy"));
     assert!(preview.contains("gate_statement"));
+
+    // Quitting says what keeps running, and that depends on whether this
+    // process hosts the watcher or is attached to one. The sentence and the
+    // role-to-sentence choice both belong to the shared crate.
+    let platform = read(&root, "tauri-desktop/src-tauri/src/commands/platform.rs");
+    let quit = rust_function(&platform, "fn quit_confirmation_copy");
+    assert!(quit.contains("quit_role()"));
+    let quit_value = rust_function(&platform, "fn quit_prompt_value");
+    assert!(quit_value.contains("quit_copy::quit_prompt"));
+    let state = read(&root, "tauri-desktop/src-tauri/src/state.rs");
+    let role = rust_function(&state, "fn quit_role(&self) -> QuitRole");
+    for role_name in [
+        "QuitRole::Hosting",
+        "QuitRole::Attached",
+        "QuitRole::Unavailable",
+    ] {
+        assert!(
+            role.contains(role_name),
+            "Tauri must map its daemon connection to `{role_name}`"
+        );
+    }
 }
 
 #[test]
@@ -147,6 +168,7 @@ fn copy_commands_reach_the_frontend_through_tauri_and_render_at_safety_surfaces(
             "withdrawal_confirmation_prompt",
             "history::withdrawal_confirmation_prompt",
         ),
+        ("quit_confirmation_copy", "platform::quit_confirmation_copy"),
     ] {
         assert!(
             build.contains(&format!("\"{name}\"")),
@@ -168,6 +190,7 @@ fn copy_commands_reach_the_frontend_through_tauri_and_render_at_safety_surfaces(
         "eligibility_copy",
         "eligibility_group_copy",
         "withdrawal_confirmation_prompt",
+        "quit_confirmation_copy",
     ] {
         assert!(
             api.contains(&format!("invokeTauri(\"{command}\"")),
@@ -218,6 +241,29 @@ fn copy_commands_reach_the_frontend_through_tauri_and_render_at_safety_surfaces(
     assert!(withdrawal.contains("useWithdrawalConfirmationPrompt(confirming)"));
     assert!(withdrawal.contains("{confirmation.data}"));
     assert!(withdrawal.contains("busy || !confirmation.data"));
+
+    let quit = read(
+        &root,
+        "tauri-desktop/frontend/src/app/quit-confirmation.tsx",
+    );
+    for rendered_copy in [
+        "useQuitConfirmationCopy",
+        "copy.data?.body",
+        "copy.data?.confirm",
+    ] {
+        assert!(
+            quit.contains(rendered_copy),
+            "quit confirmation must use `{rendered_copy}`"
+        );
+    }
+    assert!(
+        quit.contains("!copy.data"),
+        "quit must not be confirmable before the true sentence for this process is shown"
+    );
+    assert!(
+        !quit.contains("Quitting stops"),
+        "quit confirmation must not hard-code the hosting sentence; it is false when attached"
+    );
 
     let wallet = read(
         &root,

@@ -7,6 +7,8 @@ use std::{
 use serde_json::json;
 use tauri::{AppHandle, Runtime, State};
 
+use trace_commons_contributor::quit_copy::{self, QuitRole};
+
 use crate::state::AppState;
 
 fn external_url_is_allowed(url: &str) -> bool {
@@ -188,6 +190,20 @@ pub(crate) fn open_system_settings(area: String) -> Result<(), String> {
     }
     #[cfg(target_os = "macos")]
     open_url(url)
+}
+
+/// The quit prompt that is true for this process: hosting the watcher,
+/// attached to one another process runs, or connected to none.
+#[tauri::command]
+pub(crate) fn quit_confirmation_copy(
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    quit_prompt_value(state.inner().quit_role())
+}
+
+fn quit_prompt_value(role: QuitRole) -> Result<serde_json::Value, String> {
+    serde_json::to_value(quit_copy::quit_prompt(role))
+        .map_err(|_| "quit-copy-unavailable".to_owned())
 }
 
 #[tauri::command]
@@ -551,9 +567,34 @@ mod tests {
     use super::{
         credential_deep_link, deep_link_invite, existing_directory, external_url_is_allowed,
         git_repository, installed_by_homebrew, near_credits_url_is_allowed, public_run_deep_link,
-        review_deep_link, tracecommons_fixture_url_is_allowed, tracecommons_run_url_is_allowed,
-        wallet_url_is_valid,
+        quit_prompt_value, review_deep_link, tracecommons_fixture_url_is_allowed,
+        tracecommons_run_url_is_allowed, wallet_url_is_valid,
     };
+    use trace_commons_contributor::quit_copy::{self, QuitRole};
+
+    #[test]
+    fn quit_prompt_reaches_the_frontend_with_the_role_it_was_chosen_for() {
+        for (role, label, body) in [
+            (QuitRole::Hosting, "hosting", quit_copy::QUIT_HOSTING_BODY),
+            (
+                QuitRole::Attached,
+                "attached",
+                quit_copy::QUIT_ATTACHED_BODY,
+            ),
+            (
+                QuitRole::Unavailable,
+                "unavailable",
+                quit_copy::QUIT_UNAVAILABLE_BODY,
+            ),
+        ] {
+            let value = quit_prompt_value(role).unwrap();
+            assert_eq!(value["role"], label);
+            assert_eq!(value["body"], body);
+            assert_eq!(value["title"], quit_copy::QUIT_TITLE);
+            assert_eq!(value["confirm"], quit_copy::QUIT_CONFIRM);
+            assert_eq!(value["cancel"], quit_copy::QUIT_CANCEL);
+        }
+    }
 
     #[test]
     fn external_urls_are_limited_to_rust_owned_destinations() {

@@ -31,7 +31,10 @@ and GTK shells remain unchanged; no legacy app is removed by this work.
   and carries status plus pushed events over one connection. Its callback
   thread owns the persistent transport; the client refuses daemon shutdown.
   No-root startup keeps account-free routes available. Quit confirmation and
-  macOS Reopen are wired.
+  macOS Reopen are wired. The quit prompt comes from the shared `quit_copy`
+  table and is chosen per role: hosting (quitting stops the watcher),
+  attached (the other process keeps watching; no stop option, since the
+  attached client refuses shutdown), or no watcher reachable.
 
 ## Remaining parity gates
 
