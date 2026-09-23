@@ -445,6 +445,7 @@ pub struct BundleManifest {
 
 impl BundleManifest {
     /// Stable length-prefixed encoding. Lists are sorted before encoding.
+    /// A duplicate entry is an error. It is not dropped.
     pub fn canonical_bytes(&self) -> Result<Vec<u8>, ContractError> {
         if self.format_version != BUNDLE_MANIFEST_FORMAT_VERSION {
             return Err(ContractError::UnsupportedManifestVersion);
@@ -487,12 +488,17 @@ fn encode_string(output: &mut Vec<u8>, value: &str) {
     output.extend_from_slice(value.as_bytes());
 }
 
-fn encode_list(output: &mut Vec<u8>, values: &[String]) {
-    let values = values.iter().collect::<BTreeSet<_>>();
+fn encode_list(output: &mut Vec<u8>, values: &[String]) -> Result<(), ContractError> {
+    let mut values = values.to_vec();
+    values.sort();
+    if values.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(ContractError::DuplicatePolicyListEntry);
+    }
     encode_len(output, values.len());
-    for value in values {
+    for value in &values {
         encode_string(output, value);
     }
+    Ok(())
 }
 
 fn encode_policy(output: &mut Vec<u8>, policy: &PolicyRef) -> Result<(), ContractError> {
@@ -502,8 +508,8 @@ fn encode_policy(output: &mut Vec<u8>, policy: &PolicyRef) -> Result<(), Contrac
     encode_string(output, &policy.policy_id);
     encode_string(output, &policy.implementation_id);
     encode_string(output, &policy.configuration_hash);
-    encode_list(output, &policy.data_artifact_hashes);
-    encode_list(output, &policy.projection_ids);
+    encode_list(output, &policy.data_artifact_hashes)?;
+    encode_list(output, &policy.projection_ids)?;
     Ok(())
 }
 
@@ -639,6 +645,8 @@ pub enum ContractError {
     ZeroInstrumentAward,
     #[error("an instrument appears more than once")]
     DuplicateInstrumentId,
+    #[error("a policy list contains a duplicate entry")]
+    DuplicatePolicyListEntry,
     #[error("atomic units exceed the supported integer range")]
     AtomicUnitOverflow,
     #[error("the award does not use the Trace Credit instrument")]
@@ -2532,6 +2540,30 @@ mod tests {
         }
     }
 
+    #[test]
+    fn duplicate_policy_list_entries_are_rejected() {
+        let mut repeated_projection = golden_manifest();
+        repeated_projection.score.projection_ids = vec!["proj".to_string(), "proj".to_string()];
+        assert_eq!(
+            repeated_projection.bundle_id(),
+            Err(ContractError::DuplicatePolicyListEntry)
+        );
+
+        let mut repeated_hash = golden_manifest();
+        let digest = hash(b"shared");
+        repeated_hash.score.data_artifact_hashes = vec![digest.clone(), digest];
+        assert_eq!(
+            repeated_hash.bundle_id(),
+            Err(ContractError::DuplicatePolicyListEntry)
+        );
+
+        let mut forward = golden_manifest();
+        forward.score.projection_ids = vec!["a".to_string(), "b".to_string()];
+        let mut reversed = golden_manifest();
+        reversed.score.projection_ids = vec!["b".to_string(), "a".to_string()];
+        assert_eq!(forward.bundle_id().unwrap(), reversed.bundle_id().unwrap());
+    }
+
     /// Fixed identities. A change to a canonical encoding changes these values,
     /// and with them every stored `bundle_id`, signed `package_hash`, award-set
     /// identity, or stored index command. A failure here means an encoding
@@ -2787,10 +2819,7 @@ mod tests {
     #[test]
     fn canonical_encodings_frame_every_length_as_u64() {
         let mut bytes = Vec::new();
-        encode_list(
-            &mut bytes,
-            &["b".to_string(), "a".to_string(), "a".to_string()],
-        );
+        encode_list(&mut bytes, &["b".to_string(), "a".to_string()]).unwrap();
         assert_eq!(
             bytes,
             [
