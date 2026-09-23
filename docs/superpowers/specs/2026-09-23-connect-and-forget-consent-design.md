@@ -251,8 +251,9 @@ pub const AUTO_SCRUB_LIMIT: &str = "The patterns are reliable for the formats th
 /// The new fact. The old gate never had to state it.
 pub const AUTO_NO_REVIEW: &str = "No one looks at a session before it is sent, including you.";
 
-/// What replaces the review step. `hours` is the holdback window.
-pub const AUTO_REVERSAL: &str = "Nothing is shared with anyone for {hours} hours. Until then you can pull any session back from History and it leaves the commons.";
+/// What reversal actually is. See "The holdback question" below -- this is
+/// the sentence if there is no holdback window, and it is the weaker one.
+pub const AUTO_REVERSAL: &str = "You can withdraw any session at any time, from History. Withdrawing stops further use, and anything already shared stays shared.";
 ```
 
 `AUTO_NO_REVIEW` is the sentence the product will most want to soften, and it
@@ -306,10 +307,28 @@ boundary of the sentence, and it is already computed on every pass.
 
 ## Open
 
-- **The holdback window.** `AUTO_REVERSAL` has a hole in it, `{hours}`. Zero
-  makes the sentence false. Long enough to be meaningful delays the reward the
-  UX review wants to feel immediate. Whether credit accrues at contribution or
-  after the window is the same decision wearing a different hat.
+- **The holdback question, for review.** An earlier draft of `AUTO_REVERSAL`
+  promised a window -- contributed automatically, but held undistributed for
+  some hours, cancellable from History -- as the thing replacing the review
+  step. **The current position is that this is not needed**, and the constant
+  above reflects that. Recorded here because it is a genuine fork and is worth
+  a second opinion rather than a silent decision.
+
+  The case for not building it: three backstops remain without it. The
+  `residual_risk != High` routing keeps unvouched sessions out of the automatic
+  path entirely, the server-side `AwaitingPiiBackstop` re-check still runs
+  independently of anything the contributor does, and withdrawal already works
+  and works forever.
+
+  The case for it: withdrawal is post-distribution, so it stops further use but
+  cannot un-share. Without a window there is no point at which a contributor
+  can cleanly undo an automatic decision, and `AUTO_NO_REVIEW` -- "no one looks
+  at a session before it is sent, including you" -- stands on its own. Note
+  also that the mechanism may be nearly free: `AwaitingPiiBackstop` is already
+  a held state documented as never consumer, export, credit or reviewer
+  eligible, so the work could be exposing an existing hold rather than building
+  a new one. How long submissions actually sit there today has not been
+  measured.
 - **Measure the High rate on the pilot corpus.** This is the number that
   decides whether "forget" is true in practice, and it is measurable today
   without building anything: what fraction of real sessions come out High.
