@@ -554,12 +554,13 @@ mod hex_artifacts {
     }
 
     pub(super) fn decode(hex: &str) -> Option<Vec<u8>> {
-        let pairs = hex.as_bytes().chunks_exact(2);
-        if !pairs.remainder().is_empty() {
+        let (pairs, remainder) = hex.as_bytes().as_chunks::<2>();
+        if !remainder.is_empty() {
             return None;
         }
         pairs
-            .map(|pair| Some((nibble(pair[0])? << 4) | nibble(pair[1])?))
+            .iter()
+            .map(|&[high, low]| Some((nibble(high)? << 4) | nibble(low)?))
             .collect()
     }
 
