@@ -103,6 +103,7 @@ pub(crate) fn contributor_disclosure_copy() -> Value {
         "admission": witness.admission,
         "onboarding": witness.onboarding,
         "onboarding_shell": trace_commons_contributor::onboarding_copy::onboarding_copy(),
+        "privacy_scan": trace_commons_contributor::privacy_scan_copy::privacy_scan_copy(),
         "source_settings": trace_commons_contributor::source_copy::source_settings_copy(),
         "source_check_lines": source_checks,
         "insights_ui": trace_commons_contributor::insights::service::ui_copy(),

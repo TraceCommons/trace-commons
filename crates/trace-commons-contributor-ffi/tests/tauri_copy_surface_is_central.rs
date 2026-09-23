@@ -101,6 +101,8 @@ fn tauri_commands_project_shared_contributor_copy() {
     let disclosure = rust_function(&native_flows, "fn contributor_disclosure_copy");
     assert!(disclosure.contains("witness_copy::witness_copy"));
     assert!(disclosure.contains("private_inference_copy::private_inference_copy"));
+    assert!(disclosure.contains("privacy_scan_copy::privacy_scan_copy"));
+    assert!(disclosure.contains("onboarding_copy::onboarding_copy"));
 
     let witness = rust_function(&native_flows, "fn witness_review_copy");
     assert!(witness.contains("witness_copy::witness_copy"));
