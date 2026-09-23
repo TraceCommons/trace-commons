@@ -291,6 +291,7 @@ const QUIESCE_POLL_MS: u64 = 200;
 pub const METHODS: &[&str] = &[
     "acknowledge_near_ai_notice",
     "approve",
+    "certificate_detail",
     "cancel",
     "clear_public_profile",
     "consent_options",
@@ -1818,6 +1819,84 @@ macro_rules! try_response {
     };
 }
 
+/// Return only the signed certificate claims that are safe and useful for a
+/// review surface. Raw envelope bytes, signature bytes and certificate JSON
+/// never cross this boundary.
+fn handle_certificate_detail(shared: &DaemonShared, req: &Request) -> Response {
+    let id = try_response!(entry_id_param(req));
+    let entry = try_response!(entry_by_id(shared, req, id));
+    let Some(pin) = entry.previewed_envelope_digest.as_deref() else {
+        return Response::err(req.id, ERR_BAD_PARAMS, "certificate-not-held");
+    };
+    if !entry.holds_witness_certificate() {
+        return Response::err(req.id, ERR_BAD_PARAMS, "certificate-not-held");
+    }
+    let artifact = match super::approved_envelope::load_witnessed(&shared.store, id) {
+        Ok(Some(artifact)) => artifact,
+        Ok(None) | Err(_) => {
+            return Response::err(req.id, ERR_UNAVAILABLE, "certificate-detail-unavailable");
+        }
+    };
+    if artifact.digest().ok().as_deref() != Some(pin) {
+        return Response::err(req.id, ERR_UNAVAILABLE, "certificate-detail-stale");
+    }
+    let response = artifact.response();
+    let certificate: serde_json::Value = match serde_json::from_str(&response.certificate_json) {
+        Ok(value) => value,
+        Err(_) => {
+            return Response::err(req.id, ERR_UNAVAILABLE, "certificate-detail-unavailable");
+        }
+    };
+    let Some(redacted_sha256) = certificate.get("redacted_sha256").and_then(|v| v.as_str()) else {
+        return Response::err(req.id, ERR_UNAVAILABLE, "certificate-detail-unavailable");
+    };
+    let Some(residual_risk_verdict) = certificate
+        .get("residual_risk_verdict")
+        .and_then(|v| v.as_str())
+    else {
+        return Response::err(req.id, ERR_UNAVAILABLE, "certificate-detail-unavailable");
+    };
+    let Some(redaction_policy_version) = certificate
+        .get("redaction_policy_version")
+        .and_then(|v| v.as_str())
+    else {
+        return Response::err(req.id, ERR_UNAVAILABLE, "certificate-detail-unavailable");
+    };
+    let Some(witness_measurement) = certificate
+        .get("witness_measurement")
+        .and_then(|v| v.as_str())
+    else {
+        return Response::err(req.id, ERR_UNAVAILABLE, "certificate-detail-unavailable");
+    };
+    let Some(issued_at) = certificate.get("timestamp").and_then(|v| v.as_i64()) else {
+        return Response::err(req.id, ERR_UNAVAILABLE, "certificate-detail-unavailable");
+    };
+    let signer = match crate::witness::transport::recover_certificate_signer(response) {
+        Ok(signer) => signer,
+        Err(_) => {
+            return Response::err(req.id, ERR_UNAVAILABLE, "certificate-detail-unavailable");
+        }
+    };
+    Response::ok(
+        req.id,
+        serde_json::json!({
+            "state": "held",
+            "verification": "verified_at_review",
+            "redacted_sha256": redacted_sha256,
+            "residual_risk_verdict": residual_risk_verdict,
+            "redaction_policy_version": redaction_policy_version,
+            "witness_measurement": witness_measurement,
+            "issued_at": issued_at,
+            "expires_at": null,
+            "expiry_state": "not_issued",
+            "signer": signer,
+            "signature_present": !response.signature_hex.is_empty(),
+            "admission_evidence_present": response.admission.is_some(),
+            "inference_receipt": artifact.attested_inference(),
+        }),
+    )
+}
+
 /// The methods the synchronous dispatcher cannot answer, paired with the
 /// refusal label each one sends.
 ///
@@ -1894,6 +1973,7 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
             }),
         ),
         "status" => Response::ok(req.id, shared.status_value()),
+        "certificate_detail" => handle_certificate_detail(shared, req),
         "list_pending" => handle_list_pending(shared, req),
         "list_projects" => handle_list_projects(shared, req),
         // The one project worth offering to arm right now, or nothing.
@@ -2115,6 +2195,18 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         "refresh_history" => {
             // The poller owns the network. This only asks it to run sooner,
             // and says so rather than queueing an unbounded number of asks.
+            let mut state = shared.state.lock().expect("state lock");
+            let now = chrono::Utc::now();
+            if !state.history_refresh_due_at.is_some_and(|due| due <= now) {
+                state.history_refresh_due_at = Some(now);
+                if state.save(&shared.store).is_err() {
+                    return Response::err(
+                        req.id,
+                        ERR_UNAVAILABLE,
+                        "history-refresh-request-failed",
+                    );
+                }
+            }
             Response::ok(req.id, serde_json::json!({ "requested": true }))
         }
         "token_storage_status" => handle_token_storage(shared, req),
@@ -5231,6 +5323,22 @@ mod tests {
         // borrows its path.
         std::mem::forget(_d);
         DaemonShared::load(store).unwrap()
+    }
+
+    #[test]
+    fn refresh_history_request_schedules_poll_without_postponing_earlier_request() {
+        let shared = shared();
+        let response = handle_request(&shared, &req("refresh_history", serde_json::json!({})));
+        assert_eq!(response.result.unwrap()["requested"], true);
+        let first_due = shared.state.lock().unwrap().history_refresh_due_at.unwrap();
+        assert!(first_due <= chrono::Utc::now());
+
+        let response = handle_request(&shared, &req("refresh_history", serde_json::json!({})));
+        assert_eq!(response.result.unwrap()["requested"], true);
+        assert_eq!(
+            shared.state.lock().unwrap().history_refresh_due_at,
+            Some(first_due)
+        );
     }
 
     /// A queue entry whose session file holds `body`, so
@@ -8584,6 +8692,35 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn certificate_detail_returns_claims_without_raw_artifact_bytes() {
+        let (s, id, _dir, review) = recorded_witness_review().await;
+        let pin = review.summary.envelope_digest.clone();
+        super::super::approved_envelope::save_witnessed(&s.store, id, &review.artifact).unwrap();
+        {
+            let mut queue = s.queue.lock().unwrap();
+            assert!(queue.record_previewed_envelope(
+                id,
+                &pin,
+                review.artifact.attested_inference().cloned()
+            ));
+            queue.save(&s.store).unwrap();
+        }
+
+        let response = handle_request(
+            &s,
+            &req("certificate_detail", serde_json::json!({"entry_id": id})),
+        );
+        assert!(response.error.is_none(), "{:?}", response.error);
+        let detail = response.result.unwrap();
+        assert_eq!(detail["state"], "held");
+        assert_eq!(detail["verification"], "verified_at_review");
+        assert!(detail["signer"].as_str().unwrap().starts_with("0x"));
+        assert!(detail.get("certificate_json").is_none());
+        assert!(detail.get("signature_hex").is_none());
+        assert!(detail.get("envelope_bytes").is_none());
+    }
+
     #[test]
     fn a_bad_entry_id_is_a_param_error_not_a_panic() {
         let s = shared();
@@ -10562,7 +10699,7 @@ mod tests {
             src,
             "pub async fn handle_request_async(shared",
         ));
-        assert_eq!(sync.len(), 41, "synchronous dispatcher arms: {sync:?}");
+        assert_eq!(sync.len(), 42, "synchronous dispatcher arms: {sync:?}");
         assert_eq!(asy.len(), 34, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();

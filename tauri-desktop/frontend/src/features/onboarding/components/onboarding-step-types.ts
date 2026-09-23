@@ -1,0 +1,25 @@
+import type {
+  useProjects,
+  useSettings,
+  useSourceRoots,
+} from "../../settings/public";
+import type { OnboardingStep, useOnboarding } from "../hooks/use-onboarding";
+
+export type OnboardingController = ReturnType<typeof useOnboarding>;
+export type SettingsController = ReturnType<typeof useSettings>;
+export type ProjectsController = ReturnType<typeof useProjects>;
+export type RootsController = ReturnType<typeof useSourceRoots>;
+
+export type OnboardingStepProps = {
+  step: OnboardingStep;
+  onboarding: OnboardingController;
+  settings: SettingsController;
+  projects: ProjectsController;
+  roots: RootsController;
+  alreadyEnrolled: boolean;
+  initialInvite?: string | null;
+  busy: boolean;
+  showPrivacy: boolean | null;
+  onOpenScrubDisclosure: () => void;
+  onComplete: () => void;
+};

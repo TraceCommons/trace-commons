@@ -336,10 +336,10 @@ pub fn verify_receipt(
         }
     };
 
-    if Sha256::digest(request_body).as_slice() != signed_request_hash {
+    if Sha256::digest(request_body).as_ref() != signed_request_hash {
         return Err(ReceiptError::RequestHashMismatch);
     }
-    if Sha256::digest(response_body).as_slice() != signed_response_hash {
+    if Sha256::digest(response_body).as_ref() != signed_response_hash {
         return Err(ReceiptError::ResponseHashMismatch);
     }
     // Last, so a receipt bound to different bytes is reported as that rather

@@ -6,8 +6,8 @@
 //!
 //! `trace-commons-server`, `-gate-api`, and `-gate-enclave` are
 //! AGPL-3.0-or-later. Every other crate is `MIT OR Apache-2.0` so it can be
-//! embedded in proprietary software -- the contributor CLI, the desktop apps,
-//! and the envelope protocol depend on that.
+//! embedded in proprietary software -- the contributor CLI, Tauri and the
+//! native desktop apps, and the envelope protocol depend on that.
 //!
 //! Permissive code may flow into the AGPL crates. The reverse is a licence
 //! violation that no compiler will report: adding `trace-commons-gate-api` to
@@ -156,13 +156,16 @@ fn crates_for_manifest(manifest: &Path, our_crates: &BTreeSet<String>) -> Vec<Cr
         .collect()
 }
 
-/// Every crate in the tree, including the ones excluded from the workspace.
+/// Every crate in the tree, including clients outside the root workspace.
 ///
 /// `trace-commons-contributor-gtk` is in the root manifest's `exclude` list, so
 /// it does not appear in the workspace's `cargo metadata` output at all. It is
 /// also a shipped client, which makes it exactly the crate a boundary check
 /// must not miss. Any future `exclude` entry has to be added here too, which is
-/// what the completeness assertion below is for.
+/// what the completeness assertion below is for. Tauri is a separate Cargo
+/// workspace under `tauri-desktop/`; include its package explicitly so the
+/// graph walk catches an AGPL path dependency added to the app or any crate it
+/// reaches.
 fn all_crates() -> Vec<Crate> {
     let root = workspace_root();
 
@@ -195,6 +198,11 @@ fn all_crates() -> Vec<Crate> {
         "crates under crates/ that the boundary check never inspected: {:?}",
         our_crates.difference(&covered).collect::<Vec<_>>()
     );
+
+    crates.extend(crates_for_manifest(
+        &root.join("tauri-desktop/src-tauri/Cargo.toml"),
+        &our_crates,
+    ));
 
     crates
 }
@@ -256,6 +264,15 @@ fn both_sides_of_the_boundary_are_populated() {
             "{permissive} is a shipped client and must stay permissive"
         );
     }
+
+    let tauri = crates
+        .iter()
+        .find(|c| c.name == "trace-commons-tauri-desktop")
+        .expect("Tauri desktop app is included in the boundary graph");
+    assert_eq!(
+        tauri.license, "MIT OR Apache-2.0",
+        "Tauri desktop is a shipped client and must stay permissive"
+    );
 }
 
 /// The check above passes today. This one proves it would fail if the boundary
