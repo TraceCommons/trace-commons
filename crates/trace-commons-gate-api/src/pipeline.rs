@@ -400,7 +400,65 @@ fn encode_policy(output: &mut Vec<u8>, policy: &PolicyRef) -> Result<(), Contrac
 pub struct BundlePackage {
     pub bundle_id: String,
     pub manifest: BundleManifest,
+    #[serde(with = "hex_artifacts")]
     pub artifacts: BTreeMap<String, Vec<u8>>,
+}
+
+/// Serializes artifact bytes as lowercase hex strings. The derived encoding,
+/// one JSON integer per byte, made a large artifact fail JSONB storage.
+mod hex_artifacts {
+    use std::collections::BTreeMap;
+
+    use serde::de::Error as _;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(
+        artifacts: &BTreeMap<String, Vec<u8>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        serializer.collect_map(artifacts.iter().map(|(hash, bytes)| (hash, encode(bytes))))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<BTreeMap<String, Vec<u8>>, D::Error> {
+        BTreeMap::<String, String>::deserialize(deserializer)?
+            .into_iter()
+            .map(|(hash, hex)| {
+                decode(&hex)
+                    .map(|bytes| (hash, bytes))
+                    .ok_or_else(|| D::Error::custom("artifact bytes are not lowercase hex"))
+            })
+            .collect()
+    }
+
+    pub(super) fn encode(bytes: &[u8]) -> String {
+        const DIGITS: &[u8; 16] = b"0123456789abcdef";
+        let mut hex = String::with_capacity(bytes.len() * 2);
+        for byte in bytes {
+            hex.push(char::from(DIGITS[usize::from(byte >> 4)]));
+            hex.push(char::from(DIGITS[usize::from(byte & 0x0f)]));
+        }
+        hex
+    }
+
+    pub(super) fn decode(hex: &str) -> Option<Vec<u8>> {
+        let pairs = hex.as_bytes().chunks_exact(2);
+        if !pairs.remainder().is_empty() {
+            return None;
+        }
+        pairs
+            .map(|pair| Some((nibble(pair[0])? << 4) | nibble(pair[1])?))
+            .collect()
+    }
+
+    fn nibble(digit: u8) -> Option<u8> {
+        match digit {
+            b'0'..=b'9' => Some(digit - b'0'),
+            b'a'..=b'f' => Some(digit - b'a' + 10),
+            _ => None,
+        }
+    }
 }
 
 impl BundlePackage {
@@ -1757,6 +1815,33 @@ mod tests {
         let mut missing = package;
         missing.artifacts.pop_first();
         assert_eq!(missing.validate(), Err(ContractError::ArtifactSetMismatch));
+    }
+
+    #[test]
+    fn package_artifacts_serialize_as_lowercase_hex() {
+        use serde::de::IntoDeserializer;
+        use serde::de::value::Error;
+
+        let every_byte = (0..=u8::MAX).collect::<Vec<_>>();
+        let hex = hex_artifacts::encode(&every_byte);
+        assert_eq!(hex.len(), 512);
+        assert!(hex.starts_with("000102") && hex.ends_with("fdfeff"));
+        assert_eq!(hex_artifacts::decode(&hex), Some(every_byte.clone()));
+        for malformed in ["0", "0g", "0A", " 00"] {
+            assert_eq!(hex_artifacts::decode(malformed), None);
+        }
+
+        let stored = BTreeMap::from([(hash(&every_byte), hex)]);
+        let loaded =
+            hex_artifacts::deserialize(IntoDeserializer::<Error>::into_deserializer(stored));
+        assert_eq!(
+            loaded.unwrap(),
+            BTreeMap::from([(hash(&every_byte), every_byte)])
+        );
+        let upper = BTreeMap::from([(hash(b"x"), "FF".to_string())]);
+        let refused =
+            hex_artifacts::deserialize(IntoDeserializer::<Error>::into_deserializer(upper));
+        assert!(refused.is_err());
     }
 
     #[test]
