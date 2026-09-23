@@ -646,9 +646,15 @@ If withdrawal commits before the Settle decision, Settle excludes index
 membership. If withdrawal commits later, Settle stops a pending command. The
 existing revocation path invalidates an index write that completed first.
 
-If Score already commits credit, withdrawal does not remove that credit. The
-existing settlement process can finalize it without reading the trace. This
-rule preserves the current no-clawback contract.
+Withdrawal forfeits awards that are not settled. Settled awards stay.
+"Settled" means carried by a finalized settlement batch, as on `main`. If
+withdrawal commits after Score and before an instrument operation completes,
+that operation ends as `forfeited`. Settle records the withdrawal and
+completes; it does not wait for the operation. The withdrawal response
+computes `credit_retained` with the same check as
+`withdrawal_retains_all_credit` on `main`. This rule applies to every
+instrument. It preserves the current contract: settled credit is never clawed
+back, and pending credit is forfeited.
 
 A suspended policy leaves the run retryable with a safe error label. Previous
 outcomes stay immutable. The run resumes only if the same bound policy becomes

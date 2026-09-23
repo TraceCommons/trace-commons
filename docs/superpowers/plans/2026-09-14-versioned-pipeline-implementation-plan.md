@@ -656,7 +656,8 @@ The implementation is complete only when all of these conditions are met:
   preserve their correct identity and meaning.
 - Score does not write to an index. Settle uses sealed commands and immutable
   inputs. Preserve existing settlement controls and the no-clawback rule:
-  ordinary withdrawal must not remove awarded credit.
+  ordinary withdrawal must not remove settled credit, and it forfeits credit
+  that is not settled.
 - The target deployment does not depend on the implementation or domain
   concepts excluded by contracts §20.
 
@@ -800,6 +801,6 @@ Choose enabled customer and community interfaces before Milestone 6 qualificatio
 
 Do not add automatic fraud clawback while the correction policy remains
 open. Preserve reversal events under existing controls. Ordinary withdrawal
-must not remove awarded credit. Unresolved choices can block the affected
+must not remove settled credit; it forfeits credit that is not settled. Unresolved choices can block the affected
 production interface, but must not block local pipeline work. They must not
 silently remove an acceptance requirement that is not deferred.

@@ -560,7 +560,22 @@ pub struct InstrumentSettlement {
     instrument_id: InstrumentId,
     atomic_units: AtomicUnits,
     operation_ref_hash: String,
-    result_ref_hash: String,
+    outcome: InstrumentSettlementOutcome,
+}
+
+/// How an instrument operation ended. Both states are terminal, so Settle can
+/// complete with either.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum InstrumentSettlementOutcome {
+    Completed {
+        result_ref_hash: String,
+    },
+    /// Withdrawal committed before the operation completed. Credit that is
+    /// not settled is forfeited, as on the legacy path; settled credit stays.
+    Forfeited {
+        reason: ReasonCode,
+    },
 }
 
 impl InstrumentSettlement {
@@ -570,19 +585,49 @@ impl InstrumentSettlement {
         operation_ref_hash: impl Into<String>,
         result_ref_hash: impl Into<String>,
     ) -> Result<Self, ContractError> {
-        let operation_ref_hash = operation_ref_hash.into();
         let result_ref_hash = result_ref_hash.into();
+        if !is_sha256(&result_ref_hash) {
+            return Err(ContractError::InvalidSettlementReference);
+        }
+        Self::with_outcome(
+            instrument_id,
+            atomic_units,
+            operation_ref_hash.into(),
+            InstrumentSettlementOutcome::Completed { result_ref_hash },
+        )
+    }
+
+    pub fn forfeited(
+        instrument_id: InstrumentId,
+        atomic_units: AtomicUnits,
+        operation_ref_hash: impl Into<String>,
+        reason: ReasonCode,
+    ) -> Result<Self, ContractError> {
+        Self::with_outcome(
+            instrument_id,
+            atomic_units,
+            operation_ref_hash.into(),
+            InstrumentSettlementOutcome::Forfeited { reason },
+        )
+    }
+
+    fn with_outcome(
+        instrument_id: InstrumentId,
+        atomic_units: AtomicUnits,
+        operation_ref_hash: String,
+        outcome: InstrumentSettlementOutcome,
+    ) -> Result<Self, ContractError> {
         if atomic_units == AtomicUnits::ZERO {
             return Err(ContractError::ZeroInstrumentAward);
         }
-        if !is_sha256(&operation_ref_hash) || !is_sha256(&result_ref_hash) {
+        if !is_sha256(&operation_ref_hash) {
             return Err(ContractError::InvalidSettlementReference);
         }
         Ok(Self {
             instrument_id,
             atomic_units,
             operation_ref_hash,
-            result_ref_hash,
+            outcome,
         })
     }
 
@@ -598,8 +643,16 @@ impl InstrumentSettlement {
         &self.operation_ref_hash
     }
 
-    pub fn result_ref_hash(&self) -> &str {
-        &self.result_ref_hash
+    pub fn outcome(&self) -> &InstrumentSettlementOutcome {
+        &self.outcome
+    }
+
+    /// The adapter result reference. `None` when the operation was forfeited.
+    pub fn result_ref_hash(&self) -> Option<&str> {
+        match &self.outcome {
+            InstrumentSettlementOutcome::Completed { result_ref_hash } => Some(result_ref_hash),
+            InstrumentSettlementOutcome::Forfeited { .. } => None,
+        }
     }
 }
 
@@ -1054,7 +1107,7 @@ mod tests {
         );
         assert_eq!(
             decision.settlement_operations()[1].result_ref_hash(),
-            hash(b"trace-credit-result")
+            Some(hash(b"trace-credit-result").as_str())
         );
 
         let missing_operation = InstrumentSettlement::new(
@@ -1073,6 +1126,60 @@ mod tests {
                 vec![missing_operation],
             ),
             Err(ContractError::SettlementOperationMismatch)
+        );
+    }
+
+    #[test]
+    fn settle_decision_completes_with_a_forfeited_operation() {
+        let awards =
+            InstrumentAwards::new(vec![award("trace_credit", 3), award("storage_rebate", 7)])
+                .unwrap();
+        let forfeited = InstrumentSettlement::forfeited(
+            InstrumentId::new("trace_credit").unwrap(),
+            AtomicUnits::from_raw(3),
+            hash(b"trace-credit-operation"),
+            ReasonCode::new("withdrawn").unwrap(),
+        )
+        .unwrap();
+        let completed = InstrumentSettlement::new(
+            InstrumentId::new("storage_rebate").unwrap(),
+            AtomicUnits::from_raw(7),
+            hash(b"storage-rebate-operation"),
+            hash(b"storage-rebate-result"),
+        )
+        .unwrap();
+
+        let decision = SettleDecision::new(
+            IndexMembershipDecision::Exclude {
+                reason: ReasonCode::new("withdrawn").unwrap(),
+            },
+            &awards,
+            vec![forfeited, completed],
+        )
+        .unwrap();
+
+        let trace_credit = &decision.settlement_operations()[1];
+        assert_eq!(trace_credit.atomic_units(), AtomicUnits::from_raw(3));
+        assert_eq!(trace_credit.result_ref_hash(), None);
+        assert_eq!(
+            trace_credit.outcome(),
+            &InstrumentSettlementOutcome::Forfeited {
+                reason: ReasonCode::new("withdrawn").unwrap()
+            }
+        );
+        assert_eq!(
+            decision.settlement_operations()[0].result_ref_hash(),
+            Some(hash(b"storage-rebate-result").as_str())
+        );
+
+        assert_eq!(
+            InstrumentSettlement::forfeited(
+                InstrumentId::new("trace_credit").unwrap(),
+                AtomicUnits::from_raw(3),
+                "not-a-hash",
+                ReasonCode::new("withdrawn").unwrap(),
+            ),
+            Err(ContractError::InvalidSettlementReference)
         );
     }
 

@@ -640,7 +640,8 @@ precedes the first write. A retry must reuse the sealed command bytes.
   progress.
 - A failure for one instrument MUST NOT corrupt or repeat another instrument.
 - A Trace Credit hold MUST NOT alter the index decision or another instrument.
-- Settle MUST wait for all required internal operations.
+- Settle MUST wait for all required internal operations. A `forfeited`
+  operation is complete for this rule.
 - Settle MUST preserve retry information for each incomplete operation.
 
 **Acceptance:** Fail the index and two instrument paths independently. Recover
@@ -652,7 +653,8 @@ until all required operations complete.
 - Settlement MUST use the eligible operations created from the Score outcome.
 - Settle MUST process every awarded instrument, not only the first one.
 - The Settle decision MUST return every instrument identifier, atomic amount,
-  operation reference, and result reference in deterministic order.
+  operation reference, and result reference or `forfeited` state, in
+  deterministic order.
 - The persisted operations MUST exactly match the committed Score awards.
 - The Trace Credit adapter MUST preserve account-level batching, holds, caps,
   issuer approval, source-list approval, and duplicate-credit protection.
@@ -667,7 +669,7 @@ caps, concurrent settlement, and duplicate-source fixtures.
 ### STL-005: Settle completion and NEAR
 
 - Settle completion MUST mean that required internal index and credit
-  operations are complete.
+  operations are complete. A `forfeited` operation counts as complete.
 - A disabled or pending NEAR outbox item MUST NOT delay the Settle outcome.
 - External NEAR state MUST NOT change a committed Settle outcome.
 - Outcomes, audits, logs, reports, and operational responses MUST remain
@@ -782,12 +784,13 @@ Confirm the permitted content and credit behavior.
 - Withdrawal after command storage MUST stop a pending index command.
 - Withdrawal after index completion MUST invoke the existing invalidation
   path.
-- Withdrawal after Score commits MUST NOT remove awarded credit.
-- Existing settlement CAN finalize that committed credit.
+- Withdrawal after Score commits MUST end each instrument operation that has
+  not completed as `forfeited`. Settle MUST NOT wait for that operation.
 - Ordinary withdrawal MUST NOT claw back settled credit.
 
 **Acceptance:** Withdraw at every boundary from Admission through external
-payout. Confirm index and credit results.
+payout. Confirm index and credit results. Confirm that Settle completes after
+a withdrawal between Score and settlement.
 
 ### GRD-004: Policy suspension
 
@@ -917,12 +920,16 @@ identities with held and capped accounts.
 
 ### CRD-005: No-clawback rule
 
-- Ordinary withdrawal MUST leave committed Score credit unchanged.
-- Existing settlement CAN finalize credit committed before withdrawal.
+- Ordinary withdrawal MUST NOT change settled credit. Settled means carried
+  by a finalized settlement batch.
+- Withdrawal MUST forfeit credit that is not settled.
+- The withdrawal response MUST compute `credit_retained` with the same check
+  as `withdrawal_retains_all_credit` on `main`.
 - Withdrawal MUST prevent new content reads and index membership.
 
 **Acceptance:** Before Score, withdrawal prevents a Score outcome and credit
-event. After Score, credit can finalize without a content read. Later
+event. After Score and before settlement, withdrawal forfeits the credit,
+Settle completes, and the response reports `credit_retained` as false. Later
 withdrawal does not claw back finalized credit.
 
 ## 15. Lifecycle contracts
@@ -1433,14 +1440,15 @@ Expected results:
 
 1. Complete a positive Score.
 2. Withdraw before Settle decides index membership.
-3. Complete permitted settlement work.
+3. Run Settle.
 
 Expected results:
 
 - Settle excludes index membership.
-- The committed Score credit remains.
-- Existing governed settlement can finalize the credit.
-- No content read occurs during credit finalization.
+- Each instrument operation that has not completed ends as `forfeited`.
+- Settle completes and does not wait for the forfeited operations.
+- The withdrawal response reports `credit_retained` as false.
+- No content read occurs.
 
 #### SCN-010: Withdrawal after index write
 
