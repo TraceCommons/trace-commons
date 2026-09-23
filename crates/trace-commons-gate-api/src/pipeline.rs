@@ -1578,6 +1578,22 @@ impl SealedIndexCommand {
     pub fn entries(&self) -> &[SealedIndexEntry] {
         &self.entries
     }
+
+    /// The index key for one of this command's entries.
+    pub fn entry_key(
+        &self,
+        tenant: &TenantStorageRef,
+        entry: &SealedIndexEntry,
+    ) -> crate::vector_index::IndexEntryKey {
+        crate::vector_index::IndexEntryKey {
+            tenant_storage_ref: tenant.as_str().to_string(),
+            index_id: self.index_id.clone(),
+            revision_id: self.revision_id,
+            projection_id: self.projection_id.clone(),
+            model_id: self.model_id.clone(),
+            chunk: entry.chunk,
+        }
+    }
 }
 
 impl fmt::Debug for SealedIndexCommand {
@@ -3257,6 +3273,42 @@ mod tests {
         assert_eq!(
             base.bundle_id(),
             Err(ContractError::UnsupportedManifestVersion)
+        );
+    }
+
+    #[test]
+    fn sealed_command_entry_keys_carry_the_tenant_reference_and_chunk() {
+        let tenant =
+            TenantStorageRef::new("tenant_sha256:00112233445566778899aabbccddeeff").unwrap();
+        let entry = |chunk| SealedIndexEntry {
+            chunk,
+            content_hash: format!("sha256:{}", "a".repeat(64)),
+            embedding: vec![0.5, 0.25],
+        };
+        let command = SealedIndexCommand::new(
+            "pipeline-test-index-v1",
+            Uuid::nil(),
+            "pipeline-test-projection-v1",
+            "reference-embedder-v1",
+            vec![entry(7), entry(3)],
+        )
+        .unwrap();
+        let keys: Vec<_> = command
+            .entries()
+            .iter()
+            .map(|entry| command.entry_key(&tenant, entry))
+            .collect();
+        assert_eq!(
+            keys.iter().map(|key| key.chunk).collect::<Vec<_>>(),
+            vec![3, 7]
+        );
+        assert!(
+            keys.iter()
+                .all(|key| key.tenant_storage_ref == tenant.as_str())
+        );
+        assert!(
+            keys.iter()
+                .all(|key| key.model_id == "reference-embedder-v1")
         );
     }
 }
