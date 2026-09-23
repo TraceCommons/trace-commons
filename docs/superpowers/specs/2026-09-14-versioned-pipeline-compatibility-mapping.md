@@ -37,7 +37,7 @@ inserts vectors while it scores. The new path splits that work.
 | `perplexity_micros`, `tail_fraction_micros`, `peak_perplexity_micros` | Score evidence measured values |
 | `novelty_score_micros`, `peak_novelty_micros` | Score evidence measured values |
 | `nearest_neighbor_hash` | Score evidence neighbor hash. Neighbor lists stay in an encrypted artifact. |
-| `chunk_count`, `chunks_capped` | Score evidence coverage |
+| `chunk_count`, `total_chunk_count`, `chunks_capped` | Score evidence coverage |
 | `inserted_chunk_entries` not empty | Settle `Include` after Score commits |
 | `inserted_chunk_entries` empty | Settle `Exclude` |
 | insert during `evaluate` | Forbidden in Score. Settle writes a sealed command. |

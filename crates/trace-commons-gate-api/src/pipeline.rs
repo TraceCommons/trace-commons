@@ -931,6 +931,9 @@ pub struct ScoreEvidence {
     pub embedder_model_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub projection_id: Option<String>,
+    /// Hash of the input the projection embedded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub projection_input_hash: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub perplexity_micros: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -951,8 +954,13 @@ pub struct ScoreEvidence {
     pub index_cardinality: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coverage_tokens: Option<u64>,
+    /// Chunks scored.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chunk_count: Option<u32>,
+    /// Chunks in the whole trace before the per-trace cap. With
+    /// `chunk_count`, it states the coverage of a capped trace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_chunk_count: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chunks_capped: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -976,6 +984,7 @@ impl ScoreEvidence {
             scorer_model_id: None,
             embedder_model_id: None,
             projection_id: None,
+            projection_input_hash: None,
             perplexity_micros: None,
             tail_fraction_micros: None,
             novelty_score_micros: None,
@@ -987,11 +996,25 @@ impl ScoreEvidence {
             index_cardinality: None,
             coverage_tokens: None,
             chunk_count: None,
+            total_chunk_count: None,
             chunks_capped: None,
             include_eligible: None,
             credit_quality_micros: None,
             credit_quality_version: None,
             neighbor_artifact_hash: None,
+        }
+    }
+
+    /// Coverage fields are all absent, or all present with
+    /// `chunk_count <= total_chunk_count` and `chunks_capped` set exactly
+    /// when chunks were dropped.
+    fn coverage_is_consistent(&self) -> bool {
+        match (self.chunk_count, self.total_chunk_count, self.chunks_capped) {
+            (None, None, None) => true,
+            (Some(scored), Some(total), Some(capped)) => {
+                scored <= total && capped == (scored < total)
+            }
+            _ => false,
         }
     }
 }
@@ -1162,6 +1185,7 @@ impl ScoreOutput {
             }
         };
         if !command_matches
+            || !evidence.coverage_is_consistent()
             || evidence.embedding_artifact_hash != command_hash
             || evidence.neighbor_artifact_hash != neighbor_artifact.as_deref().map(sha256_prefixed)
         {
@@ -1711,6 +1735,28 @@ mod tests {
             assert_eq!(
                 index_command(entries).err(),
                 Some(ContractError::InvalidIndexCommand)
+            );
+        }
+    }
+
+    #[test]
+    fn score_output_states_capped_coverage() {
+        for (scored, total, capped, consistent) in [
+            (Some(3), Some(5), Some(true), true),
+            (Some(5), Some(5), Some(false), true),
+            (Some(3), Some(5), Some(false), false),
+            (Some(5), Some(5), Some(true), false),
+            (Some(6), Some(5), Some(true), false),
+            (Some(3), None, Some(true), false),
+        ] {
+            let mut result = score_result(None, false);
+            result.evidence.chunk_count = scored;
+            result.evidence.total_chunk_count = total;
+            result.evidence.chunks_capped = capped;
+            assert_eq!(
+                ScoreOutput::new(result, None, None).is_ok(),
+                consistent,
+                "{scored:?} of {total:?}, capped {capped:?}"
             );
         }
     }
