@@ -1,3 +1,6 @@
+import { NEAR_AI_NOTICE_LABEL } from "../health-recovery";
+import { NearAiNoticeRecovery } from "./near-ai-notice-recovery";
+
 type Health = { last_error_label: string | null; since: string | null };
 type Budget = {
   bytes_today: number;
@@ -53,7 +56,14 @@ export function QueueStatusPanel({
         <h2>Contribution safeguards</h2>
       </div>
       <div className="grid grid-cols-3 gap-px border-y border-border">
-        {health.last_error_label && (
+        {health.last_error_label === NEAR_AI_NOTICE_LABEL && (
+          <NearAiNoticeRecovery
+            label={health.last_error_label}
+            since={health.since}
+          />
+        )}
+        {health.last_error_label &&
+          health.last_error_label !== NEAR_AI_NOTICE_LABEL && (
           <div className="text-destructive">
             <strong>Daemon needs attention</strong>
             <span>

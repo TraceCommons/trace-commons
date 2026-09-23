@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
+import { getCoreStatus, retryDaemonStartup } from "../../../lib/tauri/core-api";
 import { coreKeys } from "../../../lib/tauri/query-keys";
 import { useCoreStatus } from "../../../lib/tauri/use-core-status";
 import { profileKeys } from "../../profile/public";
@@ -11,6 +12,7 @@ import {
   setConsentScopes,
 } from "../api/onboarding-api";
 import { onboardingKeys } from "../api/query-keys";
+import { rootsContinueError, rootsReadiness } from "../roots-readiness";
 import type { ConsentOption } from "../types";
 
 export type OnboardingStep =
@@ -106,6 +108,30 @@ export function useOnboarding(alreadyEnrolled: boolean) {
       ]);
     },
   });
+  // Enrollment needs a running daemon. Continue waits for it rather than
+  // advancing to a Connect step that would fail for an unrelated reason.
+  const startMutation = useMutation({
+    mutationFn: async () => {
+      await retryDaemonStartup();
+      const status = await queryClient.fetchQuery({
+        queryKey: coreKeys.status,
+        queryFn: getCoreStatus,
+        staleTime: 0,
+      });
+      if (status.startup !== "running") throw new Error("daemon-not-running");
+    },
+    onSettled: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: coreKeys.status }),
+        queryClient.invalidateQueries({
+          queryKey: settingsKeys.snapshot(core.scope),
+        }),
+      ]);
+    },
+  });
+  const rootsStartError = startMutation.isError
+    ? rootsContinueError(startMutation.error)
+    : null;
   const refreshEnrollment = async () => {
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: coreKeys.status }),
@@ -143,10 +169,22 @@ export function useOnboarding(alreadyEnrolled: boolean) {
           ? "Privacy-scan choice was not saved."
           : null;
   const startRoots = () => {
+    startMutation.reset();
     setStep("roots");
   };
-  const continueRoots = () => {
-    setStep("connect");
+  const continueRoots = async (snapshot: Record<string, unknown>) => {
+    const readiness = rootsReadiness(snapshot, core.data?.startup);
+    if (readiness === "undeclared") return;
+    if (readiness === "running") {
+      setStep("connect");
+      return;
+    }
+    try {
+      await startMutation.mutateAsync();
+      setStep("connect");
+    } catch {
+      // The roots step renders the start failure from shared copy.
+    }
   };
   const back = () => {
     setStep((current) => previousStep(current, privacyIncluded));
@@ -198,6 +236,8 @@ export function useOnboarding(alreadyEnrolled: boolean) {
     },
     startRoots,
     continueRoots,
+    startingDaemon: startMutation.isPending,
+    rootsStartError,
     back,
     enroll,
     markEnrolled,

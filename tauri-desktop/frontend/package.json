@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "build": "tsc --noEmit && vite build",
-    "test": "node --test src/features/history/history-view-model.test.mjs src/features/history/withdrawal-eligibility.test.mjs src/lib/tauri/quit-confirmation-copy.test.mjs",
+    "test": "node --test src/features/history/history-view-model.test.mjs src/features/history/withdrawal-eligibility.test.mjs src/lib/tauri/quit-confirmation-copy.test.mjs src/features/waiting/health-recovery.test.mjs src/features/onboarding/roots-readiness.test.mjs",
     "dev": "vite",
     "storybook": "storybook dev -p 6006",
     "build-storybook": "storybook build"
