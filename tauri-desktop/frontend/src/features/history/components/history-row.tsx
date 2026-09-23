@@ -1,6 +1,10 @@
 import { Button } from "@/components/ui/button";
 import { isTauriRuntime } from "../../../lib/tauri/core-api";
-import { canWithdrawStatus, historyStatusLabel } from "../withdrawal-eligibility";
+import {
+  canWithdrawStatus,
+  historyStatusLabel,
+  type SharedHistoryStatusCopy,
+} from "../withdrawal-eligibility";
 import { contributorFacingExplanations } from "../history-view-model";
 import type { HistoryRecord, WithdrawalResult } from "../types";
 import { AccountSignInControl } from "./account-sign-in-control";
@@ -17,6 +21,7 @@ export function HistoryRow({
   onAccountSignIn,
   onOpenSignInUrl,
   heldRowFallback,
+  statusCopy,
   onOpen,
   confirming,
   busy,
@@ -36,6 +41,7 @@ export function HistoryRow({
   onAccountSignIn?: () => void;
   onOpenSignInUrl?: () => void;
   heldRowFallback?: string | null;
+  statusCopy?: SharedHistoryStatusCopy | null;
   onOpen?: () => void;
   confirming?: boolean;
   busy?: boolean;
@@ -49,7 +55,7 @@ export function HistoryRow({
     month: "short",
     day: "numeric",
   });
-  const status = historyStatusLabel(record.status);
+  const status = historyStatusLabel(record.status, statusCopy);
   const canWithdraw = canWithdrawStatus(record.status);
   const visibleExplanations = contributorFacingExplanations(record.explanations);
   const rowExplanations =

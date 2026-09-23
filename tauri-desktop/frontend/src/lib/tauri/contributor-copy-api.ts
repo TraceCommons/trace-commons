@@ -187,6 +187,7 @@ export type ContributorDisclosureCopy = {
   };
   history_ui: {
     held_row_body: string;
+    status_awaiting_pii_backstop: string;
   };
   outcome: OutcomeCopy;
 };
@@ -358,6 +359,7 @@ export async function getContributorDisclosureCopy(): Promise<ContributorDisclos
     },
     history_ui: {
       held_row_body: string(historyUi, "held_row_body"),
+      status_awaiting_pii_backstop: string(historyUi, "status_awaiting_pii_backstop"),
     },
     outcome: {
       verdict_question: string(outcome, "verdict_question"),
