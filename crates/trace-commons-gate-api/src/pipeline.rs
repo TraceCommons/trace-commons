@@ -677,25 +677,34 @@ impl TryFrom<SettleDecisionFields> for SettleDecision {
 }
 
 impl SettleDecision {
+    /// Builds a decision for the committed Score outcome. The operations must
+    /// match its awards exactly.
     pub fn new(
         index_membership: IndexMembershipDecision,
-        awards: &InstrumentAwards,
+        score: &ScoreDecision,
         settlement_operations: Vec<InstrumentSettlement>,
     ) -> Result<Self, ContractError> {
         let decision = Self::from_parts(index_membership, settlement_operations)?;
-        let settlement_operations = &decision.settlement_operations;
+        decision.matches_score(score)?;
+        Ok(decision)
+    }
+
+    /// One operation per award, with the same instrument and amount. A loaded
+    /// decision is checked with this against the committed Score outcome.
+    pub fn matches_score(&self, score: &ScoreDecision) -> Result<(), ContractError> {
+        let awards = &score.awards;
         let operations_match =
             awards
                 .iter()
-                .zip(settlement_operations)
+                .zip(&self.settlement_operations)
                 .all(|(award, operation)| {
                     award.instrument_id == operation.instrument_id
                         && award.atomic_units == operation.atomic_units
                 });
-        if awards.iter().len() != settlement_operations.len() || !operations_match {
+        if awards.iter().len() != self.settlement_operations.len() || !operations_match {
             return Err(ContractError::SettlementOperationMismatch);
         }
-        Ok(decision)
+        Ok(())
     }
 
     /// Sorts operations by instrument and refuses a second operation for one
@@ -1376,6 +1385,12 @@ impl ScoreOutput {
     ) -> Result<Self, ContractError> {
         let evidence = &result.evidence;
         evidence.validate()?;
+        // The award set appears three times; all copies must agree.
+        if result.decision.awards != evidence.fixed_awards
+            || result.decision.awards != result.evaluation.awards
+        {
+            return Err(ContractError::ScoreOutputMismatch);
+        }
         let command_hash = index_command
             .as_ref()
             .map(SealedIndexCommand::content_hash)
@@ -1752,7 +1767,9 @@ mod tests {
             IndexMembershipDecision::Exclude {
                 reason: ReasonCode::new("not_selected").unwrap(),
             },
-            &awards,
+            &ScoreDecision {
+                awards: awards.clone(),
+            },
             vec![trace_credit, storage_rebate],
         )
         .unwrap();
@@ -1779,7 +1796,7 @@ mod tests {
                 IndexMembershipDecision::Exclude {
                     reason: ReasonCode::new("not_selected").unwrap(),
                 },
-                &awards,
+                &ScoreDecision { awards },
                 vec![missing_operation],
             ),
             Err(ContractError::SettlementOperationMismatch)
@@ -2014,7 +2031,9 @@ mod tests {
                     command_hash: upper.clone(),
                     entry_count: 1,
                 },
-                &InstrumentAwards::default(),
+                &ScoreDecision {
+                    awards: InstrumentAwards::default(),
+                },
                 Vec::new(),
             ),
             Err(ContractError::MalformedHash)
@@ -2219,6 +2238,60 @@ mod tests {
     }
 
     #[test]
+    fn settle_operations_follow_the_committed_score() {
+        let credit = InstrumentAwards::new(vec![award("trace_credit", 3)]).unwrap();
+        let other = InstrumentAwards::new(vec![award("trace_credit", 4)]).unwrap();
+
+        // Score cannot commit copies of its award set that disagree.
+        for (evidence_awards, evaluation_awards) in [
+            (other.clone(), credit.clone()),
+            (credit.clone(), other.clone()),
+        ] {
+            let mut result = score_result(None, false);
+            result.decision.awards = credit.clone();
+            result.evidence.fixed_awards = evidence_awards;
+            result.evaluation.awards = evaluation_awards;
+            assert_eq!(
+                ScoreOutput::new(result, None, None),
+                Err(ContractError::ScoreOutputMismatch)
+            );
+        }
+
+        let operation = InstrumentSettlement::new(
+            InstrumentId::trace_credit(),
+            AtomicUnits::from_raw(3),
+            hash(b"operation"),
+            hash(b"result"),
+        )
+        .unwrap();
+        let exclude = IndexMembershipDecision::Exclude {
+            reason: ReasonCode::new("not_selected").unwrap(),
+        };
+        let score = ScoreDecision { awards: credit };
+        let decision =
+            SettleDecision::new(exclude.clone(), &score, vec![operation.clone()]).unwrap();
+        assert_eq!(
+            SettleDecision::new(
+                exclude,
+                &ScoreDecision {
+                    awards: other.clone()
+                },
+                vec![operation]
+            ),
+            Err(ContractError::SettlementOperationMismatch)
+        );
+
+        // A loaded decision is checked against the Score outcome it settles.
+        let loaded: SettleDecision =
+            serde_json::from_value(serde_json::to_value(&decision).unwrap()).unwrap();
+        assert_eq!(loaded.matches_score(&score), Ok(()));
+        assert_eq!(
+            loaded.matches_score(&ScoreDecision { awards: other }),
+            Err(ContractError::SettlementOperationMismatch)
+        );
+    }
+
+    #[test]
     fn settle_decision_completes_with_a_forfeited_operation() {
         let awards =
             InstrumentAwards::new(vec![award("trace_credit", 3), award("storage_rebate", 7)])
@@ -2242,7 +2315,7 @@ mod tests {
             IndexMembershipDecision::Exclude {
                 reason: ReasonCode::new("withdrawn").unwrap(),
             },
-            &awards,
+            &ScoreDecision { awards },
             vec![forfeited, completed],
         )
         .unwrap();
