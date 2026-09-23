@@ -1600,21 +1600,37 @@ pub struct SettleInput {
     pub index_command: Option<SealedIndexCommand>,
 }
 
+/// Why a policy could not produce a result. The runner budgets the two kinds
+/// differently: a transient failure is retried without charging the trace's
+/// attempt budget; a permanent failure is charged to the trace.
 #[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
-#[error("policy failed: {label}")]
-pub struct PolicyError {
-    label: String,
+pub enum PolicyError {
+    /// A dependency failed: an outage, a timeout, a rate limit, or a payment
+    /// or quota error from a backend. The same trace can succeed later.
+    #[error("policy dependency failed: {}", .0.as_str())]
+    Transient(ReasonCode),
+    /// The policy cannot process this trace. Retrying does not help.
+    #[error("policy failed: {}", .0.as_str())]
+    Permanent(ReasonCode),
 }
 
 impl PolicyError {
-    pub fn new(label: impl Into<String>) -> Result<Self, ContractError> {
-        Ok(Self {
-            label: ReasonCode::new(label)?.0,
-        })
+    pub fn transient(label: impl Into<String>) -> Result<Self, ContractError> {
+        Ok(Self::Transient(ReasonCode::new(label)?))
+    }
+
+    pub fn permanent(label: impl Into<String>) -> Result<Self, ContractError> {
+        Ok(Self::Permanent(ReasonCode::new(label)?))
+    }
+
+    pub fn is_transient(&self) -> bool {
+        matches!(self, Self::Transient(_))
     }
 
     pub fn label(&self) -> &str {
-        &self.label
+        match self {
+            Self::Transient(label) | Self::Permanent(label) => label.as_str(),
+        }
     }
 }
 
@@ -2338,6 +2354,25 @@ mod tests {
         assert_eq!(
             award("storage_rebate", 3).trace_credit_microcredits(),
             Err(ContractError::NotTraceCredit)
+        );
+    }
+
+    #[test]
+    fn policy_errors_say_whether_the_trace_is_at_fault() {
+        let outage = PolicyError::transient("scorer_unavailable").unwrap();
+        let refused = PolicyError::permanent("unsupported_schema").unwrap();
+        assert!(outage.is_transient());
+        assert!(!refused.is_transient());
+        assert_eq!(outage.label(), "scorer_unavailable");
+        assert_eq!(
+            outage.to_string(),
+            "policy dependency failed: scorer_unavailable"
+        );
+        assert_eq!(refused.to_string(), "policy failed: unsupported_schema");
+        // Labels stay safe: a raw backend message is refused, not forwarded.
+        assert_eq!(
+            PolicyError::transient("HttpStatusError status=502"),
+            Err(ContractError::InvalidReasonCode)
         );
     }
 

@@ -439,10 +439,9 @@ Each phase has a small typed policy trait. This example shows the Score phase:
 ```rust
 #[async_trait]
 trait ScorePolicy: Send + Sync {
-    async fn execute(
-        &self,
-        input: &ScoreInput,
-    ) -> Result<PhaseResult<ScoreDecision, ScoreEvidence, ScoreEvaluation>, PolicyError>;
+    // `ScoreOutput` is the `PhaseResult` plus the transient artifacts that
+    // its evidence names by hash.
+    async fn execute(&self, input: &ScoreInput) -> Result<ScoreOutput, PolicyError>;
 }
 
 #[async_trait]
@@ -457,6 +456,11 @@ struct PhaseResult<D, E, V> {
     decision: D,
     evidence: E,
     evaluation: V,
+}
+
+enum PolicyError {
+    Transient(ReasonCode), // A dependency failed; retry without charging the trace.
+    Permanent(ReasonCode), // This trace cannot be processed; charge the trace.
 }
 
 struct ScoreRunner {
@@ -474,7 +478,10 @@ struct DefaultSettlePolicy {
 ```
 
 Admission, Review, and Settle use the same result shape with their own types.
-Runners hold policies as trait objects. Score policies receive read-only index
+Review returns it in `ReviewOutput` with any approved content. A policy
+reports an outage of its scorer, embedder, index, or other backend as
+`PolicyError::Transient`, so the runner does not charge the outage to the
+trace. Runners hold policies as trait objects. Score policies receive read-only index
 capabilities. Settle policies receive write capabilities.
 
 Policies hold their scorers, embedders, vector indexes, and credit adapters as
@@ -489,17 +496,15 @@ struct FixedScorePolicy {
 
 #[async_trait]
 impl ScorePolicy for FixedScorePolicy {
-    async fn execute(
-        &self,
-        _input: &ScoreInput,
-    ) -> Result<PhaseResult<ScoreDecision, ScoreEvidence, ScoreEvaluation>, PolicyError> {
-        Ok(PhaseResult {
+    async fn execute(&self, _input: &ScoreInput) -> Result<ScoreOutput, PolicyError> {
+        let result = PhaseResult {
             decision: ScoreDecision {
                 awards: self.awards.clone(),
             },
             evidence: ScoreEvidence::Fixed,
             evaluation: ScoreEvaluation::FixedAmount,
-        })
+        };
+        ScoreOutput::new(result, None, None).map_err(|_| permanent("invalid_score_output"))
     }
 }
 ```

@@ -712,10 +712,15 @@ one outcome can exist.
 - A stale lease token MUST NOT commit an outcome or side effect.
 - A worker MUST load the bundle already bound to the run.
 - Retry exhaustion MUST leave visible terminal state.
+- A `PolicyError::Transient` result MUST NOT consume the run's attempt
+  budget. The run MUST stay retryable with backoff. A
+  `PolicyError::Permanent` result MUST consume an attempt.
 
 **Acceptance:** Pause a worker past lease expiry. Let another worker finish.
 The first worker must fail at commit. Expire leases before adapter calls.
 Stable commands and event keys must prevent a second logical operation.
+Make a scorer fail transiently for longer than the attempt budget. The run
+must stay retryable and must complete when the scorer recovers.
 
 ### RUN-004: Crash matrix
 
