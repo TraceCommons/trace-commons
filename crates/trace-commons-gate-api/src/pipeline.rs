@@ -2514,6 +2514,149 @@ mod tests {
         assert!(format!("{score:?}").contains("<withheld>"));
     }
 
+    fn golden_manifest() -> BundleManifest {
+        let policy = |name: &str| PolicyRef {
+            policy_id: format!("trace_commons.{name}.golden"),
+            implementation_id: format!("trace_commons.{name}.golden.v1"),
+            configuration_hash: hash(format!("{name}-configuration").as_bytes()),
+            data_artifact_hashes: vec![hash(format!("{name}-data").as_bytes())],
+            projection_ids: vec![format!("{name}-projection")],
+        };
+        BundleManifest {
+            format_version: BUNDLE_MANIFEST_FORMAT_VERSION,
+            admission: policy("admission"),
+            review: policy("review"),
+            score: policy("score"),
+            settle: policy("settle"),
+        }
+    }
+
+    /// Fixed identities. A change to a canonical encoding changes these values,
+    /// and with them every stored `bundle_id`, signed `package_hash`, award-set
+    /// identity, or stored index command. A failure here means an encoding
+    /// changed: bump the affected format or schema version, do not just update
+    /// the value.
+    #[test]
+    fn golden_identities_are_stable() {
+        let manifest = golden_manifest();
+
+        // The manifest encoding, written out: domain, u32 format version, then
+        // for each phase in order its policy id, implementation id,
+        // configuration hash, and sorted data hashes and projection ids. Every
+        // length and count is a big-endian u64.
+        let mut expected = b"trace-commons-bundle-manifest\0".to_vec();
+        expected.extend_from_slice(&1u32.to_be_bytes());
+        for name in ["admission", "review", "score", "settle"] {
+            let string = |bytes: &mut Vec<u8>, value: &str| {
+                bytes.extend_from_slice(&(value.len() as u64).to_be_bytes());
+                bytes.extend_from_slice(value.as_bytes());
+            };
+            string(&mut expected, &format!("trace_commons.{name}.golden"));
+            string(&mut expected, &format!("trace_commons.{name}.golden.v1"));
+            string(
+                &mut expected,
+                &hash(format!("{name}-configuration").as_bytes()),
+            );
+            expected.extend_from_slice(&1u64.to_be_bytes());
+            string(&mut expected, &hash(format!("{name}-data").as_bytes()));
+            expected.extend_from_slice(&1u64.to_be_bytes());
+            string(&mut expected, &format!("{name}-projection"));
+        }
+        assert_eq!(manifest.canonical_bytes().unwrap(), expected);
+        assert_eq!(
+            manifest.bundle_id().unwrap(),
+            "sha256:72d0874799ec8e8194315bc2ce986fa8ee1c61797759ac75ad889f8bf149fc63"
+        );
+
+        let artifacts = ["admission", "review", "score", "settle"]
+            .into_iter()
+            .flat_map(|name| {
+                [
+                    format!("{name}-configuration").into_bytes(),
+                    format!("{name}-data").into_bytes(),
+                ]
+            })
+            .map(|bytes| (hash(&bytes), bytes))
+            .collect();
+        let package = BundlePackage {
+            bundle_id: manifest.bundle_id().unwrap(),
+            manifest,
+            artifacts,
+        };
+        assert_eq!(
+            package.package_hash().unwrap(),
+            "sha256:9d0444d694ef51b3d8794ca1f8e674b36f35ff5ecbecaf8213dd4cb43af4c29c"
+        );
+
+        let awards =
+            InstrumentAwards::new(vec![award("trace_credit", 3), award("storage_rebate", 7)])
+                .unwrap();
+        assert_eq!(
+            awards.canonical_id(),
+            "sha256:3fa59b4e41c8713fcfe4843da2deaa01cceabc6dd27dc17b7b74a132adb2e9ed"
+        );
+
+        let command = SealedIndexCommand::new(
+            "index-v1",
+            Uuid::from_u128(0x0123_4567_89ab_cdef_0123_4567_89ab_cdef),
+            "projection-v1",
+            "embedder-v1",
+            vec![
+                index_entry(2, vec![0.25, -1.5]),
+                index_entry(9, vec![1.0, 0.0]),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            command.content_hash().unwrap(),
+            "sha256:5aba5d8eff158ed94aaffb1d59fe64a00dbbbfceafed7cdc4a2df968086612c7"
+        );
+    }
+
+    /// Mutants the review found surviving: a decimal fraction read with the
+    /// wrong scale, a Settle match that ignores amounts, and a zero award.
+    #[test]
+    fn amounts_are_exact_and_positive() {
+        for (decimal, microcredits) in [
+            ("1.5", 1_500_000),
+            ("1.05", 1_050_000),
+            ("0.000001", 1),
+            ("12", 12_000_000),
+        ] {
+            assert_eq!(
+                Microcredits::from_credit_decimal(decimal).map(Microcredits::get),
+                Ok(microcredits),
+                "{decimal}"
+            );
+        }
+
+        let score = ScoreDecision {
+            awards: InstrumentAwards::new(vec![award("trace_credit", 3)]).unwrap(),
+        };
+        let wrong_amount = InstrumentSettlement::new(
+            InstrumentId::trace_credit(),
+            AtomicUnits::from_raw(4),
+            hash(b"operation"),
+            hash(b"result"),
+        )
+        .unwrap();
+        assert_eq!(
+            SettleDecision::new(
+                IndexMembershipDecision::Exclude {
+                    reason: ReasonCode::new("not_selected").unwrap(),
+                },
+                &score,
+                vec![wrong_amount],
+            ),
+            Err(ContractError::SettlementOperationMismatch)
+        );
+
+        assert_eq!(
+            InstrumentAward::new(InstrumentId::trace_credit(), AtomicUnits::ZERO),
+            Err(ContractError::ZeroInstrumentAward)
+        );
+    }
+
     #[test]
     fn settle_decision_completes_with_a_forfeited_operation() {
         let awards =
