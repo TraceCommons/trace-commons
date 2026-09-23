@@ -203,3 +203,123 @@ and makes it more load-bearing.
 No production code in this PR. The onboarding flow itself (Flow 1 of Epic 1),
 the settings surface for review-everything mode, and the digest redesign are
 each their own slice.
+
+---
+
+# Addendum: the disclosure, written first
+
+Finding 3 above said a parallel constant is needed and did not say what it
+would contain. This addendum writes it, because the sentence you can honestly
+show someone at connect time constrains every other choice in the flow, and it
+is the cheapest thing to get wrong late.
+
+## What the scrubber actually does
+
+Writing the sentence forced a reading of the redactor, and the finding is that
+it is **two mechanisms with different reliability**, which the current single
+sentence flattens into one claim.
+
+**Deterministic.** Fixed patterns, near-certain for the formats they cover.
+`secret_leak_patterns()` holds nine: `openai_api_key`, `github_token`,
+`aws_access_key`, `provider_token`, `cursor_api_key`, `jwt`, `npm_token`,
+`google_api_key`, `pem_header_orphan`. Alongside them
+`redact_private_emails`, `redact_known_paths` and `redact_generic_paths`
+handle addresses and identifying paths.
+
+**Probabilistic.** `redact_text_through_prose_filter` — an LLM. Everything
+that is not a known format: names, employers, customer identifiers, a
+credential someone typed into a sentence rather than pasted as a token.
+
+The first can be promised. The second cannot. `GATE_STATEMENT` today says
+"pattern-based scrubbing may have missed something", which is true of both but
+tells the contributor nothing about which half is which — acceptable when a
+human was about to read the transcript anyway, and not acceptable when nobody
+is.
+
+## The proposed constants
+
+Four sentences, in `consent_copy.rs`, covered by `harness_copy_is_central.rs`.
+Written to be shown together at the moment automatic contribution is granted.
+
+```rust
+/// What runs on every session, split by how much it can be trusted.
+pub const AUTO_SCRUB_SCOPE: &str = "Fixed patterns remove API keys and tokens in the formats we know, your email addresses, and file paths that name you or your machine. Everything else -- names, employers, a password typed into a sentence -- is removed only if a model recognises it.";
+
+/// The limit, and the descendant of GATE_STATEMENT's second clause.
+pub const AUTO_SCRUB_LIMIT: &str = "The patterns are reliable for the formats they cover and blind to everything else. The model is not reliable. Nothing here checks whether either of them was right.";
+
+/// The new fact. The old gate never had to state it.
+pub const AUTO_NO_REVIEW: &str = "No one looks at a session before it is sent, including you.";
+
+/// What replaces the review step. `hours` is the holdback window.
+pub const AUTO_REVERSAL: &str = "Nothing is shared with anyone for {hours} hours. Until then you can pull any session back from History and it leaves the commons.";
+```
+
+`AUTO_NO_REVIEW` is the sentence the product will most want to soften, and it
+is the one that must not be softened. It is the entire difference between this
+flow and the current one.
+
+## What writing it first revealed
+
+The two-tier split gives a **principled definition of the confident path**,
+which the body of this spec proposed and left hand-waved as "the scrubber had
+no trouble". Better than that: the verdict already exists and does not need
+inventing.
+
+`residual_risk(consent, report) -> ResidualPiiRisk::{Low, Medium, High}`
+already reduces a pass to a tier, and its cases line up with the disclosure
+almost exactly:
+
+- `key_finding_detected` -> **High**. A classifier flagged an object *key*,
+  which redaction cannot resolve in place.
+- `coverage_incomplete` -> **High**. The filter was unavailable, errored, or
+  left content unexamined. The comment is the right one: *"Absence of findings
+  under a broken filter is not evidence of cleanliness."*
+- `blocked_secret_detected`, or a severity-bearing label -> **Medium**. The
+  deterministic tier found things and removed them.
+- message text / tool payloads / correction included -> **Medium**.
+- otherwise **Low**.
+
+**So the routing rule is `residual_risk != High`.** Auto-contribute everything
+that is not High; send High to the review queue.
+
+The tempting rule -- auto-contribute only `Low` -- is wrong, and the codebase
+already records why. `consent.message_text_included` alone forces Medium, and
+a real coding session always includes message text, so `Low` is nearly empty
+in practice. `RedactionReport::blocked_secret_detected`'s doc comment records
+the same mistake being made once already: *"Treating it as evidence of danger
+is what made every real coding session High (issue #373)."* Medium is the
+normal, healthy state of a real session, not a warning.
+
+High is the honest boundary because High means precisely **the mechanism could
+not do what the disclosure says it does** -- the filter could not vouch for the
+text, or it found something redaction cannot fix. That is the sentence failing,
+not a risk score crossing a tuned threshold:
+
+| | `residual_risk` | Claim available | Route |
+|---|---|---|---|
+| Mechanism worked as described | Low / Medium | the disclosure holds | auto-contribute |
+| Mechanism could not vouch | High | the disclosure does not hold | review queue |
+
+The fallback is therefore not a heuristic anyone has to tune. It is the
+boundary of the sentence, and it is already computed on every pass.
+
+## Open
+
+- **The holdback window.** `AUTO_REVERSAL` has a hole in it, `{hours}`. Zero
+  makes the sentence false. Long enough to be meaningful delays the reward the
+  UX review wants to feel immediate. Whether credit accrues at contribution or
+  after the window is the same decision wearing a different hat.
+- **Measure the High rate on the pilot corpus.** This is the number that
+  decides whether "forget" is true in practice, and it is measurable today
+  without building anything: what fraction of real sessions come out High.
+  If it is small, the review queue is a rare interruption and the flow works
+  as advertised. If it is large, connect-and-forget interrupts often enough
+  that the premise fails -- and the answer is to widen the deterministic tier,
+  or to fix whatever is driving `coverage_incomplete`, rather than to relax the
+  routing rule until the sentence stops being true.
+- **Which High causes are actually filter reliability rather than content.**
+  `coverage_incomplete` forces High when a backend errored or was unavailable.
+  That is an availability problem wearing a privacy verdict's clothes, and
+  under connect-and-forget it converts directly into review-queue volume. Worth
+  separating before the rate above is interpreted.
