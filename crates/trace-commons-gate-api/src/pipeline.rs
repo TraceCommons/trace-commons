@@ -9,6 +9,7 @@
 //! a runner.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -24,6 +25,15 @@ pub const TRACE_CREDIT_INSTRUMENT_ID: &str = "trace_credit";
 
 fn sha256_prefixed(bytes: &[u8]) -> String {
     format!("sha256:{:x}", Sha256::digest(bytes))
+}
+
+/// A bounded label: 1 to 64 lowercase ASCII letters, digits, `_`, `-`, or `.`.
+fn is_safe_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_INSTRUMENT_ID_LEN
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-' | b'.')
+        })
 }
 
 fn is_sha256(value: &str) -> bool {
@@ -71,14 +81,7 @@ pub struct InstrumentId(String);
 impl InstrumentId {
     pub fn new(value: impl Into<String>) -> Result<Self, ContractError> {
         let value = value.into();
-        if value.is_empty()
-            || value.len() > MAX_INSTRUMENT_ID_LEN
-            || !value.bytes().all(|byte| {
-                byte.is_ascii_lowercase()
-                    || byte.is_ascii_digit()
-                    || matches!(byte, b'_' | b'-' | b'.')
-            })
-        {
+        if !is_safe_identifier(&value) {
             return Err(ContractError::InvalidInstrumentId);
         }
         Ok(Self(value))
@@ -479,6 +482,10 @@ pub enum ContractError {
     InvalidSettlementReference,
     #[error("settlement operations do not exactly match the score awards")]
     SettlementOperationMismatch,
+    #[error("provenance label is not a bounded safe identifier")]
+    InvalidProvenanceLabel,
+    #[error("review output does not match its decision and evidence")]
+    ReviewOutputMismatch,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -685,10 +692,15 @@ pub struct AdmissionEvaluation {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ReviewEvidence {
     pub source_content_hash: String,
+    /// Hash of the approved bytes. Equals `source_content_hash` for a
+    /// pass-through or a rejection.
     pub result_content_hash: String,
     pub content_changed: bool,
+    /// Worker that produced the approved content. Set only on approval.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub transformed_artifact_hash: Option<String>,
+    pub worker_identity: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transformation_metadata_hash: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub human_assessment_hash: Option<String>,
     #[serde(default)]
@@ -698,6 +710,145 @@ pub struct ReviewEvidence {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ReviewEvaluation {
     pub rule_id: String,
+}
+
+/// Approved content that a Review policy hands to the runner.
+///
+/// The bytes are transient. The runner encrypts and stores them, then commits
+/// only their reference with the Review outcome. This type is never
+/// serialized, and its `Debug` output withholds the bytes.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ApprovedContent {
+    bytes: Vec<u8>,
+    content_hash: String,
+    worker_identity: String,
+    transformation_metadata_hash: Option<String>,
+}
+
+impl ApprovedContent {
+    pub fn new(
+        bytes: Vec<u8>,
+        worker_identity: impl Into<String>,
+        transformation_metadata_hash: Option<String>,
+    ) -> Result<Self, ContractError> {
+        let worker_identity = worker_identity.into();
+        if !is_safe_identifier(&worker_identity) {
+            return Err(ContractError::InvalidProvenanceLabel);
+        }
+        if transformation_metadata_hash
+            .as_deref()
+            .is_some_and(|hash| !is_sha256(hash))
+        {
+            return Err(ContractError::InvalidArtifactHash);
+        }
+        Ok(Self {
+            content_hash: sha256_prefixed(&bytes),
+            bytes,
+            worker_identity,
+            transformation_metadata_hash,
+        })
+    }
+
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.bytes
+    }
+
+    pub fn content_hash(&self) -> &str {
+        &self.content_hash
+    }
+
+    pub fn worker_identity(&self) -> &str {
+        &self.worker_identity
+    }
+
+    pub fn transformation_metadata_hash(&self) -> Option<&str> {
+        self.transformation_metadata_hash.as_deref()
+    }
+}
+
+impl fmt::Debug for ApprovedContent {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ApprovedContent")
+            .field("content_hash", &self.content_hash)
+            .field("byte_len", &self.bytes.len())
+            .field("worker_identity", &self.worker_identity)
+            .field(
+                "transformation_metadata_hash",
+                &self.transformation_metadata_hash,
+            )
+            .finish()
+    }
+}
+
+/// What a Review policy returns: the persisted result and, on approval, the
+/// approved content. The constructors tie the content to the evidence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewOutput {
+    result: PhaseResult<ReviewDecision, ReviewEvidence, ReviewEvaluation>,
+    approved_content: Option<ApprovedContent>,
+}
+
+impl ReviewOutput {
+    pub fn approved(
+        result: PhaseResult<ReviewDecision, ReviewEvidence, ReviewEvaluation>,
+        content: ApprovedContent,
+    ) -> Result<Self, ContractError> {
+        let evidence = &result.evidence;
+        let consistent = matches!(result.decision, ReviewDecision::Approved { .. })
+            && evidence.result_content_hash == content.content_hash
+            && evidence.content_changed
+                != (evidence.result_content_hash == evidence.source_content_hash)
+            && evidence.worker_identity.as_deref() == Some(content.worker_identity())
+            && evidence.transformation_metadata_hash.as_deref()
+                == content.transformation_metadata_hash();
+        if !consistent {
+            return Err(ContractError::ReviewOutputMismatch);
+        }
+        Ok(Self {
+            result,
+            approved_content: Some(content),
+        })
+    }
+
+    pub fn rejected(
+        result: PhaseResult<ReviewDecision, ReviewEvidence, ReviewEvaluation>,
+    ) -> Result<Self, ContractError> {
+        let evidence = &result.evidence;
+        if !matches!(result.decision, ReviewDecision::Rejected { .. })
+            || evidence.result_content_hash != evidence.source_content_hash
+            || evidence.content_changed
+            || evidence.worker_identity.is_some()
+            || evidence.transformation_metadata_hash.is_some()
+        {
+            return Err(ContractError::ReviewOutputMismatch);
+        }
+        Ok(Self {
+            result,
+            approved_content: None,
+        })
+    }
+
+    pub fn result(&self) -> &PhaseResult<ReviewDecision, ReviewEvidence, ReviewEvaluation> {
+        &self.result
+    }
+
+    pub fn approved_content(&self) -> Option<&ApprovedContent> {
+        self.approved_content.as_ref()
+    }
+
+    pub fn into_parts(
+        self,
+    ) -> (
+        PhaseResult<ReviewDecision, ReviewEvidence, ReviewEvaluation>,
+        Option<ApprovedContent>,
+    ) {
+        (self.result, self.approved_content)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -938,10 +1089,7 @@ pub trait AdmissionPolicy: Send + Sync {
 
 #[async_trait]
 pub trait ReviewPolicy: Send + Sync {
-    async fn execute(
-        &self,
-        input: &ReviewInput,
-    ) -> Result<PhaseResult<ReviewDecision, ReviewEvidence, ReviewEvaluation>, PolicyError>;
+    async fn execute(&self, input: &ReviewInput) -> Result<ReviewOutput, PolicyError>;
 }
 
 #[async_trait]
@@ -1126,6 +1274,72 @@ mod tests {
                 vec![missing_operation],
             ),
             Err(ContractError::SettlementOperationMismatch)
+        );
+    }
+
+    fn review_result(
+        decision: ReviewDecision,
+        result_bytes: &[u8],
+        worker_identity: Option<&str>,
+    ) -> PhaseResult<ReviewDecision, ReviewEvidence, ReviewEvaluation> {
+        PhaseResult {
+            decision,
+            evidence: ReviewEvidence {
+                source_content_hash: hash(b"source"),
+                result_content_hash: hash(result_bytes),
+                content_changed: result_bytes != b"source",
+                worker_identity: worker_identity.map(str::to_string),
+                transformation_metadata_hash: None,
+                human_assessment_hash: None,
+                resolved_quarantine_reasons: Vec::new(),
+            },
+            evaluation: ReviewEvaluation {
+                rule_id: "review_rule".to_string(),
+            },
+        }
+    }
+
+    #[test]
+    fn review_output_ties_approved_content_to_evidence() {
+        let approved = ReviewDecision::Approved {
+            registry_revision_id: Uuid::nil(),
+        };
+        let content = ApprovedContent::new(b"scrubbed".to_vec(), "pii_scrubber.v1", None).unwrap();
+        let output = ReviewOutput::approved(
+            review_result(approved.clone(), b"scrubbed", Some("pii_scrubber.v1")),
+            content.clone(),
+        )
+        .unwrap();
+        assert_eq!(output.approved_content(), Some(&content));
+        assert_eq!(content.content_hash(), hash(b"scrubbed"));
+        // A derived `Debug` would print the bytes; "scr" is 115, 99, 114.
+        assert!(!format!("{content:?}").contains("115, 99, 114"));
+        assert!(!format!("{output:?}").contains("115, 99, 114"));
+
+        // Evidence that names other bytes, another worker, or a rejection is refused.
+        for result in [
+            review_result(approved.clone(), b"other", Some("pii_scrubber.v1")),
+            review_result(approved.clone(), b"scrubbed", Some("other_worker")),
+            review_result(
+                ReviewDecision::Rejected {
+                    reason: ReasonCode::new("rejected").unwrap(),
+                },
+                b"scrubbed",
+                Some("pii_scrubber.v1"),
+            ),
+        ] {
+            assert_eq!(
+                ReviewOutput::approved(result, content.clone()),
+                Err(ContractError::ReviewOutputMismatch)
+            );
+        }
+        assert_eq!(
+            ReviewOutput::rejected(review_result(approved, b"source", None)),
+            Err(ContractError::ReviewOutputMismatch)
+        );
+        assert_eq!(
+            ApprovedContent::new(b"x".to_vec(), "Not Safe", None),
+            Err(ContractError::InvalidProvenanceLabel)
         );
     }
 

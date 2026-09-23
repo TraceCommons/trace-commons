@@ -318,6 +318,12 @@ index.
 The Review outcome identifies the source revision, transformation evidence,
 and approved registry revision. A rejected trace does not enter the registry.
 
+On approval, the Review policy returns the approved bytes in
+`ReviewOutput` beside its result, as `ApprovedContent`. The bytes are
+transient. `ReviewOutput::approved` requires the evidence to name their hash
+and the worker that produced them. The server encrypts and stores the bytes,
+then commits only their reference with the outcome.
+
 ### Score
 
 Score runs after Review approves the registry revision. It determines an
