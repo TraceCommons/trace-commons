@@ -117,13 +117,16 @@ pub(crate) async fn set_source_declaration<R: Runtime>(
         .map_err(|label| label.to_owned())?;
     let roots_ready = trace_commons_contributor::daemon::settings::roots_declared(&settings);
     settings.save(&store).map_err(|_| "settings-write-failed")?;
-    if roots_ready {
-        ensure_daemon_started(&state).await?;
+    // The declaration is saved at this point. A start failure is reported as
+    // `daemon_started: false`, not as a failed save; onboarding retries the
+    // start and says truthfully that the watcher did not start.
+    let daemon_started = roots_ready && ensure_daemon_started(&state).await.is_ok();
+    if daemon_started {
         start_event_bridge(app);
     }
     Ok(serde_json::json!({
         "saved": true,
-        "daemon_started": roots_ready,
+        "daemon_started": daemon_started,
     }))
 }
 

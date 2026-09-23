@@ -359,6 +359,22 @@ fn copy_commands_reach_the_frontend_through_tauri_and_render_at_safety_surfaces(
     assert!(privacy_step.contains("{copy.disclosure}"));
     assert!(privacy_step.contains("disabled={busy || !copy}"));
 
+    let roots_step = read(
+        &root,
+        "tauri-desktop/frontend/src/features/onboarding/components/onboarding-roots-step.tsx",
+    );
+    for rendered_copy in [
+        "shell.roots_required",
+        "shell.watcher_starting",
+        "shell?.watcher_start_failed",
+        "!rootsAnswered",
+    ] {
+        assert!(
+            roots_step.contains(rendered_copy),
+            "the roots step must use `{rendered_copy}`"
+        );
+    }
+
     let private_inference = read(
         &root,
         "tauri-desktop/frontend/src/features/waiting/components/private-inference-offer.tsx",
