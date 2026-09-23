@@ -288,7 +288,12 @@ fn copy_commands_reach_the_frontend_through_tauri_and_render_at_safety_surfaces(
         &root,
         "tauri-desktop/frontend/src/features/history/components/history-row.tsx",
     );
-    assert!(history_row.contains("still being scored"));
+    assert!(history_row.contains("historyCreditLine("));
+    let history_model = read(
+        &root,
+        "tauri-desktop/frontend/src/features/history/history-view-model.ts",
+    );
+    assert!(history_model.contains("still being scored"));
 
     let eligibility = read(
         &root,
