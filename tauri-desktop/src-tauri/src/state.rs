@@ -15,6 +15,7 @@ use trace_commons_contributor::{
         attached::AttachedDaemon,
         ipc::{DaemonShared, EVENT_RESYNC_REQUIRED, Event, Response},
     },
+    quit_copy::QuitRole,
 };
 
 #[derive(Clone)]
@@ -28,6 +29,17 @@ impl DaemonConnection {
         match self {
             Self::Embedded(_) => true,
             Self::Attached(daemon) => !daemon.is_closed(),
+        }
+    }
+
+    /// What quitting this app does to the watcher. An attached watcher
+    /// belongs to another process and outlives this one; a dropped
+    /// attachment is no longer a watcher this app can speak for.
+    pub(crate) fn quit_role(&self) -> QuitRole {
+        match self {
+            Self::Embedded(_) => QuitRole::Hosting,
+            Self::Attached(daemon) if !daemon.is_closed() => QuitRole::Attached,
+            Self::Attached(_) => QuitRole::Unavailable,
         }
     }
 }
@@ -178,6 +190,21 @@ impl AppState {
             .as_ref()
             .and_then(|runtime| runtime.connection.clone())
             .filter(DaemonConnection::is_alive))
+    }
+
+    /// Which quit prompt is true for this process right now. A poisoned
+    /// lock cannot tell, so it falls to the role that claims nothing.
+    pub(crate) fn quit_role(&self) -> QuitRole {
+        self.runtime
+            .lock()
+            .ok()
+            .and_then(|runtime| {
+                runtime
+                    .as_ref()
+                    .and_then(|runtime| runtime.connection.as_ref())
+                    .map(DaemonConnection::quit_role)
+            })
+            .unwrap_or(QuitRole::Unavailable)
     }
 
     pub(crate) fn state_directory(&self) -> Result<PathBuf, String> {
@@ -417,7 +444,36 @@ pub(crate) fn compute_command(
 
 #[cfg(test)]
 mod tests {
-    use super::AppState;
+    use std::sync::Arc;
+
+    use trace_commons_contributor::{
+        config::ConfigStore, daemon::ipc::DaemonShared, quit_copy::QuitRole,
+    };
+
+    use super::{AppState, DaemonConnection};
+
+    #[test]
+    fn quit_role_is_unavailable_without_a_watcher() {
+        assert_eq!(AppState::default().quit_role(), QuitRole::Unavailable);
+    }
+
+    #[test]
+    fn an_embedded_watcher_is_hosted_by_this_process() {
+        let dir = std::env::temp_dir().join(format!(
+            "tc-tauri-quit-role-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let shared = DaemonShared::load(ConfigStore::open(dir.clone()).unwrap()).unwrap();
+        let connection = DaemonConnection::Embedded(Arc::new(shared));
+        assert_eq!(connection.quit_role(), QuitRole::Hosting);
+        drop(connection);
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn wallet_url_authorization_is_exact_and_single_use() {

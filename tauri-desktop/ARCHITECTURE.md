@@ -31,13 +31,19 @@ and GTK shells remain unchanged; no legacy app is removed by this work.
   and carries status plus pushed events over one connection. Its callback
   thread owns the persistent transport; the client refuses daemon shutdown.
   No-root startup keeps account-free routes available. Quit confirmation and
-  macOS Reopen are wired.
+  macOS Reopen are wired. The quit prompt comes from the shared `quit_copy`
+  table and is chosen per role: hosting (quitting stops the watcher),
+  attached (the other process keeps watching; no stop option, since the
+  attached client refuses shutdown), or no watcher reachable.
 
 ## Remaining parity gates
 
 - The macOS app and Tauri both register `tracecommons://`. Assign callback
   ownership before distributing both on macOS; verify cold-start and
-  already-running callback delivery from packaged builds on every OS.
+  already-running callback delivery from packaged builds on every OS. A
+  digest notification click does not depend on that: the notification
+  delegate calls back into Rust, which shows the window and opens the review
+  queue in-process instead of asking LaunchServices for the scheme handler.
 - Certificate display stays within native parity: held-session list and shared
   copy only; no Tauri-only certificate detail surface.
 - Tauri tray still lacks legacy health, budget, and armed-project summaries;

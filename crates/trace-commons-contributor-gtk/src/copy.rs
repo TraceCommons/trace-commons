@@ -1086,23 +1086,21 @@ pub const ARMING_CONFIRM: &str = ARMING_OFFER_CONFIRM;
 
 // --- Quitting ----------------------------------------------------------
 
-/// The Linux wording, and it is the *second* of the two the shared spec
-/// gives. It is true only where a separate daemon keeps running after the
-/// window closes; where this application is itself the watcher, the first
-/// wording applies. Which one is shown is decided at runtime by which of
-/// those two this process actually is -- getting it wrong is a lie about
-/// whether the machine is still watching. See `QUIT_HOSTING_BODY`.
-pub const QUIT_ATTACHED_BODY: &str = "The background watcher keeps running and will keep queuing \
-     sessions. Nothing will be sent while nobody's approving.";
+// Which body is shown is decided at runtime by whether this process hosts
+// the watcher or is attached to one -- getting it wrong is a lie about
+// whether the machine is still watching. Both sentences are shared with the
+// other shells through `trace_commons_contributor::quit_copy`.
+//
+// COPY-MIGRATED-BEGIN
+pub use trace_commons_contributor::quit_copy::{QUIT_ATTACHED_BODY, QUIT_HOSTING_BODY};
+// COPY-MIGRATED-END
+
 pub const QUIT_ATTACHED_CONFIRM: &str = "Quit";
+/// GTK talks to an attached watcher over the raw control socket, which
+/// carries `shutdown`, so this shell can offer to stop it. A shell attached
+/// through `AttachedDaemon` cannot.
 pub const QUIT_ATTACHED_ALSO_STOP: &str = "Quit and stop watching";
 
-pub const QUIT_HOSTING_BODY: &str = concat!(
-    "Quitting stops ",
-    app_name!(),
-    " watching for finished sessions. Nothing is queued or sent until you open it again. \
-     Anything already waiting stays waiting."
-);
 pub const QUIT_HOSTING_CANCEL: &str = "Cancel";
 pub const QUIT_HOSTING_CONFIRM: &str = "Quit";
 

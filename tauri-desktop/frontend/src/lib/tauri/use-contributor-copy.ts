@@ -5,6 +5,7 @@ import {
   getEligibilityCopy,
   getEligibilityGroupCopy,
   getProjectIgnoreCopy,
+  getQuitConfirmationCopy,
   getRedactionSummary,
   getResidualSecretLine,
   getWithdrawalConfirmationPrompt,
@@ -17,6 +18,7 @@ const copyKeys = {
   disclosure: ["contributor-copy", "disclosure"] as const,
   witnessReview: ["contributor-copy", "witness-review"] as const,
   withdrawalPrompt: ["contributor-copy", "withdrawal-prompt"] as const,
+  quitConfirmation: ["contributor-copy", "quit-confirmation"] as const,
   eligibility: (label: string, reason: string | null) =>
     ["contributor-copy", "eligibility", label, reason] as const,
   eligibilityGroup: (pending: number, contributable: number | null) =>
@@ -56,6 +58,20 @@ export function useWitnessReviewCopy() {
     queryKey: copyKeys.witnessReview,
     queryFn: getWitnessReviewCopy,
     staleTime: Number.POSITIVE_INFINITY,
+  });
+}
+
+/**
+ * Whether this app hosts the watcher or is attached to one can change while
+ * it runs, so the prompt is re-read every time it opens rather than cached.
+ */
+export function useQuitConfirmationCopy(open: boolean) {
+  return useQuery({
+    queryKey: copyKeys.quitConfirmation,
+    queryFn: getQuitConfirmationCopy,
+    enabled: open,
+    staleTime: 0,
+    gcTime: 0,
   });
 }
 

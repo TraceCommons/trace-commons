@@ -1,4 +1,10 @@
 import { invokeTauri } from "./core-api";
+import {
+  parseQuitConfirmationCopy,
+  type QuitConfirmationCopy,
+} from "./quit-confirmation-copy";
+
+export type { QuitConfirmationCopy } from "./quit-confirmation-copy";
 
 type RecordValue = Record<string, unknown>;
 
@@ -506,6 +512,11 @@ export async function getEligibilityGroupCopy(
     eligible_count: value.eligible_count,
     withheld_line: value.withheld_line,
   };
+}
+
+/** The quit prompt that is true for this process right now. */
+export async function getQuitConfirmationCopy(): Promise<QuitConfirmationCopy> {
+  return parseQuitConfirmationCopy(await invokeTauri("quit_confirmation_copy"));
 }
 
 export async function getWithdrawalConfirmationPrompt(): Promise<string> {

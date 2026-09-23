@@ -331,6 +331,18 @@ fn remember_deep_link(app: &tauri::AppHandle, value: &str) {
     }
 }
 
+/// Show the main window and open the review queue exactly as the
+/// `tracecommons://review` deep link does, without going through
+/// LaunchServices.
+fn open_review_queue(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
+    remember_deep_link(app, platform::REVIEW_DEEP_LINK);
+}
+
 pub(crate) fn run() {
     let builder = tauri::Builder::default().manage(AppState::default());
 
@@ -416,7 +428,8 @@ pub(crate) fn run() {
                 });
             #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
             app.state::<AppState>().set_deep_link_state("unavailable");
-            native::configure_notifications();
+            let review_app = app.handle().clone();
+            native::configure_notifications(move || open_review_queue(&review_app));
             tray::setup_tray(app)?;
             start_event_bridge(app.handle().clone());
             if recover_daemon {

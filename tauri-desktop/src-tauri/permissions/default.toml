@@ -63,6 +63,7 @@ permissions = [
   "allow-set-start-at-login",
   "allow-open-system-settings",
   "allow-quit-app",
+  "allow-quit-confirmation-copy",
   "allow-cancel-private-ai-credential",
   "allow-forget-private-ai-credential",
   "allow-native-wallet-flow",

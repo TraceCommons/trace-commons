@@ -30,6 +30,7 @@ pub mod preview_copy;
 pub mod pricing;
 pub mod private_inference_copy;
 pub mod project_copy;
+pub mod quit_copy;
 pub mod redaction_labels;
 pub mod redaction_summary;
 pub mod routing;
