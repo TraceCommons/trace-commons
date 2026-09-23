@@ -920,8 +920,6 @@ pub struct ScoreEvidence {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub embedding_artifact_hash: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub embedding_object_key: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub index_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub index_snapshot_id: Option<String>,
@@ -972,7 +970,6 @@ impl ScoreEvidence {
         Self {
             fixed_awards,
             embedding_artifact_hash: None,
-            embedding_object_key: None,
             index_id: None,
             index_snapshot_id: None,
             index_snapshot_hash: None,
