@@ -519,8 +519,10 @@ the same contract as a production implementation.
 
 ## 6. Persistence and recovery
 
-The workflow needs two new tables. Existing trace, registry, tenant, and account
-storage remains outside this model.
+The workflow needs three tables for run state and history. The bundle
+registry, receipt, and routing records that sections 3, 4, and 7 describe are
+separate. Existing trace, registry, tenant, and account storage remains
+outside this model.
 
 ```text
 pipeline_runs
@@ -534,9 +536,20 @@ pipeline_runs
   index_membership: undecided | excluded | included
   index_command_ref, index_command_hash nullable
   index_write_state: none | pending | complete | failed
-  per-instrument operation and result references live in the settlement table
   created_at, updated_at
   unique (tenant_id, request_idempotency_key)
+
+pipeline_run_settlements
+  tenant_id, run_id, instrument_id
+  atomic_units
+  operation_ref_hash, result_ref_hash nullable
+  operation_state: pending | leased | retry | held | complete | forfeited | failed
+  lease_token, lease_expires_at
+  attempt_count, max_attempts, next_attempt_at
+  last_error_label
+  created_at, updated_at
+  primary key (tenant_id, run_id, instrument_id)
+  unique (tenant_id, operation_ref_hash)
 
 phase_outcomes
   tenant_id, outcome_id, run_id, trace_id
@@ -550,8 +563,18 @@ phase_outcomes
 ```
 
 `pipeline_runs` is mutable queue state. `phase_outcomes` is immutable history.
-The run records index progress. Existing credit events, holds, batches, and
-outbox rows record credit and payout progress.
+The run records index progress. `pipeline_run_settlements` is the settlement
+table: one row for each positive award of a committed Score outcome, created
+in the Score transaction. It records that instrument operation's progress,
+lease, and retry state, independently of every other instrument, so a
+`storage_rebate` operation recovers without the Trace Credit path. A row ends
+`complete` with its result reference, or `forfeited` when withdrawal commits
+first; both count as complete for the Settle outcome.
+
+Existing credit events, holds, batches, and outbox rows stay the Trace Credit
+and payout records. A `trace_credit` settlement row links its credit event
+and settlement batch. Moving those links to a Trace Credit extension table is
+deferred.
 
 The receipt path performs these operations:
 

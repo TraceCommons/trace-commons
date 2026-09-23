@@ -698,7 +698,9 @@ submission and confirmation around injected crashes.
   state.
 - The run MUST record the next phase, state, lease, attempts, and retry time.
 - The run MUST retain safe error labels only.
-- The run MUST record index and credit progress needed for recovery.
+- The run MUST record index progress needed for recovery.
+- `pipeline_run_settlements` MUST record each instrument operation's progress,
+  lease, and retry state, one row for each positive Score award.
 - Immutable phase history MUST remain in `phase_outcomes`.
 - A terminal infrastructure error MUST NOT create a phase outcome.
 
