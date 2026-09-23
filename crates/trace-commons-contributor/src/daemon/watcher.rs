@@ -458,13 +458,10 @@ fn visit_session(
         // but the load.
         if mode == ProjectMode::AutoUpload && state == QueueState::Pending {
             let mut queue = shared.queue.lock().expect("queue lock");
-            if queue.approve(
+            if queue.approve_unattended(
                 entry_id,
                 &ctx.consent_scopes,
                 ctx.approval_inputs.as_deref(),
-                None,
-                None,
-                None,
             ) {
                 out.changed = true;
                 out.report.auto_ready += 1;
@@ -611,6 +608,10 @@ fn visit_session(
 
     let entry = QueueEntry {
         entry_id: entry_id_for(&transcript.session_hash),
+        // A freshly discovered entry is `Pending`, so no approval of any
+        // kind has happened yet. `approve_unattended` sets this when the
+        // watcher later approves it under a standing opt-in.
+        approved_unattended: false,
         session_hash: transcript.session_hash.clone(),
         source: session_ref.source.to_string(),
         declared_source: session_ref.declared_source.clone(),

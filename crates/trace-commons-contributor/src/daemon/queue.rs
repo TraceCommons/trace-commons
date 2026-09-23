@@ -270,6 +270,32 @@ pub struct QueueEntry {
     /// latter is deliberate -- see `Queue::approve`.
     #[serde(default)]
     pub approved_at: Option<DateTime<Utc>>,
+    /// Whether this entry reached `Approved` without the contributor
+    /// deciding, through a project's standing `auto_upload` opt-in.
+    ///
+    /// The distinction matters for retraction.
+    /// `refuse_pending_for_project` deliberately leaves `Approved` alone,
+    /// because "an approval is a decision the contributor already made" --
+    /// and that reasoning holds for an approval they made. It does not hold
+    /// for one the watcher made on their behalf: a contributor excluding a
+    /// project has not changed their mind about a decision, because they
+    /// never made one. `retract_unattended_for_project` uses this to
+    /// separate the two, so exclusion reaches an unattended backlog without
+    /// ever retracting a decision somebody actually took.
+    ///
+    /// Not derivable from `previewed_envelope_digest`, which is also `None`
+    /// when a contributor approves a queue row without opening the preview.
+    /// That conflates a decision with the absence of one, which is the exact
+    /// distinction this field exists to keep.
+    ///
+    /// `#[serde(default)]` because `daemon-queue.jsonl` written before this
+    /// field existed must still load; a required field here would make the
+    /// daemon refuse its own queue after an upgrade. An older entry reads as
+    /// `false`, which is the safe direction: it will not be retracted, and
+    /// the worst case is that an unattended approval predating this field
+    /// survives an exclusion the way it does today.
+    #[serde(default)]
+    pub approved_unattended: bool,
     /// How many delegated subagent transcripts this entry's session hash
     /// covers, and how many were left out because the conversation exceeded
     /// the source's raw byte budget.
@@ -794,6 +820,41 @@ impl Queue {
         purged
     }
 
+    /// Refuse every `Approved` entry for `project_key` that nobody decided.
+    ///
+    /// The companion to `refuse_pending_for_project`, and deliberately not a
+    /// widening of it. That method leaves `Approved` alone because an
+    /// approval is a decision the contributor already made, and a later
+    /// project-level preference must not silently retract a decision. This
+    /// method retracts only approvals made by the watcher under a standing
+    /// `auto_upload` opt-in, where no such decision exists: excluding the
+    /// project *is* the contributor's first and only decision about those
+    /// sessions.
+    ///
+    /// Without this, excluding a project stops nothing already approved, and
+    /// under an automatic default that is most of a contributor's backlog --
+    /// the whole settled history is approved within about two polls, and
+    /// `drain_approved` keeps sending it at the daily cap long after the
+    /// contributor said no.
+    ///
+    /// `Uploading` is still left alone, as it is by the sibling: those bytes
+    /// are already in flight and retraction is withdrawal's job, not the
+    /// queue's.
+    pub fn retract_unattended_for_project(&mut self, project_key: &str) -> usize {
+        let mut retracted = 0usize;
+        for e in self.entries.iter_mut() {
+            if e.project_key == project_key
+                && e.state == QueueState::Approved
+                && e.approved_unattended
+            {
+                e.state = QueueState::Refused;
+                e.reason_label = Some(REASON_PROJECT_IGNORED.to_string());
+                retracted += 1;
+            }
+        }
+        retracted
+    }
+
     /// Drop every `project-ignored` refusal belonging to `project_key`,
     /// returning how many went. The inverse of
     /// `refuse_pending_for_project`, and the thing that makes "You can undo
@@ -882,6 +943,29 @@ impl Queue {
         e.approved_verdict = verdict.map(str::to_string);
         e.approved_correction = correction.map(str::to_string);
         e.approved_at = approved_at;
+        true
+    }
+
+    /// Approve through a project's standing `auto_upload` opt-in.
+    ///
+    /// Identical to [`Queue::approve`] except that it records the approval as
+    /// unattended, so [`Queue::retract_unattended_for_project`] can tell it
+    /// apart from one the contributor made. A separate entry point rather
+    /// than a seventh parameter on `approve`: every existing caller of
+    /// `approve` is a contributor acting, and none of them should have to
+    /// pass a flag to say so.
+    pub fn approve_unattended(
+        &mut self,
+        entry_id: Uuid,
+        scopes: &[String],
+        inputs: Option<&str>,
+    ) -> bool {
+        if !self.approve(entry_id, scopes, inputs, None, None, None) {
+            return false;
+        }
+        if let Some(e) = self.entries.iter_mut().find(|e| e.entry_id == entry_id) {
+            e.approved_unattended = true;
+        }
         true
     }
 
@@ -2593,6 +2677,98 @@ mod tests {
             QueueState::Pending,
             "another project is untouched"
         );
+    }
+
+    #[test]
+    fn excluding_a_project_retracts_approvals_nobody_made() {
+        // The backlog case. Under an automatic default the watcher approves a
+        // contributor's settled history within about two polls, so by the time
+        // they exclude the project most of it is already `Approved` and
+        // `refuse_pending_for_project` reaches none of it.
+        let mut q = Queue::default();
+        let pending = entry_in("/w/alpha", QueueState::Pending);
+        let unattended = entry_in("/w/alpha", QueueState::Approved);
+        let unattended_id = unattended.entry_id;
+        q.push_for_test(pending);
+        q.push_for_test(QueueEntry {
+            approved_unattended: true,
+            ..unattended
+        });
+
+        let retracted = q.retract_unattended_for_project("/w/alpha");
+
+        assert_eq!(retracted, 1);
+        let e = q
+            .all()
+            .iter()
+            .find(|e| e.entry_id == unattended_id)
+            .cloned();
+        let e = e.expect("entry present");
+        assert_eq!(e.state, QueueState::Refused);
+        assert_eq!(e.reason_label.as_deref(), Some(REASON_PROJECT_IGNORED));
+    }
+
+    #[test]
+    fn excluding_a_project_leaves_an_approval_the_contributor_made() {
+        // The line `refuse_pending_for_project` draws, preserved. A decision
+        // the contributor actually took is not retracted by a later
+        // project-level preference; only one taken on their behalf is.
+        let mut q = Queue::default();
+        q.push_for_test(entry_in("/w/alpha", QueueState::Approved));
+        q.push_for_test(QueueEntry {
+            approved_unattended: true,
+            ..entry_in("/w/alpha", QueueState::Uploading)
+        });
+
+        let retracted = q.retract_unattended_for_project("/w/alpha");
+
+        assert_eq!(retracted, 0, "neither a decision nor an in-flight upload");
+        let states: Vec<_> = q.all().iter().map(|e| e.state).collect();
+        assert!(states.contains(&QueueState::Approved));
+        assert!(states.contains(&QueueState::Uploading));
+    }
+
+    #[test]
+    fn approve_unattended_marks_the_approval_and_approve_does_not() {
+        // The distinction is not derivable from `previewed_envelope_digest`,
+        // which is `None` both here and when a contributor approves a queue
+        // row without opening the preview.
+        let mut q = Queue::default();
+        let by_hand = entry_in("/w/alpha", QueueState::Pending);
+        let by_hand_id = by_hand.entry_id;
+        q.push_for_test(by_hand);
+        assert!(q.approve(by_hand_id, &[], None, None, None, None));
+
+        let mut q2 = Queue::default();
+        let armed = entry_in("/w/beta", QueueState::Pending);
+        let armed_id = armed.entry_id;
+        q2.push_for_test(armed);
+        assert!(q2.approve_unattended(armed_id, &[], None));
+
+        let hand = q.all()[0].clone();
+        let auto = q2.all()[0].clone();
+        assert_eq!(hand.state, QueueState::Approved);
+        assert_eq!(auto.state, QueueState::Approved);
+        assert!(!hand.approved_unattended, "a contributor decided this one");
+        assert!(auto.approved_unattended, "the watcher decided this one");
+    }
+
+    #[test]
+    fn an_entry_written_before_the_field_existed_is_not_retracted() {
+        // `#[serde(default)]` reads an older queue line as `false`, which is
+        // the safe direction: such an entry keeps today's behaviour rather
+        // than being retracted on the strength of a field it never carried.
+        let line =
+            serde_json::to_value(entry_in("/w/alpha", QueueState::Approved)).expect("serialise");
+        let mut map = line.as_object().expect("object").clone();
+        map.remove("approved_unattended");
+        let restored: QueueEntry =
+            serde_json::from_value(serde_json::Value::Object(map)).expect("older line still loads");
+
+        assert!(!restored.approved_unattended);
+        let mut q = Queue::default();
+        q.push_for_test(restored);
+        assert_eq!(q.retract_unattended_for_project("/w/alpha"), 0);
     }
 
     #[test]

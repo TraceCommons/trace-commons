@@ -2521,7 +2521,8 @@ fn handle_set_project_mode(shared: &DaemonShared, req: &Request) -> Response {
     // the CLI all get it: before this, ignoring from Settings left
     // the contributor staring at the cards they had just declined.
     //
-    // Pending only. See `refuse_pending_for_project`.
+    // Pending entries, plus approvals the watcher made unattended.
+    // See `refuse_pending_for_project` and `retract_unattended_for_project`.
     //
     // Leaving `Ignore` undoes exactly that, and only that: see
     // `clear_project_ignored`, which is what makes the
@@ -2544,7 +2545,14 @@ fn handle_set_project_mode(shared: &DaemonShared, req: &Request) -> Response {
     let (queue_changed, purged) = {
         let mut queue = shared.queue.lock().expect("queue lock");
         let purged = if mode == ProjectMode::Ignore {
-            queue.refuse_pending_for_project(&key)
+            // Both halves. `refuse_pending_for_project` covers entries
+            // nobody has decided yet; `retract_unattended_for_project`
+            // covers ones the watcher approved under a standing
+            // `auto_upload` opt-in, which are decisions the contributor
+            // never made and which `drain_approved` would otherwise keep
+            // sending after they said no. Contributor-made approvals are
+            // still left alone by both.
+            queue.refuse_pending_for_project(&key) + queue.retract_unattended_for_project(&key)
         } else {
             0
         };
