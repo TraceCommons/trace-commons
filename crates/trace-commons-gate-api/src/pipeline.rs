@@ -67,8 +67,22 @@ pub enum Phase {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
-#[serde(transparent)]
+#[serde(try_from = "String", into = "String")]
 pub struct ReasonCode(String);
+
+impl TryFrom<String> for ReasonCode {
+    type Error = ContractError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl From<ReasonCode> for String {
+    fn from(code: ReasonCode) -> Self {
+        code.0
+    }
+}
 
 impl ReasonCode {
     pub fn new(value: impl Into<String>) -> Result<Self, ContractError> {
@@ -90,8 +104,22 @@ impl ReasonCode {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
-#[serde(transparent)]
+#[serde(try_from = "String", into = "String")]
 pub struct InstrumentId(String);
+
+impl TryFrom<String> for InstrumentId {
+    type Error = ContractError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl From<InstrumentId> for String {
+    fn from(id: InstrumentId) -> Self {
+        id.0
+    }
+}
 
 impl InstrumentId {
     pub fn new(value: impl Into<String>) -> Result<Self, ContractError> {
@@ -229,9 +257,25 @@ pub enum MicrocreditConversionError {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(try_from = "InstrumentAwardFields")]
 pub struct InstrumentAward {
     instrument_id: InstrumentId,
     atomic_units: AtomicUnits,
+}
+
+/// Loaded `InstrumentAward` fields, checked by `InstrumentAward::new`.
+#[derive(Deserialize)]
+struct InstrumentAwardFields {
+    instrument_id: InstrumentId,
+    atomic_units: AtomicUnits,
+}
+
+impl TryFrom<InstrumentAwardFields> for InstrumentAward {
+    type Error = ContractError;
+
+    fn try_from(fields: InstrumentAwardFields) -> Result<Self, Self::Error> {
+        Self::new(fields.instrument_id, fields.atomic_units)
+    }
 }
 
 impl InstrumentAward {
@@ -272,8 +316,22 @@ impl InstrumentAward {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(transparent)]
+#[serde(try_from = "Vec<InstrumentAward>", into = "Vec<InstrumentAward>")]
 pub struct InstrumentAwards(Vec<InstrumentAward>);
+
+impl TryFrom<Vec<InstrumentAward>> for InstrumentAwards {
+    type Error = ContractError;
+
+    fn try_from(awards: Vec<InstrumentAward>) -> Result<Self, Self::Error> {
+        Self::new(awards)
+    }
+}
+
+impl From<InstrumentAwards> for Vec<InstrumentAward> {
+    fn from(awards: InstrumentAwards) -> Self {
+        awards.0
+    }
+}
 
 impl InstrumentAwards {
     pub fn new(mut awards: Vec<InstrumentAward>) -> Result<Self, ContractError> {
@@ -595,15 +653,56 @@ pub enum IndexMembershipDecision {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(try_from = "SettleDecisionFields")]
 pub struct SettleDecision {
     pub index_membership: IndexMembershipDecision,
     settlement_operations: Vec<InstrumentSettlement>,
+}
+
+/// Loaded `SettleDecision` fields. Loading repeats every check that does not
+/// need the Score awards; the runner matches those against the committed
+/// Score outcome.
+#[derive(Deserialize)]
+struct SettleDecisionFields {
+    index_membership: IndexMembershipDecision,
+    settlement_operations: Vec<InstrumentSettlement>,
+}
+
+impl TryFrom<SettleDecisionFields> for SettleDecision {
+    type Error = ContractError;
+
+    fn try_from(fields: SettleDecisionFields) -> Result<Self, Self::Error> {
+        Self::from_parts(fields.index_membership, fields.settlement_operations)
+    }
 }
 
 impl SettleDecision {
     pub fn new(
         index_membership: IndexMembershipDecision,
         awards: &InstrumentAwards,
+        settlement_operations: Vec<InstrumentSettlement>,
+    ) -> Result<Self, ContractError> {
+        let decision = Self::from_parts(index_membership, settlement_operations)?;
+        let settlement_operations = &decision.settlement_operations;
+        let operations_match =
+            awards
+                .iter()
+                .zip(settlement_operations)
+                .all(|(award, operation)| {
+                    award.instrument_id == operation.instrument_id
+                        && award.atomic_units == operation.atomic_units
+                });
+        if awards.iter().len() != settlement_operations.len() || !operations_match {
+            return Err(ContractError::SettlementOperationMismatch);
+        }
+        Ok(decision)
+    }
+
+    /// Sorts operations by instrument and refuses a second operation for one
+    /// instrument. This scan is the guard against settling an instrument
+    /// twice.
+    fn from_parts(
+        index_membership: IndexMembershipDecision,
         mut settlement_operations: Vec<InstrumentSettlement>,
     ) -> Result<Self, ContractError> {
         if let IndexMembershipDecision::Include { command_hash, .. } = &index_membership {
@@ -620,17 +719,6 @@ impl SettleDecision {
         {
             return Err(ContractError::DuplicateInstrumentId);
         }
-        let operations_match =
-            awards
-                .iter()
-                .zip(&settlement_operations)
-                .all(|(award, operation)| {
-                    award.instrument_id == operation.instrument_id
-                        && award.atomic_units == operation.atomic_units
-                });
-        if awards.iter().len() != settlement_operations.len() || !operations_match {
-            return Err(ContractError::SettlementOperationMismatch);
-        }
         Ok(Self {
             index_membership,
             settlement_operations,
@@ -643,11 +731,34 @@ impl SettleDecision {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(try_from = "InstrumentSettlementFields")]
 pub struct InstrumentSettlement {
     instrument_id: InstrumentId,
     atomic_units: AtomicUnits,
     operation_ref_hash: String,
     outcome: InstrumentSettlementOutcome,
+}
+
+/// Loaded `InstrumentSettlement` fields, checked by its constructor.
+#[derive(Deserialize)]
+struct InstrumentSettlementFields {
+    instrument_id: InstrumentId,
+    atomic_units: AtomicUnits,
+    operation_ref_hash: String,
+    outcome: InstrumentSettlementOutcome,
+}
+
+impl TryFrom<InstrumentSettlementFields> for InstrumentSettlement {
+    type Error = ContractError;
+
+    fn try_from(fields: InstrumentSettlementFields) -> Result<Self, Self::Error> {
+        Self::with_outcome(
+            fields.instrument_id,
+            fields.atomic_units,
+            fields.operation_ref_hash,
+            fields.outcome,
+        )
+    }
 }
 
 /// How an instrument operation ended. Both states are terminal, so Settle can
@@ -672,15 +783,13 @@ impl InstrumentSettlement {
         operation_ref_hash: impl Into<String>,
         result_ref_hash: impl Into<String>,
     ) -> Result<Self, ContractError> {
-        let result_ref_hash = result_ref_hash.into();
-        if !is_sha256(&result_ref_hash) {
-            return Err(ContractError::InvalidSettlementReference);
-        }
         Self::with_outcome(
             instrument_id,
             atomic_units,
             operation_ref_hash.into(),
-            InstrumentSettlementOutcome::Completed { result_ref_hash },
+            InstrumentSettlementOutcome::Completed {
+                result_ref_hash: result_ref_hash.into(),
+            },
         )
     }
 
@@ -707,7 +816,11 @@ impl InstrumentSettlement {
         if atomic_units == AtomicUnits::ZERO {
             return Err(ContractError::ZeroInstrumentAward);
         }
-        if !is_sha256(&operation_ref_hash) {
+        let result_ref_hash = match &outcome {
+            InstrumentSettlementOutcome::Completed { result_ref_hash } => Some(result_ref_hash),
+            InstrumentSettlementOutcome::Forfeited { .. } => None,
+        };
+        if !is_sha256(&operation_ref_hash) || result_ref_hash.is_some_and(|hash| !is_sha256(hash)) {
             return Err(ContractError::InvalidSettlementReference);
         }
         Ok(Self {
@@ -1093,6 +1206,7 @@ pub struct ScoreEvaluation {
 /// `content_hash()`. Settle applies the stored command; it does not query the
 /// live index or compute new embeddings. `Debug` withholds the embeddings.
 #[derive(Clone, Serialize, Deserialize, PartialEq)]
+#[serde(try_from = "SealedIndexCommandFields")]
 pub struct SealedIndexCommand {
     schema: String,
     index_id: String,
@@ -1100,6 +1214,35 @@ pub struct SealedIndexCommand {
     projection_id: String,
     model_id: String,
     entries: Vec<SealedIndexEntry>,
+}
+
+/// Loaded `SealedIndexCommand` fields. Loading keeps the stored entry order,
+/// so a stored command out of chunk order fails `validate`.
+#[derive(Deserialize)]
+struct SealedIndexCommandFields {
+    schema: String,
+    index_id: String,
+    revision_id: Uuid,
+    projection_id: String,
+    model_id: String,
+    entries: Vec<SealedIndexEntry>,
+}
+
+impl TryFrom<SealedIndexCommandFields> for SealedIndexCommand {
+    type Error = ContractError;
+
+    fn try_from(fields: SealedIndexCommandFields) -> Result<Self, Self::Error> {
+        let command = Self {
+            schema: fields.schema,
+            index_id: fields.index_id,
+            revision_id: fields.revision_id,
+            projection_id: fields.projection_id,
+            model_id: fields.model_id,
+            entries: fields.entries,
+        };
+        command.validate()?;
+        Ok(command)
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize, PartialEq)]
@@ -2005,6 +2148,74 @@ mod tests {
             >::into_deserializer(value));
             assert_eq!(loaded.ok(), risk, "{value}");
         }
+    }
+
+    #[test]
+    fn loading_repeats_constructor_checks() {
+        use serde_json::{from_value, json, to_value};
+
+        assert!(from_value::<ReasonCode>(json!("acct:alice@example.com")).is_err());
+        assert!(from_value::<InstrumentId>(json!("Trace Credit")).is_err());
+
+        let awards =
+            InstrumentAwards::new(vec![award("trace_credit", 3), award("storage_rebate", 7)])
+                .unwrap();
+        let stored = to_value(&awards).unwrap();
+        assert_eq!(
+            stored,
+            json!([
+                {"instrument_id": "storage_rebate", "atomic_units": 7},
+                {"instrument_id": "trace_credit", "atomic_units": 3},
+            ])
+        );
+        assert_eq!(from_value::<InstrumentAwards>(stored).unwrap(), awards);
+        let reordered = json!([
+            {"instrument_id": "trace_credit", "atomic_units": 3},
+            {"instrument_id": "storage_rebate", "atomic_units": 7},
+        ]);
+        assert_eq!(from_value::<InstrumentAwards>(reordered).unwrap(), awards);
+        for refused in [
+            json!([{"instrument_id": "trace_credit", "atomic_units": 0}]),
+            json!([
+                {"instrument_id": "trace_credit", "atomic_units": 3},
+                {"instrument_id": "trace_credit", "atomic_units": 4},
+            ]),
+        ] {
+            assert!(from_value::<InstrumentAwards>(refused).is_err());
+        }
+
+        let operation = |operation_ref: &str, result_ref: &str| {
+            json!({
+                "instrument_id": "trace_credit",
+                "atomic_units": 3,
+                "operation_ref_hash": operation_ref,
+                "outcome": {"status": "completed", "result_ref_hash": result_ref},
+            })
+        };
+        let valid = operation(&hash(b"operation"), &hash(b"result"));
+        assert!(from_value::<InstrumentSettlement>(valid.clone()).is_ok());
+        for refused in [
+            operation("not-a-hash", &hash(b"result")),
+            operation(&hash(b"operation"), "not-a-hash"),
+        ] {
+            assert!(from_value::<InstrumentSettlement>(refused).is_err());
+        }
+
+        let decision = json!({
+            "index_membership": {"kind": "exclude", "reason": "not_selected"},
+            "settlement_operations": [valid.clone(), valid],
+        });
+        assert!(from_value::<SettleDecision>(decision).is_err());
+
+        let command =
+            index_command(vec![index_entry(1, vec![0.5]), index_entry(2, vec![0.25])]).unwrap();
+        let mut stored = to_value(&command).unwrap();
+        assert_eq!(
+            from_value::<SealedIndexCommand>(stored.clone()).unwrap(),
+            command
+        );
+        stored["entries"].as_array_mut().unwrap().reverse();
+        assert!(from_value::<SealedIndexCommand>(stored).is_err());
     }
 
     #[test]
