@@ -751,22 +751,29 @@ impl InstrumentSettlement {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AdmissionEvidence {
     pub request_content_hash: String,
+    // No validity flag has a serde default: a stored record that lacks one
+    // fails to load instead of reading as `false`.
     pub schema_valid: bool,
     pub authority_valid: bool,
-    #[serde(default)]
     pub contribution_path_valid: bool,
-    #[serde(default)]
     pub grant_valid: bool,
-    #[serde(default)]
     pub consent_valid: bool,
-    #[serde(default)]
     pub allowed_uses_valid: bool,
-    #[serde(default)]
     pub quota_counted: bool,
     #[serde(default)]
     pub detector_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub privacy_risk: Option<String>,
+    pub privacy_risk: Option<PrivacyRisk>,
+}
+
+/// Residual privacy risk that Admission reads. The wire values match the
+/// protocol's `ResidualPiiRisk`; an unknown value fails to load.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum PrivacyRisk {
+    Low,
+    Medium,
+    High,
 }
 
 impl AdmissionEvidence {
@@ -1370,7 +1377,7 @@ pub struct AdmissionInput {
     pub allowed_uses_valid: bool,
     pub tombstoned: bool,
     pub quota_available: bool,
-    pub privacy_risk: String,
+    pub privacy_risk: PrivacyRisk,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -1921,6 +1928,88 @@ mod tests {
             })
         );
         assert_eq!(load::<AdmissionDecision>(&[("kind", "Admit")]), None);
+    }
+
+    /// A self-describing value, so serde paths can be tested without a
+    /// format crate.
+    #[derive(Clone, Copy)]
+    enum TestValue {
+        Str(&'static str),
+        Bool(bool),
+    }
+
+    impl serde::de::IntoDeserializer<'_, serde::de::value::Error> for TestValue {
+        type Deserializer = Self;
+
+        fn into_deserializer(self) -> Self {
+            self
+        }
+    }
+
+    impl<'de> serde::Deserializer<'de> for TestValue {
+        type Error = serde::de::value::Error;
+
+        fn deserialize_any<V: serde::de::Visitor<'de>>(
+            self,
+            visitor: V,
+        ) -> Result<V::Value, Self::Error> {
+            match self {
+                Self::Str(value) => visitor.visit_str(value),
+                Self::Bool(value) => visitor.visit_bool(value),
+            }
+        }
+
+        serde::forward_to_deserialize_any! {
+            bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string
+            bytes byte_buf option unit unit_struct newtype_struct seq tuple
+            tuple_struct map struct enum identifier ignored_any
+        }
+    }
+
+    fn load_test_value<T: serde::de::DeserializeOwned>(
+        fields: &[(&'static str, TestValue)],
+    ) -> Result<T, serde::de::value::Error> {
+        use serde::de::IntoDeserializer;
+        let map = fields.iter().copied().collect::<BTreeMap<_, _>>();
+        T::deserialize(map.into_deserializer())
+    }
+
+    #[test]
+    fn admission_evidence_has_no_favorable_defaults() {
+        use TestValue::{Bool, Str};
+
+        let fields = [
+            ("request_content_hash", Str("sha256:request")),
+            ("schema_valid", Bool(true)),
+            ("authority_valid", Bool(true)),
+            ("contribution_path_valid", Bool(true)),
+            ("grant_valid", Bool(true)),
+            ("consent_valid", Bool(true)),
+            ("allowed_uses_valid", Bool(true)),
+            ("quota_counted", Bool(true)),
+        ];
+        assert!(load_test_value::<AdmissionEvidence>(&fields).is_ok());
+        for missing in 1..fields.len() {
+            let mut partial = fields.to_vec();
+            let (name, _) = partial.remove(missing);
+            assert!(
+                load_test_value::<AdmissionEvidence>(&partial).is_err(),
+                "{name} defaulted"
+            );
+        }
+
+        for (value, risk) in [
+            ("low", Some(PrivacyRisk::Low)),
+            ("medium", Some(PrivacyRisk::Medium)),
+            ("high", Some(PrivacyRisk::High)),
+            ("Low", None),
+            ("unknown", None),
+        ] {
+            let loaded = PrivacyRisk::deserialize(serde::de::IntoDeserializer::<
+                serde::de::value::Error,
+            >::into_deserializer(value));
+            assert_eq!(loaded.ok(), risk, "{value}");
+        }
     }
 
     #[test]
