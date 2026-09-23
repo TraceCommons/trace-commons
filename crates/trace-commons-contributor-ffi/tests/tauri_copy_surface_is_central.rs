@@ -294,6 +294,71 @@ fn copy_commands_reach_the_frontend_through_tauri_and_render_at_safety_surfaces(
         "NEAR AI credential cost must appear before the sign-in action"
     );
 
+    let private_ai_panel = read(
+        &root,
+        "tauri-desktop/frontend/src/features/private-ai/components/private-ai-connection-panel.tsx",
+    );
+    let panel_cost = private_ai_panel
+        .find("{disclosure.data.credential_cost}")
+        .expect("Private AI credential cost is rendered");
+    let panel_action = private_ai_panel
+        .find("<PrivateAiCredentialAction")
+        .expect("Private AI credential action is rendered");
+    assert!(
+        panel_cost < panel_action,
+        "Private AI credential cost must appear before the sign-in action"
+    );
+
+    // The daemon holds uploads while the NEAR AI notice is unacknowledged.
+    // Tauri must offer the shared notice and its acknowledgement outside
+    // onboarding, and never offer the confirmation without the notice.
+    let queue_status = read(
+        &root,
+        "tauri-desktop/frontend/src/features/waiting/components/queue-status-panel.tsx",
+    );
+    assert!(queue_status.contains("<NearAiNoticeRecovery"));
+    assert!(queue_status.contains("!== NEAR_AI_NOTICE_LABEL"));
+    let recovery = read(
+        &root,
+        "tauri-desktop/frontend/src/features/waiting/components/near-ai-notice-recovery.tsx",
+    );
+    for rendered_copy in [
+        "useContributorDisclosureCopy",
+        "disclosure.data?.privacy_scan",
+        "{copy.disclosure}",
+        "{copy.offer}",
+        "copy.recovery_action",
+        "{copy.recovery_failed}",
+    ] {
+        assert!(
+            recovery.contains(rendered_copy),
+            "NEAR AI notice recovery must use `{rendered_copy}`"
+        );
+    }
+    let not_ready = recovery
+        .find("recovery.kind !== \"ready\"")
+        .expect("the recovery refuses to render without shared copy");
+    let confirm = recovery
+        .find("copy.recovery_confirm")
+        .expect("the recovery renders the shared confirmation");
+    assert!(
+        not_ready < confirm,
+        "the confirmation must be unreachable until the shared notice loads"
+    );
+    let recovery_hook = read(
+        &root,
+        "tauri-desktop/frontend/src/features/waiting/hooks/use-near-ai-notice-recovery.ts",
+    );
+    assert!(recovery_hook.contains("mutationFn: acknowledgeNearAiNotice"));
+
+    let privacy_step = read(
+        &root,
+        "tauri-desktop/frontend/src/features/onboarding/components/onboarding-privacy-step.tsx",
+    );
+    assert!(privacy_step.contains("disclosure.data?.privacy_scan"));
+    assert!(privacy_step.contains("{copy.disclosure}"));
+    assert!(privacy_step.contains("disabled={busy || !copy}"));
+
     let private_inference = read(
         &root,
         "tauri-desktop/frontend/src/features/waiting/components/private-inference-offer.tsx",
