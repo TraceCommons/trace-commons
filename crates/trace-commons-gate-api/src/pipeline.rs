@@ -38,9 +38,23 @@ fn is_safe_identifier(value: &str) -> bool {
 }
 
 fn is_sha256(value: &str) -> bool {
-    value
-        .strip_prefix("sha256:")
-        .is_some_and(|hex| hex.len() == 64 && hex.bytes().all(|byte| byte.is_ascii_hexdigit()))
+    value.strip_prefix("sha256:").is_some_and(|hex| {
+        hex.len() == 64
+            && hex
+                .bytes()
+                .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    })
+}
+
+/// Every present value must be a lowercase SHA-256 reference.
+fn require_sha256<'a>(
+    values: impl IntoIterator<Item = Option<&'a str>>,
+) -> Result<(), ContractError> {
+    if values.into_iter().flatten().all(is_sha256) {
+        Ok(())
+    } else {
+        Err(ContractError::MalformedHash)
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -549,9 +563,12 @@ pub enum ContractError {
     InvalidIndexCommand,
     #[error("score output does not match its evidence")]
     ScoreOutputMismatch,
+    #[error("a hash field is not a lowercase SHA-256 reference")]
+    MalformedHash,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AdmissionDecision {
     Admit,
     Quarantine { reason: ReasonCode },
@@ -559,6 +576,7 @@ pub enum AdmissionDecision {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ReviewDecision {
     Approved { registry_revision_id: Uuid },
     Rejected { reason: ReasonCode },
@@ -570,6 +588,7 @@ pub struct ScoreDecision {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum IndexMembershipDecision {
     Exclude {
         reason: ReasonCode,
@@ -592,6 +611,9 @@ impl SettleDecision {
         awards: &InstrumentAwards,
         mut settlement_operations: Vec<InstrumentSettlement>,
     ) -> Result<Self, ContractError> {
+        if let IndexMembershipDecision::Include { command_hash, .. } = &index_membership {
+            require_sha256([Some(command_hash.as_str())])?;
+        }
         settlement_operations.sort_by(|left, right| {
             left.instrument_id
                 .cmp(&right.instrument_id)
@@ -747,6 +769,12 @@ pub struct AdmissionEvidence {
     pub privacy_risk: Option<String>,
 }
 
+impl AdmissionEvidence {
+    pub fn validate(&self) -> Result<(), ContractError> {
+        require_sha256([Some(self.request_content_hash.as_str())])
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AdmissionEvaluation {
     pub rule_id: String,
@@ -768,6 +796,25 @@ pub struct ReviewEvidence {
     pub human_assessment_hash: Option<String>,
     #[serde(default)]
     pub resolved_quarantine_reasons: Vec<ReasonCode>,
+}
+
+impl ReviewEvidence {
+    pub fn validate(&self) -> Result<(), ContractError> {
+        require_sha256([
+            Some(self.source_content_hash.as_str()),
+            Some(self.result_content_hash.as_str()),
+            self.transformation_metadata_hash.as_deref(),
+            self.human_assessment_hash.as_deref(),
+        ])?;
+        if self
+            .worker_identity
+            .as_deref()
+            .is_some_and(|identity| !is_safe_identifier(identity))
+        {
+            return Err(ContractError::InvalidProvenanceLabel);
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -862,6 +909,7 @@ impl ReviewOutput {
         content: ApprovedContent,
     ) -> Result<Self, ContractError> {
         let evidence = &result.evidence;
+        evidence.validate()?;
         let consistent = matches!(result.decision, ReviewDecision::Approved { .. })
             && evidence.result_content_hash == content.content_hash
             && evidence.content_changed
@@ -882,6 +930,7 @@ impl ReviewOutput {
         result: PhaseResult<ReviewDecision, ReviewEvidence, ReviewEvaluation>,
     ) -> Result<Self, ContractError> {
         let evidence = &result.evidence;
+        evidence.validate()?;
         if !matches!(result.decision, ReviewDecision::Rejected { .. })
             || evidence.result_content_hash != evidence.source_content_hash
             || evidence.content_changed
@@ -1003,6 +1052,16 @@ impl ScoreEvidence {
             credit_quality_version: None,
             neighbor_artifact_hash: None,
         }
+    }
+
+    pub fn validate(&self) -> Result<(), ContractError> {
+        require_sha256([
+            self.embedding_artifact_hash.as_deref(),
+            self.index_snapshot_hash.as_deref(),
+            self.projection_input_hash.as_deref(),
+            self.nearest_neighbor_hash.as_deref(),
+            self.neighbor_artifact_hash.as_deref(),
+        ])
     }
 
     /// Coverage fields are all absent, or all present with
@@ -1171,6 +1230,7 @@ impl ScoreOutput {
         neighbor_artifact: Option<Vec<u8>>,
     ) -> Result<Self, ContractError> {
         let evidence = &result.evidence;
+        evidence.validate()?;
         let command_hash = index_command
             .as_ref()
             .map(SealedIndexCommand::content_hash)
@@ -1252,6 +1312,17 @@ pub struct SettleEvidence {
 }
 
 impl SettleEvidence {
+    pub fn validate(&self) -> Result<(), ContractError> {
+        require_sha256(std::iter::once(self.index_command_hash.as_deref()).chain(
+            self.settlement_progress.iter().flat_map(|progress| {
+                [
+                    Some(progress.operation_ref_hash.as_str()),
+                    progress.result_ref_hash.as_deref(),
+                ]
+            }),
+        ))
+    }
+
     pub fn operations(index_operation_required: bool, settlement_operations_required: u32) -> Self {
         Self {
             index_operation_required,
@@ -1316,6 +1387,12 @@ pub struct HumanReviewAssessment {
     pub reason: ReasonCode,
     pub resolved_quarantine_reasons: Vec<ReasonCode>,
     pub evidence_hash: String,
+}
+
+impl HumanReviewAssessment {
+    pub fn validate(&self) -> Result<(), ContractError> {
+        require_sha256([Some(self.evidence_hash.as_str())])
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1759,6 +1836,91 @@ mod tests {
                 "{scored:?} of {total:?}, capped {capped:?}"
             );
         }
+    }
+
+    #[test]
+    fn hash_fields_require_lowercase_sha256() {
+        let upper = hash(b"x").to_uppercase().replace("SHA256:", "sha256:");
+        assert!(!is_sha256(&upper));
+
+        let mut review = review_result(
+            ReviewDecision::Rejected {
+                reason: ReasonCode::new("rejected").unwrap(),
+            },
+            b"source",
+            None,
+        );
+        review.evidence.human_assessment_hash = Some(upper.clone());
+        assert_eq!(
+            ReviewOutput::rejected(review),
+            Err(ContractError::MalformedHash)
+        );
+
+        let mut score = score_result(None, false);
+        score.evidence.nearest_neighbor_hash = Some("sha256:short".to_string());
+        assert_eq!(
+            ScoreOutput::new(score, None, None),
+            Err(ContractError::MalformedHash)
+        );
+
+        assert_eq!(
+            SettleDecision::new(
+                IndexMembershipDecision::Include {
+                    command_hash: upper.clone(),
+                    entry_count: 1,
+                },
+                &InstrumentAwards::default(),
+                Vec::new(),
+            ),
+            Err(ContractError::MalformedHash)
+        );
+
+        let mut settle = SettleEvidence::operations(false, 1);
+        settle
+            .settlement_progress
+            .push(InstrumentSettlementProgress {
+                instrument_id: InstrumentId::trace_credit(),
+                operation_ref_hash: hash(b"operation"),
+                result_ref_hash: Some(upper),
+            });
+        assert_eq!(settle.validate(), Err(ContractError::MalformedHash));
+    }
+
+    #[test]
+    fn decisions_use_snake_case_tags() {
+        use serde::de::IntoDeserializer;
+        use serde::de::value::Error;
+
+        fn load<T: serde::de::DeserializeOwned>(
+            fields: &[(&'static str, &'static str)],
+        ) -> Option<T> {
+            let map = fields.iter().copied().collect::<BTreeMap<_, _>>();
+            T::deserialize(IntoDeserializer::<Error>::into_deserializer(map)).ok()
+        }
+
+        assert_eq!(
+            load::<AdmissionDecision>(&[("kind", "admit")]),
+            Some(AdmissionDecision::Admit)
+        );
+        assert_eq!(
+            load::<AdmissionDecision>(&[("kind", "quarantine"), ("reason", "privacy_review")]),
+            Some(AdmissionDecision::Quarantine {
+                reason: ReasonCode::new("privacy_review").unwrap()
+            })
+        );
+        assert_eq!(
+            load::<IndexMembershipDecision>(&[("kind", "exclude"), ("reason", "withdrawn")]),
+            Some(IndexMembershipDecision::Exclude {
+                reason: ReasonCode::new("withdrawn").unwrap()
+            })
+        );
+        assert_eq!(
+            load::<ReviewDecision>(&[("kind", "rejected"), ("reason", "unsafe")]),
+            Some(ReviewDecision::Rejected {
+                reason: ReasonCode::new("unsafe").unwrap()
+            })
+        );
+        assert_eq!(load::<AdmissionDecision>(&[("kind", "Admit")]), None);
     }
 
     #[test]
