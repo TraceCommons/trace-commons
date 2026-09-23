@@ -244,7 +244,9 @@ impl Microcredits {
         AtomicUnits::from_raw(self.0)
     }
 
-    pub const fn from_atomic_units(value: AtomicUnits) -> Self {
+    /// Private: units carry no instrument. Convert through
+    /// `InstrumentAward::trace_credit_microcredits`, which checks it.
+    const fn from_atomic_units(value: AtomicUnits) -> Self {
         Self(value.get())
     }
 }
@@ -2324,6 +2326,18 @@ mod tests {
                 "atomic_units": i64::MAX as u64 + 1,
             }))
             .is_err()
+        );
+    }
+
+    #[test]
+    fn only_trace_credit_awards_convert_to_microcredits() {
+        assert_eq!(
+            award("trace_credit", 3).trace_credit_microcredits(),
+            Ok(Microcredits::from_raw(3))
+        );
+        assert_eq!(
+            award("storage_rebate", 3).trace_credit_microcredits(),
+            Err(ContractError::NotTraceCredit)
         );
     }
 
