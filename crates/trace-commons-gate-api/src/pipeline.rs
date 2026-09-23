@@ -22,6 +22,7 @@ pub const BUNDLE_MANIFEST_FORMAT_VERSION: u32 = 1;
 pub const MICROCREDITS_PER_CREDIT: u64 = 1_000_000;
 pub const MAX_INSTRUMENT_ID_LEN: usize = 64;
 pub const TRACE_CREDIT_INSTRUMENT_ID: &str = "trace_credit";
+pub const INDEX_COMMAND_SCHEMA: &str = "trace_commons.pipeline_index_command.v1";
 
 fn sha256_prefixed(bytes: &[u8]) -> String {
     format!("sha256:{:x}", Sha256::digest(bytes))
@@ -486,6 +487,10 @@ pub enum ContractError {
     InvalidProvenanceLabel,
     #[error("review output does not match its decision and evidence")]
     ReviewOutputMismatch,
+    #[error("index command is malformed")]
+    InvalidIndexCommand,
+    #[error("score output does not match its evidence")]
+    ScoreOutputMismatch,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -851,7 +856,7 @@ impl ReviewOutput {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ScoreEvidence {
     pub fixed_awards: InstrumentAwards,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -902,10 +907,6 @@ pub struct ScoreEvidence {
     pub credit_quality_version: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub neighbor_artifact_hash: Option<String>,
-    #[serde(skip)]
-    pub pending_embeddings: Vec<Vec<f32>>,
-    #[serde(skip)]
-    pub pending_neighbor_bytes: Option<Vec<u8>>,
 }
 
 impl ScoreEvidence {
@@ -936,8 +937,6 @@ impl ScoreEvidence {
             credit_quality_micros: None,
             credit_quality_version: None,
             neighbor_artifact_hash: None,
-            pending_embeddings: Vec::new(),
-            pending_neighbor_bytes: None,
         }
     }
 }
@@ -946,6 +945,215 @@ impl ScoreEvidence {
 pub struct ScoreEvaluation {
     pub rule_id: String,
     pub awards: InstrumentAwards,
+}
+
+/// Index entries that Score proposes for one approved revision.
+///
+/// Score computes the entries. The server encrypts and stores the command
+/// before the Score outcome commits, and Score evidence names it by
+/// `content_hash()`. Settle applies the stored command; it does not query the
+/// live index or compute new embeddings. `Debug` withholds the embeddings.
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
+pub struct SealedIndexCommand {
+    schema: String,
+    index_id: String,
+    revision_id: Uuid,
+    projection_id: String,
+    model_id: String,
+    entries: Vec<SealedIndexEntry>,
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
+pub struct SealedIndexEntry {
+    /// The chunk's position in the trace, not its position in `entries`.
+    pub chunk: u32,
+    pub content_hash: String,
+    pub embedding: Vec<f32>,
+}
+
+impl SealedIndexCommand {
+    pub fn new(
+        index_id: impl Into<String>,
+        revision_id: Uuid,
+        projection_id: impl Into<String>,
+        model_id: impl Into<String>,
+        mut entries: Vec<SealedIndexEntry>,
+    ) -> Result<Self, ContractError> {
+        entries.sort_by_key(|entry| entry.chunk);
+        let command = Self {
+            schema: INDEX_COMMAND_SCHEMA.to_string(),
+            index_id: index_id.into(),
+            revision_id,
+            projection_id: projection_id.into(),
+            model_id: model_id.into(),
+            entries,
+        };
+        command.validate()?;
+        Ok(command)
+    }
+
+    /// Checks identity labels, unique chunks in order, hashes, and vectors of
+    /// one finite, non-empty dimension.
+    pub fn validate(&self) -> Result<(), ContractError> {
+        let dimension = self.entries.first().map(|entry| entry.embedding.len());
+        let valid = self.schema == INDEX_COMMAND_SCHEMA
+            && [&self.index_id, &self.projection_id, &self.model_id]
+                .into_iter()
+                .all(|label| is_safe_identifier(label))
+            && dimension.is_some_and(|dimension| dimension > 0)
+            && self
+                .entries
+                .windows(2)
+                .all(|pair| pair[0].chunk < pair[1].chunk)
+            && self.entries.iter().all(|entry| {
+                is_sha256(&entry.content_hash)
+                    && Some(entry.embedding.len()) == dimension
+                    && entry.embedding.iter().all(|value| value.is_finite())
+            });
+        if valid {
+            Ok(())
+        } else {
+            Err(ContractError::InvalidIndexCommand)
+        }
+    }
+
+    /// Hash of a stable binary encoding. Vector components are hashed by
+    /// their exact bit patterns.
+    pub fn content_hash(&self) -> Result<String, ContractError> {
+        self.validate()?;
+        let mut bytes = b"trace-commons-index-command\0".to_vec();
+        for label in [&self.schema, &self.index_id] {
+            encode_string(&mut bytes, label)?;
+        }
+        bytes.extend_from_slice(self.revision_id.as_bytes());
+        for label in [&self.projection_id, &self.model_id] {
+            encode_string(&mut bytes, label)?;
+        }
+        bytes.extend_from_slice(&(self.entries.len() as u64).to_be_bytes());
+        for entry in &self.entries {
+            bytes.extend_from_slice(&entry.chunk.to_be_bytes());
+            encode_string(&mut bytes, &entry.content_hash)?;
+            bytes.extend_from_slice(&(entry.embedding.len() as u64).to_be_bytes());
+            for value in &entry.embedding {
+                bytes.extend_from_slice(&value.to_bits().to_be_bytes());
+            }
+        }
+        Ok(sha256_prefixed(&bytes))
+    }
+
+    pub fn index_id(&self) -> &str {
+        &self.index_id
+    }
+
+    pub fn revision_id(&self) -> Uuid {
+        self.revision_id
+    }
+
+    pub fn projection_id(&self) -> &str {
+        &self.projection_id
+    }
+
+    pub fn model_id(&self) -> &str {
+        &self.model_id
+    }
+
+    pub fn entries(&self) -> &[SealedIndexEntry] {
+        &self.entries
+    }
+}
+
+impl fmt::Debug for SealedIndexCommand {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SealedIndexCommand")
+            .field("schema", &self.schema)
+            .field("index_id", &self.index_id)
+            .field("revision_id", &self.revision_id)
+            .field("projection_id", &self.projection_id)
+            .field("model_id", &self.model_id)
+            .field("entry_count", &self.entries.len())
+            .finish_non_exhaustive()
+    }
+}
+
+/// What a Score policy returns: the persisted result and the transient
+/// artifacts that its evidence names by hash. The server stores both
+/// artifacts encrypted before the Score outcome commits.
+#[derive(Clone, PartialEq)]
+pub struct ScoreOutput {
+    result: PhaseResult<ScoreDecision, ScoreEvidence, ScoreEvaluation>,
+    index_command: Option<SealedIndexCommand>,
+    neighbor_artifact: Option<Vec<u8>>,
+}
+
+impl ScoreOutput {
+    pub fn new(
+        result: PhaseResult<ScoreDecision, ScoreEvidence, ScoreEvaluation>,
+        index_command: Option<SealedIndexCommand>,
+        neighbor_artifact: Option<Vec<u8>>,
+    ) -> Result<Self, ContractError> {
+        let evidence = &result.evidence;
+        let command_hash = index_command
+            .as_ref()
+            .map(SealedIndexCommand::content_hash)
+            .transpose()?;
+        let command_matches = match &index_command {
+            None => evidence.include_eligible != Some(true),
+            Some(command) => {
+                evidence.include_eligible == Some(true)
+                    && evidence.index_id.as_deref() == Some(command.index_id())
+                    && evidence.projection_id.as_deref() == Some(command.projection_id())
+                    && evidence.embedder_model_id.as_deref() == Some(command.model_id())
+            }
+        };
+        if !command_matches
+            || evidence.embedding_artifact_hash != command_hash
+            || evidence.neighbor_artifact_hash != neighbor_artifact.as_deref().map(sha256_prefixed)
+        {
+            return Err(ContractError::ScoreOutputMismatch);
+        }
+        Ok(Self {
+            result,
+            index_command,
+            neighbor_artifact,
+        })
+    }
+
+    pub fn result(&self) -> &PhaseResult<ScoreDecision, ScoreEvidence, ScoreEvaluation> {
+        &self.result
+    }
+
+    pub fn index_command(&self) -> Option<&SealedIndexCommand> {
+        self.index_command.as_ref()
+    }
+
+    pub fn neighbor_artifact(&self) -> Option<&[u8]> {
+        self.neighbor_artifact.as_deref()
+    }
+
+    pub fn into_parts(
+        self,
+    ) -> (
+        PhaseResult<ScoreDecision, ScoreEvidence, ScoreEvaluation>,
+        Option<SealedIndexCommand>,
+        Option<Vec<u8>>,
+    ) {
+        (self.result, self.index_command, self.neighbor_artifact)
+    }
+}
+
+impl fmt::Debug for ScoreOutput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ScoreOutput")
+            .field("result", &self.result)
+            .field("index_command", &self.index_command)
+            .field(
+                "neighbor_artifact_len",
+                &self.neighbor_artifact.as_ref().map(Vec::len),
+            )
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1059,6 +1267,9 @@ pub struct SettleInput {
     pub source_content_hash: String,
     pub score: ScoreDecision,
     pub score_evidence: ScoreEvidence,
+    /// The command stored at Score, loaded and checked against
+    /// `score_evidence.embedding_artifact_hash` by the server.
+    pub index_command: Option<SealedIndexCommand>,
 }
 
 #[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
@@ -1094,10 +1305,7 @@ pub trait ReviewPolicy: Send + Sync {
 
 #[async_trait]
 pub trait ScorePolicy: Send + Sync {
-    async fn execute(
-        &self,
-        input: &ScoreInput,
-    ) -> Result<PhaseResult<ScoreDecision, ScoreEvidence, ScoreEvaluation>, PolicyError>;
+    async fn execute(&self, input: &ScoreInput) -> Result<ScoreOutput, PolicyError>;
 }
 
 #[async_trait]
@@ -1341,6 +1549,115 @@ mod tests {
             ApprovedContent::new(b"x".to_vec(), "Not Safe", None),
             Err(ContractError::InvalidProvenanceLabel)
         );
+    }
+
+    fn index_entry(chunk: u32, embedding: Vec<f32>) -> SealedIndexEntry {
+        SealedIndexEntry {
+            chunk,
+            content_hash: hash(format!("chunk-{chunk}").as_bytes()),
+            embedding,
+        }
+    }
+
+    fn index_command(entries: Vec<SealedIndexEntry>) -> Result<SealedIndexCommand, ContractError> {
+        SealedIndexCommand::new(
+            "index-v1",
+            Uuid::nil(),
+            "projection-v1",
+            "embedder-v1",
+            entries,
+        )
+    }
+
+    fn score_result(
+        embedding_artifact_hash: Option<String>,
+        include_eligible: bool,
+    ) -> PhaseResult<ScoreDecision, ScoreEvidence, ScoreEvaluation> {
+        let mut evidence = ScoreEvidence::fixed(InstrumentAwards::default());
+        evidence.embedding_artifact_hash = embedding_artifact_hash;
+        evidence.include_eligible = Some(include_eligible);
+        evidence.index_id = Some("index-v1".to_string());
+        evidence.projection_id = Some("projection-v1".to_string());
+        evidence.embedder_model_id = Some("embedder-v1".to_string());
+        PhaseResult {
+            decision: ScoreDecision {
+                awards: InstrumentAwards::default(),
+            },
+            evidence,
+            evaluation: ScoreEvaluation {
+                rule_id: "score_rule".to_string(),
+                awards: InstrumentAwards::default(),
+            },
+        }
+    }
+
+    #[test]
+    fn score_output_names_every_stored_chunk_by_hash() {
+        let command = index_command(vec![
+            index_entry(7, vec![0.5, -0.25]),
+            index_entry(2, vec![0.125, 1.0]),
+        ])
+        .unwrap();
+        let chunks = command
+            .entries()
+            .iter()
+            .map(|entry| entry.chunk)
+            .collect::<Vec<_>>();
+        assert_eq!(chunks, [2, 7]);
+        let command_hash = command.content_hash().unwrap();
+
+        let output = ScoreOutput::new(
+            score_result(Some(command_hash.clone()), true),
+            Some(command.clone()),
+            None,
+        )
+        .unwrap();
+        assert_eq!(output.index_command(), Some(&command));
+        assert!(!format!("{output:?}").contains("0.125"));
+
+        // One changed bit in one component changes the command identity.
+        let mut changed = command.clone();
+        changed.entries[1].embedding[0] = f32::from_bits(0.5f32.to_bits() + 1);
+        assert_ne!(changed.content_hash().unwrap(), command_hash);
+
+        for (result, command) in [
+            (
+                score_result(Some(hash(b"other")), true),
+                Some(command.clone()),
+            ),
+            (
+                score_result(Some(command_hash.clone()), false),
+                Some(command.clone()),
+            ),
+            (score_result(None, true), None),
+        ] {
+            assert_eq!(
+                ScoreOutput::new(result, command, None),
+                Err(ContractError::ScoreOutputMismatch)
+            );
+        }
+
+        let neighbors = b"neighbor-list".to_vec();
+        let mut result = score_result(None, false);
+        result.evidence.neighbor_artifact_hash = Some(hash(&neighbors));
+        assert!(ScoreOutput::new(result.clone(), None, Some(neighbors)).is_ok());
+        assert_eq!(
+            ScoreOutput::new(result, None, None),
+            Err(ContractError::ScoreOutputMismatch)
+        );
+
+        for entries in [
+            Vec::new(),
+            vec![index_entry(1, vec![f32::NAN])],
+            vec![index_entry(1, Vec::new())],
+            vec![index_entry(1, vec![0.0]), index_entry(1, vec![1.0])],
+            vec![index_entry(1, vec![0.0]), index_entry(2, vec![1.0, 2.0])],
+        ] {
+            assert_eq!(
+                index_command(entries).err(),
+                Some(ContractError::InvalidIndexCommand)
+            );
+        }
     }
 
     #[test]

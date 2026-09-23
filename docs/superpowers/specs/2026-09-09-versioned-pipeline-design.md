@@ -342,6 +342,15 @@ isolated index namespace and cannot affect an active decision.
 If Settle can use an embedding, Score stores it as encrypted evidence. The
 Score outcome stores only its artifact hash.
 
+The Score policy returns proposed index entries as a `SealedIndexCommand` in
+`ScoreOutput`, one entry for each chunk with its original chunk number, hash,
+and exact vector. `ScoreOutput::new` requires `embedding_artifact_hash` to
+equal the command hash, and `neighbor_artifact_hash` to equal the hash of the
+neighbor artifact. The server stores both encrypted before the Score outcome
+commits. Settle receives the stored command in `SettleInput`. It does not
+query the live index or compute new embeddings, so a restart cannot change
+its membership decision.
+
 ```json
 {
   "decision": {
