@@ -38,6 +38,9 @@ attribute is legal Rust.
 - `crates/trace-commons-operator-client`
 - `crates/trace-commons-mark`
 - `crates/trace-commons-build-info`
+- `crates/trace-commons-attestation`
+- `tauri-desktop/src-tauri` (`trace-commons-tauri-desktop`, a separate Cargo
+  workspace)
 
 These stay permissive deliberately. The contributor CLI, the desktop apps, and
 the envelope protocol are meant to be embedded in proprietary agent harnesses;
@@ -122,14 +125,13 @@ cargo deny --features local-gpu-models check licenses
 cargo deny --all-features check licenses
 ```
 
-Run all three, plus a fourth under `--all-features`: the feature sets pull in
-different trees, and 54 crates resolve only under `--all-features` (see
-`CLAUDE.md`). CI covers them at once by running `check licenses` and
-`check sources` under `--all-features`, and runs `check advisories` under
-`--all-features` too, so this is a pre-flight rather than the only
-enforcement. Note this is separate from — and does not replace — the repo's
-standing rule that new dependencies need explicit human approval before you
-add them.
+Run all four: the feature sets pull in different trees, and 54 crates resolve
+only under `--all-features` (see `CLAUDE.md`). CI covers them at once by
+running `check licenses` and `check sources` under `--all-features`, and runs
+`check advisories` under `--all-features` too, so this is a pre-flight rather
+than the only enforcement. Note this is separate from — and does not replace —
+the repo's standing rule that new dependencies need explicit human approval
+before you add them.
 
 ### Checklist before claiming a change is done
 
@@ -138,8 +140,8 @@ add them.
 - `cargo test -p trace-commons-server --test license_boundary` passes, without
   editing the test's expected sets.
 - `cargo deny check licenses` passes under all four invocations above, if you
-  touched dependencies (CI now runs the same check, plus advisories and
-  sources, on every push).
+  touched dependencies. CI runs the same check, plus advisories and sources,
+  on every push.
 
 ## Everything else
 
