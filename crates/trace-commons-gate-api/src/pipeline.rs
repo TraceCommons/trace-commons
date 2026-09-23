@@ -311,6 +311,18 @@ impl TryFrom<InstrumentAwardFields> for InstrumentAward {
     }
 }
 
+fn require_trace_credit_range(
+    instrument_id: &InstrumentId,
+    atomic_units: AtomicUnits,
+) -> Result<(), ContractError> {
+    if instrument_id.as_str() == TRACE_CREDIT_INSTRUMENT_ID
+        && atomic_units.get() > MAX_TRACE_CREDIT_MICROCREDITS
+    {
+        return Err(ContractError::TraceCreditOutOfRange);
+    }
+    Ok(())
+}
+
 impl InstrumentAward {
     pub fn new(
         instrument_id: InstrumentId,
@@ -319,11 +331,7 @@ impl InstrumentAward {
         if atomic_units == AtomicUnits::ZERO {
             return Err(ContractError::ZeroInstrumentAward);
         }
-        if instrument_id.as_str() == TRACE_CREDIT_INSTRUMENT_ID
-            && atomic_units.get() > MAX_TRACE_CREDIT_MICROCREDITS
-        {
-            return Err(ContractError::TraceCreditOutOfRange);
-        }
+        require_trace_credit_range(&instrument_id, atomic_units)?;
         Ok(Self {
             instrument_id,
             atomic_units,
@@ -876,6 +884,7 @@ impl InstrumentSettlement {
         if atomic_units == AtomicUnits::ZERO {
             return Err(ContractError::ZeroInstrumentAward);
         }
+        require_trace_credit_range(&instrument_id, atomic_units)?;
         let result_ref_hash = match &outcome {
             InstrumentSettlementOutcome::Completed { result_ref_hash } => Some(result_ref_hash),
             InstrumentSettlementOutcome::Forfeited { .. } => None,
@@ -2724,6 +2733,59 @@ mod tests {
             serde_json::from_value::<InstrumentAward>(serde_json::json!({
                 "instrument_id": "trace_credit",
                 "atomic_units": i64::MAX as u64 + 1,
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn trace_credit_settlements_fit_the_credit_ledger() {
+        let ledger_max = AtomicUnits::from_raw(i64::MAX as u64);
+        let over = AtomicUnits::from_raw(i64::MAX as u64 + 1);
+        let operation = hash(b"operation");
+        let result = hash(b"result");
+        assert_eq!(
+            InstrumentSettlement::new(
+                InstrumentId::trace_credit(),
+                over,
+                operation.clone(),
+                result.clone(),
+            ),
+            Err(ContractError::TraceCreditOutOfRange)
+        );
+        assert_eq!(
+            InstrumentSettlement::forfeited(
+                InstrumentId::trace_credit(),
+                over,
+                operation.clone(),
+                ReasonCode::new("withdrawn").unwrap(),
+            ),
+            Err(ContractError::TraceCreditOutOfRange)
+        );
+        assert!(
+            InstrumentSettlement::new(
+                InstrumentId::trace_credit(),
+                ledger_max,
+                operation.clone(),
+                result.clone(),
+            )
+            .is_ok()
+        );
+        assert!(
+            InstrumentSettlement::new(
+                InstrumentId::new("storage_rebate").unwrap(),
+                AtomicUnits::from_raw(u64::MAX),
+                operation.clone(),
+                result.clone(),
+            )
+            .is_ok()
+        );
+        assert!(
+            serde_json::from_value::<InstrumentSettlement>(serde_json::json!({
+                "instrument_id": "trace_credit",
+                "atomic_units": i64::MAX as u64 + 1,
+                "operation_ref_hash": operation,
+                "outcome": {"status": "completed", "result_ref_hash": result},
             }))
             .is_err()
         );
