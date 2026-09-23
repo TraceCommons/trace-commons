@@ -1,5 +1,8 @@
 # Pipeline authority and privacy implementation status
 
+> **Status: historical.** This report describes an unmerged development
+> branch. None of the code it describes is in this repository yet.
+
 The authority and privacy milestone adds authority and privacy controls to the local versioned pipeline.
 The Score policy stays fixed.
 

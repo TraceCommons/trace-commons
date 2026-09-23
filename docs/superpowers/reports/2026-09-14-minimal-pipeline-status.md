@@ -1,5 +1,8 @@
 # Minimal pipeline implementation status
 
+> **Status: historical.** This report describes an unmerged development
+> branch. None of the code it describes is in this repository yet.
+
 The minimal pipeline is an isolated local and test path. It does not replace the current
 ingest path. It uses one fixed bundle:
 

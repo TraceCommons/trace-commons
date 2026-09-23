@@ -1,5 +1,10 @@
 # Local pipeline lab
 
+> **Status: design stage.** This runbook describes tooling that is not in this
+> repository yet: the lab scripts and `trace-commons-pipeline-local`. It
+> arrives with the pipeline runtime and qualification changes, and its
+> commands can change before then. Do not follow it on a deployment.
+
 ## Purpose
 
 Use the lab to run a fixed corpus, inspect a graded report, build a signed

@@ -1,5 +1,10 @@
 # Pipeline activation and migration
 
+> **Status: design stage.** This runbook describes tooling that is not in this
+> repository yet: the activation routes and the `versioned_pipeline_pg` suite.
+> It arrives with the pipeline runtime and qualification changes, and its
+> commands can change before then. Do not follow it on a deployment.
+
 Pipeline activation routes the qualified pipeline for new submissions. Retained
 legacy records stay readable. The switch assigns each receipt to one
 implementation.
@@ -51,7 +56,8 @@ The switched route is the dual-path receipt used during migration.
 
 ## Current completion
 
-The redesign is complete for the contracts that are not deferred.
-`SCR-005` remains deferred until the external valuation protocol exists.
-New valuation rules use a later bundle through the same qualification and
-activation process.
+None of the redesign is in this repository yet. The versioned pipeline
+contracts are defined; the runtime, qualification, and activation work
+follows in later changes. `SCR-005` stays deferred until the external
+valuation protocol exists. New valuation rules use a later bundle through
+the same qualification and activation process.

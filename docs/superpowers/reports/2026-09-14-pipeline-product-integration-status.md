@@ -1,5 +1,8 @@
 # Pipeline product integration status
 
+> **Status: historical.** This report describes an unmerged development
+> branch. None of the code it describes is in this repository yet.
+
 The product integration milestone connects the versioned pipeline to contributor, customer, worker, and
 operator interfaces. The legacy product interfaces remain available for
 retained records.

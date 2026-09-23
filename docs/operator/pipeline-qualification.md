@@ -1,5 +1,10 @@
 # Pipeline qualification
 
+> **Status: design stage.** This runbook describes tooling that is not in this
+> repository yet: the qualification scripts, drills, and PostgreSQL suites. It
+> arrives with the pipeline runtime and qualification changes, and its
+> commands can change before then. Do not follow it on a deployment.
+
 Pipeline qualification adds package trust, operational evidence, and restore qualification.
 It does not activate the new pipeline for production submissions.
 

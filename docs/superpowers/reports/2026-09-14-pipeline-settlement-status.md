@@ -1,5 +1,8 @@
 # Pipeline settlement implementation status
 
+> **Status: historical.** This report describes an unmerged development
+> branch. None of the code it describes is in this repository yet.
+
 The settlement milestone keeps the isolated local and test path. It adds fixed positive credit,
 sealed index commands, and internal settlement records.
 

@@ -1,5 +1,8 @@
 # Durable pipeline implementation status
 
+> **Status: historical.** This report describes an unmerged development
+> branch. None of the code it describes is in this repository yet.
+
 The durable pipeline keeps the minimal policies from the minimal milestone. It adds durable execution and
 bundle recovery for local and test deployments.
 

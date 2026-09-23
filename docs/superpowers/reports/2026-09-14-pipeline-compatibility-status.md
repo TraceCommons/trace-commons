@@ -1,5 +1,8 @@
 # Pipeline compatibility implementation status
 
+> **Status: historical.** This report describes an unmerged development
+> branch. None of the code it describes is in this repository yet.
+
 The compatibility milestone adds a compatibility Score policy to the local versioned pipeline.
 Admission and Review stay on the authority and privacy policies.
 

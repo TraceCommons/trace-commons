@@ -4,7 +4,8 @@
 > Then add recovery, index and credit operations, and production policies in
 > small steps that reviewers can check.
 
-- **Status:** Milestone 8 implemented
+- **Status:** Plan. No milestone is implemented in this repository yet;
+  milestone work was done on an unmerged branch.
 - **Date:** 2026-09-14
 - **Architecture:** [versioned pipeline design](../specs/2026-09-09-versioned-pipeline-design.md)
 - **Final acceptance:** [versioned pipeline behavioral contracts](../specs/2026-09-11-versioned-pipeline-behavioral-contracts.md)
