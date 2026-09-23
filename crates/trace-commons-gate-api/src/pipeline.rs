@@ -305,10 +305,9 @@ impl InstrumentAwards {
     /// Canonical identity for the complete ordered award set.
     pub fn canonical_id(&self) -> String {
         let mut bytes = b"trace-commons-instrument-awards\0".to_vec();
-        bytes.extend_from_slice(&(self.0.len() as u64).to_be_bytes());
+        encode_len(&mut bytes, self.0.len());
         for award in &self.0 {
-            bytes.extend_from_slice(&(award.instrument_id.0.len() as u64).to_be_bytes());
-            bytes.extend_from_slice(award.instrument_id.0.as_bytes());
+            encode_string(&mut bytes, award.instrument_id.as_str());
             bytes.extend_from_slice(&award.atomic_units.0.to_be_bytes());
         }
         sha256_prefixed(&bytes)
@@ -382,32 +381,34 @@ impl BundleManifest {
     }
 }
 
-fn encode_string(output: &mut Vec<u8>, value: &str) -> Result<(), ContractError> {
-    let len = u32::try_from(value.len()).map_err(|_| ContractError::ManifestFieldTooLarge)?;
-    output.extend_from_slice(&len.to_be_bytes());
-    output.extend_from_slice(value.as_bytes());
-    Ok(())
+/// Every length and count in a canonical encoding is a big-endian `u64`.
+fn encode_len(output: &mut Vec<u8>, len: usize) {
+    output.extend_from_slice(&(len as u64).to_be_bytes());
 }
 
-fn encode_list(output: &mut Vec<u8>, values: &[String]) -> Result<(), ContractError> {
+fn encode_string(output: &mut Vec<u8>, value: &str) {
+    encode_len(output, value.len());
+    output.extend_from_slice(value.as_bytes());
+}
+
+fn encode_list(output: &mut Vec<u8>, values: &[String]) {
     let values = values.iter().collect::<BTreeSet<_>>();
-    let len = u32::try_from(values.len()).map_err(|_| ContractError::ManifestFieldTooLarge)?;
-    output.extend_from_slice(&len.to_be_bytes());
+    encode_len(output, values.len());
     for value in values {
-        encode_string(output, value)?;
+        encode_string(output, value);
     }
-    Ok(())
 }
 
 fn encode_policy(output: &mut Vec<u8>, policy: &PolicyRef) -> Result<(), ContractError> {
     if policy.policy_id.is_empty() || policy.implementation_id.is_empty() {
         return Err(ContractError::MissingPolicyIdentity);
     }
-    encode_string(output, &policy.policy_id)?;
-    encode_string(output, &policy.implementation_id)?;
-    encode_string(output, &policy.configuration_hash)?;
-    encode_list(output, &policy.data_artifact_hashes)?;
-    encode_list(output, &policy.projection_ids)
+    encode_string(output, &policy.policy_id);
+    encode_string(output, &policy.implementation_id);
+    encode_string(output, &policy.configuration_hash);
+    encode_list(output, &policy.data_artifact_hashes);
+    encode_list(output, &policy.projection_ids);
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -486,17 +487,13 @@ impl BundlePackage {
     pub fn canonical_bytes(&self) -> Result<Vec<u8>, ContractError> {
         self.validate()?;
         let mut bytes = b"trace-commons-bundle-package\0".to_vec();
-        encode_string(&mut bytes, &self.bundle_id)?;
+        encode_string(&mut bytes, &self.bundle_id);
         let manifest = self.manifest.canonical_bytes()?;
-        let manifest_len =
-            u32::try_from(manifest.len()).map_err(|_| ContractError::ManifestFieldTooLarge)?;
-        bytes.extend_from_slice(&manifest_len.to_be_bytes());
+        encode_len(&mut bytes, manifest.len());
         bytes.extend_from_slice(&manifest);
-        let artifact_count = u32::try_from(self.artifacts.len())
-            .map_err(|_| ContractError::ManifestFieldTooLarge)?;
-        bytes.extend_from_slice(&artifact_count.to_be_bytes());
+        encode_len(&mut bytes, self.artifacts.len());
         for hash in self.artifacts.keys() {
-            encode_string(&mut bytes, hash)?;
+            encode_string(&mut bytes, hash);
         }
         Ok(bytes)
     }
@@ -527,8 +524,6 @@ impl BundlePackage {
 pub enum ContractError {
     #[error("unsupported bundle manifest version")]
     UnsupportedManifestVersion,
-    #[error("bundle manifest field is too large")]
-    ManifestFieldTooLarge,
     #[error("policy identity is missing")]
     MissingPolicyIdentity,
     #[error("artifact hash is malformed")]
@@ -1167,17 +1162,17 @@ impl SealedIndexCommand {
         self.validate()?;
         let mut bytes = b"trace-commons-index-command\0".to_vec();
         for label in [&self.schema, &self.index_id] {
-            encode_string(&mut bytes, label)?;
+            encode_string(&mut bytes, label);
         }
         bytes.extend_from_slice(self.revision_id.as_bytes());
         for label in [&self.projection_id, &self.model_id] {
-            encode_string(&mut bytes, label)?;
+            encode_string(&mut bytes, label);
         }
-        bytes.extend_from_slice(&(self.entries.len() as u64).to_be_bytes());
+        encode_len(&mut bytes, self.entries.len());
         for entry in &self.entries {
             bytes.extend_from_slice(&entry.chunk.to_be_bytes());
-            encode_string(&mut bytes, &entry.content_hash)?;
-            bytes.extend_from_slice(&(entry.embedding.len() as u64).to_be_bytes());
+            encode_string(&mut bytes, &entry.content_hash);
+            encode_len(&mut bytes, entry.embedding.len());
             for value in &entry.embedding {
                 bytes.extend_from_slice(&value.to_bits().to_be_bytes());
             }
@@ -2136,6 +2131,38 @@ mod tests {
         let refused =
             hex_artifacts::deserialize(IntoDeserializer::<Error>::into_deserializer(upper));
         assert!(refused.is_err());
+    }
+
+    #[test]
+    fn canonical_encodings_frame_every_length_as_u64() {
+        let mut bytes = Vec::new();
+        encode_list(
+            &mut bytes,
+            &["b".to_string(), "a".to_string(), "a".to_string()],
+        );
+        assert_eq!(
+            bytes,
+            [
+                &2u64.to_be_bytes()[..],
+                &1u64.to_be_bytes(),
+                b"a",
+                &1u64.to_be_bytes(),
+                b"b",
+            ]
+            .concat()
+        );
+
+        let manifest = BundleManifest {
+            format_version: BUNDLE_MANIFEST_FORMAT_VERSION,
+            admission: policy("admission", b"configuration"),
+            review: policy("review", b"configuration"),
+            score: policy("score", b"configuration"),
+            settle: policy("settle", b"configuration"),
+        };
+        let canonical = manifest.canonical_bytes().unwrap();
+        let domain = b"trace-commons-bundle-manifest\0".len();
+        let first_len = &canonical[domain + 4..domain + 12];
+        assert_eq!(first_len, &("admission".len() as u64).to_be_bytes());
     }
 
     #[test]
