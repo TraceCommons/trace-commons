@@ -556,13 +556,24 @@ outbox rows record credit and payout progress.
 The receipt path performs these operations:
 
 1. Authenticate the request and derive the tenant.
-2. Store the encrypted trace body.
-3. Resolve and validate the active bundle.
-4. Execute Admission.
-5. Commit the run, Admission outcome, and next phase in one transaction.
+2. Look up the request key. An identical replay returns the existing run
+   here, before any limit is counted.
+3. Refuse a tombstoned request-content hash, and enforce rate and quota
+   limits. A refusal returns a safe label and stores nothing.
+4. Store the encrypted trace body.
+5. Resolve and validate the active bundle.
+6. Execute Admission.
+7. Commit the run, Admission outcome, and next phase in one transaction.
 
 The request key is unique within the tenant and binds to the request-content
 hash. A replay returns the existing run. Reuse with different content fails.
+
+Step 3 keeps the order of the current ingest path, which refuses withdrawn
+content and over-limit callers before any artifact write. Without it,
+withdrawn content resubmitted under a new request key would be stored again,
+and an over-quota caller could make the service encrypt and store a body for
+every refused request. Admission still receives the tombstone and quota
+facts and records them as evidence.
 
 An asynchronous worker performs these operations:
 

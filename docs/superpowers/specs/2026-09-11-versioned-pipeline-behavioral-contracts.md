@@ -141,8 +141,9 @@ request must fail without a content read or state change.
 - An operational error MUST NOT become a phase decision.
 - A refusal MUST NOT commit a run, outcome, registry mutation, credit event,
   index write, or external payout.
-- An encrypted content-addressed object CAN remain after a later receipt
-  failure.
+- An encrypted content-addressed object CAN remain after a receipt failure
+  that follows the store. Tombstone, rate, and quota refusals come before the
+  store and leave no object.
 - Orphan cleanup MUST NOT treat that object as a completed submission.
 - Live mutation CAN be blocked while dry-run diagnostics remain available.
 
@@ -357,6 +358,8 @@ and canary values. No prohibited value can cross the wire.
 
 - Submission MUST require an authenticated contributor claim.
 - The service MUST enforce claim, grant, consent, and tenant policy.
+- The service MUST refuse tombstoned content and enforce rate and quota
+  limits before it stores the trace. A refusal MUST store nothing.
 - The service MUST store the encrypted trace before it confirms custody.
 - The service MUST resolve and validate the active bundle.
 - Admission MUST execute before the receipt transaction commits.
@@ -406,7 +409,8 @@ Confirm the next phase, evidence, and absence of external writes.
 - A limit implementation MUST enforce the configured system-wide bound.
 
 **Acceptance:** Exercise each limit across concurrent service instances.
-Confirm that retries do not increase the accepted logical count.
+Confirm that retries do not increase the accepted logical count and that a
+refused request stores no object.
 
 ### SUB-007: Revoked-content tombstones
 
@@ -417,7 +421,8 @@ Confirm that retries do not increase the accepted logical count.
 - The refusal MUST NOT reveal contributor identity.
 
 **Acceptance:** Remove a trace, then resubmit its identifiers and content
-hashes through every supported submission path.
+hashes through every supported submission path. Confirm that each refusal
+stores no object.
 
 ## 7. Bundle and policy contracts
 
