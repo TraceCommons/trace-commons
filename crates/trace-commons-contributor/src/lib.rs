@@ -28,6 +28,7 @@ pub mod outcome_copy;
 pub mod picker;
 pub mod preview_copy;
 pub mod pricing;
+pub mod privacy_scan_copy;
 pub mod private_inference_copy;
 pub mod project_copy;
 pub mod quit_copy;

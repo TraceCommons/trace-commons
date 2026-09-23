@@ -1489,24 +1489,15 @@ pub const ONBOARD_CONSENT_OPTIONAL: &str = "Optional — each one lets your trac
 pub const ONBOARD_CONSENT_CREDIT: &str = "Credit";
 pub const ONBOARD_ALWAYS_ON_TAG: &str = "always on";
 
-pub const ONBOARD_SCAN_TITLE: &str = "Extra scrub before sending? (optional)";
-pub const ONBOARD_SCAN_LOCAL_ALWAYS: &str = "Local scrubbing removes secrets, keys, tokens and credentials by pattern before anything \
-     leaves this machine. It runs either way.";
-pub const ONBOARD_SCAN_OFFER: &str = "You can additionally send the message text of each trace — not tool output, not file \
-     contents — through a second scanner run by NEAR AI, a third party, to catch personal \
-     information the patterns miss: names, addresses, that kind of thing.";
-/// Both halves of the disclosure. The cost (text really does leave the
-/// machine to a third party) and the reassurance (an unreachable scanner
-/// holds traces rather than sending them unscanned). Cutting either half
-/// makes the screen dishonest in one direction, so they live in one string.
-pub const ONBOARD_SCAN_DISCLOSURE: &str = concat!(
-    "This means your message text is transmitted to NEAR AI before it reaches ",
-    app_name!(),
-    ". If that scanner is unreachable, nothing is sent at all — traces wait rather than \
-     going out unscanned."
-);
-pub const ONBOARD_SCAN_LOCAL_ONLY: &str = "Local scrubbing only";
-pub const ONBOARD_SCAN_WITH_NEAR: &str = "Local scrubbing + NEAR AI scan";
+// The scan screen's words live in `trace_commons_contributor::privacy_scan_copy`,
+// where the Tauri shell's recovery prompt reads the same disclosure.
+// COPY-MIGRATED-BEGIN
+pub use trace_commons_contributor::privacy_scan_copy::{
+    DISCLOSURE as ONBOARD_SCAN_DISCLOSURE, LOCAL_ALWAYS as ONBOARD_SCAN_LOCAL_ALWAYS,
+    LOCAL_ONLY as ONBOARD_SCAN_LOCAL_ONLY, OFFER as ONBOARD_SCAN_OFFER,
+    TITLE as ONBOARD_SCAN_TITLE, WITH_NEAR as ONBOARD_SCAN_WITH_NEAR,
+};
+// COPY-MIGRATED-END
 
 pub const ONBOARD_WATCH_TITLE: &str = "What to watch";
 
