@@ -6075,6 +6075,8 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         tenant_policies: Arc::new(tenant_policies),
         require_tenant_submission_policy,
         db_mirror,
+        pipeline_service: None,
+        pipeline_runtime_required: false,
         db_contributor_reads,
         db_reviewer_reads,
         db_reviewer_require_object_refs: false,
@@ -10266,6 +10268,44 @@ fn tenant_rollout_gate_dependency_requires_matching_tenant_scope() {
     )
     .expect_err("missing tenant-scoped dependency is rejected");
     assert!(missing.to_string().contains("missing dependency"));
+}
+
+#[test]
+fn required_ingest_pipeline_runtime_fails_closed_without_assembly() {
+    let error = assemble_ingest_pipeline_runtime(None, None, None, true)
+        .err()
+        .unwrap();
+    assert_eq!(
+        error.to_string(),
+        "pipeline_runtime_required_but_not_injected"
+    );
+}
+
+#[test]
+fn pipeline_receipt_tenants_require_an_injected_runtime() {
+    let gates = TraceTenantRolloutGates::for_feature(
+        TraceTenantRolloutFeature::PipelineReceipts,
+        &["tenant-a"],
+    );
+    let error = validate_pipeline_receipt_rollout(&gates, false)
+        .err()
+        .unwrap();
+    assert_eq!(
+        error.to_string(),
+        "pipeline_receipts_configured_without_runtime"
+    );
+    assert!(validate_pipeline_receipt_rollout(&gates, true).is_ok());
+    assert!(validate_pipeline_receipt_rollout(&TraceTenantRolloutGates::default(), false).is_ok());
+}
+
+#[test]
+fn ingest_and_pipeline_derive_the_same_tenant_storage_ref() {
+    for tenant in ["tenant-a", "tenant-b", "a much longer tenant identifier"] {
+        assert_eq!(
+            tenant_storage_ref(tenant),
+            trace_commons_server::versioned_pipeline::pipeline_tenant_storage_ref(tenant).as_str()
+        );
+    }
 }
 
 #[test]
@@ -27298,6 +27338,8 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         tenant_policies: Arc::new(BTreeMap::new()),
         require_tenant_submission_policy: false,
         db_mirror: None,
+        pipeline_service: None,
+        pipeline_runtime_required: false,
         db_contributor_reads: false,
         db_reviewer_reads: false,
         db_reviewer_require_object_refs: false,

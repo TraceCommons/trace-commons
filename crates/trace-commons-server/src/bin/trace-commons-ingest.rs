@@ -59,12 +59,12 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 use trace_commons_protocol::trace_contribution::{
     ConsentMetadata, ConsentScope, EmbeddingAnalysisMetadata, PiiClassifyPolicy,
     PrivacyFilterBackendTag, ProcessEvalRating, ProcessEvaluationLabels, ResidualPiiRisk,
-    SourceSessionIdentity, TRACE_CONTRIBUTION_SCHEMA_VERSION, TraceAllowedUse,
-    TraceContributionEnvelope, TraceSubmissionReceipt, TraceSubmissionStatusRequest,
-    TraceSubmissionStatusUpdate, TraceValueScorecard, apply_credit_estimate_to_envelope,
-    canonical_summary_for_embedding, privacy_filter_backend_from_env,
-    rescrub_envelope_prose_pii_with, rescrub_trace_envelope, retention_policy_for_allowed_use,
-    retention_policy_for_trace, run_privacy_filter_canary,
+    ResidualRiskCondition, SourceSessionIdentity, TRACE_CONTRIBUTION_SCHEMA_VERSION,
+    TraceAllowedUse, TraceContributionEnvelope, TraceSubmissionReceipt,
+    TraceSubmissionStatusRequest, TraceSubmissionStatusUpdate, TraceValueScorecard,
+    apply_credit_estimate_to_envelope, canonical_summary_for_embedding,
+    privacy_filter_backend_from_env, rescrub_envelope_prose_pii_with, rescrub_trace_envelope,
+    retention_policy_for_allowed_use, retention_policy_for_trace, run_privacy_filter_canary,
 };
 use trace_commons_server::account_native_auth::{
     IssuedNativeCode, NATIVE_AUTH_CODE_TTL, NATIVE_AUTH_REQUEST_TTL, NATIVE_CODE_CHALLENGE_METHOD,
@@ -96,6 +96,7 @@ use trace_commons_server::account_passkey::{
 };
 use trace_commons_server::config::{DatabaseConfig, NearConfig, WebauthnConfig};
 use trace_commons_server::db::DeviceKeyRecord as StorageDeviceKeyRecord;
+use trace_commons_server::db::postgres::PgBackend;
 use trace_commons_server::db::{
     CreditSettlementAdvisoryLock, Database, PayoutHoldReason, PayoutResolution,
     TraceCorpusRlsDiagnostics,
@@ -249,6 +250,10 @@ use trace_commons_server::trace_gate_service::{
 use trace_commons_server::trace_score_attestation::{
     AttestationConfig, AttestationSigningState, ScoreAttestationCoverage, ScoreAttestationScope,
     ScoreAttestationSubmissionEntry, sign_scoped_score_attestation, sign_score_attestation,
+};
+use trace_commons_server::versioned_pipeline::{
+    PipelineAdmissionLimits, PipelineQuotaScope, PipelineReceiptRequest, PipelineReceiptResult,
+    PipelineService,
 };
 use uuid::Uuid;
 
@@ -649,6 +654,12 @@ const TRACE_COMMONS_OBJECT_PRIMARY_REPLAY_EXPORT_TENANT_IDS: &str =
     "TRACE_COMMONS_OBJECT_PRIMARY_REPLAY_EXPORT_TENANT_IDS";
 const TRACE_COMMONS_OBJECT_PRIMARY_DERIVED_EXPORTS_TENANT_IDS: &str =
     "TRACE_COMMONS_OBJECT_PRIMARY_DERIVED_EXPORTS_TENANT_IDS";
+const TRACE_COMMONS_PIPELINE_RECEIPTS_TENANT_IDS: &str =
+    "TRACE_COMMONS_PIPELINE_RECEIPTS_TENANT_IDS";
+/// Fails ingest startup closed when no pipeline runtime was injected (or an
+/// injected one is not production-qualified) rather than booting without one.
+/// See `assemble_ingest_pipeline_runtime`.
+const TRACE_COMMONS_PIPELINE_RUNTIME_REQUIRED: &str = "TRACE_COMMONS_PIPELINE_RUNTIME_REQUIRED";
 const TRACE_COMMONS_LEGAL_HOLD_RETENTION_POLICIES: &str =
     "TRACE_COMMONS_LEGAL_HOLD_RETENTION_POLICIES";
 const TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST: &str =
@@ -1220,6 +1231,20 @@ SUBCOMMANDS:
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    run_ingest(None).await
+}
+
+/// Starts ingest with an optional production pipeline assembly.
+///
+/// The repository build deliberately passes `None`: proprietary scorer,
+/// index, settlement, and payout implementations do not live in this tree. A
+/// production distribution must pass an assembler and set
+/// `TRACE_COMMONS_PIPELINE_RUNTIME_REQUIRED=true`. Startup then fails closed
+/// if assembly is absent or an injected dependency is not production
+/// qualified.
+pub async fn run_ingest(
+    pipeline_runtime_assembler: Option<&dyn IngestPipelineRuntimeAssembler>,
+) -> anyhow::Result<()> {
     // Choose the rustls crypto provider before anything can open a TLS
     // connection.
     //
@@ -1304,7 +1329,9 @@ async fn main() -> anyhow::Result<()> {
         policy = PiiClassifyPolicy::from_env().as_label(),
         "Trace Commons PII classify policy"
     );
-    let state = Arc::new(AppState::from_env().await?);
+    let state = Arc::new(
+        AppState::from_env_with_pipeline_runtime_assembler(pipeline_runtime_assembler).await?,
+    );
     validate_trace_export_job_scheduler_config(state.as_ref(), state.export_job_scheduler.as_ref())
         .await?;
     validate_trace_near_credit_outbox_scheduler_config(
@@ -1564,6 +1591,13 @@ struct AppState {
     tenant_policies: Arc<BTreeMap<String, TenantSubmissionPolicy>>,
     require_tenant_submission_policy: bool,
     db_mirror: Option<Arc<dyn Database>>,
+    pipeline_service: Option<Arc<PipelineService>>,
+    /// Fails startup closed (`pipeline_receipts_configured_without_runtime`
+    /// / `pipeline_runtime_required_but_not_injected`) instead of silently
+    /// running ingest without a pipeline runtime. See
+    /// `TRACE_COMMONS_PIPELINE_RUNTIME_REQUIRED` and
+    /// `validate_pipeline_receipt_rollout`.
+    pipeline_runtime_required: bool,
     db_contributor_reads: bool,
     db_reviewer_reads: bool,
     db_reviewer_require_object_refs: bool,
@@ -2144,10 +2178,16 @@ enum TraceTenantRolloutFeature {
     ObjectPrimarySubmitReview,
     ObjectPrimaryReplayExport,
     ObjectPrimaryDerivedExports,
+    /// Tenants whose new receipts are routed to the versioned pipeline
+    /// instead of the legacy corpus path. Unlike every other feature here,
+    /// there is no paired "globally enabled" `AppState` bool -- this rollout
+    /// is tenant-list-only, and additionally requires an injected pipeline
+    /// runtime (`validate_pipeline_receipt_rollout`).
+    PipelineReceipts,
 }
 
 impl TraceTenantRolloutFeature {
-    const ALL: [Self; 11] = [
+    const ALL: [Self; 12] = [
         Self::DbContributorReads,
         Self::DbReviewerReads,
         Self::DbReviewerRequireObjectRefs,
@@ -2159,6 +2199,7 @@ impl TraceTenantRolloutFeature {
         Self::ObjectPrimarySubmitReview,
         Self::ObjectPrimaryReplayExport,
         Self::ObjectPrimaryDerivedExports,
+        Self::PipelineReceipts,
     ];
 
     fn env_key(self) -> &'static str {
@@ -2186,6 +2227,7 @@ impl TraceTenantRolloutFeature {
             Self::ObjectPrimaryDerivedExports => {
                 TRACE_COMMONS_OBJECT_PRIMARY_DERIVED_EXPORTS_TENANT_IDS
             }
+            Self::PipelineReceipts => TRACE_COMMONS_PIPELINE_RECEIPTS_TENANT_IDS,
         }
     }
 
@@ -2202,6 +2244,7 @@ impl TraceTenantRolloutFeature {
             Self::ObjectPrimarySubmitReview => "object_primary_submit_review",
             Self::ObjectPrimaryReplayExport => "object_primary_replay_export",
             Self::ObjectPrimaryDerivedExports => "object_primary_derived_exports",
+            Self::PipelineReceipts => "pipeline_receipts",
         }
     }
 }
@@ -3532,7 +3575,9 @@ impl AppState {
         )
     }
 
-    async fn from_env() -> anyhow::Result<Self> {
+    async fn from_env_with_pipeline_runtime_assembler(
+        pipeline_runtime_assembler: Option<&dyn IngestPipelineRuntimeAssembler>,
+    ) -> anyhow::Result<Self> {
         let root = std::env::var("TRACE_COMMONS_DATA_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|_| default_data_dir());
@@ -3561,7 +3606,10 @@ impl AppState {
         let tenant_policies = parse_tenant_submission_policies_from_env()?;
         let require_tenant_submission_policy =
             env_truthy("TRACE_COMMONS_REQUIRE_TENANT_SUBMISSION_POLICY");
-        let db_mirror = trace_corpus_db_mirror_from_env().await?;
+        let db_connections = trace_corpus_db_mirror_from_env().await?;
+        let db_mirror = db_connections
+            .as_ref()
+            .map(|connections| connections.database.clone());
         let postgres_runtime_role_sha256 = parse_postgres_runtime_role_sha256_from_env()?;
         let require_postgres_trace_rls_ready =
             env_truthy(TRACE_COMMONS_REQUIRE_POSTGRES_TRACE_RLS_READY);
@@ -3736,6 +3784,14 @@ impl AppState {
             require_object_store_versioning,
             artifact_store.as_ref(),
         )?;
+        let pipeline_runtime_required = env_truthy(TRACE_COMMONS_PIPELINE_RUNTIME_REQUIRED);
+        let pipeline_service = assemble_ingest_pipeline_runtime(
+            pipeline_runtime_assembler,
+            db_connections.as_ref(),
+            artifact_store.as_ref(),
+            pipeline_runtime_required,
+        )?;
+        validate_pipeline_receipt_rollout(&tenant_rollout_gates, pipeline_service.is_some())?;
         let near_credit_submitter_config = trace_near_credit_submitter_from_env()?;
         let near_credit_submitter_timeout_ms = near_credit_submitter_config
             .as_ref()
@@ -4198,6 +4254,8 @@ impl AppState {
             tenant_policies: Arc::new(tenant_policies),
             require_tenant_submission_policy,
             db_mirror,
+            pipeline_service,
+            pipeline_runtime_required,
             db_contributor_reads,
             db_reviewer_reads,
             db_reviewer_require_object_refs,
@@ -4502,6 +4560,22 @@ fn enforce_db_mirror_write_result(
         ))),
         Err(_) => Ok(()),
     }
+}
+
+/// Refuses to start ingest with `pipeline_receipts_configured_without_runtime`
+/// when `TRACE_COMMONS_PIPELINE_RECEIPTS_TENANT_IDS` names tenants but no
+/// pipeline runtime was injected -- a configured tenant would otherwise fall
+/// straight through `route_pipeline_receipt` to the legacy path with no
+/// indication the rollout gate did nothing (D3).
+fn validate_pipeline_receipt_rollout(
+    gates: &TraceTenantRolloutGates,
+    runtime_present: bool,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        runtime_present || gates.tenant_count(TraceTenantRolloutFeature::PipelineReceipts) == 0,
+        "pipeline_receipts_configured_without_runtime"
+    );
+    Ok(())
 }
 
 fn validate_rollout_gate_dependency(
@@ -7219,7 +7293,16 @@ fn parse_optional_scheduler_i64_env(
     Ok(value)
 }
 
-async fn trace_corpus_db_mirror_from_env() -> anyhow::Result<Option<Arc<dyn Database>>> {
+/// The DB-mirror connection pair: the type-erased `Database` mirror ingest's
+/// existing DB-mirror paths use, and the concrete `PgBackend` the pipeline
+/// runtime needs (`assemble_ingest_pipeline_runtime`). Both wrap the same
+/// PostgreSQL pool.
+struct TraceCorpusDbConnections {
+    database: Arc<dyn Database>,
+    postgres: Arc<PgBackend>,
+}
+
+async fn trace_corpus_db_mirror_from_env() -> anyhow::Result<Option<TraceCorpusDbConnections>> {
     if !env_truthy("TRACE_COMMONS_DB_DUAL_WRITE") {
         return Ok(None);
     }
@@ -7231,11 +7314,18 @@ async fn trace_corpus_db_mirror_from_env() -> anyhow::Result<Option<Arc<dyn Data
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(5);
     let config = DatabaseConfig::from_postgres_url(&url, pool_size);
-    let db = trace_commons_server::db::connect_from_config(&config)
+    let postgres = Arc::new(
+        PgBackend::new(&config)
+            .await
+            .context("failed to connect Trace Commons DB dual-write mirror")?,
+    );
+    postgres
+        .run_migrations()
         .await
-        .context("failed to connect Trace Commons DB dual-write mirror")?;
+        .context("failed to migrate Trace Commons DB dual-write mirror")?;
+    let database = postgres.clone() as Arc<dyn Database>;
     tracing::info!("Trace Commons PostgreSQL DB dual-write mirror enabled");
-    Ok(Some(db))
+    Ok(Some(TraceCorpusDbConnections { database, postgres }))
 }
 
 async fn validate_required_postgres_trace_rls_ready(
@@ -11890,6 +11980,9 @@ struct TraceCommonsObjectStoreConfigStatus {
 struct TraceCommonsConfigStatusResponse {
     schema_version: &'static str,
     db_mirror_configured: bool,
+    pipeline_runtime_configured: bool,
+    pipeline_runtime_required: bool,
+    pipeline_runtime_production_qualified: bool,
     signed_token_auth_enabled: bool,
     signed_token_key_count: usize,
     signed_token_eddsa_key_count: usize,
@@ -12151,6 +12244,12 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
     TraceCommonsConfigStatusResponse {
         schema_version: TRACE_CONTRIBUTION_SCHEMA_VERSION,
         db_mirror_configured: state.db_mirror.is_some(),
+        pipeline_runtime_configured: state.pipeline_service.is_some(),
+        pipeline_runtime_required: state.pipeline_runtime_required,
+        pipeline_runtime_production_qualified: state
+            .pipeline_service
+            .as_deref()
+            .is_some_and(pipeline_runtime_is_production_qualified),
         signed_token_auth_enabled: state.signed_token_verifier.is_some(),
         signed_token_key_count: signed_token_verifier
             .as_ref()
@@ -13415,6 +13514,87 @@ async fn reject_conflicting_witness_retry(
     Ok(())
 }
 
+/// Routes a receipt to the versioned pipeline instead of the legacy corpus
+/// path, for a `PipelineReceipts`-rollout tenant with an injected runtime.
+///
+/// Called from `submit_trace_handler` only after the legacy handler's
+/// authentication, submit rate limit, admission reservation,
+/// tenant-access-grant check, envelope validation, and server re-scrub have
+/// all already run (D15) -- this function does none of that itself and
+/// trusts its caller for it. `envelope` is that re-scrubbed envelope.
+/// Returns `Ok(None)` -- meaning "stay on the legacy path" -- unless the
+/// tenant is in the `PipelineReceipts` rollout set AND a runtime was
+/// injected; a tenant listed without an injected runtime is refused at
+/// startup instead (`validate_pipeline_receipt_rollout`), so it can never
+/// reach this function.
+async fn route_pipeline_receipt(
+    state: &AppState,
+    tenant: &TenantCtx,
+    envelope: &TraceContributionEnvelope,
+    raw_body: &[u8],
+    residual_risk_basis: &[ResidualRiskCondition],
+) -> ApiResult<Option<TraceSubmissionReceipt>> {
+    if !state.tenant_rollout_gates.enabled_for(
+        TraceTenantRolloutFeature::PipelineReceipts,
+        false,
+        tenant.tenant_id(),
+    ) {
+        return Ok(None);
+    }
+    let Some(pipeline_service) = state.pipeline_service.as_ref() else {
+        return Ok(None);
+    };
+    let idempotency_key = envelope.submission_id.to_string();
+    let result = pipeline_service
+        .submit(PipelineReceiptRequest {
+            tenant_id: tenant.tenant_id(),
+            actor_principal_ref: tenant.principal_ref(),
+            counts_toward_quota: tenant.role() == TokenRole::Contributor,
+            request_idempotency_key: &idempotency_key,
+            request_bytes: raw_body,
+            server_envelope: envelope,
+            residual_risk_basis,
+            limits: PipelineAdmissionLimits {
+                max_per_tenant_per_hour: state.submission_quota.max_per_tenant_per_hour,
+                max_per_principal_per_hour: state.submission_quota.max_per_principal_per_hour,
+            },
+        })
+        .await
+        .map_err(internal_error)?;
+    match result {
+        PipelineReceiptResult::Created(_) | PipelineReceiptResult::Replayed(_) => {
+            Ok(Some(TraceSubmissionReceipt {
+                status: "processing".to_string(),
+                credit_points_pending: None,
+                credit_points_final: None,
+                explanation: vec!["Accepted for pipeline processing.".to_string()],
+            }))
+        }
+        PipelineReceiptResult::ContentConflict => Err(api_error(
+            StatusCode::CONFLICT,
+            "receipt id reused with different content",
+        )),
+        // Same message as the legacy `ensure_not_revoked_by_tombstone` check
+        // this bypasses -- the pipeline keeps its own tombstone record, but
+        // the caller-visible refusal is the same one.
+        PipelineReceiptResult::Tombstoned => Err(api_error(
+            StatusCode::CONFLICT,
+            "trace content was previously revoked for this tenant",
+        )),
+        // Same messages as the legacy `enforce_submission_quota` check: the
+        // pipeline enforces its own quota over pipeline receipts only (D10;
+        // see the "Submission quota at switch-over" operator doc section).
+        PipelineReceiptResult::QuotaExceeded(PipelineQuotaScope::Tenant) => Err(api_error(
+            StatusCode::TOO_MANY_REQUESTS,
+            "trace contribution tenant submission quota exceeded",
+        )),
+        PipelineReceiptResult::QuotaExceeded(PipelineQuotaScope::Principal) => Err(api_error(
+            StatusCode::TOO_MANY_REQUESTS,
+            "trace contribution principal submission quota exceeded",
+        )),
+    }
+}
+
 async fn submit_trace_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -13649,6 +13829,26 @@ async fn submit_trace_handler(
         // the ranker exports read them) and holds `credit_points_pending` at
         // 0.0: the contributor's figure is the gate's, once it has scored.
         apply_credit_estimate_to_envelope(&mut envelope);
+
+        // Tenant rollout gate (D3, D15): every legacy check above --
+        // authentication, the submit rate limit, admission reservation, the
+        // tenant-access-grant check, envelope validation, and the server
+        // re-scrub -- has already run, so a `PipelineReceipts`-listed tenant
+        // with an injected runtime can be hived off to the pipeline here.
+        // Every other tenant falls through unchanged to the legacy path
+        // below.
+        if let Some(receipt) = route_pipeline_receipt(
+            state.as_ref(),
+            &tenant,
+            &envelope,
+            &raw_body,
+            &residual_risk_basis,
+        )
+        .await?
+        {
+            return Ok(Json(receipt));
+        }
+
         let corpus_status = status_for_risk(
             envelope.privacy.residual_pii_risk,
             state.accept_medium_risk_submissions,
@@ -17464,6 +17664,13 @@ mod near_provisioning;
 use near_provisioning::{
     near_ai_provision_finish_handler, near_ai_provision_start_handler,
     near_provision_finish_handler, near_provision_start_handler,
+};
+
+#[path = "trace_commons_ingest_internal/pipeline_runtime.rs"]
+mod pipeline_runtime;
+use pipeline_runtime::{
+    IngestPipelineRuntimeAssembler, assemble_ingest_pipeline_runtime,
+    pipeline_runtime_is_production_qualified,
 };
 
 /// Complete the native half of a browser redeem: mint the one-time code and
@@ -46570,6 +46777,9 @@ fn rollout_feature_global_enabled(state: &AppState, feature: TraceTenantRolloutF
         TraceTenantRolloutFeature::ObjectPrimaryDerivedExports => {
             state.object_primary_derived_exports
         }
+        // Tenant-list-only: no paired "globally enabled" `AppState` bool (see
+        // the variant's doc comment).
+        TraceTenantRolloutFeature::PipelineReceipts => false,
     }
 }
 
