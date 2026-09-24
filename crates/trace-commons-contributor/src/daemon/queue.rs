@@ -539,6 +539,7 @@ fn reoffered_from(old: QueueEntry) -> QueueEntry {
         approved_correction: None,
         approved_inputs: None,
         approved_at: None,
+        approved_unattended: false,
         previewed_envelope_digest: None,
         attested_inference: None,
         // The caller found content the watcher never observed (the
@@ -938,6 +939,12 @@ impl Queue {
         }
         e.state = QueueState::Approved;
         e.reason_label = None;
+        // The latest approver wins. An entry can be auto-approved, revoked
+        // back to `Pending` by a scope change or an Undo, and then approved
+        // by hand; without this reset it would still be marked unattended
+        // and could be retracted as though nobody had decided it.
+        // `approve_unattended` sets it back to `true` after calling here.
+        e.approved_unattended = false;
         e.approved_scopes = Some(scopes.to_vec());
         e.approved_inputs = inputs.map(str::to_string);
         e.approved_verdict = verdict.map(str::to_string);
@@ -1109,6 +1116,10 @@ impl Queue {
         e.approved_correction = None;
         e.approved_inputs = None;
         e.approved_at = None;
+        // A term of approval like the rest, so it clears with them. A
+        // `Pending` entry carrying it would apply to whatever approval came
+        // next, which is the stale-term failure `reoffered_from` documents.
+        e.approved_unattended = false;
         // The artifact the contributor was shown is no longer the one that
         // would be sent, so the re-offer must be previewed afresh.
         e.previewed_envelope_digest = None;

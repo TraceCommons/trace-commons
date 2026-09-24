@@ -608,10 +608,13 @@ fn visit_session(
 
     let entry = QueueEntry {
         entry_id: entry_id_for(&transcript.session_hash),
-        // A freshly discovered entry is `Pending`, so no approval of any
-        // kind has happened yet. `approve_unattended` sets this when the
-        // watcher later approves it under a standing opt-in.
-        approved_unattended: false,
+        // Follows `armed`, because the `state` below is `Approved` on the
+        // same condition: a settled session in an armed project is approved
+        // here on first sight, without ever being `Pending`. That is the
+        // backlog case retraction exists for, so recording it as the
+        // contributor's own would make `retract_unattended_for_project` skip
+        // exactly the entries it is meant to reach.
+        approved_unattended: armed,
         session_hash: transcript.session_hash.clone(),
         source: session_ref.source.to_string(),
         declared_source: session_ref.declared_source.clone(),
@@ -725,13 +728,10 @@ fn visit_session(
                 // matching the fresh-entry path above: a standing
                 // opt-in is not held.
                 if armed
-                    && queue.approve(
+                    && queue.approve_unattended(
                         entry_id,
                         &ctx.consent_scopes,
                         ctx.approval_inputs.as_deref(),
-                        None,
-                        None,
-                        None,
                     )
                 {
                     out.changed = true;
@@ -1366,6 +1366,82 @@ mod tests {
             .unwrap();
         assert_eq!(report.armed_not_settled, 1, "{report:?}");
         assert_eq!(report.auto_ready, 0, "{report:?}");
+    }
+
+    #[tokio::test]
+    async fn a_backlog_approved_on_first_sight_is_marked_unattended() {
+        // The case the flag exists for, and the one `push_for_test` unit
+        // tests cannot reach: an armed project's settled session is created
+        // `Approved` directly by `visit_session`, never passing through
+        // `Pending` or `approve_unattended`. Reviewed as High on #997
+        // because the entry was being recorded as the contributor's own.
+        let f = WatcherFixture::new();
+        f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        f.set_mode("proj", ProjectMode::AutoUpload);
+        // Past ARMED_SETTLE_SECS, so it is approved rather than held.
+        let report = f.settle(Utc::now() + chrono::Duration::hours(30)).await;
+        assert_eq!(report.auto_ready, 1, "{report:?}");
+
+        let entries = f.shared.queue.lock().unwrap().all().to_vec();
+        let e = entries.first().expect("one entry");
+        assert_eq!(e.state, QueueState::Approved, "armed and settled");
+        assert!(
+            e.approved_unattended,
+            "nobody decided this; excluding the project must be able to retract it"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_session_offered_before_the_project_was_armed_is_not_marked() {
+        // The other direction. An entry that reached `Approved` because the
+        // contributor approved it stays theirs, so exclusion leaves it alone.
+        let f = WatcherFixture::new();
+        f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        let id = f.shared.queue.lock().unwrap().all()[0].entry_id;
+        assert!(
+            f.shared
+                .queue
+                .lock()
+                .unwrap()
+                .approve(id, &[], None, None, None, None)
+        );
+
+        let e = f.shared.queue.lock().unwrap().all()[0].clone();
+        assert_eq!(e.state, QueueState::Approved);
+        assert!(!e.approved_unattended, "the contributor decided this one");
+    }
+
+    #[tokio::test]
+    async fn a_manual_approval_after_an_unattended_one_is_not_retractable() {
+        // Reviewed as Medium on #997: the flag was never cleared, so an
+        // auto-approval that was revoked and then approved by hand stayed
+        // marked unattended and could be retracted as if nobody decided it.
+        let f = WatcherFixture::new();
+        f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        f.set_mode("proj", ProjectMode::AutoUpload);
+        f.settle(Utc::now() + chrono::Duration::hours(30)).await;
+        let id = f.shared.queue.lock().unwrap().all()[0].entry_id;
+        assert!(f.shared.queue.lock().unwrap().all()[0].approved_unattended);
+
+        {
+            let mut q = f.shared.queue.lock().unwrap();
+            assert!(q.revoke_approval(id, "scopes-changed"));
+            assert!(
+                !q.all()[0].approved_unattended,
+                "revocation clears it with the other terms of approval"
+            );
+            assert!(q.approve(id, &[], None, None, None, None));
+        }
+
+        let mut q = f.shared.queue.lock().unwrap();
+        assert!(!q.all()[0].approved_unattended);
+        let key = q.all()[0].project_key.clone();
+        assert_eq!(
+            q.retract_unattended_for_project(&key),
+            0,
+            "the contributor approved this one by hand; it is not retractable"
+        );
     }
 
     #[tokio::test]
