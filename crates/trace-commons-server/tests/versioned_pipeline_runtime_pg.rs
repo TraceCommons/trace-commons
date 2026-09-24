@@ -10,7 +10,8 @@ use sha2::{Digest, Sha256};
 use trace_commons_gate_api::pipeline::{
     AtomicUnits, IndexMembershipDecision, InstrumentAward, InstrumentDescriptor, InstrumentId,
     InstrumentKind, Phase, PhaseResult, ReasonCode, ReviewDecision, ReviewEvaluation,
-    ReviewEvidence, ReviewOutput, ScoreEvidence, SettleDecision, TRACE_CREDIT_DECIMALS,
+    ReviewEvidence, ReviewOutput, ScoreEvidence, SettleDecision, SettleEvidence,
+    TRACE_CREDIT_DECIMALS,
 };
 use trace_commons_gate_api::{
     IndexEntryKey, IndexUpsertResult, ReferenceEmbedder, ReferencePerplexityScorer,
@@ -1950,5 +1951,198 @@ async fn equal_key_with_different_content_fails_closed() {
             .iter()
             .any(|outcome| outcome.phase == Phase::Settle),
         "no Settle outcome is written"
+    );
+}
+
+/// Inserts a `trace_withdrawals` tombstone for `submission_id` (columns
+/// from `migrations/V43__trace_withdrawal.sql`), in a tenant-scoped
+/// transaction on the runtime backend. This alone flips
+/// `PipelineService::submission_guard`'s `operable` to `false` -- the guard
+/// checks for a withdrawal row directly, regardless of
+/// `trace_submissions.status`.
+async fn withdraw_submission(backend: &PgBackend, tenant_id: &str, submission_id: uuid::Uuid) {
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, tenant_id).await;
+    tx.execute(
+        "INSERT INTO trace_withdrawals (
+            tenant_id, submission_id, withdrawn_at, prior_status, distribution_reach
+         ) VALUES ($1, $2, NOW(), 'accepted', 'not_distributed')",
+        &[&tenant_id, &submission_id],
+    )
+    .await
+    .expect("insert trace_withdrawals row");
+    tx.commit().await.expect("commit withdrawal insert");
+}
+
+/// Fix round 1 (review finding on Task 12): the committed Settle decision
+/// and the `index_membership` column must reflect the submission-
+/// operability guard, not the Settle policy's raw selection. A run whose
+/// submission was withdrawn between Score and Settle must commit `Exclude
+/// { reason: submission_inoperable }` and touch the index writer zero
+/// times, even though the policy itself selected `Include` (guard.operable
+/// was still true when the policy ran, inside `commit_settle_from_progress`
+/// -- not inside the policy call itself).
+#[tokio::test]
+async fn withdrawal_between_score_and_settle_excludes_the_index() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, index, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        None,
+    )
+    .await;
+    let tenant = format!("settle-withdrawn-{}", uuid::Uuid::new_v4());
+    let (run, _evidence) = run_to_settle_ready(&service, &tenant).await;
+
+    withdraw_submission(&backend, &tenant, run.submission_id).await;
+
+    let settled = service
+        .process_run(&tenant, run.run_id)
+        .await
+        .unwrap()
+        .expect("Settle runs and completes despite the withdrawal");
+    assert_eq!(settled.state, PipelineRunState::Complete);
+    assert_eq!(settled.next_phase, None);
+    assert_eq!(settled.index_membership, "excluded");
+    assert_eq!(settled.index_write_state, "none");
+    assert_eq!(service.settle_evaluations(), 1);
+
+    let outcomes = service
+        .store()
+        .list_outcomes(&tenant, settled.run_id)
+        .await
+        .unwrap();
+    let settle_outcome = outcomes
+        .into_iter()
+        .find(|outcome| outcome.phase == Phase::Settle)
+        .expect("Settle outcome recorded");
+    let decision: SettleDecision = serde_json::from_value(settle_outcome.decision).unwrap();
+    match decision.index_membership {
+        IndexMembershipDecision::Exclude { reason } => {
+            assert_eq!(reason.as_str(), PIPELINE_SUBMISSION_INOPERABLE_LABEL);
+        }
+        IndexMembershipDecision::Include { .. } => {
+            panic!("a withdrawn submission must not commit an Include decision")
+        }
+    }
+    let evidence: SettleEvidence = serde_json::from_value(settle_outcome.evidence).unwrap();
+    assert_eq!(evidence.submission_operable, Some(false));
+
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    assert_eq!(
+        index.entry_count(tenant_ref.as_str(), MINIMAL_INDEX_ID),
+        0,
+        "no entry was applied for a withdrawn submission"
+    );
+    assert_eq!(
+        index.writer_calls(),
+        0,
+        "dispatch never started for a submission already inoperable at persist time"
+    );
+}
+
+/// Fix round 1, second case: the guard can newly fail *between*
+/// `persist_settle_selection` and dispatch -- a crash right after the
+/// selection persists (leaving `index_membership = "included"`,
+/// `index_write_state = "pending"`) gives real wall-clock room for a
+/// withdrawal to land before the retry reaches Step 5's dispatch. The
+/// retry must cancel the index write and still commit `Exclude`, not the
+/// stale `Include` the persisted selection holds.
+#[tokio::test]
+async fn withdrawal_during_dispatch_cancels_the_index_write() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, index, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        Some(PipelineCrashPoint::AfterSettleSelection),
+    )
+    .await;
+    let tenant = format!("settle-withdrawn-mid-{}", uuid::Uuid::new_v4());
+    let (run, _evidence) = run_to_settle_ready(&service, &tenant).await;
+
+    let crashed = service.process_run(&tenant, run.run_id).await;
+    let error = crashed.expect_err("the injected crash must propagate as an error");
+    assert_eq!(error.to_string(), INJECTED_PIPELINE_CRASH);
+
+    let after_crash = service
+        .store()
+        .get_run(&tenant, run.run_id)
+        .await
+        .unwrap()
+        .expect("run still exists after the crash");
+    assert_eq!(
+        after_crash.index_membership, "included",
+        "the selection persisted an include before the crash"
+    );
+    assert_eq!(after_crash.index_write_state, "pending");
+
+    // Expire the lease directly (a time shortcut, not a processor call --
+    // the crashed attempt never called `mark_retry`/`mark_failed`) and
+    // insert the withdrawal before the retry claims the run.
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &tenant).await;
+    tx.execute(
+        "UPDATE pipeline_runs SET lease_expires_at = NOW() - INTERVAL '1 second'
+         WHERE tenant_id = $1 AND run_id = $2",
+        &[&tenant, &run.run_id],
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    withdraw_submission(&backend, &tenant, run.submission_id).await;
+
+    let settled = service
+        .process_run(&tenant, run.run_id)
+        .await
+        .unwrap()
+        .expect("the retry cancels dispatch and completes Settle");
+    assert_eq!(settled.state, PipelineRunState::Complete);
+    assert_eq!(settled.index_write_state, "cancelled");
+    assert_eq!(settled.index_membership, "excluded");
+    assert_eq!(
+        service.settle_evaluations(),
+        1,
+        "the policy ran once, before the crash; the retry reuses the persisted selection"
+    );
+
+    let outcomes = service
+        .store()
+        .list_outcomes(&tenant, run.run_id)
+        .await
+        .unwrap();
+    let settle_outcome = outcomes
+        .into_iter()
+        .find(|outcome| outcome.phase == Phase::Settle)
+        .expect("Settle outcome recorded");
+    let decision: SettleDecision = serde_json::from_value(settle_outcome.decision).unwrap();
+    match decision.index_membership {
+        IndexMembershipDecision::Exclude { reason } => {
+            assert_eq!(reason.as_str(), PIPELINE_SUBMISSION_INOPERABLE_LABEL);
+        }
+        IndexMembershipDecision::Include { .. } => {
+            panic!("a submission withdrawn before dispatch must not commit an Include decision")
+        }
+    }
+    let evidence: SettleEvidence = serde_json::from_value(settle_outcome.evidence).unwrap();
+    assert_eq!(evidence.submission_operable, Some(false));
+
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    assert_eq!(
+        index.entry_count(tenant_ref.as_str(), MINIMAL_INDEX_ID),
+        0,
+        "no entry was applied before dispatch was cancelled"
+    );
+    assert_eq!(
+        index.writer_calls(),
+        0,
+        "dispatch was cancelled before any upsert call"
     );
 }

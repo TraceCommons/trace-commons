@@ -3033,8 +3033,42 @@ impl PipelineService {
             .await?;
         let stored_decision = serde_json::from_value::<SettleDecision>(selection.decision.clone())
             .map_err(|_| anyhow::anyhow!("settlement_operation_mismatch"))?;
-        let final_decision =
-            SettleDecision::new(stored_decision.index_membership, &score_decision, vec![])?;
+        // The committed decision records what actually happened, not what
+        // the policy raw-selected: the selection persists `Include` even
+        // when the guard was already inoperable at persist time (only the
+        // DB `index_membership` column was corrected then), and the guard
+        // can newly fail between persist and dispatch, leaving
+        // `index_write_state = 'cancelled'` with `index_membership` still
+        // `'included'`. Task 13's rule (applies here per the controller
+        // ruling): the selection's `Include` only if `run.index_membership
+        // == "included"` and `run.index_write_state == "complete"`; else
+        // `Exclude { reason: submission_inoperable }` when the guard is
+        // inoperable now; else the selection's own `Exclude` (a plain
+        // policy exclusion, unrelated to the guard).
+        let observed_include =
+            run.index_membership == "included" && run.index_write_state == "complete";
+        let final_index_membership = if observed_include {
+            stored_decision.index_membership.clone()
+        } else if !guard.operable {
+            IndexMembershipDecision::Exclude {
+                reason: ReasonCode::new(PIPELINE_SUBMISSION_INOPERABLE_LABEL)?,
+            }
+        } else {
+            match &stored_decision.index_membership {
+                IndexMembershipDecision::Exclude { reason } => IndexMembershipDecision::Exclude {
+                    reason: reason.clone(),
+                },
+                // Unreachable given the state machine above (an operable
+                // guard with `observed_include` false and a selection that
+                // still says `Include` would mean dispatch neither
+                // completed, retried, nor cancelled) -- fail closed rather
+                // than commit an unproven `Include`.
+                IndexMembershipDecision::Include { .. } => IndexMembershipDecision::Exclude {
+                    reason: ReasonCode::new(PIPELINE_SUBMISSION_INOPERABLE_LABEL)?,
+                },
+            }
+        };
+        let final_decision = SettleDecision::new(final_index_membership, &score_decision, vec![])?;
         let mut evidence = serde_json::from_value::<SettleEvidence>(selection.evidence.clone())
             .map_err(|_| anyhow::anyhow!("settlement_operation_mismatch"))?;
         evidence.index_command_hash = run.index_command_hash.clone();
