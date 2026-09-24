@@ -167,7 +167,7 @@ jobs:
       - name: Create one database per suite
         run: |
           set -euo pipefail
-          for db in onboarding ledger account_ledger migration ingest invite merge rls store tokens account_trust account_trust_growth account_trust_route witness_evidence source_sessions inference_connection inference_connection_route walletv2 legacy_invite_link device_invite_subject pipeline; do
+          for db in onboarding ledger account_ledger migration ingest invite merge rls store tokens account_trust account_trust_growth account_trust_route witness_evidence source_sessions inference_connection inference_connection_route walletv2 legacy_invite_link device_invite_subject pipeline pipeline_http; do
             PGPASSWORD=trace createdb -h 127.0.0.1 -U trace "admission_test_$db"
           done
           PGPASSWORD=trace createdb -h 127.0.0.1 -U trace reward_test_missions
@@ -348,6 +348,10 @@ jobs:
             echo "::error::versioned_pipeline_runtime_pg never provisioned its runtime role"
             exit 1
           fi
+      - name: versioned pipeline real HTTP
+        run: cargo test -p trace-commons-server --bin trace-commons-ingest real_http_receipt_completes_and_resumes_after_restart
+        env:
+          TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_pipeline_http
       - name: mission and insight reward ledger
         # Reward suites report independently: a red ledger step used to abort
         # the job before the two published-mission steps ever ran, so their

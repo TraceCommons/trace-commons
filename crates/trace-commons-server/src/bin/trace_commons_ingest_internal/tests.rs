@@ -98881,6 +98881,15 @@ mod nearai_ceremony_pg_tests;
 #[path = "wallet_v2_pg_tests.rs"]
 mod wallet_v2_pg_tests;
 
+/// Spec section 3D acceptance: a receipt through the real HTTP router, auth,
+/// and worker, surviving a crash and restart. Nested here (not declared
+/// directly in `trace-commons-ingest.rs`) for the same reason as
+/// `admission_pg_tests` and `nearai_ceremony_pg_tests` above: it reuses this
+/// module's private test-state and fixture helpers, which are visible only
+/// to `tests`'s descendants.
+#[path = "pipeline_http_pg_tests.rs"]
+mod pipeline_http_pg_tests;
+
 /// The nineteen `validate_*_reason` / `validate_*_purpose` wrappers all reduce
 /// to this, so the trim / reject-empty / reject-over-1024 contract and the two
 /// message templates are pinned here once rather than at each wrapper.
