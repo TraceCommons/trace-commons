@@ -167,7 +167,7 @@ jobs:
       - name: Create one database per suite
         run: |
           set -euo pipefail
-          for db in onboarding ledger account_ledger migration ingest invite merge rls store tokens account_trust account_trust_growth account_trust_route witness_evidence source_sessions inference_connection inference_connection_route walletv2 legacy_invite_link device_invite_subject; do
+          for db in onboarding ledger account_ledger migration ingest invite merge rls store tokens account_trust account_trust_growth account_trust_route witness_evidence source_sessions inference_connection inference_connection_route walletv2 legacy_invite_link device_invite_subject pipeline; do
             PGPASSWORD=trace createdb -h 127.0.0.1 -U trace "admission_test_$db"
           done
           PGPASSWORD=trace createdb -h 127.0.0.1 -U trace reward_test_missions
@@ -335,6 +335,19 @@ jobs:
         run: cargo test -p trace-commons-server --lib pipeline_upgrade -- --ignored
         env:
           TRACE_COMMONS_PIPELINE_PG_UPGRADE_TEST_URL: postgres://trace@127.0.0.1:5432/pipeline_test_upgrade
+      - name: versioned pipeline runtime
+        run: cargo test -p trace-commons-server --test versioned_pipeline_runtime_pg
+        env:
+          TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_pipeline
+      - name: Refuse a pipeline run that never used its NOBYPASSRLS role
+        run: |
+          set -euo pipefail
+          found=$(PGPASSWORD=trace psql -qtA -h 127.0.0.1 -U trace postgres \
+                    -c "SELECT COUNT(*) FROM pg_roles WHERE rolname='trace_pipeline_runtime_test';")
+          if [ "${found:-0}" != "1" ]; then
+            echo "::error::versioned_pipeline_runtime_pg never provisioned its runtime role"
+            exit 1
+          fi
       - name: mission and insight reward ledger
         # Reward suites report independently: a red ledger step used to abort
         # the job before the two published-mission steps ever ran, so their
