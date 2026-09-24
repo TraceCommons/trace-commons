@@ -25,6 +25,11 @@ pub const TRACE_CREDIT_INSTRUMENT_ID: &str = "trace_credit";
 /// Largest Trace Credit award, in microcredits. The credit ledger stores
 /// amounts as signed 64-bit integers (`BIGINT`).
 pub const MAX_TRACE_CREDIT_MICROCREDITS: u64 = i64::MAX as u64;
+/// Trace Credit's pinned NEP-141 `decimals`. One atomic unit is then one
+/// microcredit, so the microcredit ledger needs no scale conversion.
+pub const TRACE_CREDIT_DECIMALS: u8 = 6;
+/// Largest pinned `decimals`: one whole token, 10^38, still fits in `u128`.
+pub const MAX_INSTRUMENT_DECIMALS: u8 = 38;
 pub const INDEX_COMMAND_SCHEMA: &str = "trace_commons.pipeline_index_command.v1";
 
 fn sha256_prefixed(bytes: &[u8]) -> String {
@@ -38,6 +43,37 @@ fn is_safe_identifier(value: &str) -> bool {
         && value.bytes().all(|byte| {
             byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-' | b'.')
         })
+}
+
+/// A NEAR account id, as `near-account-id` checks it: 2 to 64 lowercase
+/// letters and digits, with single `-`, `_`, or `.` separators between them.
+fn is_near_account_id(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    let separator = |byte: &u8| matches!(byte, b'-' | b'_' | b'.');
+    (2..=64).contains(&bytes.len())
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || separator(byte))
+        && !bytes.first().is_some_and(separator)
+        && !bytes.last().is_some_and(separator)
+        && !bytes
+            .windows(2)
+            .any(|pair| separator(&pair[0]) && separator(&pair[1]))
+}
+
+/// An EIP-155 chain id in canonical decimal: nonzero, with no leading zero.
+fn is_evm_chain_id(value: &str) -> bool {
+    !value.starts_with('0')
+        && value.bytes().all(|byte| byte.is_ascii_digit())
+        && value.parse::<u64>().is_ok()
+}
+
+/// A lowercase `0x`-prefixed EVM address. Lowercase keeps one spelling per
+/// contract, so the bundle identifier does not depend on EIP-55 casing.
+fn is_evm_address(value: &str) -> bool {
+    value
+        .strip_prefix("0x")
+        .is_some_and(|hex| is_lower_hex(hex, 40))
 }
 
 fn is_lower_hex(value: &str, len: usize) -> bool {
@@ -304,8 +340,9 @@ impl Microcredits {
 
     /// Convert Trace Credit microcredits to the generic settlement unit.
     ///
-    /// This is the Trace Credit adapter boundary. One Trace Credit atomic unit
-    /// is one microcredit, so the conversion is exact.
+    /// This is the Trace Credit adapter boundary. Trace Credit pins
+    /// `TRACE_CREDIT_DECIMALS`, so one atomic unit is one microcredit and the
+    /// conversion is exact.
     pub const fn into_atomic_units(self) -> AtomicUnits {
         AtomicUnits::from_raw(self.0 as u128)
     }
@@ -483,6 +520,70 @@ pub struct PolicyRef {
     pub projection_ids: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum InstrumentKind {
+    /// A NEAR fungible token.
+    Nep141,
+    /// An EVM fungible token.
+    Erc20,
+    /// An off-chain credit account. It is not a token.
+    CreditAccount,
+}
+
+impl InstrumentKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Nep141 => "nep141",
+            Self::Erc20 => "erc20",
+            Self::CreditAccount => "credit_account",
+        }
+    }
+}
+
+/// The token or account that an instrument settles in, and the scale of its
+/// atomic units. A bundle manifest pins one descriptor for each instrument, so
+/// a signed award always says which token it pays and at what scale.
+///
+/// A descriptor never changes for an instrument. A different contract,
+/// network, kind, or `decimals` is a new `InstrumentId`, never a new reading
+/// of awards already signed.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InstrumentDescriptor {
+    pub kind: InstrumentKind,
+    /// `nep141`: the NEAR network, such as `mainnet`. `erc20`: the EIP-155
+    /// chain id in decimal, such as `1`. `credit_account`: the ledger label.
+    pub network: String,
+    /// `nep141`: the token's NEAR account id. `erc20`: the lowercase
+    /// `0x`-prefixed contract address. `credit_account`: the account label.
+    pub contract: String,
+    /// One whole token is `10^decimals` atomic units.
+    pub decimals: u8,
+}
+
+impl InstrumentDescriptor {
+    /// Checks the network and contract spelling for the kind, and the
+    /// `decimals` bound. Each accepted form has one spelling, so equal
+    /// descriptors give equal bundle identifiers.
+    pub fn validate(&self) -> Result<(), ContractError> {
+        let located = match self.kind {
+            InstrumentKind::Nep141 => {
+                is_safe_identifier(&self.network) && is_near_account_id(&self.contract)
+            }
+            InstrumentKind::Erc20 => {
+                is_evm_chain_id(&self.network) && is_evm_address(&self.contract)
+            }
+            InstrumentKind::CreditAccount => {
+                is_safe_identifier(&self.network) && is_safe_identifier(&self.contract)
+            }
+        };
+        if !located || self.decimals > MAX_INSTRUMENT_DECIMALS {
+            return Err(ContractError::InvalidInstrumentDescriptor);
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BundleManifest {
     pub format_version: u32,
@@ -490,11 +591,50 @@ pub struct BundleManifest {
     pub review: PolicyRef,
     pub score: PolicyRef,
     pub settle: PolicyRef,
+    /// The instruments that this bundle can award, each pinned to one
+    /// descriptor. An award for an instrument that is not here is refused.
+    #[serde(deserialize_with = "unique_instruments")]
+    pub instruments: BTreeMap<InstrumentId, InstrumentDescriptor>,
+}
+
+/// Loads the pinned instruments and refuses a repeated instrument. A plain
+/// map keeps the last copy, and a reader that keeps the first copy would pin
+/// a different descriptor.
+fn unique_instruments<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<BTreeMap<InstrumentId, InstrumentDescriptor>, D::Error> {
+    struct UniqueInstruments;
+
+    impl<'de> serde::de::Visitor<'de> for UniqueInstruments {
+        type Value = BTreeMap<InstrumentId, InstrumentDescriptor>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("a map from instrument identifier to descriptor")
+        }
+
+        fn visit_map<A: serde::de::MapAccess<'de>>(
+            self,
+            mut map: A,
+        ) -> Result<Self::Value, A::Error> {
+            use serde::de::Error as _;
+
+            let mut instruments = BTreeMap::new();
+            while let Some((instrument_id, descriptor)) = map.next_entry()? {
+                if instruments.insert(instrument_id, descriptor).is_some() {
+                    return Err(A::Error::custom(ContractError::DuplicateInstrumentId));
+                }
+            }
+            Ok(instruments)
+        }
+    }
+
+    deserializer.deserialize_map(UniqueInstruments)
 }
 
 impl BundleManifest {
     /// Stable length-prefixed encoding. Lists are sorted before encoding.
-    /// A duplicate entry is an error. It is not dropped.
+    /// A duplicate entry is an error. It is not dropped. The pinned
+    /// instruments follow the four policies, in instrument order.
     pub fn canonical_bytes(&self) -> Result<Vec<u8>, ContractError> {
         if self.format_version != BUNDLE_MANIFEST_FORMAT_VERSION {
             return Err(ContractError::UnsupportedManifestVersion);
@@ -504,11 +644,34 @@ impl BundleManifest {
         for policy in [&self.admission, &self.review, &self.score, &self.settle] {
             encode_policy(&mut bytes, policy)?;
         }
+        encode_len(&mut bytes, self.instruments.len());
+        for (instrument_id, descriptor) in &self.instruments {
+            encode_instrument(&mut bytes, instrument_id, descriptor)?;
+        }
         Ok(bytes)
     }
 
     pub fn bundle_id(&self) -> Result<String, ContractError> {
         Ok(sha256_prefixed(&self.canonical_bytes()?))
+    }
+
+    /// The descriptor that this bundle pins for an instrument.
+    pub fn instrument(&self, instrument_id: &InstrumentId) -> Option<&InstrumentDescriptor> {
+        self.instruments.get(instrument_id)
+    }
+
+    /// Refuses an award set that names an instrument this bundle does not
+    /// pin. A runner applies this to Score's awards before it commits the
+    /// Score outcome, so no settlement starts for an unpinned instrument.
+    pub fn require_pinned(&self, awards: &InstrumentAwards) -> Result<(), ContractError> {
+        if awards
+            .iter()
+            .all(|award| self.instruments.contains_key(award.instrument_id()))
+        {
+            Ok(())
+        } else {
+            Err(ContractError::UnpinnedInstrument)
+        }
     }
 
     fn referenced_artifacts(&self) -> Result<BTreeSet<String>, ContractError> {
@@ -559,6 +722,26 @@ fn encode_policy(output: &mut Vec<u8>, policy: &PolicyRef) -> Result<(), Contrac
     encode_string(output, &policy.configuration_hash);
     encode_list(output, &policy.data_artifact_hashes)?;
     encode_list(output, &policy.projection_ids)?;
+    Ok(())
+}
+
+fn encode_instrument(
+    output: &mut Vec<u8>,
+    instrument_id: &InstrumentId,
+    descriptor: &InstrumentDescriptor,
+) -> Result<(), ContractError> {
+    descriptor.validate()?;
+    // `Microcredits` reads a Trace Credit atomic unit as one microcredit.
+    if instrument_id.as_str() == TRACE_CREDIT_INSTRUMENT_ID
+        && descriptor.decimals != TRACE_CREDIT_DECIMALS
+    {
+        return Err(ContractError::TraceCreditDecimals);
+    }
+    encode_string(output, instrument_id.as_str());
+    encode_string(output, descriptor.kind.as_str());
+    encode_string(output, &descriptor.network);
+    encode_string(output, &descriptor.contract);
+    output.push(descriptor.decimals);
     Ok(())
 }
 
@@ -700,6 +883,12 @@ pub enum ContractError {
     AtomicUnitOverflow,
     #[error("atomic units are not a canonical unsigned decimal string")]
     NonCanonicalAtomicUnits,
+    #[error("instrument descriptor does not match the form its kind requires")]
+    InvalidInstrumentDescriptor,
+    #[error("the trace_credit instrument must pin six decimals")]
+    TraceCreditDecimals,
+    #[error("an award names an instrument that the bundle does not pin")]
+    UnpinnedInstrument,
     #[error("the award does not use the Trace Credit instrument")]
     NotTraceCredit,
     #[error("a Trace Credit award exceeds the credit ledger's signed 64-bit range")]
@@ -2049,6 +2238,31 @@ mod tests {
         }
     }
 
+    fn trace_credit_descriptor() -> InstrumentDescriptor {
+        InstrumentDescriptor {
+            kind: InstrumentKind::Nep141,
+            network: "mainnet".to_string(),
+            contract: "trace-credit.golden.near".to_string(),
+            decimals: TRACE_CREDIT_DECIMALS,
+        }
+    }
+
+    fn bat_descriptor() -> InstrumentDescriptor {
+        InstrumentDescriptor {
+            kind: InstrumentKind::Erc20,
+            network: "1".to_string(),
+            contract: "0x0d8775f648430679a709e98d2b0cb6250d2887ef".to_string(),
+            decimals: 18,
+        }
+    }
+
+    fn pinned_instruments() -> BTreeMap<InstrumentId, InstrumentDescriptor> {
+        BTreeMap::from([
+            (InstrumentId::new("bat").unwrap(), bat_descriptor()),
+            (InstrumentId::trace_credit(), trace_credit_descriptor()),
+        ])
+    }
+
     #[test]
     fn checked_microcredit_conversion_is_exact() {
         assert_eq!(
@@ -3022,6 +3236,7 @@ mod tests {
             review: policy("review"),
             score: policy("score"),
             settle: policy("settle"),
+            instruments: pinned_instruments(),
         }
     }
 
@@ -3060,15 +3275,17 @@ mod tests {
 
         // The manifest encoding, written out: domain, u32 format version, then
         // for each phase in order its policy id, implementation id,
-        // configuration hash, and sorted data hashes and projection ids. Every
-        // length and count is a big-endian u64.
+        // configuration hash, and sorted data hashes and projection ids. Then
+        // the pinned instruments in instrument order: id, kind, network,
+        // contract, and one `decimals` byte. Every length and count is a
+        // big-endian u64.
+        let string = |bytes: &mut Vec<u8>, value: &str| {
+            bytes.extend_from_slice(&(value.len() as u64).to_be_bytes());
+            bytes.extend_from_slice(value.as_bytes());
+        };
         let mut expected = b"trace-commons-bundle-manifest\0".to_vec();
         expected.extend_from_slice(&1u32.to_be_bytes());
         for name in ["admission", "review", "score", "settle"] {
-            let string = |bytes: &mut Vec<u8>, value: &str| {
-                bytes.extend_from_slice(&(value.len() as u64).to_be_bytes());
-                bytes.extend_from_slice(value.as_bytes());
-            };
             string(&mut expected, &format!("trace_commons.{name}.golden"));
             string(&mut expected, &format!("trace_commons.{name}.golden.v1"));
             string(
@@ -3080,10 +3297,32 @@ mod tests {
             expected.extend_from_slice(&1u64.to_be_bytes());
             string(&mut expected, &format!("{name}-projection"));
         }
+        expected.extend_from_slice(&2u64.to_be_bytes());
+        for (id, kind, network, contract, decimals) in [
+            (
+                "bat",
+                "erc20",
+                "1",
+                "0x0d8775f648430679a709e98d2b0cb6250d2887ef",
+                18,
+            ),
+            (
+                "trace_credit",
+                "nep141",
+                "mainnet",
+                "trace-credit.golden.near",
+                6,
+            ),
+        ] {
+            for value in [id, kind, network, contract] {
+                string(&mut expected, value);
+            }
+            expected.push(decimals);
+        }
         assert_eq!(manifest.canonical_bytes().unwrap(), expected);
         assert_eq!(
             manifest.bundle_id().unwrap(),
-            "sha256:72d0874799ec8e8194315bc2ce986fa8ee1c61797759ac75ad889f8bf149fc63"
+            "sha256:c913706a95ab42d083b633979578fc4e46b39fe8f4204620ba7c6a2e3d6e1b76"
         );
 
         let artifacts = ["admission", "review", "score", "settle"]
@@ -3103,7 +3342,7 @@ mod tests {
         };
         assert_eq!(
             package.package_hash().unwrap(),
-            "sha256:9d0444d694ef51b3d8794ca1f8e674b36f35ff5ecbecaf8213dd4cb43af4c29c"
+            "sha256:d0e78bc1bec67983332689133b313bd6ab92acc9ac44f2112a653022f3cdbe29"
         );
 
         let awards =
@@ -3243,6 +3482,7 @@ mod tests {
             review: policy(policies[1].0, policies[1].1),
             score: policy(policies[2].0, policies[2].1),
             settle: policy(policies[3].0, policies[3].1),
+            instruments: pinned_instruments(),
         };
         let artifacts = policies
             .iter()
@@ -3323,6 +3563,7 @@ mod tests {
             review: policy("review", b"configuration"),
             score: policy("score", b"configuration"),
             settle: policy("settle", b"configuration"),
+            instruments: pinned_instruments(),
         };
         let canonical = manifest.canonical_bytes().unwrap();
         let domain = b"trace-commons-bundle-manifest\0".len();
@@ -3338,6 +3579,7 @@ mod tests {
             review: policy("review", b"configuration"),
             score: policy("score", b"configuration"),
             settle: policy("settle", b"configuration"),
+            instruments: pinned_instruments(),
         };
         let base_id = base.bundle_id().unwrap();
 
@@ -3365,6 +3607,23 @@ mod tests {
 
         let mut changed = base.clone();
         changed.review.implementation_id = "changed-implementation".to_string();
+        assert_ne!(changed.bundle_id().unwrap(), base_id);
+
+        // A pinned descriptor is part of the bundle identity.
+        let bat = InstrumentId::new("bat").unwrap();
+        let changes: [fn(&mut InstrumentDescriptor); 4] = [
+            |descriptor| descriptor.kind = InstrumentKind::Nep141,
+            |descriptor| descriptor.network = "10".to_string(),
+            |descriptor| descriptor.contract = format!("0x{}", "1".repeat(40)),
+            |descriptor| descriptor.decimals = 8,
+        ];
+        for change in changes {
+            let mut changed = base.clone();
+            change(changed.instruments.get_mut(&bat).unwrap());
+            assert_ne!(changed.bundle_id().unwrap(), base_id);
+        }
+        let mut changed = base.clone();
+        changed.instruments.remove(&bat);
         assert_ne!(changed.bundle_id().unwrap(), base_id);
 
         base.format_version += 1;
@@ -3408,5 +3667,171 @@ mod tests {
             keys.iter()
                 .all(|key| key.model_id == "reference-embedder-v1")
         );
+    }
+
+    #[test]
+    fn instrument_descriptors_have_one_spelling_per_kind() {
+        let credit_account = InstrumentDescriptor {
+            kind: InstrumentKind::CreditAccount,
+            network: "trace_commons".to_string(),
+            contract: "inference_credit".to_string(),
+            decimals: 0,
+        };
+        for valid in [trace_credit_descriptor(), bat_descriptor(), credit_account] {
+            assert_eq!(valid.validate(), Ok(()), "{valid:?}");
+        }
+        let implicit = InstrumentDescriptor {
+            contract: "a".repeat(64),
+            ..trace_credit_descriptor()
+        };
+        assert_eq!(implicit.validate(), Ok(()));
+
+        let malformed = |change: fn(&mut InstrumentDescriptor), base: InstrumentDescriptor| {
+            let mut descriptor = base;
+            change(&mut descriptor);
+            descriptor.validate()
+        };
+        let near: [fn(&mut InstrumentDescriptor); 8] = [
+            |d| d.contract = "a".to_string(),
+            |d| d.contract = "a".repeat(65),
+            |d| d.contract = "-credit.near".to_string(),
+            |d| d.contract = "credit.near.".to_string(),
+            |d| d.contract = "credit..near".to_string(),
+            |d| d.contract = "Credit.near".to_string(),
+            |d| d.contract = "credit near".to_string(),
+            |d| d.network = "Mainnet".to_string(),
+        ];
+        for change in near {
+            assert_eq!(
+                malformed(change, trace_credit_descriptor()),
+                Err(ContractError::InvalidInstrumentDescriptor)
+            );
+        }
+        let evm: [fn(&mut InstrumentDescriptor); 7] = [
+            |d| d.network = "0".to_string(),
+            |d| d.network = "01".to_string(),
+            |d| d.network = "eip155:1".to_string(),
+            |d| d.network = "18446744073709551616".to_string(),
+            |d| d.contract = "0x0D8775F648430679A709E98D2B0CB6250D2887EF".to_string(),
+            |d| d.contract = "0d8775f648430679a709e98d2b0cb6250d2887ef".to_string(),
+            |d| d.contract = "0x0d8775f648430679a709e98d2b0cb6250d2887e".to_string(),
+        ];
+        for change in evm {
+            assert_eq!(
+                malformed(change, bat_descriptor()),
+                Err(ContractError::InvalidInstrumentDescriptor)
+            );
+        }
+        assert_eq!(
+            malformed(|d| d.decimals = MAX_INSTRUMENT_DECIMALS, bat_descriptor()),
+            Ok(())
+        );
+        assert_eq!(
+            malformed(
+                |d| d.decimals = MAX_INSTRUMENT_DECIMALS + 1,
+                bat_descriptor()
+            ),
+            Err(ContractError::InvalidInstrumentDescriptor)
+        );
+
+        // A manifest refuses a malformed descriptor, and Trace Credit must
+        // pin six decimals so one atomic unit stays one microcredit.
+        let mut manifest = golden_manifest();
+        manifest
+            .instruments
+            .get_mut(&InstrumentId::new("bat").unwrap())
+            .unwrap()
+            .network = "0".to_string();
+        assert_eq!(
+            manifest.bundle_id(),
+            Err(ContractError::InvalidInstrumentDescriptor)
+        );
+        let mut manifest = golden_manifest();
+        manifest
+            .instruments
+            .get_mut(&InstrumentId::trace_credit())
+            .unwrap()
+            .decimals = 18;
+        assert_eq!(
+            manifest.bundle_id(),
+            Err(ContractError::TraceCreditDecimals)
+        );
+    }
+
+    #[test]
+    fn manifest_loading_pins_each_instrument_once() {
+        use serde_json::{from_str, from_value, json, to_value};
+
+        let manifest = golden_manifest();
+        let stored = to_value(&manifest).unwrap();
+        assert_eq!(
+            stored["instruments"],
+            json!({
+                "bat": {
+                    "kind": "erc20",
+                    "network": "1",
+                    "contract": "0x0d8775f648430679a709e98d2b0cb6250d2887ef",
+                    "decimals": 18,
+                },
+                "trace_credit": {
+                    "kind": "nep141",
+                    "network": "mainnet",
+                    "contract": "trace-credit.golden.near",
+                    "decimals": 6,
+                },
+            })
+        );
+        assert_eq!(
+            from_value::<BundleManifest>(stored.clone()).unwrap(),
+            manifest
+        );
+
+        // A manifest without pinned instruments fails to load. It does not
+        // read as an empty set.
+        let mut missing = stored.clone();
+        missing.as_object_mut().unwrap().remove("instruments");
+        assert!(from_value::<BundleManifest>(missing).is_err());
+
+        // JSON text can repeat a key. The loader refuses it.
+        let text = serde_json::to_string(&stored).unwrap();
+        let bat = serde_json::to_string(&stored["instruments"]["bat"]).unwrap();
+        let repeated = text.replacen(
+            "\"instruments\":{",
+            &format!("\"instruments\":{{\"bat\":{bat},"),
+            1,
+        );
+        assert_ne!(repeated, text);
+        assert!(from_str::<BundleManifest>(&repeated).is_err());
+    }
+
+    #[test]
+    fn awards_for_unpinned_instruments_are_refused() {
+        let manifest = golden_manifest();
+        assert_eq!(
+            manifest.instrument(&InstrumentId::trace_credit()),
+            Some(&trace_credit_descriptor())
+        );
+        assert_eq!(
+            manifest.instrument(&InstrumentId::new("storage_rebate").unwrap()),
+            None
+        );
+
+        let pinned =
+            InstrumentAwards::new(vec![award("trace_credit", 3), award("bat", 10u128.pow(18))])
+                .unwrap();
+        assert_eq!(manifest.require_pinned(&pinned), Ok(()));
+        assert_eq!(
+            manifest.require_pinned(&InstrumentAwards::default()),
+            Ok(())
+        );
+        for unpinned in [
+            vec![award("storage_rebate", 7)],
+            vec![award("trace_credit", 3), award("storage_rebate", 7)],
+        ] {
+            assert_eq!(
+                manifest.require_pinned(&InstrumentAwards::new(unpinned).unwrap()),
+                Err(ContractError::UnpinnedInstrument)
+            );
+        }
     }
 }

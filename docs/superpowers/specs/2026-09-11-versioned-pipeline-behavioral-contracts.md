@@ -434,13 +434,26 @@ stores no object.
   configuration, data artifacts, and projection identifiers.
 - The manifest MUST NOT claim to bind policy code. Qualification binds a
   package to a code revision.
-- The bundle identifier MUST be the canonical hash of the manifest.
+- The manifest MUST pin one instrument descriptor for each instrument that
+  the bundle can award. A descriptor has a `kind` (`nep141`, `erc20`, or
+  `credit_account`), a network, a contract, and `decimals`.
+- Each descriptor MUST have one spelling: a NEAR account id for `nep141`, a
+  decimal EIP-155 chain id and a lowercase `0x` address for `erc20`, and safe
+  labels for `credit_account`. `decimals` MUST NOT exceed 38.
+- The `trace_credit` descriptor MUST pin 6 decimals, so one atomic unit is one
+  microcredit.
+- An instrument identifier MUST keep one descriptor. A change of kind,
+  network, contract, or `decimals` MUST use a new instrument identifier.
+- A manifest that repeats an instrument MUST fail to load.
+- The bundle identifier MUST be the canonical hash of the manifest, including
+  the pinned descriptors.
 - The bundle hash MUST exclude mutable external state.
 - A change to a listed immutable input MUST change the bundle identifier.
 
 **Acceptance:** Use golden manifests. Change each identity input separately.
-Change the format version and each policy identifier. Confirm the expected
-bundle identifiers.
+Change the format version and each policy identifier. Change each descriptor
+field. Confirm the expected bundle identifiers. Load a manifest that repeats
+an instrument key, and a manifest with no instruments. Both must fail.
 
 ### BND-002: Package integrity
 
@@ -579,6 +592,9 @@ and shadow comparison. No active index mutation can occur.
   string: ASCII digits only, with no sign, no leading zero, and no value above
   `u128::MAX`. A JSON number MUST be refused.
 - The award-set identity MUST encode each amount as 16 big-endian bytes.
+- Each award MUST name an instrument that the bound bundle pins. The runner
+  MUST refuse an award for an unpinned instrument before the Score outcome
+  commits.
 - An empty collection MUST remain distinct from an incomplete Score phase.
 - Trace Credit MUST use the `trace_credit` instrument.
 - One Trace Credit MUST equal 1,000,000 microcredits.

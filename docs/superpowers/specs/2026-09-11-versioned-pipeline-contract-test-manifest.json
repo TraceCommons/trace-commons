@@ -65,7 +65,7 @@
       "boundary": "bundle identity, traits, binding, and integrity",
       "implementation_milestone": 1,
       "evidence_status": "planned",
-      "test_ids": ["pipeline::package_validation_binds_manifest_and_all_artifacts", "pipeline::every_immutable_policy_input_changes_bundle_identity", "pipeline::instrument_identity_is_bounded_and_canonical", "versioned_pipeline_qualification::package_signature_binds_canonical_package_and_trusted_key", "versioned_pipeline_pg::signed_package_qualification_gates_activation", "versioned_pipeline_pg::bound_bundle_survives_activation_and_rollback", "versioned_pipeline_pg::activation_after_resolution_does_not_rebind_the_receipt", "versioned_pipeline_pg::tenant_activation_is_explicit_and_gated", "versioned_pipeline_pg::rollback_containment_and_legacy_retirement"]
+      "test_ids": ["pipeline::package_validation_binds_manifest_and_all_artifacts", "pipeline::every_immutable_policy_input_changes_bundle_identity", "pipeline::instrument_identity_is_bounded_and_canonical", "pipeline::instrument_descriptors_have_one_spelling_per_kind", "pipeline::manifest_loading_pins_each_instrument_once", "versioned_pipeline_qualification::package_signature_binds_canonical_package_and_trusted_key", "versioned_pipeline_pg::signed_package_qualification_gates_activation", "versioned_pipeline_pg::bound_bundle_survives_activation_and_rollback", "versioned_pipeline_pg::activation_after_resolution_does_not_rebind_the_receipt", "versioned_pipeline_pg::tenant_activation_is_explicit_and_gated", "versioned_pipeline_pg::rollback_containment_and_legacy_retirement"]
     },
     {
       "contract_ids": ["REV-001", "REV-002", "REV-003", "REV-004"],
@@ -79,7 +79,7 @@
       "boundary": "score policy, capabilities, units, and credit event",
       "implementation_milestone": 5,
       "evidence_status": "planned",
-      "test_ids": ["pipeline::checked_microcredit_conversion_is_exact", "pipeline::duplicate_instruments_are_rejected", "pipeline::instrument_awards_have_deterministic_ordering", "pipeline::atomic_unit_arithmetic_rejects_overflow", "pipeline::atomic_units_travel_as_canonical_decimal_strings", "pipeline::award_set_identity_encodes_each_amount_in_sixteen_bytes", "minimal_policies_produce_explicit_zero_credit_completion", "versioned_pipeline_pg::four_index_and_credit_combinations_complete", "versioned_pipeline_index::reader_excludes_the_queried_revision", "versioned_pipeline_compat::compatibility_score_queries_reader_without_writes", "versioned_pipeline_compat::write_detector_records_settle_side_upserts_only", "versioned_pipeline_pg::score_does_not_write_and_settle_ignores_later_index_mutation"]
+      "test_ids": ["pipeline::checked_microcredit_conversion_is_exact", "pipeline::duplicate_instruments_are_rejected", "pipeline::instrument_awards_have_deterministic_ordering", "pipeline::atomic_unit_arithmetic_rejects_overflow", "pipeline::atomic_units_travel_as_canonical_decimal_strings", "pipeline::award_set_identity_encodes_each_amount_in_sixteen_bytes", "pipeline::awards_for_unpinned_instruments_are_refused", "minimal_policies_produce_explicit_zero_credit_completion", "versioned_pipeline_pg::four_index_and_credit_combinations_complete", "versioned_pipeline_index::reader_excludes_the_queried_revision", "versioned_pipeline_compat::compatibility_score_queries_reader_without_writes", "versioned_pipeline_compat::write_detector_records_settle_side_upserts_only", "versioned_pipeline_pg::score_does_not_write_and_settle_ignores_later_index_mutation"]
     },
     {
       "contract_ids": ["SCR-005"],
