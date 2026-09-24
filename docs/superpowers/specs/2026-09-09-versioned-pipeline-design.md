@@ -101,7 +101,7 @@ struct ScoreDecision {
 
 struct InstrumentAward {
     instrument_id: InstrumentId,
-    atomic_units: u64,
+    atomic_units: AtomicUnits, // u128; a decimal string on the wire
 }
 
 enum IndexMembershipDecision {
@@ -116,7 +116,7 @@ struct SettleDecision {
 
 struct InstrumentSettlement {
     instrument_id: InstrumentId,
-    atomic_units: u64,
+    atomic_units: AtomicUnits,
     operation_ref_hash: ContentHash,
     result_ref_hash: ContentHash,
 }
@@ -125,11 +125,24 @@ struct InstrumentSettlement {
 `instrument_id` is a bounded safe label. Award and settlement collections sort
 by that identifier and reject duplicates. An empty award collection is the
 completed zero-award result. Each amount uses checked integer atomic units.
+Each award names an instrument that the bound bundle pins (section 3).
+
+`AtomicUnits` is a `u128`, which holds any NEP-141 balance. One NEAR is
+10^24 yoctoNEAR, so `u64` cannot hold even 0.0001 NEAR. On the wire an amount
+is a canonical decimal string, as NEAR's `U128` is: ASCII digits only, with no
+sign and no leading zero. A JSON number is refused, because JavaScript and
+decoders that read numbers as `f64` lose precision above 2^53. The award-set
+identity encodes each amount as 16 big-endian bytes.
 
 Trace Credit is the `trace_credit` instrument. One Trace Credit equals
-1,000,000 microcredits. Its adapter converts microcredits to atomic units
-exactly, without floating point. Decimal conversion rejects excess precision
-and overflow.
+1,000,000 microcredits. Trace Credit is a NEP-141 token with `decimals = 6`, so
+one atomic unit is one microcredit. The existing `BIGINT` microcredit ledger
+maps one to one to the token, with no scale conversion. This is also the
+6-decimal convention of USDC and USDT on NEAR. `Microcredits` stays `u64`. A
+`trace_credit` amount cannot exceed `MAX_TRACE_CREDIT_MICROCREDITS`, which is
+`i64::MAX`: about 9.2 trillion credits. Its adapter converts microcredits to
+atomic units exactly, without floating point. Decimal conversion rejects
+excess precision and overflow.
 
 An operational error is not a decision. The run remains retryable or moves to
 a failed state with a safe error label.
@@ -209,6 +222,7 @@ struct BundleManifest {
     review: PolicyRef,
     score: PolicyRef,
     settle: PolicyRef,
+    instruments: BTreeMap<InstrumentId, InstrumentDescriptor>,
 }
 
 struct PolicyRef {
@@ -217,6 +231,13 @@ struct PolicyRef {
     configuration_hash: ContentHash,
     data_artifact_hashes: Vec<ContentHash>,
     projection_ids: Vec<ProjectionId>,
+}
+
+struct InstrumentDescriptor {
+    kind: InstrumentKind, // nep141 | erc20 | credit_account
+    network: String,      // NEAR network, EIP-155 chain id, or ledger label
+    contract: String,     // NEAR account id, 0x address, or account label
+    decimals: u8,         // one whole token is 10^decimals atomic units
 }
 
 impl BundleManifest {
@@ -246,8 +267,38 @@ The bundle hash excludes mutable external state. A policy records the exact
 external state that it reads as evidence.
 
 Golden tests protect bundle identity. A change to a policy or implementation
-identifier, configuration, data, or projection identity must change the bundle
-identifier.
+identifier, configuration, data, projection identity, or pinned instrument
+descriptor must change the bundle identifier.
+
+### Pinned instruments
+
+The manifest pins one descriptor for each instrument that the bundle can
+award. A signed award then says exactly which token it pays and at what
+scale. The descriptor gives:
+
+- `kind`: `nep141` for a NEAR token, `erc20` for an EVM token, or
+  `credit_account` for an off-chain credit account that is not a token.
+  Inference credits can use `credit_account`.
+- `network` and `contract`: a NEAR network and account id, an EIP-155 chain id
+  and lowercase `0x` contract address, or a ledger label and account label.
+- `decimals`: the scale of the atomic units, at most 38.
+
+Each kind accepts one spelling of its network and contract, so equal
+descriptors give equal bundle identifiers. The descriptors are part of the
+canonical manifest bytes, so they are part of the bundle identifier.
+
+The `trace_credit` descriptor must pin 6 decimals. A manifest that repeats an
+instrument, or that has no `instruments` field, fails to load.
+
+An award for an instrument that the bound bundle does not pin is refused. The
+runner checks Score's awards with `BundleManifest::require_pinned` before the
+Score outcome commits, so no settlement starts for an unpinned instrument.
+
+A descriptor never changes for an instrument identifier. A change of
+contract, network, kind, or `decimals` is a new instrument with a new
+identifier. An award that is already signed never gets a new meaning. The
+bundle registry enforces this rule: it refuses a package that pins a
+registered instrument identifier to a different descriptor.
 
 ## 4. Workflow
 
@@ -357,11 +408,11 @@ its membership decision.
     "awards": [
       {
         "instrument_id": "trace_credit",
-        "atomic_units": 200000000
+        "atomic_units": "200000000"
       },
       {
         "instrument_id": "storage_rebate",
-        "atomic_units": 5
+        "atomic_units": "5"
       }
     ]
   },
@@ -416,6 +467,24 @@ stable key for the tenant, run, Score outcome, and instrument. The instrument
 adapter can group compatible operations into its own batches. The Trace Credit
 adapter preserves existing holds, caps, issuer approval, source-list approval,
 and duplicate-credit protection.
+
+These rules apply to settlement:
+
+1. A run can settle in several instruments. Score returns a set of awards,
+   and the set can name several instruments. The design has no per-tenant or
+   per-run instrument selector. `SettleDecision` carries one operation for
+   each award.
+2. A run has at most one award for each instrument. `InstrumentAwards` and
+   `SettleDecision` refuse a second award or operation for an instrument. The
+   settlement table key `(tenant_id, run_id, instrument_id)` refuses a second
+   row.
+3. Each instrument settles as an independent leg. Its operation has a stable
+   key, so a retry is idempotent. A retry of one leg does not repeat a
+   completed operation, in that leg or in another leg.
+4. Settlement has no atomicity across instruments. One leg can complete while
+   another is held, retried, or forfeited. No leg waits for another leg or
+   reverses another leg. The Settle outcome records after every leg completes
+   or is forfeited.
 
 The server records the Settle outcome after all required index and instrument
 operations complete. The decision returns every operation and its result
@@ -541,7 +610,9 @@ pipeline_runs
 
 pipeline_run_settlements
   tenant_id, run_id, instrument_id
-  atomic_units
+  atomic_units NUMERIC(39,0) CHECK (atomic_units > 0)
+  CHECK (instrument_id <> 'trace_credit'
+         OR atomic_units <= 9223372036854775807)
   operation_ref_hash, result_ref_hash nullable
   operation_state: pending | leased | retry | held | complete | forfeited | failed
   lease_token, lease_expires_at
@@ -570,6 +641,15 @@ lease, and retry state, independently of every other instrument, so a
 `storage_rebate` operation recovers without the Trace Credit path. A row ends
 `complete` with its result reference, or `forfeited` when withdrawal commits
 first; both count as complete for the Settle outcome.
+
+`atomic_units` is `NUMERIC(39,0)`. Its 39 digits hold every `u128` value.
+`BIGINT` is signed 64-bit and would refuse any token amount above `i64::MAX`.
+The positivity check matches the rule that only a positive award creates a
+row. A reader loads the value through `AtomicUnits`, which refuses a value
+above `u128::MAX`. The second check
+holds `trace_credit` rows to `i64::MAX` (9223372036854775807), the range of
+the `BIGINT` credit ledger. The database enforces the ledger bound, and not
+only the Rust contract.
 
 Existing credit events, holds, batches, and outbox rows stay the Trace Credit
 and payout records. A `trace_credit` settlement row links its credit event
@@ -816,15 +896,18 @@ settlement before it can operate in production.
 11. Settle uses deterministic index keys and self-exclusion.
 12. Shadow comparisons use an isolated index namespace.
 13. Score awards are ordered by bounded instrument identifier and reject
-   duplicate instruments.
+   duplicate instruments. A run has at most one award for each instrument.
 14. Positive Score awards create one idempotent eligible operation per
-   instrument.
+   instrument. Each instrument settles as an independent leg, with no
+   atomicity across instruments.
 15. Settle returns every instrument operation and result reference. Runners
    persist and honor those values instead of recomputing them.
 16. Existing Trace Credit batches, holds, approvals, and the NEAR outbox
    remain authoritative.
-17. All awards use checked integer atomic units. The Trace Credit adapter
-   converts exact microcredits.
+17. All awards use checked `u128` atomic units, carried as canonical decimal
+   strings. Trace Credit pins 6 decimals, so the Trace Credit adapter converts
+   exact microcredits. The settlement table holds `trace_credit` rows to
+   `i64::MAX`.
 18. Each phase checks submission and policy authority before work and commit.
 19. Authentication supplies tenant scope. Envelope tenant fields provide
   attribution only.
@@ -832,6 +915,10 @@ settlement before it can operate in production.
 21. Policy implementations hold scorers, embedders, vector indexes, and
   instrument adapters
   behind trait objects.
+22. The bundle manifest pins one descriptor for each instrument that it can
+  award. The descriptors are part of the bundle identifier. An award for an
+  unpinned instrument is refused. A new contract, network, kind, or
+  `decimals` is a new instrument.
 
 
 

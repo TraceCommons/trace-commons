@@ -670,6 +670,8 @@ precedes the first write. A retry must reuse the sealed command bytes.
 - Index application and every instrument settlement MUST record independent
   progress.
 - A failure for one instrument MUST NOT corrupt or repeat another instrument.
+- Settlement MUST NOT be atomic across instruments. No instrument leg can wait
+  for another leg or reverse another leg.
 - A Trace Credit hold MUST NOT alter the index decision or another instrument.
 - Settle MUST wait for all required internal operations. A `forfeited`
   operation is complete for this rule.
@@ -722,6 +724,9 @@ submission and confirmation around injected crashes.
 - The run MUST record index progress needed for recovery.
 - `pipeline_run_settlements` MUST record each instrument operation's progress,
   lease, and retry state, one row for each positive Score award.
+- `pipeline_run_settlements.atomic_units` MUST be `NUMERIC(39,0)` with
+  `CHECK (atomic_units > 0)`. A database check MUST hold `trace_credit` rows
+  to `i64::MAX`.
 - Immutable phase history MUST remain in `phase_outcomes`.
 - A terminal infrastructure error MUST NOT create a phase outcome.
 
