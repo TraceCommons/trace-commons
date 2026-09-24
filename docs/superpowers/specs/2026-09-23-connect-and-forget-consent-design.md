@@ -1,6 +1,6 @@
 # Connect-and-Forget Contribution Consent — Design
 
-Date: 2026-09-23 (rev 4, 2026-09-24)
+Date: 2026-09-23 (rev 5, 2026-09-24)
 Status: draft for review
 Extends: [`2026-08-31-contributor-trust-by-default-design.md`](2026-08-31-contributor-trust-by-default-design.md) (#507)
 Source: [`../../contributor-ux-review.md`](../../contributor-ux-review.md)
@@ -8,6 +8,15 @@ Scope: `trace-commons-contributor` (`daemon/policy.rs`, `daemon/watcher.rs`,
 `daemon/queue.rs`, `daemon/uploader.rs`, `consent_copy.rs`), the onboarding
 surface in the Tauri client (#1003, merged as #963). No production code in this PR.
 
+> **Rev 5** reverses rev 3's conclusion for invited contributors. R3's
+> admission requirement is scoped to the `near-` and `nearai-` tenant
+> namespaces, which an invited tenant is never in, so the gate that blocks
+> wallet and NEAR AI-login enrollees does not apply to them. What they lack is
+> a prose pass, and the witness supplies exactly that. Offering the witness at
+> the grant makes invite the first enrollment that can have Flow 1 -- the
+> opposite of what rev 3 said. The inference-receipt half of rev 2's Addendum 4
+> stays withdrawn, with the reason recorded so it is not rebuilt.
+>
 > **Rev 4** keeps rev 3's structure, which review found sound, and fixes nine
 > findings against it -- three of which were requirements that could not be met
 > or checked anything as written: the certified value named did not exist, the
@@ -186,12 +195,45 @@ in Flow 1 onboarding.**
 
 | Enrollment | R1 pipeline | R3 admission | R4 provenance | Flow 1 |
 |---|---|---|---|---|
-| NEAR AI login / wallet | possible, unverified per session | **blocked by #706** | #1005 | **no** |
-| Invite | no prose pass by default | n/a | not deliverable as rev 2 proposed | **no** |
+| Invite **with the witness offered at the grant** | satisfied by the enclave | **does not apply** | #1005 | **the first viable path** |
+| Invite, as shipped | no prose pass | does not apply | — | no |
+| NEAR AI login / wallet | satisfied by the enclave | **blocked by #706** | #1005 | no, until #706 |
 
-**No enrollment type qualifies today.** Rev 2's Addenda 3 and 4 claimed
-witness enrollees qualified "today" and that invite enrollees could be brought
-in; both are withdrawn.
+**The invite path is the one that can work first, and rev 3 had this
+backwards.** R3 is scoped to two tenant namespaces and invite tenants are in
+neither. `ANCHOR_NAMESPACES` is `["near-", "nearai-"]`, and `admission.rs:76`
+is explicit about the rest:
+
+> A tenant in neither namespace is not refused, it is `None`: this is the
+> invite-free path, and an invited tenant simply does not use it.
+
+So the per-session admission step that Flow 1 removes, and that blocks wallet
+and NEAR AI-login enrollees, is not a gate an invited contributor ever passes
+through. Rev 3 marked invite "n/a" on R3 and then did not draw the conclusion.
+
+What invite lacks is R1, and that is exactly what the witness supplies: the
+enclave runs the full pipeline, which no local path does. **Offering the
+witness at the grant therefore turns invite from the least eligible enrollment
+into the only currently eligible one.**
+
+**Rev 5 reverses rev 3's conclusion for invite enrollees.** Rev 2's Addendum 4
+proposed offering the witness at the grant and pairing it with an inference
+receipt; rev 3 withdrew the whole of it because the receipt half does not
+deliver provenance. The witness half was withdrawn with it, and should not have
+been -- the receipt was answering R4, and the witness answers R1. Rev 5 keeps
+the witness offer and leaves provenance to #1005.
+
+**The receipt half stays withdrawn**, and the reason is worth stating in full
+because it is the part most likely to be reconstructed: `AttestedCall`
+(`routing/attested.rs:282`) carries a single `request_body`, `response_body`
+and `upstream_id`, and the receipt is a signature over one
+`<requestHash>:<responseHash>` pair. **One receipt attests one call; a session
+holds many.** A genuine call wrapped in an otherwise fabricated transcript
+verifies. Separately, `chat_id` is `RoutedExchange::upstream_id`, which "exists
+in the local proxy's SQLite ledger and nowhere else", so a receipt exists only
+for contributors routing inference through the local proxy -- which most
+invited contributors are not. It proves neither that the session is real nor
+that it is theirs.
 
 What stands between here and Flow 1 is more than the three external items.
 External: #706's answer for automatic sends, #1005, and #507's local content
@@ -331,9 +373,18 @@ contributed, and no sentence covers that.
 
 ## Open
 
-- **#706 under Flow 1.** The blocking question. Either admission evidence gets
-  a non-per-session form, or Flow 1 is unavailable to the tenants it was
-  designed for.
+- **What stops spam on the invite path.** This is the cost of rev 5 being
+  right about availability. Invited tenants sit outside the admission ledger,
+  and the receipt mechanism does not substitute for it, so an invited
+  contributor on Flow 1 contributes at volume with neither a per-session
+  admission step nor attested provenance until #1005. Manual review was
+  carrying part of that load and Flow 1 removes it. The honest options are to
+  gate the invite Flow 1 grant on #1005 landing, to cap automatic volume for
+  unattested tenants, or to accept the exposure and say so.
+- **#706 under Flow 1**, still open for wallet and NEAR AI-login enrollees.
+  Either admission evidence gets a non-per-session form, or Flow 1 stays
+  unavailable to them while being available to invited contributors, which is
+  an odd shape and worth deciding deliberately.
 - **Whether R1–R7 gate the mode or the flow.** This spec says the mode; it is
   the single decision that most changes the implementation.
 - **Measurement.** How many sessions would satisfy R1 -- a certified pipeline
