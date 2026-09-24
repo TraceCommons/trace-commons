@@ -352,3 +352,86 @@ because under Flow 1 that moment has no one in front of it.
   `ConsentCopy` is extended past its three fields.
 - **Whether declining the witness disclosure should be reversible** into Flow 1
   later, and what re-grants.
+
+---
+
+# Addendum 3: witness enrollees are Flow 1's population, not its exception
+
+Addendum 2 treated the witness path as an obstacle to Flow 1 — a disclosure
+that has to move into the grant, failing which the contributor is on Flow 2.
+That is the right mechanism and the wrong framing, and inverting it changes who
+Flow 1 is for.
+
+## The enclave is the model pass
+
+Rev 2's eligibility rule requires that a prose pass actually ran, and observed
+that no production path configures one: `pii_filter: None` everywhere,
+`envelope.rs:105-106` returning a deterministic-only redactor.
+
+For a witness enrollee that is not the path taken. The raw session goes to a
+verified enclave which performs the redaction, calling NEAR AI from inside it.
+A real classifier runs over the whole session, which is exactly what
+`AUTO_SCRUB_SCOPE` claims and exactly what the deterministic-only path cannot
+deliver.
+
+So the population splits the opposite way from how Addendum 2 read it:
+
+| Enrollment | Prose pass | Is `AUTO_SCRUB_SCOPE` true? | Flow 1 available |
+|---|---|---|---|
+| NEAR AI login or wallet (witness set) | in the enclave | **yes** | **yes, today** |
+| Invite, no witness, no `pii_filter` | none | no | no, until the local content pass |
+
+**Flow 1 is buildable now for precisely the contributors Addendum 2 was
+pushing towards Flow 2.** They are not the exception; they are the only
+population whose disclosure is currently honest.
+
+## What has to change for them to reach it
+
+One thing: the per-session raw-upload confirmation becomes a standing one.
+
+`ipc.rs:3581` refuses a witness send without `raw_session_confirmed`, and
+`witness_copy.rs:685` says it per session. Flow 1 has no per-session moment, so
+the confirmation has to be given once, at grant time, as part of the
+disclosure — a fifth sentence covering the raw upload to the enclave and its
+irreversibility (*"Cancelling afterwards cannot recall a session already sent
+to the witness"*), plus a standing `raw_session_confirmed` the uploader honours
+for auto-contributed sessions.
+
+## Why this does not weaken the property that makes raw upload acceptable
+
+It is worth being explicit, because "remove the confirmation click from the
+largest disclosure in the system" reads as a weakening and is not one.
+
+The property is stated in `witness/mod.rs`: the raw send is acceptable **only
+because the enclave's measurement was verified first**, and that ordering is
+enforced by types rather than by review — `VerifiedWitness` has private fields
+and one constructor which *is* the verification, and the only function that
+transmits raw bytes takes a `&VerifiedWitness`. There is no path from having a
+witness URL to sending raw bytes that skips it.
+
+That check is structural and runs on every send. It does not consult
+`raw_session_confirmed` and is unaffected by how the contributor consented. So
+a standing confirmation replaces the **human click**, not the **attestation**.
+What the contributor gives up is being asked each time; what protects them —
+that the bytes only ever reach a measured enclave — is untouched, and cannot be
+turned off by this or any other consent change.
+
+The honest statement of the trade is therefore narrow: under Flow 1 a witness
+enrollee is not re-asked before each raw upload, and an upload that has
+happened cannot be recalled. Both belong in the grant-time sentence.
+
+## Consequences
+
+- **The standing confirmation must void with the witness.** The grant records
+  the witness identity it was given under, and a change to the witness URL or
+  its expected measurement voids it, returning affected projects to ask-first
+  until re-consented. This is the same rule rev 2 applies to the filter
+  configuration, and it matters more here: the enclave's identity is the whole
+  basis on which raw upload was acceptable.
+- **`AUTO_REVERSAL` still needs its witness clause.** Withdrawal governs the
+  commons; nothing governs the enclave.
+- **Flow 1's availability is now a sequencing question with an answer.** Ship
+  it for witness enrollees, where the disclosure is true today, and let the
+  local content pass (#507) bring the rest in later. That is a smaller first
+  slice than "Flow 1 for everyone" and a larger one than "Flow 1 for nobody",
+  which is what rev 2 amounted to in practice.
