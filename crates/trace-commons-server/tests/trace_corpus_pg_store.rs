@@ -118,12 +118,7 @@ async fn gate_driver_backend() -> Option<PgBackend> {
         .run_migrations()
         .await
         .expect("run migrations before provisioning the gate-driver role");
-    admin
-        .raw_pool_for_tests_and_diagnostics()
-        .get()
-        .await
-        .expect("get a connection to provision the gate-driver role")
-        .batch_execute(&format!("ALTER ROLE {GATE_DRIVER_ROLE} LOGIN;"))
+    grant_gate_driver_login(&admin)
         .await
         .unwrap_or_else(|e| panic!("grant LOGIN to {GATE_DRIVER_ROLE}: {e}"));
 
@@ -143,6 +138,75 @@ async fn gate_driver_backend() -> Option<PgBackend> {
     .await
     .expect("build a backend with the gate-driver pool configured");
     Some(backend)
+}
+
+/// Grant LOGIN to the gate-driver role.
+///
+/// Every test that needs the narrow pool calls this, and libtest runs them in
+/// parallel against one database. `ALTER ROLE` rewrites the role's
+/// `pg_authid` row even when LOGIN is already set, so two in flight update the
+/// same catalog tuple and PostgreSQL raises `XX000 tuple concurrently
+/// updated` -- surfacing as a bare `db error` in whichever test lost, on PRs
+/// that touch nothing here.
+///
+/// The fix is the one `trace_corpus_pg_rls` uses for its role grants:
+/// serialise the DDL on a transaction-scoped advisory lock taken as the first
+/// statement of the same `batch_execute`, which runs as one implicit
+/// transaction, so the lock is released when the batch commits. Same key as
+/// that suite's `RLS_TEST_ROLE_DDL_LOCK_*`, so role DDL from either suite
+/// cannot interleave if they ever share a database concurrently.
+async fn grant_gate_driver_login(admin: &PgBackend) -> Result<(), String> {
+    admin
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .map_err(|e| format!("get a connection: {e}"))?
+        .batch_execute(&format!(
+            "SELECT pg_advisory_xact_lock({TEST_ROLE_DDL_LOCK_CLASSID}, \
+                {TEST_ROLE_DDL_LOCK_OBJID});
+             ALTER ROLE {GATE_DRIVER_ROLE} LOGIN;"
+        ))
+        .await
+        .map_err(|e| format!("{e:?}"))
+}
+
+/// Advisory-lock key for test role DDL. Must equal `trace_corpus_pg_rls`'s
+/// `RLS_TEST_ROLE_DDL_LOCK_CLASSID` / `_OBJID`; the two-int form with its own
+/// classid cannot alias the one-arg `pg_advisory_xact_lock(hashtext(tenant))`
+/// the audit-chain append takes.
+const TEST_ROLE_DDL_LOCK_CLASSID: i32 = 0x726f_6c65u32 as i32; // "role"
+const TEST_ROLE_DDL_LOCK_OBJID: i32 = 0x7273_6c73u32 as i32; // "rsls"
+
+/// Concurrent callers of `grant_gate_driver_login` must all succeed.
+///
+/// Reproduces the race directly rather than waiting for the suite's natural
+/// parallelism to hit it: sixteen grants against the same role at once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gate_driver_login_grant_survives_concurrent_callers() {
+    let Some(config) = postgres_test_config() else {
+        return;
+    };
+    let admin = PgBackend::new(&config)
+        .await
+        .expect("connect to the test database");
+    admin
+        .run_migrations()
+        .await
+        .expect("run migrations before provisioning the gate-driver role");
+    let admin = std::sync::Arc::new(admin);
+    for round in 0..8 {
+        let calls: Vec<_> = (0..16)
+            .map(|_| {
+                let admin = std::sync::Arc::clone(&admin);
+                tokio::spawn(async move { grant_gate_driver_login(&admin).await })
+            })
+            .collect();
+        for (i, call) in calls.into_iter().enumerate() {
+            call.await
+                .expect("grant task panicked")
+                .unwrap_or_else(|e| panic!("round {round}, caller {i}: {e}"));
+        }
+    }
 }
 
 /// Refuse a gate-driver pool that is not the narrow role.
