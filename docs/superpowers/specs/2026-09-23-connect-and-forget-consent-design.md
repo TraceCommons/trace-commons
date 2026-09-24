@@ -524,3 +524,105 @@ fallback and it is also the current product, so nothing is lost by declining.
   contributor's raw text leaves the machine — not a substitute for scrubbing
   locally. The content pass remains the only route to Flow 1 that sends nothing
   raw anywhere, and it stays scheduled.
+
+---
+
+# Addendum 5: spam economics, and what it does to Addendum 4
+
+A second axis, raised in review and not considered anywhere above: **removing
+spam is expensive when a trace's inference is not verified from NEAR AI.**
+
+Everything in this spec so far reasons about privacy — what leaves the machine
+and what the contributor was told. Provenance is a different question with a
+different answer, and it turns out to point the same way in one place and the
+opposite way in another.
+
+## Two certificates, not one
+
+The witness certifies **redaction**. The receipt certifies **provenance**.
+Addendum 3 and 4 treated the witness as though it delivered both, and it does
+not.
+
+- `InferenceAttestationRecord::certified()` is constructible only by
+  `submit::witness_envelope`, and only "after the witness has certified a
+  request that carried a receipt". Without a receipt the record is
+  `STATE_UNCERTIFIED` with `REASON_NO_ATTESTED_CALL`.
+- NEAR AI-login and wallet enrollment set `inference_receipt_endpoint` and
+  `inference_receipt_check_attestation: true` at signup
+  (`nearai_onboarding.rs:419-420`, `account_onboarding.rs:919-920`).
+- Invite enrollment sets both from the environment only, under the same
+  opt-in rule as the witness (`commands.rs:195-197`).
+
+So an invite enrollee who is given a witness under Addendum 4 has their
+sessions redacted in a verified enclave and still produces traces whose
+inference nothing attests. The enclave vouches for what was removed, not for
+where the conversation came from.
+
+## Why that is expensive
+
+Without provenance, distinguishing a real session from fabricated text is a
+content problem, and the corpus is already paying for it: per-author perplexity
+as a shadow signal (#967), perplexity and novelty floor calibration (#968,
+#970), credit-quality recalibration (#969), the dedup simhash re-derivation and
+its v2 set-semantic hash (#975, #978, #980), the re-cluster and its escalations
+(#983, #985). That is the cost of deciding, statistically and after the fact,
+whether a trace is worth anything.
+
+A certified receipt answers the same question directly and cheaply.
+
+## The part that matters for this design
+
+**Manual review is itself a spam control, and Flow 1 removes it.** A
+contributor who reads each session before approving it does not bulk-submit
+fabricated traces about their own machine. Automatic contribution removes that
+filter. Removing it at the same time as accepting traces whose provenance is
+unattested removes both filters at once, and leaves only the expensive
+statistical one.
+
+That reframes the two paths:
+
+| | Redaction certified | Provenance certified | Flow 1 defensible |
+|---|---|---|---|
+| NEAR AI login / wallet | yes, enclave | yes, receipt | **yes** |
+| Invite + witness (Addendum 4) | yes, enclave | **no** | **not on this axis** |
+| Invite, as shipped | no | no | no |
+
+Addendum 3's conclusion survives and is strengthened: NEAR AI-login and wallet
+enrollees are the right Flow 1 population, now for two independent reasons that
+happen to coincide.
+
+**Addendum 4 does not survive unchanged.** Offering the witness at the grant
+solves the privacy prerequisite and leaves the provenance one untouched, so it
+would deliver automatic contribution at volume from exactly the population
+whose traces are most expensive to evaluate. That is the wrong direction to
+push volume in.
+
+## The amendment
+
+An invite enrollee reaching Flow 1 needs **both** opt-ins, not one:
+
+1. the witness, for redaction — Addendum 4's argument, unchanged; and
+2. a receipt endpoint with `inference_receipt_check_attestation`, for
+   provenance.
+
+Both are environment-only today and both are contributor-choices rather than
+server-pushed ones, so the same reasoning that lets the grant offer the first
+lets it offer the second.
+
+A contributor who cannot supply attested inference — because they run a local
+model, or a provider that mints no receipt — should not reach Flow 1. Not on
+privacy grounds, which the witness settles, but because automatic contribution
+of unattestable traces is the case the corpus cannot cheaply defend against.
+Flow 2 remains open to them and costs the commons nothing, because a human is
+still reading each one.
+
+## Open
+
+- **Is an uncertified trace worth less, or worth nothing, under Flow 1?** The
+  gate already scores; this is about whether automatic contribution should be
+  available at all without a receipt, which is a policy question rather than a
+  scoring one.
+- **#805 is directly relevant** and unresolved: a brokered call yields a
+  gateway receipt that binds no model. A receipt that does not bind the model
+  does not settle provenance, so the second opt-in above is necessary and may
+  not be sufficient.
