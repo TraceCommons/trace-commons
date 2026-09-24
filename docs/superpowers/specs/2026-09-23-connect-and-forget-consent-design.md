@@ -1,6 +1,6 @@
 # Connect-and-Forget Contribution Consent — Design
 
-Date: 2026-09-23 (rev 6, 2026-09-24)
+Date: 2026-09-23 (rev 7, 2026-09-24)
 Status: draft for review
 Extends: [`2026-08-31-contributor-trust-by-default-design.md`](2026-08-31-contributor-trust-by-default-design.md) (#507)
 Source: [`../../contributor-ux-review.md`](../../contributor-ux-review.md)
@@ -9,6 +9,17 @@ Scope: `trace-commons-contributor` (`daemon/policy.rs`, `daemon/watcher.rs`,
 surface in the Tauri client, named the main client for the MVP in #1003 and
 merged in #963. No production code in this PR.
 
+> **Rev 7** records three answers settled in review. The witness reaches an
+> invited contributor through **connected inference**, which is the
+> contributor-chosen relationship the no-server-pushed-enablement rule needs;
+> an invitee who has not connected inference gets no witness at the grant.
+> Connected inference is **one route** to a witness and receipts rather than
+> the door to automatic contribution. And there is a **third path**: automatic
+> contribution earned incrementally from trust signals gathered during and
+> after onboarding, whose mechanism is deliberately left open.
+>
+> Gate placement and the R1 allowlist were confirmed as rev 6 implemented them.
+>
 > **Rev 6** fixes the findings against revs 4 and 5 that do not depend on an
 > open question, and marks the two that do. The gate moves to the `AutoUpload`
 > decision -- misplaced in three consecutive revisions, each time by gating a
@@ -239,8 +250,8 @@ every automatic contribution would ship at the floor scope with nobody asked,
 or an implementer pre-selects scopes nobody chose.
 
 **The placement, named rather than deferred:** the scope picker runs
-immediately after connect and before the Flow 1 / Flow 2 question, it blocks
-the grant, and it has no default. A contributor who declines to choose does not
+immediately after connect and before the path question, it blocks any grant,
+and it has no default. A contributor who declines to choose does not
 get a floor-scope grant -- they get no grant, and land on Flow 2.
 
 ## Where that leaves availability
@@ -269,8 +280,19 @@ invite's R1 problem, which is what leaves it the only enrollment with no
 structural blocker.**
 
 That is narrower than eligible, and rev 5 overstated it. R4 waits on #1005 and
-R5-R7 are unbuilt, so Flow 1 cannot be granted to anyone yet. And **where an
-invited contributor's witness comes from is unresolved** -- see Open.
+R5-R7 are unbuilt, so Flow 1 cannot be granted to anyone yet.
+
+**Where the witness comes from, settled in review: connected inference.** An
+invited contributor receives the witness as part of deliberately connecting
+NEAR AI inference, which is the contributor-chosen relationship the
+no-server-pushed-enablement rule requires -- the enclave arrives with something
+the person asked for rather than as a side effect of joining. **An invited
+contributor who has not connected inference does not get a witness from the
+commons at the grant**, and stays on the local-redaction path.
+
+Connecting inference is therefore **one route** to a witness and to receipts.
+It is not a precondition for contributing, and it is not the only door to
+automatic contribution -- see the third path below.
 
 **Rev 5 reverses rev 3's conclusion for invite enrollees.** Rev 2's Addendum 4
 proposed offering the witness at the grant and pairing it with an inference
@@ -301,16 +323,45 @@ saved certified artifact, R6's void rule, R7's scope placement, the
 discovered-after-the-grant default with its audit row, withdrawal durability in
 every mode, and the logout rule above.
 
-## The two paths
+## The three paths
 
-Unchanged from rev 2 and not contested.
+Flow 1 and Flow 2 are unchanged from rev 2 and have not been contested. The
+third was settled in review and is new here.
 
-**Flow 1 — automatic.** Available only where R1–R7 hold.
+**Flow 1 — automatic from the grant.** Available only where R1–R7 hold. A
+single decision at connect, covering everything after it.
+
+**Flow 3 — earned.** Automatic contribution is **granted incrementally**,
+from trust signals gathered during and after onboarding, rather than in one
+act at connect. It is not a lesser Flow 1 and not a staging area for it: it is
+the path for a contributor who will not make a blanket grant at connect and
+should not have to approve every session forever.
+
+The requirements do not weaken for it. R1–R7 still bind whatever becomes
+automatic, because the gates attach to the `AutoUpload` mode rather than to the
+onboarding path that reached it. What differs is *when* and *how much* becomes
+automatic, not what automatic means.
+
+**The mechanism is deliberately not fixed here** -- which signals count, what
+they accumulate toward, where thresholds sit. Two structural properties are
+fixed, because the rest of this spec depends on them:
+
+- **Whatever is earned is expressed as project mode**, so that exclusion,
+  retraction, the void rule and the logout rule all reach it unchanged.
+- **Nothing is earned silently.** A folder that becomes automatic is announced
+  in the same way the first-contribution notice is, since the contributor did
+  not make a decision at the moment it changed.
+
+This is also where connected inference sits. It supplies a witness and
+receipts, which satisfy R1 and feed R4 -- so it is **one route toward
+automatic contribution, not the door to it**. A contributor who never connects
+inference can still reach Flow 3; a contributor who connects it on day one
+still meets R1–R7 like anyone else.
 
 **Flow 2 — choose myself.** Per-folder `Automatic` / `Ask me` / `Never`, and
 per-session approve or decline.
 
-### Flow 2's armed folders need the same gates
+### Flow 2's armed folders need the same gates, and so does anything Flow 3 earns
 
 `AutoUpload` stays reachable inside Flow 2 — screen 5's "Automatic", the arming
 offer, Settings, and CLI `--mode auto` — with none of R1–R7 attached. So rev 2's
@@ -450,29 +501,10 @@ contributed, and no sentence covers that.
 
 ## Open
 
-- **Where an invited contributor's witness configuration comes from.** Rev 5
-  proposed offering the witness at the grant, and the invite path has no source
-  for the URL, `signing_address` and measurement pins: enrollment reads them
-  from the environment only, and fetching the commons-published set at the
-  grant is the server-pushed enablement both the config field's doc and the
-  enrollment code rule out. Either a legitimate source exists -- the commons
-  publishing them and the contributor explicitly accepting them at the grant
-  may qualify, since the server would propose and the person decide -- or the
-  invite path waits on one. **This spec does not guess**, because guessing a
-  mechanism is what put the gate in the wrong place three revisions running.
-- **Whether connecting inference belongs in onboarding.** Receipts require
-  `chat_id`, which is `RoutedExchange::upstream_id` and exists only in the
-  local proxy's ledger, so a contributor not routing inference has no receipt
-  to offer. That is why the receipt proposal failed and why provenance stays
-  open. Routed inference is the only existing path to it, and it may also
-  answer the question above, since a contributor who deliberately connected to
-  NEAR AI for inference has a relationship in which the scrubbing enclave is
-  chosen rather than pushed. Against it: materially higher onboarding friction,
-  and it only works if the inference is worth routing, which is a product
-  decision. Note also that `routing/mod.rs` holds the proxy ledger to
-  attribution only -- it "must never reach a gate, a scoring input, or a credit
-  computation" -- so routing is not itself evidence; only the provider-signed
-  receipt is.
+- **The earned-trust path's mechanism.** Which signals count, what they
+  accumulate toward, and where the thresholds sit. Settled in review that the
+  path exists and that its signals are gathered during and after onboarding;
+  the mechanism itself is deliberately not fixed here.
 - **Witness capacity and back-pressure.** Routing invited contributors through
   the shared witness puts every automatic session, including pre-grant
   backlogs, through a small fixed number of concurrent slots with a long
