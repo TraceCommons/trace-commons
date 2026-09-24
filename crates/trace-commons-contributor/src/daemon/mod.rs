@@ -594,17 +594,35 @@ async fn drain_approved(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<U
             .collect()
     };
     if !ignored_ids.is_empty() {
-        let mut q = shared.queue.lock().expect("queue lock");
-        for id in &ignored_ids {
-            q.set_state(
-                *id,
-                queue::QueueState::Refused,
-                Some(queue::REASON_PROJECT_IGNORED.to_string()),
-            );
+        {
+            let mut q = shared.queue.lock().expect("queue lock");
+            for id in &ignored_ids {
+                q.set_state(
+                    *id,
+                    queue::QueueState::Refused,
+                    Some(queue::REASON_PROJECT_IGNORED.to_string()),
+                );
+            }
+            if let Err(e) = q.save(&shared.store) {
+                tracing::warn!(error = %e, "could not persist project-ignored refusals");
+            }
+            // Swept and published here rather than at the end of the pass.
+            //
+            // The pass returns before its own sweep in two cases that this
+            // block makes likely: every candidate was refused here, so
+            // `approved` is empty and the `is_empty` branch returns; and
+            // `load_config` returning `None`. In both the entries are
+            // `Refused` on disk with their approved envelopes still on it,
+            // and an app that redraws on events goes on showing them as
+            // approved until some unrelated change arrives.
+            //
+            // The race this block exists for -- an entry released from
+            // `Uploading` after its project was excluded -- is also the case
+            // most likely to be the only candidate, so the early return is
+            // the expected path rather than an edge of it.
+            let _ = approved_envelope::sweep(&shared.store, &q.pinned_entry_ids());
         }
-        if let Err(e) = q.save(&shared.store) {
-            tracing::warn!(error = %e, "could not persist project-ignored refusals");
-        }
+        shared.publish(ipc::EVENT_QUEUE_CHANGED, serde_json::json!({}));
     }
     let approved: Vec<queue::QueueEntry> = candidates
         .into_iter()
@@ -1569,6 +1587,11 @@ mod tests {
             assert_eq!(q.all()[0].state, queue::QueueState::Approved);
         }
 
+        // Subscribed before the pass: the refusal has to reach an app that
+        // redraws on events, and this pass returns early -- every candidate
+        // was refused, so it never reaches its own publish at the end.
+        let mut events = shared.events.subscribe();
+
         drain_approved_for_test(&shared, at("2026-08-08T13:00:00Z"))
             .await
             .unwrap();
@@ -1578,6 +1601,12 @@ mod tests {
             e.state,
             queue::QueueState::Refused,
             "excluded before it was sent, so it must not be sent"
+        );
+        let published = events.try_recv().expect("a queue-changed event");
+        assert_eq!(
+            published.event,
+            ipc::EVENT_QUEUE_CHANGED,
+            "an app redrawing on events would otherwise still show it approved"
         );
         assert_eq!(
             e.reason_label.as_deref(),

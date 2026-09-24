@@ -2634,7 +2634,7 @@ fn handle_set_project_mode(shared: &DaemonShared, req: &Request) -> Response {
     // reads the *new* policy, so the queue cannot be written first --
     // and a real fix wants both files under one atomic write, which
     // the store does not offer.
-    let (queue_changed, purged) = {
+    let (queue_changed, purged, retracted) = {
         let mut queue = shared.queue.lock().expect("queue lock");
         let purged = if mode == ProjectMode::Ignore {
             // Both halves. `refuse_pending_for_project` covers entries
@@ -2644,7 +2644,22 @@ fn handle_set_project_mode(shared: &DaemonShared, req: &Request) -> Response {
             // never made and which `drain_approved` would otherwise keep
             // sending after they said no. Contributor-made approvals are
             // still left alone by both.
-            queue.refuse_pending_for_project(&key) + queue.retract_unattended_for_project(&key)
+            queue.refuse_pending_for_project(&key)
+        } else {
+            0
+        };
+        // Counted separately, not folded into `purged`.
+        //
+        // `purged` is the number of *waiting* entries removed, and the shells
+        // compare it with the cards they had on screen: a mismatch is how
+        // they decide to say the queue changed while the contributor was
+        // deciding (`macos/Sources/TCShellCore/ProjectIgnoreCopy.swift:64`).
+        // Unattended approvals were never waiting cards, so adding them to
+        // that number reports a change that did not happen -- "7 waiting
+        // traces were removed, not 2", where the other five were never on
+        // screen. A shell may render this or ignore it.
+        let retracted = if mode == ProjectMode::Ignore {
+            queue.retract_unattended_for_project(&key)
         } else {
             0
         };
@@ -2654,18 +2669,21 @@ fn handle_set_project_mode(shared: &DaemonShared, req: &Request) -> Response {
             queue.clear_project_ignored(&key)
         };
         let relabelled = relabel_queue_entries(&policy, &mut queue);
-        if relabelled || purged > 0 || restored > 0 {
+        if relabelled || purged > 0 || retracted > 0 || restored > 0 {
             if let Err(_e) = queue.save(&shared.store) {
                 return Response::err(req.id, ERR_UNAVAILABLE, "queue-write-failed");
             }
         }
-        (relabelled || restored > 0, purged)
+        (relabelled || restored > 0, purged, retracted)
     };
     drop(policy);
-    if queue_changed || purged > 0 {
+    if queue_changed || purged > 0 || retracted > 0 {
         shared.publish(EVENT_QUEUE_CHANGED, serde_json::json!({}));
     }
-    Response::ok(req.id, serde_json::json!({ "ok": true, "purged": purged }))
+    Response::ok(
+        req.id,
+        serde_json::json!({ "ok": true, "purged": purged, "retracted": retracted }),
+    )
 }
 
 fn handle_pause(shared: &DaemonShared, req: &Request) -> Response {
