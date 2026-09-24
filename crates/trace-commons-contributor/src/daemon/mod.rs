@@ -554,7 +554,7 @@ async fn drain_approved(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<U
         let s = shared.settings.lock().expect("settings lock");
         s.approval_hold_secs
     };
-    let approved: Vec<queue::QueueEntry> = {
+    let candidates: Vec<queue::QueueEntry> = {
         let q = shared.queue.lock().expect("queue lock");
         q.all()
             .iter()
@@ -564,6 +564,52 @@ async fn drain_approved(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<U
             .cloned()
             .collect()
     };
+
+    // Re-check the project's mode at send time, for approvals nobody made.
+    //
+    // `retract_unattended_for_project` runs once, when the mode changes, and
+    // skips `Uploading` because those bytes are in flight. But an `Uploading`
+    // entry is not necessarily sent: `Queue::release_in_flight` returns every
+    // one of them to `Approved` at the end of a pass and after a restart,
+    // without consulting the mode or the flag. So an entry claimed just
+    // before the contributor excluded its project comes back `Approved` and
+    // would upload on a later pass, after they said no.
+    //
+    // Checking here rather than hooking `release_in_flight` covers the
+    // restart case for free: whatever path returned the entry to `Approved`,
+    // it cannot leave without passing this.
+    //
+    // A contributor-made approval is deliberately not re-checked. That is a
+    // decision they took about these bytes, and `refuse_pending_for_project`
+    // does not retract those either.
+    let ignored_ids: Vec<uuid::Uuid> = {
+        let policy = shared.policy.lock().expect("policy lock");
+        candidates
+            .iter()
+            .filter(|e| {
+                e.approved_unattended
+                    && policy.resolve(&e.project_key) == policy::ProjectMode::Ignore
+            })
+            .map(|e| e.entry_id)
+            .collect()
+    };
+    if !ignored_ids.is_empty() {
+        let mut q = shared.queue.lock().expect("queue lock");
+        for id in &ignored_ids {
+            q.set_state(
+                *id,
+                queue::QueueState::Refused,
+                Some(queue::REASON_PROJECT_IGNORED.to_string()),
+            );
+        }
+        if let Err(e) = q.save(&shared.store) {
+            tracing::warn!(error = %e, "could not persist project-ignored refusals");
+        }
+    }
+    let approved: Vec<queue::QueueEntry> = candidates
+        .into_iter()
+        .filter(|e| !ignored_ids.contains(&e.entry_id))
+        .collect();
     if approved.is_empty() {
         // Re-check enrollment when the queue is empty, so a stale not-logged-in
         // condition gets retracted if the contributor has logged back in.
@@ -1471,6 +1517,73 @@ mod tests {
             history_refresh_decision(at("2026-08-08T12:00:00Z"), None, None, interval()),
             HistoryRefresh::OnInterval
         );
+    }
+
+    #[tokio::test]
+    async fn an_entry_released_from_upload_is_not_sent_after_its_project_is_excluded() {
+        // The race reviewed on #997. `retract_unattended_for_project` runs
+        // once, at the mode change, and skips `Uploading`. But
+        // `release_in_flight` returns every `Uploading` entry to `Approved`
+        // at the end of a pass and after a restart, without consulting the
+        // mode or the flag -- so an entry claimed just before the exclusion
+        // comes back eligible and would upload after the contributor said no.
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().join("state")).unwrap();
+        let shared = Arc::new(ipc::DaemonShared::load(store).unwrap());
+
+        let entry_id = {
+            let mut q = shared.queue.lock().expect("queue lock");
+            let mut e = queue::QueueEntry {
+                approved_unattended: true,
+                ..queue::QueueEntry::default()
+            };
+            e.entry_id = uuid::Uuid::new_v4();
+            e.session_hash = "sha256:race".to_string();
+            e.project_key = "/w/alpha".to_string();
+            e.state = queue::QueueState::Uploading;
+            let id = e.entry_id;
+            q.upsert(e, 100).unwrap();
+            id
+        };
+
+        // The contributor excludes the project while the entry is in flight.
+        {
+            let mut policy = shared.policy.lock().expect("policy lock");
+            policy
+                .set_mode(
+                    "/w/alpha",
+                    policy::ProjectMode::Ignore,
+                    at("2026-08-08T12:00:00Z"),
+                )
+                .unwrap();
+        }
+        {
+            let mut q = shared.queue.lock().expect("queue lock");
+            assert_eq!(
+                q.retract_unattended_for_project("/w/alpha"),
+                0,
+                "an Uploading entry is deliberately skipped"
+            );
+            // The pass ends without sending it.
+            assert!(q.release_in_flight());
+            assert_eq!(q.all()[0].state, queue::QueueState::Approved);
+        }
+
+        drain_approved_for_test(&shared, at("2026-08-08T13:00:00Z"))
+            .await
+            .unwrap();
+
+        let e = shared.queue.lock().expect("queue lock").all()[0].clone();
+        assert_eq!(
+            e.state,
+            queue::QueueState::Refused,
+            "excluded before it was sent, so it must not be sent"
+        );
+        assert_eq!(
+            e.reason_label.as_deref(),
+            Some(queue::REASON_PROJECT_IGNORED)
+        );
+        assert_eq!(entry_id, e.entry_id);
     }
 
     #[tokio::test]
