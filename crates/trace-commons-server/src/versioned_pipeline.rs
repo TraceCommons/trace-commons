@@ -16,7 +16,8 @@ use tokio_postgres::Row;
 use trace_commons_gate_api::IndexWriteError;
 use trace_commons_gate_api::pipeline::{
     AdmissionDecision, AdmissionEvaluation, AdmissionEvidence, AdmissionInput, AtomicUnits,
-    BundlePackage, IndexMembershipDecision, InstrumentAwards, PIPELINE_OUTCOME_SCHEMA_ID,
+    BundlePackage, IndexMembershipDecision, InstrumentAward, InstrumentAwards, InstrumentId,
+    InstrumentSettlement, InstrumentSettlementProgress, Microcredits, PIPELINE_OUTCOME_SCHEMA_ID,
     PIPELINE_OUTCOME_SCHEMA_VERSION, Phase, PhaseResult, PrivacyRisk, ReasonCode, ReviewDecision,
     ReviewEvaluation, ReviewEvidence, ReviewInput, SchemaRef, ScoreDecision, ScoreEvaluation,
     ScoreEvidence, ScoreInput, SealedIndexCommand, SettleDecision, SettleEvaluation,
@@ -33,15 +34,22 @@ use crate::trace_artifact_store::{
     EncryptedTraceArtifactReceipt, TraceArtifactKind, TraceArtifactStore,
 };
 use crate::trace_corpus_storage::{
-    TraceCorpusStatus, TraceObjectArtifactKind, TraceObjectRefWrite, TraceSubmissionWrite,
-    safe_residual_risk_basis_labels,
+    TraceCorpusStatus, TraceCorpusStore, TraceCreditAccountSettlementLineItem,
+    TraceCreditSettlementBatchStatus, TraceCreditSettlementBatchWrite,
+    TraceCreditSettlementNearStatus, TraceObjectArtifactKind, TraceObjectRefWrite,
+    TraceSubmissionWrite, safe_residual_risk_basis_labels,
 };
 use crate::versioned_pipeline_bundle::{
     IdentifiedEmbedder, IdentifiedIndexReader, IdentifiedIndexWriter, IdentifiedPerplexityScorer,
     MinimalPolicyBundle, PIPELINE_BUNDLE_INVALID_LABEL, PIPELINE_DEPENDENCY_MISSING_LABEL,
     dependency_content_hash, pipeline_operation_ref, pipeline_result_ref,
 };
-use crate::versioned_pipeline_credit::SettlementAdapterRegistry;
+use crate::versioned_pipeline_credit::{
+    PIPELINE_CREDIT_REASON, PIPELINE_SETTLEMENT_POLICY_VERSION, SettlementAdapterRegistry,
+    SettlementRequest, credit_account_hash, issuer_approval_hash, microcredits_to_settled_i64,
+    pipeline_credit_event_id, pipeline_ledger_source_key, pipeline_settlement_batch_id,
+    source_list_hash,
+};
 
 /// The tenant's derived storage reference, the same value ingest's
 /// `tenant_storage_ref` produces: the first 16 bytes of SHA-256, as hex.
@@ -228,6 +236,34 @@ pub struct PipelineSettlementRecord {
     pub attempt_count: u32,
     pub max_attempts: u32,
     pub last_error_label: Option<String>,
+}
+
+/// The result of `PipelineService::settle_internal_credit`: either the
+/// Trace Credit leg settled into the ledger (its credit event and the
+/// finalized batch that carries it), or an active hold on the account kept
+/// it pending -- `PgPipelineStore::update_settlement` records the row as
+/// `held` and no ledger row is written.
+enum InternalCreditResult {
+    Complete {
+        credit_event_id: Uuid,
+        settlement_batch_id: Uuid,
+    },
+    Held,
+}
+
+/// `PgPipelineStore::update_settlement`'s per-call update. `credit_event_id`
+/// and `settlement_batch_id` only ever move from `NULL` to `Some` (a `None`
+/// here leaves whatever is already stored); `payout_state` similarly leaves
+/// the column unchanged when `None`. `result_ref_hash` is the exception --
+/// see `update_settlement`'s doc comment for which states force it to
+/// `NULL` regardless of what this carries.
+struct SettlementUpdate<'a> {
+    operation_state: &'a str,
+    result_ref_hash: Option<&'a str>,
+    credit_event_id: Option<Uuid>,
+    settlement_batch_id: Option<Uuid>,
+    payout_state: Option<&'a str>,
+    error_label: Option<&'a str>,
 }
 
 /// Also the shape `settle_selection` persists (decision D4): the Settle
@@ -1284,6 +1320,78 @@ impl PgPipelineStore {
         rows.iter().map(pipeline_settlement_from_row).collect()
     }
 
+    /// Advances one instrument leg (port 2160 to 2211). Gated on the run's
+    /// own lease, same as every other commit in this phase -- settlement
+    /// rows have no lease of their own that this call checks.
+    ///
+    /// `result_ref_hash` only ever moves from `NULL` to a value on the
+    /// transition to `'complete'`; the schema's own
+    /// `pipeline_run_settlements_result_shape` check already forbids a
+    /// non-`NULL` result on any other state, but `'forfeited'` and
+    /// `'retry'` write it as `NULL` outright rather than `COALESCE`ing
+    /// through whatever `update.result_ref_hash` carries, so a caller can
+    /// never accidentally persist a result alongside a non-`'complete'`
+    /// state. `credit_event_id`/`settlement_batch_id` only move from `NULL`
+    /// to a value (never overwritten or cleared); `payout_state` is written
+    /// only when the caller supplies one. `attempt_count` increments on
+    /// `'retry'`/`'failed'` (not `'forfeited'` -- forfeiture is not a
+    /// dispatch failure); `next_attempt_at` only moves on `'retry'`.
+    async fn update_settlement(
+        &self,
+        run: &PipelineRunRecord,
+        instrument_id: &str,
+        update: SettlementUpdate<'_>,
+    ) -> Result<PipelineSettlementRecord, DatabaseError> {
+        let lease_token = required_lease_token(run)?;
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, &run.tenant_id).await?;
+        let row = tx
+            .query_opt(
+                "UPDATE pipeline_run_settlements s
+                    SET operation_state = $4,
+                        result_ref_hash = CASE
+                            WHEN $4 IN ('forfeited', 'retry') THEN NULL
+                            ELSE COALESCE(s.result_ref_hash, $5)
+                        END,
+                        credit_event_id = COALESCE(s.credit_event_id, $6),
+                        settlement_batch_id = COALESCE(s.settlement_batch_id, $7),
+                        payout_state = COALESCE($8, s.payout_state),
+                        last_error_label = $9,
+                        attempt_count = CASE
+                            WHEN $4 IN ('retry', 'failed') THEN s.attempt_count + 1
+                            ELSE s.attempt_count
+                        END,
+                        next_attempt_at = CASE
+                            WHEN $4 = 'retry' THEN NOW() + INTERVAL '50 milliseconds'
+                            ELSE s.next_attempt_at
+                        END,
+                        updated_at = NOW()
+                   FROM pipeline_runs p
+                  WHERE s.tenant_id = $1 AND s.run_id = $2 AND s.instrument_id = $3
+                    AND p.tenant_id = s.tenant_id AND p.run_id = s.run_id
+                    AND p.state = 'leased' AND p.lease_token = $10
+                    AND p.lease_expires_at > NOW()
+                  RETURNING s.*, s.atomic_units::TEXT AS atomic_units_text",
+                &[
+                    &run.tenant_id,
+                    &run.run_id,
+                    &instrument_id,
+                    &update.operation_state,
+                    &update.result_ref_hash,
+                    &update.credit_event_id,
+                    &update.settlement_batch_id,
+                    &update.payout_state,
+                    &update.error_label,
+                    &lease_token,
+                ],
+            )
+            .await?
+            .ok_or_else(stale_lease_error)?;
+        let settlement = pipeline_settlement_from_row(&row)?;
+        tx.commit().await?;
+        Ok(settlement)
+    }
+
     /// Records (or updates) the receipt-artifact staging row inside the
     /// caller's tenant transaction, before the object-store write and again
     /// after it. A crash between the two calls leaves a `staged` row with a
@@ -1919,7 +2027,6 @@ pub struct PipelineService {
     index_reader: Arc<dyn IdentifiedIndexReader>,
     index_writer: Arc<dyn IdentifiedIndexWriter>,
     settlement_adapters: SettlementAdapterRegistry,
-    #[expect(dead_code, reason = "first used by Task 13")]
     caps: PipelineCaps,
     crash_point: Option<PipelineCrashPoint>,
     crash_pending: AtomicBool,
@@ -3011,17 +3118,218 @@ impl PipelineService {
             }
         }
 
-        // Every settlement row this task handles is already terminal --
-        // there are none -- so the run can complete now. Task 13 extends
-        // `commit_settle_from_progress` for the case with real legs.
+        // Step 6 (brief 3C, port 4724 to 4872 under the #971 settlement
+        // shape, amendments-971 A9): each settlement row Score seeded
+        // settles as an independent leg with no atomicity across
+        // instruments -- no leg waits for or reverses another leg, and a
+        // retry never repeats a leg that already reached `complete`. Guard
+        // is re-checked immediately before any instrument dispatch, the
+        // same reason Step 5 re-checks it before its own external effect:
+        // the withdrawal can land in the gap since Step 3's read.
+        guard = self.submission_guard(&run).await?;
+        let settlements = self
+            .store
+            .list_settlements(&run.tenant_id, run.run_id)
+            .await?;
+        if !guard.operable {
+            // The submission stopped being operable: every leg that has not
+            // already completed is forfeited without calling its adapter.
+            // Credit that already settled stays settled (skipped below);
+            // credit that did not is forfeited, same as every other
+            // instrument -- there is no special case for Trace Credit here.
+            for settlement in &settlements {
+                if settlement.operation_state != "complete" {
+                    self.store
+                        .update_settlement(
+                            &run,
+                            &settlement.instrument_id,
+                            SettlementUpdate {
+                                operation_state: "forfeited",
+                                result_ref_hash: None,
+                                credit_event_id: None,
+                                settlement_batch_id: None,
+                                payout_state: None,
+                                error_label: Some(PIPELINE_SUBMISSION_INOPERABLE_LABEL),
+                            },
+                        )
+                        .await?;
+                }
+            }
+        } else {
+            // D4: the expected result comes from the persisted selection,
+            // not from the row -- the row's own `result_ref_hash` column
+            // holds `NULL` until the leg actually completes.
+            let selection_decision =
+                serde_json::from_value::<SettleDecision>(selection.decision.clone())
+                    .map_err(|_| anyhow::anyhow!("settlement_operation_mismatch"))?;
+            let mut held = false;
+            let mut settlement_blocked = false;
+            for settlement in settlements.clone() {
+                if matches!(
+                    settlement.operation_state.as_str(),
+                    "complete" | "forfeited"
+                ) {
+                    continue;
+                }
+                let instrument_id = InstrumentId::new(settlement.instrument_id.clone())
+                    .map_err(|_| anyhow::anyhow!("settlement_operation_mismatch"))?;
+                let adapter = self
+                    .settlement_adapters
+                    .get(&instrument_id)
+                    .ok_or_else(|| anyhow::anyhow!("settlement_adapter_missing"))?;
+                let cap = self
+                    .caps
+                    .per_instrument_atomic_units
+                    .get(instrument_id.as_str())
+                    .copied()
+                    .ok_or_else(|| anyhow::anyhow!(PIPELINE_CREDIT_CAP_LABEL))?;
+                if settlement.atomic_units > cap {
+                    self.store
+                        .update_settlement(
+                            &run,
+                            instrument_id.as_str(),
+                            SettlementUpdate {
+                                operation_state: "failed",
+                                result_ref_hash: None,
+                                credit_event_id: None,
+                                settlement_batch_id: None,
+                                payout_state: None,
+                                error_label: Some(PIPELINE_CREDIT_CAP_LABEL),
+                            },
+                        )
+                        .await?;
+                    settlement_blocked = true;
+                    continue;
+                }
+                let expected_result_ref_hash = selection_decision
+                    .settlement_operations()
+                    .iter()
+                    .find(|operation| operation.instrument_id() == &instrument_id)
+                    .and_then(|operation| operation.result_ref_hash())
+                    .map(str::to_string)
+                    .ok_or_else(|| anyhow::anyhow!("settlement result reference is missing"))?;
+                let request = SettlementRequest {
+                    tenant_id: run.tenant_id.clone(),
+                    run_id: run.run_id,
+                    instrument_id: instrument_id.clone(),
+                    atomic_units: settlement.atomic_units,
+                    operation_ref_hash: settlement.operation_ref_hash.clone(),
+                    expected_result_ref_hash: expected_result_ref_hash.clone(),
+                };
+                let actual_result = match adapter.settle(&request) {
+                    Ok(result) if result == expected_result_ref_hash => result,
+                    Ok(_) => {
+                        self.store
+                            .update_settlement(
+                                &run,
+                                instrument_id.as_str(),
+                                SettlementUpdate {
+                                    operation_state: "failed",
+                                    result_ref_hash: None,
+                                    credit_event_id: None,
+                                    settlement_batch_id: None,
+                                    payout_state: None,
+                                    error_label: Some("settlement_result_mismatch"),
+                                },
+                            )
+                            .await?;
+                        settlement_blocked = true;
+                        continue;
+                    }
+                    Err(_) => {
+                        self.store
+                            .update_settlement(
+                                &run,
+                                instrument_id.as_str(),
+                                SettlementUpdate {
+                                    operation_state: "retry",
+                                    result_ref_hash: None,
+                                    credit_event_id: None,
+                                    settlement_batch_id: None,
+                                    payout_state: None,
+                                    error_label: Some("settlement_adapter_unavailable"),
+                                },
+                            )
+                            .await?;
+                        settlement_blocked = true;
+                        continue;
+                    }
+                };
+                let (credit_event_id, settlement_batch_id) =
+                    if instrument_id == InstrumentId::trace_credit() {
+                        match self
+                            .settle_internal_credit(&run, &settlement, score_outcome.outcome_id)
+                            .await?
+                        {
+                            InternalCreditResult::Complete {
+                                credit_event_id,
+                                settlement_batch_id,
+                            } => (Some(credit_event_id), Some(settlement_batch_id)),
+                            InternalCreditResult::Held => {
+                                self.store
+                                    .update_settlement(
+                                        &run,
+                                        instrument_id.as_str(),
+                                        SettlementUpdate {
+                                            operation_state: "held",
+                                            result_ref_hash: None,
+                                            credit_event_id: None,
+                                            settlement_batch_id: None,
+                                            payout_state: None,
+                                            error_label: Some(PIPELINE_CREDIT_HELD_LABEL),
+                                        },
+                                    )
+                                    .await?;
+                                held = true;
+                                settlement_blocked = true;
+                                continue;
+                            }
+                        }
+                    } else {
+                        (None, None)
+                    };
+                self.store
+                    .update_settlement(
+                        &run,
+                        instrument_id.as_str(),
+                        SettlementUpdate {
+                            operation_state: "complete",
+                            result_ref_hash: Some(&actual_result),
+                            credit_event_id,
+                            settlement_batch_id,
+                            payout_state: None,
+                            error_label: None,
+                        },
+                    )
+                    .await?;
+                self.inject_crash(PipelineCrashPoint::AfterInstrumentOperation)?;
+            }
+            if settlement_blocked {
+                // Every non-terminal row this attempt leaves behind is
+                // retried together, under whichever label best explains why
+                // (decision P2's mechanics: the Settle code calls
+                // `mark_retry` itself here, never returning `Err` for this
+                // case, so it never reaches `process_claimed_run`'s
+                // allowlist).
+                let label = if held {
+                    PIPELINE_CREDIT_HELD_LABEL
+                } else {
+                    "settlement_operation_retry"
+                };
+                return Ok(self.store.mark_retry(&run, label).await?);
+            }
+        }
+
         self.commit_settle_from_progress(&run, &selection, guard)
             .await
     }
 
-    /// Commits the Settle outcome once every settlement row is terminal.
-    /// This task completes only the case with no settlement rows at all (no
-    /// instrument was awarded to this run); Task 13 extends it to build the
-    /// final decision from real per-instrument outcomes (amendments-971 A9).
+    /// Commits the Settle outcome once every settlement row is terminal
+    /// (`complete` or `forfeited`) -- Step 6 above guarantees that by the
+    /// time this runs, either through completion or through the guard's
+    /// forfeiture pass. Builds the final decision from what actually
+    /// happened to each leg (amendments-971 A9), never from the selection's
+    /// own proposed operations.
     async fn commit_settle_from_progress(
         &self,
         run: &PipelineRunRecord,
@@ -3068,10 +3376,67 @@ impl PipelineService {
                 },
             }
         };
-        let final_decision = SettleDecision::new(final_index_membership, &score_decision, vec![])?;
+        // Every row is terminal here (Step 6's contract): `complete` becomes
+        // a `Completed` operation carrying the adapter's actual result;
+        // `forfeited` becomes a `Forfeited` operation under the same safe
+        // label the row itself was written with. `list_settlements` orders
+        // by `instrument_id`, so this is already instrument order;
+        // `SettleDecision::from_parts` re-sorts regardless.
+        let settlements = self
+            .store
+            .list_settlements(&run.tenant_id, run.run_id)
+            .await?;
+        let operations = settlements
+            .iter()
+            .map(|settlement| -> anyhow::Result<InstrumentSettlement> {
+                let instrument_id = InstrumentId::new(settlement.instrument_id.clone())
+                    .map_err(|_| anyhow::anyhow!("settlement_operation_mismatch"))?;
+                match settlement.operation_state.as_str() {
+                    "complete" => {
+                        let result_ref_hash = settlement
+                            .result_ref_hash
+                            .clone()
+                            .ok_or_else(|| anyhow::anyhow!("settlement_operation_mismatch"))?;
+                        InstrumentSettlement::new(
+                            instrument_id,
+                            settlement.atomic_units,
+                            settlement.operation_ref_hash.clone(),
+                            result_ref_hash,
+                        )
+                        .map_err(|_| anyhow::anyhow!("settlement_operation_mismatch"))
+                    }
+                    "forfeited" => InstrumentSettlement::forfeited(
+                        instrument_id,
+                        settlement.atomic_units,
+                        settlement.operation_ref_hash.clone(),
+                        ReasonCode::new(PIPELINE_SUBMISSION_INOPERABLE_LABEL)
+                            .expect("static safe label"),
+                    )
+                    .map_err(|_| anyhow::anyhow!("settlement_operation_mismatch")),
+                    // Step 6 never returns here with a row left `pending`,
+                    // `retry`, `held`, or `failed` -- it retries the run
+                    // itself first. Fail closed rather than commit a
+                    // decision that misrepresents a leg still in flight.
+                    _ => Err(anyhow::anyhow!("settlement_operation_mismatch")),
+                }
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let final_decision =
+            SettleDecision::new(final_index_membership, &score_decision, operations)?;
         let mut evidence = serde_json::from_value::<SettleEvidence>(selection.evidence.clone())
             .map_err(|_| anyhow::anyhow!("settlement_operation_mismatch"))?;
         evidence.index_command_hash = run.index_command_hash.clone();
+        evidence.settlement_progress = settlements
+            .iter()
+            .map(|settlement| {
+                Ok(InstrumentSettlementProgress {
+                    instrument_id: InstrumentId::new(settlement.instrument_id.clone())?,
+                    operation_ref_hash: settlement.operation_ref_hash.clone(),
+                    result_ref_hash: settlement.result_ref_hash.clone(),
+                })
+            })
+            .collect::<Result<Vec<_>, trace_commons_gate_api::pipeline::ContractError>>()
+            .map_err(|_| anyhow::anyhow!("settlement_operation_mismatch"))?;
         evidence.index_progress = Some(run.index_write_state.clone());
         evidence.submission_operable = Some(guard.operable);
         evidence.guard_reason = if guard.operable {
@@ -3097,6 +3462,200 @@ impl PipelineService {
             .await?;
         self.inject_crash(PipelineCrashPoint::AfterSettleCommit)?;
         Ok(updated)
+    }
+
+    /// Settles the Trace Credit leg into the internal credit ledger (port
+    /// 4937 to 5112), adapted for the #971 settlement shape and PR 2's
+    /// scope:
+    ///
+    /// - Ruling A8: the microcredit amount comes from
+    ///   `InstrumentAward::trace_credit_microcredits`, not the removed
+    ///   `Microcredits::from_atomic_units` (private as of #971).
+    /// - `external_ref` carries `pipeline_ledger_source_key` (a hash of the
+    ///   tenant and request idempotency key) rather than a raw run/outcome
+    ///   id string, per the repo's hash-only convention -- PR 2's schema
+    ///   (migrations V75 to V78) has no `ledger_source_key` column on
+    ///   `trace_credit_ledger` for a dedicated idempotency key; that column
+    ///   is out of this PR's scope.
+    /// - The batch never dispatches a NEAR payout in PR 2: `near_status` is
+    ///   always `Disabled` and `near_contract_id` always `None` (no
+    ///   `self.payout` config exists on this service).
+    ///
+    /// An active hold on the account (checked before any ledger write)
+    /// returns `Held` without touching the ledger at all -- the caller
+    /// records the row as `held` and leaves the leg pending.
+    async fn settle_internal_credit(
+        &self,
+        run: &PipelineRunRecord,
+        settlement: &PipelineSettlementRecord,
+        score_outcome_id: Uuid,
+    ) -> anyhow::Result<InternalCreditResult> {
+        let submission = self
+            .backend
+            .get_trace_submission(&run.tenant_id, run.submission_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("submission is missing"))?;
+        let account_ref = submission.auth_principal_ref;
+        let account_hash = credit_account_hash(&account_ref);
+        let holds = self.backend.list_trace_credit_holds(&run.tenant_id).await?;
+        if holds
+            .iter()
+            .any(|hold| hold.credit_account_ref == account_ref && hold.released_at.is_none())
+        {
+            return Ok(InternalCreditResult::Held);
+        }
+        let event_id = pipeline_credit_event_id(&run.tenant_id, run.run_id, score_outcome_id);
+        let amount = InstrumentAward::new(InstrumentId::trace_credit(), settlement.atomic_units)
+            .map_err(|_| anyhow::anyhow!("settlement_operation_mismatch"))?
+            .trace_credit_microcredits()
+            .map_err(|_| anyhow::anyhow!("settlement_operation_mismatch"))?;
+        let external_ref = pipeline_ledger_source_key(&run.tenant_id, &run.request_idempotency_key);
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = PgPipelineStore::tenant_transaction(&mut client, &run.tenant_id).await?;
+        tx.execute(
+            "INSERT INTO trace_credit_ledger (
+                tenant_id, credit_event_id, submission_id, trace_id, credit_account_ref,
+                event_type, points_delta, reason, external_ref, actor_principal_ref,
+                actor_role, settlement_state, pipeline_run_id, score_outcome_id, instrument_id
+             ) VALUES (
+                $1,$2,$3,$4,$5,'accepted',$6,$7,$8,$5,'pipeline_worker','pending',$9,$10,$11
+             )
+             ON CONFLICT (tenant_id, credit_event_id) DO NOTHING",
+            &[
+                &run.tenant_id,
+                &event_id,
+                &run.submission_id,
+                &run.trace_id,
+                &account_ref,
+                &amount.to_credit_decimal(),
+                &PIPELINE_CREDIT_REASON,
+                &external_ref,
+                &run.run_id,
+                &score_outcome_id,
+                &settlement.instrument_id,
+            ],
+        )
+        .await?;
+        let pending_events = tx
+            .query(
+                "SELECT credit_event_id, submission_id, points_delta
+                   FROM trace_credit_ledger
+                  WHERE tenant_id = $1
+                    AND pipeline_run_id IS NOT NULL
+                    AND instrument_id = $2
+                    AND credit_account_ref = $3
+                    AND settlement_state = 'pending'
+                  ORDER BY credit_event_id",
+                &[&run.tenant_id, &settlement.instrument_id, &account_ref],
+            )
+            .await?;
+        tx.commit().await?;
+        anyhow::ensure!(
+            pending_events
+                .iter()
+                .any(|event| event.get::<_, Uuid>("credit_event_id") == event_id),
+            "eligible credit event is missing"
+        );
+        let event_ids = pending_events
+            .iter()
+            .map(|event| event.get::<_, Uuid>("credit_event_id"))
+            .collect::<Vec<_>>();
+        let submission_ids = pending_events
+            .iter()
+            .map(|event| event.get::<_, Uuid>("submission_id"))
+            .collect::<Vec<_>>();
+        let list_hash = source_list_hash(&event_ids);
+        let settled_micros = pending_events.iter().try_fold(0_i64, |total, event| {
+            let points_delta: String = event.get("points_delta");
+            let amount = Microcredits::from_credit_decimal(&points_delta)
+                .map_err(|_| anyhow::anyhow!("credit_amount_overflow"))?;
+            let amount = microcredits_to_settled_i64(amount)?;
+            total
+                .checked_add(amount)
+                .ok_or_else(|| anyhow::anyhow!("credit_amount_overflow"))
+        })?;
+        let batch_id = pipeline_settlement_batch_id(&run.tenant_id, &list_hash);
+        let existing = self
+            .backend
+            .list_trace_credit_settlement_batches(&run.tenant_id)
+            .await?
+            .into_iter()
+            .find(|batch| batch.settlement_batch_id == batch_id);
+        if existing
+            .as_ref()
+            .is_none_or(|batch| batch.status != TraceCreditSettlementBatchStatus::Finalized)
+        {
+            let line_item = TraceCreditAccountSettlementLineItem {
+                credit_account_ref: account_ref.clone(),
+                credit_account_hash: account_hash.clone(),
+                settled_credit_delta_micros: settled_micros,
+                source_credit_event_ids: event_ids.clone(),
+                source_submission_ids: submission_ids.clone(),
+                source_list_hash: list_hash.clone(),
+                near_status: TraceCreditSettlementNearStatus::Disabled,
+                near_outbox_id: None,
+                near_payout_hold_reason: None,
+            };
+            let preview = TraceCreditSettlementBatchWrite {
+                tenant_id: run.tenant_id.clone(),
+                settlement_batch_id: batch_id,
+                policy_version: PIPELINE_SETTLEMENT_POLICY_VERSION.to_string(),
+                status: TraceCreditSettlementBatchStatus::DryRun,
+                reason_hash: list_hash.clone(),
+                issuer_approval_evidence_hash: Some(issuer_approval_hash(&list_hash)),
+                source_credit_event_ids: event_ids.clone(),
+                source_submission_ids: submission_ids.clone(),
+                source_list_hash: list_hash.clone(),
+                settled_credit_points: Microcredits::from_raw(
+                    u64::try_from(settled_micros).unwrap_or(0),
+                )
+                .to_credit_decimal(),
+                settled_credit_micros: settled_micros,
+                line_items: vec![line_item.clone()],
+                near_contract_id: None,
+                ranking_model_version: None,
+                ranking_target_use: None,
+                ranking_calibration_run_id: None,
+                ranking_calibration_report_hash: None,
+                ranking_calibration_joined_evidence_hash: None,
+                ranking_credit_events_excluded_count: 0,
+                ranking_credit_events_excluded_reason_counts: BTreeMap::new(),
+                actor_principal_ref: account_ref.clone(),
+            };
+            self.backend
+                .upsert_trace_credit_settlement_batch(preview.clone())
+                .await?;
+            let mut finalized = preview;
+            finalized.status = TraceCreditSettlementBatchStatus::Finalized;
+            self.backend
+                .upsert_trace_credit_settlement_batch(finalized)
+                .await?;
+            let mut client = self.backend.trace_pool().get().await?;
+            let tx = PgPipelineStore::tenant_transaction(&mut client, &run.tenant_id).await?;
+            tx.execute(
+                "UPDATE trace_credit_settlement_batches
+                    SET instrument_id = $3
+                  WHERE tenant_id = $1 AND settlement_batch_id = $2
+                    AND (instrument_id IS NULL OR instrument_id = $3)",
+                &[&run.tenant_id, &batch_id, &settlement.instrument_id],
+            )
+            .await?;
+            tx.execute(
+                "UPDATE trace_credit_ledger
+                    SET settlement_state = 'final'
+                  WHERE tenant_id = $1 AND credit_event_id = ANY($2)
+                    AND pipeline_run_id IS NOT NULL
+                    AND instrument_id = $3
+                    AND settlement_state = 'pending'",
+                &[&run.tenant_id, &event_ids, &settlement.instrument_id],
+            )
+            .await?;
+            tx.commit().await?;
+        }
+        Ok(InternalCreditResult::Complete {
+            credit_event_id: event_id,
+            settlement_batch_id: batch_id,
+        })
     }
 }
 

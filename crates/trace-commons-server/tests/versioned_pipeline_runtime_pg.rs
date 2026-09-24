@@ -9,8 +9,8 @@ use secrecy::SecretString;
 use sha2::{Digest, Sha256};
 use trace_commons_gate_api::pipeline::{
     AtomicUnits, IndexMembershipDecision, InstrumentAward, InstrumentDescriptor, InstrumentId,
-    InstrumentKind, Phase, PhaseResult, ReasonCode, ReviewDecision, ReviewEvaluation,
-    ReviewEvidence, ReviewOutput, ScoreEvidence, SettleDecision, SettleEvidence,
+    InstrumentKind, InstrumentSettlementOutcome, Phase, PhaseResult, ReasonCode, ReviewDecision,
+    ReviewEvaluation, ReviewEvidence, ReviewOutput, ScoreEvidence, SettleDecision, SettleEvidence,
     TRACE_CREDIT_DECIMALS,
 };
 use trace_commons_gate_api::{
@@ -27,13 +27,18 @@ use trace_commons_server::secrets::SecretsCrypto;
 use trace_commons_server::trace_artifact_store::{
     LocalEncryptedTraceArtifactStore, TraceArtifactStore,
 };
+use trace_commons_server::trace_corpus_storage::{
+    TraceCorpusStore, TraceCreditHoldReason, TraceCreditHoldWrite,
+};
 use trace_commons_server::versioned_pipeline::*;
 use trace_commons_server::versioned_pipeline_bundle::{
     MINIMAL_INDEX_ID, MINIMAL_PROJECTION_ID, MinimalPolicyBundle, PipelineBundleConfig,
     PipelineInstrumentAwardConfig, dependency_content_hash, pipeline_operation_ref,
+    pipeline_result_ref,
 };
 use trace_commons_server::versioned_pipeline_credit::{
-    RecordingSettlementAdapter, SettlementAdapter, SettlementAdapterRegistry,
+    RecordingSettlementAdapter, SettlementAdapter, SettlementAdapterRegistry, SettlementRequest,
+    credit_account_hash,
 };
 use trace_commons_server::versioned_pipeline_index::{IndexFault, IsolatedPipelineIndex};
 
@@ -698,6 +703,79 @@ async fn test_service(
     (Arc::new(service), index, adapters)
 }
 
+/// P5: like `test_service`, but takes the settlement adapters directly
+/// rather than building the two recording ones itself -- for a test whose
+/// adapter shape `RecordingSettlementAdapter` cannot produce (a double that
+/// always returns a mismatching result).
+async fn test_service_with_adapters(
+    backend: Arc<PgBackend>,
+    artifact_store: Arc<dyn TraceArtifactStore>,
+    config: PipelineBundleConfig,
+    adapters: Vec<Arc<dyn SettlementAdapter>>,
+) -> Arc<PipelineService> {
+    let scorer = Arc::new(ReferencePerplexityScorer::new());
+    let embedder = Arc::new(ReferenceEmbedder::new());
+    let package = MinimalPolicyBundle::minimal_package(&config, scorer.as_ref(), embedder.as_ref())
+        .expect("build minimal bundle package");
+    let index = IsolatedPipelineIndex::new();
+    let registry =
+        SettlementAdapterRegistry::new(adapters).expect("build settlement adapter registry");
+    let caps = PipelineCaps {
+        per_instrument_atomic_units: BTreeMap::from([
+            (
+                "storage_rebate".to_string(),
+                AtomicUnits::from_raw(u128::MAX),
+            ),
+            (
+                InstrumentId::trace_credit().as_str().to_string(),
+                AtomicUnits::from_raw(u128::MAX),
+            ),
+        ]),
+    };
+    let service = PipelineServiceBuilder::new(
+        backend,
+        artifact_store,
+        package,
+        index.clone(),
+        index.clone(),
+        registry,
+        caps,
+    )
+    .with_scorer(scorer)
+    .with_embedder(embedder)
+    .build()
+    .expect("build pipeline service");
+    Arc::new(service)
+}
+
+/// P5's mismatching adapter double: always returns a well-formed but wrong
+/// result reference, regardless of what the request expects. Proves Settle
+/// fails the row closed on D4's binding check -- the expected result comes
+/// from the persisted selection, never trusted from whatever the adapter
+/// hands back -- rather than accepting a plausible-looking but different
+/// result.
+struct MismatchingSettlementAdapter {
+    instrument_id: InstrumentId,
+}
+
+impl SettlementAdapter for MismatchingSettlementAdapter {
+    fn instrument_id(&self) -> &InstrumentId {
+        &self.instrument_id
+    }
+
+    fn adapter_identity(&self) -> &str {
+        "mismatching_test_only"
+    }
+
+    fn payout_rail(&self) -> &str {
+        "none"
+    }
+
+    fn settle(&self, _request: &SettlementRequest) -> anyhow::Result<String> {
+        Ok(format!("sha256:{}", "f".repeat(64)))
+    }
+}
+
 fn receipt<'a>(
     tenant: &'a str,
     key: &'a str,
@@ -779,6 +857,59 @@ async fn count_staged_artifacts(backend: &Arc<PgBackend>, tenant_id: &str) -> i6
         .get(0);
     tx.commit().await.expect("commit count_staged_artifacts");
     count
+}
+
+/// `SELECT COUNT(*)` over `trace_credit_ledger` for one pipeline run, in its
+/// own tenant-scoped transaction.
+async fn count_credit_ledger_rows_for_run(
+    backend: &Arc<PgBackend>,
+    tenant_id: &str,
+    run_id: uuid::Uuid,
+) -> i64 {
+    let mut client = backend
+        .trace_pool_for_test()
+        .get()
+        .await
+        .expect("client for count_credit_ledger_rows_for_run");
+    let tx = tenant_tx(&mut client, tenant_id).await;
+    let count: i64 = tx
+        .query_one(
+            "SELECT COUNT(*) FROM trace_credit_ledger
+              WHERE tenant_id = $1 AND pipeline_run_id = $2",
+            &[&tenant_id, &run_id],
+        )
+        .await
+        .expect("count credit ledger rows")
+        .get(0);
+    tx.commit()
+        .await
+        .expect("commit count_credit_ledger_rows_for_run");
+    count
+}
+
+/// The `status` column of `trace_credit_settlement_batches` for
+/// `settlement_batch_id`, or `None` if no row exists.
+async fn settlement_batch_status(
+    backend: &Arc<PgBackend>,
+    tenant_id: &str,
+    settlement_batch_id: uuid::Uuid,
+) -> Option<String> {
+    let mut client = backend
+        .trace_pool_for_test()
+        .get()
+        .await
+        .expect("client for settlement_batch_status");
+    let tx = tenant_tx(&mut client, tenant_id).await;
+    let row = tx
+        .query_opt(
+            "SELECT status FROM trace_credit_settlement_batches
+              WHERE tenant_id = $1 AND settlement_batch_id = $2",
+            &[&tenant_id, &settlement_batch_id],
+        )
+        .await
+        .expect("query settlement batch status");
+    tx.commit().await.expect("commit settlement_batch_status");
+    row.map(|row| row.get::<_, String>("status"))
 }
 
 /// Recursively counts regular files under `path`. Used to confirm a refused
@@ -2144,5 +2275,550 @@ async fn withdrawal_during_dispatch_cancels_the_index_write() {
         index.writer_calls(),
         0,
         "dispatch was cancelled before any upsert call"
+    );
+}
+
+/// Amendments-971 A9: each instrument settles as an independent leg with no
+/// atomicity across instruments. One leg's adapter failure retries only
+/// that leg; the other, already `complete`, is never dispatched again, and
+/// the run records its Settle outcome only once both legs are terminal.
+#[tokio::test]
+async fn independent_instruments_retry_without_repeating_a_completed_one() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _index, adapters) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        scored_config(false),
+        None,
+    )
+    .await;
+    let rebate = adapters[0].clone();
+    let trace_credit = adapters[1].clone();
+    let tenant = format!("settle-instruments-{}", uuid::Uuid::new_v4());
+    let (run, _evidence) = run_to_settle_ready(&service, &tenant).await;
+
+    rebate.fail_next();
+    let retried = service
+        .process_run(&tenant, run.run_id)
+        .await
+        .unwrap()
+        .expect("Settle retries while one leg is blocked");
+    assert_eq!(retried.state, PipelineRunState::Retry);
+
+    let settlements = service
+        .store()
+        .list_settlements(&tenant, run.run_id)
+        .await
+        .unwrap();
+    let rebate_row = settlements
+        .iter()
+        .find(|settlement| settlement.instrument_id == "storage_rebate")
+        .expect("storage_rebate row seeded");
+    let credit_row = settlements
+        .iter()
+        .find(|settlement| settlement.instrument_id == InstrumentId::trace_credit().as_str())
+        .expect("trace_credit row seeded");
+    assert_eq!(rebate_row.operation_state, "retry");
+    assert_eq!(credit_row.operation_state, "complete");
+    let expected_credit_result = pipeline_result_ref(
+        run.run_id,
+        &InstrumentAward::new(
+            InstrumentId::trace_credit(),
+            AtomicUnits::from_raw(1_000_000),
+        )
+        .unwrap(),
+    );
+    assert_eq!(
+        credit_row.result_ref_hash.as_deref(),
+        Some(expected_credit_result.as_str())
+    );
+
+    let outcomes = service
+        .store()
+        .list_outcomes(&tenant, run.run_id)
+        .await
+        .unwrap();
+    assert!(
+        !outcomes
+            .iter()
+            .any(|outcome| outcome.phase == Phase::Settle),
+        "no Settle outcome while a leg is still blocked"
+    );
+    assert_eq!(
+        trace_credit.requests().len(),
+        1,
+        "the completed leg was dispatched exactly once so far"
+    );
+
+    force_due(&backend, &tenant, run.run_id).await;
+    let settled = service
+        .process_run(&tenant, run.run_id)
+        .await
+        .unwrap()
+        .expect("the retry completes the remaining leg");
+    assert_eq!(settled.state, PipelineRunState::Complete);
+
+    assert_eq!(
+        trace_credit.requests().len(),
+        1,
+        "the already-complete leg was never dispatched again"
+    );
+    assert_eq!(
+        count_credit_ledger_rows_for_run(&backend, &tenant, run.run_id).await,
+        1,
+        "exactly one credit ledger row for the run"
+    );
+
+    let settlements = service
+        .store()
+        .list_settlements(&tenant, run.run_id)
+        .await
+        .unwrap();
+    let credit_row = settlements
+        .iter()
+        .find(|settlement| settlement.instrument_id == InstrumentId::trace_credit().as_str())
+        .expect("trace_credit row present");
+    let batch_id = credit_row
+        .settlement_batch_id
+        .expect("trace_credit settled into a batch");
+    assert_eq!(
+        settlement_batch_status(&backend, &tenant, batch_id).await,
+        Some("finalized".to_string())
+    );
+
+    let outcomes = service
+        .store()
+        .list_outcomes(&tenant, run.run_id)
+        .await
+        .unwrap();
+    let settle_outcomes: Vec<_> = outcomes
+        .into_iter()
+        .filter(|outcome| outcome.phase == Phase::Settle)
+        .collect();
+    assert_eq!(settle_outcomes.len(), 1, "exactly one Settle outcome");
+    let settle_outcome = settle_outcomes.into_iter().next().unwrap();
+    let decision: SettleDecision = serde_json::from_value(settle_outcome.decision).unwrap();
+    let operations = decision.settlement_operations();
+    assert_eq!(operations.len(), 2);
+    assert_eq!(operations[0].instrument_id().as_str(), "storage_rebate");
+    assert_eq!(operations[1].instrument_id().as_str(), "trace_credit");
+    for operation in operations {
+        match operation.outcome() {
+            InstrumentSettlementOutcome::Completed { result_ref_hash } => {
+                assert!(!result_ref_hash.is_empty());
+            }
+            InstrumentSettlementOutcome::Forfeited { .. } => {
+                panic!("both legs completed; neither should be forfeited")
+            }
+        }
+    }
+    let evidence: SettleEvidence = serde_json::from_value(settle_outcome.evidence).unwrap();
+    assert_eq!(evidence.settlement_progress.len(), 2);
+}
+
+/// Brief 3C / amendments-971: a withdrawal recorded after Score forfeits
+/// every settlement leg that has not already completed -- no adapter is
+/// called for either instrument -- and Settle still completes the run with
+/// a committed `Forfeited` operation per leg.
+#[tokio::test]
+async fn withdrawal_after_score_forfeits_pending_operations_and_settle_completes() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _index, adapters) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        scored_config(false),
+        None,
+    )
+    .await;
+    let rebate = adapters[0].clone();
+    let trace_credit = adapters[1].clone();
+    let tenant = format!("settle-forfeit-{}", uuid::Uuid::new_v4());
+    let (run, _evidence) = run_to_settle_ready(&service, &tenant).await;
+
+    withdraw_submission(&backend, &tenant, run.submission_id).await;
+
+    let settled = service
+        .process_run(&tenant, run.run_id)
+        .await
+        .unwrap()
+        .expect("Settle completes despite the withdrawal");
+    assert_eq!(settled.state, PipelineRunState::Complete);
+    assert_eq!(settled.next_phase, None);
+
+    assert_eq!(
+        rebate.requests().len(),
+        0,
+        "no adapter call for a forfeited leg"
+    );
+    assert_eq!(
+        trace_credit.requests().len(),
+        0,
+        "no adapter call for a forfeited leg"
+    );
+    assert_eq!(
+        count_credit_ledger_rows_for_run(&backend, &tenant, run.run_id).await,
+        0,
+        "no credit ledger row for a forfeited trace_credit leg"
+    );
+
+    let settlements = service
+        .store()
+        .list_settlements(&tenant, run.run_id)
+        .await
+        .unwrap();
+    assert_eq!(settlements.len(), 2);
+    for settlement in &settlements {
+        assert_eq!(settlement.operation_state, "forfeited");
+        assert_eq!(settlement.result_ref_hash, None);
+    }
+
+    let outcomes = service
+        .store()
+        .list_outcomes(&tenant, run.run_id)
+        .await
+        .unwrap();
+    let settle_outcome = outcomes
+        .into_iter()
+        .find(|outcome| outcome.phase == Phase::Settle)
+        .expect("Settle outcome recorded");
+    let decision: SettleDecision = serde_json::from_value(settle_outcome.decision).unwrap();
+    let operations = decision.settlement_operations();
+    assert_eq!(operations.len(), 2);
+    for operation in operations {
+        match operation.outcome() {
+            InstrumentSettlementOutcome::Forfeited { reason } => {
+                assert_eq!(reason.as_str(), PIPELINE_SUBMISSION_INOPERABLE_LABEL);
+            }
+            InstrumentSettlementOutcome::Completed { .. } => {
+                panic!("expected every operation to be forfeited")
+            }
+        }
+    }
+    match decision.index_membership {
+        IndexMembershipDecision::Exclude { reason } => {
+            assert_eq!(reason.as_str(), PIPELINE_SUBMISSION_INOPERABLE_LABEL);
+        }
+        IndexMembershipDecision::Include { .. } => {
+            panic!("a withdrawn submission must not commit an Include decision")
+        }
+    }
+    let evidence: SettleEvidence = serde_json::from_value(settle_outcome.evidence).unwrap();
+    assert_eq!(evidence.submission_operable, Some(false));
+}
+
+/// A withdrawal recorded after a run has already completed leaves the
+/// settled leg, its finalized batch, and the committed Settle outcome
+/// untouched -- there is no reprocessing path that could revisit them, and
+/// this locks that in.
+#[tokio::test]
+async fn settled_credit_stays_when_withdrawal_follows_settlement() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _index, _adapters) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        scored_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("settle-post-withdraw-{}", uuid::Uuid::new_v4());
+    let (run, _evidence) = run_to_settle_ready(&service, &tenant).await;
+
+    let settled = service
+        .process_run(&tenant, run.run_id)
+        .await
+        .unwrap()
+        .expect("Settle completes");
+    assert_eq!(settled.state, PipelineRunState::Complete);
+
+    let settlements_before = service
+        .store()
+        .list_settlements(&tenant, run.run_id)
+        .await
+        .unwrap();
+    let credit_before = settlements_before
+        .iter()
+        .find(|settlement| settlement.instrument_id == InstrumentId::trace_credit().as_str())
+        .expect("trace_credit row present")
+        .clone();
+    let outcomes_before = service
+        .store()
+        .list_outcomes(&tenant, run.run_id)
+        .await
+        .unwrap();
+    let settle_outcome_before = outcomes_before
+        .into_iter()
+        .find(|outcome| outcome.phase == Phase::Settle)
+        .expect("Settle outcome recorded");
+    let batch_id = credit_before
+        .settlement_batch_id
+        .expect("trace_credit settled into a batch");
+    let batch_status_before = settlement_batch_status(&backend, &tenant, batch_id).await;
+    let ledger_count_before = count_credit_ledger_rows_for_run(&backend, &tenant, run.run_id).await;
+
+    withdraw_submission(&backend, &tenant, run.submission_id).await;
+
+    let settlements_after = service
+        .store()
+        .list_settlements(&tenant, run.run_id)
+        .await
+        .unwrap();
+    let credit_after = settlements_after
+        .iter()
+        .find(|settlement| settlement.instrument_id == InstrumentId::trace_credit().as_str())
+        .expect("trace_credit row present")
+        .clone();
+    assert_eq!(
+        credit_after, credit_before,
+        "the settled leg is unchanged by a later withdrawal"
+    );
+
+    let outcomes_after = service
+        .store()
+        .list_outcomes(&tenant, run.run_id)
+        .await
+        .unwrap();
+    let settle_outcome_after = outcomes_after
+        .into_iter()
+        .find(|outcome| outcome.phase == Phase::Settle)
+        .expect("Settle outcome still recorded");
+    assert_eq!(
+        settle_outcome_after.decision,
+        settle_outcome_before.decision
+    );
+    assert_eq!(
+        settle_outcome_after.evidence,
+        settle_outcome_before.evidence
+    );
+
+    assert_eq!(
+        settlement_batch_status(&backend, &tenant, batch_id).await,
+        batch_status_before
+    );
+    assert_eq!(
+        count_credit_ledger_rows_for_run(&backend, &tenant, run.run_id).await,
+        ledger_count_before
+    );
+}
+
+/// A hold on the Trace Credit account (the same `TraceCorpusStore` API the
+/// port's `place_credit_hold` uses) keeps that leg pending while every other
+/// instrument still completes: the run retries under `credit_held`, and
+/// only once the hold is released does the Settle outcome commit.
+#[tokio::test]
+async fn a_held_account_keeps_trace_credit_pending_and_other_instruments_complete() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _index, adapters) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        scored_config(false),
+        None,
+    )
+    .await;
+    let trace_credit = adapters[1].clone();
+    let tenant = format!("settle-held-{}", uuid::Uuid::new_v4());
+    let (run, _evidence) = run_to_settle_ready(&service, &tenant).await;
+
+    // The receipt helper always submits as this principal (`receipt`'s
+    // fixed `actor_principal_ref`), which becomes the submission's
+    // `auth_principal_ref` and so the credit account the hold must name.
+    let account_ref = "principal_sha256:test".to_string();
+    let hold_id = uuid::Uuid::new_v4();
+    backend
+        .upsert_trace_credit_hold(TraceCreditHoldWrite {
+            tenant_id: tenant.clone(),
+            hold_id,
+            credit_account_ref: account_ref.clone(),
+            credit_account_hash: credit_account_hash(&account_ref),
+            reason: TraceCreditHoldReason::PolicyMigration,
+            reason_hash: credit_account_hash("pipeline-hold"),
+            actor_principal_ref: account_ref.clone(),
+            released_at: None,
+        })
+        .await
+        .expect("place a credit hold through the runtime role");
+
+    let held = service
+        .process_run(&tenant, run.run_id)
+        .await
+        .unwrap()
+        .expect("Settle retries while the account is held");
+    assert_eq!(held.state, PipelineRunState::Retry);
+    assert_eq!(
+        held.last_error_label.as_deref(),
+        Some(PIPELINE_CREDIT_HELD_LABEL)
+    );
+
+    let settlements = service
+        .store()
+        .list_settlements(&tenant, run.run_id)
+        .await
+        .unwrap();
+    let rebate_row = settlements
+        .iter()
+        .find(|settlement| settlement.instrument_id == "storage_rebate")
+        .expect("storage_rebate row seeded");
+    let credit_row = settlements
+        .iter()
+        .find(|settlement| settlement.instrument_id == InstrumentId::trace_credit().as_str())
+        .expect("trace_credit row seeded");
+    assert_eq!(rebate_row.operation_state, "complete");
+    assert_eq!(credit_row.operation_state, "held");
+    assert_eq!(credit_row.result_ref_hash, None);
+    assert_eq!(
+        credit_row.last_error_label.as_deref(),
+        Some(PIPELINE_CREDIT_HELD_LABEL)
+    );
+    assert_eq!(
+        trace_credit.requests().len(),
+        1,
+        "the adapter rail was dispatched once even though the ledger stayed pending"
+    );
+    assert_eq!(
+        count_credit_ledger_rows_for_run(&backend, &tenant, run.run_id).await,
+        0,
+        "no ledger row while the account is held"
+    );
+
+    let outcomes = service
+        .store()
+        .list_outcomes(&tenant, run.run_id)
+        .await
+        .unwrap();
+    assert!(
+        !outcomes
+            .iter()
+            .any(|outcome| outcome.phase == Phase::Settle),
+        "no Settle outcome while the trace_credit leg is held"
+    );
+
+    backend
+        .upsert_trace_credit_hold(TraceCreditHoldWrite {
+            tenant_id: tenant.clone(),
+            hold_id,
+            credit_account_ref: account_ref.clone(),
+            credit_account_hash: credit_account_hash(&account_ref),
+            reason: TraceCreditHoldReason::PolicyMigration,
+            reason_hash: credit_account_hash("pipeline-hold"),
+            actor_principal_ref: account_ref.clone(),
+            released_at: Some(chrono::Utc::now()),
+        })
+        .await
+        .expect("release the credit hold");
+
+    force_due(&backend, &tenant, run.run_id).await;
+    let settled = service
+        .process_run(&tenant, run.run_id)
+        .await
+        .unwrap()
+        .expect("the retry completes once the hold is released");
+    assert_eq!(settled.state, PipelineRunState::Complete);
+
+    let settlements = service
+        .store()
+        .list_settlements(&tenant, run.run_id)
+        .await
+        .unwrap();
+    let credit_row = settlements
+        .iter()
+        .find(|settlement| settlement.instrument_id == InstrumentId::trace_credit().as_str())
+        .expect("trace_credit row present");
+    assert_eq!(credit_row.operation_state, "complete");
+    assert_eq!(
+        count_credit_ledger_rows_for_run(&backend, &tenant, run.run_id).await,
+        1
+    );
+
+    let outcomes = service
+        .store()
+        .list_outcomes(&tenant, run.run_id)
+        .await
+        .unwrap();
+    let settle_outcomes: Vec<_> = outcomes
+        .into_iter()
+        .filter(|outcome| outcome.phase == Phase::Settle)
+        .collect();
+    assert_eq!(settle_outcomes.len(), 1, "exactly one Settle outcome");
+}
+
+/// D4: the expected result comes from the persisted selection, not from
+/// whatever the adapter hands back. An adapter that returns a well-formed
+/// but different result reference fails the row closed rather than being
+/// trusted.
+#[tokio::test]
+async fn adapter_result_that_differs_from_the_selection_fails_closed() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let mismatching = Arc::new(MismatchingSettlementAdapter {
+        instrument_id: InstrumentId::new("storage_rebate").unwrap(),
+    });
+    let trace_credit_adapter = RecordingSettlementAdapter::new(
+        InstrumentId::trace_credit(),
+        "recording_trace_credit_test_only",
+        "none",
+    );
+    let service = test_service_with_adapters(
+        backend.clone(),
+        artifact_store(&dir),
+        scored_config(false),
+        vec![
+            mismatching as Arc<dyn SettlementAdapter>,
+            trace_credit_adapter as Arc<dyn SettlementAdapter>,
+        ],
+    )
+    .await;
+    let tenant = format!("settle-mismatch-{}", uuid::Uuid::new_v4());
+    let (run, _evidence) = run_to_settle_ready(&service, &tenant).await;
+
+    let result = service
+        .process_run(&tenant, run.run_id)
+        .await
+        .unwrap()
+        .expect("Settle retries after the mismatch");
+    assert_eq!(result.state, PipelineRunState::Retry);
+    assert_eq!(
+        result.last_error_label.as_deref(),
+        Some("settlement_operation_retry")
+    );
+
+    let settlements = service
+        .store()
+        .list_settlements(&tenant, run.run_id)
+        .await
+        .unwrap();
+    let rebate_row = settlements
+        .iter()
+        .find(|settlement| settlement.instrument_id == "storage_rebate")
+        .expect("storage_rebate row seeded");
+    assert_eq!(rebate_row.operation_state, "failed");
+    assert_eq!(
+        rebate_row.last_error_label.as_deref(),
+        Some("settlement_result_mismatch")
+    );
+    assert_eq!(rebate_row.result_ref_hash, None);
+
+    let outcomes = service
+        .store()
+        .list_outcomes(&tenant, run.run_id)
+        .await
+        .unwrap();
+    assert!(
+        !outcomes
+            .iter()
+            .any(|outcome| outcome.phase == Phase::Settle),
+        "no Settle outcome after a mismatch"
     );
 }
