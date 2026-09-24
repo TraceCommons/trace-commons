@@ -2127,9 +2127,19 @@ impl PipelineService {
             .map_err(|_| anyhow::anyhow!("{phase:?} outcome is malformed"))
     }
 
-    /// Reads the source envelope bytes the receipt staged at Admission,
-    /// decoding the P1 wrapper back to the exact bytes Task 9 stored.
-    async fn load_source_bytes(&self, run: &PipelineRunRecord) -> anyhow::Result<Vec<u8>> {
+    /// Reads and decrypts the bytes stored at `object_ref_id` for `run`,
+    /// under the port's operability predicate (the submission must not be
+    /// revoked/expired/purged, the object ref must not be invalidated or
+    /// deleted), inside one tenant-scoped `FOR SHARE` transaction, then
+    /// decodes the P1 wrapper back to the exact bytes. Shared by
+    /// `load_source_bytes` and `load_approved_bytes`, which differ only in
+    /// which object ref id they read and what they do with the bytes
+    /// afterward.
+    async fn load_object_bytes(
+        &self,
+        run: &PipelineRunRecord,
+        object_ref_id: Uuid,
+    ) -> anyhow::Result<Vec<u8>> {
         let mut client = self.backend.trace_pool().get().await?;
         let tx = PgPipelineStore::tenant_transaction(&mut client, &run.tenant_id).await?;
         let object_ref = tx
@@ -2149,11 +2159,7 @@ impl PipelineService {
                     AND object_ref.invalidated_at IS NULL
                     AND object_ref.deleted_at IS NULL
                   FOR SHARE OF submission, object_ref",
-                &[
-                    &run.tenant_id,
-                    &run.submission_id,
-                    &run.source_object_ref_id,
-                ],
+                &[&run.tenant_id, &run.submission_id, &object_ref_id],
             )
             .await?
             .ok_or_else(|| anyhow::anyhow!(PIPELINE_SUBMISSION_INOPERABLE_LABEL))?;
@@ -2161,7 +2167,7 @@ impl PipelineService {
         let content_sha256: String = object_ref.get("content_sha256");
         let ciphertext_sha256 = content_sha256
             .strip_prefix("sha256:")
-            .ok_or_else(|| anyhow::anyhow!("source artifact hash is malformed"))?;
+            .ok_or_else(|| anyhow::anyhow!("object artifact hash is malformed"))?;
         let tenant_storage_ref = pipeline_tenant_storage_ref(&run.tenant_id);
         let wrapper = self.artifact_store.read_json_by_object_key(
             tenant_storage_ref.as_str(),
@@ -2171,6 +2177,12 @@ impl PipelineService {
         )?;
         tx.commit().await?;
         decode_pipeline_artifact_bytes(&wrapper)
+    }
+
+    /// Reads the source envelope bytes the receipt staged at Admission,
+    /// decoding the P1 wrapper back to the exact bytes Task 9 stored.
+    async fn load_source_bytes(&self, run: &PipelineRunRecord) -> anyhow::Result<Vec<u8>> {
+        self.load_object_bytes(run, run.source_object_ref_id).await
     }
 
     /// Reads the approved-content object the run's Review commit wrote,
@@ -2185,43 +2197,7 @@ impl PipelineService {
             .approved_content_hash
             .as_deref()
             .ok_or_else(|| anyhow::anyhow!(PIPELINE_SUBMISSION_INOPERABLE_LABEL))?;
-        let mut client = self.backend.trace_pool().get().await?;
-        let tx = PgPipelineStore::tenant_transaction(&mut client, &run.tenant_id).await?;
-        let object_ref = tx
-            .query_opt(
-                "SELECT object_ref.object_key, object_ref.content_sha256
-                   FROM trace_submissions submission
-                   JOIN trace_object_refs object_ref
-                     ON object_ref.tenant_id = submission.tenant_id
-                    AND object_ref.submission_id = submission.submission_id
-                  WHERE submission.tenant_id = $1
-                    AND submission.submission_id = $2
-                    AND object_ref.object_ref_id = $3
-                    AND submission.status NOT IN ('revoked', 'expired', 'purged')
-                    AND submission.revoked_at IS NULL
-                    AND submission.purged_at IS NULL
-                    AND (submission.expires_at IS NULL OR submission.expires_at > NOW())
-                    AND object_ref.invalidated_at IS NULL
-                    AND object_ref.deleted_at IS NULL
-                  FOR SHARE OF submission, object_ref",
-                &[&run.tenant_id, &run.submission_id, &approved_object_ref_id],
-            )
-            .await?
-            .ok_or_else(|| anyhow::anyhow!(PIPELINE_SUBMISSION_INOPERABLE_LABEL))?;
-        let object_key: String = object_ref.get("object_key");
-        let content_sha256: String = object_ref.get("content_sha256");
-        let ciphertext_sha256 = content_sha256
-            .strip_prefix("sha256:")
-            .ok_or_else(|| anyhow::anyhow!("approved artifact hash is malformed"))?;
-        let tenant_storage_ref = pipeline_tenant_storage_ref(&run.tenant_id);
-        let wrapper = self.artifact_store.read_json_by_object_key(
-            tenant_storage_ref.as_str(),
-            TraceArtifactKind::ContributionEnvelope,
-            &object_key,
-            ciphertext_sha256,
-        )?;
-        tx.commit().await?;
-        let bytes = decode_pipeline_artifact_bytes(&wrapper)?;
+        let bytes = self.load_object_bytes(run, approved_object_ref_id).await?;
         anyhow::ensure!(
             sha256_prefixed(&bytes) == approved_content_hash,
             "approved_content_mismatch"
