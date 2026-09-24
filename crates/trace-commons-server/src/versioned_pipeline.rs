@@ -2737,8 +2737,15 @@ impl PipelineService {
     ) -> anyhow::Result<Option<PipelineRunRecord>> {
         let bundle = match self.load_bound_bundle(&run).await {
             Ok(bundle) => bundle,
-            Err(label) if label == PIPELINE_POLICY_NOT_RUNNABLE_LABEL => {
-                return Ok(Some(self.store.mark_retry(&run, label).await?));
+            // D9: a dependency the service does not hold, or a bundle whose
+            // operator-controlled runnable flag is off, is not this run's
+            // fault -- it waits in retry without the claim's attempt being
+            // charged, per `mark_transient_retry`.
+            Err(label)
+                if label == PIPELINE_DEPENDENCY_MISSING_LABEL
+                    || label == PIPELINE_POLICY_NOT_RUNNABLE_LABEL =>
+            {
+                return Ok(Some(self.store.mark_transient_retry(&run, label).await?));
             }
             Err(label) => {
                 self.store.mark_failed(&run, label).await?;

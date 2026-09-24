@@ -4,9 +4,11 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use secrecy::SecretString;
 use sha2::{Digest, Sha256};
+use tokio_postgres::NoTls;
 use trace_commons_gate_api::pipeline::{
     AtomicUnits, IndexMembershipDecision, InstrumentAward, InstrumentDescriptor, InstrumentId,
     InstrumentKind, InstrumentSettlementOutcome, Phase, PhaseResult, ReasonCode, ReviewDecision,
@@ -14,7 +16,7 @@ use trace_commons_gate_api::pipeline::{
     TRACE_CREDIT_DECIMALS,
 };
 use trace_commons_gate_api::{
-    IndexEntryKey, IndexUpsertResult, ReferenceEmbedder, ReferencePerplexityScorer,
+    Embedder, IndexEntryKey, IndexUpsertResult, ReferenceEmbedder, ReferencePerplexityScorer,
     VectorIndexWriter,
 };
 use trace_commons_protocol::trace_contribution::{
@@ -32,9 +34,9 @@ use trace_commons_server::trace_corpus_storage::{
 };
 use trace_commons_server::versioned_pipeline::*;
 use trace_commons_server::versioned_pipeline_bundle::{
-    MINIMAL_INDEX_ID, MINIMAL_PROJECTION_ID, MinimalPolicyBundle, PipelineBundleConfig,
-    PipelineInstrumentAwardConfig, dependency_content_hash, pipeline_operation_ref,
-    pipeline_result_ref,
+    IdentifiedEmbedder, MINIMAL_INDEX_ID, MINIMAL_PROJECTION_ID, MinimalPolicyBundle,
+    PipelineBundleConfig, PipelineInstrumentAwardConfig, dependency_content_hash,
+    pipeline_operation_ref, pipeline_result_ref,
 };
 use trace_commons_server::versioned_pipeline_credit::{
     RecordingSettlementAdapter, SettlementAdapter, SettlementAdapterRegistry, SettlementRequest,
@@ -378,6 +380,79 @@ fn db_error_message(error: &tokio_postgres::Error) -> String {
         .as_db_error()
         .map(|db| db.message().to_string())
         .unwrap_or_else(|| error.to_string())
+}
+
+/// Corrupts the stored `package` for `(tenant_id, bundle_id)` in place, as
+/// an owner connection rather than through `PgPipelineStore` -- proving a
+/// tampered row, not a tampering API `PgPipelineStore` would ever offer.
+/// `pipeline_bundle_packages` carries its own immutability trigger
+/// (`pipeline_bundle_packages_reject_update`, migration V76), so this drops
+/// it and recreates it -- exactly as the migration defines it -- inside the
+/// same transaction that performs the `UPDATE`. Flips one hex digit of the
+/// first stored artifact so its bytes no longer hash to the key they are
+/// stored under (`BundlePackage::validate`'s `ArtifactHashMismatch`).
+async fn tamper_stored_bundle_package(tenant_id: &str, bundle_id: &str) {
+    let url = std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL")
+        .expect("TRACE_COMMONS_PG_TEST_DATABASE_URL must be set for this test");
+    let (mut client, connection) = tokio_postgres::connect(&url, NoTls)
+        .await
+        .expect("connect as the migration owner");
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+
+    let tx = client
+        .transaction()
+        .await
+        .expect("open owner transaction for tampering");
+    tx.batch_execute(
+        "DROP TRIGGER pipeline_bundle_packages_reject_update ON pipeline_bundle_packages;",
+    )
+    .await
+    .expect("drop the immutability trigger");
+
+    let row = tx
+        .query_one(
+            "SELECT package FROM pipeline_bundle_packages
+             WHERE tenant_id = $1 AND bundle_id = $2",
+            &[&tenant_id, &bundle_id],
+        )
+        .await
+        .expect("load the stored package");
+    let mut package: serde_json::Value = row.get("package");
+    let artifacts = package
+        .get_mut("artifacts")
+        .and_then(serde_json::Value::as_object_mut)
+        .expect("the package carries an artifacts object");
+    let (_, value) = artifacts
+        .iter_mut()
+        .next()
+        .expect("the package carries at least one artifact");
+    let hex = value
+        .as_str()
+        .expect("artifact bytes are hex-encoded")
+        .to_string();
+    let mut corrupted = hex.chars().collect::<Vec<_>>();
+    corrupted[0] = if corrupted[0] == '0' { '1' } else { '0' };
+    *value = serde_json::Value::String(corrupted.into_iter().collect());
+
+    tx.execute(
+        "UPDATE pipeline_bundle_packages SET package = $3
+         WHERE tenant_id = $1 AND bundle_id = $2",
+        &[&tenant_id, &bundle_id, &package],
+    )
+    .await
+    .expect("tamper the stored package");
+
+    tx.batch_execute(
+        "CREATE TRIGGER pipeline_bundle_packages_reject_update
+             BEFORE UPDATE ON pipeline_bundle_packages
+             FOR EACH ROW EXECUTE FUNCTION reject_pipeline_bundle_package_mutation();",
+    )
+    .await
+    .expect("recreate the immutability trigger");
+
+    tx.commit().await.expect("commit the tampering transaction");
 }
 
 #[tokio::test]
@@ -746,6 +821,92 @@ async fn test_service_with_adapters(
     .build()
     .expect("build pipeline service");
     Arc::new(service)
+}
+
+/// P5: like `test_service`, but takes the embedder directly instead of
+/// building a `ReferenceEmbedder` itself -- for a service that must hold a
+/// dependency other than the one an existing run's bound bundle names. Its
+/// own default package names `embedder`, so `build()` still succeeds.
+async fn test_service_with_embedder(
+    backend: Arc<PgBackend>,
+    artifact_store: Arc<dyn TraceArtifactStore>,
+    config: PipelineBundleConfig,
+    embedder: Arc<dyn IdentifiedEmbedder>,
+) -> Arc<PipelineService> {
+    let scorer = Arc::new(ReferencePerplexityScorer::new());
+    let package = MinimalPolicyBundle::minimal_package(&config, scorer.as_ref(), embedder.as_ref())
+        .expect("build minimal bundle package");
+    let index = IsolatedPipelineIndex::new();
+    let storage_rebate = RecordingSettlementAdapter::new(
+        InstrumentId::new("storage_rebate").unwrap(),
+        "recording_storage_rebate_test_only",
+        "none",
+    );
+    let trace_credit = RecordingSettlementAdapter::new(
+        InstrumentId::trace_credit(),
+        "recording_trace_credit_test_only",
+        "none",
+    );
+    let registry = SettlementAdapterRegistry::new(vec![
+        storage_rebate as Arc<dyn SettlementAdapter>,
+        trace_credit as Arc<dyn SettlementAdapter>,
+    ])
+    .expect("build settlement adapter registry");
+    let caps = PipelineCaps {
+        per_instrument_atomic_units: BTreeMap::from([
+            (
+                "storage_rebate".to_string(),
+                AtomicUnits::from_raw(u128::MAX),
+            ),
+            (
+                InstrumentId::trace_credit().as_str().to_string(),
+                AtomicUnits::from_raw(u128::MAX),
+            ),
+        ]),
+    };
+    let service = PipelineServiceBuilder::new(
+        backend,
+        artifact_store,
+        package,
+        index.clone(),
+        index.clone(),
+        registry,
+        caps,
+    )
+    .with_scorer(scorer)
+    .with_embedder(embedder)
+    .build()
+    .expect("build pipeline service");
+    Arc::new(service)
+}
+
+/// An embedder whose descriptor is chosen by the test and which counts
+/// calls, mirroring the unit-test double in `versioned_pipeline_bundle.rs`
+/// (P5: integration tests define their own copy of these doubles).
+struct CountingEmbedder {
+    descriptor: Vec<u8>,
+    calls: AtomicUsize,
+}
+
+impl Embedder for CountingEmbedder {
+    fn embed(&self, plaintext: &[u8]) -> anyhow::Result<Vec<f32>> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        ReferenceEmbedder::new().embed(plaintext)
+    }
+}
+
+impl IdentifiedEmbedder for CountingEmbedder {
+    fn dependency_identity(&self) -> &str {
+        "counting_embedder_test_only"
+    }
+
+    fn model_id(&self) -> &str {
+        "counting-embedder-v1"
+    }
+
+    fn content_descriptor(&self) -> Vec<u8> {
+        self.descriptor.clone()
+    }
 }
 
 /// P5's mismatching adapter double: always returns a well-formed but wrong
@@ -2820,5 +2981,270 @@ async fn adapter_result_that_differs_from_the_selection_fails_closed() {
             .iter()
             .any(|outcome| outcome.phase == Phase::Settle),
         "no Settle outcome after a mismatch"
+    );
+}
+
+/// 3A acceptance: a run keeps the bundle it was bound to at receipt even
+/// after another bundle is activated for the tenant. Activating bundle B
+/// changes what a *new* receipt binds to; it never rebinds a run already in
+/// flight.
+#[tokio::test]
+async fn activation_does_not_rebind_an_existing_run() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("activation-{}", uuid::Uuid::new_v4());
+
+    let env = envelope(uuid::Uuid::new_v4()).await;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+    let PipelineReceiptResult::Created(created) = service
+        .submit(receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+        .await
+        .unwrap()
+    else {
+        panic!("receipt creates a run")
+    };
+    let bundle_a = created.bundle_id.clone();
+
+    // Register and activate a second bundle B for the tenant, with a
+    // storage_rebate award A does not have -- so if a phase ever ran under
+    // the wrong bundle, its settlement rows would visibly differ, not just
+    // its `bundle_id` label (`pipeline_runs.bundle_id` is immutable and
+    // `phase_outcomes.bundle_id` is stamped from the run row either way, so
+    // neither alone would catch the runner loading the wrong package). The
+    // run above must stay bound to A; only a receipt submitted from here on
+    // should see B.
+    let scorer = ReferencePerplexityScorer::new();
+    let embedder = ReferenceEmbedder::new();
+    let config_b = PipelineBundleConfig {
+        instrument_awards: vec![PipelineInstrumentAwardConfig {
+            instrument_id: "storage_rebate".into(),
+            atomic_units: AtomicUnits::from_raw(9),
+            descriptor: storage_rebate_descriptor(),
+        }],
+        include_index: false,
+        variant: Some("activation-b".to_string()),
+    };
+    let package_b = MinimalPolicyBundle::minimal_package(&config_b, &scorer, &embedder)
+        .expect("build bundle B package");
+    assert_ne!(bundle_a, package_b.bundle_id);
+    service
+        .register_bundle(&tenant, &package_b)
+        .await
+        .expect("register bundle B");
+    service
+        .activate_bundle(&tenant, &package_b.bundle_id)
+        .await
+        .expect("activate bundle B");
+
+    // Process the run to completion: every outcome stays bound to A.
+    service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Review runs");
+    service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Score runs");
+    let settled = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Settle runs");
+    assert_eq!(settled.state, PipelineRunState::Complete);
+    assert_eq!(settled.bundle_id, bundle_a);
+
+    // A's Score policy awards nothing: if Score had run under B instead, a
+    // storage_rebate settlement row would exist.
+    let settlements = service
+        .store()
+        .list_settlements(&tenant, created.run_id)
+        .await
+        .unwrap();
+    assert!(
+        settlements.is_empty(),
+        "the run settled under A's award-free policy, not B's"
+    );
+
+    let outcomes = service
+        .store()
+        .list_outcomes(&tenant, created.run_id)
+        .await
+        .unwrap();
+    assert!(!outcomes.is_empty(), "the run recorded outcomes");
+    for outcome in &outcomes {
+        assert_eq!(
+            outcome.bundle_id, bundle_a,
+            "every outcome stays bound to the bundle the run was bound to at receipt"
+        );
+    }
+
+    // A new receipt binds to B.
+    let env_second = envelope(uuid::Uuid::new_v4()).await;
+    let raw_second = serde_json::to_vec(&env_second).unwrap();
+    let key_second = env_second.submission_id.to_string();
+    let PipelineReceiptResult::Created(created_second) = service
+        .submit(receipt(
+            &tenant,
+            &key_second,
+            &raw_second,
+            &env_second,
+            NO_LIMITS,
+        ))
+        .await
+        .unwrap()
+    else {
+        panic!("second receipt creates a run")
+    };
+    assert_eq!(created_second.bundle_id, package_b.bundle_id);
+}
+
+/// 3A acceptance (decision D9): a run whose named dependency (by content
+/// hash) is not held by the service processing it waits in retry without
+/// charging the attempt the claim took, rather than failing. The moment a
+/// service that does hold the named dependency processes the same run, it
+/// proceeds.
+#[tokio::test]
+async fn a_run_whose_dependency_is_not_held_waits_without_charging() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let shared_artifact_store = artifact_store(&dir);
+    let (service_one, _, _) = test_service(
+        backend.clone(),
+        shared_artifact_store.clone(),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let counting_embedder = Arc::new(CountingEmbedder {
+        descriptor: b"dependency-missing-test-embedder-v1".to_vec(),
+        calls: AtomicUsize::new(0),
+    });
+    let service_two = test_service_with_embedder(
+        backend.clone(),
+        shared_artifact_store,
+        minimal_config(false),
+        counting_embedder,
+    )
+    .await;
+
+    let tenant = format!("dep-missing-{}", uuid::Uuid::new_v4());
+    let env = envelope(uuid::Uuid::new_v4()).await;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+    let PipelineReceiptResult::Created(created) = service_one
+        .submit(receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+        .await
+        .unwrap()
+    else {
+        panic!("receipt creates a run")
+    };
+
+    let reviewed = service_one
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("service 1 holds every dependency Review needs");
+    assert_eq!(reviewed.next_phase, Some(Phase::Score));
+    let attempt_count_before = reviewed.attempt_count;
+
+    // Service 2 does not hold the embedder bundle A names: the run waits in
+    // retry without the claim's attempt being charged.
+    let waited = service_two
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("service 2 releases the run into retry rather than failing it");
+    assert_eq!(waited.state, PipelineRunState::Retry);
+    assert_eq!(
+        waited.last_error_label.as_deref(),
+        Some("bundle_dependency_missing")
+    );
+    assert_eq!(
+        waited.attempt_count, attempt_count_before,
+        "a missing named dependency never charges the attempt the claim took"
+    );
+
+    force_due(&backend, &tenant, created.run_id).await;
+
+    // Service 1 holds the named embedder: the same run now proceeds.
+    let scored = service_one
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("service 1 holds the named embedder and completes Score");
+    assert_eq!(scored.next_phase, Some(Phase::Settle));
+}
+
+/// 3A acceptance: a stored bundle package that has been tampered with
+/// underneath the service fails closed -- the run is marked failed under
+/// the safe label, and no new phase outcome is recorded for it.
+#[tokio::test]
+async fn a_tampered_stored_package_fails_closed() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("tampered-package-{}", uuid::Uuid::new_v4());
+
+    let env = envelope(uuid::Uuid::new_v4()).await;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+    let PipelineReceiptResult::Created(created) = service
+        .submit(receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+        .await
+        .unwrap()
+    else {
+        panic!("receipt creates a run")
+    };
+
+    let outcomes_before = service
+        .store()
+        .list_outcomes(&tenant, created.run_id)
+        .await
+        .unwrap();
+
+    tamper_stored_bundle_package(&tenant, &created.bundle_id).await;
+
+    let failed = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("the run fails closed on a tampered package");
+    assert_eq!(failed.state, PipelineRunState::Failed);
+    assert_eq!(
+        failed.last_error_label.as_deref(),
+        Some("bundle_package_invalid")
+    );
+
+    let outcomes_after = service
+        .store()
+        .list_outcomes(&tenant, created.run_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        outcomes_after.len(),
+        outcomes_before.len(),
+        "no new outcome is recorded when the stored package fails closed"
     );
 }
