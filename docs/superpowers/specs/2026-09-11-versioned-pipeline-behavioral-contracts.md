@@ -575,6 +575,10 @@ and shadow comparison. No active index mutation can occur.
 - Score MUST return an ordered collection keyed by bounded `instrument_id`.
 - A decision MUST reject duplicate instrument identifiers.
 - Each award MUST use checked integer atomic units.
+- Atomic units MUST be `u128`. They MUST travel as a canonical decimal
+  string: ASCII digits only, with no sign, no leading zero, and no value above
+  `u128::MAX`. A JSON number MUST be refused.
+- The award-set identity MUST encode each amount as 16 big-endian bytes.
 - An empty collection MUST remain distinct from an incomplete Score phase.
 - Trace Credit MUST use the `trace_credit` instrument.
 - One Trace Credit MUST equal 1,000,000 microcredits.
@@ -583,7 +587,8 @@ and shadow comparison. No active index mutation can occur.
 
 **Acceptance:** Exercise an empty award set, two simultaneous instruments,
 deterministic ordering, duplicate identifiers, maximum values, overflow,
-negative source input, and excess-precision Trace Credit conversion.
+negative source input, and excess-precision Trace Credit conversion. Load
+amounts above `u64::MAX`, and refuse a signed, zero-padded, or numeric amount.
 
 ### SCR-004: Score persistence and instrument operations
 

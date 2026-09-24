@@ -79,7 +79,7 @@
       "boundary": "score policy, capabilities, units, and credit event",
       "implementation_milestone": 5,
       "evidence_status": "planned",
-      "test_ids": ["pipeline::checked_microcredit_conversion_is_exact", "pipeline::duplicate_instruments_are_rejected", "pipeline::instrument_awards_have_deterministic_ordering", "pipeline::atomic_unit_arithmetic_rejects_overflow", "minimal_policies_produce_explicit_zero_credit_completion", "versioned_pipeline_pg::four_index_and_credit_combinations_complete", "versioned_pipeline_index::reader_excludes_the_queried_revision", "versioned_pipeline_compat::compatibility_score_queries_reader_without_writes", "versioned_pipeline_compat::write_detector_records_settle_side_upserts_only", "versioned_pipeline_pg::score_does_not_write_and_settle_ignores_later_index_mutation"]
+      "test_ids": ["pipeline::checked_microcredit_conversion_is_exact", "pipeline::duplicate_instruments_are_rejected", "pipeline::instrument_awards_have_deterministic_ordering", "pipeline::atomic_unit_arithmetic_rejects_overflow", "pipeline::atomic_units_travel_as_canonical_decimal_strings", "pipeline::award_set_identity_encodes_each_amount_in_sixteen_bytes", "minimal_policies_produce_explicit_zero_credit_completion", "versioned_pipeline_pg::four_index_and_credit_combinations_complete", "versioned_pipeline_index::reader_excludes_the_queried_revision", "versioned_pipeline_compat::compatibility_score_queries_reader_without_writes", "versioned_pipeline_compat::write_detector_records_settle_side_upserts_only", "versioned_pipeline_pg::score_does_not_write_and_settle_ignores_later_index_mutation"]
     },
     {
       "contract_ids": ["SCR-005"],

@@ -170,24 +170,62 @@ impl InstrumentId {
     }
 }
 
+/// An amount in an instrument's smallest unit. `u128` holds a NEP-141
+/// balance.
+///
+/// The wire form is a canonical decimal string, as NEAR's `U128` uses: a JSON
+/// number above 2^53 loses precision in JavaScript and in any decoder that
+/// reads numbers as `f64`. Loading accepts ASCII digits only, with no sign, no
+/// leading zero, and no value above `u128::MAX`.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
-#[serde(transparent)]
-pub struct AtomicUnits(u64);
+#[serde(try_from = "String", into = "String")]
+pub struct AtomicUnits(u128);
+
+impl TryFrom<String> for AtomicUnits {
+    type Error = ContractError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        value.parse()
+    }
+}
+
+impl From<AtomicUnits> for String {
+    fn from(units: AtomicUnits) -> Self {
+        units.0.to_string()
+    }
+}
+
+impl std::str::FromStr for AtomicUnits {
+    type Err = ContractError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let canonical = !value.is_empty()
+            && value.bytes().all(|byte| byte.is_ascii_digit())
+            && (value == "0" || !value.starts_with('0'));
+        if !canonical {
+            return Err(ContractError::NonCanonicalAtomicUnits);
+        }
+        value
+            .parse::<u128>()
+            .map(Self)
+            .map_err(|_| ContractError::AtomicUnitOverflow)
+    }
+}
+
+impl fmt::Display for AtomicUnits {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
 
 impl AtomicUnits {
     pub const ZERO: Self = Self(0);
 
-    pub const fn from_raw(value: u64) -> Self {
+    pub const fn from_raw(value: u128) -> Self {
         Self(value)
     }
 
-    pub fn try_from_u128(value: u128) -> Result<Self, ContractError> {
-        u64::try_from(value)
-            .map(Self)
-            .map_err(|_| ContractError::AtomicUnitOverflow)
-    }
-
-    pub const fn get(self) -> u64 {
+    pub const fn get(self) -> u128 {
         self.0
     }
 
@@ -266,16 +304,18 @@ impl Microcredits {
 
     /// Convert Trace Credit microcredits to the generic settlement unit.
     ///
-    /// This is the Trace Credit adapter boundary. Both representations use
-    /// the same checked `u64`, so conversion is exact.
+    /// This is the Trace Credit adapter boundary. One Trace Credit atomic unit
+    /// is one microcredit, so the conversion is exact.
     pub const fn into_atomic_units(self) -> AtomicUnits {
-        AtomicUnits::from_raw(self.0)
+        AtomicUnits::from_raw(self.0 as u128)
     }
 
     /// Private: units carry no instrument. Convert through
     /// `InstrumentAward::trace_credit_microcredits`, which checks it.
-    const fn from_atomic_units(value: AtomicUnits) -> Self {
-        Self(value.get())
+    fn from_atomic_units(value: AtomicUnits) -> Result<Self, ContractError> {
+        u64::try_from(value.get())
+            .map(Self)
+            .map_err(|_| ContractError::TraceCreditOutOfRange)
     }
 }
 
@@ -316,7 +356,7 @@ fn require_trace_credit_range(
     atomic_units: AtomicUnits,
 ) -> Result<(), ContractError> {
     if instrument_id.as_str() == TRACE_CREDIT_INSTRUMENT_ID
-        && atomic_units.get() > MAX_TRACE_CREDIT_MICROCREDITS
+        && atomic_units.get() > u128::from(MAX_TRACE_CREDIT_MICROCREDITS)
     {
         return Err(ContractError::TraceCreditOutOfRange);
     }
@@ -357,7 +397,7 @@ impl InstrumentAward {
         if self.instrument_id.as_str() != TRACE_CREDIT_INSTRUMENT_ID {
             return Err(ContractError::NotTraceCredit);
         }
-        Ok(Microcredits::from_atomic_units(self.atomic_units))
+        Microcredits::from_atomic_units(self.atomic_units)
     }
 }
 
@@ -406,7 +446,8 @@ impl InstrumentAwards {
         self.0.is_empty()
     }
 
-    /// Canonical identity for the complete ordered award set.
+    /// Canonical identity for the complete ordered award set. Each amount is
+    /// its full 16-byte big-endian `u128`.
     pub fn canonical_id(&self) -> String {
         let mut bytes = b"trace-commons-instrument-awards\0".to_vec();
         encode_len(&mut bytes, self.0.len());
@@ -657,6 +698,8 @@ pub enum ContractError {
     DuplicatePolicyListEntry,
     #[error("atomic units exceed the supported integer range")]
     AtomicUnitOverflow,
+    #[error("atomic units are not a canonical unsigned decimal string")]
+    NonCanonicalAtomicUnits,
     #[error("the award does not use the Trace Credit instrument")]
     NotTraceCredit,
     #[error("a Trace Credit award exceeds the credit ledger's signed 64-bit range")]
@@ -2039,7 +2082,7 @@ mod tests {
         );
     }
 
-    fn award(instrument_id: &str, atomic_units: u64) -> InstrumentAward {
+    fn award(instrument_id: &str, atomic_units: u128) -> InstrumentAward {
         InstrumentAward::new(
             InstrumentId::new(instrument_id).unwrap(),
             AtomicUnits::from_raw(atomic_units),
@@ -2090,13 +2133,68 @@ mod tests {
     #[test]
     fn atomic_unit_arithmetic_rejects_overflow() {
         assert_eq!(
-            AtomicUnits::from_raw(u64::MAX).checked_add(AtomicUnits::from_raw(1)),
+            AtomicUnits::from_raw(u128::MAX).checked_add(AtomicUnits::from_raw(1)),
             Err(ContractError::AtomicUnitOverflow)
         );
+        // One above `u128::MAX`.
         assert_eq!(
-            AtomicUnits::try_from_u128(u128::from(u64::MAX) + 1),
+            "340282366920938463463374607431768211456".parse::<AtomicUnits>(),
             Err(ContractError::AtomicUnitOverflow)
         );
+    }
+
+    /// A NEP-141 balance above `u64::MAX` survives the wire, and only the
+    /// canonical decimal spelling of an amount loads.
+    #[test]
+    fn atomic_units_travel_as_canonical_decimal_strings() {
+        use serde_json::{from_value, json, to_value};
+
+        // 10^24 yoctoNEAR is one NEAR.
+        let one_near = AtomicUnits::from_raw(10u128.pow(24));
+        assert_eq!(
+            to_value(one_near).unwrap(),
+            json!("1000000000000000000000000")
+        );
+        for units in [
+            AtomicUnits::ZERO,
+            one_near,
+            AtomicUnits::from_raw(u128::MAX),
+        ] {
+            let stored = to_value(units).unwrap();
+            assert_eq!(from_value::<AtomicUnits>(stored).unwrap(), units);
+            assert_eq!(units.to_string().parse::<AtomicUnits>(), Ok(units));
+        }
+
+        for malformed in [
+            "", "+1", "-1", "01", "00", " 1", "1 ", "1.0", "1e3", "0x10", "\u{ff11}",
+        ] {
+            assert_eq!(
+                malformed.parse::<AtomicUnits>(),
+                Err(ContractError::NonCanonicalAtomicUnits),
+                "{malformed:?}"
+            );
+            assert!(from_value::<AtomicUnits>(json!(malformed)).is_err());
+        }
+        // A JSON number is refused, even a small one.
+        assert!(from_value::<AtomicUnits>(json!(3)).is_err());
+        assert!(
+            from_value::<InstrumentAward>(json!({
+                "instrument_id": "storage_rebate",
+                "atomic_units": 3,
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn award_set_identity_encodes_each_amount_in_sixteen_bytes() {
+        let awards = InstrumentAwards::new(vec![award("storage_rebate", u128::MAX)]).unwrap();
+        let mut expected = b"trace-commons-instrument-awards\0".to_vec();
+        expected.extend_from_slice(&1u64.to_be_bytes());
+        expected.extend_from_slice(&("storage_rebate".len() as u64).to_be_bytes());
+        expected.extend_from_slice(b"storage_rebate");
+        expected.extend_from_slice(&[0xff; 16]);
+        assert_eq!(awards.canonical_id(), hash(&expected));
     }
 
     #[test]
@@ -2620,21 +2718,21 @@ mod tests {
         assert_eq!(
             stored,
             json!([
-                {"instrument_id": "storage_rebate", "atomic_units": 7},
-                {"instrument_id": "trace_credit", "atomic_units": 3},
+                {"instrument_id": "storage_rebate", "atomic_units": "7"},
+                {"instrument_id": "trace_credit", "atomic_units": "3"},
             ])
         );
         assert_eq!(from_value::<InstrumentAwards>(stored).unwrap(), awards);
         let reordered = json!([
-            {"instrument_id": "trace_credit", "atomic_units": 3},
-            {"instrument_id": "storage_rebate", "atomic_units": 7},
+            {"instrument_id": "trace_credit", "atomic_units": "3"},
+            {"instrument_id": "storage_rebate", "atomic_units": "7"},
         ]);
         assert_eq!(from_value::<InstrumentAwards>(reordered).unwrap(), awards);
         for refused in [
-            json!([{"instrument_id": "trace_credit", "atomic_units": 0}]),
+            json!([{"instrument_id": "trace_credit", "atomic_units": "0"}]),
             json!([
-                {"instrument_id": "trace_credit", "atomic_units": 3},
-                {"instrument_id": "trace_credit", "atomic_units": 4},
+                {"instrument_id": "trace_credit", "atomic_units": "3"},
+                {"instrument_id": "trace_credit", "atomic_units": "4"},
             ]),
         ] {
             assert!(from_value::<InstrumentAwards>(refused).is_err());
@@ -2643,7 +2741,7 @@ mod tests {
         let operation = |operation_ref: &str, result_ref: &str| {
             json!({
                 "instrument_id": "trace_credit",
-                "atomic_units": 3,
+                "atomic_units": "3",
                 "operation_ref_hash": operation_ref,
                 "outcome": {"status": "completed", "result_ref_hash": result_ref},
             })
@@ -2730,8 +2828,8 @@ mod tests {
 
     #[test]
     fn trace_credit_awards_fit_the_credit_ledger() {
-        let ledger_max = AtomicUnits::from_raw(i64::MAX as u64);
-        let over = AtomicUnits::from_raw(i64::MAX as u64 + 1);
+        let ledger_max = AtomicUnits::from_raw(i64::MAX as u128);
+        let over = AtomicUnits::from_raw(i64::MAX as u128 + 1);
         assert!(InstrumentAward::new(InstrumentId::trace_credit(), ledger_max).is_ok());
         assert_eq!(
             InstrumentAward::new(InstrumentId::trace_credit(), over),
@@ -2743,12 +2841,12 @@ mod tests {
         );
         // Other instruments keep the full range the settlement table stores.
         let rebate = InstrumentId::new("storage_rebate").unwrap();
-        assert!(InstrumentAward::new(rebate, AtomicUnits::from_raw(u64::MAX)).is_ok());
+        assert!(InstrumentAward::new(rebate, AtomicUnits::from_raw(u128::MAX)).is_ok());
         // A loaded award is bounded too.
         assert!(
             serde_json::from_value::<InstrumentAward>(serde_json::json!({
                 "instrument_id": "trace_credit",
-                "atomic_units": i64::MAX as u64 + 1,
+                "atomic_units": (i64::MAX as u128 + 1).to_string(),
             }))
             .is_err()
         );
@@ -2756,8 +2854,8 @@ mod tests {
 
     #[test]
     fn trace_credit_settlements_fit_the_credit_ledger() {
-        let ledger_max = AtomicUnits::from_raw(i64::MAX as u64);
-        let over = AtomicUnits::from_raw(i64::MAX as u64 + 1);
+        let ledger_max = AtomicUnits::from_raw(i64::MAX as u128);
+        let over = AtomicUnits::from_raw(i64::MAX as u128 + 1);
         let operation = hash(b"operation");
         let result = hash(b"result");
         assert_eq!(
@@ -2790,7 +2888,7 @@ mod tests {
         assert!(
             InstrumentSettlement::new(
                 InstrumentId::new("storage_rebate").unwrap(),
-                AtomicUnits::from_raw(u64::MAX),
+                AtomicUnits::from_raw(u128::MAX),
                 operation.clone(),
                 result.clone(),
             )
@@ -2799,7 +2897,7 @@ mod tests {
         assert!(
             serde_json::from_value::<InstrumentSettlement>(serde_json::json!({
                 "instrument_id": "trace_credit",
-                "atomic_units": i64::MAX as u64 + 1,
+                "atomic_units": (i64::MAX as u128 + 1).to_string(),
                 "operation_ref_hash": operation,
                 "outcome": {"status": "completed", "result_ref_hash": result},
             }))
@@ -3013,7 +3111,7 @@ mod tests {
                 .unwrap();
         assert_eq!(
             awards.canonical_id(),
-            "sha256:3fa59b4e41c8713fcfe4843da2deaa01cceabc6dd27dc17b7b74a132adb2e9ed"
+            "sha256:c53b5473d879aeb407a52c4740aea317aa5f90cb41c0b62bfa9c932332889955"
         );
 
         let command = SealedIndexCommand::new(
