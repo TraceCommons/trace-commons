@@ -435,3 +435,92 @@ happened cannot be recalled. Both belong in the grant-time sentence.
   local content pass (#507) bring the rest in later. That is a smaller first
   slice than "Flow 1 for everyone" and a larger one than "Flow 1 for nobody",
   which is what rev 2 amounted to in practice.
+
+---
+
+# Addendum 4: Flow 1 for invite enrollees
+
+Addendum 3 established that Flow 1 is honest today only for contributors whose
+enrollment sets a witness, because the enclave supplies the prose pass that no
+local path does. This addendum brings invite enrollees to the same place
+without waiting on #507's local content pass.
+
+## Three routes, two of which already exist
+
+| Route | State | What it does |
+|---|---|---|
+| Witness | works today, env-only (`witness_settings_from_env`) | raw session to a **verified enclave**, which redacts and returns |
+| `pii_filter: "near-ai"` | works today, fail-closed on misconfig | prose filter calls NEAR AI directly |
+| Local content pass | does not exist (#507) | a model reading prose, on the machine |
+
+So this is largely a surfacing problem rather than a build problem. Neither
+existing route is offered anywhere in onboarding; both are reachable only by
+setting configuration or environment by hand.
+
+## Prefer the witness, and say why
+
+The two existing routes are not equivalent, and the intuitive ranking is
+backwards. Both send the contributor's text off the machine — `uploader.rs:389`
+says so of the NEAR AI path in as many words, which is why the one-time notice
+gates a send at all. The difference is what receives it:
+
+- **Witness:** a *verified* enclave. The measurement is checked before any
+  bytes move, structurally (`VerifiedWitness`).
+- **`pii_filter: near-ai`:** NEAR AI's API directly. No attestation, no
+  measurement, nothing that constrains what the recipient runs.
+
+The witness sounds like the larger disclosure and is the smaller one. Flow 1
+should offer the witness, not the direct filter.
+
+## The rule this appears to violate, and does not
+
+Invite enrollment refuses a server-supplied witness on principle:
+
+> Enrollment never turns the witness on. It is opt-in, from config or the
+> environment, and a server-supplied enablement is exactly the "no
+> server-pushed enablement" rule this field exists under.
+
+That rule forbids **the server deciding**. It does not forbid the contributor
+deciding, and it is the server-push that the rule is about: a witness that
+could appear because an endpoint said so is a witness the contributor never
+chose.
+
+**Choosing Flow 1 is the contributor deciding.** So the grant screen may offer
+the witness as part of that choice, because the enablement then originates with
+the person, at the moment they ask for automatic contribution, with the
+disclosure in front of them. That satisfies the rule rather than bending it.
+
+What would violate it is enabling the witness as a side effect of anything
+else — a default, a server response, or a Flow 1 grant whose disclosure did not
+mention it.
+
+## What the invite Flow 1 grant has to say
+
+Everything Addendum 3 requires for witness enrollees, because after this they
+are witness enrollees. The raw upload is the same raw upload:
+
+- the four constants;
+- the fifth sentence covering the raw send to the enclave and that cancelling
+  cannot recall a session already sent to it;
+- and, because these contributors did not meet the witness during enrollment,
+  a plain statement of what the enclave is and that its identity is verified
+  before anything is sent. A NEAR AI or wallet enrollee met this at signup; an
+  invite enrollee is seeing it for the first time at the grant.
+
+Declining leaves them on Flow 2 with today's behaviour exactly — deterministic
+scrubbing, per-session review, nothing sent to an enclave. That is the honest
+fallback and it is also the current product, so nothing is lost by declining.
+
+## Consequences
+
+- **The standing confirmation voids with the witness identity**, as in
+  Addendum 3. It matters equally here.
+- **Turning off Flow 1 should turn the witness back off** for a contributor who
+  reached it this way, since the witness existed only as part of that grant.
+  Leaving it on would be the side-effect enablement the rule forbids, arrived
+  at by a slower path.
+- **This does not retire #507's local content pass.** It routes around the
+  prerequisite by borrowing a remote model, which is a real trade — the
+  contributor's raw text leaves the machine — not a substitute for scrubbing
+  locally. The content pass remains the only route to Flow 1 that sends nothing
+  raw anywhere, and it stays scheduled.
