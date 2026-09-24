@@ -823,6 +823,56 @@ async fn test_service_with_adapters(
     Arc::new(service)
 }
 
+/// P5, Task 16: like `test_service_with_adapters`, but also takes the index
+/// directly rather than building its own -- the only variant that takes the
+/// adapters, the index, and an optional crash point together, per the
+/// ruling that a crash-matrix test needing two services to share both the
+/// recording adapters *and* the in-memory index (which has no other way for
+/// a second service to see the first one's writes) gets one helper, not a
+/// separate combination for each.
+async fn test_service_with_adapters_and_index(
+    backend: Arc<PgBackend>,
+    artifact_store: Arc<dyn TraceArtifactStore>,
+    config: PipelineBundleConfig,
+    adapters: Vec<Arc<dyn SettlementAdapter>>,
+    index: Arc<IsolatedPipelineIndex>,
+    crash_point: Option<PipelineCrashPoint>,
+) -> Arc<PipelineService> {
+    let scorer = Arc::new(ReferencePerplexityScorer::new());
+    let embedder = Arc::new(ReferenceEmbedder::new());
+    let package = MinimalPolicyBundle::minimal_package(&config, scorer.as_ref(), embedder.as_ref())
+        .expect("build minimal bundle package");
+    let registry =
+        SettlementAdapterRegistry::new(adapters).expect("build settlement adapter registry");
+    let caps = PipelineCaps {
+        per_instrument_atomic_units: BTreeMap::from([
+            (
+                "storage_rebate".to_string(),
+                AtomicUnits::from_raw(u128::MAX),
+            ),
+            (
+                InstrumentId::trace_credit().as_str().to_string(),
+                AtomicUnits::from_raw(u128::MAX),
+            ),
+        ]),
+    };
+    let mut builder = PipelineServiceBuilder::new(
+        backend,
+        artifact_store,
+        package,
+        index.clone(),
+        index.clone(),
+        registry,
+        caps,
+    )
+    .with_scorer(scorer)
+    .with_embedder(embedder);
+    if let Some(crash_point) = crash_point {
+        builder = builder.with_crash_point(crash_point);
+    }
+    Arc::new(builder.build().expect("build pipeline service"))
+}
+
 /// P5: like `test_service`, but takes the embedder directly instead of
 /// building a `ReferenceEmbedder` itself -- for a service that must hold a
 /// dependency other than the one an existing run's bound bundle names. Its
@@ -3381,4 +3431,303 @@ async fn a_tampered_stored_package_fails_closed() {
         outcomes_before.len(),
         "no new outcome is recorded when the stored package fails closed"
     );
+}
+
+/// Review focus item 2, generalized to every crash point (Task 16): a crash
+/// between an artifact write and its database commit -- and at every other
+/// injected point -- must leave exactly one logical effect per phase once a
+/// second service resumes the run to completion.
+///
+/// `AfterArtifactStorage` crashes inside `submit` itself, before the run's
+/// insert ever commits (the whole receipt is one transaction that has not
+/// reached its final commit yet), so recovery there is a resubmission of
+/// the same bytes, not a lease-expiry resume. Every other point crashes
+/// mid-phase, after the run was claimed (`leased`) -- `commit_review`,
+/// `commit_score`, and `commit_settle` each clear the lease as part of
+/// their own transaction before the crash point that follows them fires, so
+/// for those three the lease is already gone by the time service A's error
+/// propagates; for the rest the run is genuinely stuck `leased`. Expiring
+/// the lease unconditionally (the earlier crash tests' pattern: a direct
+/// UPDATE, a time shortcut, never a processor call) is harmless either way,
+/// since `claim_run` only consults it for a row still in state `leased`.
+#[tokio::test]
+async fn crash_matrix_produces_one_logical_effect_per_point() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    for point in [
+        PipelineCrashPoint::AfterArtifactStorage,
+        PipelineCrashPoint::AfterReviewArtifactStorage,
+        PipelineCrashPoint::AfterReviewCommit,
+        PipelineCrashPoint::AfterScoreArtifactStorage,
+        PipelineCrashPoint::AfterScoreCommit,
+        PipelineCrashPoint::AfterSettleSelection,
+        PipelineCrashPoint::AfterIndexApply,
+        PipelineCrashPoint::AfterInstrumentOperation,
+        PipelineCrashPoint::AfterSettleCommit,
+    ] {
+        // Fresh tenant, artifact directory, and index per point (ruling:
+        // "if that keeps the points independent") -- the index is an
+        // in-memory double whose `writer_calls()` counter is global, not
+        // tenant-scoped, so a fresh one per point keeps that counter (and
+        // the on-disk artifact tree) free of carryover from earlier points.
+        let dir = tempfile::tempdir().unwrap();
+        let index = IsolatedPipelineIndex::new();
+        let storage_rebate = RecordingSettlementAdapter::new(
+            InstrumentId::new("storage_rebate").unwrap(),
+            "recording_storage_rebate_test_only",
+            "none",
+        );
+        let trace_credit = RecordingSettlementAdapter::new(
+            InstrumentId::trace_credit(),
+            "recording_trace_credit_test_only",
+            "none",
+        );
+        let adapters: Vec<Arc<dyn SettlementAdapter>> = vec![
+            storage_rebate.clone() as Arc<dyn SettlementAdapter>,
+            trace_credit.clone() as Arc<dyn SettlementAdapter>,
+        ];
+
+        // P5 (ruling): A and B share the same two recording adapters, the
+        // same `IsolatedPipelineIndex`, the same database (one `backend`
+        // Arc), and the same artifact root -- a second `artifact_store(&dir)`
+        // over the same directory, as a real restart would reopen it.
+        let service_a = test_service_with_adapters_and_index(
+            backend.clone(),
+            artifact_store(&dir),
+            scored_config(true),
+            adapters.clone(),
+            index.clone(),
+            Some(point),
+        )
+        .await;
+        let service_b = test_service_with_adapters_and_index(
+            backend.clone(),
+            artifact_store(&dir),
+            scored_config(true),
+            adapters.clone(),
+            index.clone(),
+            None,
+        )
+        .await;
+
+        let tenant = format!("crash-matrix-{point:?}-{}", uuid::Uuid::new_v4());
+        let env = envelope(uuid::Uuid::new_v4()).await;
+        let raw = serde_json::to_vec(&env).unwrap();
+        let key = env.submission_id.to_string();
+
+        let run_id = if point == PipelineCrashPoint::AfterArtifactStorage {
+            let crashed = service_a
+                .submit(receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+                .await;
+            let error =
+                crashed.expect_err("service A's receipt must crash at AfterArtifactStorage");
+            assert_eq!(error.to_string(), INJECTED_PIPELINE_CRASH);
+
+            // Nothing committed (the receipt transaction never reached its
+            // final commit), so this is a fresh submission from the store's
+            // point of view, not a claim resume -- resubmit the same bytes.
+            let PipelineReceiptResult::Created(created) = service_b
+                .submit(receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+                .await
+                .unwrap()
+            else {
+                panic!("resubmission after the crash must create the run (point {point:?})")
+            };
+            created.run_id
+        } else {
+            let PipelineReceiptResult::Created(created) = service_a
+                .submit(receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+                .await
+                .unwrap()
+            else {
+                panic!("receipt creates a run (point {point:?})")
+            };
+
+            // Drive service A phase by phase until its injected crash
+            // fires -- bounded, with a clear failure message if it never
+            // does (Review, then Score, then Settle is at most 3 calls).
+            let mut crashed_error = None;
+            for _ in 0..5 {
+                match service_a.process_run(&tenant, created.run_id).await {
+                    Ok(_) => continue,
+                    Err(error) => {
+                        crashed_error = Some(error);
+                        break;
+                    }
+                }
+            }
+            let error = crashed_error.unwrap_or_else(|| {
+                panic!(
+                    "service A never hit its crash point within 5 process_run calls (point {point:?})"
+                )
+            });
+            assert_eq!(error.to_string(), INJECTED_PIPELINE_CRASH);
+
+            // `pipeline_runs_lease_shape` requires `lease_token`/
+            // `lease_expires_at` to be both set or both null, so this only
+            // touches a row still genuinely `leased` -- for
+            // `AfterReviewCommit`/`AfterScoreCommit`, whose commit already
+            // cleared the lease before the crash fired, the row is not
+            // `leased` and this matches zero rows (a harmless no-op).
+            let mut client = backend.trace_pool_for_test().get().await.unwrap();
+            let tx = tenant_tx(&mut client, &tenant).await;
+            tx.execute(
+                "UPDATE pipeline_runs SET lease_expires_at = NOW() - INTERVAL '1 second'
+                 WHERE tenant_id = $1 AND run_id = $2 AND state = 'leased'",
+                &[&tenant, &created.run_id],
+            )
+            .await
+            .unwrap();
+            tx.commit().await.unwrap();
+            created.run_id
+        };
+
+        // Resume with service B until the run completes -- bounded, with a
+        // clear failure message if it never does. The first iteration's
+        // check also covers `AfterSettleCommit`, whose crash fires only
+        // after `commit_settle` already committed `state = complete`: the
+        // loop finds the run already `Complete` and calls `process_run`
+        // zero times.
+        for attempt in 0..6 {
+            let current = service_b
+                .store()
+                .get_run(&tenant, run_id)
+                .await
+                .unwrap()
+                .unwrap_or_else(|| panic!("run must exist while resuming (point {point:?})"));
+            if current.state == PipelineRunState::Complete {
+                break;
+            }
+            assert!(
+                attempt < 5,
+                "run at crash point {point:?} did not reach Complete within 6 resume attempts \
+                 (last state {:?})",
+                current.state
+            );
+            service_b
+                .process_run(&tenant, run_id)
+                .await
+                .unwrap_or_else(|error| {
+                    panic!("service B failed to resume at point {point:?}: {error}")
+                });
+        }
+
+        // Exactly four phase outcomes, one per phase.
+        let outcomes = service_b
+            .store()
+            .list_outcomes(&tenant, run_id)
+            .await
+            .unwrap();
+        for phase in [Phase::Admission, Phase::Review, Phase::Score, Phase::Settle] {
+            assert_eq!(
+                outcomes
+                    .iter()
+                    .filter(|outcome| outcome.phase == phase)
+                    .count(),
+                1,
+                "expected exactly one {phase:?} outcome at crash point {point:?}"
+            );
+        }
+
+        // A9: legs are independent -- each adapter was dispatched exactly
+        // once across A and B together (the adapters are the same shared
+        // instances for both services).
+        assert_eq!(
+            storage_rebate.requests().len(),
+            1,
+            "storage_rebate must be dispatched exactly once across A and B at point {point:?}"
+        );
+        assert_eq!(
+            trace_credit.requests().len(),
+            1,
+            "trace_credit must be dispatched exactly once across A and B at point {point:?}"
+        );
+
+        // Exactly one trace_credit_ledger row for the run.
+        assert_eq!(
+            count_credit_ledger_rows_for_run(&backend, &tenant, run_id).await,
+            1,
+            "exactly one credit ledger row for the run at point {point:?}"
+        );
+
+        // The index holds each command chunk once. The double's map key is
+        // (tenant, index_id, entry_id), and `entry_id` is derived
+        // deterministically from the chunk's own `IndexEntryKey` bytes, so
+        // a chunk applied twice (a crashed attempt's apply, then the
+        // retry's re-apply of the same still-`pending` command) can only
+        // ever occupy one map slot -- `entry_count` equal to the command's
+        // own chunk count is exactly the proof that no chunk was inserted
+        // twice, independent of how many times `upsert` was actually
+        // called for it.
+        let score_outcome = outcomes
+            .iter()
+            .find(|outcome| outcome.phase == Phase::Score)
+            .expect("Score outcome recorded");
+        let score_evidence: ScoreEvidence =
+            serde_json::from_value(score_outcome.evidence.clone()).unwrap();
+        let final_run = service_b
+            .store()
+            .get_run(&tenant, run_id)
+            .await
+            .unwrap()
+            .expect("run exists after completion");
+        let command = service_b
+            .load_index_command(&final_run, &score_evidence)
+            .await
+            .unwrap()
+            .expect("Score proposed a command");
+        let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+        assert_eq!(
+            index.entry_count(tenant_ref.as_str(), MINIMAL_INDEX_ID),
+            command.entries().len(),
+            "the index must hold each command chunk exactly once at point {point:?}"
+        );
+
+        // The Settle decision's operations are Completed, with the helper
+        // refs -- both legs actually settled (no withdrawal was injected),
+        // so neither is Forfeited.
+        let settle_outcome = outcomes
+            .iter()
+            .find(|outcome| outcome.phase == Phase::Settle)
+            .expect("Settle outcome recorded");
+        let decision: SettleDecision =
+            serde_json::from_value(settle_outcome.decision.clone()).unwrap();
+        let operations = decision.settlement_operations();
+        assert_eq!(
+            operations.len(),
+            2,
+            "one settlement operation per award at point {point:?}"
+        );
+        let storage_award = InstrumentAward::new(
+            InstrumentId::new("storage_rebate").unwrap(),
+            AtomicUnits::from_raw(5),
+        )
+        .unwrap();
+        let credit_award = InstrumentAward::new(
+            InstrumentId::trace_credit(),
+            AtomicUnits::from_raw(1_000_000),
+        )
+        .unwrap();
+        for operation in operations {
+            let expected_award = if operation.instrument_id().as_str() == "storage_rebate" {
+                &storage_award
+            } else {
+                &credit_award
+            };
+            match operation.outcome() {
+                InstrumentSettlementOutcome::Completed { result_ref_hash } => {
+                    assert_eq!(
+                        result_ref_hash.as_str(),
+                        pipeline_result_ref(run_id, expected_award).as_str(),
+                        "unexpected result ref for {} at point {point:?}",
+                        expected_award.instrument_id().as_str()
+                    );
+                }
+                InstrumentSettlementOutcome::Forfeited { .. } => {
+                    panic!("expected every leg Completed (no withdrawal) at point {point:?}")
+                }
+            }
+        }
+    }
 }
