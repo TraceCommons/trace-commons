@@ -909,6 +909,41 @@ impl IdentifiedEmbedder for CountingEmbedder {
     }
 }
 
+/// P5: an embedder that fails its first 7 `embed` calls and then delegates
+/// to the reference embedder, for `transient_policy_errors_do_not_exhaust_the_trace`.
+/// `FixedScorePolicy` chunks the reviewed artifact and aborts a Score
+/// attempt on the first `embed` error, so a failing attempt never reaches a
+/// second chunk -- every one of the first 7 failing calls is therefore the
+/// sole call of its own attempt, and counting raw `embed` calls counts
+/// attempts.
+struct FlakyEmbedder {
+    calls: AtomicUsize,
+}
+
+impl Embedder for FlakyEmbedder {
+    fn embed(&self, plaintext: &[u8]) -> anyhow::Result<Vec<f32>> {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        if call < 7 {
+            anyhow::bail!("embedder dependency outage (test double)");
+        }
+        ReferenceEmbedder::new().embed(plaintext)
+    }
+}
+
+impl IdentifiedEmbedder for FlakyEmbedder {
+    fn dependency_identity(&self) -> &str {
+        "flaky_embedder_test_only"
+    }
+
+    fn model_id(&self) -> &str {
+        "flaky-embedder-v1"
+    }
+
+    fn content_descriptor(&self) -> Vec<u8> {
+        b"flaky-embedder-test-descriptor-v1".to_vec()
+    }
+}
+
 /// P5's mismatching adapter double: always returns a well-formed but wrong
 /// result reference, regardless of what the request expects. Proves Settle
 /// fails the row closed on D4's binding check -- the expected result comes
@@ -3187,6 +3222,105 @@ async fn a_run_whose_dependency_is_not_held_waits_without_charging() {
         .unwrap()
         .expect("service 1 holds the named embedder and completes Score");
     assert_eq!(scored.next_phase, Some(Phase::Settle));
+}
+
+/// R4 (decision D9): a `PolicyError::Transient` raised while a phase runs --
+/// not only a missing bound dependency at the bundle load, which
+/// `a_run_whose_dependency_is_not_held_waits_without_charging` above already
+/// covers -- releases the run without charging the claim's attempt, so a
+/// dependency outage cannot exhaust the trace's attempt budget.
+/// `FixedScorePolicy` (`versioned_pipeline_bundle.rs`) maps an embedder
+/// failure to `PolicyError::transient("embedder_unavailable")` when the
+/// bundle carries an index (P5). `FlakyEmbedder` fails its first 7 calls;
+/// `max_attempts` defaults to 5 (migration V76/V77), so 7 failures is more
+/// than the run's whole attempt budget, and the run still reaches Score.
+#[tokio::test]
+async fn transient_policy_errors_do_not_exhaust_the_trace() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let flaky_embedder = Arc::new(FlakyEmbedder {
+        calls: AtomicUsize::new(0),
+    });
+    let service = test_service_with_embedder(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        flaky_embedder,
+    )
+    .await;
+
+    let tenant = format!("transient-score-retry-{}", uuid::Uuid::new_v4());
+    let env = envelope(uuid::Uuid::new_v4()).await;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+    let PipelineReceiptResult::Created(created) = service
+        .submit(receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+        .await
+        .unwrap()
+    else {
+        panic!("receipt creates a run")
+    };
+
+    let reviewed = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Review runs");
+    assert_eq!(reviewed.next_phase, Some(Phase::Score));
+
+    // Read `max_attempts` from the run row itself, and prove the test's
+    // premise: 7 failures is more than the whole budget, not merely more
+    // than what is left of it.
+    assert!(
+        7 > reviewed.max_attempts,
+        "the test proves the trace survives more failures than its attempt \
+         budget (max_attempts = {}), not merely a lucky few",
+        reviewed.max_attempts
+    );
+    let attempt_count_before_score = reviewed.attempt_count;
+
+    for attempt in 1..=7 {
+        force_due(&backend, &tenant, created.run_id).await;
+        let retried = service
+            .process_run(&tenant, created.run_id)
+            .await
+            .unwrap()
+            .unwrap_or_else(|| panic!("attempt {attempt} releases the run into retry"));
+        assert_eq!(
+            retried.state,
+            PipelineRunState::Retry,
+            "attempt {attempt} stays in retry, never failed, although attempt \
+             {attempt} > max_attempts once attempt > 5"
+        );
+        assert_eq!(
+            retried.last_error_label.as_deref(),
+            Some("embedder_unavailable"),
+            "attempt {attempt} carries the policy's own transient label"
+        );
+        assert_eq!(
+            retried.attempt_count, attempt_count_before_score,
+            "attempt {attempt}: a transient policy failure never charges the \
+             attempt the claim took"
+        );
+    }
+
+    // The 8th call: the embedder's 8th `embed` call succeeds, and Score
+    // completes.
+    force_due(&backend, &tenant, created.run_id).await;
+    let scored = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("the 8th call completes Score");
+    assert_eq!(scored.state, PipelineRunState::Pending);
+    assert_eq!(scored.next_phase, Some(Phase::Settle));
+    assert_eq!(
+        scored.attempt_count,
+        attempt_count_before_score + 1,
+        "the attempt that finally succeeds is the only one that charges the trace"
+    );
 }
 
 /// 3A acceptance: a stored bundle package that has been tampered with

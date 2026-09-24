@@ -18,10 +18,10 @@ use trace_commons_gate_api::pipeline::{
     AdmissionDecision, AdmissionEvaluation, AdmissionEvidence, AdmissionInput, AtomicUnits,
     BundlePackage, IndexMembershipDecision, InstrumentAward, InstrumentAwards, InstrumentId,
     InstrumentSettlement, InstrumentSettlementProgress, Microcredits, PIPELINE_OUTCOME_SCHEMA_ID,
-    PIPELINE_OUTCOME_SCHEMA_VERSION, Phase, PhaseResult, PrivacyRisk, ReasonCode, ReviewDecision,
-    ReviewEvaluation, ReviewEvidence, ReviewInput, SchemaRef, ScoreDecision, ScoreEvaluation,
-    ScoreEvidence, ScoreInput, SealedIndexCommand, SettleDecision, SettleEvaluation,
-    SettleEvidence, SettleInput, TenantStorageRef,
+    PIPELINE_OUTCOME_SCHEMA_VERSION, Phase, PhaseResult, PolicyError, PrivacyRisk, ReasonCode,
+    ReviewDecision, ReviewEvaluation, ReviewEvidence, ReviewInput, SchemaRef, ScoreDecision,
+    ScoreEvaluation, ScoreEvidence, ScoreInput, SealedIndexCommand, SettleDecision,
+    SettleEvaluation, SettleEvidence, SettleInput, TenantStorageRef,
 };
 use trace_commons_protocol::trace_contribution::{
     ResidualPiiRisk, ResidualRiskCondition, TraceContributionEnvelope,
@@ -2770,6 +2770,22 @@ impl PipelineService {
                         .get_run(&run.tenant_id, run.run_id)
                         .await
                         .map_err(Into::into);
+                }
+                // D9 (Task 15): a typed `PolicyError` raised while a phase
+                // runs is budgeted by kind, ahead of the P2 string allowlist
+                // below -- a transient dependency failure (an outage, a
+                // timeout) releases the run without charging the claim's
+                // attempt, exactly like a missing bound dependency (Task
+                // 14); a permanent policy failure is charged like any other
+                // labeled retry.
+                if let Some(policy) = error.downcast_ref::<PolicyError>() {
+                    return Ok(Some(if policy.is_transient() {
+                        self.store
+                            .mark_transient_retry(&run, policy.label())
+                            .await?
+                    } else {
+                        self.store.mark_retry(&run, policy.label()).await?
+                    }));
                 }
                 // The fixed allowlist from decision P2: a charged retry
                 // (the attempt already taken by the claim stays charged)
