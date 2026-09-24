@@ -15,10 +15,10 @@ use sha2::{Digest, Sha256};
 use tokio_postgres::Row;
 use trace_commons_gate_api::pipeline::{
     AdmissionDecision, AdmissionEvaluation, AdmissionEvidence, AdmissionInput, AtomicUnits,
-    BundlePackage, PIPELINE_OUTCOME_SCHEMA_ID, PIPELINE_OUTCOME_SCHEMA_VERSION, Phase, PhaseResult,
-    PrivacyRisk, ReviewDecision, ReviewEvaluation, ReviewEvidence, ReviewInput, SchemaRef,
-    ScoreDecision, ScoreEvaluation, ScoreEvidence, SettleDecision, SettleEvaluation,
-    SettleEvidence, TenantStorageRef,
+    BundlePackage, InstrumentAwards, PIPELINE_OUTCOME_SCHEMA_ID, PIPELINE_OUTCOME_SCHEMA_VERSION,
+    Phase, PhaseResult, PrivacyRisk, ReviewDecision, ReviewEvaluation, ReviewEvidence, ReviewInput,
+    SchemaRef, ScoreDecision, ScoreEvaluation, ScoreEvidence, ScoreInput, SealedIndexCommand,
+    SettleDecision, SettleEvaluation, SettleEvidence, TenantStorageRef,
 };
 use trace_commons_protocol::trace_contribution::{
     ResidualPiiRisk, ResidualRiskCondition, TraceContributionEnvelope,
@@ -37,7 +37,7 @@ use crate::trace_corpus_storage::{
 use crate::versioned_pipeline_bundle::{
     IdentifiedEmbedder, IdentifiedIndexReader, IdentifiedIndexWriter, IdentifiedPerplexityScorer,
     MinimalPolicyBundle, PIPELINE_BUNDLE_INVALID_LABEL, PIPELINE_DEPENDENCY_MISSING_LABEL,
-    dependency_content_hash,
+    dependency_content_hash, pipeline_operation_ref,
 };
 use crate::versioned_pipeline_credit::SettlementAdapterRegistry;
 
@@ -881,6 +881,111 @@ impl PgPipelineStore {
         Ok(updated)
     }
 
+    /// Commits the Score outcome together with the exact index command it
+    /// proposed (if any) and one pending settlement row per award, in one
+    /// transaction (decision D5). `command`/`neighbor` are each `(object
+    /// ref, hash)`, already stored by the caller before this call opens its
+    /// transaction. Every award's settlement row starts `operation_state =
+    /// 'pending'` (the column default) with `result_ref_hash` NULL --
+    /// Settle records a result only once a leg completes. An award naming
+    /// an instrument that `payout_rails` does not cover fails the whole
+    /// commit with the safe label `settlement_adapter_missing`.
+    pub async fn commit_score(
+        &self,
+        run: &PipelineRunRecord,
+        outcome: StoredPhaseResult,
+        awards: &InstrumentAwards,
+        command: Option<(&str, &str)>,
+        neighbor: Option<(&str, &str)>,
+        payout_rails: &BTreeMap<String, String>,
+    ) -> Result<PipelineRunRecord, DatabaseError> {
+        if outcome.phase != Phase::Score || run.next_phase != Some(Phase::Score) {
+            return Err(DatabaseError::Constraint(
+                "phase does not match run transition".to_string(),
+            ));
+        }
+        let lease_token = required_lease_token(run)?;
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, &run.tenant_id).await?;
+        ensure_current_lease(&tx, run, lease_token).await?;
+
+        insert_outcome(
+            &tx,
+            &run.tenant_id,
+            run.run_id,
+            run.trace_id,
+            &run.bundle_id,
+            Uuid::new_v4(),
+            outcome,
+        )
+        .await?;
+
+        for award in awards.iter() {
+            let instrument_id = award.instrument_id().as_str();
+            let payout_rail = payout_rails.get(instrument_id).ok_or_else(|| {
+                DatabaseError::Constraint("settlement_adapter_missing".to_string())
+            })?;
+            let payout_state = if payout_rail == "none" {
+                "disabled"
+            } else {
+                "pending"
+            };
+            let atomic_units = award.atomic_units().to_string();
+            let operation_ref_hash = pipeline_operation_ref(run.run_id, award);
+            tx.execute(
+                "INSERT INTO pipeline_run_settlements (
+                    tenant_id, run_id, instrument_id, atomic_units,
+                    operation_ref_hash, result_ref_hash, payout_rail, payout_state
+                 ) VALUES ($1,$2,$3,$4::TEXT::NUMERIC,$5,$6,$7,$8)",
+                &[
+                    &run.tenant_id,
+                    &run.run_id,
+                    &instrument_id,
+                    &atomic_units,
+                    &operation_ref_hash,
+                    &Option::<&str>::None,
+                    &payout_rail.as_str(),
+                    &payout_state,
+                ],
+            )
+            .await?;
+        }
+
+        let (command_ref, command_hash) = match command {
+            Some((object_ref, hash)) => (Some(object_ref), Some(hash)),
+            None => (None, None),
+        };
+        let (neighbor_ref, neighbor_hash) = match neighbor {
+            Some((object_ref, hash)) => (Some(object_ref), Some(hash)),
+            None => (None, None),
+        };
+        let row = tx
+            .query_one(
+                "UPDATE pipeline_runs
+                 SET next_phase = 'settle', state = 'pending',
+                     index_command_ref = $3, index_command_hash = $4,
+                     score_neighbor_ref = $5, score_neighbor_hash = $6,
+                     lease_token = NULL, lease_expires_at = NULL,
+                     next_attempt_at = NOW(), phase_started_at = NOW(), updated_at = NOW()
+                 WHERE tenant_id = $1 AND run_id = $2
+                   AND lease_token = $7 AND lease_expires_at > NOW()
+                 RETURNING *",
+                &[
+                    &run.tenant_id,
+                    &run.run_id,
+                    &command_ref,
+                    &command_hash,
+                    &neighbor_ref,
+                    &neighbor_hash,
+                    &lease_token,
+                ],
+            )
+            .await?;
+        let updated = pipeline_run_from_row(&row)?;
+        tx.commit().await?;
+        Ok(updated)
+    }
+
     pub async fn mark_failed(
         &self,
         run: &PipelineRunRecord,
@@ -1640,7 +1745,6 @@ pub struct PipelineService {
     caps: PipelineCaps,
     crash_point: Option<PipelineCrashPoint>,
     crash_pending: AtomicBool,
-    #[expect(dead_code, reason = "first used by Task 11")]
     score_evaluations: AtomicUsize,
     #[expect(dead_code, reason = "first used by Task 12")]
     settle_evaluations: AtomicUsize,
@@ -2205,6 +2309,57 @@ impl PipelineService {
         Ok(bytes)
     }
 
+    /// Reads and validates the sealed index command a committed Score
+    /// outcome stored, per decision P1 (the byte wrapper) and the runtime
+    /// plan's ruling A7. `evidence` is the same Score outcome's own
+    /// evidence; `None` when Score proposed no command
+    /// (`embedding_artifact_hash` absent). Any failure -- a missing or
+    /// malformed reference, a decode failure, or a mismatch against the
+    /// evidence or the run's own recorded hash/revision -- is the safe
+    /// label `index_command_invalid`.
+    pub async fn load_index_command(
+        &self,
+        run: &PipelineRunRecord,
+        evidence: &ScoreEvidence,
+    ) -> anyhow::Result<Option<SealedIndexCommand>> {
+        let Some(expected_hash) = evidence.embedding_artifact_hash.as_deref() else {
+            return Ok(None);
+        };
+        let stored = run
+            .index_command_ref
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("index_command_invalid"))?;
+        let (object_key, ciphertext_sha256) = stored
+            .rsplit_once('#')
+            .ok_or_else(|| anyhow::anyhow!("index_command_invalid"))?;
+        let tenant = pipeline_tenant_storage_ref(&run.tenant_id);
+        let wrapper = self
+            .artifact_store
+            .read_json_by_object_key(
+                tenant.as_str(),
+                TraceArtifactKind::VectorPayload,
+                object_key,
+                ciphertext_sha256,
+            )
+            .map_err(|_| anyhow::anyhow!("index_command_invalid"))?;
+        let bytes = decode_pipeline_artifact_bytes(&wrapper)
+            .map_err(|_| anyhow::anyhow!("index_command_invalid"))?;
+        let command = serde_json::from_slice::<SealedIndexCommand>(&bytes)
+            .map_err(|_| anyhow::anyhow!("index_command_invalid"))?;
+        let command_hash = command
+            .content_hash()
+            .map_err(|_| anyhow::anyhow!("index_command_invalid"))?;
+        anyhow::ensure!(
+            command_hash == expected_hash
+                && Some(command_hash.as_str()) == run.index_command_hash.as_deref()
+                && Some(command.revision_id()) == run.approved_revision_id
+                && Some(command.index_id()) == evidence.index_id.as_deref()
+                && Some(command.model_id()) == evidence.embedder_model_id.as_deref(),
+            "index_command_invalid"
+        );
+        Ok(Some(command))
+    }
+
     /// Claims the next due run for `tenant_id` and advances it one phase.
     pub async fn process_one(&self, tenant_id: &str) -> anyhow::Result<Option<PipelineRunRecord>> {
         let Some(run) = self.store.claim_next(tenant_id).await? else {
@@ -2360,11 +2515,107 @@ impl PipelineService {
                 self.inject_crash(PipelineCrashPoint::AfterReviewCommit)?;
                 Ok(updated)
             }
-            // Task 11 replaces this arm.
-            Phase::Score => anyhow::bail!("phase_not_implemented"),
+            Phase::Score => self.commit_score_phase(run, bundle).await,
             // Task 12 replaces this arm.
             Phase::Settle => anyhow::bail!("phase_not_implemented"),
         }
+    }
+
+    /// Runs Score over the approved bytes, stores the exact index command
+    /// and neighbor artifact it proposed (each wrapped per decision P1),
+    /// and commits the Score outcome together with one pending settlement
+    /// operation per award (decision D5).
+    async fn commit_score_phase(
+        &self,
+        run: &PipelineRunRecord,
+        bundle: &MinimalPolicyBundle,
+    ) -> anyhow::Result<PipelineRunRecord> {
+        let revision_id = run
+            .approved_revision_id
+            .ok_or_else(|| anyhow::anyhow!("approved revision is missing"))?;
+        self.score_evaluations.fetch_add(1, Ordering::SeqCst);
+        let reviewed_artifact = self.load_approved_bytes(run).await?;
+        let tenant = pipeline_tenant_storage_ref(&run.tenant_id);
+        let output = bundle
+            .score
+            .execute(&ScoreInput {
+                run_id: run.run_id,
+                tenant_storage_ref: tenant.clone(),
+                trace_id: run.trace_id,
+                registry_revision_id: revision_id,
+                source_content_hash: run.approved_content_hash.clone().unwrap_or_default(),
+                reviewed_artifact,
+            })
+            .await?;
+        let (result, command, neighbor) = output.into_parts();
+        // A7: before any artifact is stored, every award must name an
+        // instrument this bundle's manifest pins.
+        bundle
+            .package
+            .manifest
+            .require_pinned(&result.decision.awards)
+            .map_err(|_| anyhow::anyhow!("score_outcome_invalid"))?;
+        let command_ref = match &command {
+            None => None,
+            Some(command) => {
+                anyhow::ensure!(
+                    command.revision_id() == revision_id,
+                    "index_command_invalid"
+                );
+                let bytes = serde_json::to_vec(command)?;
+                let wrapper = encode_pipeline_artifact_bytes(&bytes)?;
+                let receipt = self.artifact_store.put_serialized_json(
+                    tenant.as_str(),
+                    TraceArtifactKind::VectorPayload,
+                    &format!("pipeline-index-command-{}", run.run_id),
+                    &wrapper,
+                )?;
+                Some((
+                    format!("{}#{}", receipt.object_key, receipt.ciphertext_sha256),
+                    command.content_hash()?,
+                ))
+            }
+        };
+        let neighbor_ref = match &neighbor {
+            None => None,
+            Some(bytes) => {
+                let wrapper = encode_pipeline_artifact_bytes(bytes)?;
+                let receipt = self.artifact_store.put_serialized_json(
+                    tenant.as_str(),
+                    TraceArtifactKind::VectorPayload,
+                    &format!("pipeline-score-neighbors-{}", run.run_id),
+                    &wrapper,
+                )?;
+                Some((
+                    format!("{}#{}", receipt.object_key, receipt.ciphertext_sha256),
+                    sha256_prefixed(bytes),
+                ))
+            }
+        };
+        self.inject_crash(PipelineCrashPoint::AfterScoreArtifactStorage)?;
+        let updated = self
+            .store
+            .commit_score(
+                run,
+                StoredPhaseResult::from_result(Phase::Score, &result)?,
+                &result.decision.awards,
+                command_ref.as_ref().map(|(r, h)| (r.as_str(), h.as_str())),
+                neighbor_ref.as_ref().map(|(r, h)| (r.as_str(), h.as_str())),
+                &self.settlement_adapters.payout_rails(),
+            )
+            .await
+            .map_err(|error| match &error {
+                // The store's Display prefixes every Constraint error
+                // ("Constraint violation: ..."), which would not match
+                // decision P2's fixed allowlist verbatim; re-raise the one
+                // label the allowlist expects as a bare anyhow error.
+                DatabaseError::Constraint(label) if label == "settlement_adapter_missing" => {
+                    anyhow::anyhow!("settlement_adapter_missing")
+                }
+                _ => anyhow::Error::from(error),
+            })?;
+        self.inject_crash(PipelineCrashPoint::AfterScoreCommit)?;
+        Ok(updated)
     }
 }
 

@@ -7,8 +7,9 @@ use std::sync::Arc;
 
 use secrecy::SecretString;
 use trace_commons_gate_api::pipeline::{
-    AtomicUnits, InstrumentDescriptor, InstrumentId, InstrumentKind, Phase, PhaseResult,
-    ReasonCode, ReviewDecision, ReviewEvaluation, ReviewEvidence, ReviewOutput,
+    AtomicUnits, InstrumentAward, InstrumentDescriptor, InstrumentId, InstrumentKind, Phase,
+    PhaseResult, ReasonCode, ReviewDecision, ReviewEvaluation, ReviewEvidence, ReviewOutput,
+    ScoreEvidence, TRACE_CREDIT_DECIMALS,
 };
 use trace_commons_gate_api::{ReferenceEmbedder, ReferencePerplexityScorer};
 use trace_commons_protocol::trace_contribution::{
@@ -24,7 +25,7 @@ use trace_commons_server::trace_artifact_store::{
 use trace_commons_server::versioned_pipeline::*;
 use trace_commons_server::versioned_pipeline_bundle::{
     MinimalPolicyBundle, PipelineBundleConfig, PipelineInstrumentAwardConfig,
-    dependency_content_hash,
+    dependency_content_hash, pipeline_operation_ref,
 };
 use trace_commons_server::versioned_pipeline_credit::{
     RecordingSettlementAdapter, SettlementAdapter, SettlementAdapterRegistry,
@@ -96,6 +97,17 @@ fn storage_rebate_descriptor() -> InstrumentDescriptor {
         network: "pipeline-test".to_string(),
         contract: "storage-rebate".to_string(),
         decimals: 0,
+    }
+}
+
+/// Pinned per A4: `nep141` on `testnet`, six decimals. Shared by the Score
+/// tests below.
+fn trace_credit_descriptor() -> InstrumentDescriptor {
+    InstrumentDescriptor {
+        kind: InstrumentKind::Nep141,
+        network: "testnet".to_string(),
+        contract: "trace-credit.testnet".to_string(),
+        decimals: TRACE_CREDIT_DECIMALS,
     }
 }
 
@@ -548,9 +560,63 @@ async fn envelope(submission_id: uuid::Uuid) -> TraceContributionEnvelope {
     envelope
 }
 
+/// Like `envelope`, but with a long capture turn so the serialized envelope
+/// is well over 768 bytes -- the minimal Score policy chunks the approved
+/// bytes at 256 bytes each, and the Score tests below need at least three
+/// chunks.
+async fn large_envelope(submission_id: uuid::Uuid) -> TraceContributionEnvelope {
+    let now = chrono::Utc::now();
+    let long_input = "Inspect the bounded runtime fixture in detail. ".repeat(30);
+    let long_response = "Every field of the fixture was reviewed. ".repeat(20);
+    let raw = RawTraceContribution::from_capture_turns(
+        &[RawTraceCaptureTurn {
+            user_input: long_input,
+            response: Some(long_response),
+            tool_calls: Vec::new(),
+            started_at: now,
+            completed_at: Some(now + chrono::Duration::seconds(1)),
+            state: Some("complete".to_string()),
+        }],
+        RecordedTraceContributionOptions {
+            include_message_text: true,
+            ..RecordedTraceContributionOptions::default()
+        },
+    );
+    let mut envelope = DeterministicTraceRedactor::try_default()
+        .unwrap()
+        .redact_trace(raw)
+        .await
+        .unwrap();
+    envelope.submission_id = submission_id;
+    envelope.privacy.residual_pii_risk = ResidualPiiRisk::Low;
+    envelope
+}
+
 fn minimal_config(include_index: bool) -> PipelineBundleConfig {
     PipelineBundleConfig {
         instrument_awards: vec![],
+        include_index,
+        variant: None,
+    }
+}
+
+/// A config that awards both pinned instruments (`storage_rebate` 5 atomic
+/// units, `trace_credit` 1,000,000 atomic units), per the resolution note on
+/// test configs that award both descriptors.
+fn scored_config(include_index: bool) -> PipelineBundleConfig {
+    PipelineBundleConfig {
+        instrument_awards: vec![
+            PipelineInstrumentAwardConfig {
+                instrument_id: "storage_rebate".into(),
+                atomic_units: AtomicUnits::from_raw(5),
+                descriptor: storage_rebate_descriptor(),
+            },
+            PipelineInstrumentAwardConfig {
+                instrument_id: InstrumentId::trace_credit().as_str().to_string(),
+                atomic_units: AtomicUnits::from_raw(1_000_000),
+                descriptor: trace_credit_descriptor(),
+            },
+        ],
         include_index,
         variant: None,
     }
@@ -1157,4 +1223,276 @@ async fn review_crash_after_artifact_storage_reuses_one_revision() {
         dependency_content_hash(&bytes),
         processed.approved_content_hash.unwrap()
     );
+}
+
+/// Score stores the exact index command it proposed, and seeds one pending
+/// settlement operation per award, in the Score commit (decision D5). The
+/// stored command survives a restart bit-for-bit, and keeps every chunk of a
+/// multi-chunk envelope.
+#[tokio::test]
+async fn score_commit_seeds_one_operation_per_award_and_keeps_every_chunk() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        scored_config(true),
+        None,
+    )
+    .await;
+    let tenant = format!("score-commit-{}", uuid::Uuid::new_v4());
+    let env = large_envelope(uuid::Uuid::new_v4()).await;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+    let PipelineReceiptResult::Created(created) = service
+        .submit(receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+        .await
+        .unwrap()
+    else {
+        panic!("receipt creates a run")
+    };
+
+    let reviewed = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Review runs");
+    assert_eq!(reviewed.next_phase, Some(Phase::Score));
+
+    let scored = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Score runs");
+
+    // One state, all its facts together: next_phase advanced, the command
+    // reference and hash are set, and Settle has not yet decided membership.
+    assert_eq!(scored.next_phase, Some(Phase::Settle));
+    assert!(scored.index_command_ref.is_some());
+    assert!(scored.index_command_hash.is_some());
+    assert_eq!(scored.index_membership, "undecided");
+
+    let settlements = service
+        .store()
+        .list_settlements(&tenant, scored.run_id)
+        .await
+        .unwrap();
+    assert_eq!(settlements.len(), 2);
+    let storage_award = InstrumentAward::new(
+        InstrumentId::new("storage_rebate").unwrap(),
+        AtomicUnits::from_raw(5),
+    )
+    .unwrap();
+    let credit_award = InstrumentAward::new(
+        InstrumentId::trace_credit(),
+        AtomicUnits::from_raw(1_000_000),
+    )
+    .unwrap();
+    for settlement in &settlements {
+        assert_eq!(settlement.operation_state, "pending");
+        assert!(settlement.result_ref_hash.is_none());
+        // The test adapters (`test_service`) use payout rail "none".
+        assert_eq!(settlement.payout_state, "disabled");
+        let expected_award = if settlement.instrument_id == "storage_rebate" {
+            &storage_award
+        } else {
+            &credit_award
+        };
+        assert_eq!(
+            settlement.operation_ref_hash,
+            pipeline_operation_ref(scored.run_id, expected_award)
+        );
+    }
+
+    let outcomes = service
+        .store()
+        .list_outcomes(&tenant, scored.run_id)
+        .await
+        .unwrap();
+    let score_outcome = outcomes
+        .into_iter()
+        .find(|outcome| outcome.phase == Phase::Score)
+        .expect("Score outcome recorded");
+    let evidence: ScoreEvidence = serde_json::from_value(score_outcome.evidence).unwrap();
+
+    let command = service
+        .load_index_command(&scored, &evidence)
+        .await
+        .unwrap()
+        .expect("Score proposed a command");
+    assert_eq!(
+        command.content_hash().unwrap(),
+        evidence.embedding_artifact_hash.clone().unwrap()
+    );
+    let chunks: Vec<u32> = command.entries().iter().map(|entry| entry.chunk).collect();
+    assert!(
+        chunks.len() >= 3,
+        "expected at least three chunks, got {}",
+        chunks.len()
+    );
+    assert_eq!(chunks, (0..chunks.len() as u32).collect::<Vec<_>>());
+
+    // Build a NEW service over the same database and artifact root (a
+    // restart), then load the command again from durable state alone.
+    let (restarted, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        scored_config(true),
+        None,
+    )
+    .await;
+    let reloaded_run = restarted
+        .store()
+        .get_run(&tenant, scored.run_id)
+        .await
+        .unwrap()
+        .expect("run still exists after restart");
+    let reloaded_command = restarted
+        .load_index_command(&reloaded_run, &evidence)
+        .await
+        .unwrap()
+        .expect("the retained command reloads");
+    assert_eq!(
+        command, reloaded_command,
+        "reloaded command must be bit-for-bit equal"
+    );
+}
+
+/// A run with no pinned awards, and indexing disabled, still advances to
+/// Settle: zero settlement rows and no command reference.
+#[tokio::test]
+async fn empty_awards_still_continue_to_settle() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("score-empty-{}", uuid::Uuid::new_v4());
+    let env = envelope(uuid::Uuid::new_v4()).await;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+    let PipelineReceiptResult::Created(created) = service
+        .submit(receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+        .await
+        .unwrap()
+    else {
+        panic!("receipt creates a run")
+    };
+
+    service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Review runs");
+    let scored = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Score runs");
+
+    assert_eq!(scored.next_phase, Some(Phase::Settle));
+    assert!(scored.index_command_ref.is_none());
+    assert!(scored.index_command_hash.is_none());
+    let settlements = service
+        .store()
+        .list_settlements(&tenant, scored.run_id)
+        .await
+        .unwrap();
+    assert!(settlements.is_empty());
+}
+
+/// Review focus item 2's crash test, applied to Score: a crash between the
+/// index command's artifact write and the database commit must leave
+/// exactly one Score outcome, one command reference, and one settlement row
+/// per award once the run retries -- the retry reuses the stored bytes
+/// rather than double-committing.
+#[tokio::test]
+async fn score_crash_after_command_storage_keeps_one_command() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        scored_config(true),
+        Some(PipelineCrashPoint::AfterScoreArtifactStorage),
+    )
+    .await;
+    let tenant = format!("score-crash-{}", uuid::Uuid::new_v4());
+    let env = large_envelope(uuid::Uuid::new_v4()).await;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+    let PipelineReceiptResult::Created(created) = service
+        .submit(receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+        .await
+        .unwrap()
+    else {
+        panic!("receipt creates a run")
+    };
+
+    service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Review runs");
+
+    let crashed = service.process_run(&tenant, created.run_id).await;
+    let error = crashed.expect_err("the injected crash must propagate as an error");
+    assert_eq!(error.to_string(), INJECTED_PIPELINE_CRASH);
+
+    // Expire the lease: a direct UPDATE, a time shortcut in the test, not a
+    // processor call -- the crashed attempt never called `mark_retry` or
+    // `mark_failed` (the injected crash propagates unchanged), so the run is
+    // otherwise stuck `leased` until its lease naturally expires.
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &tenant).await;
+    tx.execute(
+        "UPDATE pipeline_runs SET lease_expires_at = NOW() - INTERVAL '1 second'
+         WHERE tenant_id = $1 AND run_id = $2",
+        &[&tenant, &created.run_id],
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+
+    let scored = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("the retry claims and completes Score");
+    assert_eq!(scored.next_phase, Some(Phase::Settle));
+    assert!(
+        scored.index_command_ref.is_some(),
+        "the retry stores one command reference"
+    );
+
+    let outcomes = service
+        .store()
+        .list_outcomes(&tenant, scored.run_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| outcome.phase == Phase::Score)
+            .count(),
+        1,
+        "exactly one Score outcome after the crash and its retry"
+    );
+
+    let settlements = service
+        .store()
+        .list_settlements(&tenant, scored.run_id)
+        .await
+        .unwrap();
+    assert_eq!(settlements.len(), 2, "two settlement rows, one per award");
 }
