@@ -2,20 +2,34 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Versioned pipeline runtime against PostgreSQL, as a role that cannot bypass RLS.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use secrecy::SecretString;
 use trace_commons_gate_api::pipeline::{
-    AtomicUnits, InstrumentDescriptor, InstrumentKind, Phase, PhaseResult, ReasonCode,
-    ReviewDecision, ReviewEvaluation, ReviewEvidence, ReviewOutput,
+    AtomicUnits, InstrumentDescriptor, InstrumentId, InstrumentKind, Phase, PhaseResult,
+    ReasonCode, ReviewDecision, ReviewEvaluation, ReviewEvidence, ReviewOutput,
 };
 use trace_commons_gate_api::{ReferenceEmbedder, ReferencePerplexityScorer};
+use trace_commons_protocol::trace_contribution::{
+    DeterministicTraceRedactor, RawTraceCaptureTurn, RawTraceContribution,
+    RecordedTraceContributionOptions, ResidualPiiRisk, TraceContributionEnvelope, TraceRedactor,
+};
 use trace_commons_server::config::DatabaseConfig;
 use trace_commons_server::db::{Database, postgres::PgBackend};
+use trace_commons_server::secrets::SecretsCrypto;
+use trace_commons_server::trace_artifact_store::{
+    LocalEncryptedTraceArtifactStore, TraceArtifactStore,
+};
 use trace_commons_server::versioned_pipeline::*;
 use trace_commons_server::versioned_pipeline_bundle::{
     MinimalPolicyBundle, PipelineBundleConfig, PipelineInstrumentAwardConfig,
     dependency_content_hash,
 };
+use trace_commons_server::versioned_pipeline_credit::{
+    RecordingSettlementAdapter, SettlementAdapter, SettlementAdapterRegistry,
+};
+use trace_commons_server::versioned_pipeline_index::IsolatedPipelineIndex;
 
 const RUNTIME_ROLE: &str = "trace_pipeline_runtime_test";
 static SETUP_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -488,4 +502,425 @@ async fn attempts_exhaust_to_failed_but_transient_retries_do_not_charge() {
         failed.last_error_label.as_deref(),
         Some("attempts_exhausted")
     );
+}
+
+fn artifact_store(root: &tempfile::TempDir) -> Arc<dyn TraceArtifactStore> {
+    Arc::new(LocalEncryptedTraceArtifactStore::new(
+        root.path(),
+        SecretsCrypto::new(SecretString::from(
+            "pipeline-runtime-test-master-key-32-bytes".to_string(),
+        ))
+        .unwrap(),
+    ))
+}
+
+/// A redacted, low-risk envelope, as port lines 109 to 133 build one --
+/// changed to return the envelope itself rather than its serialized bytes,
+/// so callers can both submit it and read its fields (submission_id,
+/// trace_id, privacy.redaction_hash) without a round trip through JSON.
+async fn envelope(submission_id: uuid::Uuid) -> TraceContributionEnvelope {
+    let now = chrono::Utc::now();
+    let raw = RawTraceContribution::from_capture_turns(
+        &[RawTraceCaptureTurn {
+            user_input: "Inspect the bounded runtime fixture.".to_string(),
+            response: Some("Done.".to_string()),
+            tool_calls: Vec::new(),
+            started_at: now,
+            completed_at: Some(now + chrono::Duration::seconds(1)),
+            state: Some("complete".to_string()),
+        }],
+        RecordedTraceContributionOptions {
+            include_message_text: true,
+            ..RecordedTraceContributionOptions::default()
+        },
+    );
+    let mut envelope = DeterministicTraceRedactor::try_default()
+        .unwrap()
+        .redact_trace(raw)
+        .await
+        .unwrap();
+    envelope.submission_id = submission_id;
+    envelope.privacy.residual_pii_risk = ResidualPiiRisk::Low;
+    envelope
+}
+
+fn minimal_config(include_index: bool) -> PipelineBundleConfig {
+    PipelineBundleConfig {
+        instrument_awards: vec![],
+        include_index,
+        variant: None,
+    }
+}
+
+/// Builds a service over an isolated index (as both reader and writer), the
+/// reference scorer and embedder, and `storage_rebate`/`trace_credit`
+/// recording settlement adapters with an uncapped (`u64::MAX`) cap for each,
+/// on payout rail `none`.
+async fn test_service(
+    backend: Arc<PgBackend>,
+    artifact_store: Arc<dyn TraceArtifactStore>,
+    config: PipelineBundleConfig,
+) -> (
+    Arc<PipelineService>,
+    Arc<IsolatedPipelineIndex>,
+    Vec<Arc<RecordingSettlementAdapter>>,
+) {
+    let scorer = Arc::new(ReferencePerplexityScorer::new());
+    let embedder = Arc::new(ReferenceEmbedder::new());
+    let package = MinimalPolicyBundle::minimal_package(&config, scorer.as_ref(), embedder.as_ref())
+        .expect("build minimal bundle package");
+    let index = IsolatedPipelineIndex::new();
+    let storage_rebate = RecordingSettlementAdapter::new(
+        InstrumentId::new("storage_rebate").unwrap(),
+        "recording_storage_rebate_test_only",
+        "none",
+    );
+    let trace_credit = RecordingSettlementAdapter::new(
+        InstrumentId::trace_credit(),
+        "recording_trace_credit_test_only",
+        "none",
+    );
+    let adapters = vec![storage_rebate.clone(), trace_credit.clone()];
+    let registry = SettlementAdapterRegistry::new(
+        adapters
+            .iter()
+            .cloned()
+            .map(|adapter| adapter as Arc<dyn SettlementAdapter>)
+            .collect(),
+    )
+    .expect("build settlement adapter registry");
+    let caps = PipelineCaps {
+        per_instrument_atomic_units: BTreeMap::from([
+            (
+                "storage_rebate".to_string(),
+                AtomicUnits::from_raw(u128::MAX),
+            ),
+            (
+                InstrumentId::trace_credit().as_str().to_string(),
+                AtomicUnits::from_raw(u128::MAX),
+            ),
+        ]),
+    };
+    let service = PipelineServiceBuilder::new(
+        backend,
+        artifact_store,
+        package,
+        index.clone(),
+        index.clone(),
+        registry,
+        caps,
+    )
+    .with_scorer(scorer)
+    .with_embedder(embedder)
+    .build()
+    .expect("build pipeline service");
+    (Arc::new(service), index, adapters)
+}
+
+fn receipt<'a>(
+    tenant: &'a str,
+    key: &'a str,
+    raw: &'a [u8],
+    envelope: &'a TraceContributionEnvelope,
+    limits: PipelineAdmissionLimits,
+) -> PipelineReceiptRequest<'a> {
+    PipelineReceiptRequest {
+        tenant_id: tenant,
+        actor_principal_ref: "principal_sha256:test",
+        counts_toward_quota: true,
+        request_idempotency_key: key,
+        request_bytes: raw,
+        server_envelope: envelope,
+        residual_risk_basis: &[],
+        limits,
+    }
+}
+
+const NO_LIMITS: PipelineAdmissionLimits = PipelineAdmissionLimits {
+    max_per_tenant_per_hour: 0,
+    max_per_principal_per_hour: 0,
+};
+
+/// `SELECT COUNT(*)` over `pipeline_runs` for `tenant_id`, in its own
+/// tenant-scoped transaction.
+async fn count_runs(backend: &Arc<PgBackend>, tenant_id: &str) -> i64 {
+    let mut client = backend
+        .trace_pool_for_test()
+        .get()
+        .await
+        .expect("client for count_runs");
+    let tx = client.transaction().await.expect("tx for count_runs");
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&tenant_id],
+    )
+    .await
+    .expect("set tenant for count_runs");
+    let count: i64 = tx
+        .query_one(
+            "SELECT COUNT(*) FROM pipeline_runs WHERE tenant_id = $1",
+            &[&tenant_id],
+        )
+        .await
+        .expect("count runs")
+        .get(0);
+    tx.commit().await.expect("commit count_runs");
+    count
+}
+
+/// `SELECT COUNT(*)` over `pipeline_receipt_artifacts` for `tenant_id`, in
+/// its own tenant-scoped transaction. A refused receipt (tombstoned or
+/// quota-exceeded) never reaches the staging insert, so this is also the
+/// count of receipts that got as far as storing an artifact.
+async fn count_staged_artifacts(backend: &Arc<PgBackend>, tenant_id: &str) -> i64 {
+    let mut client = backend
+        .trace_pool_for_test()
+        .get()
+        .await
+        .expect("client for count_staged_artifacts");
+    let tx = client
+        .transaction()
+        .await
+        .expect("tx for count_staged_artifacts");
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&tenant_id],
+    )
+    .await
+    .expect("set tenant for count_staged_artifacts");
+    let count: i64 = tx
+        .query_one(
+            "SELECT COUNT(*) FROM pipeline_receipt_artifacts WHERE tenant_id = $1",
+            &[&tenant_id],
+        )
+        .await
+        .expect("count staged artifacts")
+        .get(0);
+    tx.commit().await.expect("commit count_staged_artifacts");
+    count
+}
+
+/// Recursively counts regular files under `path`. Used to confirm a refused
+/// receipt left no ciphertext on disk.
+fn count_files_under(path: &std::path::Path) -> usize {
+    let Ok(entries) = std::fs::read_dir(path) else {
+        return 0;
+    };
+    let mut count = 0;
+    for entry in entries.flatten() {
+        let entry_path = entry.path();
+        if entry_path.is_dir() {
+            count += count_files_under(&entry_path);
+        } else {
+            count += 1;
+        }
+    }
+    count
+}
+
+#[tokio::test]
+async fn receipt_replay_and_conflict_are_exact() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) =
+        test_service(backend.clone(), artifact_store(&dir), minimal_config(false)).await;
+    let tenant = format!("replay-{}", uuid::Uuid::new_v4());
+    let env = envelope(uuid::Uuid::new_v4()).await;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+    let PipelineReceiptResult::Created(created) = service
+        .submit(receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+        .await
+        .unwrap()
+    else {
+        panic!("first receipt creates a run")
+    };
+    let PipelineReceiptResult::Replayed(replayed) = service
+        .submit(receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+        .await
+        .unwrap()
+    else {
+        panic!("identical bytes replay")
+    };
+    assert_eq!(created.run_id, replayed.run_id);
+    let mut changed = raw.clone();
+    changed.push(b' ');
+    assert!(matches!(
+        service
+            .submit(receipt(&tenant, &key, &changed, &env, NO_LIMITS))
+            .await
+            .unwrap(),
+        PipelineReceiptResult::ContentConflict
+    ));
+    assert_eq!(count_runs(&backend, &tenant).await, 1);
+}
+
+/// A tombstone can only reference a submission that already exists (the
+/// table's foreign key). In production a tombstone is always created for a
+/// PRIOR submission -- the one that was later withdrawn or redacted -- and
+/// matches a fresh resubmission by `trace_id`/`redaction_hash`, not by
+/// `submission_id`. This test reproduces that shape: it seeds an unrelated
+/// prior submission, tombstones it by the redaction hash the new envelope
+/// carries, and submits the new envelope under a different submission id.
+#[tokio::test]
+async fn tombstoned_content_is_refused_before_the_store() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) =
+        test_service(backend.clone(), artifact_store(&dir), minimal_config(false)).await;
+    let tenant = format!("tombstone-{}", uuid::Uuid::new_v4());
+    let env = envelope(uuid::Uuid::new_v4()).await;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+
+    let prior_submission_id = uuid::Uuid::new_v4();
+    let mut client = backend
+        .trace_pool_for_test()
+        .get()
+        .await
+        .expect("client for tombstone seed");
+    let tx = client.transaction().await.expect("tx for tombstone seed");
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&tenant],
+    )
+    .await
+    .expect("set tenant for tombstone seed");
+    tx.execute(
+        "INSERT INTO trace_tenants (tenant_id) VALUES ($1) ON CONFLICT (tenant_id) DO NOTHING",
+        &[&tenant],
+    )
+    .await
+    .expect("seed trace_tenants");
+    tx.execute(
+        "INSERT INTO trace_submissions (
+            tenant_id, submission_id, trace_id, auth_principal_ref, schema_version,
+            consent_policy_version, consent_scopes, allowed_uses, retention_policy_id,
+            status, privacy_risk, redaction_pipeline_version, redaction_hash, redaction_counts
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)",
+        &[
+            &tenant,
+            &prior_submission_id,
+            &uuid::Uuid::new_v4(),
+            &"seed-principal",
+            &"ironclaw.trace_contribution.v1",
+            &"v1",
+            &serde_json::json!([]),
+            &serde_json::json!([]),
+            &"retention-default",
+            &"revoked",
+            &"low",
+            &"v1",
+            &dependency_content_hash(b"tombstone-test-prior-submission"),
+            &serde_json::json!({}),
+        ],
+    )
+    .await
+    .expect("seed prior trace_submissions");
+    tx.execute(
+        "INSERT INTO trace_tombstones (
+            tenant_id, tombstone_id, submission_id, trace_id, redaction_hash, reason,
+            effective_at, created_by_principal_ref
+         ) VALUES ($1,$2,$3,$4,$5,$6,NOW(),$7)",
+        &[
+            &tenant,
+            &uuid::Uuid::new_v4(),
+            &prior_submission_id,
+            &Option::<uuid::Uuid>::None,
+            &Some(env.privacy.redaction_hash.clone()),
+            &"withdrawn",
+            &"seed-principal",
+        ],
+    )
+    .await
+    .expect("seed trace_tombstones");
+    tx.commit().await.expect("commit tombstone seed");
+
+    let result = service
+        .submit(receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+        .await
+        .unwrap();
+    assert!(matches!(result, PipelineReceiptResult::Tombstoned));
+    assert_eq!(count_runs(&backend, &tenant).await, 0);
+    assert_eq!(
+        count_staged_artifacts(&backend, &tenant).await,
+        0,
+        "a tombstoned receipt stores no pipeline_receipt_artifacts row"
+    );
+    assert_eq!(
+        count_files_under(dir.path()),
+        0,
+        "a tombstoned receipt writes no artifact file"
+    );
+}
+
+#[tokio::test]
+async fn quota_is_counted_before_the_store_under_concurrency() {
+    let Some(backend) = runtime_backend(8).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) =
+        test_service(backend.clone(), artifact_store(&dir), minimal_config(false)).await;
+    let tenant = format!("quota-{}", uuid::Uuid::new_v4());
+    let limits = PipelineAdmissionLimits {
+        max_per_tenant_per_hour: 3,
+        max_per_principal_per_hour: 0,
+    };
+    let mut tasks = Vec::new();
+    for _ in 0..6 {
+        let service = service.clone();
+        let tenant = tenant.clone();
+        tasks.push(tokio::spawn(async move {
+            let env = envelope(uuid::Uuid::new_v4()).await;
+            let raw = serde_json::to_vec(&env).unwrap();
+            let key = env.submission_id.to_string();
+            service
+                .submit(receipt(&tenant, &key, &raw, &env, limits))
+                .await
+                .unwrap()
+        }));
+    }
+    let mut created = 0;
+    let mut refused = 0;
+    for task in tasks {
+        match task.await.unwrap() {
+            PipelineReceiptResult::Created(_) => created += 1,
+            PipelineReceiptResult::QuotaExceeded(PipelineQuotaScope::Tenant) => refused += 1,
+            other => panic!("unexpected receipt result {other:?}"),
+        }
+    }
+    assert_eq!((created, refused), (3, 3));
+    assert_eq!(count_runs(&backend, &tenant).await, 3);
+    assert_eq!(
+        count_staged_artifacts(&backend, &tenant).await,
+        3,
+        "refused receipts store nothing"
+    );
+}
+
+#[tokio::test]
+async fn pool_size_one_receipt_does_not_nest_checkouts() {
+    let Some(backend) = runtime_backend(1).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(backend, artifact_store(&dir), minimal_config(false)).await;
+    let env = envelope(uuid::Uuid::new_v4()).await;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        service.submit(receipt("pool-one", &key, &raw, &env, NO_LIMITS)),
+    )
+    .await
+    .expect("a receipt with one pool connection must not wait on itself");
+    assert!(matches!(
+        result.unwrap(),
+        PipelineReceiptResult::Created(_) | PipelineReceiptResult::Replayed(_)
+    ));
 }
