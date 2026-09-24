@@ -246,3 +246,109 @@ proposal is withdrawn on those grounds rather than on the grounds rev 1 gave.
   consent basis, and review established that withdrawing it is currently much
   harder than giving it. `docs/legal-counsel-review-checklist.md` should be run
   against this.
+
+---
+
+# Addendum 2: what is consented to on first install, and in what order
+
+Epic 1's two flows are the two paths above: **Flow 1 (Connect-and-Forget)** is
+the automatic path, **Flow 2 (Customize-and-Tailor)** is choose-myself. This
+addendum answers the sequencing question they raise — what a contributor must
+agree to before anything can be sent, and what can wait.
+
+## The gates that already exist
+
+Onboarding today asks for everything up front, but the daemon does not depend
+on that: it refuses a send on its own when a precondition is missing, and each
+refusal is a named, fail-closed label. Before any session leaves:
+
+| Gate | Where | Applies to |
+|---|---|---|
+| Enrollment is live (config + device key) | `uploader.rs:380`, `enrollment_is_live` | everyone |
+| NEAR AI notice acknowledged | `uploader.rs:389`, `near-ai-notice-not-acknowledged` | NEAR AI configured |
+| Token-distribution review | `uploader.rs:490`, `token-distribution-review-required` | opted in |
+| Raw-session confirmation | `ipc.rs:3581`, `raw_session_confirmed` | witness enrollees |
+
+The NEAR AI gate's comment is the model for all of them: the notice is
+delivered interactively *because* a daemon that consumed the marker
+non-interactively "would send the contributor's text to a third party with the
+notice never actually delivered."
+
+## The rule
+
+**A step belongs in first-install onboarding only if a send cannot proceed
+without it. Everything else moves to the moment it is needed, where the daemon
+already refuses and the shell shows a recovery prompt.**
+
+This is not speculative. #1001 has just done exactly that for the NEAR AI
+notice: acknowledgement "was wired only into onboarding", so a contributor who
+reached the condition outside that flow saw a generic "Daemon needs attention".
+It now recovers in the queue with the full notice and fails closed until the
+text has loaded. That is the pattern this rule generalises, and it is what lets
+onboarding shrink without any promise being dropped.
+
+Applying it to the eleven steps the prototype currently runs:
+
+**Mandatory at first install**
+
+1. **Connect** — invite or NEAR AI login or wallet. Nothing else is meaningful
+   without an identity, and `enrollment_is_live` gates every send on it.
+2. **The one question** — Flow 1 or Flow 2. This sets the default mode for
+   newly discovered folders and is the only genuinely new policy concept.
+3. **The disclosure matching the answer.** For Flow 2 this is today's consent
+   screen. For Flow 1 it is the four constants above, and it must be complete,
+   because Flow 1's whole claim is that nothing further will be asked.
+
+**Deferred to the point of need, with a recovery path**
+
+- NEAR AI notice, per #1001's pattern.
+- Token-distribution review.
+- Source roots beyond the defaults, and per-project modes. Flow 2 shows the
+  discovered-projects screen at connect because choosing is the point of that
+  flow; Flow 1 does not, because it has nothing to ask.
+- The optional third-party scan, which is already optional.
+
+## The one thing that cannot be deferred
+
+**For a witness enrollee on Flow 1, the raw-upload disclosure has to move
+forward into the grant.**
+
+Their sessions leave the machine unredacted for the enclave — `witness/mod.rs`
+calls it "the largest disclosure in this system." Today `ipc.rs:3581` refuses
+without `raw_session_confirmed` and `witness_copy.rs:685` says it per session.
+Under Flow 1 there is no per-session moment, so a deferred prompt would either
+block every automatic send forever — making Flow 1 non-functional for exactly
+the enrollees most likely to choose it — or be acknowledged once somewhere that
+is not the consent screen, which is the "notice never actually delivered"
+failure the NEAR AI comment warns about.
+
+There is a second reason, which the shipped disclosure states and rev 2's
+`AUTO_REVERSAL` does not survive: *"Cancelling afterwards cannot recall a
+session already sent to the witness"* (`witness_copy.rs:685`). The witness
+upload is irreversible the moment it happens, before any contribution decision
+exists. So for a witness enrollee, "you can withdraw any session at any time"
+is not the whole reversal story — withdrawal governs the commons, and nothing
+governs the enclave. That gap is invisible today because a person confirms each
+one; under Flow 1 nobody does.
+
+So for these contributors Flow 1's disclosure carries a fifth sentence, and the
+grant is not obtainable without it. A contributor who declines it is on Flow 2.
+That is the honest outcome: their traces cannot be sent unattended under a
+disclosure that omits the largest thing that happens to them.
+
+The general form of the rule: **anything that will happen without a further
+prompt must be disclosed before the grant, not at the moment it happens** —
+because under Flow 1 that moment has no one in front of it.
+
+## What this leaves open
+
+- **Flow 2 is under-specified here.** Epic 1 gives it four steps — tool
+  selection, session and repo permissions, scrub model, contribute — and only
+  the middle two map onto anything that exists. The "choose scrub model
+  (auto/manual)" step in particular has no counterpart in the code: there is no
+  contributor-facing scrub-model choice, and `pii_filter` is unset on every
+  production path.
+- **Where the one question renders**, given the copy reaches GTK alone unless
+  `ConsentCopy` is extended past its three fields.
+- **Whether declining the witness disclosure should be reversible** into Flow 1
+  later, and what re-grants.
