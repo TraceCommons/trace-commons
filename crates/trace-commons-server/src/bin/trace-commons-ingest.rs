@@ -1439,18 +1439,8 @@ pub async fn run_ingest(
         .await
         .with_context(|| format!("failed to bind trace commons ingestion service at {addr}"))?;
     tracing::info!(%addr, "Trace Commons ingestion service listening");
-    let shutdown_grace_seconds = parse_usize_env(
-        TRACE_COMMONS_SHUTDOWN_GRACE_SECONDS,
-        TRACE_COMMONS_DEFAULT_SHUTDOWN_GRACE_SECONDS,
-    )? as u64;
     let shutdown_state = Arc::clone(&state);
-    let result = serve_ingest_with_graceful_shutdown(
-        listener,
-        app(state),
-        shutdown_grace_seconds,
-        wait_for_shutdown_signal(),
-    )
-    .await;
+    let result = run_pipeline_app(state, listener, wait_for_shutdown_signal()).await;
     // Runs on the way out of BOTH a clean drain and an aborted one: the
     // novelty corpus is the gate's memory of what "duplicate" means, and a
     // restart that drops it silently re-scores every subsequent trace against
@@ -1598,6 +1588,12 @@ struct AppState {
     /// `TRACE_COMMONS_PIPELINE_RUNTIME_REQUIRED` and
     /// `validate_pipeline_receipt_rollout`.
     pipeline_runtime_required: bool,
+    /// Set by the owned pipeline worker loop (`spawn_pipeline_worker`) once
+    /// its first readiness probe succeeds, and cleared on a failing one.
+    /// `GET /v1/pipeline/readiness` reads this same `Arc` -- it is `false`
+    /// unconditionally when no worker is running at all (no runtime
+    /// injected).
+    pipeline_worker_ready: Arc<std::sync::atomic::AtomicBool>,
     db_contributor_reads: bool,
     db_reviewer_reads: bool,
     db_reviewer_require_object_refs: bool,
@@ -3792,6 +3788,7 @@ impl AppState {
             pipeline_runtime_required,
         )?;
         validate_pipeline_receipt_rollout(&tenant_rollout_gates, pipeline_service.is_some())?;
+        let pipeline_worker_ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let near_credit_submitter_config = trace_near_credit_submitter_from_env()?;
         let near_credit_submitter_timeout_ms = near_credit_submitter_config
             .as_ref()
@@ -4256,6 +4253,7 @@ impl AppState {
             db_mirror,
             pipeline_service,
             pipeline_runtime_required,
+            pipeline_worker_ready,
             db_contributor_reads,
             db_reviewer_reads,
             db_reviewer_require_object_refs,
@@ -7813,6 +7811,7 @@ fn app(state: Arc<AppState>) -> Router {
             axum::routing::put(token_bundles::put).get(token_bundles::read),
         )
         .route("/health", get(health_handler))
+        .route("/v1/pipeline/readiness", get(pipeline_readiness_handler))
         .route("/v1/source", get(source_offer_handler))
         // Unauthenticated, like /v1/source above and for the same structural
         // reason: it is registered here, outside every auth layer, on purpose.
@@ -17669,8 +17668,8 @@ use near_provisioning::{
 #[path = "trace_commons_ingest_internal/pipeline_runtime.rs"]
 mod pipeline_runtime;
 use pipeline_runtime::{
-    IngestPipelineRuntimeAssembler, assemble_ingest_pipeline_runtime,
-    pipeline_runtime_is_production_qualified,
+    IngestPipelineRuntimeAssembler, assemble_ingest_pipeline_runtime, pipeline_readiness_handler,
+    pipeline_runtime_is_production_qualified, run_pipeline_app,
 };
 
 /// Complete the native half of a browser redeem: mint the one-time code and

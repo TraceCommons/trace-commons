@@ -6077,6 +6077,7 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         db_mirror,
         pipeline_service: None,
         pipeline_runtime_required: false,
+        pipeline_worker_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         db_contributor_reads,
         db_reviewer_reads,
         db_reviewer_require_object_refs: false,
@@ -10306,6 +10307,93 @@ fn ingest_and_pipeline_derive_the_same_tenant_storage_ref() {
             trace_commons_server::versioned_pipeline::pipeline_tenant_storage_ref(tenant).as_str()
         );
     }
+}
+
+#[tokio::test]
+async fn pipeline_readiness_reports_a_label_when_the_worker_is_not_ready() {
+    use super::pipeline_runtime::build_pipeline_app;
+    use tower::ServiceExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_state_with_options(
+        dir.path().to_path_buf(),
+        None,
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    let response = build_pipeline_app(state)
+        .oneshot(
+            axum::http::Request::get("/v1/pipeline/readiness")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        body,
+        serde_json::json!({"status": "not_ready", "reason": "pipeline_runtime_absent"})
+    );
+}
+
+#[tokio::test]
+async fn source_stays_public_on_the_pipeline_app() {
+    use super::pipeline_runtime::build_pipeline_app;
+    use tower::ServiceExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_state_with_options(
+        dir.path().to_path_buf(),
+        None,
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    let response = build_pipeline_app(state)
+        .oneshot(
+            axum::http::Request::get("/v1/source")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn run_pipeline_app_stops_within_the_grace_period() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_state_with_options(
+        dir.path().to_path_buf(),
+        None,
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    let server = tokio::spawn(run_pipeline_app(state, listener, async {
+        let _ = rx.await;
+    }));
+    tx.send(()).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(15), server)
+        .await
+        .expect("bounded shutdown")
+        .unwrap()
+        .unwrap();
 }
 
 #[test]
@@ -27340,6 +27428,7 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         db_mirror: None,
         pipeline_service: None,
         pipeline_runtime_required: false,
+        pipeline_worker_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         db_contributor_reads: false,
         db_reviewer_reads: false,
         db_reviewer_require_object_refs: false,
