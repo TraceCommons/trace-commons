@@ -1,13 +1,19 @@
 # Connect-and-Forget Contribution Consent — Design
 
-Date: 2026-09-23 (rev 3, 2026-09-24)
+Date: 2026-09-23 (rev 4, 2026-09-24)
 Status: draft for review
 Extends: [`2026-08-31-contributor-trust-by-default-design.md`](2026-08-31-contributor-trust-by-default-design.md) (#507)
 Source: [`../../contributor-ux-review.md`](../../contributor-ux-review.md)
 Scope: `trace-commons-contributor` (`daemon/policy.rs`, `daemon/watcher.rs`,
 `daemon/queue.rs`, `daemon/uploader.rs`, `consent_copy.rs`), the onboarding
-surface in the Tauri client (#1003). No production code in this PR.
+surface in the Tauri client (#1003, merged as #963). No production code in this PR.
 
+> **Rev 4** keeps rev 3's structure, which review found sound, and fixes nine
+> findings against it -- three of which were requirements that could not be met
+> or checked anything as written: the certified value named did not exist, the
+> consent gate sat on the branch that never sends, and logout undid both the
+> arming rule and withdrawal durability.
+>
 > **Rev 3.** Two prior revisions each proposed a safety mechanism that the code
 > does not implement: rev 1 derived automatic contribution from
 > `residual_risk != High`, which cannot tell "no model ran" from "a model found
@@ -38,8 +44,26 @@ kept onboarding ask-first because *"arming automation before the contributor
 has seen a single preview asks for trust they have no basis to give yet"*
 (`OnboardingProjectsView.swift:15`).
 
-Rev 3 does not overturn that. It agrees with it and adds the reasons review
-surfaced.
+**Rev 3 reverses both of #507's conclusions, and should say so rather than
+claim agreement.**
+
+- #507 kept onboarding ask-first *because the contributor has not seen a single
+  preview*. None of R1-R7 requires one: Flow 1 still takes the grant at
+  connect. The basis has moved from earned trust to disclosed mechanism, which
+  is a weaker basis, as rev 1 already conceded.
+- #507 also concluded that per-project arming was fine as-is. Putting the gates
+  on the mode reverses that too.
+
+Both reversals are defensible and neither is accidental, but they are
+reversals.
+
+**Folders already armed through today's arming offer do not meet R1-R7.** The
+spec must choose: disarm them and re-ask, grandfather them with the gap
+recorded, or migrate them as each next session supplies the evidence. This
+design takes the third -- an armed folder keeps its mode, and its next session
+is held rather than sent until R1 is satisfied for it -- because disarming
+silently discards a decision the contributor did make, and grandfathering
+carries the gap forever.
 
 ## What automatic contribution requires
 
@@ -53,8 +77,18 @@ Not "a witness is configured". The witness has a first-class
 `deterministic-only` mode, and the client does not check the certificate's
 `redaction_policy_version`.
 
-- **Evidence:** the certified `redaction_policy_version` says `full-pipeline`,
-  or the envelope's pipeline version and privacy-filter summary say so.
+`full-pipeline` is the witness's **startup mode name**, not a certified value,
+so a check for that literal would reject every real certificate. What is
+certified is `redaction_pipeline_version()`: the deterministic identifier
+`ironclaw-deterministic-secret-path-v3`, alone when no classifier ran, or with
+a `+<suffix>` when one did (`privacy-filter-near-ai-v1`, and the sidecar and
+self-hosted equivalents).
+
+- **Evidence:** a certified pipeline version carrying the deterministic
+  prefix **and** one of the named classifier suffixes.
+- **Not evidence:** the bare deterministic identifier with no suffix -- that is
+  the deterministic-only run, and it is the value an implementation guessing a
+  mapping is most likely to accept by mistake.
 - **Not evidence:** `witness.is_some()`, `pii_filter == Some("near-ai")`.
 - Note `pii_filter: None` can still pick up an environment-configured filter
   (`TRACE_PRIVACY_FILTER_BACKEND`), so the config field alone reads the
@@ -72,12 +106,14 @@ The intended shape, which the spec should state rather than reverse-engineer:
   `SHA256(response_body_as_received)` and the witness verifies by hashing those
   exact bytes, so pre-scrubbing them breaks verification.
 - **The consent gate for automatic sends is a fail-closed check on the
-  unpinned witness branch**, covering every `AutoUpload` route.
+  _pinned_ witness path, before the send**, covering every `AutoUpload` route.
 
-That last point replaces rev 2's standing `raw_session_confirmed`.
-`raw_session_confirmed` is read only by the interactive witness-preview
-request (`ipc.rs:3701`); it is not a gate on the automatic path, so a standing
-version of it would wrap a check that path never makes.
+The branch matters and rev 3 had it wrong. `submit.rs:580` bails with
+`witness_expected_measurement` when `!trust.is_pinned()`, before anything
+reaches the network, so raw sessions leave **only** on the pinned path. A gate
+on the unpinned branch would wrap a path that never sends -- the same shape as
+rev 2's standing `raw_session_confirmed`, which is read only by the interactive
+witness-preview request (`ipc.rs:3701`) and never by the automatic path.
 
 ### R3. Admission evidence exists for the session
 
@@ -155,8 +191,14 @@ in Flow 1 onboarding.**
 
 **No enrollment type qualifies today.** Rev 2's Addenda 3 and 4 claimed
 witness enrollees qualified "today" and that invite enrollees could be brought
-in; both are withdrawn. The work that changes this is #706's answer for
-automatic sends, #1005, and #507's local content pass.
+in; both are withdrawn.
+
+What stands between here and Flow 1 is more than the three external items.
+External: #706's answer for automatic sends, #1005, and #507's local content
+pass. Internal to this design and not yet built: R5's post-witness hold with a
+saved certified artifact, R6's void rule, R7's scope placement, the
+discovered-after-the-grant default with its audit row, withdrawal durability in
+every mode, and the logout rule above.
 
 ## The two paths
 
@@ -192,6 +234,20 @@ audit row.
 grant, and writes an explicit policy entry and an audit row when it does.
 `UNKNOWN_PROJECT_KEY` stays permanently `NotifyOnly`.
 
+**Logout defeats both this rule and withdrawal durability, and the spec has to
+say what happens.** Logout clears local state wholesale -- project modes, the
+queue, history and the audit trail. After a logout and a Flow 1 re-grant every
+rediscovered project counts as "discovered after the grant" and is armed,
+including a folder previously set to `Never` and sessions predating the
+original grant; and the record of what was withdrawn is gone, so the
+durability requirement has nothing left to check against.
+
+Two ways out: keep mode, withdrawal and discovery state across logout, or rule
+that **a re-grant after logout arms nothing already on disk**. This design
+takes the second as the floor, because it holds even when the first is
+incomplete, and it fails in the safe direction: the contributor is asked again
+about folders they had already decided.
+
 ## Deferral does not work under Flow 1
 
 Rev 2 deferred the NEAR AI notice and token-distribution review to the point of
@@ -204,24 +260,37 @@ need. Neither recovers:
   review, so a one-time prompt cannot satisfy it, and armed entries cycle
   between revoke and re-approve with no health label.
 
-Both contradict Flow 1's claim that nothing further will be asked. **These
-gates are settled before the grant, or the recovery re-offers affected
-entries.**
+Both contradict Flow 1's claim that nothing further will be asked, and the two
+need different answers.
 
-Source roots also belong in the mandatory list: the daemon needs them before it
-will start.
+- **The NEAR AI notice can be settled before the grant.** #1001 already ships a
+  recovery prompt for it, but that records the acknowledgement without reviving
+  entries refused before it, so **the recovery must also re-offer those
+  entries** or those sessions stay lost.
+- **Token-distribution review cannot be settled before the grant**, because it
+  clears only through a per-entry witness review. There is no one-time form of
+  it. Either Flow 1 is unavailable while it is on, or it becomes a per-entry
+  hold that the digest counts -- this design takes the hold, since the
+  alternative silently disables the flow.
+
+Source roots are a further gate of the same kind: the daemon needs them before
+it will start, so they are settled at connect rather than deferred.
 
 ## The disclosure
 
-Four constants in `consent_copy.rs`, plus what review established must join
-them. `harness_copy_is_central.rs` scans six harness files for `HARNESS_*`
-fields; macOS and Windows receive consent copy through the three-field
-`ConsentCopy` payload, and the Tauri client — named the main client in #1003 —
-is TypeScript the scanner cannot read at all. **Extending `ConsentCopy` and
-giving the scanner a `.tsx` needle are prerequisites, not follow-ups.**
+Three constants in `consent_copy.rs` -- matching the three it carries today --
+plus what review established must join them. `harness_copy_is_central.rs` checks `HARNESS_*` harness-state copy and never
+consent copy, so it is the wrong test to name. The one that matters is
+`tauri_copy_surface_is_central.rs`, which already scans `.ts` and `.tsx` and
+already requires the Tauri preview to go through `consent_copy` -- so the
+Tauri client is not unreachable by tooling, as rev 3 said.
+
+**The prerequisite is extending that test, and the Swift and C# consent-copy
+tests, to the new `AUTO_*` constants**, together with `ConsentCopy` itself,
+which carries three fields today.
 
 ```rust
-pub const AUTO_SCRUB_SCOPE: &str = "Fixed patterns remove API keys and tokens in the formats we know, your email addresses, and file paths that name you or your machine. Everything else -- names, employers, a password typed into a sentence -- is removed by a model.";
+pub const AUTO_SCRUB_SCOPE: &str = "Fixed patterns remove API keys and tokens in the formats we know, and many file paths and email addresses that name you. Everything else -- names, employers, a password typed into a sentence -- is removed when a model recognises it.";
 
 pub const AUTO_SCRUB_LIMIT: &str = "The patterns are reliable for the formats they cover and blind to everything else. The model is not reliable. Nothing here checks whether either of them was right.";
 
@@ -267,14 +336,18 @@ contributed, and no sentence covers that.
   designed for.
 - **Whether R1–R7 gate the mode or the flow.** This spec says the mode; it is
   the single decision that most changes the implementation.
-- **Measurement.** How many sessions would satisfy R1 with a `full-pipeline`
-  certificate. Rev 2's plan read `trace_submissions.privacy_risk`, the server's
+- **Measurement.** How many sessions would satisfy R1 -- a certified pipeline
+  version carrying the deterministic prefix and a classifier suffix. Rev 2's plan read `trace_submissions.privacy_risk`, the server's
   re-scored value over sessions that survived client refusals — the wrong
   population. `residual_risk_basis` (#474, V52) gives the cause breakdown.
 - **Shipped copy that this contradicts.** The arming copy's "Every future
-  session" and "time to change your mind", and the Linux attached-daemon quit
-  dialog's "Nothing will be sent while nobody's approving", which would steer a
-  contributor to Quit while the daemon keeps uploading.
+  session" and "time to change your mind"; and the attached-daemon quit copy,
+  which since #1000 is the shared `QUIT_ATTACHED_BODY` in `quit_copy.rs` used
+  by the Tauri confirmation as well as GTK, with macOS carrying its own. It
+  tells the contributor nothing will be sent while nobody is approving, which
+  is **already wrong today for any armed Flow 2 folder**, not only under Flow
+  1. Scoping the fix to the Linux dialog would leave Tauri and macOS users with
+  the same false sentence.
 - **Legal posture**, unchanged: a one-time grant is a different consent basis,
   and review established that withdrawing it is currently much harder than
   giving it.
