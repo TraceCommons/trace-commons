@@ -176,6 +176,7 @@ jobs:
           PGPASSWORD=trace createdb -h 127.0.0.1 -U trace reward_test_participant_http
           PGPASSWORD=trace createdb -h 127.0.0.1 -U trace reward_test_mission_packages
           PGPASSWORD=trace createdb -h 127.0.0.1 -U trace reward_test_mission_http
+          PGPASSWORD=trace createdb -h 127.0.0.1 -U trace pipeline_test_upgrade
       # Each step carries only the variables its own suite reads, NOT a job-wide
       # `env:` block. That is not tidiness: `trace_invite_registry_pg` reads
       # `TRACE_COMMONS_PG_TEST_DATABASE_URL` as its own main URL, so setting
@@ -330,6 +331,10 @@ jobs:
           grep -q 'test result: ok. 5 passed; 0 failed' legacy-invite-counts.log
         env:
           TRACE_COMMONS_LEGACY_INVITE_COUNTS_PG_TEST_URL: postgres://trace@127.0.0.1:5432/postgres
+      - name: versioned pipeline storage upgrade
+        run: cargo test -p trace-commons-server --lib pipeline_upgrade -- --ignored
+        env:
+          TRACE_COMMONS_PIPELINE_PG_UPGRADE_TEST_URL: postgres://trace@127.0.0.1:5432/pipeline_test_upgrade
       - name: mission and insight reward ledger
         # Reward suites report independently: a red ledger step used to abort
         # the job before the two published-mission steps ever ran, so their

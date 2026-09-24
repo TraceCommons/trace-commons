@@ -15,6 +15,8 @@ mod account_trust_growth;
 mod legacy_invite_link;
 #[path = "postgres_mission_catalog.rs"]
 mod mission_catalog;
+#[cfg(test)]
+mod pipeline_upgrade_tests;
 #[path = "postgres_public_run.rs"]
 mod public_run;
 #[path = "postgres_reward_participant.rs"]
