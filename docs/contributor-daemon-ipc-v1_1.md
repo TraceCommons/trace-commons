@@ -464,7 +464,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `pause` | `until` (optional RFC 3339 timestamp) | `paused: true`, `paused_until` | see "Pause semantics" below |
 | `resume` | — | `paused: false` | |
 | `list_projects` | — | `projects[]` of `{project_id, project_label, mode, added_at, configured, is_unresolved_bucket}` | configured **and** discovered projects; see "`list_projects`" below |
-| `set_project_mode` | `project_id` **or** `project_key`, `mode` (`label` accepted and ignored) | `ok: true`, `purged: <count>` | socket clients send `project_id`; `auto_upload` no longer requires a terminal; see "Naming a project" above and "`set_project_mode` and the ignore purge" below |
+| `set_project_mode` | `project_id` **or** `project_key`, `mode` (`label` accepted and ignored) | `ok: true`, `purged: <count>`, `retracted: <count>` | socket clients send `project_id`; `auto_upload` no longer requires a terminal; see "Naming a project" above and "`set_project_mode` and the ignore purge" below |
 | `list_history` | `limit` (optional, default 50, max 1000) | `history[]` | |
 | `history_rollup` | — | see below | |
 | `history_detail` | `submission_id` | owned redacted outcome, correction, up to 24 evidence candidates, contributed versions, publication state, and an opaque local owner-scope digest | one account-authenticated request; each excerpt capped at 700 characters; native clients use the digest only to evict account-owned caches after sign-in changes |
@@ -928,16 +928,33 @@ the daemon process and does not survive a daemon restart.
 
 ### `set_project_mode` and the ignore purge
 
-Setting a project to `ignore` also clears whatever it has waiting: every
-`pending` entry for that project moves to `refused` with
-`reason_label = "project-ignored"`. The response carries `purged`, the
-number of entries that moved.
+Setting a project to `ignore` also clears whatever it has waiting. Two
+kinds of entry move to `refused` with `reason_label = "project-ignored"`,
+and the response counts them separately:
 
-`approved` and `uploading` entries are deliberately untouched. An approval
-is a decision already made about specific bytes under specific consent
-scopes, and a project-level preference set afterwards does not retract it --
-so a project with three waiting and one approved loses three and still
-uploads one. A client MUST say so rather than let a contributor discover it.
+- `purged`: `pending` entries for that project -- the cards the contributor
+  was shown as waiting.
+- `retracted`: `approved` entries the daemon approved **unattended**, under
+  the project's standing `auto_upload`. Nobody decided about those bytes, so
+  excluding the project is the contributor's first decision about them.
+
+A client comparing the result with the number of waiting cards it showed
+MUST compare against `purged` only; `retracted` entries were never on screen
+as waiting. Both fields are always present and may be `0`.
+
+An `approved` entry the **contributor** approved is deliberately untouched,
+and so is an `uploading` entry. A contributor's approval is a decision
+already made about specific bytes under specific consent scopes, and a
+project-level preference set afterwards does not retract it -- so a project
+with three waiting and one approved by hand loses three and still uploads
+one. A client MUST say so rather than let a contributor discover it.
+
+An unattended approval that was `uploading` at the moment of the change and
+did not complete -- the daily cap, a fail-closed precondition, a restart --
+returns to `approved`. It is not sent: the upload pass re-checks the
+project's mode before sending any unattended approval, refuses it as
+`"project-ignored"` if the project is now `ignore`, and emits
+`queue_changed`. That refusal arrives on a later pass, not in this response.
 
 `"project-ignored"` is not `"dismissed-by-contributor"`. A dismissal is
 permanent and suppresses that conversation at its path forever; this is a
@@ -945,8 +962,9 @@ verdict on whatever was queued at the moment the mode changed, so setting
 the project back to `notify_only` or `auto_upload` lets those sessions be
 offered again -- including sessions that are finished and will never be
 written to again. Leaving `ignore` drops that project's `"project-ignored"`
-entries outright, which is what lets the watcher re-offer them; `dismissed`
-and pipeline refusals in the same project are untouched. The re-offer
+entries outright -- purged, retracted and refused-at-send alike -- which is
+what lets the watcher re-offer them; `dismissed` and pipeline refusals in the
+same project are untouched. The re-offer
 arrives on a later poll, not in this response, and is still subject to the
 queue cap.
 
