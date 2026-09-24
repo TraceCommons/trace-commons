@@ -5,6 +5,10 @@ full repo guidance (build commands, CI gates, conventions, known gotchas); read
 it too. This file leads with licensing because it is the one rule here whose
 violation a compiler will never report.
 
+The Tauri app (`tauri-desktop/`) is the main client for the MVP, the first
+end-user release this repo is targeting; client-side work for that release
+lands there first. `CLAUDE.md` lists the other shells.
+
 ## Licensing: the split is load-bearing
 
 This repository is **split-licensed**. Which license applies depends on which

@@ -16,6 +16,10 @@ It also holds the contributor side: the contributor CLI and daemon
 shells -- macOS (`macos/`, Swift), Windows (`windows/`, C#), Linux GTK
 (`crates/trace-commons-contributor-gtk`), and Tauri (`tauri-desktop/`).
 
+**The Tauri app is the main client** for the MVP, the first end-user release
+this repo is targeting. Client-side work for that release lands in
+`tauri-desktop/` first.
+
 There is **no Ironclaw path dependency**. Do not look for one. Do not propose
 adding one.
 
